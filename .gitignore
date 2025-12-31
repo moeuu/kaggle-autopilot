@@ -1,0 +1,49 @@
+# ---- Python / tooling ----
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+env/
+
+# Test / lint / typecheck caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+
+# ---- Secrets ----
+.env
+.env.*
+kaggle.json
+**/kaggle.json
+.kaggle/
+
+# ---- Project outputs (do not commit) ----
+data/
+artifacts/
+logs/
+
+# ---- Common large files ----
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+# Optional: notebooks checkpoints
+.ipynb_checkpoints/
