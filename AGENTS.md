@@ -7,10 +7,10 @@ You are the implementer/tester for this repo.
 
 ## Repository purpose
 Build a Kaggle competition automation CLI:
-- download data via Kaggle Python API
+- download data via Kaggle CLI
 - train a robust baseline (MVP: tabular CSV)
 - generate a valid submission.csv (must match sample_submission.csv)
-- optionally submit via Kaggle Python API with strong guardrails
+- optionally submit via Kaggle CLI with strong guardrails
 
 ## Hard constraints (must follow)
 - Do NOT automate accepting rules / joining competitions in the browser.
@@ -44,13 +44,13 @@ Build a Kaggle competition automation CLI:
 
 ## Coding standards
 - Python 3.11+ recommended
-- Use Kaggle Python API directly (OAuth via ~/.kaggle/access_token)
+- Use Kaggle CLI via subprocess; authenticate via `~/.kaggle/kaggle.json` or env vars
 - Clear exceptions + actionable error messages
 - Deterministic runs (seed control) when feasible
 
-## Notes on Kaggle API integration
-- Use Kaggle Python API: `api.competition_download_files(slug)`, `api.competition_submit(...)`
-- If an API call fails due to missing rule acceptance, print the Rules URL and exit.
+## Notes on Kaggle CLI integration
+- Use Kaggle CLI: `kaggle competitions download -c <slug>`, `kaggle competitions submit -c <slug> ...`
+- If a CLI call fails due to missing rule acceptance, print the Rules URL and exit.
 
 ## What “done” looks like for MVP
 - `kagglebot run <slug>` downloads, trains, and produces a valid submission.csv in artifacts/

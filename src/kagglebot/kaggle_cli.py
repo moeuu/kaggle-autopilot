@@ -1,34 +1,86 @@
 from __future__ import annotations
 
-from kaggle.api.kaggle_api_extended import KaggleApi
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
 
-def get_kaggle_api() -> KaggleApi:
-    """
-    Get authenticated Kaggle API instance.
-    Uses OAuth token from ~/.kaggle/access_token automatically.
-    """
-    api = KaggleApi()
-    api.authenticate()
-    return api
+@dataclass(frozen=True)
+class KaggleCliError(RuntimeError):
+    message: str
+    output: str
+
+    def __str__(self) -> str:
+        return f"{self.message}\n{self.output}".strip()
 
 
-def kaggle_submit(slug: str, submission_file: str, message: str) -> None:
-    """
-    Submit a file to a Kaggle competition using the Python API.
+@dataclass(frozen=True)
+class RulesNotAcceptedError(KaggleCliError):
+    slug: str
 
-    Args:
-        slug: Competition slug (e.g., 'titanic')
-        submission_file: Path to submission CSV file
-        message: Submission description message
 
-    Raises:
-        RuntimeError: If submission fails
-    """
-    api = get_kaggle_api()
+def download_competition(slug: str, dest_dir: Path, *, overwrite: bool = False) -> str:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    args = [
+        "kaggle",
+        "competitions",
+        "download",
+        "-c",
+        slug,
+        "-p",
+        str(dest_dir),
+        "--unzip",
+    ]
+    if overwrite:
+        args.append("--force")
+    return _run_kaggle(args, slug)
+
+
+def submit_competition(slug: str, submission_file: Path, message: str) -> str:
+    args = [
+        "kaggle",
+        "competitions",
+        "submit",
+        "-c",
+        slug,
+        "-f",
+        str(submission_file),
+        "-m",
+        message,
+    ]
+    return _run_kaggle(args, slug)
+
+
+def _run_kaggle(args: list[str], slug: str) -> str:
     try:
-        result = api.competition_submit(submission_file, message, slug)
-        # The API returns a SubmitResult object, but may raise on error
-        print(f"Submission successful: {result}")
-    except Exception as e:
-        raise RuntimeError(f"Kaggle submission failed: {e}") from e
+        completed = subprocess.run(args, check=False, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise KaggleCliError(
+            "Kaggle CLI not found. Install the kaggle package and ensure `kaggle` is on PATH.",
+            "",
+        ) from exc
+
+    output = "".join([completed.stdout or "", completed.stderr or ""]).strip()
+    if completed.returncode != 0:
+        if _is_rules_not_accepted(output):
+            raise RulesNotAcceptedError(
+                message="Competition rules not accepted.",
+                output=output,
+                slug=slug,
+            )
+        raise KaggleCliError(
+            message=f"Kaggle CLI failed with exit code {completed.returncode}.",
+            output=output,
+        )
+    return output
+
+
+def _is_rules_not_accepted(output: str) -> bool:
+    text = output.lower()
+    if "rules" in text and ("accept" in text or "accepted" in text):
+        return True
+    if "competition rules" in text and "not" in text:
+        return True
+    if "forbidden" in text and "competition" in text:
+        return True
+    return False

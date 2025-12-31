@@ -372,7 +372,7 @@ Add the following sections to enhance reviewer guidance:
 
 **✅ PASS**: Secrets properly excluded
 
-- `.kaggle/` directory ignored (including OAuth tokens)
+- `.kaggle/` directory ignored (including `kaggle.json` and credentials)
 - No hardcoded credentials in source code
 
 ### Dependency Vulnerabilities

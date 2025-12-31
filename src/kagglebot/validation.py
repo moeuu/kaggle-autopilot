@@ -25,10 +25,30 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
             f"Got rows:      {len(sub)}"
         )
 
-    # 3) Basic id column null check.
+    # 3) Basic id column checks.
     id_col = sample.columns[0]
     if sub[id_col].isna().any():
         raise ValueError(f"Submission contains missing values in id column '{id_col}'.")
+    if sub[id_col].duplicated().any():
+        raise ValueError(f"Submission contains duplicate values in id column '{id_col}'.")
+
+    sample_ids = sample[id_col]
+    sub_ids = sub[id_col]
+    if sample_ids.isna().any():
+        raise ValueError(f"Sample submission contains missing values in id column '{id_col}'.")
+    if sample_ids.duplicated().any():
+        raise ValueError(f"Sample submission contains duplicate values in id column '{id_col}'.")
+
+    if set(sub_ids) != set(sample_ids):
+        missing = sorted(set(sample_ids) - set(sub_ids))
+        extra = sorted(set(sub_ids) - set(sample_ids))
+        missing_preview = missing[:5]
+        extra_preview = extra[:5]
+        raise ValueError(
+            "Submission id values do not match sample_submission.csv.\n"
+            f"Missing ids (first 5): {missing_preview}\n"
+            f"Extra ids (first 5):   {extra_preview}"
+        )
 
     # 4) All-NaN target columns are not allowed (guard against bad output).
     for c in sample.columns[1:]:

@@ -1,6 +1,7 @@
-from pathlib import Path
-import pandas as pd
 import sys
+from pathlib import Path
+
+import pandas as pd
 
 
 def validate_titanic_submission(submission_path: Path) -> None:

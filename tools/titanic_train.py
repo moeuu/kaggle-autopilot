@@ -1,11 +1,11 @@
 from pathlib import Path
-import pandas as pd
 
+import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 
 def main(data_dir: Path, out_csv: Path) -> None:
@@ -15,8 +15,8 @@ def main(data_dir: Path, out_csv: Path) -> None:
     y = train["Survived"].astype(int)
 
     features = ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"]
-    X = train[features].copy()
-    X_test = test[features].copy()
+    x = train[features].copy()
+    x_test = test[features].copy()
 
     num_cols = ["Pclass", "Age", "SibSp", "Parch", "Fare"]
     cat_cols = ["Sex", "Embarked"]
@@ -26,27 +26,33 @@ def main(data_dir: Path, out_csv: Path) -> None:
             ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), num_cols),
             (
                 "cat",
-                Pipeline([
-                    ("imputer", SimpleImputer(strategy="most_frequent")),
-                    ("onehot", OneHotEncoder(handle_unknown="ignore")),
-                ]),
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
                 cat_cols,
             ),
         ]
     )
 
-    model = Pipeline([
-        ("preprocess", preprocess),
-        ("clf", LogisticRegression(max_iter=2000)),
-    ])
+    model = Pipeline(
+        [
+            ("preprocess", preprocess),
+            ("clf", LogisticRegression(max_iter=2000)),
+        ]
+    )
 
-    model.fit(X, y)
-    preds = model.predict(X_test).astype(int)
+    model.fit(x, y)
+    preds = model.predict(x_test).astype(int)
 
-    sub = pd.DataFrame({
-        "PassengerId": test["PassengerId"].astype(int),
-        "Survived": preds,
-    })
+    sub = pd.DataFrame(
+        {
+            "PassengerId": test["PassengerId"].astype(int),
+            "Survived": preds,
+        }
+    )
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     sub.to_csv(out_csv, index=False)

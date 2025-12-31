@@ -3,17 +3,30 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Role
-You are the architect/reviewer for this repo.
-- Prefer planning, risk analysis, and interface design first.
-- When asked to implement, do so in small, testable chunks.
+You are the **Staff Engineer / Architect** for this repository.
+- **Planning first**: Review ARCHITECTURE.md, SPEC.md, and PLAN.md before implementing
+- **Risk analysis**: Check SECURITY.md for safety requirements
+- **Phased implementation**: Follow PLAN.md phases - don't skip ahead
+- **Small, testable chunks**: Each PR should be a complete, tested unit of work
 
 ## Project Overview
 
-Kaggle Autopilot is a CLI tool that automates Kaggle competition workflows:
-- Download competition data via Kaggle Python API
-- Build baseline models (MVP: tabular CSV competitions)
-- Generate valid submission.csv matching sample_submission.csv
-- Submit to Kaggle via Python API with safety guardrails
+Kaggle Autopilot is a **production-grade, fully automated** CLI tool for Kaggle competitions:
+
+### Vision
+- User provides competition URL: `kagglebot run https://www.kaggle.com/c/titanic --submit`
+- Tool automatically: downloads data → analyzes competition → trains models → generates predictions → validates → submits
+- **Zero prompts** - completely non-interactive (except manual rules acceptance once)
+- **Production-grade models** - serious GBDT, stacking, CV (not toy baselines)
+- **Safe by default** - dedup, rate limits, validation, reproducibility
+
+### Current State (MVP)
+- ✅ Data download and validation
+- ✅ Basic tabular training (Ridge, LogisticRegression)
+- ✅ Submission validation and local ledger
+- ⏳ **Next**: Competition analyzer, orchestrator, production models
+
+See PLAN.md for detailed roadmap.
 
 ## Critical Constraints (NEVER violate)
 
@@ -25,15 +38,24 @@ Kaggle Autopilot is a CLI tool that automates Kaggle competition workflows:
 
 4. **Do NOT commit secrets**: Never commit API credentials, tokens, or large datasets.
 
-## Submission Safety Guardrails (must implement)
+## Design Principles (Production-Grade Automation)
 
-- **Default to DRY RUN**: End-to-end commands must NOT submit by default
-- **Require explicit flag**: Submissions require `--submit` flag AND human-readable message
-- **Duplicate detection**: Hash submission.csv and maintain local history to prevent duplicate submissions
+### Non-Interactive Operation
+- **No prompts**: All decisions automated or configured via CLI flags/config files
+- **Single command**: `kagglebot run <competition> --submit` runs end-to-end
+- **Safe defaults**: Conservative choices when ambiguous (no external data, etc.)
+- **Clear errors**: Exit codes and messages guide user on failures (see SPEC.md)
+
+### Submission Safety Guardrails (must implement)
+
+- **Require explicit flag**: Submissions require `--submit` flag (default: validate only)
+- **Duplicate detection**: Hash submission.csv and check local ledger before submitting
+- **Rate limiting**: Max 5 submissions/day, min 1 hour between (configurable)
 - **Strict validation**: Before any submission:
   - Columns must be identical to sample_submission.csv
   - Row count must match exactly
-  - If id column exists, align rows by id
+  - ID column alignment verified
+  - Value ranges validated (e.g., probabilities in [0,1])
 
 ## Tooling (uv package manager)
 
@@ -106,7 +128,7 @@ kagglebot submit <slug> -m "<message>"                 # Submit with guardrails 
 ```
 src/kagglebot/
   cli.py           # Typer/Rich CLI entry point
-  kaggle_cli.py    # Wrapper around Kaggle Python API
+  kaggle_cli.py    # Wrapper around Kaggle CLI
   detect.py        # Competition type detection
   tabular/         # Baseline tabular pipeline
   rules/           # Optional: parse/summarize rules
@@ -119,7 +141,7 @@ artifacts/         # Models, submissions (gitignored)
 
 - **Small, composable functions**: Clear inputs/outputs, easy to test
 - **User-friendly failures**: Actionable error messages
-- **Python API first**: Use Kaggle Python API directly (automatic OAuth via ~/.kaggle/access_token)
+- **Kaggle CLI first**: Use Kaggle CLI with `~/.kaggle/kaggle.json` or env vars
 - **Minimal dependencies**: pandas + scikit-learn + typer + rich for MVP
 - **Deterministic runs**: Control random seeds when feasible
 - **Python 3.11+**: Target modern Python
@@ -128,13 +150,13 @@ artifacts/         # Models, submissions (gitignored)
   - LogisticRegression has max_iter=2000 to prevent hangs
   - Consider memory-mapped files or Dask for huge datasets
 
-## Kaggle API Integration
+## Kaggle CLI Integration
 
-- Uses Kaggle Python API (`kaggle.api.kaggle_api_extended.KaggleApi`)
-- Authentication via OAuth token (automatic from ~/.kaggle/access_token)
-- Download: `api.competition_download_files(slug)`
-- Submit: `api.competition_submit(file, message, slug)`
-- If API fails due to missing rule acceptance, print the competition rules URL and exit gracefully
+- Uses Kaggle CLI (`kaggle competitions ...`)
+- Authentication via `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`
+- Download: `kaggle competitions download -c <slug>`
+- Submit: `kaggle competitions submit -c <slug> -f <file> -m <message>`
+- If CLI fails due to missing rule acceptance, print the competition rules URL and exit gracefully
 
 ## ZIP File Handling
 
@@ -161,7 +183,7 @@ Before committing any change, verify:
 - [ ] No large CSV/zip files committed (check .gitignore)
 - [ ] All submission code paths guarded by `--submit` flag
 - [ ] Duplicate submission check cannot be bypassed accidentally
-- [ ] Validation runs before any Kaggle API submit call
+- [ ] Validation runs before any Kaggle CLI submit call
 - [ ] Error messages include actionable next steps
 - [ ] All new functions have type hints
 - [ ] Tests pass: `uv run pytest -q`
@@ -201,3 +223,41 @@ When reviewing PRs or changes:
 - `kagglebot run <slug> --submit -m "baseline"` submits once with all guardrails enforced
 - Works on common tabular competitions (e.g., Titanic-like: train.csv, test.csv, sample_submission.csv)
 - Focus: "always produce valid submission" over leaderboard score
+
+---
+
+## Architectural Documentation
+
+Before implementing features, review these documents:
+
+1. **ARCHITECTURE.md** - System design, modules, data flow, extension points
+2. **SPEC.md** - CLI commands, config schema, exit codes, artifact layout
+3. **PLAN.md** - Phased implementation roadmap (7 phases to production)
+4. **SECURITY.md** - Security guidelines, credential handling, safety guardrails
+5. **AGENTS.md** - Instructions for implementer/tester agents (Codex)
+
+### Implementation Workflow
+
+1. **Plan**: Review PLAN.md phase tasks
+2. **Design**: Check ARCHITECTURE.md for interfaces and patterns
+3. **Spec**: Verify behavior matches SPEC.md contracts
+4. **Security**: Ensure compliance with SECURITY.md
+5. **Test**: Write tests before implementation
+6. **Implement**: Small, testable chunks
+7. **Review**: Self-review against all docs
+
+### Key Architectural Decisions
+
+- **Non-interactive**: No prompts during execution
+- **Plugin architecture**: Extensible for different competition types
+- **Checkpointing**: Resume from failures
+- **Structured logging**: JSON logs for automation
+- **Time budgets**: Configurable training time limits
+- **Resource limits**: Memory and CPU constraints
+- **Model registry**: Extensible model system (see ARCHITECTURE.md)
+
+Follow the critical path in PLAN.md:
+```
+Phase 0 (Foundation) → Phase 1 (Analyzer) + Phase 2 (Orchestrator) →
+Phase 3 (Training) → Phase 4 (Submission) → Phase 5 (Polish)
+```

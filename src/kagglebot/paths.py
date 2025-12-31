@@ -35,7 +35,7 @@ class CompetitionPaths:
 
     @property
     def submission_ledger(self) -> Path:
-        return self.submissions_dir / "ledger.jsonl"
+        return self.submissions_dir / "history.jsonl"
 
     @property
     def config_file(self) -> Path:

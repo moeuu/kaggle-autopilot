@@ -76,3 +76,29 @@ def test_validate_submission_all_nan_target():
 
         with pytest.raises(ValueError, match="All values are NaN"):
             validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_id_mismatch():
+    """Test validation fails when ids do not match sample submission."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sample_path = Path(tmpdir) / "sample.csv"
+        submission_path = Path(tmpdir) / "submission.csv"
+
+        pd.DataFrame({"id": [1, 2, 3], "target": [0.5, 0.7, 0.3]}).to_csv(sample_path, index=False)
+        pd.DataFrame({"id": [1, 2, 4], "target": [0.5, 0.7, 0.3]}).to_csv(submission_path, index=False)
+
+        with pytest.raises(ValueError, match="id values do not match"):
+            validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_duplicate_id():
+    """Test validation fails when ids are duplicated."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sample_path = Path(tmpdir) / "sample.csv"
+        submission_path = Path(tmpdir) / "submission.csv"
+
+        pd.DataFrame({"id": [1, 2, 3], "target": [0.5, 0.7, 0.3]}).to_csv(sample_path, index=False)
+        pd.DataFrame({"id": [1, 1, 3], "target": [0.5, 0.7, 0.3]}).to_csv(submission_path, index=False)
+
+        with pytest.raises(ValueError, match="duplicate values"):
+            validate_submission(str(sample_path), str(submission_path))

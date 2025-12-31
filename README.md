@@ -4,7 +4,7 @@ A CLI tool that automates Kaggle competition workflows with safety guardrails.
 
 ## Features
 
-- Download competition data via Kaggle Python API
+- Download competition data via Kaggle CLI
 - Build baseline models (MVP: tabular CSV competitions)
 - Generate valid submission.csv matching sample_submission.csv
 - Submit to Kaggle with safety guardrails (dry-run by default)
@@ -22,41 +22,46 @@ uv sync
 
 ## Prerequisites
 
-1. Kaggle API authentication:
-   - Uses OAuth token from `~/.kaggle/access_token` (automatic)
-   - If not authenticated, run any Kaggle CLI command to trigger OAuth flow
+1. Kaggle CLI installed and authenticated:
+   - Ensure `kaggle` is on your PATH
+   - Credentials in `~/.kaggle/kaggle.json` or via env vars
 2. Manually accept competition rules in your browser (required once per competition)
 
 ## Usage
 
-### Bootstrap workspace (no network actions)
+### Download data
 
 ```bash
-kagglebot bootstrap titanic
+kagglebot download https://www.kaggle.com/competitions/titanic --force
 ```
 
-### Validate a submission (dry-run default)
+### Train and predict (baseline)
 
 ```bash
-kagglebot run titanic --submission path/to/submission.csv
+kagglebot train titanic
+kagglebot predict titanic
 ```
 
-By default, `--sample` resolves to `data/<slug>/raw/sample_submission.csv`.
-
-### Record a submission (requires explicit force)
+### Submit (requires explicit force + message)
 
 ```bash
-kagglebot run titanic --submission path/to/submission.csv --no-dry-run --force --message "baseline"
+kagglebot submit titanic --message "baseline v1" --force
+```
+
+### End-to-end run (dry-run by default)
+
+```bash
+kagglebot run https://www.kaggle.com/competitions/titanic --submit --message "baseline v1" --no-dry-run --force
 ```
 
 ## Safety Features
 
-- **Dry-run by default**: Use `--no-dry-run --force` to allow side effects
+- **Dry-run by default**: Use `--no-dry-run --force` to allow network actions
 - **Duplicate detection**: Prevents recording identical submissions by hash
 - **Strict validation**: Validates submission format against sample_submission.csv
 - **No automated rule acceptance**: Users must manually accept rules in browser
 - **Run ledger**: Records runs in `artifacts/<slug>/runs/<run_id>/metadata.json`
-- **Submission ledger**: Records submissions in `artifacts/<slug>/submissions/ledger.jsonl`
+- **Submission ledger**: Records submissions in `artifacts/<slug>/submissions/history.jsonl`
 
 ## Project Structure
 
@@ -69,7 +74,8 @@ kaggle-autopilot/
 │       ├── tabular_baseline.py # Baseline model training
 │       ├── validation.py       # Submission validation
 │       ├── history.py          # Submission tracking
-│       ├── kaggle_cli.py       # Kaggle API wrapper
+│       ├── kaggle_cli.py       # Kaggle CLI wrapper
+│       ├── competition.py      # URL/slug parsing helpers
 │       ├── paths.py            # Path management
 │       └── hashing.py          # File hashing utilities
 ├── data/                   # Downloaded datasets (gitignored)
