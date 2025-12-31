@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from kagglebot.history import SubmissionLedger
+
 
 def validate_submission(sample_path: str, submission_path: str) -> None:
     sample = pd.read_csv(sample_path)
@@ -32,3 +34,8 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
     for c in sample.columns[1:]:
         if sub[c].isna().all():
             raise ValueError(f"All values are NaN for target column '{c}'.")
+
+
+def ensure_not_duplicate_submission(ledger: SubmissionLedger, submission_path: str) -> None:
+    if ledger.is_duplicate(submission_path):
+        raise ValueError("Duplicate submission detected (hash already recorded).")

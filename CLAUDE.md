@@ -10,10 +10,10 @@ You are the architect/reviewer for this repo.
 ## Project Overview
 
 Kaggle Autopilot is a CLI tool that automates Kaggle competition workflows:
-- Download competition data via Kaggle CLI
+- Download competition data via Kaggle Python API
 - Build baseline models (MVP: tabular CSV competitions)
 - Generate valid submission.csv matching sample_submission.csv
-- Submit to Kaggle via CLI with safety guardrails
+- Submit to Kaggle via Python API with safety guardrails
 
 ## Critical Constraints (NEVER violate)
 
@@ -23,7 +23,7 @@ Kaggle Autopilot is a CLI tool that automates Kaggle competition workflows:
 
 3. **Do NOT enable abuse**: Never implement multi-account behavior, submission spamming, or rule circumvention.
 
-4. **Do NOT commit secrets**: Never commit `kaggle.json`, API keys, tokens, or large datasets.
+4. **Do NOT commit secrets**: Never commit API credentials, tokens, or large datasets.
 
 ## Submission Safety Guardrails (must implement)
 
@@ -93,11 +93,12 @@ uv run pyright  # or mypy
 ## Planned CLI Interface
 
 ```bash
-kagglebot bootstrap <competition_slug>  # Download data, setup workspace
-kagglebot train <slug>                  # Train baseline model
-kagglebot predict <slug>                # Generate submission.csv
-kagglebot submit <slug> -m "<message>"  # Submit with guardrails
-kagglebot run <slug> [--submit]         # End-to-end (default: dry-run)
+kagglebot bootstrap <competition_slug>                 # Prepare workspace dirs + config (no network)
+kagglebot run <slug> --submission <path>               # Validate + ledger (dry-run default)
+kagglebot run <slug> --no-dry-run --force --submission <path> -m "<message>"
+kagglebot train <slug>                                 # Train baseline model (future)
+kagglebot predict <slug>                               # Generate submission.csv (future)
+kagglebot submit <slug> -m "<message>"                 # Submit with guardrails (future)
 ```
 
 ## Target Architecture
@@ -105,7 +106,7 @@ kagglebot run <slug> [--submit]         # End-to-end (default: dry-run)
 ```
 src/kagglebot/
   cli.py           # Typer/Rich CLI entry point
-  kaggle_cli.py    # Wrapper around `kaggle` command (subprocess)
+  kaggle_cli.py    # Wrapper around Kaggle Python API
   detect.py        # Competition type detection
   tabular/         # Baseline tabular pipeline
   rules/           # Optional: parse/summarize rules
@@ -118,7 +119,7 @@ artifacts/         # Models, submissions (gitignored)
 
 - **Small, composable functions**: Clear inputs/outputs, easy to test
 - **User-friendly failures**: Actionable error messages
-- **Subprocess wrappers**: Use `subprocess.run(..., check=True)` for Kaggle CLI
+- **Python API first**: Use Kaggle Python API directly (automatic OAuth via ~/.kaggle/access_token)
 - **Minimal dependencies**: pandas + scikit-learn + typer + rich for MVP
 - **Deterministic runs**: Control random seeds when feasible
 - **Python 3.11+**: Target modern Python
@@ -127,11 +128,13 @@ artifacts/         # Models, submissions (gitignored)
   - LogisticRegression has max_iter=2000 to prevent hangs
   - Consider memory-mapped files or Dask for huge datasets
 
-## Kaggle CLI Integration
+## Kaggle API Integration
 
-- Download: `kaggle competitions download -c <slug>`
-- Submit: `kaggle competitions submit -c <slug> -f submission.csv -m "<message>"`
-- If Kaggle CLI fails due to missing rule acceptance, print the competition rules URL and exit gracefully
+- Uses Kaggle Python API (`kaggle.api.kaggle_api_extended.KaggleApi`)
+- Authentication via OAuth token (automatic from ~/.kaggle/access_token)
+- Download: `api.competition_download_files(slug)`
+- Submit: `api.competition_submit(file, message, slug)`
+- If API fails due to missing rule acceptance, print the competition rules URL and exit gracefully
 
 ## ZIP File Handling
 
@@ -154,13 +157,12 @@ When operating as architect/reviewer:
 
 Before committing any change, verify:
 
-- [ ] No `kaggle.json`, API keys, or secrets in diff
+- [ ] No API credentials, tokens, or secrets in diff
 - [ ] No large CSV/zip files committed (check .gitignore)
 - [ ] All submission code paths guarded by `--submit` flag
 - [ ] Duplicate submission check cannot be bypassed accidentally
-- [ ] Validation runs before any Kaggle CLI submit call
+- [ ] Validation runs before any Kaggle API submit call
 - [ ] Error messages include actionable next steps
-- [ ] No `shell=True` in subprocess calls (injection risk)
 - [ ] All new functions have type hints
 - [ ] Tests pass: `uv run pytest -q`
 - [ ] Linting passes: `uv run ruff check .`
@@ -173,7 +175,6 @@ When reviewing PRs or changes:
 - [ ] No infinite submit loops or retry logic without bounds
 - [ ] No repeated submissions of same file (duplicate check working)
 - [ ] No automation of rule acceptance or browser actions
-- [ ] Subprocess calls use list args (not shell strings)
 - [ ] Submission history growth is bounded (JSONL append-only)
   - Typical: <1000 submissions = ~100KB
   - If supporting high-volume use: add rotation or cleanup tool

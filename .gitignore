@@ -42,7 +42,6 @@ artifacts/**/*.csv
 *.zip
 
 # Kaggle API credentials (NEVER commit)
-kaggle.json
 .kaggle/
 
 # Testing

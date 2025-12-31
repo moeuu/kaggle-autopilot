@@ -1,30 +1,34 @@
 from __future__ import annotations
 
-import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+from kaggle.api.kaggle_api_extended import KaggleApi
 
 
-@dataclass(frozen=True)
-class CmdResult:
-    code: int
-    stdout: str
-    stderr: str
-
-
-def run_kaggle(args: Sequence[str]) -> CmdResult:
+def get_kaggle_api() -> KaggleApi:
     """
-    Run `kaggle ...` command. We keep a thin wrapper so we can standardize error handling.
+    Get authenticated Kaggle API instance.
+    Uses OAuth token from ~/.kaggle/access_token automatically.
     """
-    proc = subprocess.run(
-        ["kaggle", *args],
-        text=True,
-        capture_output=True,
-    )
-    return CmdResult(code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+    api = KaggleApi()
+    api.authenticate()
+    return api
 
 
 def kaggle_submit(slug: str, submission_file: str, message: str) -> None:
-    res = run_kaggle(["competitions", "submit", "-c", slug, "-f", submission_file, "-m", message])
-    if res.code != 0:
-        raise RuntimeError(f"kaggle submit failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
+    """
+    Submit a file to a Kaggle competition using the Python API.
+
+    Args:
+        slug: Competition slug (e.g., 'titanic')
+        submission_file: Path to submission CSV file
+        message: Submission description message
+
+    Raises:
+        RuntimeError: If submission fails
+    """
+    api = get_kaggle_api()
+    try:
+        result = api.competition_submit(submission_file, message, slug)
+        # The API returns a SubmitResult object, but may raise on error
+        print(f"Submission successful: {result}")
+    except Exception as e:
+        raise RuntimeError(f"Kaggle submission failed: {e}") from e

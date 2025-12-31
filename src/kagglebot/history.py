@@ -4,27 +4,83 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from kagglebot.hashing import sha256_file
 from kagglebot.paths import CompetitionPaths, repo_root
 
 
+def _new_run_id() -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{uuid4().hex[:8]}"
+
+
 @dataclass(frozen=True)
-class SubmissionHistory:
-    history_file: Path
+class RunRecord:
+    run_id: str
+    run_dir: Path
+    metadata_path: Path
+
+
+@dataclass(frozen=True)
+class RunLedger:
+    base_dir: Path
 
     @staticmethod
-    def for_slug(slug: str) -> SubmissionHistory:
-        paths = CompetitionPaths(slug=slug, repo_root=repo_root())
+    def for_slug(slug: str, root: Path | None = None) -> RunLedger:
+        base_root = root if root is not None else repo_root()
+        paths = CompetitionPaths(slug=slug, repo_root=base_root)
+        paths.runs_dir.mkdir(parents=True, exist_ok=True)
+        return RunLedger(base_dir=paths.runs_dir)
+
+    def start_run(
+        self,
+        *,
+        slug: str,
+        dry_run: bool,
+        force: bool,
+        submission_path: str | None,
+        sample_path: str | None,
+        message: str | None,
+        argv: list[str] | None,
+    ) -> RunRecord:
+        run_id = _new_run_id()
+        run_dir = self.base_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
+        metadata_path = run_dir / "metadata.json"
+
+        metadata = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "slug": slug,
+            "created_at": datetime.now(UTC).isoformat(),
+            "dry_run": dry_run,
+            "force": force,
+            "submission_path": submission_path,
+            "sample_path": sample_path,
+            "message": message,
+            "argv": argv,
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        return RunRecord(run_id=run_id, run_dir=run_dir, metadata_path=metadata_path)
+
+
+@dataclass(frozen=True)
+class SubmissionLedger:
+    ledger_path: Path
+
+    @staticmethod
+    def for_slug(slug: str, root: Path | None = None) -> SubmissionLedger:
+        base_root = root if root is not None else repo_root()
+        paths = CompetitionPaths(slug=slug, repo_root=base_root)
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)
-        hf = paths.submissions_dir / "history.jsonl"
-        return SubmissionHistory(history_file=hf)
+        return SubmissionLedger(ledger_path=paths.submission_ledger)
 
     def is_duplicate(self, submission_path: str) -> bool:
         new_hash = sha256_file(submission_path)
-        if not self.history_file.exists():
+        if not self.ledger_path.exists():
             return False
-        for line in self.history_file.read_text().splitlines():
+        for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rec = json.loads(line)
@@ -32,12 +88,14 @@ class SubmissionHistory:
                 return True
         return False
 
-    def record(self, submission_path: str, message: str) -> None:
+    def record(self, submission_path: str, message: str, run_id: str | None) -> None:
+        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         rec = {
             "ts": datetime.now(UTC).isoformat(),
             "sha256": sha256_file(submission_path),
             "submission_path": submission_path,
             "message": message,
+            "run_id": run_id,
         }
-        with self.history_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
+        with self.ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(rec) + "\n")

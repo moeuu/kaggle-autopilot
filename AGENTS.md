@@ -7,22 +7,23 @@ You are the implementer/tester for this repo.
 
 ## Repository purpose
 Build a Kaggle competition automation CLI:
-- download data via Kaggle CLI
+- download data via Kaggle Python API
 - train a robust baseline (MVP: tabular CSV)
 - generate a valid submission.csv (must match sample_submission.csv)
-- optionally submit via Kaggle CLI with strong guardrails
+- optionally submit via Kaggle Python API with strong guardrails
 
 ## Hard constraints (must follow)
 - Do NOT automate accepting rules / joining competitions in the browser.
 - Do NOT scrape Kaggle pages.
 - Do NOT bypass limits, spam submissions, or encourage multi-account behavior.
 - Do NOT write or commit secrets:
-  - `~/.kaggle/kaggle.json`, API keys, tokens
+  - API credentials, tokens
 - Do NOT commit large datasets or artifacts.
 
 ## Operational safety defaults
 - Default to DRY RUN for end-to-end command.
 - Submissions require an explicit flag (e.g., `--submit`) AND a human-readable message.
+- Require `--force` to allow side effects beyond local validation/ledgers.
 - Implement duplicate submission detection (hash + local history).
 - Implement strict submission validation:
   - identical columns to sample_submission.csv
@@ -43,13 +44,13 @@ Build a Kaggle competition automation CLI:
 
 ## Coding standards
 - Python 3.11+ recommended
-- Prefer `subprocess.run(..., check=True)` wrappers for Kaggle CLI
+- Use Kaggle Python API directly (OAuth via ~/.kaggle/access_token)
 - Clear exceptions + actionable error messages
 - Deterministic runs (seed control) when feasible
 
-## Notes on Kaggle CLI integration
-- Use `kaggle competitions download -c <slug>` and `kaggle competitions submit -c <slug> ...`
-- If a Kaggle command fails due to missing rule acceptance, print the Rules URL and exit.
+## Notes on Kaggle API integration
+- Use Kaggle Python API: `api.competition_download_files(slug)`, `api.competition_submit(...)`
+- If an API call fails due to missing rule acceptance, print the Rules URL and exit.
 
 ## What “done” looks like for MVP
 - `kagglebot run <slug>` downloads, trains, and produces a valid submission.csv in artifacts/

@@ -320,8 +320,8 @@ Each submission creates one line in `history.jsonl`:
 
 ### Secrets Management
 
-- **Kaggle API credentials**: Must be in `~/.kaggle/kaggle.json` (never committed)
-- **Gitignore**: Explicit blocks for `kaggle.json`, `data/`, `artifacts/`
+- **Kaggle API credentials**: OAuth token in `~/.kaggle/access_token` (never committed)
+- **Gitignore**: Explicit blocks for `.kaggle/`, `data/`, `artifacts/`
 
 ### Subprocess Injection
 

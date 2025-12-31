@@ -20,6 +20,8 @@ dependencies = [
     "pandas>=2.0.0",
     "scikit-learn>=1.3.0",
     "joblib>=1.3.0",
+    "kaggle>=1.7.4.5",
+    "kagglesdk>=0.1.14",
 ]
 
 [project.scripts]

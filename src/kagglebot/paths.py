@@ -26,8 +26,20 @@ class CompetitionPaths:
         return self.artifacts / "submissions"
 
     @property
+    def runs_dir(self) -> Path:
+        return self.artifacts / "runs"
+
+    @property
     def submission_csv(self) -> Path:
         return self.submissions_dir / "submission.csv"
+
+    @property
+    def submission_ledger(self) -> Path:
+        return self.submissions_dir / "ledger.jsonl"
+
+    @property
+    def config_file(self) -> Path:
+        return self.artifacts / "config.json"
 
 
 def repo_root() -> Path:
