@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Role
+You are the architect/reviewer for this repo.
+- Prefer planning, risk analysis, and interface design first.
+- When asked to implement, do so in small, testable chunks.
+
 ## Project Overview
 
 Kaggle Autopilot is a CLI tool that automates Kaggle competition workflows:
@@ -30,18 +35,59 @@ Kaggle Autopilot is a CLI tool that automates Kaggle competition workflows:
   - Row count must match exactly
   - If id column exists, align rows by id
 
+## Tooling (uv package manager)
+
+This project uses **uv** for fast, reliable Python package management.
+
+### Installation
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Common uv Commands
+```bash
+# Install project in editable mode with dev dependencies
+uv pip install -e ".[dev]"
+
+# Add a new dependency
+uv add pandas
+
+# Add a dev dependency
+uv add --dev pytest
+
+# Remove a dependency
+uv remove <package>
+
+# Run commands in the uv environment
+uv run pytest
+uv run kagglebot run titanic
+
+# Update all dependencies
+uv pip compile pyproject.toml -o requirements.txt --upgrade
+```
+
+### uv Best Practices
+- Always use `uv run` for CLI commands to ensure correct environment
+- Keep `uv.lock` committed for reproducible installs
+- Use `uv add` instead of manually editing pyproject.toml
+- Run `uv sync` after pulling changes to update environment
+
 ## Development Commands
 
 ```bash
+# Sync deps (uv)
+uv sync
+
 # Run tests
-pytest -q
+uv run pytest -q
 
 # Lint and format
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 
 # Type checking (optional)
-pyright  # or mypy
+uv run pyright  # or mypy
 ```
 
 ## Planned CLI Interface
@@ -57,7 +103,7 @@ kagglebot run <slug> [--submit]         # End-to-end (default: dry-run)
 ## Target Architecture
 
 ```
-kagglebot/
+src/kagglebot/
   cli.py           # Typer/Rich CLI entry point
   kaggle_cli.py    # Wrapper around `kaggle` command (subprocess)
   detect.py        # Competition type detection
@@ -76,12 +122,77 @@ artifacts/         # Models, submissions (gitignored)
 - **Minimal dependencies**: pandas + scikit-learn + typer + rich for MVP
 - **Deterministic runs**: Control random seeds when feasible
 - **Python 3.11+**: Target modern Python
+- **Resource limits**: Current MVP assumes datasets fit in memory
+  - For large competitions (>1GB CSV), add chunked processing
+  - LogisticRegression has max_iter=2000 to prevent hangs
+  - Consider memory-mapped files or Dask for huge datasets
 
 ## Kaggle CLI Integration
 
 - Download: `kaggle competitions download -c <slug>`
 - Submit: `kaggle competitions submit -c <slug> -f submission.csv -m "<message>"`
 - If Kaggle CLI fails due to missing rule acceptance, print the competition rules URL and exit gracefully
+
+## ZIP File Handling
+
+- bootstrap.py extracts all ZIPs in `data/<slug>/raw/`
+- **No zip bomb protection** (acceptable: Kaggle CLI is trusted source)
+- If adding support for user-uploaded ZIPs, add size/ratio checks
+- Uses `zipfile.ZipFile.extractall()` with fixed destination (no path traversal risk)
+
+## Architect/Reviewer Role
+
+When operating as architect/reviewer:
+
+1. **Before Implementation**: Review PLAN.md for design coherence
+2. **Interface Design**: Ensure CLI commands have clear contracts (inputs/outputs/errors)
+3. **Safety Analysis**: Check all code paths for accidental submission or rule bypass
+4. **Testability**: Verify new code has clear test boundaries (dependency injection where needed)
+5. **Documentation**: Update PLAN.md and README.md for any architectural changes
+
+## Pre-Commit Safety Checklist
+
+Before committing any change, verify:
+
+- [ ] No `kaggle.json`, API keys, or secrets in diff
+- [ ] No large CSV/zip files committed (check .gitignore)
+- [ ] All submission code paths guarded by `--submit` flag
+- [ ] Duplicate submission check cannot be bypassed accidentally
+- [ ] Validation runs before any Kaggle CLI submit call
+- [ ] Error messages include actionable next steps
+- [ ] No `shell=True` in subprocess calls (injection risk)
+- [ ] All new functions have type hints
+- [ ] Tests pass: `uv run pytest -q`
+- [ ] Linting passes: `uv run ruff check .`
+
+## Code Review Checklist
+
+When reviewing PRs or changes:
+
+### Safety
+- [ ] No infinite submit loops or retry logic without bounds
+- [ ] No repeated submissions of same file (duplicate check working)
+- [ ] No automation of rule acceptance or browser actions
+- [ ] Subprocess calls use list args (not shell strings)
+- [ ] Submission history growth is bounded (JSONL append-only)
+  - Typical: <1000 submissions = ~100KB
+  - If supporting high-volume use: add rotation or cleanup tool
+
+### Reproducibility
+- [ ] Random seeds set where applicable (train/test splits, model init)
+- [ ] Deterministic runs for same input data
+- [ ] Clear logging of validation scores and model choices
+
+### Testing
+- [ ] Critical validators have test coverage
+- [ ] New commands have integration tests
+- [ ] Edge cases tested (empty files, missing columns, etc.)
+
+### User Experience
+- [ ] Error messages are actionable (not just stack traces)
+- [ ] Help text is clear (`kagglebot <command> --help`)
+- [ ] Progress indicators for long operations
+- [ ] Dry-run mode clearly announces no submission occurred
 
 ## MVP Success Criteria
 

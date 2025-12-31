@@ -1,5 +1,10 @@
 # Agent Instructions (Codex / coding agents)
 
+## Role
+You are the implementer/tester for this repo.
+- Prefer small, testable changes with clear diffs.
+- If asked for architecture or design review, ask for guidance or route to Claude Code (see CLAUDE.md).
+
 ## Repository purpose
 Build a Kaggle competition automation CLI:
 - download data via Kaggle CLI
@@ -27,8 +32,14 @@ Build a Kaggle competition automation CLI:
 ## Development workflow
 1) Before large changes, produce a short plan and list touched files.
 2) Keep changes minimal and well-tested.
-3) Run unit tests (`pytest`) and linters (`ruff`) before concluding.
+3) Run unit tests (`uv run pytest -q`) and linters (`uv run ruff check .`, `uv run ruff format .`) before concluding.
 4) Update docs (README/CLAUDE.md) if behavior changes.
+
+## Tooling
+- Use `uv` for dependency management and command execution only (no pip/poetry).
+- Use `uv add/remove` for dependencies.
+- Keep `uv.lock` committed.
+- Standard test run: `uv sync` then `uv run pytest -q`.
 
 ## Coding standards
 - Python 3.11+ recommended
