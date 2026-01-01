@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +20,7 @@ class RulesNotAcceptedError(KaggleCliError):
     slug: str
 
 
-def download_competition(slug: str, dest_dir: Path, *, overwrite: bool = False) -> str:
+def download_competition(slug: str, dest_dir: Path, *, overwrite: bool = False, stream_output: bool = False) -> str:
     dest_dir.mkdir(parents=True, exist_ok=True)
     args = [
         "kaggle",
@@ -33,10 +34,10 @@ def download_competition(slug: str, dest_dir: Path, *, overwrite: bool = False) 
     ]
     if overwrite:
         args.append("--force")
-    return _run_kaggle(args, slug)
+    return _run_kaggle(args, slug, stream_output=stream_output)
 
 
-def submit_competition(slug: str, submission_file: Path, message: str) -> str:
+def submit_competition(slug: str, submission_file: Path, message: str, *, stream_output: bool = False) -> str:
     args = [
         "kaggle",
         "competitions",
@@ -48,12 +49,12 @@ def submit_competition(slug: str, submission_file: Path, message: str) -> str:
         "-m",
         message,
     ]
-    return _run_kaggle(args, slug)
+    return _run_kaggle(args, slug, stream_output=stream_output)
 
 
-def kernels_push(kernel_dir: Path, *, slug: str | None = None) -> str:
+def kernels_push(kernel_dir: Path, *, slug: str | None = None, stream_output: bool = False) -> str:
     args = ["kaggle", "kernels", "push", "-p", str(kernel_dir)]
-    return _run_kaggle(args, slug)
+    return _run_kaggle(args, slug, stream_output=stream_output)
 
 
 def kernels_status(kernel_id: str, *, slug: str | None = None) -> str:
@@ -61,10 +62,10 @@ def kernels_status(kernel_id: str, *, slug: str | None = None) -> str:
     return _run_kaggle(args, slug)
 
 
-def kernels_output(kernel_id: str, output_dir: Path, *, slug: str | None = None) -> str:
+def kernels_output(kernel_id: str, output_dir: Path, *, slug: str | None = None, stream_output: bool = False) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     args = ["kaggle", "kernels", "output", kernel_id, "-p", str(output_dir)]
-    return _run_kaggle(args, slug)
+    return _run_kaggle(args, slug, stream_output=stream_output)
 
 
 def competitions_files(slug: str) -> str:
@@ -72,8 +73,10 @@ def competitions_files(slug: str) -> str:
     return _run_kaggle(args, slug)
 
 
-def _run_kaggle(args: list[str], slug: str | None) -> str:
+def _run_kaggle(args: list[str], slug: str | None, *, stream_output: bool = False) -> str:
     try:
+        if stream_output:
+            return _run_kaggle_stream(args, slug)
         completed = subprocess.run(args, check=False, capture_output=True, text=True)
     except FileNotFoundError as exc:
         raise KaggleCliError(
@@ -91,6 +94,46 @@ def _run_kaggle(args: list[str], slug: str | None) -> str:
             )
         raise KaggleCliError(
             message=f"Kaggle CLI failed with exit code {completed.returncode}.",
+            output=output,
+        )
+    return output
+
+
+def _run_kaggle_stream(args: list[str], slug: str | None) -> str:
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except FileNotFoundError as exc:
+        raise KaggleCliError(
+            "Kaggle CLI not found. Install the kaggle package and ensure `kaggle` is on PATH.",
+            "",
+        ) from exc
+
+    output_chunks: list[bytes] = []
+    if proc.stdout is not None:
+        for chunk in iter(lambda: proc.stdout.read(4096), b""):
+            if hasattr(sys.stdout, "buffer"):
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+            else:
+                sys.stdout.write(chunk.decode(errors="replace"))
+                sys.stdout.flush()
+            output_chunks.append(chunk)
+
+    return_code = proc.wait()
+    output = b"".join(output_chunks).decode(errors="replace").strip()
+    if return_code != 0:
+        if slug and _is_rules_not_accepted(output):
+            raise RulesNotAcceptedError(
+                message="Competition rules not accepted.",
+                output=output,
+                slug=slug,
+            )
+        raise KaggleCliError(
+            message=f"Kaggle CLI failed with exit code {return_code}.",
             output=output,
         )
     return output

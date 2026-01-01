@@ -881,7 +881,7 @@ All tests should pass.
 
 - [ ] **C120**: Test flag validation
   - Invoke with --compute kaggle_gpu without --kaggle-username
-  - Assert error if username can't be detected
+  - Assert error if username can't be detected via `KAGGLE_USERNAME` or `~/.kaggle/kaggle.json`
 
 ### Integration Tests
 
@@ -915,7 +915,7 @@ All tests should pass. Run integration tests separately.
 - [ ] **C124**: Update README.md
   - Add "Compute Switching" section after "Features"
   - Show example for each compute mode (local_cpu, local_gpu, kaggle_gpu, kaggle_tpu)
-  - Document --compute flag and related flags (--strict, --kaggle-username, etc.)
+  - Document --compute flag and related flags (--strict, --kaggle-username optional, etc.)
   - Update "Features" to mention GPU support
 
 - [ ] **C125**: Update CLAUDE.md (already done in this session)
@@ -976,7 +976,7 @@ All tests should pass. Run integration tests separately.
   - Verify faster than CPU (optional)
 
 - [ ] **C133**: Manual test: Kaggle GPU on Titanic
-  - Run: `uv run kagglebot run titanic --compute kaggle_gpu --kaggle-username <your-user> --dry-run`
+  - Run: `uv run kagglebot run titanic --compute kaggle_gpu --dry-run`
   - Verify kernel package generated
   - Manually push kernel: `kaggle kernels push -p <package-dir>`
   - Wait for completion

@@ -21,7 +21,7 @@ Build a Kaggle competition automation CLI:
 - Do NOT commit large datasets or artifacts.
 
 ## Operational safety defaults
-- Default to DRY RUN for end-to-end command.
+- Default to NO DRY RUN for end-to-end command; use `--dry-run` for previews.
 - Submissions require an explicit flag (e.g., `--submit`) AND a human-readable message.
 - Require `--force` to allow side effects beyond local validation/ledgers.
 - Implement duplicate submission detection (hash + local history).

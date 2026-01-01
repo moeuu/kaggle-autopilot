@@ -14,6 +14,18 @@ class CompetitionPaths:
         return self.repo_root / "data" / self.slug / "raw"
 
     @property
+    def data_dir(self) -> Path:
+        return self.artifacts / "data"
+
+    @property
+    def context_dir(self) -> Path:
+        return self.artifacts / "context"
+
+    @property
+    def prompts_dir(self) -> Path:
+        return self.artifacts / "prompts"
+
+    @property
     def artifacts(self) -> Path:
         return self.repo_root / "artifacts" / self.slug
 
@@ -56,6 +68,22 @@ class CompetitionPaths:
     @property
     def config_file(self) -> Path:
         return self.artifacts / "config.json"
+
+    @property
+    def meta_path(self) -> Path:
+        return self.context_dir / "meta.json"
+
+    @property
+    def plan_path(self) -> Path:
+        return self.context_dir / "plan.json"
+
+    @property
+    def rules_url_path(self) -> Path:
+        return self.context_dir / "rules_url.txt"
+
+    @property
+    def dataset_summary_path(self) -> Path:
+        return self.context_dir / "dataset_summary.txt"
 
 
 def repo_root() -> Path:

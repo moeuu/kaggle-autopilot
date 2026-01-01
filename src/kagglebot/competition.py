@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import re
 from urllib.parse import urlparse
 
-_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+from kagglebot.validators import validate_slug
 
 
 def parse_competition_slug(value: str) -> str:
@@ -18,8 +17,7 @@ def parse_competition_slug(value: str) -> str:
         slug = raw.strip("/")
         if "/" in slug:
             raise ValueError(f"Expected a slug, got '{value}'.")
-        _validate_slug(slug)
-        return slug
+        return _normalize_slug(slug)
 
     parsed = urlparse(raw)
     if not parsed.netloc:
@@ -30,17 +28,15 @@ def parse_competition_slug(value: str) -> str:
     segments = [seg for seg in parsed.path.split("/") if seg]
     if len(segments) >= 2 and segments[0] in {"c", "competitions"}:
         slug = segments[1]
-        _validate_slug(slug)
-        return slug
+        return _normalize_slug(slug)
 
     raise ValueError(f"Unable to parse competition slug from '{value}'.")
 
 
 def rules_url_for_slug(slug: str) -> str:
-    _validate_slug(slug)
+    slug = _normalize_slug(slug)
     return f"https://www.kaggle.com/competitions/{slug}/rules"
 
 
-def _validate_slug(slug: str) -> None:
-    if not _SLUG_RE.fullmatch(slug):
-        raise ValueError(f"Invalid competition slug '{slug}'.")
+def _normalize_slug(slug: str) -> str:
+    return validate_slug(slug.lower())

@@ -3,15 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rich import print
-
-from kagglebot import kaggle_cli
-from kagglebot.runners.base import RunContext, RunResult
+from kagglebot import kaggle_api
+from kagglebot.exceptions import KernelFailedError, KernelTimeoutError, RulesNotAcceptedError
+from kagglebot.validators import validate_kernel_package
 
 KERNEL_TEMPLATE = r"""
 import json
@@ -104,10 +103,6 @@ def infer_task(y: pd.Series) -> str:
 def build_preprocessor(feature_cols: list[str], train: pd.DataFrame) -> ColumnTransformer:
     cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
     num_cols = [c for c in feature_cols if c not in cat_cols]
-    try:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
     return ColumnTransformer(
         transformers=[
             ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), num_cols),
@@ -116,7 +111,7 @@ def build_preprocessor(feature_cols: list[str], train: pd.DataFrame) -> ColumnTr
                 Pipeline(
                     [
                         ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("ohe", ohe),
+                        ("ohe", OneHotEncoder(handle_unknown="ignore")),
                     ]
                 ),
                 cat_cols,
@@ -148,7 +143,7 @@ def train_torch_mlp(x, y, task: str, num_classes: int, device: str):
     from torch.utils.data import DataLoader, TensorDataset
 
     x_tensor = torch.tensor(x, dtype=torch.float32)
-    y_tensor = torch.tensor(np.asarray(y))
+    y_tensor = torch.tensor(y)
     dataset = TensorDataset(x_tensor, y_tensor)
     loader = DataLoader(dataset, batch_size=256, shuffle=True)
 
@@ -381,103 +376,105 @@ if __name__ == "__main__":
 """.strip()
 
 
-class KaggleNotebookRunner:
-    name = "kaggle_notebook"
+@dataclass(frozen=True)
+class KernelRunResult:
+    kernel_id: str
+    kernel_slug: str
+    kernel_dir: Path
+    output_dir: Path
+    submission_path: Path | None
+    summary_path: Path
 
-    def run(self, context: RunContext) -> RunResult:
-        slug = context.slug
-        run_id = context.run_id
-        paths = context.paths
 
-        run_dir = paths.artifacts / run_id
-        kernel_dir = run_dir / "kernel"
-        output_dir = run_dir / "output"
-        logs_dir = run_dir / "logs"
-        summary_path = run_dir / "summary.json"
+def run_kernel(
+    *,
+    slug: str,
+    run_id: str,
+    base_dir: Path,
+    kaggle_username: str,
+    kernel_name: str | None,
+    accelerator: str,
+    enable_internet: bool,
+    dry_run: bool,
+    timeout_minutes: int = 120,
+) -> KernelRunResult:
+    run_dir = base_dir / "runs" / run_id
+    kernel_dir = run_dir / "kernel"
+    output_dir = run_dir / "output"
+    logs_dir = run_dir / "logs"
+    summary_path = run_dir / "summary.json"
 
-        kernel_dir.mkdir(parents=True, exist_ok=True)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        logs_dir.mkdir(parents=True, exist_ok=True)
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
-        kaggle_username = resolve_kaggle_username(context.kaggle_username)
-        kernel_slug = build_kernel_slug(slug, run_id)
-        kernel_id = f"{kaggle_username}/{kernel_slug}"
+    kernel_slug = sanitize_kernel_slug(kernel_name or f"kagglebot-{slug}-{run_id}")
+    kernel_id = f"{kaggle_username}/{kernel_slug}"
 
-        accelerator = context.accelerator
+    if not dry_run:
+        kaggle_api.kernels_init(kernel_dir)
+    _write_kernel_metadata(
+        kernel_dir=kernel_dir,
+        kernel_id=kernel_id,
+        title=f"kagglebot {slug} {run_id}",
+        competition_slug=slug,
+        accelerator=accelerator,
+        enable_internet=enable_internet,
+    )
 
-        metadata = build_kernel_metadata(
-            kaggle_username=kaggle_username,
-            kernel_slug=kernel_slug,
-            title=kernel_slug.replace("-", " "),
-            competition_slug=slug,
-            accelerator=accelerator,
-            enable_internet=context.enable_internet,
-        )
-        kernel_metadata_path = kernel_dir / "kernel-metadata.json"
-        kernel_metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    kernel_main = kernel_dir / "main.py"
+    kernel_main.write_text(render_kernel_main(slug, accelerator), encoding="utf-8")
 
-        kernel_main_path = kernel_dir / "main.py"
-        kernel_main_path.write_text(render_kernel_main(slug, accelerator), encoding="utf-8")
+    validate_kernel_package(kernel_dir)
 
-        commands = [
-            f"kaggle kernels push -p {kernel_dir}",
-            f"kaggle kernels status {kernel_id}",
-            f"kaggle kernels output {kernel_id} -p {output_dir}",
-        ]
+    commands = [
+        f"kaggle kernels push -p {kernel_dir}",
+        f"kaggle kernels status {kernel_id}",
+        f"kaggle kernels output {kernel_id} -p {output_dir}",
+    ]
+    summary = {
+        "schema_version": 1,
+        "slug": slug,
+        "run_id": run_id,
+        "kernel_slug": kernel_slug,
+        "kernel_id": kernel_id,
+        "accelerator": accelerator,
+        "enable_internet": enable_internet,
+        "dry_run": dry_run,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "commands": commands,
+    }
 
-        summary = {
-            "schema_version": 1,
-            "slug": slug,
-            "run_id": run_id,
-            "runner": self.name,
-            "kernel_slug": kernel_slug,
-            "kernel_id": kernel_id,
-            "accelerator": accelerator,
-            "enable_internet": context.enable_internet,
-            "dry_run": context.dry_run,
-            "generated_at": datetime.now(UTC).isoformat(),
-            "commands": commands,
-        }
-
-        if context.dry_run:
-            print("[yellow]DRY RUN[/yellow]: Kaggle CLI commands will not be executed.")
-            for command in commands:
-                print(f"[cyan]planned[/cyan]: {command}")
-            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-            return RunResult(
-                run_id=run_id,
-                runner=self.name,
-                submission_path=None,
-                summary_path=summary_path,
-                analysis_path=None,
-                kernel_slug=kernel_slug,
-            )
-
-        print(f"[cyan]checking competition access[/cyan]: {slug}")
-        kaggle_cli.competitions_files(slug)
-        print(f"[cyan]pushing kernel[/cyan]: {kernel_dir}")
-        kaggle_cli.kernels_push(kernel_dir, slug=slug, stream_output=True)
-        print(f"[cyan]waiting for kernel[/cyan]: {kernel_id}")
-        _wait_for_kernel(kernel_id, logs_dir=logs_dir, slug=slug)
-        print(f"[cyan]downloading kernel output[/cyan]: {output_dir}")
-        kaggle_cli.kernels_output(kernel_id, output_dir, slug=slug, stream_output=True)
-
-        submission_path = find_submission_file(output_dir)
-        paths.submissions_dir.mkdir(parents=True, exist_ok=True)
-        local_submission = paths.submission_csv
-        shutil.copy2(submission_path, local_submission)
-
-        summary["submission_path"] = str(local_submission)
+    if dry_run:
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-
-        return RunResult(
-            run_id=run_id,
-            runner=self.name,
-            submission_path=local_submission,
-            summary_path=summary_path,
-            analysis_path=None,
+        return KernelRunResult(
+            kernel_id=kernel_id,
             kernel_slug=kernel_slug,
+            kernel_dir=kernel_dir,
+            output_dir=output_dir,
+            submission_path=None,
+            summary_path=summary_path,
         )
+
+    if not kaggle_api.check_rules_accepted(slug):
+        raise RulesNotAcceptedError("Competition rules not accepted.")
+
+    kaggle_api.kernels_push(kernel_dir, slug=slug)
+    _wait_for_kernel(kernel_id, logs_dir=logs_dir, timeout_minutes=timeout_minutes, slug=slug)
+    kaggle_api.kernels_output(kernel_id, output_dir, slug=slug)
+
+    submission_path = find_submission_file(output_dir)
+    summary["submission_path"] = str(submission_path)
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    return KernelRunResult(
+        kernel_id=kernel_id,
+        kernel_slug=kernel_slug,
+        kernel_dir=kernel_dir,
+        output_dir=output_dir,
+        submission_path=submission_path,
+        summary_path=summary_path,
+    )
 
 
 def sanitize_kernel_slug(value: str, max_length: int = 80) -> str:
@@ -488,61 +485,6 @@ def sanitize_kernel_slug(value: str, max_length: int = 80) -> str:
     if len(slug) > max_length:
         slug = slug[:max_length].rstrip("-")
     return slug
-
-
-def build_kernel_slug(competition_slug: str, run_id: str, *, max_length: int = 50) -> str:
-    short_id = run_id.rsplit("-", 1)[-1]
-    base_slug = sanitize_kernel_slug(competition_slug, max_length=200)
-    base = f"kb-{base_slug}-{short_id}"
-    if len(base) <= max_length:
-        return base
-    reserved = len("kb--") + len(short_id)
-    room = max_length - reserved
-    if room < 1:
-        raise ValueError("Kernel slug length budget is too small.")
-    trimmed_slug = base_slug[:room].rstrip("-")
-    if not trimmed_slug:
-        raise ValueError("Kernel slug is empty after trimming.")
-    return f"kb-{trimmed_slug}-{short_id}"
-
-
-def build_kernel_metadata(
-    *,
-    kaggle_username: str,
-    kernel_slug: str,
-    title: str,
-    competition_slug: str,
-    accelerator: str,
-    enable_internet: bool,
-) -> dict[str, object]:
-    enable_gpu = accelerator == "gpu"
-    enable_tpu = accelerator == "tpu"
-    if enable_gpu and enable_tpu:
-        raise ValueError("enable_gpu and enable_tpu cannot both be true.")
-    return {
-        "id": f"{kaggle_username}/{kernel_slug}",
-        "title": title,
-        "code_file": "main.py",
-        "language": "python",
-        "kernel_type": "script",
-        "is_private": True,
-        "enable_gpu": enable_gpu,
-        "enable_tpu": enable_tpu,
-        "enable_internet": enable_internet,
-        "competition_sources": [competition_slug],
-        "dataset_sources": [],
-        "kernel_sources": [],
-        "model_sources": [],
-        "keywords": [],
-    }
-
-
-def render_kernel_main(competition_slug: str, accelerator: str) -> str:
-    return (
-        KERNEL_TEMPLATE.replace("__COMPETITION_SLUG__", competition_slug)
-        .replace("__ACCELERATOR__", accelerator)
-        .strip()
-    )
 
 
 def resolve_kaggle_username(explicit: str | None) -> str:
@@ -558,10 +500,65 @@ def resolve_kaggle_username(explicit: str | None) -> str:
         username = payload.get("username")
         if username:
             return str(username)
-    raise ValueError(
-        "Kaggle username is required for kaggle_* compute modes. "
-        "Set --kaggle-username, KAGGLE_USERNAME, or ~/.kaggle/kaggle.json."
+    raise ValueError("Kaggle username is required for kaggle_* compute modes.")
+
+
+def render_kernel_main(competition_slug: str, accelerator: str) -> str:
+    return (
+        KERNEL_TEMPLATE.replace("__COMPETITION_SLUG__", competition_slug)
+        .replace("__ACCELERATOR__", accelerator)
+        .strip()
     )
+
+
+def _write_kernel_metadata(
+    *,
+    kernel_dir: Path,
+    kernel_id: str,
+    title: str,
+    competition_slug: str,
+    accelerator: str,
+    enable_internet: bool,
+) -> None:
+    meta_path = kernel_dir / "kernel-metadata.json"
+    if meta_path.exists():
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    else:
+        payload = {
+            "id": "",
+            "title": "",
+            "code_file": "main.py",
+            "language": "python",
+            "kernel_type": "script",
+            "is_private": True,
+            "enable_gpu": False,
+            "enable_tpu": False,
+            "enable_internet": False,
+            "competition_sources": [],
+            "dataset_sources": [],
+            "kernel_sources": [],
+            "model_sources": [],
+            "keywords": [],
+        }
+
+    payload["id"] = kernel_id
+    payload["title"] = title
+    payload["code_file"] = "main.py"
+    payload["language"] = "python"
+    payload["kernel_type"] = "script"
+    payload["is_private"] = True
+    payload["enable_gpu"] = accelerator == "gpu"
+    payload["enable_tpu"] = accelerator == "tpu"
+    payload["enable_internet"] = bool(enable_internet)
+    payload["competition_sources"] = [competition_slug]
+    payload.setdefault("dataset_sources", [])
+    payload.setdefault("kernel_sources", [])
+    payload.setdefault("model_sources", [])
+    payload.setdefault("keywords", [])
+    if payload["enable_gpu"] and payload["enable_tpu"]:
+        raise ValueError("enable_gpu and enable_tpu cannot both be true.")
+
+    meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def find_submission_file(output_dir: Path) -> Path:
@@ -573,26 +570,22 @@ def find_submission_file(output_dir: Path) -> Path:
     return matches[0]
 
 
-def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str) -> None:
-    timeout_seconds = 60 * 60
+def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, timeout_minutes: int, slug: str) -> None:
+    timeout_seconds = max(timeout_minutes, 1) * 60
     poll_seconds = 15
     start = time.monotonic()
     status_log = logs_dir / "kernel_status.log"
-    last_status = None
 
     while True:
-        output = kaggle_cli.kernels_status(kernel_id, slug=slug)
+        output = kaggle_api.kernels_status(kernel_id, slug=slug)
         status = _parse_kernel_status(output)
-        if status != last_status:
-            print(f"[cyan]kernel status[/cyan]: {status}")
-            last_status = status
         status_log.write_text(output, encoding="utf-8")
         if status == "complete":
             return
         if status == "failed":
-            raise RuntimeError(f"Kernel run failed: {output}")
+            raise KernelFailedError(f"Kernel run failed: {output}")
         if time.monotonic() - start > timeout_seconds:
-            raise TimeoutError("Timed out waiting for kernel completion.")
+            raise KernelTimeoutError("Timed out waiting for kernel completion.")
         time.sleep(poll_seconds)
 
 

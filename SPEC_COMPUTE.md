@@ -38,7 +38,7 @@ kagglebot run <competition> [OPTIONS]
 
 --kaggle-username TEXT
     Kaggle username for kernel ownership
-    Required for kaggle_* compute unless auto-detected from ~/.kaggle/
+    Optional override; auto-detected from KAGGLE_USERNAME or ~/.kaggle/kaggle.json
 
 --enable-internet
     Allow internet in Kaggle Notebooks (default: false)
@@ -55,7 +55,7 @@ kagglebot run <competition> [OPTIONS]
 
 ```bash
 --dry-run
-    Show plan without execution (default: false for safety)
+    Show plan without execution (default: false)
     Safe: no downloads, no kernel push, no submission
 
 --submit

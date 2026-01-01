@@ -463,7 +463,7 @@ class KaggleNotebookRunner(Runner):
             from ..compute.exceptions import ComputeError
             raise ComputeError(
                 f"Kaggle credentials not found or invalid: {e}. "
-                "Ensure ~/.kaggle/access_token exists or run 'kaggle config'"
+                "Ensure ~/.kaggle/kaggle.json exists or set KAGGLE_USERNAME/KAGGLE_KEY"
             ) from e
 
         # Check rules accepted

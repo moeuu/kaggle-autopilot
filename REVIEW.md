@@ -79,7 +79,7 @@ The codebase implements all critical safety guardrails and follows the architect
 | Guardrail | Status | Implementation | Location |
 |-----------|--------|----------------|----------|
 | No auto-accept rules | ✅ PASS | Probe-based detection + graceful exit | bootstrap.py:29-38 |
-| Dry-run by default | ✅ PASS | `--submit` required, warns on dry-run | cli.py:56-58 |
+| Dry-run optional | ✅ PASS | `--dry-run` available for preview; `--submit` required | cli.py:56-58 |
 | Duplicate prevention | ✅ PASS | SHA256 hash check + history.jsonl | cli.py:61-67 |
 | Strict validation | ✅ PASS | 4-level validation before submit | validation.py:7-35 |
 | No shell injection | ✅ PASS | All subprocess calls use list args | kaggle_cli.py:19-23 |

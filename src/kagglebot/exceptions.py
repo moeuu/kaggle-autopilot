@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+
+class KaggleBotError(Exception):
+    """Base error for kagglebot commands."""
+
+    exit_code = 1
+
+
+class RulesNotAcceptedError(KaggleBotError):
+    """Competition rules were not accepted by the user."""
+
+    exit_code = 2
+
+
+class KaggleCliError(KaggleBotError):
+    """Kaggle CLI returned a non-zero exit code."""
+
+    exit_code = 4
+
+    def __init__(self, message: str, output: str = "") -> None:
+        super().__init__(message)
+        self.message = message
+        self.output = output
+
+
+class ValidationError(KaggleBotError):
+    """Submission validation failed."""
+
+    exit_code = 6
+
+
+class DuplicateSubmissionError(KaggleBotError):
+    """Submission hash already exists in the local ledger."""
+
+    exit_code = 8
+
+
+class SubmissionRateLimitError(KaggleBotError):
+    """Local rate limit exceeded for submissions."""
+
+    exit_code = 9
+
+
+class GPUNotAvailableError(KaggleBotError):
+    """Requested GPU is not available locally."""
+
+    exit_code = 10
+
+
+class KernelTimeoutError(KaggleBotError):
+    """Kaggle kernel did not complete within the timeout."""
+
+    exit_code = 11
+
+
+class KernelFailedError(KaggleBotError):
+    """Kaggle kernel completed with a failure status."""
+
+    exit_code = 12
+
+
+class GitError(KaggleBotError):
+    """Git command failed."""
+
+    exit_code = 1

@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from kagglebot.exceptions import SubmissionRateLimitError
 from kagglebot.history import SubmissionLedger
 from kagglebot.validation import ensure_submission_rate_limit, validate_submission
 
@@ -133,5 +134,5 @@ def test_submission_rate_limit(tmp_path):
     ledger.ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger.ledger_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="cooldown"):
+    with pytest.raises(SubmissionRateLimitError, match="cooldown"):
         ensure_submission_rate_limit(ledger, max_submissions_per_day=5, min_hours_between=1.0)

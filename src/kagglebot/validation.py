@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
+from kagglebot.exceptions import DuplicateSubmissionError, SubmissionRateLimitError
 from kagglebot.history import SubmissionLedger
 
 
@@ -62,12 +63,9 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
 def ensure_not_duplicate_submission(
     ledger: SubmissionLedger,
     submission_path: str,
-    *,
-    slug: str,
-    message: str,
 ) -> None:
-    if ledger.is_duplicate(submission_path, slug=slug, message=message):
-        raise ValueError("Duplicate submission detected (hash already recorded).")
+    if ledger.is_duplicate(submission_path):
+        raise DuplicateSubmissionError("Duplicate submission detected (hash already recorded).")
 
 
 def ensure_submission_rate_limit(
@@ -103,8 +101,8 @@ def ensure_submission_rate_limit(
             last_ts = ts
 
     if recent >= max_submissions_per_day:
-        raise ValueError("Submission rate limit exceeded (max per day).")
+        raise SubmissionRateLimitError("Submission rate limit exceeded (max per day).")
     if last_ts is not None:
         elapsed = (now - last_ts).total_seconds() / 3600.0
         if elapsed < min_hours_between:
-            raise ValueError("Submission rate limit exceeded (cooldown).")
+            raise SubmissionRateLimitError("Submission rate limit exceeded (cooldown).")

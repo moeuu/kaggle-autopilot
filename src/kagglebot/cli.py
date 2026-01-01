@@ -1,351 +1,479 @@
 from __future__ import annotations
 
+import shlex
+import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 import typer
 from rich import print
 
-from kagglebot.analyzer import UnsupportedCompetitionError, analyze_competition
+from kagglebot.agents.claude_runner import run_claude
+from kagglebot.agents.codex_runner import run_codex
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.competition import parse_competition_slug, rules_url_for_slug
 from kagglebot.compute import Compute, compute_to_runner_and_accelerator
+from kagglebot.exceptions import (
+    DuplicateSubmissionError,
+    GPUNotAvailableError,
+    KaggleCliError,
+    KernelFailedError,
+    KernelTimeoutError,
+    RulesNotAcceptedError,
+    SubmissionRateLimitError,
+    ValidationError,
+)
+from kagglebot.git_ops import branch_exists, commit_all, create_branch, ensure_clean_worktree, ensure_git_repo
 from kagglebot.history import RunLedger, SubmissionLedger
-from kagglebot.kaggle_cli import KaggleCliError, RulesNotAcceptedError, download_competition, submit_competition
+from kagglebot.kaggle_api import check_rules_accepted, submit_competition
+from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
 from kagglebot.paths import CompetitionPaths, repo_root
-from kagglebot.runners import KaggleNotebookRunner, LocalRunner, RunContext
-from kagglebot.training import predict_tabular, train_tabular
-from kagglebot.validation import ensure_not_duplicate_submission, ensure_submission_rate_limit, validate_submission
-
-EXIT_RULES_NOT_ACCEPTED = 2
-EXIT_INVALID_COMPETITION = 3
-EXIT_DOWNLOAD_FAILED = 4
-EXIT_TRAINING_FAILED = 5
-EXIT_VALIDATION_FAILED = 6
-EXIT_SUBMISSION_FAILED = 7
-EXIT_DUPLICATE_SUBMISSION = 8
+from kagglebot.solver.baseline import train_and_predict
+from kagglebot.solver.validate import validate_submission_file
+from kagglebot.validation import ensure_not_duplicate_submission, ensure_submission_rate_limit
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
+
+
+class Agent(str, Enum):
+    codex = "codex"
+    claude = "claude"
 
 
 @app.command()
 def bootstrap(
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    force: bool = typer.Option(False, "--force", help="Overwrite the local config if it exists."),
-) -> None:
-    """
-    Prepare workspace directories and write a config file.
-    Does not join competitions or perform network actions.
-    """
-    slug = _resolve_slug(competition)
-    config_path = bootstrap_competition(slug=slug, force=force)
-    print(f"[green]bootstrap complete[/green]: {config_path}")
-
-
-@app.command()
-def download(
-    competition: str = typer.Argument(..., help="Competition URL or slug."),
+    download: bool = typer.Option(False, "--download/--no-download", help="Download competition data."),
+    rules_source: str = typer.Option(
+        "url",
+        "--rules-source",
+        help="Rules capture source: none, url, fetch, file.",
+    ),
+    rules_file: Path | None = typer.Option(
+        None,
+        "--rules-file",
+        help="Rules file to copy when --rules-source file.",
+    ),
     force: bool = typer.Option(False, "--force", help="Allow Kaggle CLI download."),
-    overwrite: bool = typer.Option(False, "--overwrite", help="Force re-download even if files exist."),
+    quiet: bool = typer.Option(True, "--quiet/--no-quiet", help="Use --quiet for Kaggle CLI download."),
+    workdir: Path | None = typer.Option(None, "--workdir", help="Base working directory."),
 ) -> None:
-    """Download competition data via Kaggle CLI into data/<slug>/raw."""
     slug = _resolve_slug(competition)
-    if not force:
+    base_root = workdir if workdir is not None else repo_root()
+
+    if download and not force:
         _refuse_side_effect("download competition data")
-    paths = CompetitionPaths(slug=slug, repo_root=repo_root())
-    bootstrap_competition(slug=slug, force=False)
+
     try:
-        download_competition(slug, paths.data_raw, overwrite=overwrite)
+        meta_path = bootstrap_competition(
+            slug=slug,
+            root=base_root,
+            force=force,
+            rules_source=rules_source,
+            rules_file=rules_file,
+            download=download,
+            quiet=quiet,
+        )
     except RulesNotAcceptedError:
         _print_rules_and_exit(slug)
     except KaggleCliError as exc:
         _print_kaggle_error(exc, action="download")
-        raise typer.Exit(code=EXIT_DOWNLOAD_FAILED)
-    print(f"[green]download complete[/green]: {paths.data_raw}")
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    print(f"[green]bootstrap complete[/green]: {meta_path}")
+
+
+@app.command()
+def implement(
+    competition: str = typer.Argument(..., help="Competition URL or slug."),
+    agent: Agent = typer.Option(..., "--agent", help="Agent to run (codex or claude)."),
+    commit: bool = typer.Option(False, "--commit/--no-commit", help="Commit changes after verification."),
+    verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
+    dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Skip running the agent."),
+    workdir: Path | None = typer.Option(None, "--workdir", help="Base working directory."),
+) -> None:
+    slug = _resolve_slug(competition)
+    base_root = workdir if workdir is not None else repo_root()
+
+    paths = CompetitionPaths(slug=slug, repo_root=base_root)
+    bootstrap_competition(slug=slug, root=base_root)
+
+    run_ledger = RunLedger.for_slug(slug, root=base_root)
+    run_record = run_ledger.start_run(
+        slug=slug,
+        dry_run=dry_run,
+        force=False,
+        submission_path=None,
+        sample_path=None,
+        message=None,
+        argv=list(sys.argv),
+        extra={"agent": agent.value, "command": "implement"},
+    )
+    print(f"[green]run started[/green]: {run_record.run_id}")
+
+    agent_dir = paths.runs_dir / run_record.run_id / agent.value
+    prompt_path = paths.prompts_dir / f"{agent.value}.md"
+    if not prompt_path.exists():
+        raise typer.Exit(code=1)
+
+    _run_agent(
+        agent=agent,
+        prompt_path=prompt_path,
+        agent_dir=agent_dir,
+        branch_name=f"bot/{slug}/{run_record.run_id}",
+        verify_cmd=verify_cmd,
+        commit=commit,
+        dry_run=dry_run,
+        base_root=base_root,
+        slug=slug,
+        run_id=run_record.run_id,
+    )
+    print(f"[green]agent logs[/green]: {agent_dir}")
 
 
 @app.command()
 def train(
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    time_budget_minutes: int = typer.Option(
-        60,
-        "--time-budget",
-        "--time-budget-min",
-        help="Max training time in minutes.",
-    ),
-    models: str | None = typer.Option(None, "--models", help="Comma-separated model list."),
-    cv_folds: int = typer.Option(5, "--cv-folds", help="Number of cross-validation folds."),
-    no_stacking: bool = typer.Option(False, "--no-stacking", help="Disable stacking."),
-) -> None:
-    """Train a baseline model and write artifacts into artifacts/<slug>/."""
-    slug = _resolve_slug(competition)
-    model_list = _parse_models(models)
-    paths = CompetitionPaths(slug=slug, repo_root=repo_root())
-    bootstrap_competition(slug=slug, force=False)
-    try:
-        analysis = analyze_competition(
-            slug=slug,
-            paths=paths,
-            time_budget_minutes=time_budget_minutes,
-            cv_folds=cv_folds,
-            models=model_list,
-            use_stacking=not no_stacking,
-        )
-    except UnsupportedCompetitionError as exc:
-        print(f"[red]unsupported competition[/red]: {exc}")
-        raise typer.Exit(code=EXIT_INVALID_COMPETITION) from exc
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]analysis failed[/red]: {exc}")
-        raise typer.Exit(code=EXIT_TRAINING_FAILED) from exc
-    try:
-        result = train_tabular(
-            analysis.metadata,
-            paths=paths,
-            time_budget_minutes=time_budget_minutes,
-            model_names=model_list,
-            cv_folds=cv_folds,
-            accelerator="none",
-            strict_accelerator=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]training failed[/red]: {exc}")
-        raise typer.Exit(code=EXIT_TRAINING_FAILED) from exc
-    print(f"[green]analysis saved[/green]: {analysis.analysis_path}")
-    print(f"[green]model saved[/green]: {result.model_path}")
-    print(f"[green]report saved[/green]: {result.report_path}")
-
-
-@app.command()
-def predict(
-    competition: str = typer.Argument(..., help="Competition URL or slug."),
-) -> None:
-    """Generate a submission from the latest trained baseline model."""
-    slug = _resolve_slug(competition)
-    paths = CompetitionPaths(slug=slug, repo_root=repo_root())
-    bootstrap_competition(slug=slug, force=False)
-    try:
-        analysis = analyze_competition(
-            slug=slug,
-            paths=paths,
-            time_budget_minutes=60,
-            cv_folds=5,
-            models=None,
-            use_stacking=False,
-        )
-        submission_path = predict_tabular(analysis.metadata, paths=paths)
-    except UnsupportedCompetitionError as exc:
-        print(f"[red]unsupported competition[/red]: {exc}")
-        raise typer.Exit(code=EXIT_INVALID_COMPETITION) from exc
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]prediction failed[/red]: {exc}")
-        raise typer.Exit(code=EXIT_TRAINING_FAILED) from exc
-    print(f"[green]submission written[/green]: {submission_path}")
-
-
-@app.command()
-def submit(
-    competition: str = typer.Argument(..., help="Competition URL or slug."),
-    message: str = typer.Option(..., "--message", help="Submission message."),
-    force: bool = typer.Option(False, "--force", help="Allow Kaggle CLI submission."),
-    force_submit: bool = typer.Option(False, "--force-submit", help="Allow duplicate submissions."),
-) -> None:
-    """Validate and submit artifacts/<slug>/submissions/submission.csv to Kaggle."""
-    slug = _resolve_slug(competition)
-    if not force:
-        _refuse_side_effect("submit to Kaggle")
-    paths = CompetitionPaths(slug=slug, repo_root=repo_root())
-    submission_path = paths.submission_csv
-    sample_path = paths.data_raw / "sample_submission.csv"
-
-    try:
-        validate_submission(str(sample_path), str(submission_path))
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]submission validation failed[/red]: {exc}")
-        raise typer.Exit(code=EXIT_VALIDATION_FAILED) from exc
-
-    ledger = SubmissionLedger.for_slug(slug)
-    ensure_submission_rate_limit(ledger)
-    if not force_submit:
-        try:
-            ensure_not_duplicate_submission(ledger, str(submission_path), slug=slug, message=message)
-        except ValueError as exc:
-            print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=EXIT_DUPLICATE_SUBMISSION) from exc
-
-    try:
-        submit_competition(slug, submission_path, message)
-    except RulesNotAcceptedError:
-        _print_rules_and_exit(slug)
-    except KaggleCliError as exc:
-        _print_kaggle_error(exc, action="submit")
-        raise typer.Exit(code=EXIT_SUBMISSION_FAILED) from exc
-
-    ledger.record(str(submission_path), message=message, run_id=None, slug=slug)
-    print("[green]submission recorded[/green]")
-
-
-@app.command()
-def run(
-    competition: str = typer.Argument(..., help="Competition URL or slug."),
-    submit: bool = typer.Option(False, "--submit/--no-submit", help="Submit after validation."),
     compute: Compute = typer.Option(Compute.local_cpu, "--compute", help="Compute target for training."),
-    enable_internet: bool = typer.Option(False, "--enable-internet", help="Enable internet in Kaggle notebook."),
     kaggle_username: str | None = typer.Option(
         None,
         "--kaggle-username",
-        help="Kaggle username for Kaggle notebook kernels (defaults to config/env).",
+        help="Kaggle username for Kaggle kernel runs.",
     ),
-    workdir: Path | None = typer.Option(
-        None,
-        "--workdir",
-        help="Base working directory for artifacts/data (default: current working directory).",
-    ),
-    time_budget_minutes: int = typer.Option(
-        60,
-        "--time-budget",
-        "--time-budget-min",
-        help="Max training time in minutes.",
-    ),
-    config: Path | None = typer.Option(None, "--config", help="Optional config path."),
-    resume: str | None = typer.Option(None, "--resume", help="Resume from a previous run id."),
-    models: str | None = typer.Option(None, "--models", help="Comma-separated model list."),
-    cv_folds: int = typer.Option(5, "--cv-folds", help="Number of cross-validation folds."),
-    no_stacking: bool = typer.Option(False, "--no-stacking", help="Disable stacking."),
-    message: str | None = typer.Option(None, "--message", help="Submission message."),
-    force: bool = typer.Option(False, "--force", help="Allow side effects beyond validation."),
-    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run", help="Skip Kaggle CLI operations."),
-    force_submit: bool = typer.Option(False, "--force-submit", help="Allow duplicate submissions."),
+    enable_internet: bool = typer.Option(False, "--enable-internet", help="Enable internet in Kaggle kernels."),
     strict_accelerator: bool = typer.Option(
         False,
         "--strict-accelerator",
         help="Fail if requested accelerator is unavailable (local_gpu).",
     ),
+    kernel_name: str | None = typer.Option(None, "--kernel-name", help="Custom kernel slug."),
+    seed: int = typer.Option(42, "--seed", help="Random seed for local training."),
+    dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Skip Kaggle kernel execution."),
+    force: bool = typer.Option(False, "--force", help="Allow Kaggle CLI operations."),
+    workdir: Path | None = typer.Option(None, "--workdir", help="Base working directory."),
 ) -> None:
-    """
-    Run the end-to-end pipeline: download → train → predict → validate → submit.
-    """
-    _ = (config, resume)
     slug = _resolve_slug(competition)
-    model_list = _parse_models(models)
-
-    if submit and not message:
-        print("[red]Submission requires --message.[/red]")
-        raise typer.Exit(code=EXIT_SUBMISSION_FAILED)
-    submit_message = message or ""
-
     base_root = workdir if workdir is not None else repo_root()
     paths = CompetitionPaths(slug=slug, repo_root=base_root)
-    bootstrap_competition(slug=slug, force=False, root=base_root)
+    bootstrap_competition(slug=slug, root=base_root)
 
     run_ledger = RunLedger.for_slug(slug, root=base_root)
     run_record = run_ledger.start_run(
         slug=slug,
         dry_run=dry_run,
         force=force,
-        submission_path=str(paths.submission_csv),
-        sample_path=str(paths.data_raw / "sample_submission.csv"),
-        message=message,
+        submission_path=None,
+        sample_path=None,
+        message=None,
         argv=list(sys.argv),
+        extra={"compute": compute.value, "command": "train"},
     )
-    print(f"[green]run started[/green]: {run_record.run_id}")
 
     selection = compute_to_runner_and_accelerator(compute)
     if selection.runner == "kaggle_notebook" and not dry_run and not force:
         _refuse_side_effect("execute Kaggle notebook runner")
 
-    context = RunContext(
-        competition=competition,
-        slug=slug,
-        run_id=run_record.run_id,
-        paths=paths,
-        workdir=base_root,
-        dry_run=dry_run,
-        submit=submit,
-        force=force,
-        force_submit=force_submit,
-        message=submit_message,
-        time_budget_minutes=time_budget_minutes,
-        cv_folds=cv_folds,
-        model_names=model_list,
-        use_stacking=not no_stacking,
-        compute=compute.value,
-        accelerator=selection.accelerator,
-        enable_internet=enable_internet,
-        kaggle_username=kaggle_username,
-        strict_accelerator=strict_accelerator,
-    )
+    data_dir = paths.data_dir
+    if selection.runner == "local" and not _has_csvs(data_dir):
+        print("[red]No data found[/red]: run bootstrap with --download first.")
+        raise typer.Exit(code=1)
 
-    runner_impl = LocalRunner() if selection.runner == "local" else KaggleNotebookRunner()
+    submission_path = paths.submissions_dir / f"{run_record.run_id}_submission.csv"
+
+    if selection.runner == "local":
+        try:
+            result = train_and_predict(
+                data_dir=data_dir,
+                output_path=submission_path,
+                compute=compute,
+                strict_accelerator=strict_accelerator,
+                seed=seed,
+                metrics_path=paths.runs_dir / run_record.run_id / "metrics.json",
+            )
+        except GPUNotAvailableError as exc:
+            print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=exc.exit_code) from exc
+        except Exception as exc:  # noqa: BLE001
+            print(f"[red]training failed[/red]: {exc}")
+            raise typer.Exit(code=5) from exc
+        print(f"[green]submission written[/green]: {result.submission_path}")
+        return
+
     try:
-        result = runner_impl.run(context)
-    except UnsupportedCompetitionError as exc:
-        print(f"[red]unsupported competition[/red]: {exc}")
-        raise typer.Exit(code=EXIT_INVALID_COMPETITION) from exc
+        kaggle_user = resolve_kaggle_username(kaggle_username)
+    except ValueError as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    try:
+        kernel_result = run_kernel(
+            slug=slug,
+            run_id=run_record.run_id,
+            base_dir=paths.artifacts,
+            kaggle_username=kaggle_user,
+            kernel_name=kernel_name,
+            accelerator=selection.accelerator,
+            enable_internet=enable_internet,
+            dry_run=dry_run,
+        )
     except RulesNotAcceptedError:
         _print_rules_and_exit(slug)
     except KaggleCliError as exc:
-        _print_kaggle_error(exc, action="run")
-        raise typer.Exit(code=EXIT_DOWNLOAD_FAILED) from exc
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]run failed[/red]: {exc}")
-        raise typer.Exit(code=EXIT_TRAINING_FAILED) from exc
+        _print_kaggle_error(exc, action="run kernel")
+        raise typer.Exit(code=exc.exit_code) from exc
+    except (KernelTimeoutError, KernelFailedError) as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=exc.exit_code) from exc
 
-    submission_path = result.submission_path
-    if submission_path is None:
+    if kernel_result.submission_path is None:
         print("[yellow]no submission produced[/yellow]: dry-run or kernel output missing.")
         return
 
-    sample_path = paths.data_raw / "sample_submission.csv"
-    if not sample_path.exists():
-        if dry_run:
-            print("[yellow]sample_submission.csv missing[/yellow]: skipping validation in dry-run.")
-            return
-        if not force:
-            _refuse_side_effect("download competition data for validation")
-        try:
-            download_competition(slug, paths.data_raw, overwrite=False)
-        except RulesNotAcceptedError:
-            _print_rules_and_exit(slug)
-        except KaggleCliError as exc:
-            _print_kaggle_error(exc, action="download")
-            raise typer.Exit(code=EXIT_DOWNLOAD_FAILED) from exc
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+    print(f"[green]submission written[/green]: {submission_path}")
 
-    try:
-        validate_submission(str(sample_path), str(submission_path))
-    except Exception as exc:  # noqa: BLE001
-        print(f"[red]submission validation failed[/red]: {exc}")
-        raise typer.Exit(code=EXIT_VALIDATION_FAILED) from exc
-    print(f"[green]submission validated[/green]: {submission_path}")
 
-    if not submit:
-        print("[yellow]Submission skipped[/yellow]: pass --submit to upload.")
-        return
-
-    if dry_run:
-        print("[yellow]DRY RUN[/yellow]: submission skipped.")
-        return
-
+@app.command()
+def submit(
+    competition: str = typer.Argument(..., help="Competition URL or slug."),
+    file: Path = typer.Option(..., "-f", "--file", help="Submission CSV file."),
+    message: str = typer.Option(..., "-m", "--message", help="Submission message."),
+    force: bool = typer.Option(False, "--force", help="Allow Kaggle CLI submission."),
+    force_duplicate: bool = typer.Option(False, "--force-duplicate", help="Allow duplicate submissions."),
+    workdir: Path | None = typer.Option(None, "--workdir", help="Base working directory."),
+) -> None:
+    slug = _resolve_slug(competition)
+    if not file.exists():
+        raise typer.Exit(code=1)
     if not force:
         _refuse_side_effect("submit to Kaggle")
 
-    ledger = SubmissionLedger.for_slug(slug, root=base_root)
-    ensure_submission_rate_limit(ledger)
-    if not force_submit:
+    base_root = workdir if workdir is not None else repo_root()
+    paths = CompetitionPaths(slug=slug, repo_root=base_root)
+    sample_path = _find_sample_submission(paths.data_dir)
+    if sample_path:
         try:
-            ensure_not_duplicate_submission(ledger, str(submission_path), slug=slug, message=submit_message)
-        except ValueError as exc:
+            validate_submission_file(sample_path, file)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[red]submission validation failed[/red]: {exc}")
+            raise typer.Exit(code=ValidationError.exit_code) from exc
+
+    ledger = SubmissionLedger.for_slug(slug, root=base_root)
+    try:
+        ensure_submission_rate_limit(ledger)
+    except SubmissionRateLimitError as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=exc.exit_code) from exc
+    if not force_duplicate:
+        try:
+            ensure_not_duplicate_submission(ledger, str(file))
+        except DuplicateSubmissionError as exc:
             print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=EXIT_DUPLICATE_SUBMISSION) from exc
+            raise typer.Exit(code=exc.exit_code) from exc
 
     try:
-        submit_competition(slug, Path(submission_path), submit_message)
+        if not check_rules_accepted(slug):
+            _print_rules_and_exit(slug)
+    except KaggleCliError as exc:
+        _print_kaggle_error(exc, action="rules check")
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    try:
+        submit_competition(slug, file, message)
     except RulesNotAcceptedError:
         _print_rules_and_exit(slug)
     except KaggleCliError as exc:
         _print_kaggle_error(exc, action="submit")
-        raise typer.Exit(code=EXIT_SUBMISSION_FAILED) from exc
+        raise typer.Exit(code=exc.exit_code) from exc
 
-    ledger.record(str(submission_path), message=submit_message, run_id=run_record.run_id, slug=slug)
+    ledger.record(str(file), message=message, run_id=None, slug=slug)
+    print("[green]submission recorded[/green]")
+
+
+@app.command()
+def run(
+    competition: str = typer.Argument(..., help="Competition URL or slug."),
+    agent: Agent = typer.Option(..., "--agent", help="Agent to run (codex or claude)."),
+    compute: Compute = typer.Option(Compute.local_cpu, "--compute", help="Compute target for training."),
+    submit: bool = typer.Option(False, "--submit/--no-submit", help="Submit after validation."),
+    message: str | None = typer.Option(None, "-m", "--message", help="Submission message."),
+    kaggle_username: str | None = typer.Option(
+        None,
+        "--kaggle-username",
+        help="Kaggle username for Kaggle kernel runs.",
+    ),
+    enable_internet: bool = typer.Option(False, "--enable-internet", help="Enable internet in Kaggle kernels."),
+    strict_accelerator: bool = typer.Option(
+        False,
+        "--strict-accelerator",
+        help="Fail if requested accelerator is unavailable (local_gpu).",
+    ),
+    kernel_name: str | None = typer.Option(None, "--kernel-name", help="Custom kernel slug."),
+    seed: int = typer.Option(42, "--seed", help="Random seed for local training."),
+    dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Skip external commands."),
+    force: bool = typer.Option(False, "--force", help="Allow Kaggle CLI operations."),
+    force_duplicate: bool = typer.Option(False, "--force-duplicate", help="Allow duplicate submissions."),
+    commit: bool = typer.Option(False, "--commit/--no-commit", help="Commit after agent verification."),
+    verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
+    workdir: Path | None = typer.Option(None, "--workdir", help="Base working directory."),
+) -> None:
+    slug = _resolve_slug(competition)
+    base_root = workdir if workdir is not None else repo_root()
+    paths = CompetitionPaths(slug=slug, repo_root=base_root)
+
+    selection = compute_to_runner_and_accelerator(compute)
+    if selection.runner == "kaggle_notebook" and not dry_run and not force:
+        _refuse_side_effect("execute Kaggle notebook runner")
+
+    if submit and not message:
+        print("[red]Submission requires --message.[/red]")
+        raise typer.Exit(code=1)
+
+    download_needed = not _has_csvs(paths.data_dir)
+    if download_needed and not dry_run and not force:
+        _refuse_side_effect("download competition data")
+
+    try:
+        bootstrap_competition(
+            slug=slug,
+            root=base_root,
+            force=force,
+            download=download_needed and not dry_run,
+        )
+    except RulesNotAcceptedError:
+        _print_rules_and_exit(slug)
+    except KaggleCliError as exc:
+        _print_kaggle_error(exc, action="download")
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    run_ledger = RunLedger.for_slug(slug, root=base_root)
+    run_record = run_ledger.start_run(
+        slug=slug,
+        dry_run=dry_run,
+        force=force,
+        submission_path=None,
+        sample_path=None,
+        message=message,
+        argv=list(sys.argv),
+        extra={"compute": compute.value, "agent": agent.value, "command": "run"},
+    )
+
+    agent_dir = paths.runs_dir / run_record.run_id / agent.value
+    prompt_path = paths.prompts_dir / f"{agent.value}.md"
+    _run_agent(
+        agent=agent,
+        prompt_path=prompt_path,
+        agent_dir=agent_dir,
+        branch_name=f"bot/{slug}/{run_record.run_id}",
+        verify_cmd=verify_cmd,
+        commit=commit,
+        dry_run=dry_run,
+        base_root=base_root,
+        slug=slug,
+        run_id=run_record.run_id,
+    )
+
+    submission_path = paths.submissions_dir / f"{run_record.run_id}_submission.csv"
+    if selection.runner == "local" and not _has_csvs(paths.data_dir):
+        if dry_run:
+            print("[yellow]DRY RUN[/yellow]: no local data available for training.")
+            return
+        print("[red]No data found[/red]: run bootstrap with --download first.")
+        raise typer.Exit(code=1)
+    try:
+        if selection.runner == "local":
+            result = train_and_predict(
+                data_dir=paths.data_dir,
+                output_path=submission_path,
+                compute=compute,
+                strict_accelerator=strict_accelerator,
+                seed=seed,
+                metrics_path=paths.runs_dir / run_record.run_id / "metrics.json",
+            )
+            submission_path = result.submission_path
+        else:
+            try:
+                kaggle_user = resolve_kaggle_username(kaggle_username)
+            except ValueError as exc:
+                print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1) from exc
+            kernel_result = run_kernel(
+                slug=slug,
+                run_id=run_record.run_id,
+                base_dir=paths.artifacts,
+                kaggle_username=kaggle_user,
+                kernel_name=kernel_name,
+                accelerator=selection.accelerator,
+                enable_internet=enable_internet,
+                dry_run=dry_run,
+            )
+            if kernel_result.submission_path is None:
+                print("[yellow]no submission produced[/yellow]: dry-run or kernel output missing.")
+                return
+            submission_path.parent.mkdir(parents=True, exist_ok=True)
+            submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+    except GPUNotAvailableError as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=exc.exit_code) from exc
+    except RulesNotAcceptedError:
+        _print_rules_and_exit(slug)
+    except KaggleCliError as exc:
+        _print_kaggle_error(exc, action="run kernel")
+        raise typer.Exit(code=exc.exit_code) from exc
+    except (KernelTimeoutError, KernelFailedError) as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=exc.exit_code) from exc
+    except Exception as exc:  # noqa: BLE001
+        print(f"[red]training failed[/red]: {exc}")
+        raise typer.Exit(code=5) from exc
+
+    sample_path = _find_sample_submission(paths.data_dir)
+    if sample_path:
+        try:
+            validate_submission_file(sample_path, submission_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[red]submission validation failed[/red]: {exc}")
+            raise typer.Exit(code=ValidationError.exit_code) from exc
+        print(f"[green]submission validated[/green]: {submission_path}")
+
+    if not submit:
+        print("[yellow]Submission skipped[/yellow]: pass --submit to upload.")
+        return
+    if dry_run:
+        print("[yellow]DRY RUN[/yellow]: submission skipped.")
+        return
+    if not force:
+        _refuse_side_effect("submit to Kaggle")
+
+    ledger = SubmissionLedger.for_slug(slug, root=base_root)
+    try:
+        ensure_submission_rate_limit(ledger)
+    except SubmissionRateLimitError as exc:
+        print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=exc.exit_code) from exc
+    if not force_duplicate:
+        try:
+            ensure_not_duplicate_submission(ledger, str(submission_path))
+        except DuplicateSubmissionError as exc:
+            print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=exc.exit_code) from exc
+
+    try:
+        if not check_rules_accepted(slug):
+            _print_rules_and_exit(slug)
+    except KaggleCliError as exc:
+        _print_kaggle_error(exc, action="rules check")
+        raise typer.Exit(code=exc.exit_code) from exc
+
+    try:
+        submit_competition(slug, submission_path, message or "")
+    except RulesNotAcceptedError:
+        _print_rules_and_exit(slug)
+    except KaggleCliError as exc:
+        _print_kaggle_error(exc, action="submit")
+        raise typer.Exit(code=exc.exit_code) from exc
+    ledger.record(str(submission_path), message=message or "", run_id=run_record.run_id, slug=slug)
     print("[green]submission recorded[/green]")
 
 
@@ -354,7 +482,7 @@ def _resolve_slug(competition: str) -> str:
         return parse_competition_slug(competition)
     except ValueError as exc:
         print(f"[red]Invalid competition[/red]: {exc}")
-        raise typer.Exit(code=EXIT_INVALID_COMPETITION) from exc
+        raise typer.Exit(code=3) from exc
 
 
 def _refuse_side_effect(action: str) -> None:
@@ -365,7 +493,7 @@ def _refuse_side_effect(action: str) -> None:
 def _print_rules_and_exit(slug: str) -> None:
     print("[red]Competition rules not accepted.[/red]")
     print(f"Visit: {rules_url_for_slug(slug)}")
-    raise typer.Exit(code=EXIT_RULES_NOT_ACCEPTED)
+    raise typer.Exit(code=2)
 
 
 def _print_kaggle_error(exc: KaggleCliError, action: str) -> None:
@@ -374,11 +502,72 @@ def _print_kaggle_error(exc: KaggleCliError, action: str) -> None:
         print(exc.output)
 
 
-def _parse_models(models: str | None) -> list[str] | None:
-    if not models:
-        return None
-    cleaned = [m.strip().lower() for m in models.split(",") if m.strip()]
-    return cleaned or None
+def _run_agent(
+    *,
+    agent: Agent,
+    prompt_path: Path,
+    agent_dir: Path,
+    branch_name: str,
+    verify_cmd: str,
+    commit: bool,
+    dry_run: bool,
+    base_root: Path,
+    slug: str,
+    run_id: str,
+) -> None:
+    if not prompt_path.exists():
+        print(f"[red]Prompt not found[/red]: {prompt_path}")
+        raise typer.Exit(code=1)
+
+    if dry_run:
+        if agent == Agent.codex:
+            run_codex(prompt_path, agent_dir, dry_run=True)
+        else:
+            run_claude(prompt_path, agent_dir, dry_run=True)
+        print("[yellow]DRY RUN[/yellow]: agent execution skipped.")
+        return
+
+    ensure_git_repo(cwd=base_root)
+    ensure_clean_worktree(cwd=base_root)
+    if branch_exists(branch_name, cwd=base_root):
+        print(f"[red]Branch already exists[/red]: {branch_name}")
+        raise typer.Exit(code=1)
+    create_branch(branch_name, cwd=base_root)
+
+    if agent == Agent.codex:
+        run_codex(prompt_path, agent_dir)
+    else:
+        run_claude(prompt_path, agent_dir)
+
+    verify_log = agent_dir / "verify.log"
+    verify_result = _run_verify(verify_cmd, cwd=base_root, log_path=verify_log)
+    if verify_result != 0:
+        print(f"[red]verification failed[/red]: {verify_log}")
+        raise typer.Exit(code=1)
+
+    if commit:
+        commit_all(f"kagglebot: implement {slug} run {run_id}", cwd=base_root)
+
+
+def _run_verify(command: str, *, cwd: Path, log_path: Path) -> int:
+    args = shlex.split(command)
+    completed = subprocess.run(args, capture_output=True, text=True, check=False, cwd=str(cwd))
+    log_path.write_text(
+        "".join([completed.stdout or "", completed.stderr or ""]),
+        encoding="utf-8",
+    )
+    return completed.returncode
+
+
+def _has_csvs(data_dir: Path) -> bool:
+    return any(data_dir.rglob("*.csv"))
+
+
+def _find_sample_submission(data_dir: Path) -> Path | None:
+    for path in data_dir.rglob("sample_submission.csv"):
+        if path.is_file():
+            return path
+    return None
 
 
 if __name__ == "__main__":

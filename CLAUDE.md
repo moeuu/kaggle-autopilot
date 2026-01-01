@@ -129,10 +129,10 @@ kagglebot run titanic --compute local_gpu --submit -m "GPU baseline"
 kagglebot run titanic --compute local_gpu --strict --submit -m "GPU required"
 
 # Kaggle GPU kernel
-kagglebot run titanic --compute kaggle_gpu --kaggle-username myuser --submit -m "kernel baseline"
+kagglebot run titanic --compute kaggle_gpu --submit -m "kernel baseline"
 
 # Kaggle TPU kernel
-kagglebot run titanic --compute kaggle_tpu --kaggle-username myuser --enable-internet --submit -m "TPU baseline"
+kagglebot run titanic --compute kaggle_tpu --enable-internet --submit -m "TPU baseline"
 
 # Dry-run (preview without execution)
 kagglebot run titanic --compute kaggle_gpu --dry-run
@@ -143,13 +143,14 @@ kagglebot run titanic --compute kaggle_gpu --dry-run
 - **GPU auto-detection**: Automatically detect CUDA/MPS, fallback to CPU by default
 - **Strict mode opt-in**: Use `--strict` to fail if requested compute unavailable
 - **Kaggle kernels**: Push to Kaggle for GPU/TPU, but submission always local (for safety)
+- **Kaggle username**: Auto-detect from `KAGGLE_USERNAME` or `~/.kaggle/kaggle.json` (override with `--kaggle-username`)
 - **Rules acceptance**: ALWAYS manual (NEVER automated)
 
 ### Other Commands
 
 ```bash
 kagglebot bootstrap <competition_slug>                 # Prepare workspace dirs + config (no network)
-kagglebot run <slug> --submission <path>               # Validate + ledger (dry-run default)
+kagglebot run <slug> --submission <path>               # Validate + ledger
 kagglebot train <slug>                                 # Train baseline model (future)
 kagglebot predict <slug>                               # Generate submission.csv (future)
 kagglebot submit <slug> -m "<message>"                 # Submit with guardrails (future)
@@ -175,8 +176,8 @@ artifacts/         # Models, submissions (gitignored)
 - **uv package manager**: Use `uv add/remove` for dependencies, `uv run` for commands
 - **Small, composable functions**: Clear inputs/outputs, easy to test
 - **User-friendly failures**: Actionable error messages with remediation hints
-- **Kaggle Python API**: Use `KaggleApi()` directly (not subprocess CLI calls)
-- **OAuth authentication**: Use `~/.kaggle/access_token` (NOT kaggle.json)
+- **Kaggle CLI**: Use subprocess wrappers in `kaggle_cli.py`
+- **Authentication**: Use `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`
 - **Minimal dependencies**: Keep dependency tree small and auditable
 - **Deterministic runs**: Control random seeds, document non-deterministic behavior
 - **Python 3.11+**: Target modern Python with type hints
@@ -186,29 +187,23 @@ artifacts/         # Models, submissions (gitignored)
   - Model training has configurable time budgets
   - Consider memory-mapped files or Dask for huge datasets
 
-## Kaggle API Integration
+## Kaggle CLI Integration
 
-**Primary Method**: Use Kaggle Python API directly (not subprocess calls)
+**Primary Method**: Use Kaggle CLI via `kaggle_cli.py` (subprocess wrapper)
 
-```python
-from kaggle.api.kaggle_api_extended import KaggleApi
-
-api = KaggleApi()
-api.authenticate()  # Uses ~/.kaggle/access_token (OAuth)
-
+```bash
 # Download competition data
-api.competition_download_files(competition, path=dest)
+kaggle competitions download -c <slug> -p <path>
 
 # Submit to competition
-api.competition_submit(file_path, message, competition)
+kaggle competitions submit -c <slug> -f <file> -m "<message>"
 
 # Check submission status
-api.competition_submissions(competition)
+kaggle competitions submissions -c <slug>
 ```
 
 **Authentication**:
-- **OAuth tokens**: Use `~/.kaggle/access_token` (NOT kaggle.json)
-- Auto-authenticated via `api.authenticate()`
+- Use `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME` / `KAGGLE_KEY`
 - If auth fails, print clear instructions and exit (exit code 2)
 
 **Rules Acceptance**:

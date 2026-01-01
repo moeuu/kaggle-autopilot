@@ -214,11 +214,11 @@
   - `--runner {local,kaggle_notebook}` (default: local)
   - `--accelerator {none,gpu,tpu,auto}` (default: auto for notebook, none for local)
   - `--enable-internet` (flag, default: false)
-  - `--kaggle-username TEXT`
+  - `--kaggle-username TEXT` (optional override; default from env/config)
   - `--kernel-slug TEXT`
   - `--max-kernel-runtime MINUTES` (default: 120)
 - [ ] **N062**: Add validation:
-  - Require --kaggle-username if not auto-detectable
+  - Error if username not found in `KAGGLE_USERNAME` or `~/.kaggle/kaggle.json`
   - Warn if --enable-internet is set
   - Validate --max-kernel-runtime within Kaggle limits
 

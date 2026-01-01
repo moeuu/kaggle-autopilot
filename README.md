@@ -1,340 +1,122 @@
 # Kaggle Autopilot
 
-A CLI tool that automates Kaggle competition workflows with safety guardrails and flexible compute options (local CPU/GPU or Kaggle cloud GPU/TPU).
+A CLI tool that automates Kaggle competition workflows with safety guardrails and compute switching (local CPU/GPU or Kaggle notebook GPU/TPU).
 
 ## Features
 
-- **Automated pipeline**: Download → analyze → train → predict → validate → submit
-- **Compute switching**: Train locally (CPU/GPU) or on Kaggle cloud (GPU/TPU)
-- **GPU auto-detection**: Automatically detects CUDA/MPS, falls back to CPU
-- **Production models**: Gradient boosting (LightGBM, CatBoost, XGBoost) with cross-validation
-- **Safety guardrails**: Dry-run by default, duplicate detection, strict validation
-- **Non-interactive**: All decisions via CLI flags/config, zero prompts
-- **Submission tracking**: Local ledger with deduplication and audit trail
+- **End-to-end pipeline**: bootstrap → implement (agent) → train → submit
+- **Compute switching**: local CPU/GPU or Kaggle notebook GPU/TPU
+- **GPU auto-detection**: detects CUDA/MPS for local GPU runs
+- **Guardrails**: explicit submission flags, dedupe ledger, strict validation
+- **Non-interactive**: no prompts by default
+- **Artifacts & logs**: structured run metadata and agent transcripts
 
----
+## Prerequisites
 
-## Quickstart / Commands
+- **Python**: 3.11+
+- **uv**: https://astral.sh/uv
+- **Kaggle CLI**: `kaggle --version`
+- **Kaggle auth**: `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`
+- **Rules acceptance**: manually accept rules in the browser
 
-### Prerequisites
+## Setup
 
-**Python**: 3.11 or later
-
-**uv package manager**: Install if not already available:
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-**Kaggle CLI**: Ensure `kaggle` command is on your PATH:
-```bash
-# Test Kaggle CLI is installed
-kaggle --version
-```
-
-**Kaggle authentication**: Use OAuth tokens (recommended):
-- Authenticate via `kaggle config` or ensure `~/.kaggle/access_token` exists
-- **No need for kaggle.json** - OAuth tokens are preferred
-
-**Competition rules**: You **must manually accept rules** in your browser once per competition:
-1. Visit: `https://www.kaggle.com/competitions/<competition-slug>/rules`
-2. Click "I Understand and Accept"
-3. This tool will **never automate** this step (security requirement)
-
----
-
-### Setup
-
-**Clone and install dependencies**:
-```bash
-git clone <your-repo-url>
-cd kaggle-autopilot
 uv sync
 ```
 
-**Add a new dependency**:
+## Commands
+
+### Bootstrap
+Creates artifacts, prompts, and plan.json. Optionally downloads data.
+
 ```bash
-uv add pandas  # Runtime dependency
-uv add --dev pytest  # Development dependency
+uv run kagglebot bootstrap titanic --rules-source url
+uv run kagglebot bootstrap titanic --download --rules-source url --force
 ```
 
-**Remove a dependency**:
+### Implement (agent)
+Runs Codex or Claude on a clean git worktree, verifies, and optionally commits.
+
 ```bash
-uv remove <package-name>
+uv run kagglebot implement titanic --agent codex --no-commit
 ```
 
----
+### Train
+Trains locally or in a Kaggle notebook. Local runs write to `artifacts/<slug>/submissions/<runid>_submission.csv`.
 
-### Basic Usage
-
-**Get help**:
 ```bash
-uv run kagglebot --help
-uv run kagglebot run --help
+uv run kagglebot train titanic --compute local_cpu
+uv run kagglebot train titanic --compute local_gpu --strict-accelerator
+uv run kagglebot train titanic --compute kaggle_gpu --kaggle-username <user> --force
 ```
 
-**Dry-run** (preview without submitting):
-```bash
-uv run kagglebot run https://www.kaggle.com/competitions/titanic --dry-run
-```
+### Submit
+Validates submission, checks dedupe ledger, then submits via Kaggle CLI.
 
-**Full run with submission**:
 ```bash
-uv run kagglebot run https://www.kaggle.com/competitions/titanic \
-  --submit \
-  --message "baseline v1" \
-  --no-dry-run \
+uv run kagglebot submit titanic \
+  -f artifacts/titanic/submissions/<runid>_submission.csv \
+  -m "baseline v1" \
   --force
 ```
 
-**Competition slug** (alternative to URL):
-```bash
-uv run kagglebot run titanic --submit --message "baseline v1" --no-dry-run --force
-```
+### Run (orchestrated)
+Bootstrap → implement → train → optional submit.
 
----
-
-### Compute Modes
-
-Kagglebot supports **4 compute modes** via the `--compute` flag:
-
-#### 1. Local CPU (default, works everywhere)
-```bash
-uv run kagglebot run titanic --compute local_cpu --submit --message "CPU baseline"
-```
-- **Default**: No `--compute` flag needed
-- **Use case**: Testing, small datasets, or no GPU available
-
-#### 2. Local GPU (auto-detect CUDA/MPS)
-```bash
-uv run kagglebot run titanic --compute local_gpu --submit --message "GPU baseline"
-```
-- **Auto-detection**: Automatically detects NVIDIA CUDA or Apple Silicon MPS
-- **Fallback**: Falls back to CPU if GPU not available (unless `--strict-accelerator`)
-- **Strict mode**: Fail if GPU not found:
-  ```bash
-  uv run kagglebot run titanic --compute local_gpu --strict-accelerator
-  ```
-
-#### 3. Kaggle GPU kernel (free cloud GPU)
 ```bash
 uv run kagglebot run titanic \
-  --compute kaggle_gpu \
-  --kaggle-username your-kaggle-username \
+  --agent codex \
+  --compute local_cpu \
   --submit \
-  --message "kernel GPU baseline"
+  --message "baseline v1" \
+  --force
 ```
-- **Required**: `--kaggle-username` (or auto-detected from Kaggle config)
-- **What happens**: Generates kernel package → pushes to Kaggle → polls until complete → downloads outputs → validates → submits locally
-- **Submission**: Always happens **locally** (not from kernel) for safety
 
-#### 4. Kaggle TPU kernel (free cloud TPU)
+## Compute Modes
+
+- **local_cpu**: Train locally on CPU (default)
+- **local_gpu**: Train locally on GPU (CUDA/MPS if available)
+- **kaggle_gpu**: Train in a Kaggle Notebook with GPU
+- **kaggle_tpu**: Train in a Kaggle Notebook with TPU
+
+Optional flags:
 ```bash
-uv run kagglebot run titanic \
-  --compute kaggle_tpu \
-  --kaggle-username your-kaggle-username \
-  --enable-internet \
-  --submit \
-  --message "kernel TPU baseline"
-```
-- **Internet access**: Use `--enable-internet` only if competition allows external data
-- **Warning**: Enabling internet logs a security warning
-
-**Optional flags for Kaggle kernels**:
-```bash
---dry-run  # Preview kernel package without pushing
+--strict-accelerator   # Fail if local GPU not available
+--enable-internet      # Kaggle kernel internet access (only if rules allow)
+--kaggle-username      # Required for kaggle_* if not in env/config
+--dry-run              # Skip external commands
 ```
 
----
+## Safety Guardrails
 
-### Testing and Quality
+- **Rules acceptance**: Never automated; exits with rules URL if missing
+- **Submission validation**: Columns + row count + ID alignment
+- **Deduplication**: SHA256 ledger under `artifacts/<slug>/submissions/history.jsonl`
+- **Rate limiting**: Prevents rapid repeated submissions
+- **Explicit submission**: Requires `--submit` and `--message`
+- **Force flags**: `--force` for Kaggle CLI side effects, `--force-duplicate` to bypass dedupe
 
-**Run all tests**:
-```bash
-uv run pytest -q
+## Artifacts Layout
+
+```
+artifacts/<slug>/
+├── context/            # meta.json, plan.json, rules
+├── prompts/            # codex.md, claude.md
+├── data/               # downloaded CSV/ZIP files
+├── runs/
+│   └── <run_id>/
+│       ├── kernel/     # kernel package (kaggle_* compute)
+│       ├── output/     # kernel outputs
+│       └── <agent>/    # transcripts + last_message
+└── submissions/
+    └── history.jsonl   # submission ledger
 ```
 
-**Run specific test file**:
-```bash
-uv run pytest tests/test_validation.py -v
-```
+## Testing
 
-**Test coverage**:
-```bash
-uv run pytest --cov=kagglebot --cov-report=term-missing
-```
-
-**Lint code**:
-```bash
-uv run ruff check .
-```
-
-**Auto-format code**:
 ```bash
 uv run ruff format .
+uv run ruff check .
+uv run pytest -q
 ```
-
-**Type checking** (optional):
-```bash
-uv run pyright
-```
-
----
-
-### Troubleshooting
-
-#### Competition rules not accepted
-**Symptom**: Exit code 2, message: "Competition rules not accepted"
-
-**Solution**:
-1. Visit: `https://www.kaggle.com/competitions/<slug>/rules`
-2. Manually click "I Understand and Accept" in browser
-3. Retry command
-
-**Why manual?**: Automating rule acceptance violates Kaggle terms of service
-
----
-
-#### Kaggle authentication errors
-**Symptom**: "Kaggle credentials not found" or "401 Unauthorized"
-
-**Solution**:
-```bash
-# Run Kaggle config to authenticate
-kaggle config
-
-# Credentials stored in:
-# - OAuth tokens: ~/.kaggle/access_token (recommended)
-# - Legacy: ~/.kaggle/kaggle.json (still works)
-```
-
-**Note**: This tool uses Kaggle Python API with OAuth tokens (no need for kaggle.json)
-
----
-
-#### GPU not detected
-**Symptom**: Fails with `--strict-accelerator`, or falls back to CPU
-
-**Check GPU availability**:
-```python
-# CUDA (NVIDIA)
-python -c "import torch; print(torch.cuda.is_available())"
-
-# MPS (Apple Silicon)
-python -c "import torch; print(torch.backends.mps.is_available())"
-```
-
-**Solutions**:
-- Use `--compute local_cpu` to run on CPU
-- Use `--compute kaggle_gpu` to run on Kaggle's free GPU
-- Omit `--strict-accelerator` to allow fallback to CPU
-
----
-
-#### Where are artifacts stored?
-
-**Directory structure**:
-```
-kaggle-autopilot/
-├── data/                           # Downloaded datasets (gitignored)
-│   └── <slug>/
-│       ├── raw/                    # Original ZIP files
-│       └── extracted/              # Extracted CSVs
-├── artifacts/                      # All outputs (gitignored)
-│   └── <slug>/
-│       ├── runs/
-│       │   └── <run_id>/
-│       │       ├── plan.json       # Modeling strategy
-│       │       ├── summary.json    # CV scores, model info
-│       │       ├── submission.csv  # Final submission
-│       │       └── kernel/         # Kernel package (if --compute kaggle_*)
-│       ├── submissions/
-│       │   └── history.jsonl       # Submission ledger
-│       └── reports/
-│           └── analysis.json       # Competition analysis
-```
-
-**View run history**:
-```bash
-cat artifacts/titanic/submissions/history.jsonl
-```
-
-## Safety Features
-
-- **Dry-run by default**: Use `--no-dry-run --force` to allow network actions
-- **Duplicate detection**: Prevents recording identical submissions by hash
-- **Strict validation**: Validates submission format against sample_submission.csv
-- **No automated rule acceptance**: Users must manually accept rules in browser
-- **Run ledger**: Records runs in `artifacts/<slug>/runs/<run_id>/metadata.json`
-- **Submission ledger**: Records submissions in `artifacts/<slug>/submissions/history.jsonl`
-- **Reports**: Analysis and training reports in `artifacts/<slug>/reports/`
-- **Notebook runs**: Kaggle kernel artifacts stored in `artifacts/<slug>/<run_id>/`
-
-## Project Structure
-
-```
-kaggle-autopilot/
-├── src/kagglebot/
-│   ├── cli.py              # CLI entry point (Typer)
-│   ├── compute.py          # Compute mapping & GPU detection
-│   ├── runners/            # Execution backends
-│   │   ├── base.py         # Runner interface (ABC)
-│   │   ├── local.py        # LocalRunner (CPU/GPU)
-│   │   └── kaggle_notebook.py  # KaggleNotebookRunner
-│   ├── analyzer/           # Competition analysis
-│   ├── training/           # Model training (tabular, text, image)
-│   ├── validation.py       # Submission validation
-│   ├── history.py          # Submission ledger
-│   ├── kaggle_cli.py       # Kaggle API wrapper
-│   └── paths.py            # Path management
-├── data/                   # Downloaded datasets (gitignored)
-├── artifacts/              # All outputs (gitignored)
-├── tests/                  # Test suite (pytest)
-└── config/                 # Config templates
-```
-
-## Development
-
-See **Testing and Quality** section above for common commands.
-
-**Additional development setup**:
-```bash
-# Sync dependencies after pulling changes
-uv sync
-
-# Install pre-commit hooks (optional)
-uv run pre-commit install
-```
-
-## Current Status
-
-**Implemented**:
-- ✅ Data download and validation
-- ✅ Competition analysis (tabular)
-- ✅ Tabular training (Ridge/LogReg/HistGB/CatBoost)
-- ✅ Submission validation and ledger
-- ✅ Compute switching (local CPU/GPU + Kaggle GPU/TPU)
-
-**In Progress** (see PLAN_COMPUTE.md):
-- 🚧 Production models (LightGBM, XGBoost)
-
-**Roadmap**:
-- Competition types: Text, image, timeseries
-- Advanced strategies: Stacking, ensembles, feature engineering
-- Auto-tuning: Hyperparameter optimization
-
-**Limitations (MVP)**:
-- Only tabular competitions (train.csv, test.csv, sample_submission.csv)
-- Single-target competitions only (multi-target planned)
-- Basic models only (production models in progress)
-
-## Documentation
-
-- **SPEC_COMPUTE.md**: CLI flags, exit codes, artifact layout
-- **ARCHITECTURE_COMPUTE.md**: Module design, runner interface
-- **PLAN_COMPUTE.md**: 7-week implementation roadmap
-- **CLAUDE.md**: Development guidelines for contributors
-- **AGENTS.md**: Instructions for implementer agents
-
-## License
-
-MIT

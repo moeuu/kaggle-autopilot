@@ -29,7 +29,7 @@ New Options:
       SECURITY: Only set if competition explicitly requires external data
 
   --kaggle-username TEXT
-      Kaggle username for kernel ownership (default: auto-detect from ~/.kaggle/)
+      Kaggle username for kernel ownership (default: KAGGLE_USERNAME or ~/.kaggle/kaggle.json)
 
   --kernel-slug TEXT
       Custom kernel slug (default: auto-generated: kb-<competition>-<run_id>)
@@ -166,7 +166,7 @@ src/kagglebot/
 ```
 1. PREPARATION (Local)
    ├─ Validate user accepted competition rules
-   ├─ Detect Kaggle username (from ~/.kaggle/ or --kaggle-username)
+   ├─ Detect Kaggle username (from KAGGLE_USERNAME, ~/.kaggle/kaggle.json, or --kaggle-username)
    ├─ Generate kernel package directory
    │  ├─ kernel-metadata.json
    │  ├─ main.py (from template + strategy)
@@ -704,7 +704,7 @@ artifacts/<slug>/
 | Failure | Exit Code | Action |
 |---------|-----------|--------|
 | Rules not accepted | 2 | Print rules URL, exit |
-| Kaggle username not found | 3 | Prompt for --kaggle-username |
+| Kaggle username not found | 3 | Set --kaggle-username or KAGGLE_USERNAME or ~/.kaggle/kaggle.json |
 | Kernel push failed | 4 | Show Kaggle CLI error, check credentials |
 | Kernel timeout | 5 | Show kernel URL for debugging |
 | Kernel error/cancelled | 6 | Download logs, show error message |

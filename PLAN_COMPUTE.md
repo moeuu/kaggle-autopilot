@@ -540,7 +540,7 @@ This document outlines the phased implementation plan for compute switching func
   - max_kernel_runtime from CLI
   - kaggle_username from CLI or config
 - [ ] **C112**: Add flag validation:
-  - If --kaggle-username not provided and runner=kaggle_notebook: error
+  - If Kaggle username not found in `KAGGLE_USERNAME`, `~/.kaggle/kaggle.json`, or `--kaggle-username`: error
   - If --enable-internet: log warning
   - If --max-kernel-runtime > Kaggle limits: warn
 - [ ] **C113**: Update help text for all flags
