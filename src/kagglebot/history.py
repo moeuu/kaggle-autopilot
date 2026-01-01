@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from kagglebot.hashing import sha256_file
+from kagglebot.hashing import sha256_file, sha256_text
 from kagglebot.paths import CompetitionPaths, repo_root
 
 
@@ -76,26 +76,45 @@ class SubmissionLedger:
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)
         return SubmissionLedger(ledger_path=paths.submission_ledger)
 
-    def is_duplicate(self, submission_path: str) -> bool:
+    def is_duplicate(self, submission_path: str, *, slug: str, message: str) -> bool:
         new_hash = sha256_file(submission_path)
+        fingerprint = submission_fingerprint(submission_path, slug=slug, message=message)
         if not self.ledger_path.exists():
             return False
         for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rec = json.loads(line)
-            if rec.get("sha256") == new_hash:
+            if rec.get("fingerprint") == fingerprint:
                 return True
+            rec_hash = rec.get("sha256")
+            if rec_hash and rec_hash == new_hash:
+                rec_message = rec.get("message", "")
+                if submission_fingerprint_from_hash(rec_hash, slug=slug, message=rec_message) == fingerprint:
+                    return True
         return False
 
-    def record(self, submission_path: str, message: str, run_id: str | None) -> None:
+    def record(self, submission_path: str, message: str, run_id: str | None, *, slug: str) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        fingerprint = submission_fingerprint(submission_path, slug=slug, message=message)
         rec = {
             "ts": datetime.now(UTC).isoformat(),
             "sha256": sha256_file(submission_path),
+            "fingerprint": fingerprint,
+            "slug": slug,
             "submission_path": submission_path,
             "message": message,
             "run_id": run_id,
         }
         with self.ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(rec) + "\n")
+
+
+def submission_fingerprint(submission_path: str, *, slug: str, message: str) -> str:
+    file_hash = sha256_file(submission_path)
+    return submission_fingerprint_from_hash(file_hash, slug=slug, message=message)
+
+
+def submission_fingerprint_from_hash(file_hash: str, *, slug: str, message: str) -> str:
+    payload = f"{slug}\n{message}\n{file_hash}"
+    return sha256_text(payload)

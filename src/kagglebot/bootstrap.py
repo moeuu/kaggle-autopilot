@@ -16,6 +16,7 @@ def _default_config(paths: CompetitionPaths) -> dict[str, object]:
             "data_raw": str(paths.data_raw),
             "artifacts": str(paths.artifacts),
             "models_dir": str(paths.models_dir),
+            "reports_dir": str(paths.reports_dir),
             "submissions_dir": str(paths.submissions_dir),
             "runs_dir": str(paths.runs_dir),
         },
@@ -32,6 +33,7 @@ def bootstrap_competition(slug: str, force: bool = False, root: Path | None = No
 
     paths.data_raw.mkdir(parents=True, exist_ok=True)
     paths.models_dir.mkdir(parents=True, exist_ok=True)
+    paths.reports_dir.mkdir(parents=True, exist_ok=True)
     paths.submissions_dir.mkdir(parents=True, exist_ok=True)
     paths.runs_dir.mkdir(parents=True, exist_ok=True)
 

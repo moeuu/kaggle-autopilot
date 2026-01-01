@@ -1,0 +1,576 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+from rich import print
+
+from kagglebot import kaggle_cli
+from kagglebot.runners.base import RunContext, RunResult
+
+KERNEL_TEMPLATE = r"""
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import accuracy_score, mean_squared_error
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+
+COMPETITION_SLUG = "__COMPETITION_SLUG__"
+ACCELERATOR = "__ACCELERATOR__"
+INPUT_ROOT = Path("/kaggle/input") / COMPETITION_SLUG
+WORKING_DIR = Path("/kaggle/working")
+SUBMISSION_PATH = WORKING_DIR / "submission.csv"
+METRICS_PATH = WORKING_DIR / "metrics.json"
+
+
+def find_csvs(root: Path) -> list[Path]:
+    return [p for p in root.rglob("*.csv") if p.is_file()]
+
+
+def pick_files(csvs: list[Path]) -> tuple[Path, Path, Path]:
+    if not csvs:
+        raise FileNotFoundError(f"No CSV files found under {INPUT_ROOT}.")
+
+    def score_sample(path: Path) -> int:
+        name = path.name.lower()
+        if "sample_submission" in name:
+            return 3
+        if "sample" in name and "submission" in name:
+            return 2
+        if "submission" in name:
+            return 1
+        return 0
+
+    sample_candidates = sorted(csvs, key=score_sample, reverse=True)
+    sample_path = sample_candidates[0] if score_sample(sample_candidates[0]) > 0 else None
+
+    train_path = None
+    test_path = None
+    for path in csvs:
+        name = path.name.lower()
+        if "train" in name and train_path is None:
+            train_path = path
+        if "test" in name and test_path is None:
+            test_path = path
+
+    if train_path is None or test_path is None:
+        raise FileNotFoundError("Unable to locate train.csv or test.csv in competition data.")
+    if sample_path is None:
+        raise FileNotFoundError("Unable to locate sample_submission.csv in competition data.")
+
+    return train_path, test_path, sample_path
+
+
+def infer_target(train: pd.DataFrame, test: pd.DataFrame, sample: pd.DataFrame) -> tuple[str, str, list[str]]:
+    id_col = sample.columns[0]
+    sample_targets = list(sample.columns[1:])
+    candidates = [c for c in train.columns if c not in test.columns and c in sample.columns]
+    target_cols = candidates or sample_targets
+    if len(target_cols) != 1:
+        raise ValueError("This baseline only supports single-target competitions.")
+    target_col = target_cols[0]
+    if target_col not in train.columns:
+        raise ValueError(f"Target column '{target_col}' not found in train.csv.")
+    feature_cols = [c for c in train.columns if c not in target_cols]
+    if id_col in feature_cols:
+        feature_cols.remove(id_col)
+    return id_col, target_col, feature_cols
+
+
+def infer_task(y: pd.Series) -> str:
+    if y.dtype == "object":
+        return "classification"
+    nunique = y.nunique(dropna=True)
+    if nunique <= 20:
+        return "classification"
+    if nunique / max(len(y), 1) <= 0.05:
+        return "classification"
+    return "regression"
+
+
+def build_preprocessor(feature_cols: list[str], train: pd.DataFrame) -> ColumnTransformer:
+    cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
+    num_cols = [c for c in feature_cols if c not in cat_cols]
+    return ColumnTransformer(
+        transformers=[
+            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), num_cols),
+            (
+                "cat",
+                Pipeline(
+                    [
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("ohe", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                cat_cols,
+            ),
+        ],
+        remainder="drop",
+    )
+
+
+def build_sklearn_model(task: str, preprocessor: ColumnTransformer) -> Pipeline:
+    estimator = LogisticRegression(max_iter=2000) if task == "classification" else Ridge()
+    return Pipeline([("pre", preprocessor), ("model", estimator)])
+
+
+def predict_sklearn(model, x, task: str, prediction_kind: str):
+    if task == "classification" and prediction_kind == "probability" and hasattr(model, "predict_proba"):
+        proba = model.predict_proba(x)
+        if proba.shape[1] == 1:
+            return proba[:, 0]
+        if proba.shape[1] == 2:
+            return proba[:, 1]
+        return proba.max(axis=1)
+    return model.predict(x)
+
+
+def train_torch_mlp(x, y, task: str, num_classes: int, device: str):
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    x_tensor = torch.tensor(x, dtype=torch.float32)
+    y_tensor = torch.tensor(y)
+    dataset = TensorDataset(x_tensor, y_tensor)
+    loader = DataLoader(dataset, batch_size=256, shuffle=True)
+
+    input_dim = x.shape[1]
+    output_dim = num_classes if task == "classification" and num_classes > 2 else 1
+
+    model = nn.Sequential(
+        nn.Linear(input_dim, 128),
+        nn.ReLU(),
+        nn.Dropout(0.2),
+        nn.Linear(128, output_dim),
+    ).to(device)
+
+    if task == "classification":
+        loss_fn = nn.CrossEntropyLoss() if num_classes > 2 else nn.BCEWithLogitsLoss()
+    else:
+        loss_fn = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    model.train()
+    for _ in range(10):
+        for xb, yb in loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            optimizer.zero_grad()
+            out = model(xb)
+            if task == "classification" and num_classes == 2:
+                yb = yb.float().view(-1, 1)
+            loss = loss_fn(out, yb)
+            loss.backward()
+            optimizer.step()
+    return model
+
+
+def predict_torch(model, x, task: str, num_classes: int, prediction_kind: str, device: str):
+    import torch
+
+    model.eval()
+    with torch.no_grad():
+        x_tensor = torch.tensor(x, dtype=torch.float32).to(device)
+        outputs = model(x_tensor).cpu().numpy()
+    if task == "classification":
+        if num_classes > 2:
+            probs = np.exp(outputs) / np.exp(outputs).sum(axis=1, keepdims=True)
+            if prediction_kind == "probability":
+                return probs.max(axis=1)
+            return probs.argmax(axis=1)
+        probs = 1 / (1 + np.exp(-outputs.ravel()))
+        if prediction_kind == "probability":
+            return probs
+        return (probs >= 0.5).astype(int)
+    return outputs.ravel()
+
+
+def train_tpu_model(x, y, task: str, num_classes: int):
+    import tensorflow as tf
+
+    resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
+    tf.config.experimental_connect_to_cluster(resolver)
+    tf.tpu.experimental.initialize_tpu_system(resolver)
+    strategy = tf.distribute.TPUStrategy(resolver)
+
+    with strategy.scope():
+        output_units = num_classes if task == "classification" and num_classes > 2 else 1
+        model = tf.keras.Sequential(
+            [
+                tf.keras.layers.Input(shape=(x.shape[1],)),
+                tf.keras.layers.Dense(128, activation="relu"),
+                tf.keras.layers.Dropout(0.2),
+                tf.keras.layers.Dense(output_units),
+            ]
+        )
+
+        if task == "classification":
+            if num_classes > 2:
+                model.add(tf.keras.layers.Activation("softmax"))
+                model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+            else:
+                model.add(tf.keras.layers.Activation("sigmoid"))
+                model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+        else:
+            model.compile(optimizer="adam", loss="mse")
+
+    model.fit(x, y, batch_size=256, epochs=10, verbose=0)
+    return model
+
+
+def predict_tpu(model, x, task: str, num_classes: int, prediction_kind: str):
+    outputs = model.predict(x, batch_size=256, verbose=0)
+    if task == "classification":
+        if num_classes > 2:
+            probs = outputs
+            if prediction_kind == "probability":
+                return probs.max(axis=1)
+            return probs.argmax(axis=1)
+        probs = outputs.ravel()
+        if prediction_kind == "probability":
+            return probs
+        return (probs >= 0.5).astype(int)
+    return outputs.ravel()
+
+
+def main() -> None:
+    print(f"competition slug: {COMPETITION_SLUG}")
+    csvs = find_csvs(INPUT_ROOT)
+    train_path, test_path, sample_path = pick_files(csvs)
+    print(f"train: {train_path}")
+    print(f"test: {test_path}")
+    print(f"sample: {sample_path}")
+
+    train = pd.read_csv(train_path)
+    test = pd.read_csv(test_path)
+    sample = pd.read_csv(sample_path)
+
+    id_col, target_col, feature_cols = infer_target(train, test, sample)
+    print(f"id column: {id_col}")
+    print(f"target column: {target_col}")
+    print(f"feature count: {len(feature_cols)}")
+
+    x = train[feature_cols]
+    y = train[target_col]
+    task = infer_task(y)
+    prediction_kind = "probability" if sample[target_col].dtype.kind in {"f", "c"} else "class"
+
+    label_encoder = None
+    num_classes = 0
+    y_encoded = y
+    if task == "classification":
+        label_encoder = LabelEncoder()
+        y_encoded = label_encoder.fit_transform(y)
+        num_classes = len(label_encoder.classes_)
+
+    stratify = y_encoded if task == "classification" else None
+    x_train_raw, x_valid_raw, y_train, y_valid = train_test_split(
+        x,
+        y_encoded,
+        test_size=0.2,
+        random_state=42,
+        stratify=stratify,
+    )
+
+    preprocessor = build_preprocessor(feature_cols, train)
+    x_train = preprocessor.fit_transform(x_train_raw)
+    x_valid = preprocessor.transform(x_valid_raw)
+    x_test_processed = preprocessor.transform(test[feature_cols])
+    if hasattr(x_train, "toarray"):
+        x_train = x_train.toarray()
+        x_valid = x_valid.toarray()
+        x_test_processed = x_test_processed.toarray()
+
+    model_kind = "sklearn"
+    torch_device = "cpu"
+
+    if ACCELERATOR == "tpu":
+        try:
+            model = train_tpu_model(x_train, y_train, task, num_classes)
+            preds_valid = predict_tpu(model, x_valid, task, num_classes, "class")
+            model_kind = "tpu"
+        except Exception as exc:
+            raise RuntimeError(f"TPU initialization failed: {exc}") from exc
+    elif ACCELERATOR == "gpu":
+        try:
+            import torch
+
+            torch_device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch_device == "cpu":
+                print("GPU requested but CUDA not available; falling back to CPU.")
+            model = train_torch_mlp(x_train, y_train, task, num_classes, torch_device)
+            preds_valid = predict_torch(model, x_valid, task, num_classes, "class", torch_device)
+            model_kind = "torch"
+        except Exception as exc:
+            print(f"GPU training failed, falling back to sklearn: {exc}")
+            model = build_sklearn_model(task, preprocessor)
+            model.fit(x_train_raw, y_train)
+            preds_valid = predict_sklearn(model, x_valid_raw, task, "class")
+            model_kind = "sklearn"
+    else:
+        model = build_sklearn_model(task, preprocessor)
+        model.fit(x_train_raw, y_train)
+        preds_valid = predict_sklearn(model, x_valid_raw, task, "class")
+        model_kind = "sklearn"
+
+    if task == "classification":
+        metric = "accuracy"
+        preds_eval = np.asarray(preds_valid)
+        if preds_eval.ndim > 1:
+            preds_eval = preds_eval.argmax(axis=1)
+        score = accuracy_score(y_valid, preds_eval)
+    else:
+        metric = "rmse"
+        score = mean_squared_error(y_valid, preds_valid, squared=False)
+    print(f"validation {metric}: {score:.4f}")
+
+    if ACCELERATOR == "tpu":
+        preds = predict_tpu(model, x_test_processed, task, num_classes, prediction_kind)
+    elif ACCELERATOR == "gpu":
+        if model_kind == "torch":
+            preds = predict_torch(model, x_test_processed, task, num_classes, prediction_kind, torch_device)
+        else:
+            preds = predict_sklearn(model, test[feature_cols], task, prediction_kind)
+    else:
+        preds = predict_sklearn(model, test[feature_cols], task, prediction_kind)
+
+    if label_encoder is not None and prediction_kind == "class":
+        preds = label_encoder.inverse_transform(np.asarray(preds, dtype=int))
+
+    submission = sample.copy()
+    if id_col in test.columns:
+        mapping = pd.Series(preds, index=test[id_col])
+        submission[target_col] = submission[id_col].map(mapping)
+    else:
+        submission[target_col] = preds
+    submission.to_csv(SUBMISSION_PATH, index=False)
+    print(f"wrote submission: {SUBMISSION_PATH}")
+
+    payload = {
+        "task": task,
+        "metric": metric,
+        "score": float(score),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        METRICS_PATH.write_text(json.dumps(payload, indent=2))
+    except Exception as exc:
+        print(f"failed to write metrics.json: {exc}")
+
+
+if __name__ == "__main__":
+    main()
+""".strip()
+
+
+class KaggleNotebookRunner:
+    name = "kaggle_notebook"
+
+    def run(self, context: RunContext) -> RunResult:
+        slug = context.slug
+        run_id = context.run_id
+        paths = context.paths
+
+        run_dir = paths.artifacts / run_id
+        kernel_dir = run_dir / "kernel"
+        output_dir = run_dir / "output"
+        logs_dir = run_dir / "logs"
+        summary_path = run_dir / "summary.json"
+
+        kernel_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        kaggle_username = resolve_kaggle_username(context.kaggle_username)
+        kernel_slug = sanitize_kernel_slug(f"kagglebot-{slug}-{run_id}")
+        kernel_id = f"{kaggle_username}/{kernel_slug}"
+
+        accelerator = context.accelerator
+
+        metadata = build_kernel_metadata(
+            kaggle_username=kaggle_username,
+            kernel_slug=kernel_slug,
+            title=f"kagglebot {slug} {run_id}",
+            competition_slug=slug,
+            accelerator=accelerator,
+            enable_internet=context.enable_internet,
+        )
+        kernel_metadata_path = kernel_dir / "kernel-metadata.json"
+        kernel_metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+        kernel_main_path = kernel_dir / "main.py"
+        kernel_main_path.write_text(render_kernel_main(slug, accelerator), encoding="utf-8")
+
+        commands = [
+            f"kaggle kernels push -p {kernel_dir}",
+            f"kaggle kernels status {kernel_id}",
+            f"kaggle kernels output {kernel_id} -p {output_dir}",
+        ]
+
+        summary = {
+            "schema_version": 1,
+            "slug": slug,
+            "run_id": run_id,
+            "runner": self.name,
+            "kernel_slug": kernel_slug,
+            "kernel_id": kernel_id,
+            "accelerator": accelerator,
+            "enable_internet": context.enable_internet,
+            "dry_run": context.dry_run,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "commands": commands,
+        }
+
+        if context.dry_run:
+            print("[yellow]DRY RUN[/yellow]: Kaggle CLI commands will not be executed.")
+            for command in commands:
+                print(f"[cyan]planned[/cyan]: {command}")
+            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            return RunResult(
+                run_id=run_id,
+                runner=self.name,
+                submission_path=None,
+                summary_path=summary_path,
+                analysis_path=None,
+                kernel_slug=kernel_slug,
+            )
+
+        kaggle_cli.competitions_files(slug)
+        kaggle_cli.kernels_push(kernel_dir, slug=slug)
+        _wait_for_kernel(kernel_id, logs_dir=logs_dir, slug=slug)
+        kaggle_cli.kernels_output(kernel_id, output_dir, slug=slug)
+
+        submission_path = find_submission_file(output_dir)
+        paths.submissions_dir.mkdir(parents=True, exist_ok=True)
+        local_submission = paths.submission_csv
+        shutil.copy2(submission_path, local_submission)
+
+        summary["submission_path"] = str(local_submission)
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+        return RunResult(
+            run_id=run_id,
+            runner=self.name,
+            submission_path=local_submission,
+            summary_path=summary_path,
+            analysis_path=None,
+            kernel_slug=kernel_slug,
+        )
+
+
+def sanitize_kernel_slug(value: str, max_length: int = 80) -> str:
+    slug = re.sub(r"[^a-z0-9-]+", "-", value.lower())
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    if not slug:
+        raise ValueError("Kernel slug is empty after sanitization.")
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip("-")
+    return slug
+
+
+def build_kernel_metadata(
+    *,
+    kaggle_username: str,
+    kernel_slug: str,
+    title: str,
+    competition_slug: str,
+    accelerator: str,
+    enable_internet: bool,
+) -> dict[str, object]:
+    enable_gpu = accelerator == "gpu"
+    enable_tpu = accelerator == "tpu"
+    if enable_gpu and enable_tpu:
+        raise ValueError("enable_gpu and enable_tpu cannot both be true.")
+    return {
+        "id": f"{kaggle_username}/{kernel_slug}",
+        "title": title,
+        "code_file": "main.py",
+        "language": "python",
+        "kernel_type": "script",
+        "is_private": True,
+        "enable_gpu": enable_gpu,
+        "enable_tpu": enable_tpu,
+        "enable_internet": enable_internet,
+        "competition_sources": [competition_slug],
+        "dataset_sources": [],
+        "kernel_sources": [],
+        "model_sources": [],
+        "keywords": [],
+    }
+
+
+def render_kernel_main(competition_slug: str, accelerator: str) -> str:
+    return (
+        KERNEL_TEMPLATE.replace("__COMPETITION_SLUG__", competition_slug)
+        .replace("__ACCELERATOR__", accelerator)
+        .strip()
+    )
+
+
+def resolve_kaggle_username(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    env = os.getenv("KAGGLE_USERNAME")
+    if env:
+        return env
+    config_dir = Path(os.getenv("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser()
+    config_path = config_dir / "kaggle.json"
+    if config_path.exists():
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        username = payload.get("username")
+        if username:
+            return str(username)
+    raise ValueError("Kaggle username is required for kaggle_* compute modes.")
+
+
+def find_submission_file(output_dir: Path) -> Path:
+    matches = [path for path in output_dir.rglob("submission.csv") if path.is_file()]
+    if not matches:
+        raise FileNotFoundError(f"No submission.csv found under {output_dir}")
+    if len(matches) > 1:
+        raise ValueError(f"Multiple submission.csv files found under {output_dir}")
+    return matches[0]
+
+
+def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str) -> None:
+    timeout_seconds = 60 * 60
+    poll_seconds = 15
+    start = time.monotonic()
+    status_log = logs_dir / "kernel_status.log"
+
+    while True:
+        output = kaggle_cli.kernels_status(kernel_id, slug=slug)
+        status = _parse_kernel_status(output)
+        status_log.write_text(output, encoding="utf-8")
+        if status == "complete":
+            return
+        if status == "failed":
+            raise RuntimeError(f"Kernel run failed: {output}")
+        if time.monotonic() - start > timeout_seconds:
+            raise TimeoutError("Timed out waiting for kernel completion.")
+        time.sleep(poll_seconds)
+
+
+def _parse_kernel_status(output: str) -> str:
+    text = output.lower()
+    if "error" in text or "failed" in text:
+        return "failed"
+    if "complete" in text or "success" in text:
+        return "complete"
+    if "running" in text or "queued" in text or "pending" in text:
+        return "running"
+    return "unknown"

@@ -9,3 +9,9 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    h = hashlib.sha256()
+    h.update(text.encode("utf-8"))
+    return h.hexdigest()

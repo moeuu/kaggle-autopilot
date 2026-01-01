@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
+
 import pandas as pd
 
 from kagglebot.history import SubmissionLedger
@@ -56,6 +59,52 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
             raise ValueError(f"All values are NaN for target column '{c}'.")
 
 
-def ensure_not_duplicate_submission(ledger: SubmissionLedger, submission_path: str) -> None:
-    if ledger.is_duplicate(submission_path):
+def ensure_not_duplicate_submission(
+    ledger: SubmissionLedger,
+    submission_path: str,
+    *,
+    slug: str,
+    message: str,
+) -> None:
+    if ledger.is_duplicate(submission_path, slug=slug, message=message):
         raise ValueError("Duplicate submission detected (hash already recorded).")
+
+
+def ensure_submission_rate_limit(
+    ledger: SubmissionLedger,
+    *,
+    max_submissions_per_day: int = 5,
+    min_hours_between: float = 1.0,
+) -> None:
+    if not ledger.ledger_path.exists():
+        return
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=1)
+    last_ts: datetime | None = None
+    recent = 0
+
+    for line in ledger.ledger_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        ts_str = rec.get("ts")
+        if not ts_str:
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if ts >= cutoff:
+            recent += 1
+        if last_ts is None or ts > last_ts:
+            last_ts = ts
+
+    if recent >= max_submissions_per_day:
+        raise ValueError("Submission rate limit exceeded (max per day).")
+    if last_ts is not None:
+        elapsed = (now - last_ts).total_seconds() / 3600.0
+        if elapsed < min_hours_between:
+            raise ValueError("Submission rate limit exceeded (cooldown).")

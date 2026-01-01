@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from kagglebot.validation import validate_submission
+from kagglebot.history import SubmissionLedger
+from kagglebot.validation import ensure_submission_rate_limit, validate_submission
 
 
 def test_validate_submission_success():
@@ -102,3 +105,33 @@ def test_validate_submission_duplicate_id():
 
         with pytest.raises(ValueError, match="duplicate values"):
             validate_submission(str(sample_path), str(submission_path))
+
+
+def test_submission_rate_limit(tmp_path):
+    ledger = SubmissionLedger.for_slug("demo", root=tmp_path)
+    now = datetime.now(UTC)
+    entries = [
+        {
+            "ts": (now - timedelta(hours=1)).isoformat(),
+            "sha256": "a",
+            "fingerprint": "f1",
+            "slug": "demo",
+            "submission_path": "sub.csv",
+            "message": "m1",
+            "run_id": "r1",
+        },
+        {
+            "ts": (now - timedelta(minutes=10)).isoformat(),
+            "sha256": "b",
+            "fingerprint": "f2",
+            "slug": "demo",
+            "submission_path": "sub2.csv",
+            "message": "m2",
+            "run_id": "r2",
+        },
+    ]
+    ledger.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.ledger_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="cooldown"):
+        ensure_submission_rate_limit(ledger, max_submissions_per_day=5, min_hours_between=1.0)

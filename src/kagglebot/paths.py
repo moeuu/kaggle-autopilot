@@ -22,6 +22,10 @@ class CompetitionPaths:
         return self.artifacts / "models"
 
     @property
+    def reports_dir(self) -> Path:
+        return self.artifacts / "reports"
+
+    @property
     def submissions_dir(self) -> Path:
         return self.artifacts / "submissions"
 
@@ -36,6 +40,18 @@ class CompetitionPaths:
     @property
     def submission_ledger(self) -> Path:
         return self.submissions_dir / "history.jsonl"
+
+    @property
+    def analysis_path(self) -> Path:
+        return self.reports_dir / "competition_analysis.json"
+
+    @property
+    def training_report_path(self) -> Path:
+        return self.reports_dir / "training_report.json"
+
+    @property
+    def model_info_path(self) -> Path:
+        return self.models_dir / "model_info.json"
 
     @property
     def config_file(self) -> Path:

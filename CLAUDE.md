@@ -112,12 +112,44 @@ uv run ruff format .
 uv run pyright  # or mypy
 ```
 
-## Planned CLI Interface
+## CLI Interface
+
+### Compute Switching (Primary Feature)
+
+**Single flag for execution mode**: `--compute {local_cpu, local_gpu, kaggle_gpu, kaggle_tpu}`
+
+```bash
+# Local CPU (default)
+kagglebot run titanic --compute local_cpu --submit -m "baseline"
+
+# Local GPU (auto-detect CUDA/MPS, fallback to CPU)
+kagglebot run titanic --compute local_gpu --submit -m "GPU baseline"
+
+# Local GPU (strict mode - fail if no GPU)
+kagglebot run titanic --compute local_gpu --strict --submit -m "GPU required"
+
+# Kaggle GPU kernel
+kagglebot run titanic --compute kaggle_gpu --kaggle-username myuser --submit -m "kernel baseline"
+
+# Kaggle TPU kernel
+kagglebot run titanic --compute kaggle_tpu --kaggle-username myuser --enable-internet --submit -m "TPU baseline"
+
+# Dry-run (preview without execution)
+kagglebot run titanic --compute kaggle_gpu --dry-run
+```
+
+**Key Principles**:
+- **Non-interactive**: All decisions via flags/config, zero prompts
+- **GPU auto-detection**: Automatically detect CUDA/MPS, fallback to CPU by default
+- **Strict mode opt-in**: Use `--strict` to fail if requested compute unavailable
+- **Kaggle kernels**: Push to Kaggle for GPU/TPU, but submission always local (for safety)
+- **Rules acceptance**: ALWAYS manual (NEVER automated)
+
+### Other Commands
 
 ```bash
 kagglebot bootstrap <competition_slug>                 # Prepare workspace dirs + config (no network)
 kagglebot run <slug> --submission <path>               # Validate + ledger (dry-run default)
-kagglebot run <slug> --no-dry-run --force --submission <path> -m "<message>"
 kagglebot train <slug>                                 # Train baseline model (future)
 kagglebot predict <slug>                               # Generate submission.csv (future)
 kagglebot submit <slug> -m "<message>"                 # Submit with guardrails (future)
@@ -139,24 +171,55 @@ artifacts/         # Models, submissions (gitignored)
 
 ## Coding Guidelines
 
+- **Non-interactive execution**: No prompts, all decisions via flags/config
+- **uv package manager**: Use `uv add/remove` for dependencies, `uv run` for commands
 - **Small, composable functions**: Clear inputs/outputs, easy to test
-- **User-friendly failures**: Actionable error messages
-- **Kaggle CLI first**: Use Kaggle CLI with `~/.kaggle/kaggle.json` or env vars
-- **Minimal dependencies**: pandas + scikit-learn + typer + rich for MVP
-- **Deterministic runs**: Control random seeds when feasible
-- **Python 3.11+**: Target modern Python
+- **User-friendly failures**: Actionable error messages with remediation hints
+- **Kaggle Python API**: Use `KaggleApi()` directly (not subprocess CLI calls)
+- **OAuth authentication**: Use `~/.kaggle/access_token` (NOT kaggle.json)
+- **Minimal dependencies**: Keep dependency tree small and auditable
+- **Deterministic runs**: Control random seeds, document non-deterministic behavior
+- **Python 3.11+**: Target modern Python with type hints
+- **GPU support**: Auto-detect CUDA/MPS, graceful fallback to CPU
 - **Resource limits**: Current MVP assumes datasets fit in memory
   - For large competitions (>1GB CSV), add chunked processing
-  - LogisticRegression has max_iter=2000 to prevent hangs
+  - Model training has configurable time budgets
   - Consider memory-mapped files or Dask for huge datasets
 
-## Kaggle CLI Integration
+## Kaggle API Integration
 
-- Uses Kaggle CLI (`kaggle competitions ...`)
-- Authentication via `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`
-- Download: `kaggle competitions download -c <slug>`
-- Submit: `kaggle competitions submit -c <slug> -f <file> -m <message>`
-- If CLI fails due to missing rule acceptance, print the competition rules URL and exit gracefully
+**Primary Method**: Use Kaggle Python API directly (not subprocess calls)
+
+```python
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+api = KaggleApi()
+api.authenticate()  # Uses ~/.kaggle/access_token (OAuth)
+
+# Download competition data
+api.competition_download_files(competition, path=dest)
+
+# Submit to competition
+api.competition_submit(file_path, message, competition)
+
+# Check submission status
+api.competition_submissions(competition)
+```
+
+**Authentication**:
+- **OAuth tokens**: Use `~/.kaggle/access_token` (NOT kaggle.json)
+- Auto-authenticated via `api.authenticate()`
+- If auth fails, print clear instructions and exit (exit code 2)
+
+**Rules Acceptance**:
+- Check rules accepted BEFORE any submission
+- If not accepted: print URL and exit with code 2
+- NEVER automate acceptance (user must click in browser)
+
+**Subprocess Usage** (only for Kaggle kernels):
+- Kernel push/poll/download still uses Kaggle CLI subprocess
+- Use list args (NEVER `shell=True`)
+- Example: `subprocess.run(["kaggle", "kernels", "push", "-p", kernel_dir], check=True)`
 
 ## ZIP File Handling
 
@@ -230,11 +293,19 @@ When reviewing PRs or changes:
 
 Before implementing features, review these documents:
 
+### Core Architecture
 1. **ARCHITECTURE.md** - System design, modules, data flow, extension points
 2. **SPEC.md** - CLI commands, config schema, exit codes, artifact layout
 3. **PLAN.md** - Phased implementation roadmap (7 phases to production)
 4. **SECURITY.md** - Security guidelines, credential handling, safety guardrails
 5. **AGENTS.md** - Instructions for implementer/tester agents (Codex)
+
+### Compute Switching (Current Priority)
+6. **SPEC_COMPUTE.md** - CLI flags, ComputePlan, exit codes, artifact layout
+7. **ARCHITECTURE_COMPUTE.md** - Module boundaries, runner interface, GPU detection
+8. **PLAN_COMPUTE.md** - 7-week implementation plan (140 tasks)
+9. **DESIGN_NOTEBOOK_RUNNER.md** - Kaggle kernel execution design
+10. **TASKS_NOTEBOOK_RUNNER.md** - Granular notebook runner tasks
 
 ### Implementation Workflow
 
@@ -259,5 +330,149 @@ Before implementing features, review these documents:
 Follow the critical path in PLAN.md:
 ```
 Phase 0 (Foundation) → Phase 1 (Analyzer) + Phase 2 (Orchestrator) →
-Phase 3 (Training) → Phase 4 (Submission) → Phase 5 (Polish)
+Phase 3 (Training) → Phase 4 (Submission) → Phase 5 (Polish) →
+Phase N (Notebook Runner - optional)
 ```
+
+---
+
+## Compute Switching Architecture (Current Implementation Priority)
+
+**See SPEC_COMPUTE.md, ARCHITECTURE_COMPUTE.md, and PLAN_COMPUTE.md for full details**
+
+### Overview
+
+Compute switching enables seamless execution across 4 modes:
+- **local_cpu**: Train on local CPU (default, safe, works everywhere)
+- **local_gpu**: Train on local GPU with CUDA/MPS auto-detection (2-5x faster)
+- **kaggle_gpu**: Execute on Kaggle GPU kernel (free cloud GPU)
+- **kaggle_tpu**: Execute on Kaggle TPU kernel (free cloud TPU)
+
+### Key Components
+
+```
+src/kagglebot/
+  compute/
+    planner.py         # ComputePlan generation, GPU detection fallback
+    gpu_detector.py    # CUDA/MPS detection via PyTorch
+    exceptions.py      # GPUNotAvailableError, etc.
+  runners/
+    base.py            # Runner ABC, RunContext, RunResult
+    local.py           # LocalRunner (CPU/GPU)
+    kaggle_notebook.py # KaggleNotebookRunner (kernel execution)
+  kernel/
+    packager.py        # Generate kernel packages
+    manager.py         # Push, poll, download kernels
+    metadata.py        # kernel-metadata.json generation
+    templates/         # Jinja2 templates for kernel scripts
+  training/
+    tabular_engine.py  # UPDATED: GPU params for LightGBM/CatBoost/XGBoost
+```
+
+### Critical Implementation Rules
+
+1. **Non-interactive execution**:
+   - All compute decisions via `--compute` flag
+   - No prompts for GPU availability
+   - Fallback to CPU by default (strict mode opt-in via `--strict`)
+
+2. **GPU detection and fallback**:
+   - Auto-detect CUDA (NVIDIA) or MPS (Apple Silicon)
+   - If GPU requested but not available: fall back to CPU (unless `--strict`)
+   - Log detection results and fallback decisions
+   - Clear error messages if strict mode fails
+
+3. **Kaggle kernel execution**:
+   - Submission always happens locally (NEVER from kernel)
+   - Check rules accepted BEFORE pushing kernel
+   - No secrets in kernel code (validate before push)
+   - `enable_internet=false` by default (require explicit flag)
+   - Kernel slug includes run_id for uniqueness
+   - Timeout enforcement on kernel polling
+
+4. **uv package manager**:
+   - Use `uv add jinja2` for new dependencies
+   - Use `uv run pytest` for testing
+   - Keep `uv.lock` committed
+   - No pip or requirements.txt
+
+5. **Exit codes**:
+   - 2: Rules not accepted
+   - 10: GPU not available (strict mode)
+   - 11: Kernel timeout
+   - 12: Kernel execution failed
+
+### Implementation Checklist
+
+Before merging compute switching code:
+- [ ] GPU detection works (CUDA and MPS)
+- [ ] Fallback logic works (local_gpu → local_cpu when no GPU)
+- [ ] Strict mode fails correctly (raises GPUNotAvailableError)
+- [ ] LocalRunner trains with GPU params (LightGBM, CatBoost, XGBoost)
+- [ ] KaggleNotebookRunner generates valid kernel packages
+- [ ] Kernel push/poll/download works (mocked in tests)
+- [ ] Rules acceptance check enforced
+- [ ] No secrets in kernel code (validation works)
+- [ ] Submission happens locally (not from kernel)
+- [ ] All tests pass (>80% coverage)
+- [ ] Documentation complete
+
+---
+
+## Kaggle Notebook Runner (Phase N)
+
+**See DESIGN_NOTEBOOK_RUNNER.md for full design**
+
+### Critical Security Rules
+
+When implementing notebook runner:
+
+1. **NEVER embed secrets in kernels**:
+   - ❌ No Kaggle API keys in kernel code
+   - ❌ No credentials in kernel-metadata.json
+   - ❌ No tokens in generated main.py
+   - ✅ Submission happens locally (not from kernel)
+
+2. **Internet access OFF by default**:
+   - `enable_internet: false` in kernel-metadata.json
+   - Require explicit `--enable-internet` flag
+   - Log warning when enabled
+   - Only allow if competition permits external data
+
+3. **Rules acceptance required**:
+   - Check rules accepted BEFORE pushing kernel
+   - Exit code 2 if not accepted
+   - NEVER automate acceptance
+
+4. **Kernel package validation**:
+   - Scan for secret patterns before push
+   - Fail if potential credentials detected
+   - Log what would be pushed in dry-run
+
+5. **Competition sources format**:
+   - Use slug only: `["titanic"]`
+   - NOT: `["c/titanic"]` or `["competitions/titanic"]`
+   - Kaggle CLI requirement
+
+### Implementation Checklist
+
+Before merging notebook runner code:
+- [ ] No secrets in kernel templates
+- [ ] enable_internet defaults to false
+- [ ] Rules check implemented (no automation)
+- [ ] Kernel package validated before push
+- [ ] Dry-run mode works (no push/execute)
+- [ ] All subprocess calls secure (no shell=True)
+- [ ] Timeout enforced on kernel polling
+- [ ] Submission happens locally (not in kernel)
+- [ ] Ledger records kernel_id for audit
+- [ ] Documentation complete (usage + security)
+
+### Testing Requirements
+
+- [ ] Unit tests with mocked Kaggle CLI
+- [ ] Integration tests (no actual push)
+- [ ] Manual test on Kaggle (private kernel)
+- [ ] Verify no secrets in pushed kernel
+- [ ] Test all error paths (timeout, failure, etc.)
+- [ ] Backward compatibility (local runner still works)
