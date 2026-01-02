@@ -30,7 +30,7 @@ uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-adva
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
 2. **Plan**: Agent generates `plan.json` with target metric/score/direction
-3. **Baseline**: Agent implements initial solution in `kagglebot/solver/`
+3. **Baseline**: Agent implements initial solution in `kagglebot/solver/` (simple feature engineering + model sweep)
 4. **Iterate**: Train → evaluate → diagnose → improve (up to 5 iterations)
 5. **Submit**: Auto-submit when top1-tier (or at iteration 5 if `--submit`)
 

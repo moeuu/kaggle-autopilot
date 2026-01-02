@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,7 @@ def train_evaluate_and_predict(
     target_override: str | None,
 ) -> TrainingOutcome:
     data = load_competition_data(data_dir, target_column_override=target_override)
+    data, feature_report = _augment_features(data)
     label_encoder = None
     if data.task == "classification":
         label_encoder = LabelEncoder()
@@ -72,7 +74,7 @@ def train_evaluate_and_predict(
     )
 
     metric_direction = infer_direction(metric, direction)
-    candidates = _build_candidates(data, selection)
+    candidates = _build_candidates(data, selection, seed=seed)
     evaluation, best_candidate, best_model, best_preprocessor = _evaluate_candidates(
         data=data,
         candidates=candidates,
@@ -115,6 +117,7 @@ def train_evaluate_and_predict(
             "params": best_candidate.get("params", {}),
             "preprocessing": best_candidate.get("preprocessing", {}),
             "target_transform": target_transform.name if target_transform else None,
+            "feature_engineering": feature_report,
         },
         accelerator=selection,
     )
@@ -148,20 +151,20 @@ def _resolve_target_transform(metric: str, data: CompetitionData) -> TargetTrans
     return None
 
 
-def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str, object]]:
+def _build_candidates(data: CompetitionData, accelerator: str, *, seed: int) -> list[dict[str, object]]:
     candidates: list[dict[str, object]] = []
     if data.task == "classification":
         candidates.append(
             {
                 "name": "logreg",
-                "model": LogisticRegression(max_iter=2000),
+                "model": LogisticRegression(max_iter=2000, class_weight="balanced"),
                 "preprocessing": _build_linear_preprocessor(data),
             }
         )
         candidates.append(
             {
                 "name": "hist_gb",
-                "model": HistGradientBoostingClassifier(),
+                "model": HistGradientBoostingClassifier(max_depth=7, learning_rate=0.05, max_iter=300),
                 "preprocessing": _build_tree_preprocessor(data),
             }
         )
@@ -170,11 +173,15 @@ def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str,
                 {
                     "name": "catboost_gpu",
                     "model": CatBoostClassifier(
-                        iterations=300,
-                        depth=6,
-                        learning_rate=0.1,
+                        iterations=600,
+                        depth=8,
+                        learning_rate=0.05,
+                        l2_leaf_reg=3.0,
                         loss_function="Logloss",
+                        eval_metric="Accuracy",
+                        auto_class_weights="Balanced",
                         task_type="GPU",
+                        random_seed=seed,
                         verbose=False,
                         allow_writing_files=False,
                     ),
@@ -190,11 +197,15 @@ def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str,
                 {
                     "name": "catboost_cpu",
                     "model": CatBoostClassifier(
-                        iterations=300,
-                        depth=6,
-                        learning_rate=0.1,
+                        iterations=600,
+                        depth=8,
+                        learning_rate=0.05,
+                        l2_leaf_reg=3.0,
                         loss_function="Logloss",
+                        eval_metric="Accuracy",
+                        auto_class_weights="Balanced",
                         task_type="CPU",
+                        random_seed=seed,
                         verbose=False,
                         allow_writing_files=False,
                     ),
@@ -215,11 +226,14 @@ def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str,
                 {
                     "name": "catboost_gpu",
                     "model": CatBoostRegressor(
-                        iterations=300,
-                        depth=6,
-                        learning_rate=0.1,
+                        iterations=600,
+                        depth=8,
+                        learning_rate=0.05,
+                        l2_leaf_reg=3.0,
                         loss_function="RMSE",
+                        eval_metric="RMSE",
                         task_type="GPU",
+                        random_seed=seed,
                         verbose=False,
                         allow_writing_files=False,
                     ),
@@ -235,11 +249,14 @@ def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str,
                 {
                     "name": "catboost_cpu",
                     "model": CatBoostRegressor(
-                        iterations=300,
-                        depth=6,
-                        learning_rate=0.1,
+                        iterations=600,
+                        depth=8,
+                        learning_rate=0.05,
+                        l2_leaf_reg=3.0,
                         loss_function="RMSE",
+                        eval_metric="RMSE",
                         task_type="CPU",
+                        random_seed=seed,
                         verbose=False,
                         allow_writing_files=False,
                     ),
@@ -247,6 +264,86 @@ def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str,
                 }
             )
     return candidates
+
+
+def _augment_features(data: CompetitionData) -> tuple[CompetitionData, dict[str, object]]:
+    train = data.train.copy()
+    test = data.test.copy()
+    feature_cols = list(data.feature_columns)
+    added = []
+
+    num_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(train[c])]
+    agg_features = []
+    if num_cols:
+        train_num = train[num_cols]
+        test_num = test[num_cols]
+        agg_map = {
+            "agg__num_sum": (train_num.sum(axis=1, skipna=True), test_num.sum(axis=1, skipna=True)),
+            "agg__num_mean": (train_num.mean(axis=1, skipna=True), test_num.mean(axis=1, skipna=True)),
+            "agg__num_std": (
+                train_num.std(axis=1, skipna=True).fillna(0.0),
+                test_num.std(axis=1, skipna=True).fillna(0.0),
+            ),
+            "agg__num_min": (train_num.min(axis=1, skipna=True), test_num.min(axis=1, skipna=True)),
+            "agg__num_max": (train_num.max(axis=1, skipna=True), test_num.max(axis=1, skipna=True)),
+            "agg__num_missing": (train_num.isna().sum(axis=1), test_num.isna().sum(axis=1)),
+            "agg__num_zero": ((train_num == 0).sum(axis=1), (test_num == 0).sum(axis=1)),
+        }
+        for name, (train_series, test_series) in agg_map.items():
+            if name in train.columns:
+                continue
+            train[name] = train_series
+            test[name] = test_series
+            feature_cols.append(name)
+            added.append(name)
+            agg_features.append(name)
+
+    pattern = re.compile(r"([-+]?\d*\.?\d+)")
+    extracted_cols = []
+    cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
+    for col in cat_cols:
+        train_series = train[col].astype("string")
+        test_series = test[col].astype("string")
+        train_extracted = train_series.str.extract(pattern, expand=False)
+        non_null = train_series.notna().sum()
+        if non_null == 0:
+            continue
+        ratio = float(train_extracted.notna().sum()) / float(non_null)
+        if ratio < 0.2:
+            continue
+        safe_name = _safe_feature_name(col)
+        new_col = f"num__{safe_name}"
+        if new_col in train.columns:
+            continue
+        train[new_col] = pd.to_numeric(train_extracted, errors="coerce")
+        test[new_col] = pd.to_numeric(test_series.str.extract(pattern, expand=False), errors="coerce")
+        feature_cols.append(new_col)
+        added.append(new_col)
+        extracted_cols.append(new_col)
+
+    report = {
+        "numeric_aggregates": agg_features,
+        "numeric_extraction": extracted_cols,
+        "total_added": len(added),
+    }
+    return (
+        CompetitionData(
+            train=train,
+            test=test,
+            sample=data.sample,
+            id_column=data.id_column,
+            target_column=data.target_column,
+            feature_columns=feature_cols,
+            task=data.task,
+            prediction_kind=data.prediction_kind,
+        ),
+        report,
+    )
+
+
+def _safe_feature_name(name: str) -> str:
+    cleaned = re.sub(r"[^0-9a-zA-Z_]+", "_", name)
+    return cleaned.strip("_") or "feature"
 
 
 def _build_linear_preprocessor(data: CompetitionData) -> ColumnTransformer:
@@ -525,6 +622,8 @@ def _fit_and_score(
     target_transform: TargetTransform | None,
 ):
     x_train_proc, x_eval_proc = _apply_preprocessor(preprocessor, x_train, x_eval)
+    x_train_proc = _prepare_catboost_frame(model, x_train_proc)
+    x_eval_proc = _prepare_catboost_frame(model, x_eval_proc)
     y_train_enc = _encode_target(data, y_train, label_encoder, target_transform=target_transform, apply_transform=True)
     fit_kwargs = _catboost_fit_kwargs(model, x_train_proc)
     model.fit(x_train_proc, y_train_enc, **fit_kwargs)
@@ -542,11 +641,27 @@ def _catboost_fit_kwargs(model, x):
     cat_features = [
         idx
         for idx, col in enumerate(x.columns)
-        if pd.api.types.is_object_dtype(x[col]) or pd.api.types.is_categorical_dtype(x[col])
+        if pd.api.types.is_object_dtype(x[col])
+        or pd.api.types.is_categorical_dtype(x[col])
+        or pd.api.types.is_string_dtype(x[col])
     ]
     if not cat_features:
         return {}
     return {"cat_features": cat_features}
+
+
+def _prepare_catboost_frame(model, frame):
+    if model is None:
+        return frame
+    if not model.__class__.__name__.startswith("CatBoost"):
+        return frame
+    if not hasattr(frame, "columns"):
+        return frame
+    frame = frame.copy()
+    for col in frame.columns:
+        if pd.api.types.is_object_dtype(frame[col]) or pd.api.types.is_categorical_dtype(frame[col]):
+            frame[col] = frame[col].astype("string").fillna("missing")
+    return frame
 
 
 def _fit_torch_and_score(
@@ -755,6 +870,8 @@ def _predict_with_model(
         x_test = preprocessor.transform(x_test)
         x_train = _dense_array(x_train)
         x_test = _dense_array(x_test)
+    x_train = _prepare_catboost_frame(model, x_train)
+    x_test = _prepare_catboost_frame(model, x_test)
     if model is None:
         return _predict_torch_full(data, metric, x_train, x_test, label_encoder, target_transform)
     y_train_enc = _encode_target(
