@@ -67,7 +67,7 @@ def bootstrap(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
     download: bool = typer.Option(False, "--download/--no-download", help="Download competition data."),
-    rules_source: str = typer.Option("none", "--rules-source", help="Rules capture source: none, url, file."),
+    rules_source: str = typer.Option("url", "--rules-source", help="Rules capture source: none, url, file."),
     rules_file: Path | None = typer.Option(None, "--rules-file", help="Rules file path when rules-source=file."),
     quiet: bool = typer.Option(True, "--quiet/--no-quiet", help="Use --quiet for Kaggle CLI download."),
 ) -> None:
@@ -301,7 +301,7 @@ def autopilot(
     else:
         print(f"[cyan]downloading data[/cyan]: {paths.data_dir}")
 
-    rules_source = "file" if rules_file else "none"
+    rules_source = "file" if rules_file else "url"
     bootstrap_competition(
         slug=slug,
         competition_url=competition if "kaggle.com" in competition else None,

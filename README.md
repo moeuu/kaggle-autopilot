@@ -9,7 +9,7 @@ Safe, non-interactive automation for Kaggle competitions with top1-gated autopil
 - Kaggle CLI on PATH
 - Kaggle credentials (`~/.kaggle/kaggle.json` or env vars)
 - **Competition rules accepted manually in browser** (required once per competition)
-- Optional: provide rules text via `--rules-file` (md/txt/html). Rules scraping is disabled.
+- Rules/overview/data are fetched from Kaggle during download; you can override rules with `--rules-file` (md/txt/html).
 
 ## Install
 
@@ -25,22 +25,22 @@ Run autopilot with a single command:
 uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
   --agent codex \
   --compute kaggle_gpu \
-  --rules-file /path/to/rules.md \
   --submit
 ```
+Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched rules text.
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
 2. **Plan**: Agent generates `plan.json` with target metric/score/direction
 3. **Baseline**: Agent implements initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel_overrides.py`)
-4. **Iterate**: Train → evaluate → diagnose → improve (up to 5 iterations)
-5. **Submit**: Auto-submit when top1-tier (or at iteration 5 if `--submit`)
+4. **Iterate**: Train → evaluate → diagnose → improve (default 3 iterations; override with `--max-iterations`)
+5. **Submit**: Auto-submit when top1-tier (or at final iteration if `--submit`)
 
 **Safe defaults**:
-- Max 5 iterations
+- Default max iterations: 3 (`--max-iterations` to override)
 - No training time limit (accuracy-first)
 - Internet ON by default (disable with `--internet off`)
-- Submit only when top1-tier or at iteration 5 (with `--submit`)
+- Submit only when top1-tier or at final iteration (with `--submit`)
 
 ## Manual Commands
 
@@ -106,7 +106,7 @@ Autopilot uses it as a heuristic gate:
 - Maximize metrics: submit when offline score >= top1
 
 Offline evaluation is a pseudo-test (holdout/CV) and is **not directly comparable** to the public leaderboard; the heuristic gate is a safety check, not a guarantee.
-If top1-tier is not reached, autopilot iterates up to 5 times and submits the best offline candidate on iteration 5 (when `--submit` is set).
+If top1-tier is not reached, autopilot iterates up to `max_iterations` (default 3) and submits the best offline candidate on the final iteration (when `--submit` is set).
 
 ## Artifacts Layout
 
@@ -120,8 +120,10 @@ artifacts/<slug>/
     sample_submission_head.csv   # Head of sample submission
     top1_public.json             # Leaderboard leader snapshot
     rules_url.txt                # Competition rules URL
-    rules.md                     # Rules markdown (from --rules-file)
+    rules.md                     # Rules markdown (fetched or from --rules-file)
     rules.html                   # Rules HTML (if provided)
+    overview.md                  # Competition overview (if available)
+    data.md                      # Data description (if available)
     knowledge_hints.txt          # Similar competitions + hints
   kernel_overrides.py            # Kaggle kernel override hooks
   prompts/

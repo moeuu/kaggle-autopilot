@@ -1,8 +1,8 @@
 # Autopilot
 
-Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **verify → train → evaluate → diagnose → improve → repeat** until top1-tier is reached or 5 iterations complete.
+Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **verify → train → evaluate → diagnose → improve → repeat** until top1-tier is reached or `max_iterations` (default 3) complete.
 
-**Key principle**: Submission happens **only** when offline score is top1-tier (direction-aware) or at iteration 5 when `--submit` is set.
+**Key principle**: Submission happens **only** when offline score is top1-tier (direction-aware) or at the final iteration when `--submit` is set.
 
 ## Usage
 
@@ -10,11 +10,10 @@ Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **v
 uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
   --agent codex \
   --compute kaggle_gpu \
-  --rules-file /path/to/rules.md \
   --submit
 ```
 
-Use `--rules-file` (md/txt/html) to supply competition rules; scraping is disabled.
+Rules/overview/data are fetched from Kaggle during download. Use `--rules-file` (md/txt/html) to override rules.
 
 ## How It Works
 
@@ -61,7 +60,7 @@ For each iteration:
 
 The loop stops when:
 - **Top1-tier reached** → Submit if `--submit` flag is set
-- **Max iterations reached** → Submit best offline candidate at iteration 5 (if `--submit`)
+- **Max iterations reached** → Submit best offline candidate at the final iteration (if `--submit`)
 
 ### 3. Submission (Optional)
 
@@ -73,7 +72,7 @@ If `--submit` is set AND top1-tier is reached:
 
 **Important**: Submission never happens automatically. You must:
 - Pass `--submit` flag
-- Reach top1-tier or finish iteration 5 (best candidate)
+- Reach top1-tier or finish the final iteration (best candidate)
 - Have accepted competition rules manually in your browser
 
 ## Scoring Strategy
@@ -131,7 +130,7 @@ You can **manually edit** `plan.json` to override these choices before re-runnin
 
 ### Hard Caps
 
-- **Max iterations**: Default 5, configurable via `--max-iterations`
+- **Max iterations**: Default 3, configurable via `--max-iterations`
 - **Max total time**: Default 2 hours, configurable via `--max-total-min`
 - **Patience**: Default 2 iterations without improvement, configurable via `--patience`
 - **Min improvement**: Default 0.0 (any improvement counts), configurable via `--min-improvement`
@@ -186,7 +185,9 @@ artifacts/<slug>/
     sample_submission.csv        # Required submission format
     top1_public.json             # Public leaderboard leader (context only)
     rules_url.txt                # Competition rules URL
-    rules.md                     # Rules markdown (from --rules-file)
+    rules.md                     # Rules markdown (fetched or from --rules-file)
+    overview.md                  # Competition overview (if available)
+    data.md                      # Data description (if available)
 
   prompts/
     codex_plan_and_baseline.md   # Baseline generation prompt
@@ -259,7 +260,7 @@ Evaluation:
   --seed INT                     Random seed (default: 42)
 
 Iteration Control:
-  --max-iterations INT           Max improvement cycles (default: 5)
+  --max-iterations INT           Max improvement cycles (default: 3)
   --max-total-min INT            Max wall-clock time in minutes (default: 120)
   --patience INT                 Early stopping patience (default: 2)
   --min-improvement FLOAT        Minimum score improvement threshold (default: 0.0)
@@ -293,7 +294,7 @@ uv run kagglebot autopilot titanic --agent codex --compute local_cpu
 
 Output:
 - Generates plan.json and baseline
-- Runs up to 5 iterations
+- Runs up to `max_iterations` (default 3)
 - Stops when target met or patience exhausted
 - Does **not** submit (missing `--submit` flag)
 

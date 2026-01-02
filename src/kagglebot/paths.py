@@ -67,6 +67,14 @@ class CompetitionPaths:
         return self.context_dir / "rules.md"
 
     @property
+    def overview_md_path(self) -> Path:
+        return self.context_dir / "overview.md"
+
+    @property
+    def data_md_path(self) -> Path:
+        return self.context_dir / "data.md"
+
+    @property
     def knowledge_hints_path(self) -> Path:
         return self.context_dir / "knowledge_hints.txt"
 

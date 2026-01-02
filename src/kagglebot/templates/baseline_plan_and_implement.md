@@ -29,6 +29,8 @@
 - `{top1_public_path}` - Current leaderboard leader score (context only, NOT submission criterion)
 - `{rules_url_path}` - Competition rules reference
 - `{rules_html_path}` - Rules HTML (if present)
+- `artifacts/{slug}/context/overview.md` - Competition overview (if present)
+- `artifacts/{slug}/context/data.md` - Data description (if present)
 {kb_hints_section}
 
 ## Knowledge Base: Similar Competitions
@@ -58,13 +60,14 @@ Update `{plan_path}` with the following fields:
 
 **Plan Guidelines**:
 - **target_metric**: Derive from rules.html and dataset (do not assume defaults)
+- **Context**: Read overview.md/data.md for problem framing and data caveats
 - **target_score**: Set based on Top1 public leaderboard ({top1_score}) and dataset complexity
   - For small datasets (<5K rows): Add 10-20% margin to Top1
   - For medium datasets (5K-100K rows): Add 5-10% margin
   - For large datasets (>100K rows): Match or slightly exceed Top1
   - Direction-aware: minimize means higher value is more lenient, maximize means lower value
 - **score_source**: Use `holdout` by default; only use `cv` if you need robust estimates (small datasets, high variance)
-- **submit_policy**: Keep as `on_target_only` (only submit when target met OR at iteration 5)
+- **submit_policy**: Keep as `on_target_only` (only submit when target met OR at final iteration)
 
 ### Step 2: Implement Baseline Solution
 

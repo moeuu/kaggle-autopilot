@@ -327,7 +327,7 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     assert (iter_dir / "agent" / "prompt.md").exists()
 
 
-def test_autopilot_caps_iterations_at_five(monkeypatch, tmp_path: Path) -> None:
+def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
     calls = {"train": 0}
 
     _write_plan(
@@ -369,4 +369,4 @@ def test_autopilot_caps_iterations_at_five(monkeypatch, tmp_path: Path) -> None:
 
     config = _make_config(tmp_path, max_iterations=10)
     run_autopilot(config)
-    assert calls["train"] == 5
+    assert calls["train"] == 10

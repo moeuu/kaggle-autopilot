@@ -273,6 +273,8 @@ def build_plan_and_baseline_prompt(
         f"- artifacts/{slug}/context/rules_url.txt",
         f"- artifacts/{slug}/context/rules.md (if present)",
         f"- artifacts/{slug}/context/rules.html (if present)",
+        f"- artifacts/{slug}/context/overview.md (if present)",
+        f"- artifacts/{slug}/context/data.md (if present)",
         f"- artifacts/{slug}/kernel_overrides.py (for kaggle_gpu/kaggle_tpu)",
         f"- artifacts/{slug}/context/knowledge_hints.txt",
         "",
@@ -311,13 +313,14 @@ def build_plan_and_baseline_prompt(
         '  "cv_folds": 5,',
         '  "seed": 42,',
         '  "internet": "on",',
-        '  "max_iterations": 5,',
+        '  "max_iterations": 3,',
         '  "submit_policy": "on_target_only"',
         "}",
         "```",
         "",
         "Guidance:",
         "- Derive target_metric and direction from rules.md/rules.html and sample_submission.csv.",
+        "- Read overview.md/data.md for problem framing and data caveats.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV for small datasets or high variance; otherwise holdout.",
         "- Do NOT change submit_policy; autopilot controls submission gating.",
@@ -348,7 +351,8 @@ def build_plan_and_baseline_prompt(
         "uv run pytest -q",
         "```",
         "",
-        "The autopilot will iterate up to 5 times and submit only when top1-tier or at iteration 5.",
+        "The autopilot will iterate up to max_iterations (default 3)",
+        "and submit only when top1-tier or at the final iteration.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -366,7 +370,7 @@ def build_improve_template() -> str:
 
 **Competition**: `{slug}`
 **Iteration**: {iteration}
-**Goal**: Improve offline score toward top1-tier or best possible within 5 iterations
+**Goal**: Improve offline score toward top1-tier or best possible within the max_iterations budget (default 3)
 **Compute**: {compute} ({accelerator})
 
 ## Current Score Context
@@ -387,6 +391,8 @@ def build_improve_template() -> str:
 - **Rules URL**: `{rules_url}`
 - **Rules Markdown**: `{rules_md}` (preferred)
 - **Rules HTML**: `{rules_html}` (fallback)
+- **Overview Markdown**: `{overview_md}` (read this)
+- **Data Markdown**: `{data_md}` (read this)
 - **Dataset Profile**: `{dataset_profile}`
 - **Sample Submission**: `{sample_submission}`
 - **Kernel Overrides**: `{kernel_overrides}` (use this for kaggle_gpu/kaggle_tpu)
@@ -417,6 +423,8 @@ Read the diagnostics and metrics files to understand:
 ### Step 2: Implement Improvements
 
 Make **targeted, incremental changes** to improve the offline score.
+
+Before changing the model, read overview.md/data.md and respect any constraints or data caveats.
 
 **Where to implement**:
 - If `compute` starts with `kaggle_`: edit `{kernel_overrides}` only.

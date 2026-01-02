@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -61,6 +64,10 @@ def bootstrap_competition(
             paths,
             f"Rules content not provided. See: {rules_url}\n",
         )
+    if not paths.overview_md_path.exists():
+        _write_overview_markdown(paths, f"Overview content not provided. See: {rules_url}\n")
+    if not paths.data_md_path.exists():
+        _write_data_markdown(paths, f"Data content not provided. See: {rules_url}\n")
     _ensure_kernel_overrides(paths)
     _write_plan(paths, force=force)
 
@@ -72,6 +79,14 @@ def bootstrap_competition(
         else:
             download_competition(slug, paths.data_dir, force=True, quiet=quiet)
             _unzip_downloads(paths.data_dir)
+            if rules_source == "url" and _pages_need_refresh(paths, rules_url):
+                _capture_rules(
+                    paths,
+                    rules_source=rules_source,
+                    rules_file=rules_file,
+                    rules_url=rules_url,
+                    dry_run=dry_run,
+                )
 
     profile = _write_dataset_profile(paths)
     _cache_sample_submission(paths)
@@ -117,7 +132,33 @@ def _capture_rules(
     rules_url: str,
     dry_run: bool,
 ) -> None:
-    if rules_source in {"none", "url"}:
+    if rules_source == "none":
+        return
+    if rules_source == "url":
+        if dry_run:
+            (paths.context_dir / "rules_url_skipped.txt").write_text(
+                "DRY RUN: rules download skipped.\n", encoding="utf-8"
+            )
+            return
+        pages = _fetch_competition_pages(slug=paths.slug, rules_url=rules_url)
+        if pages:
+            rules_md = _select_page_markdown(pages, names=("rules",), keywords=("rule",))
+            overview_md = _select_page_markdown(
+                pages,
+                names=("description", "overview"),
+                keywords=("overview", "description"),
+            )
+            data_md = _select_page_markdown(
+                pages,
+                names=("data-description", "data"),
+                keywords=("data",),
+            )
+            if rules_md:
+                _write_rules_markdown(paths, rules_md)
+            if overview_md:
+                _write_overview_markdown(paths, overview_md)
+            if data_md:
+                _write_data_markdown(paths, data_md)
         return
     if rules_source != "file":
         raise ValueError(f"Unknown rules source: {rules_source}")
@@ -175,6 +216,79 @@ def _write_rules_from_file(paths: CompetitionPaths, rules_file: Path, *, rules_u
     _write_rules_markdown(paths, text or f"Rules URL: {rules_url}")
 
 
+def _fetch_competition_pages(*, slug: str, rules_url: str, timeout: int = 10) -> list[dict[str, object]]:
+    competition_url = (
+        f"https://www.kaggle.com/api/i/competitions.CompetitionService/GetCompetition?competitionName={slug}"
+    )
+    payload = _fetch_json_with_retry(competition_url, timeout=timeout)
+    if payload is None:
+        return []
+    competition_id = None
+    if isinstance(payload, dict):
+        competition_id = payload.get("id") or payload.get("competition", {}).get("id")
+    if not competition_id:
+        return []
+
+    pages_url = f"https://www.kaggle.com/api/i/competitions.PageService/ListPages?competitionId={competition_id}"
+    pages_payload = _fetch_json_with_retry(pages_url, timeout=timeout)
+    if pages_payload is None:
+        return []
+    pages = pages_payload.get("pages", []) if isinstance(pages_payload, dict) else []
+    if not isinstance(pages, list):
+        return []
+    return [page for page in pages if isinstance(page, dict)]
+
+
+def _select_page_markdown(
+    pages: list[dict[str, object]],
+    *,
+    names: tuple[str, ...],
+    keywords: tuple[str, ...],
+) -> str | None:
+    name_set = {name.lower() for name in names}
+    for page in pages:
+        name = str(page.get("name") or "").lower()
+        if name in name_set:
+            content = page.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    for page in pages:
+        name = str(page.get("name") or "").lower()
+        if any(keyword in name for keyword in keywords):
+            content = page.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    for page in pages:
+        title = str(page.get("title") or "").lower()
+        if any(keyword in title for keyword in keywords):
+            content = page.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return None
+
+
+def _fetch_json_with_retry(url: str, *, timeout: int, attempts: int = 3) -> dict[str, object] | None:
+    for attempt in range(attempts):
+        try:
+            return _fetch_json(url, timeout=timeout)
+        except (urllib.error.URLError, ValueError, json.JSONDecodeError):
+            if attempt < attempts - 1:
+                time.sleep(1.0)
+                continue
+            return None
+    return None
+
+
+def _fetch_json(url: str, *, timeout: int) -> dict[str, object]:
+    req = urllib.request.Request(url, headers={"User-Agent": "kagglebot/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read().decode("utf-8")
+    payload = json.loads(data)
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected JSON payload.")
+    return payload
+
+
 def _write_rules_markdown(paths: CompetitionPaths, text: str) -> None:
     normalized = text.strip()
     if not normalized:
@@ -182,6 +296,42 @@ def _write_rules_markdown(paths: CompetitionPaths, text: str) -> None:
     if not normalized.endswith("\n"):
         normalized += "\n"
     paths.rules_md_path.write_text(normalized, encoding="utf-8")
+
+
+def _write_overview_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Overview content unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.overview_md_path.write_text(normalized, encoding="utf-8")
+
+
+def _write_data_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Data content unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.data_md_path.write_text(normalized, encoding="utf-8")
+
+
+def _pages_need_refresh(paths: CompetitionPaths, rules_url: str) -> bool:
+    def needs_refresh(path: Path, markers: tuple[str, ...]) -> bool:
+        if not path.exists():
+            return True
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return True
+        return any(text.startswith(marker) for marker in markers)
+
+    if needs_refresh(paths.rules_md_path, ("Rules content not provided.", f"Rules URL: {rules_url}")):
+        return True
+    if needs_refresh(paths.overview_md_path, ("Overview content not provided.",)):
+        return True
+    if needs_refresh(paths.data_md_path, ("Data content not provided.",)):
+        return True
+    return False
 
 
 def _ensure_kernel_overrides(paths: CompetitionPaths) -> None:

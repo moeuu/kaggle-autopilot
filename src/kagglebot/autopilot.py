@@ -125,7 +125,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
     best_submission: Path | None = None
     submitted = False
 
-    max_iterations = min(int(resolved["max_iterations"]), 5)
+    max_iterations = max(1, int(resolved["max_iterations"]))
     holdout_frac = float(resolved["holdout_frac"])
     cv_folds = int(resolved["cv_folds"])
     seed = int(resolved["seed"])
@@ -350,7 +350,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     internet = choose(config.internet, plan.internet, "on")
     if internet in (None, "auto"):
         internet = "on"
-    max_iterations = choose(config.max_iterations, plan.max_iterations, 5)
+    max_iterations = choose(config.max_iterations, plan.max_iterations, 3)
     max_total_min = choose(config.max_total_min, plan.max_total_min, 240)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
@@ -387,7 +387,7 @@ def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
         time_budget_min=resolved.get("time_budget_min"),  # type: ignore[arg-type]
         kernel_name=resolved.get("kernel_name"),  # type: ignore[arg-type]
         internet=str(resolved.get("internet") or "on"),
-        max_iterations=int(resolved.get("max_iterations") or 5),
+        max_iterations=int(resolved.get("max_iterations") or 3),
         max_total_min=int(resolved.get("max_total_min") or 240),
         patience=int(resolved.get("patience") or 2),
         min_improvement=float(resolved.get("min_improvement") or 0.0),
@@ -675,6 +675,8 @@ def _run_improvement(
         rules_url=str(config.paths.rules_url_path),
         rules_md=str(config.paths.rules_md_path),
         rules_html=str(config.paths.rules_html_path),
+        overview_md=str(config.paths.overview_md_path),
+        data_md=str(config.paths.data_md_path),
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
         kernel_overrides=str(config.paths.kernel_overrides_path),
