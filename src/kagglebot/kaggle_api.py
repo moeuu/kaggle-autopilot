@@ -7,6 +7,7 @@ from pathlib import Path
 from kagglebot.competition import parse_competition_slug
 from kagglebot.exceptions import KaggleCliError, RulesNotAcceptedError
 from kagglebot.exec_utils import run_command
+from kagglebot.validators import safe_extract_zip
 
 
 def download_competition(slug: str, dest_dir: Path, *, force: bool, quiet: bool, dry_run: bool = False) -> str:
@@ -79,7 +80,8 @@ def competitions_files(slug: str, *, dry_run: bool = False) -> str:
 
 
 def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> dict[str, object]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    leaderboard_dir = output_dir / "leaderboard"
+    leaderboard_dir.mkdir(parents=True, exist_ok=True)
     if not dry_run:
         _run_kaggle(
             [
@@ -90,12 +92,17 @@ def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> d
                 "-c",
                 slug,
                 "-p",
-                str(output_dir),
+                str(leaderboard_dir),
             ],
             slug=slug,
             dry_run=dry_run,
         )
-    csv_path = _find_leaderboard_csv(output_dir)
+    csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
+    if csv_path is None:
+        zip_paths = list(leaderboard_dir.glob("*.zip"))
+        for zip_path in zip_paths:
+            safe_extract_zip(zip_path, leaderboard_dir)
+        csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     if dry_run or csv_path is None or not csv_path.exists():
         return {
             "score": None,
@@ -109,7 +116,16 @@ def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> d
             first = next(reader)
         except StopIteration:
             raise ValueError("Leaderboard CSV is empty.")
-    score = _extract_score(first)
+    try:
+        score = _extract_score(first)
+    except ValueError as exc:
+        return {
+            "score": None,
+            "timestamp": int(datetime.now(UTC).timestamp()),
+            "source": "kaggle competitions leaderboard --download",
+            "scope": "public",
+            "error": str(exc),
+        }
     return {
         "score": score,
         "timestamp": int(datetime.now(UTC).timestamp()),
@@ -118,24 +134,44 @@ def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> d
     }
 
 
-def _find_leaderboard_csv(output_dir: Path) -> Path | None:
+def _find_leaderboard_csv(output_dir: Path, slug: str) -> Path | None:
     csvs = list(output_dir.glob("*.csv"))
     if not csvs:
         return None
+    slug_lower = slug.lower()
     preferred = [path for path in csvs if "leaderboard" in path.name.lower()]
+    if not preferred:
+        preferred = [path for path in csvs if slug_lower in path.name.lower()]
     candidates = preferred or csvs
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _extract_score(row: dict[str, str]) -> float:
-    if "Score" in row:
-        return float(str(row["Score"]).replace(",", ""))
+    preferred_keys = ("Score", "PublicScore", "Public Score", "PrivateScore", "Private Score")
+    for key in preferred_keys:
+        if key in row:
+            value = _parse_score_value(row.get(key))
+            if value is not None:
+                return value
     for key, value in row.items():
-        try:
-            return float(str(value).replace(",", ""))
-        except ValueError:
+        if "score" not in key.lower():
             continue
+        parsed = _parse_score_value(value)
+        if parsed is not None:
+            return parsed
     raise ValueError("Unable to parse a numeric score from leaderboard CSV.")
+
+
+def _parse_score_value(value: str | None) -> float | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip().replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 def _parse_rules_accepted(row: dict[str, str]) -> bool | None:

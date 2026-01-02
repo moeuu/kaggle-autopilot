@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import shlex
 from dataclasses import dataclass
@@ -76,6 +77,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
     print(f"[cyan]fetching leaderboard[/cyan]: {config.slug}")
     top1_info = leaderboard_top1(config.slug, config.paths.context_dir, dry_run=config.dry_run)
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
+    _print_top1_info(top1_info)
 
     if _needs_planning(plan, config):
         print("[cyan]plan[/cyan]: generating baseline plan")
@@ -463,11 +465,14 @@ def _run_plan_and_baseline(config: AutopilotConfig, run_id: str) -> None:
     )
     prompt_path = agent_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
+    _print_agent_prompt(prompt_path, prompt_text)
 
     if config.dry_run:
         return
     print("[cyan]plan[/cyan]: running agent")
     result = run_codex(prompt_path, agent_dir, dry_run=False)
+    response_text = _read_agent_response(result.last_message_path)
+    _print_agent_response(result.last_message_path, response_text)
     if result.returncode != 0:
         raise RuntimeError(f"Codex planning/baseline step failed: {result.stderr}")
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
@@ -478,6 +483,34 @@ def _render_prompt(template: str, mapping: dict[str, str]) -> str:
     for key, value in mapping.items():
         rendered = rendered.replace(f"{{{{{key}}}}}", value)
     return rendered
+
+
+def _print_top1_info(top1_info: dict[str, object]) -> None:
+    score = top1_info.get("score") if isinstance(top1_info, dict) else None
+    source = top1_info.get("source") if isinstance(top1_info, dict) else None
+    if score is None:
+        print("[yellow]top1 public score[/yellow]: unavailable")
+        return
+    suffix = f" (source: {source})" if source else ""
+    print(f"[cyan]top1 public score[/cyan]: {score}{suffix}")
+
+
+def _print_agent_prompt(prompt_path: Path, prompt_text: str) -> None:
+    print(f"[cyan]codex prompt[/cyan]: {prompt_path}")
+    builtins.print(prompt_text.rstrip())
+    builtins.print("")
+
+
+def _read_agent_response(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").rstrip()
+
+
+def _print_agent_response(response_path: Path, response_text: str) -> None:
+    print(f"[cyan]codex response[/cyan]: {response_path}")
+    builtins.print(response_text)
+    builtins.print("")
 
 
 def _load_kernel_metrics(metrics_path: Path, direction: str):
@@ -614,29 +647,30 @@ def _run_improvement(
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "prompt.md"
-    prompt_path.write_text(
-        prompt_template.format(
-            slug=config.slug,
-            iteration=iteration,
-            plan_path=str(config.paths.plan_path),
-            run_path=str(config.paths.run_dir(run_id) / "run.json"),
-            metrics_path=str(iter_dir / "metrics.json"),
-            diagnostics_path=str(iter_dir / "diagnostics.md"),
-            logs_dir=str(iter_dir / "logs"),
-            compute=config.compute,
-            accelerator=config.accelerator,
-            knowledge_hints=str(config.paths.knowledge_hints_path),
-        ),
-        encoding="utf-8",
+    prompt_text = prompt_template.format(
+        slug=config.slug,
+        iteration=iteration,
+        plan_path=str(config.paths.plan_path),
+        run_path=str(config.paths.run_dir(run_id) / "run.json"),
+        metrics_path=str(iter_dir / "metrics.json"),
+        diagnostics_path=str(iter_dir / "diagnostics.md"),
+        logs_dir=str(iter_dir / "logs"),
+        compute=config.compute,
+        accelerator=config.accelerator,
+        knowledge_hints=str(config.paths.knowledge_hints_path),
     )
+    prompt_path.write_text(prompt_text, encoding="utf-8")
+    _print_agent_prompt(prompt_path, prompt_text)
 
     print("[cyan]improve[/cyan]: running agent")
     result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run)
+    response_text = _read_agent_response(result.last_message_path)
+    _print_agent_response(result.last_message_path, response_text)
     if result.returncode != 0:
         raise RuntimeError("Codex improvement failed.")
 
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
-    summary = result.last_message_path.read_text(encoding="utf-8")
+    summary = response_text
     record_improvement(
         knowledge_paths=config.knowledge_paths,
         run_id=run_id,

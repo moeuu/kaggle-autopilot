@@ -27,7 +27,8 @@ def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
 
     def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
         captured["args"] = args
-        csv_path = tmp_path / "leaderboard.csv"
+        csv_path = tmp_path / "leaderboard" / "leaderboard.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
         csv_path.write_text("Rank,Score\n1,0.123\n", encoding="utf-8")
         return ""
 
@@ -36,3 +37,30 @@ def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
     assert "-c" in captured["args"]
     assert "-p" in captured["args"]
     assert result["score"] == 0.123
+
+
+def test_leaderboard_top1_prefers_score_columns(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        csv_path = tmp_path / "leaderboard" / "leaderboard.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("TeamId,PublicScore\n1301,0.81234\n", encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+    result = kaggle_api.leaderboard_top1("demo", tmp_path)
+    assert result["score"] == 0.81234
+
+
+def test_leaderboard_top1_extracts_zip(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        zip_path = tmp_path / "leaderboard" / "demo.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        import zipfile
+
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("demo-leaderboard.csv", "Rank,Score\n1,0.987\n")
+        return ""
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+    result = kaggle_api.leaderboard_top1("demo", tmp_path)
+    assert result["score"] == 0.987

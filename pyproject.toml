@@ -46,3 +46,8 @@ ignore = []
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Kaggle CLI + credentials (opt-in)",
+]

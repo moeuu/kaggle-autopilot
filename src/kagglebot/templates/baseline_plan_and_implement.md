@@ -6,7 +6,7 @@
 **URL**: {competition_url}
 **Rules**: {rules_url}
 **Task**: {task_type}
-**Suggested Metric**: {suggested_metric}
+**Metric (confirm via rules)**: {suggested_metric}
 **Dataset**: {n_rows:,} rows × {n_cols} columns
 **Tags**: {tags}
 
@@ -28,6 +28,7 @@
 - `{sample_submission_path}` - Required submission format (MUST match exactly)
 - `{top1_public_path}` - Current leaderboard leader score (context only, NOT submission criterion)
 - `{rules_url_path}` - Competition rules reference
+- `{rules_html_path}` - Rules HTML (if present)
 {kb_hints_section}
 
 ## Knowledge Base: Similar Competitions
@@ -56,6 +57,7 @@ Update `{plan_path}` with the following fields:
 ```
 
 **Plan Guidelines**:
+- **target_metric**: Derive from rules.html and dataset (do not assume defaults)
 - **target_score**: Set based on Top1 public leaderboard ({top1_score}) and dataset complexity
   - For small datasets (<5K rows): Add 10-20% margin to Top1
   - For medium datasets (5K-100K rows): Add 5-10% margin

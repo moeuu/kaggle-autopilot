@@ -33,15 +33,15 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
             stderr="",
         )
 
-    args = [
-        "codex",
-        "exec",
-        "-a",
-        "never",
-        "--sandbox",
-        "workspace-write",
-    ]
-    if _supports_search():
+    args = ["codex", "exec"]
+    supported = _supported_flags()
+    if "--full-auto" in supported:
+        args.append("--full-auto")
+    elif "-a" in supported:
+        args += ["-a", "never"]
+    if "--sandbox" in supported:
+        args += ["--sandbox", "workspace-write"]
+    if "--search" in supported:
         args.append("--search")
     args += [
         "--json",
@@ -63,11 +63,25 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
 
 
 @lru_cache(maxsize=1)
-def _supports_search() -> bool:
+def _codex_help() -> str:
     try:
         result = run_command(["codex", "exec", "--help"])
     except FileNotFoundError:
-        return False
+        return ""
     if result.returncode != 0:
-        return False
-    return "--search" in result.output
+        return ""
+    return result.output
+
+
+def _supported_flags() -> set[str]:
+    text = _codex_help()
+    flags: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("-"):
+            continue
+        for token in line.split():
+            if not token.startswith("-"):
+                break
+            flags.add(token.rstrip(","))
+    return flags
