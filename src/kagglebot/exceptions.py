@@ -68,4 +68,3 @@ class KernelFailedError(KaggleBotError):
     """Kaggle kernel completed with a failure status."""
 
     exit_code = 12
-

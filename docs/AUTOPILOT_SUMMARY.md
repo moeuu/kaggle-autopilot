@@ -224,9 +224,9 @@ See [AUTOPILOT_SINGLE_SUBMIT.md](./AUTOPILOT_SINGLE_SUBMIT.md) for full specific
 ## Documentation Links
 
 - **Full Specification:** [AUTOPILOT_SINGLE_SUBMIT.md](./AUTOPILOT_SINGLE_SUBMIT.md)
-- **Architecture Review:** [../ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVIEW.md)
-- **Failure Modes:** [../FAILURE_MODES.md](../FAILURE_MODES.md)
-- **Submission Checklist:** [../CHECKLIST_SUBMIT.md](../CHECKLIST_SUBMIT.md)
+- **Architecture Reference:** [architecture_final.md](./architecture_final.md)
+- **Failure Modes:** [safety/failure_modes.md](./safety/failure_modes.md)
+- **Submission Checklist:** [safety/submission_checklist.md](./safety/submission_checklist.md)
 
 ---
 

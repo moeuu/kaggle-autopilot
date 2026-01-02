@@ -56,7 +56,7 @@ def _make_config(tmp_path: Path, **overrides) -> AutopilotConfig:
         target_metric=None,
         target_score=None,
         target_direction=None,
-        max_iterations=2,
+        max_iterations=1,
         max_total_min=60,
         patience=2,
         min_improvement=0.0,
@@ -103,6 +103,8 @@ def test_autopilot_uses_plan_from_agent(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
 
     config = _make_config(tmp_path)
     run_autopilot(config)
@@ -112,7 +114,99 @@ def test_autopilot_uses_plan_from_agent(monkeypatch, tmp_path: Path) -> None:
     assert run_payload["config"]["target_score"] == 0.5
 
 
-def test_autopilot_no_submit_when_below_target(monkeypatch, tmp_path: Path) -> None:
+def test_autopilot_submit_when_top1_tier(monkeypatch, tmp_path: Path) -> None:
+    submission_calls: list[Path] = []
+
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+    )
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=0.4,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="ridge",
+            model_summary={},
+            accelerator="cpu",
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
+    )
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+
+    config = _make_config(tmp_path, submit=True, max_iterations=3)
+    run_autopilot(config)
+    assert len(submission_calls) == 1
+
+
+def test_autopilot_no_submit_when_top1_tier_without_submit(monkeypatch, tmp_path: Path) -> None:
+    submission_calls: list[Path] = []
+
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+    )
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=0.4,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="ridge",
+            model_summary={},
+            accelerator="cpu",
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
+    )
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1)
+    run_autopilot(config)
+    assert submission_calls == []
+
+
+def test_autopilot_submit_at_final_iteration(monkeypatch, tmp_path: Path) -> None:
     submission_calls: list[Path] = []
 
     _write_plan(
@@ -145,55 +239,13 @@ def test_autopilot_no_submit_when_below_target(monkeypatch, tmp_path: Path) -> N
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
     )
-
-    config = _make_config(tmp_path, submit=True, max_iterations=1)
-    run_autopilot(config)
-    assert submission_calls == []
-
-
-def test_autopilot_submit_when_target_met(monkeypatch, tmp_path: Path) -> None:
-    submission_calls: list[Path] = []
-
-    _write_plan(
-        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
-        target_metric="rmse",
-        target_score=0.5,
-        target_direction="minimize",
-    )
-
-    def fake_train(*args, **kwargs):  # noqa: ARG001
-        output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
-        evaluation = EvaluationResult(
-            score_source="holdout",
-            metric="rmse",
-            direction="minimize",
-            value=0.1,
-            std=None,
-            train_score=None,
-            val_score=None,
-            fold_scores=None,
-        )
-        return TrainingOutcome(
-            submission_path=output_path,
-            evaluation=evaluation,
-            model_name="ridge",
-            model_summary={},
-            accelerator="cpu",
-        )
-
-    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
-    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
-    monkeypatch.setattr(
-        "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
-    )
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -211,6 +263,8 @@ def test_autopilot_stops_when_target_missing(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot.submit_competition", lambda *args, **kwargs: calls.update(submit=1))
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
 
     config = _make_config(tmp_path, submit=True)
     run_autopilot(config)
@@ -218,48 +272,6 @@ def test_autopilot_stops_when_target_missing(monkeypatch, tmp_path: Path) -> Non
     assert run_payload["status"] == "missing_target"
     assert calls["train"] == 0
     assert calls["submit"] == 0
-
-
-def test_autopilot_patience_stops(monkeypatch, tmp_path: Path) -> None:
-    calls = {"train": 0}
-
-    _write_plan(
-        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
-        target_metric="rmse",
-        target_score=0.5,
-        target_direction="minimize",
-    )
-
-    def fake_train(*args, **kwargs):  # noqa: ARG001
-        calls["train"] += 1
-        output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
-        evaluation = EvaluationResult(
-            score_source="holdout",
-            metric="rmse",
-            direction="minimize",
-            value=1.0,
-            std=None,
-            train_score=None,
-            val_score=None,
-            fold_scores=None,
-        )
-        return TrainingOutcome(
-            submission_path=output_path,
-            evaluation=evaluation,
-            model_name="ridge",
-            model_summary={},
-            accelerator="cpu",
-        )
-
-    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
-    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-
-    config = _make_config(tmp_path, max_iterations=5, patience=1, min_improvement=0.1)
-    run_autopilot(config)
-    assert calls["train"] == 2
 
 
 def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
@@ -304,10 +316,57 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
 
     config = _make_config(tmp_path, max_iterations=2)
     run_autopilot(config)
     iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
     assert (iter_dir / "agent" / "prompt.md").exists()
+
+
+def test_autopilot_caps_iterations_at_five(monkeypatch, tmp_path: Path) -> None:
+    calls = {"train": 0}
+
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+        max_iterations=10,
+    )
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        calls["train"] += 1
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=1.0,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="ridge",
+            model_summary={},
+            accelerator="cpu",
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+
+    config = _make_config(tmp_path, max_iterations=10)
+    run_autopilot(config)
+    assert calls["train"] == 5

@@ -53,15 +53,15 @@ Build a Kaggle competition automation CLI:
 - If a CLI call fails due to missing rule acceptance, print the Rules URL and exit.
 
 ## What "done" looks like for MVP
-- `kagglebot run <slug>` downloads, trains, and produces a valid submission.csv in artifacts/
-- `kagglebot run <slug> --submit` submits once (with guardrails)
+- `kagglebot autopilot <slug> --agent codex --compute local_cpu` downloads, trains, and produces a valid submission.csv in artifacts/
+- `kagglebot autopilot <slug> --agent codex --compute local_cpu --submit` submits once (with guardrails)
 - Works on a common tabular competition (e.g., Titanic-like structure)
 
 ---
 
 ## Kaggle Notebook Runner (Optional Phase N)
 
-**See DESIGN_NOTEBOOK_RUNNER.md and TASKS_NOTEBOOK_RUNNER.md**
+**See docs/notebook_runner/design.md and docs/notebook_runner/tasks.md**
 
 ### Implementation Guidelines
 

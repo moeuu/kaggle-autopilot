@@ -67,7 +67,7 @@ def bootstrap(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
     download: bool = typer.Option(False, "--download/--no-download", help="Download competition data."),
-    rules_source: str = typer.Option("url", "--rules-source", help="Rules capture source: none, url, fetch, file."),
+    rules_source: str = typer.Option("fetch", "--rules-source", help="Rules capture source: none, url, fetch, file."),
     rules_file: Path | None = typer.Option(None, "--rules-file", help="Rules file path when rules-source=file."),
     quiet: bool = typer.Option(True, "--quiet/--no-quiet", help="Use --quiet for Kaggle CLI download."),
 ) -> None:
@@ -75,9 +75,6 @@ def bootstrap(
     slug = parse_competition_slug(competition)
     paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir)
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
-
-    if download and not cfg.force and not cfg.dry_run:
-        raise typer.BadParameter("Refusing to download without --force.")
 
     meta_path = bootstrap_competition(
         slug=slug,
@@ -298,17 +295,23 @@ def autopilot(
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
 
     resolved_accelerator = _resolve_accelerator(compute.value, accelerator)
-    data_present = any(paths.data_dir.rglob("*.csv"))
+    if cfg.dry_run:
+        print(f"[yellow]DRY RUN[/yellow]: would download data to {paths.data_dir}")
+    else:
+        print(f"[cyan]downloading data[/cyan]: {paths.data_dir}")
 
     bootstrap_competition(
         slug=slug,
         competition_url=competition if "kaggle.com" in competition else None,
         paths=paths,
         knowledge_paths=knowledge_paths,
-        download=not data_present and not cfg.dry_run,
-        force=cfg.force,
+        rules_source="fetch",
+        download=not cfg.dry_run,
+        force=False,
         dry_run=cfg.dry_run,
     )
+    if not cfg.dry_run:
+        print(f"[green]download complete[/green]: {paths.data_dir}")
 
     run_id = new_run_id()
     config = AutopilotConfig(

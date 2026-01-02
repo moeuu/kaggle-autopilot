@@ -58,8 +58,48 @@ def ensure_taxonomy(paths: KnowledgePaths) -> dict[str, object]:
 
 
 def load_taxonomy(path: Path) -> dict[str, object]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data
+    text = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return _parse_yaml_taxonomy(text)
+
+
+def _parse_yaml_taxonomy(text: str) -> dict[str, object]:
+    tags: set[str] = set()
+    aliases: dict[str, str] = {}
+    current: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+            stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0 and stripped.endswith(":"):
+            current = stripped[:-1]
+            continue
+        if current is None:
+            continue
+        if current == "aliases":
+            if ":" in stripped:
+                alias_key, alias_val = stripped.split(":", 1)
+                alias_key = alias_key.strip()
+                alias_val = alias_val.strip().strip('"').strip("'")
+                if alias_key and alias_val:
+                    aliases[alias_key] = alias_val
+            continue
+        if current == "inference_rules":
+            continue
+        if stripped.startswith("-"):
+            item = stripped[1:].strip().strip('"').strip("'")
+            if item:
+                tags.add(item)
+    return {"tags": sorted(tags), "aliases": aliases}
 
 
 def _taxonomy_from_dict(payload: dict[str, object]) -> Taxonomy:
@@ -93,6 +133,8 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     n_rows = len(train)
     n_cols = len(train.columns)
     missingness = float(train.isna().mean().mean())
+    missingness_by_column = {col: float(val) for col, val in train.isna().mean().items()}
+    dtype_by_column = {col: str(dtype) for col, dtype in train.dtypes.items()}
     cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
     high_cardinality = [c for c in cat_cols if train[c].nunique(dropna=True) > 50]
 
@@ -107,10 +149,14 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         tags.append("high_cardinality_cats")
 
     metric = "accuracy" if task != "regression" else "rmse"
+    target_stats = _target_stats(train[target_col], task)
 
     profile.update(
         {
             "status": "ok",
+            "train_file": train_path.name,
+            "test_file": test_path.name,
+            "sample_submission_file": sample_path.name,
             "train_rows": n_rows,
             "train_cols": n_cols,
             "test_rows": len(test),
@@ -120,14 +166,36 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             "task": task,
             "metric": metric,
             "missingness": missingness,
+            "missingness_by_column": missingness_by_column,
+            "dtype_by_column": dtype_by_column,
             "categorical_columns": cat_cols,
             "numeric_columns": [c for c in feature_cols if c not in cat_cols],
             "high_cardinality_columns": high_cardinality,
             "modality": modality,
             "tags": tags,
+            "target_stats": target_stats,
         }
     )
     return profile
+
+
+def _target_stats(target: pd.Series, task: str) -> dict[str, object]:
+    stats: dict[str, object] = {}
+    if task == "regression":
+        values = pd.to_numeric(target, errors="coerce").dropna()
+        if not values.empty:
+            stats["min"] = float(values.min())
+            stats["max"] = float(values.max())
+            stats["mean"] = float(values.mean())
+            stats["std"] = float(values.std(ddof=0))
+            skew = float(values.skew())
+            stats["skew"] = None if pd.isna(skew) else skew
+    else:
+        counts = target.value_counts(dropna=False)
+        stats["unique"] = int(counts.size)
+        if counts.sum() > 0:
+            stats["top_class_ratio"] = float(counts.iloc[0] / counts.sum())
+    return stats
 
 
 def _infer_modality(data_dir: Path, train: pd.DataFrame) -> str:
@@ -139,7 +207,7 @@ def _infer_modality(data_dir: Path, train: pd.DataFrame) -> str:
         avg_len = 0.0
         sample = train[text_cols].astype(str).head(200)
         if not sample.empty:
-            avg_len = sample.applymap(len).mean().mean()
+            avg_len = sample.apply(lambda col: col.map(len)).mean().mean()
         if avg_len >= 30:
             return "text"
     if any("date" in c.lower() or "time" in c.lower() for c in train.columns):
@@ -171,60 +239,254 @@ def build_plan_and_baseline_prompt(
     similar_improvements: list[dict[str, object]],
 ) -> str:
     tags = profile.get("tags", [])
+    task = profile.get("task", "unknown")
+    metric = profile.get("metric", "rmse")
+    n_rows = profile.get("train_rows", 0)
+    n_cols = profile.get("train_cols", 0)
+
     lines = [
-        "# Kagglebot Codex Plan + Baseline Prompt",
+        "# Kagglebot Codex: Plan + Baseline",
         "",
-        f"Competition slug: {slug}",
-        f"Rules URL: {rules_url}",
+        "## Competition Overview",
         "",
-        "Context:",
-        f"- Dataset profile: artifacts/{slug}/context/dataset_profile.json",
-        f"- Sample submission: artifacts/{slug}/context/sample_submission.csv",
-        f"- Leaderboard snapshot: artifacts/{slug}/context/top1_public.json",
-        f"- Rules reference: artifacts/{slug}/context/rules_url.txt (or rules.*)",
-        f"- Tags: {tags}",
+        f"**Slug**: {slug}",
+        "**Competition URL**: {{competition_url}}",
+        f"**Rules URL**: {rules_url}",
+        f"**Task**: {task}",
+        f"**Suggested Metric**: {metric}",
+        f"**Dataset**: {n_rows:,} rows × {n_cols} columns",
+        f"**Tags**: {', '.join(tags) if tags else 'None'}",
         "",
-        "Knowledge base (similar competitions):",
+        "## Compute Context",
+        "",
+        "- Compute mode: {{compute_mode}}",
+        "- Accelerator: {{accelerator}}",
+        "- Internet: {{internet}}",
+        "- Run ID: {{run_id}}",
+        "",
+        "## Context Files (read these)",
+        "",
+        f"- artifacts/{slug}/context/dataset_profile.json",
+        f"- artifacts/{slug}/context/sample_submission.csv",
+        f"- artifacts/{slug}/context/sample_submission_head.csv",
+        f"- artifacts/{slug}/context/top1_public.json",
+        f"- artifacts/{slug}/context/rules_url.txt",
+        f"- artifacts/{slug}/context/rules.html (if present)",
+        f"- artifacts/{slug}/context/knowledge_hints.txt",
+        "",
+        "## Knowledge Base: Similar Competitions",
+        "",
     ]
+
     if similar_improvements:
+        lines.append("We found past runs on similar competitions. Learn from what worked:")
+        lines.append("")
         for item in similar_improvements:
-            lines.append(f"- {item['slug']} (overlap={item['overlap']}): {item['summary']}")
+            overlap = item.get("overlap", 0)
+            summary = item.get("summary", "No summary")
+            comp_slug = item.get("slug", "unknown")
+            lines.append(f"- {comp_slug} ({overlap} tag overlap): {summary}")
     else:
-        lines.append("- None found.")
+        lines.append("No similar competitions found in knowledge base (this is the first run).")
+
     lines += [
         "",
-        "Instructions:",
-        "1) Read meta.json, dataset_profile.json, and sample_submission.csv.",
-        "2) Update artifacts/<slug>/plan.json with target metric/score/direction and evaluation strategy.",
-        "   - Fill: target_metric, target_score, target_direction, score_source.",
-        "   - Set holdout_frac/cv_folds/seed/time_budget_min/kernel_name/internet when appropriate.",
-        "   - Keep submit_policy as on_target_only unless explicitly justified.",
-        "3) Implement a robust baseline under kagglebot/solver/.",
-        "4) Keep CLI stable and non-interactive.",
-        "5) Avoid secrets in code/logs.",
-        "6) Ensure tests pass: uv run pytest -q",
+        "---",
+        "",
+        "## Your Task",
+        "",
+        "### 1) Decide the plan (required)",
+        "",
+        f"Update artifacts/{slug}/plan.json with:",
+        "",
+        "```json",
+        "{",
+        '  "target_metric": "rmse",',
+        '  "target_score": 0.13,',
+        '  "target_direction": "minimize",',
+        '  "score_source": "holdout",',
+        '  "holdout_frac": 0.2,',
+        '  "cv_folds": 5,',
+        '  "seed": 42,',
+        '  "max_iterations": 5,',
+        '  "submit_policy": "on_target_only"',
+        "}",
+        "```",
+        "",
+        "Guidance:",
+        "- Use top1_public.json to set a realistic target_score.",
+        "- If unsure: regression -> RMSE/RMSLE; classification -> logloss/AUC.",
+        "- Prefer CV for small datasets or high variance; otherwise holdout.",
+        "- Do NOT change submit_policy; autopilot controls submission gating.",
+        "",
+        "### 2) Implement baseline pipeline",
+        "",
+        "Implement a robust baseline in kagglebot/solver/ that:",
+        "- Loads train/test and sample_submission correctly.",
+        "- Handles missing values and encodes categoricals.",
+        "- Trains a strong baseline model (tree ensemble for tabular).",
+        "- Evaluates with the score_source from plan.json.",
+        "- Writes submission.csv matching sample_submission.csv exactly.",
+        "",
+        "Compute-specific notes:",
+        "- local_gpu: use GPU-capable libs (xgboost gpu_hist, catboost GPU, or torch cuda).",
+        "- kaggle_gpu/kaggle_tpu: update kernel_runner.py kernel script to use GPU/TPU.",
+        "- TPU: if full TPU usage is not feasible, still produce a correct baseline.",
+        "",
+        "### 3) Safety + verification",
+        "",
+        "- NEVER accept Kaggle rules via API.",
+        "- NEVER include secrets in code/logs.",
+        "- NO interactive prompts.",
+        "",
+        "Run tests before finishing:",
+        "```bash",
+        "uv run pytest -q",
+        "```",
+        "",
+        "The autopilot will iterate up to 5 times and submit only when top1-tier or at iteration 5.",
     ]
     return "\n".join(lines) + "\n"
 
 
 def build_improve_template() -> str:
-    return (
-        "# Kagglebot Codex Improvement Prompt\n\n"
-        "Competition: {slug}\n"
-        "Iteration: {iteration}\n\n"
-        "Inputs:\n"
-        "- Plan: {plan_path}\n"
-        "- Run config: {run_path}\n"
-        "- Metrics: {metrics_path}\n"
-        "- Diagnostics: {diagnostics_path}\n"
-        "- Logs: {logs_dir}\n\n"
-        "Task:\n"
-        "1) Identify likely causes of the current score.\n"
-        "2) Implement improvements in kagglebot/solver/ to improve offline score (direction-aware).\n"
-        "3) Keep CLI stable and non-interactive.\n"
-        "4) Update/add tests so `uv run pytest -q` passes.\n"
-        "5) Do NOT introduce secrets.\n"
-    )
+    """Build the improvement prompt template for iterations 1-N.
+
+    This template has placeholders that get filled with .format() at runtime:
+    - {slug}, {iteration}, {plan_path}, {run_path}, {metrics_path}, {diagnostics_path}, {logs_dir}
+    """
+    return """\
+# Kagglebot Codex: Improvement Iteration
+
+## Context
+
+**Competition**: `{slug}`
+**Iteration**: {iteration}
+**Goal**: Improve offline score toward top1-tier or best possible within 5 iterations
+**Compute**: {compute} ({accelerator})
+
+## Input Files
+
+- **Plan**: `{plan_path}` - Target metric/score/direction, evaluation strategy
+- **Run Config**: `{run_path}` - Current run settings and history
+- **Current Metrics**: `{metrics_path}` - Latest offline evaluation results
+- **Diagnostics**: `{diagnostics_path}` - Agent-readable analysis of current performance
+- **Logs**: `{logs_dir}` - Training logs and error messages (if any)
+- **Knowledge Hints**: `{knowledge_hints}`
+
+## Your Task
+
+### Step 1: Analyze Current Performance
+
+Read the diagnostics and metrics files to understand:
+
+1. **What is the current score?**
+   - Check `metrics.json` for `value`, `direction`, and `target`
+   - Compare to `target_score` in `plan.json`
+
+2. **Why is the score not meeting target?**
+   - Underfitting? (high train + val error → model too simple)
+   - Overfitting? (low train error, high val error → model too complex or bad CV)
+   - Data leakage? (unrealistically good scores)
+   - Poor feature engineering? (missing important signals)
+   - Wrong hyperparameters? (learning rate, regularization, tree depth)
+   - Class imbalance? (classification only)
+   - Bad splits? (e.g., time series shuffled incorrectly)
+
+3. **What has been tried before?**
+   - Check `{run_path}` for previous iteration summaries
+   - Don't repeat failed experiments
+
+### Step 2: Implement Improvements
+
+Make **targeted, incremental changes** to `kagglebot/solver/` to improve the offline score.
+
+**Recommended strategies** (pick 1-2 per iteration):
+
+**For Underfitting**:
+- Add more features (interactions, polynomials, domain-specific)
+- Use a more complex model (Linear → Tree Ensemble → Neural Network)
+- Reduce regularization (lower L1/L2 penalties, increase max_depth)
+- Increase training time (more epochs, trees)
+
+**For Overfitting**:
+- Add regularization (L1/L2, dropout, early stopping)
+- Reduce model complexity (fewer trees, smaller max_depth, fewer layers)
+- Improve cross-validation (more folds, stratified splits, grouped CV)
+- Feature selection (drop noisy/redundant features)
+- Data augmentation (if applicable)
+
+**For Feature Engineering**:
+- Handle missing values better (indicators, model-based imputation)
+- Encode categoricals differently (target encoding, embeddings)
+- Create domain-specific features (e.g., for time series: lags, rolling stats)
+- Remove highly correlated features
+- Log/sqrt transform skewed features
+
+**For Hyperparameter Tuning**:
+- Grid search or random search over key parameters
+- Tune learning rate, max_depth, n_estimators, regularization
+- Use appropriate loss function for the metric
+
+**For Classification**:
+- Handle class imbalance (SMOTE, class weights, stratified sampling)
+- Adjust decision threshold (precision-recall tradeoff)
+- Try different metrics during training (focal loss for imbalance)
+
+**For Ensembling** (later iterations only):
+- Blend predictions from multiple models
+- Stack models with a meta-learner
+- Average across CV folds
+
+### Step 3: Validate Changes
+
+Before finalizing:
+
+1. **Run offline evaluation**:
+   ```bash
+   uv run kagglebot train {{slug}} --compute local_cpu
+   ```
+
+2. **Check metrics**:
+   - Is the score improving in the right direction?
+   - Is train-val gap reasonable? (not too large = overfitting)
+
+3. **Run tests**:
+   ```bash
+   uv run pytest -q
+   ```
+
+### Step 4: Safety Checks
+
+**CRITICAL SAFETY RULES**:
+- ❌ NEVER automate rules acceptance or submission
+- ❌ NEVER commit secrets (kaggle.json, API keys)
+- ❌ NEVER add interactive prompts
+- ❌ NEVER bypass safety guardrails (duplicate checks, rate limits)
+- ✅ DO keep changes incremental and testable
+- ✅ DO preserve backward compatibility with existing CLI
+- ✅ DO document significant changes in code comments
+
+**Quality Checklist**:
+- [ ] Changes address root cause from diagnostics
+- [ ] Offline score improves (or provides learning for next iteration)
+- [ ] submission.csv format still matches sample_submission.csv
+- [ ] Tests pass: `uv run pytest -q`
+- [ ] No secrets leaked into code/logs
+
+---
+
+## Tips for Effective Improvements
+
+1. **Make one change at a time**: Easier to debug and understand what worked
+2. **Trust offline evaluation**: Don't chase public leaderboard scores
+3. **Read diagnostics carefully**: The autopilot generates actionable hints
+4. **Check for data leakage**: If score is "too good to be true", it probably is
+5. **Don't over-optimize**: Diminishing returns after 3-5 iterations are normal
+6. **Document what didn't work**: Failed experiments provide valuable learning
+
+Good luck improving the model! 🔧
+"""
 
 
 def resolve_similar_improvements(

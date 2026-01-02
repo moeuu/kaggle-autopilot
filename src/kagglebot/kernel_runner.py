@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich import print
+
 from kagglebot.exceptions import KernelFailedError, KernelTimeoutError, RulesNotAcceptedError
 from kagglebot.kaggle_api import check_rules_accepted, kernels_init, kernels_output, kernels_push, kernels_status
 from kagglebot.validators import validate_kernel_package
@@ -22,7 +24,7 @@ class KernelRunResult:
 
 def sanitize_kernel_slug(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
-    return cleaned[:60]
+    return cleaned[:50]
 
 
 def find_submission_file(output_dir: Path) -> Path | None:
@@ -60,9 +62,9 @@ def run_kernel(
     cv_folds: int,
     seed: int,
     dry_run: bool,
-    timeout_minutes: int,
+    timeout_minutes: int | None,
 ) -> KernelRunResult:
-    kernel_dir = base_dir / slug / "runs" / run_id / "kernel"
+    kernel_dir = base_dir / slug / "kernels" / run_id
     output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +73,7 @@ def run_kernel(
         raise RulesNotAcceptedError("Competition rules not accepted.")
 
     if not dry_run:
+        print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
         kernels_init(kernel_dir, dry_run=False)
 
     kernel_slug = _resolve_kernel_slug(kernel_name, slug, run_id, iteration)
@@ -78,7 +81,7 @@ def run_kernel(
     _write_kernel_metadata(
         kernel_dir=kernel_dir,
         kernel_id=kernel_id,
-        title=f"kagglebot {slug} {run_id}",
+        title=kernel_slug,
         code_file="kernel.py",
         accelerator=accelerator,
         enable_internet=enable_internet,
@@ -103,8 +106,11 @@ def run_kernel(
     if dry_run:
         return KernelRunResult(kernel_id=kernel_id, output_dir=output_dir, submission_path=None, metrics_path=None)
 
+    print(f"[cyan]kernel push[/cyan]: {kernel_dir}")
     kernels_push(kernel_dir, slug=slug, dry_run=False)
+    print(f"[cyan]kernel status[/cyan]: {kernel_id}")
     _wait_for_kernel(kernel_id, slug, timeout_minutes)
+    print(f"[cyan]kernel output[/cyan]: {output_dir}")
     kernels_output(kernel_id, output_dir, slug=slug, dry_run=False)
 
     submission_path = _find_output_file(output_dir, "submission.csv")
@@ -115,7 +121,17 @@ def run_kernel(
 
 
 def _resolve_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
-    base = kernel_name or f"kagglebot-{slug}-{run_id}-iter{iteration}"
+    if kernel_name:
+        return sanitize_kernel_slug(kernel_name)
+    suffix = f"{run_id[-6:]}-i{iteration}"
+    prefix = f"kagglebot-{slug}"
+    max_len = 50
+    allowed_prefix_len = max_len - len(suffix) - 1
+    if allowed_prefix_len < 1:
+        prefix = "kagglebot"
+    else:
+        prefix = prefix[:allowed_prefix_len].rstrip("-")
+    base = f"{prefix}-{suffix}"
     return sanitize_kernel_slug(base)
 
 
@@ -185,17 +201,31 @@ def _write_kernel_script(
     (kernel_dir / "kernel.py").write_text(script, encoding="utf-8")
 
 
-def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int) -> None:
-    deadline = time.monotonic() + max(timeout_minutes, 1) * 60
-    while time.monotonic() < deadline:
+def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None) -> None:
+    deadline = None
+    if timeout_minutes is not None:
+        deadline = time.monotonic() + max(timeout_minutes, 1) * 60
+    last_status = None
+    while True:
         output = kernels_status(kernel_id, slug=slug, dry_run=False)
-        status = output.strip().lower()
+        status = _parse_kernel_status(output).lower()
+        if status != last_status:
+            print(f"[cyan]kernel status[/cyan]: {status}")
+            last_status = status
         if "complete" in status:
             return
         if "error" in status or "fail" in status:
             raise KernelFailedError(f"Kaggle kernel failed: {output}")
         time.sleep(10)
-    raise KernelTimeoutError("Kaggle kernel did not complete within timeout.")
+        if deadline is not None and time.monotonic() > deadline:
+            raise KernelTimeoutError("Kaggle kernel did not complete within timeout.")
+
+
+def _parse_kernel_status(output: str) -> str:
+    match = re.search(r"status\\s+\\\"?([A-Za-z0-9_.-]+)\\\"?", output)
+    if match:
+        return match.group(1)
+    return output.strip() or "unknown"
 
 
 def _find_output_file(output_dir: Path, filename: str) -> Path | None:

@@ -1997,4 +1997,4 @@ submission.csv generated → validation → optional submit
 
 ## Next Steps
 
-See **PLAN_COMPUTE.md** for phased implementation roadmap.
+See **plan.md** for phased implementation roadmap.

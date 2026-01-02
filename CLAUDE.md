@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Role
 You are the **Staff Engineer / Architect** for this repository.
-- **Planning first**: Review ARCHITECTURE.md, SPEC.md, and PLAN.md before implementing
+- **Planning first**: Review docs/architecture_final.md, docs/architecture.md, and docs/spec_autopilot.md before implementing
 - **Risk analysis**: Check SECURITY.md for safety requirements
-- **Phased implementation**: Follow PLAN.md phases - don't skip ahead
+- **Phased implementation**: Follow docs/agents/codex_implementation_plan.md phases - don't skip ahead
 - **Small, testable chunks**: Each PR should be a complete, tested unit of work
 
 ## Project Overview
@@ -14,7 +14,7 @@ You are the **Staff Engineer / Architect** for this repository.
 Kaggle Autopilot is a **production-grade, fully automated** CLI tool for Kaggle competitions:
 
 ### Vision
-- User provides competition URL: `kagglebot run https://www.kaggle.com/c/titanic --submit`
+- User provides competition URL: `kagglebot autopilot https://www.kaggle.com/c/titanic --agent codex --compute local_cpu --submit`
 - Tool automatically: downloads data → analyzes competition → trains models → generates predictions → validates → submits
 - **Zero prompts** - completely non-interactive (except manual rules acceptance once)
 - **Production-grade models** - serious GBDT, stacking, CV (not toy baselines)
@@ -26,7 +26,7 @@ Kaggle Autopilot is a **production-grade, fully automated** CLI tool for Kaggle 
 - ✅ Submission validation and local ledger
 - ⏳ **Next**: Competition analyzer, orchestrator, production models
 
-See PLAN.md for detailed roadmap.
+See docs/agents/codex_implementation_plan.md for detailed roadmap.
 
 ## Critical Constraints (NEVER violate)
 
@@ -42,9 +42,9 @@ See PLAN.md for detailed roadmap.
 
 ### Non-Interactive Operation
 - **No prompts**: All decisions automated or configured via CLI flags/config files
-- **Single command**: `kagglebot run <competition> --submit` runs end-to-end
+- **Single command**: `kagglebot autopilot <competition> --agent codex --compute local_cpu --submit` runs end-to-end
 - **Safe defaults**: Conservative choices when ambiguous (no external data, etc.)
-- **Clear errors**: Exit codes and messages guide user on failures (see SPEC.md)
+- **Clear errors**: Exit codes and messages guide user on failures (see docs/spec_autopilot.md)
 
 ### Submission Safety Guardrails (must implement)
 
@@ -83,7 +83,7 @@ uv remove <package>
 
 # Run commands in the uv environment
 uv run pytest
-uv run kagglebot run titanic
+uv run kagglebot train titanic --compute local_cpu
 
 # Update all dependencies
 uv pip compile pyproject.toml -o requirements.txt --upgrade
@@ -120,22 +120,22 @@ uv run pyright  # or mypy
 
 ```bash
 # Local CPU (default)
-kagglebot run titanic --compute local_cpu --submit -m "baseline"
+kagglebot train titanic --compute local_cpu
 
 # Local GPU (auto-detect CUDA/MPS, fallback to CPU)
-kagglebot run titanic --compute local_gpu --submit -m "GPU baseline"
+kagglebot train titanic --compute local_gpu
 
 # Local GPU (strict mode - fail if no GPU)
-kagglebot run titanic --compute local_gpu --strict --submit -m "GPU required"
+kagglebot train titanic --compute local_gpu --strict-accelerator
 
 # Kaggle GPU kernel
-kagglebot run titanic --compute kaggle_gpu --submit -m "kernel baseline"
+kagglebot train titanic --compute kaggle_gpu --force
 
 # Kaggle TPU kernel
-kagglebot run titanic --compute kaggle_tpu --enable-internet --submit -m "TPU baseline"
+kagglebot train titanic --compute kaggle_tpu --internet on --force
 
 # Dry-run (preview without execution)
-kagglebot run titanic --compute kaggle_gpu --dry-run
+kagglebot train titanic --compute kaggle_gpu --dry-run
 ```
 
 **Key Principles**:
@@ -149,11 +149,11 @@ kagglebot run titanic --compute kaggle_gpu --dry-run
 ### Other Commands
 
 ```bash
-kagglebot bootstrap <competition_slug>                 # Prepare workspace dirs + config (no network)
-kagglebot run <slug> --submission <path>               # Validate + ledger
-kagglebot train <slug>                                 # Train baseline model (future)
-kagglebot predict <slug>                               # Generate submission.csv (future)
-kagglebot submit <slug> -m "<message>"                 # Submit with guardrails (future)
+kagglebot bootstrap <competition_slug>                 # Prepare workspace dirs + context
+kagglebot implement <competition_slug> --agent codex    # Generate baseline solution
+kagglebot train <slug> --compute local_cpu              # Train baseline model
+kagglebot submit <slug> -f <path> -m "<message>" --force # Submit with guardrails
+kagglebot autopilot <slug> --agent codex --compute local_cpu --submit
 ```
 
 ## Target Architecture
@@ -227,11 +227,11 @@ kaggle competitions submissions -c <slug>
 
 When operating as architect/reviewer:
 
-1. **Before Implementation**: Review PLAN.md for design coherence
+1. **Before Implementation**: Review docs/architecture_final.md and docs/spec_autopilot.md for design coherence
 2. **Interface Design**: Ensure CLI commands have clear contracts (inputs/outputs/errors)
 3. **Safety Analysis**: Check all code paths for accidental submission or rule bypass
 4. **Testability**: Verify new code has clear test boundaries (dependency injection where needed)
-5. **Documentation**: Update PLAN.md and README.md for any architectural changes
+5. **Documentation**: Update docs/architecture_final.md, docs/spec_autopilot.md, and README.md for any architectural changes
 
 ## Pre-Commit Safety Checklist
 
@@ -277,8 +277,8 @@ When reviewing PRs or changes:
 
 ## MVP Success Criteria
 
-- `kagglebot run <slug>` downloads data, trains baseline, produces valid submission.csv in artifacts/
-- `kagglebot run <slug> --submit -m "baseline"` submits once with all guardrails enforced
+- `kagglebot autopilot <slug> --agent codex --compute local_cpu` downloads data, trains baseline, produces valid submission.csv in artifacts/
+- `kagglebot autopilot <slug> --agent codex --compute local_cpu --submit --message "baseline"` submits once with all guardrails enforced
 - Works on common tabular competitions (e.g., Titanic-like: train.csv, test.csv, sample_submission.csv)
 - Focus: "always produce valid submission" over leaderboard score
 
@@ -289,24 +289,24 @@ When reviewing PRs or changes:
 Before implementing features, review these documents:
 
 ### Core Architecture
-1. **ARCHITECTURE.md** - System design, modules, data flow, extension points
-2. **SPEC.md** - CLI commands, config schema, exit codes, artifact layout
-3. **PLAN.md** - Phased implementation roadmap (7 phases to production)
+1. **docs/architecture_final.md** - System design, modules, data flow, extension points
+2. **docs/spec_autopilot.md** - CLI commands, artifacts, exit codes, autopilot contract
+3. **docs/agents/codex_implementation_plan.md** - Phased implementation roadmap
 4. **SECURITY.md** - Security guidelines, credential handling, safety guardrails
 5. **AGENTS.md** - Instructions for implementer/tester agents (Codex)
 
 ### Compute Switching (Current Priority)
-6. **SPEC_COMPUTE.md** - CLI flags, ComputePlan, exit codes, artifact layout
-7. **ARCHITECTURE_COMPUTE.md** - Module boundaries, runner interface, GPU detection
-8. **PLAN_COMPUTE.md** - 7-week implementation plan (140 tasks)
-9. **DESIGN_NOTEBOOK_RUNNER.md** - Kaggle kernel execution design
-10. **TASKS_NOTEBOOK_RUNNER.md** - Granular notebook runner tasks
+6. **docs/compute/spec.md** - CLI flags, ComputePlan, exit codes, artifact layout
+7. **docs/compute/architecture.md** - Module boundaries, runner interface, GPU detection
+8. **docs/compute/plan.md** - 7-week implementation plan (140 tasks)
+9. **docs/notebook_runner/design.md** - Kaggle kernel execution design
+10. **docs/notebook_runner/tasks.md** - Granular notebook runner tasks
 
 ### Implementation Workflow
 
-1. **Plan**: Review PLAN.md phase tasks
-2. **Design**: Check ARCHITECTURE.md for interfaces and patterns
-3. **Spec**: Verify behavior matches SPEC.md contracts
+1. **Plan**: Review docs/agents/codex_implementation_plan.md phase tasks
+2. **Design**: Check docs/architecture_final.md for interfaces and patterns
+3. **Spec**: Verify behavior matches docs/spec_autopilot.md contracts
 4. **Security**: Ensure compliance with SECURITY.md
 5. **Test**: Write tests before implementation
 6. **Implement**: Small, testable chunks
@@ -320,9 +320,9 @@ Before implementing features, review these documents:
 - **Structured logging**: JSON logs for automation
 - **Time budgets**: Configurable training time limits
 - **Resource limits**: Memory and CPU constraints
-- **Model registry**: Extensible model system (see ARCHITECTURE.md)
+- **Model registry**: Extensible model system (see docs/architecture_final.md)
 
-Follow the critical path in PLAN.md:
+Follow the critical path in docs/agents/codex_implementation_plan.md:
 ```
 Phase 0 (Foundation) → Phase 1 (Analyzer) + Phase 2 (Orchestrator) →
 Phase 3 (Training) → Phase 4 (Submission) → Phase 5 (Polish) →
@@ -333,7 +333,7 @@ Phase N (Notebook Runner - optional)
 
 ## Compute Switching Architecture (Current Implementation Priority)
 
-**See SPEC_COMPUTE.md, ARCHITECTURE_COMPUTE.md, and PLAN_COMPUTE.md for full details**
+**See docs/compute/spec.md, docs/compute/architecture.md, and docs/compute/plan.md for full details**
 
 ### Overview
 
@@ -416,7 +416,7 @@ Before merging compute switching code:
 
 ## Kaggle Notebook Runner (Phase N)
 
-**See DESIGN_NOTEBOOK_RUNNER.md for full design**
+**See docs/notebook_runner/design.md for full design**
 
 ### Critical Security Rules
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from kagglebot.exec_utils import run_command
@@ -39,6 +40,10 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
         "never",
         "--sandbox",
         "workspace-write",
+    ]
+    if _supports_search():
+        args.append("--search")
+    args += [
         "--json",
         "--output-last-message",
         str(last_message_path),
@@ -55,3 +60,14 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
         stdout=result.stdout,
         stderr=result.stderr,
     )
+
+
+@lru_cache(maxsize=1)
+def _supports_search() -> bool:
+    try:
+        result = run_command(["codex", "exec", "--help"])
+    except FileNotFoundError:
+        return False
+    if result.returncode != 0:
+        return False
+    return "--search" in result.output

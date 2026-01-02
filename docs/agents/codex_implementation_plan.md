@@ -657,8 +657,8 @@ Before release:
 ### Documentation
 - [ ] README accurate and comprehensive
 - [ ] ARCHITECTURE_FINAL.md complete
-- [ ] CHECKLIST_SUBMIT.md reviewed
-- [ ] FAILURE_MODES.md covers all scenarios
+- [ ] ../safety/submission_checklist.md reviewed
+- [ ] ../safety/failure_modes.md covers all scenarios
 - [ ] All CLI --help outputs correct
 
 ### Security

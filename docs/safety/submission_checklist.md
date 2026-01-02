@@ -351,4 +351,4 @@ Before first use, verify:
 - **Kaggle API Docs**: https://github.com/Kaggle/kaggle-api
 - **Competition Rules**: https://www.kaggle.com/competitions/<slug>/rules
 - **SECURITY.md**: Security guidelines for this repo
-- **SPEC_COMPUTE.md**: Exit codes and error messages
+- **../compute/spec.md**: Exit codes and error messages

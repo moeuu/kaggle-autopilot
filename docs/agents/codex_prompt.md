@@ -43,7 +43,7 @@ Follow this exact order (dependencies enforced):
 
    class GPUNotAvailableError(KaggleBotError):
        exit_code = 10
-   # ... (see ARCHITECTURE_REVIEW.md section 5.4)
+   # ... (see ../architecture_final.md section 5.4)
    ```
 
 2. Create `src/kagglebot/competition.py`:
@@ -188,7 +188,7 @@ Follow this exact order (dependencies enforced):
 
 **Goal**: Implement LocalRunner and KaggleNotebookRunner
 
-**Follow**: TASKS_COMPUTE.md tasks C021-C105
+**Follow**: ../compute/tasks.md tasks C021-C105
 
 **Key checks**:
 - LocalRunner validates GPU before training
@@ -243,10 +243,10 @@ ledger.record(submission_path, self.message)
 ```
 
 **Acceptance Criteria**:
-- ✅ `kagglebot run ../etc/passwd` fails with exit code 1 (invalid slug)
-- ✅ `kagglebot run titanic --submit` fails with exit code 2 if rules not accepted
-- ✅ Submitting same file twice logs warning
-- ✅ Help text clear: `uv run kagglebot run --help`
+- ✅ `kagglebot train ../etc/passwd` fails with exit code 1 (invalid slug)
+- ✅ `kagglebot train titanic --compute kaggle_gpu --force` fails with exit code 2 if rules not accepted
+- ✅ Submitting same file twice is blocked by duplicate detection
+- ✅ Help text clear: `uv run kagglebot --help`
 - ✅ Tests pass: `uv run pytest tests/test_cli.py -v`
 
 ---
@@ -260,8 +260,8 @@ ledger.record(submission_path, self.message)
 2. Manual test on Titanic:
    ```bash
    # Accept rules in browser first
-   uv run kagglebot run titanic --compute local_cpu --dry-run
-   uv run kagglebot run titanic --compute local_cpu --submit --message "test" --force
+   uv run kagglebot train titanic --compute local_cpu --dry-run
+   uv run kagglebot submit titanic -f <submission.csv> -m "test" --force
    ```
 
 3. Security audit checklist:
@@ -285,22 +285,22 @@ ledger.record(submission_path, self.message)
 
 ### Test 1: Invalid Slug Rejected
 ```bash
-uv run kagglebot run "../etc/passwd"
+uv run kagglebot train "../etc/passwd"
 # Expected: Exit code 1, error message about invalid slug
 ```
 
 ### Test 2: Rules Not Accepted
 ```bash
 # Don't accept rules for test-competition
-uv run kagglebot run test-competition --submit --message "test" --force
+uv run kagglebot train test-competition --compute kaggle_gpu --force
 # Expected: Exit code 2, message with rules URL
 ```
 
 ### Test 3: Duplicate Detection
 ```bash
 # Submit same file twice
-uv run kagglebot run titanic --submit --message "v1" --force
-uv run kagglebot run titanic --submit --message "v1" --force
+uv run kagglebot submit titanic -f <submission.csv> -m "v1" --force
+uv run kagglebot submit titanic -f <submission.csv> -m "v1" --force
 # Expected: Second submission skipped with warning
 ```
 
@@ -432,7 +432,7 @@ data_dir = Path("data") / slug
 ## Debugging Checklist
 
 If tests fail:
-1. Check exit codes match SPEC_COMPUTE.md
+1. Check exit codes match ../compute/spec.md
 2. Check error messages are actionable
 3. Check no secrets in logs (grep for "key", "token", "password")
 4. Check subprocess uses list args (not strings)
@@ -450,14 +450,13 @@ If manual tests fail:
 ## Success Criteria
 
 **Definition of Done** (all must be true):
-- ✅ All 140 tasks in TASKS_COMPUTE.md complete
+- ✅ All 140 tasks in ../compute/tasks.md complete
 - ✅ All acceptance tests pass
 - ✅ Manual Titanic test succeeds
 - ✅ Security audit passes (no secrets, no shell=True, etc.)
 - ✅ Test coverage >80%
 - ✅ Linting passes
 - ✅ Documentation complete
-- ✅ No P0 or P1 issues from ARCHITECTURE_REVIEW.md
 
 **Ship Criteria**:
 - ✅ All "Definition of Done" items complete
@@ -510,17 +509,16 @@ uv run ruff check .
 uv run ruff format .
 
 # Manual test
-uv run kagglebot run titanic --dry-run
+uv run kagglebot train titanic --compute local_cpu --dry-run
 ```
 
 ---
 
 ## Contact / Help
 
-- **Documentation**: See SPEC_COMPUTE.md, ARCHITECTURE_COMPUTE.md, PLAN_COMPUTE.md
-- **Safety Rules**: See CHECKLIST_SUBMIT.md
-- **Failure Modes**: See FAILURE_MODES.md
-- **Architecture Review**: See ARCHITECTURE_REVIEW.md
-- **Detailed Tasks**: See TASKS_COMPUTE.md
+- **Documentation**: See ../compute/spec.md, ../compute/architecture.md, ../compute/plan.md
+- **Safety Rules**: See ../safety/submission_checklist.md
+- **Failure Modes**: See ../safety/failure_modes.md
+- **Detailed Tasks**: See ../compute/tasks.md
 
 **Remember**: Safety first. When in doubt, fail safely (exit with error) rather than proceeding unsafely.

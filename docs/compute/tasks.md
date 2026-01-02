@@ -13,7 +13,7 @@
 2. **Complete each task fully**: Write code + tests before moving on
 3. **Check off tasks**: Mark with `[x]` when complete
 4. **Run tests frequently**: `uv run pytest -q` after each task
-5. **Review docs**: Check SPEC_COMPUTE.md, ARCHITECTURE_COMPUTE.md for details
+5. **Review docs**: Check spec.md, architecture.md for details
 
 ---
 
@@ -855,7 +855,7 @@ All tests should pass.
   - For GPUNotAvailableError: suggest --compute local_cpu or --compute kaggle_gpu
   - For KernelTimeoutError: suggest --max-kernel-runtime increase
   - For KernelFailedError: include kernel URL for logs
-  - Use ERROR_MESSAGES dict from ARCHITECTURE_COMPUTE.md
+  - Use ERROR_MESSAGES dict from architecture.md
 
 ### Unit Tests
 
@@ -1065,7 +1065,7 @@ After completing all 140 tasks:
 ## Notes for Implementers
 
 1. **Test frequently**: Run `uv run pytest -q` after every few tasks
-2. **Read the specs**: Refer to SPEC_COMPUTE.md and ARCHITECTURE_COMPUTE.md for details
+2. **Read the specs**: Refer to spec.md and architecture.md for details
 3. **Ask questions**: If a task is unclear, check the design docs or ask for clarification
 4. **Document as you go**: Add docstrings to every function/class
 5. **Commit often**: Small commits make debugging easier

@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import shlex
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich import print
+
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.compute import Compute
 from kagglebot.exceptions import RulesNotAcceptedError
 from kagglebot.exec_utils import run_command
+from kagglebot.git_utils import ensure_main_branch, write_working_diff
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
@@ -60,18 +62,23 @@ class AutopilotConfig:
 
 
 def run_autopilot(config: AutopilotConfig) -> None:
-    start_time = time.monotonic()
     run_id = config.run_id or new_run_id()
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[green]run started[/green]: {run_id}")
+    if not config.dry_run:
+        ensure_main_branch(config.paths.repo_root, slug=config.slug, run_id=run_id)
+
     plan = _load_plan(config.paths)
     if not config.paths.plan_path.exists():
         _write_plan(config.paths, plan)
 
+    print(f"[cyan]fetching leaderboard[/cyan]: {config.slug}")
     top1_info = leaderboard_top1(config.slug, config.paths.context_dir, dry_run=config.dry_run)
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
 
     if _needs_planning(plan, config):
+        print("[cyan]plan[/cyan]: generating baseline plan")
         _run_plan_and_baseline(config, run_id)
         plan = _load_plan(config.paths)
 
@@ -98,6 +105,8 @@ def run_autopilot(config: AutopilotConfig) -> None:
         resolved=resolved,
         status="running",
     )
+    if run_payload.get("status") == "running":
+        run_payload["status"] = "completed"
     (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
 
     record_run(
@@ -111,13 +120,10 @@ def run_autopilot(config: AutopilotConfig) -> None:
     )
     dataset_profile = _load_dataset_profile(config.paths)
     best_score = None
-    no_improve = 0
+    best_submission: Path | None = None
+    submitted = False
 
-    last_submission: Path | None = None
-    max_iterations = int(resolved["max_iterations"])
-    max_total_min = int(resolved["max_total_min"])
-    patience = int(resolved["patience"])
-    min_improvement = float(resolved["min_improvement"])
+    max_iterations = min(int(resolved["max_iterations"]), 5)
     holdout_frac = float(resolved["holdout_frac"])
     cv_folds = int(resolved["cv_folds"])
     seed = int(resolved["seed"])
@@ -125,156 +131,173 @@ def run_autopilot(config: AutopilotConfig) -> None:
     kernel_name = resolved["kernel_name"]
     enable_internet = str(resolved["internet"]) == "on"
 
-    for iteration in range(1, max_iterations + 1):
-        iter_dir = config.paths.iter_dir(run_id, iteration)
-        logs_dir = iter_dir / "logs"
-        agent_dir = iter_dir / "agent"
-        iter_dir.mkdir(parents=True, exist_ok=True)
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        agent_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for iteration in range(1, max_iterations + 1):
+            iter_dir = config.paths.iter_dir(run_id, iteration)
+            logs_dir = iter_dir / "logs"
+            agent_dir = iter_dir / "agent"
+            iter_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            agent_dir.mkdir(parents=True, exist_ok=True)
 
-        if _time_exceeded(start_time, max_total_min):
-            break
+            print(f"[cyan]iteration[/cyan]: {iteration}/{max_iterations}")
 
-        _run_verify(config.verify_cmd, dry_run=config.dry_run)
+            _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
-        submission_path = iter_dir / "submission.csv"
-        evaluation = None
-        model_summary = {}
-        accelerator_used = config.accelerator
+            submission_path = iter_dir / "submission.csv"
+            evaluation = None
+            model_summary = {}
+            accelerator_used = config.accelerator
 
-        if config.compute.startswith("kaggle_"):
-            kaggle_user = resolve_kaggle_username(config.kaggle_username)
-            kernel_result = run_kernel(
-                slug=config.slug,
+            if config.compute.startswith("kaggle_"):
+                kaggle_user = resolve_kaggle_username(config.kaggle_username)
+                print(f"[cyan]kernel run[/cyan]: {config.compute}")
+                kernel_result = run_kernel(
+                    slug=config.slug,
+                    run_id=run_id,
+                    iteration=iteration,
+                    base_dir=config.paths.base_dir.parent,
+                    kaggle_username=kaggle_user,
+                    kernel_name=kernel_name,
+                    accelerator=config.accelerator,
+                    enable_internet=enable_internet,
+                    score_source=score_source,
+                    metric=target_metric,
+                    direction=metric_direction,
+                    holdout_frac=holdout_frac,
+                    cv_folds=cv_folds,
+                    seed=seed,
+                    dry_run=config.dry_run,
+                    timeout_minutes=None,
+                )
+                if kernel_result.submission_path:
+                    submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+                if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+                    evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction)
+            else:
+                compute_enum = Compute(config.compute)
+                print(f"[cyan]training[/cyan]: {config.compute}")
+                outcome = train_evaluate_and_predict(
+                    data_dir=config.paths.data_dir,
+                    output_path=submission_path,
+                    compute=compute_enum,
+                    strict_accelerator=config.strict_accelerator,
+                    seed=seed,
+                    score_source=score_source,
+                    metric=target_metric,
+                    direction=metric_direction,
+                    holdout_frac=holdout_frac,
+                    cv_folds=cv_folds,
+                    plan_score_source=score_source,
+                    target_override=None,
+                )
+                evaluation = outcome.evaluation
+                model_summary = outcome.model_summary
+                accelerator_used = outcome.accelerator
+
+            if evaluation is None:
+                raise RuntimeError("No evaluation metrics produced.")
+            print(f"[green]iteration complete[/green]: {evaluation.metric}={evaluation.value:.6f}")
+
+            met_target = _meets_target(evaluation.value, target_score, metric_direction)
+            top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
+            top1_tier = _is_top1_tier(evaluation.value, top1_score, metric_direction)
+
+            metrics_payload = _build_metrics_payload(
                 run_id=run_id,
                 iteration=iteration,
-                base_dir=config.paths.base_dir.parent,
-                kaggle_username=kaggle_user,
-                kernel_name=kernel_name,
-                accelerator=config.accelerator,
-                enable_internet=enable_internet,
-                score_source=score_source,
-                metric=target_metric,
-                direction=metric_direction,
+                evaluation=evaluation,
+                target_score=target_score,
+                met_target=met_target,
+                top1_info=top1_info,
+                compute=config.compute,
+                accelerator=accelerator_used,
                 holdout_frac=holdout_frac,
                 cv_folds=cv_folds,
                 seed=seed,
-                dry_run=config.dry_run,
-                timeout_minutes=resolved["time_budget_min"] or max_total_min,
             )
-            if kernel_result.submission_path:
-                submission_path.write_bytes(kernel_result.submission_path.read_bytes())
-            if kernel_result.metrics_path and kernel_result.metrics_path.exists():
-                evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction)
-        else:
-            compute_enum = Compute(config.compute)
-            outcome = train_evaluate_and_predict(
-                data_dir=config.paths.data_dir,
-                output_path=submission_path,
-                compute=compute_enum,
-                strict_accelerator=config.strict_accelerator,
-                seed=seed,
-                score_source=score_source,
-                metric=target_metric,
-                direction=metric_direction,
-                holdout_frac=holdout_frac,
-                cv_folds=cv_folds,
-                plan_score_source=score_source,
-                target_override=None,
+            (iter_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+
+            diff_summary = write_working_diff(config.paths.repo_root, iter_dir / "code.diff")
+            if not diff_summary:
+                diff_summary = "No code changes."
+            diagnostics = _build_diagnostics(
+                evaluation=evaluation,
+                model_summary=model_summary,
+                best_score=best_score,
+                target_score=target_score,
+                dataset_profile=dataset_profile,
+                top1_score=top1_score,
+                top1_tier=top1_tier,
+                diff_summary=diff_summary,
             )
-            evaluation = outcome.evaluation
-            model_summary = outcome.model_summary
-            accelerator_used = outcome.accelerator
+            (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
-        if evaluation is None:
-            raise RuntimeError("No evaluation metrics produced.")
-        last_submission = submission_path
-
-        met_target = _meets_target(
-            evaluation.value,
-            target_score,
-            metric_direction,
-        )
-
-        metrics_payload = _build_metrics_payload(
-            run_id=run_id,
-            iteration=iteration,
-            evaluation=evaluation,
-            target_score=target_score,
-            met_target=met_target,
-            top1_info=top1_info,
-            compute=config.compute,
-            accelerator=accelerator_used,
-            holdout_frac=holdout_frac,
-            cv_folds=cv_folds,
-            seed=seed,
-        )
-        (iter_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
-
-        diagnostics = _build_diagnostics(
-            evaluation=evaluation,
-            model_summary=model_summary,
-            best_score=best_score,
-            target_score=target_score,
-            dataset_profile=dataset_profile,
-        )
-        (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
-
-        record_iteration(
-            knowledge_paths=config.knowledge_paths,
-            run_id=run_id,
-            iteration=iteration,
-            score_source=evaluation.score_source,
-            offline_value=evaluation.value,
-            offline_std=evaluation.std,
-            top1_public_score=top1_info.get("score") if isinstance(top1_info, dict) else None,
-            met_target=met_target,
-            git_commit=None,
-        )
-
-        prev_best = best_score
-        improved = _update_best_score(best_score, evaluation.value, metric_direction, min_improvement)
-        if improved:
-            best_score = evaluation.value
-            no_improve = 0
-        else:
-            no_improve += 1
-        delta_offline = None
-        if prev_best is not None:
-            delta_offline = (
-                prev_best - evaluation.value if metric_direction == "minimize" else evaluation.value - prev_best
+            record_iteration(
+                knowledge_paths=config.knowledge_paths,
+                run_id=run_id,
+                iteration=iteration,
+                score_source=evaluation.score_source,
+                offline_value=evaluation.value,
+                offline_std=evaluation.std,
+                top1_public_score=top1_info.get("score") if isinstance(top1_info, dict) else None,
+                met_target=met_target,
+                git_commit=None,
             )
 
-        if met_target:
-            _attempt_submit(
+            prev_best = best_score
+            delta_offline = None
+            if prev_best is not None:
+                delta_offline = (
+                    prev_best - evaluation.value if metric_direction == "minimize" else evaluation.value - prev_best
+                )
+            improved = _update_best_score(best_score, evaluation.value, metric_direction, 0.0)
+            if improved:
+                best_score = evaluation.value
+                best_submission = submission_path
+
+            if top1_tier:
+                if config.submit:
+                    _attempt_submit(
+                        config=config,
+                        run_id=run_id,
+                        submission_path=submission_path,
+                        best_score=best_score or evaluation.value,
+                    )
+                    submitted = True
+                    run_payload["status"] = "submitted"
+                else:
+                    run_payload["status"] = "completed"
+                break
+
+            if iteration >= max_iterations:
+                if config.submit and best_submission and not submitted:
+                    _attempt_submit(
+                        config=config,
+                        run_id=run_id,
+                        submission_path=best_submission,
+                        best_score=best_score,
+                    )
+                    run_payload["status"] = "submitted"
+                else:
+                    run_payload["status"] = "completed"
+                break
+
+            print("[cyan]improve[/cyan]: generating next iteration plan")
+            _run_improvement(
                 config=config,
                 run_id=run_id,
-                submission_path=submission_path,
-                best_score=best_score or evaluation.value,
+                iteration=iteration,
+                iter_dir=iter_dir,
+                delta_offline=delta_offline,
             )
-            break
+    except KeyboardInterrupt:
+        run_payload["status"] = "interrupted"
+        (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+        print("[yellow]run interrupted[/yellow]")
+        return
 
-        if no_improve >= patience:
-            break
-
-        if iteration >= max_iterations:
-            break
-
-        if _time_exceeded(start_time, max_total_min):
-            break
-
-        _run_improvement(
-            config=config,
-            run_id=run_id,
-            iteration=iteration,
-            iter_dir=iter_dir,
-            delta_offline=delta_offline,
-        )
-
-    if _submit_at_final(resolved["submit_policy"]) and config.submit and not config.dry_run and last_submission:
-        if last_submission.exists():
-            _attempt_submit(config=config, run_id=run_id, submission_path=last_submission, best_score=best_score)
+    (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
 
 
 def _load_plan(paths: CompetitionPaths) -> PlanConfig:
@@ -315,7 +338,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
     cv_folds = choose(config.cv_folds, plan.cv_folds, 5)
     seed = choose(config.seed, plan.seed, 42)
-    time_budget_min = choose(config.time_budget_min, plan.time_budget_min, 60)
+    time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
     internet = choose(config.internet, plan.internet, "auto")
     if internet in (None, "auto"):
@@ -403,11 +426,6 @@ def _build_run_payload(
     }
 
 
-def _submit_at_final(policy: str | None) -> bool:
-    value = (policy or "").lower()
-    return value in {"submit_at_final", "force_at_final", "allow_final"}
-
-
 def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
     if not paths.dataset_profile_path.exists():
         return {}
@@ -431,16 +449,35 @@ def _run_plan_and_baseline(config: AutopilotConfig, run_id: str) -> None:
     agent_dir = iter_dir / "agent"
     iter_dir.mkdir(parents=True, exist_ok=True)
     agent_dir.mkdir(parents=True, exist_ok=True)
-    prompt_text = config.paths.codex_plan_and_baseline_prompt.read_text(encoding="utf-8")
+    template = config.paths.codex_plan_and_baseline_prompt.read_text(encoding="utf-8")
+    prompt_text = _render_prompt(
+        template,
+        {
+            "slug": config.slug,
+            "competition_url": config.competition_url or "unknown",
+            "compute_mode": config.compute,
+            "accelerator": config.accelerator,
+            "internet": str(config.internet or "auto"),
+            "run_id": run_id,
+        },
+    )
     prompt_path = agent_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
     if config.dry_run:
         return
+    print("[cyan]plan[/cyan]: running agent")
     result = run_codex(prompt_path, agent_dir, dry_run=False)
     if result.returncode != 0:
-        raise RuntimeError("Codex planning/baseline step failed.")
+        raise RuntimeError(f"Codex planning/baseline step failed: {result.stderr}")
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
+
+
+def _render_prompt(template: str, mapping: dict[str, str]) -> str:
+    rendered = template
+    for key, value in mapping.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+    return rendered
 
 
 def _load_kernel_metrics(metrics_path: Path, direction: str):
@@ -484,6 +521,7 @@ def _build_metrics_payload(
         "target_score": target_score,
         "met_target": met_target,
         "top1_public_score": top1_info.get("score"),
+        "top1_public_timestamp": top1_info.get("timestamp"),
         "compute": compute,
         "accelerator": accelerator,
         "timestamp": int(datetime.now(UTC).timestamp()),
@@ -500,17 +538,17 @@ def _build_diagnostics(
     best_score: float | None,
     target_score: float,
     dataset_profile: dict[str, object],
+    top1_score: float | None,
+    top1_tier: bool,
+    diff_summary: str,
 ) -> str:
     direction = evaluation.direction
-    delta_to_target = (
-        target_score - evaluation.value if direction == "minimize" else evaluation.value - target_score
-    )
+    delta_to_target = target_score - evaluation.value if direction == "minimize" else evaluation.value - target_score
     best_line = best_score if best_score is not None else evaluation.value
-    trend = (
-        "improving"
-        if best_score is None or _meets_target(evaluation.value, best_line, direction)
-        else "stalled"
-    )
+    trend = "improving" if best_score is None or _meets_target(evaluation.value, best_line, direction) else "stalled"
+    top1_delta = None
+    if top1_score is not None:
+        top1_delta = top1_score - evaluation.value if direction == "minimize" else evaluation.value - top1_score
     gap = None
     if evaluation.train_score is not None and evaluation.val_score is not None:
         gap = evaluation.train_score - evaluation.val_score
@@ -534,6 +572,10 @@ def _build_diagnostics(
         f"Best so far: {best_line:.6f} ({trend})",
         f"Evaluation: {evaluation.score_source}",
     ]
+    if top1_score is None:
+        lines.append("Top1 public score: unavailable")
+    else:
+        lines.append(f"Top1 public score: {top1_score:.6f} (delta {top1_delta:.6f}, top1-tier={top1_tier})")
     if gap is not None:
         lines.append(f"Train/val gap: {gap:.6f}")
     if evaluation.std is not None:
@@ -554,6 +596,9 @@ def _build_diagnostics(
         "1) Try a stronger model or tuning.",
         "2) Add features or target transformations.",
         "3) Adjust validation strategy.",
+        "",
+        "Diff summary:",
+        diff_summary or "No code changes.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -578,10 +623,14 @@ def _run_improvement(
             metrics_path=str(iter_dir / "metrics.json"),
             diagnostics_path=str(iter_dir / "diagnostics.md"),
             logs_dir=str(iter_dir / "logs"),
+            compute=config.compute,
+            accelerator=config.accelerator,
+            knowledge_hints=str(config.paths.knowledge_hints_path),
         ),
         encoding="utf-8",
     )
 
+    print("[cyan]improve[/cyan]: running agent")
     result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run)
     if result.returncode != 0:
         raise RuntimeError("Codex improvement failed.")
@@ -617,6 +666,7 @@ def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Pa
             message=_submission_message(config, run_id, best_score),
             submission_path=str(submission_path),
         )
+    print(f"[cyan]submit[/cyan]: {config.slug}")
     submit_competition(
         config.slug, submission_path, _submission_message(config, run_id, best_score), dry_run=config.dry_run
     )
@@ -626,6 +676,7 @@ def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Pa
         submission_path=submission_path,
         run_id=run_id,
     )
+    print("[green]submission recorded[/green]")
 
 
 def _submission_message(config: AutopilotConfig, run_id: str, best_score: float | None) -> str:
@@ -642,14 +693,26 @@ def _meets_target(value: float, target: float, direction: str) -> bool:
     return value >= target
 
 
+def _is_top1_tier(value: float, top1_score: float | None, direction: str) -> bool:
+    if top1_score is None:
+        return False
+    if direction == "minimize":
+        return value <= top1_score
+    return value >= top1_score
+
+
 def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:
+    """Check if current score represents an improvement over best score.
+
+    Uses a small epsilon (1e-9) to handle floating point precision issues.
+    """
     if best is None:
         return True
+
+    eps = 1e-9  # Small tolerance for floating point comparison
     if direction == "minimize":
-        return (best - current) >= min_improvement
-    return (current - best) >= min_improvement
-
-
-def _time_exceeded(start_time: float, max_total_min: int) -> bool:
-    elapsed = (time.monotonic() - start_time) / 60
-    return elapsed >= max_total_min
+        improvement = best - current
+        return improvement >= (min_improvement - eps)
+    else:  # maximize
+        improvement = current - best
+        return improvement >= (min_improvement - eps)

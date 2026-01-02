@@ -59,12 +59,24 @@ class CompetitionPaths:
         return self.context_dir / "rules_url.txt"
 
     @property
+    def rules_html_path(self) -> Path:
+        return self.context_dir / "rules.html"
+
+    @property
+    def knowledge_hints_path(self) -> Path:
+        return self.context_dir / "knowledge_hints.txt"
+
+    @property
     def dataset_profile_path(self) -> Path:
         return self.context_dir / "dataset_profile.json"
 
     @property
     def sample_submission_path(self) -> Path:
         return self.context_dir / "sample_submission.csv"
+
+    @property
+    def sample_submission_head_path(self) -> Path:
+        return self.context_dir / "sample_submission_head.csv"
 
     @property
     def top1_public_path(self) -> Path:
@@ -95,6 +107,10 @@ class CompetitionPaths:
         return self.base_dir / "submissions"
 
     @property
+    def kernels_dir(self) -> Path:
+        return self.base_dir / "kernels"
+
+    @property
     def submission_ledger_path(self) -> Path:
         return self.submissions_dir / "ledger.jsonl"
 
@@ -107,6 +123,9 @@ class CompetitionPaths:
 
     def iter_dir(self, run_id: str, iteration: int) -> Path:
         return self.run_dir(run_id) / f"iter-{iteration}"
+
+    def kernel_run_dir(self, run_id: str) -> Path:
+        return self.kernels_dir / run_id
 
 
 @dataclass(frozen=True)

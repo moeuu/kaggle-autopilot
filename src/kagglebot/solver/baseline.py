@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from catboost import CatBoostClassifier, CatBoostRegressor
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
@@ -29,6 +31,13 @@ class TrainingOutcome:
     accelerator: str
 
 
+@dataclass(frozen=True)
+class TargetTransform:
+    name: str
+    forward: Callable[[np.ndarray], np.ndarray]
+    inverse: Callable[[np.ndarray], np.ndarray]
+
+
 def train_evaluate_and_predict(
     *,
     data_dir: Path,
@@ -49,6 +58,7 @@ def train_evaluate_and_predict(
     if data.task == "classification":
         label_encoder = LabelEncoder()
         label_encoder.fit(data.train[data.target_column])
+    target_transform = _resolve_target_transform(metric, data)
 
     selection = _select_accelerator(compute, strict_accelerator)
     selection_score = select_score_source(
@@ -73,6 +83,7 @@ def train_evaluate_and_predict(
         holdout_frac=holdout_frac,
         cv_folds=cv_folds,
         label_encoder=label_encoder,
+        target_transform=target_transform,
     )
 
     preds = _predict_with_model(
@@ -83,6 +94,7 @@ def train_evaluate_and_predict(
         selection=selection_score,
         prediction_kind=data.prediction_kind,
         label_encoder=label_encoder,
+        target_transform=target_transform,
     )
 
     submission_path = write_submission(
@@ -102,6 +114,7 @@ def train_evaluate_and_predict(
             "model": best_candidate["name"],
             "params": best_candidate.get("params", {}),
             "preprocessing": best_candidate.get("preprocessing", {}),
+            "target_transform": target_transform.name if target_transform else None,
         },
         accelerator=selection,
     )
@@ -120,6 +133,19 @@ def _select_accelerator(compute: Compute, strict: bool) -> str:
             "No local GPU detected for --compute local_gpu. Disable --strict-accelerator to fall back to CPU."
         )
     return "cpu"
+
+
+def _resolve_target_transform(metric: str, data: CompetitionData) -> TargetTransform | None:
+    if data.task != "regression":
+        return None
+    metric_lower = metric.lower()
+    if "rmsle" in metric_lower:
+        return TargetTransform(
+            name="log1p",
+            forward=lambda y: np.log1p(np.clip(np.asarray(y, dtype=float), 0, None)),
+            inverse=lambda y: np.clip(np.expm1(np.asarray(y, dtype=float)), 0, None),
+        )
+    return None
 
 
 def _build_candidates(data: CompetitionData, accelerator: str) -> list[dict[str, object]]:
@@ -276,6 +302,7 @@ def _evaluate_candidates(
     holdout_frac: float,
     cv_folds: int,
     label_encoder: LabelEncoder | None,
+    target_transform: TargetTransform | None,
 ) -> tuple[EvaluationResult, dict[str, object], object, ColumnTransformer | None]:
     best_score: float | None = None
     best_candidate: dict[str, object] | None = None
@@ -298,6 +325,7 @@ def _evaluate_candidates(
                 cv_folds=cv_folds,
                 direction=direction,
                 label_encoder=label_encoder,
+                target_transform=target_transform,
             )
             model = None
             preprocessor = candidate["preprocessing"]
@@ -314,6 +342,7 @@ def _evaluate_candidates(
                 holdout_frac=holdout_frac,
                 cv_folds=cv_folds,
                 label_encoder=label_encoder,
+                target_transform=target_transform,
             )
 
         mean_score = float(np.mean(scores)) if scores else float("nan")
@@ -358,23 +387,62 @@ def _evaluate_sklearn_or_catboost(
     holdout_frac: float,
     cv_folds: int,
     label_encoder: LabelEncoder | None,
+    target_transform: TargetTransform | None,
 ) -> tuple[list[float], float | None, float | None]:
     if selection.source == "test":
         x_train, y_train, x_eval, y_eval = _prepare_test_split(data, selection, preprocessor)
         fitted, train_score = _fit_and_score(
-            model, x_train, y_train, x_train, y_train, metric, data, preprocessor, label_encoder
+            model,
+            x_train,
+            y_train,
+            x_train,
+            y_train,
+            metric,
+            data,
+            preprocessor,
+            label_encoder,
+            target_transform,
         )
         _, eval_score = _fit_and_score(
-            model, x_train, y_train, x_eval, y_eval, metric, data, preprocessor, label_encoder
+            model,
+            x_train,
+            y_train,
+            x_eval,
+            y_eval,
+            metric,
+            data,
+            preprocessor,
+            label_encoder,
+            target_transform,
         )
         return [eval_score], train_score, eval_score
 
     if selection.source == "holdout":
         x_train, x_val, y_train, y_val = _holdout_split(data, seed, holdout_frac)
         fitted, train_score = _fit_and_score(
-            model, x_train, y_train, x_train, y_train, metric, data, preprocessor, label_encoder
+            model,
+            x_train,
+            y_train,
+            x_train,
+            y_train,
+            metric,
+            data,
+            preprocessor,
+            label_encoder,
+            target_transform,
         )
-        _, val_score = _fit_and_score(model, x_train, y_train, x_val, y_val, metric, data, preprocessor, label_encoder)
+        _, val_score = _fit_and_score(
+            model,
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+            metric,
+            data,
+            preprocessor,
+            label_encoder,
+            target_transform,
+        )
         return [val_score], train_score, val_score
 
     scores = []
@@ -384,7 +452,18 @@ def _evaluate_sklearn_or_catboost(
         x_val = data.train.iloc[val_idx][data.feature_columns]
         y_tr = data.train.iloc[train_idx][data.target_column]
         y_val = data.train.iloc[val_idx][data.target_column]
-        _, fold_score = _fit_and_score(model, x_tr, y_tr, x_val, y_val, metric, data, preprocessor, label_encoder)
+        _, fold_score = _fit_and_score(
+            model,
+            x_tr,
+            y_tr,
+            x_val,
+            y_val,
+            metric,
+            data,
+            preprocessor,
+            label_encoder,
+            target_transform,
+        )
         scores.append(fold_score)
     return scores, None, float(np.mean(scores)) if scores else None
 
@@ -399,17 +478,26 @@ def _evaluate_torch(
     cv_folds: int,
     direction: str,
     label_encoder: LabelEncoder | None,
+    target_transform: TargetTransform | None,
 ) -> tuple[list[float], float | None, float | None]:
     if selection.source == "test":
         x_train, y_train, x_eval, y_eval = _prepare_test_split(data, selection, None)
-        preds_eval, train_score = _fit_torch_and_score(x_train, y_train, x_train, y_train, metric, data, label_encoder)
-        preds_eval, eval_score = _fit_torch_and_score(x_train, y_train, x_eval, y_eval, metric, data, label_encoder)
+        preds_eval, train_score = _fit_torch_and_score(
+            x_train, y_train, x_train, y_train, metric, data, label_encoder, target_transform
+        )
+        preds_eval, eval_score = _fit_torch_and_score(
+            x_train, y_train, x_eval, y_eval, metric, data, label_encoder, target_transform
+        )
         return [eval_score], train_score, eval_score
 
     if selection.source == "holdout":
         x_train, x_val, y_train, y_val = _holdout_split(data, seed, holdout_frac)
-        preds_train, train_score = _fit_torch_and_score(x_train, y_train, x_train, y_train, metric, data, label_encoder)
-        preds_val, val_score = _fit_torch_and_score(x_train, y_train, x_val, y_val, metric, data, label_encoder)
+        preds_train, train_score = _fit_torch_and_score(
+            x_train, y_train, x_train, y_train, metric, data, label_encoder, target_transform
+        )
+        preds_val, val_score = _fit_torch_and_score(
+            x_train, y_train, x_val, y_val, metric, data, label_encoder, target_transform
+        )
         return [val_score], train_score, val_score
 
     scores = []
@@ -419,28 +507,66 @@ def _evaluate_torch(
         x_val = data.train.iloc[val_idx][data.feature_columns]
         y_tr = data.train.iloc[train_idx][data.target_column]
         y_val = data.train.iloc[val_idx][data.target_column]
-        _, fold_score = _fit_torch_and_score(x_tr, y_tr, x_val, y_val, metric, data, label_encoder)
+        _, fold_score = _fit_torch_and_score(x_tr, y_tr, x_val, y_val, metric, data, label_encoder, target_transform)
         scores.append(fold_score)
     return scores, None, float(np.mean(scores)) if scores else None
 
 
-def _fit_and_score(model, x_train, y_train, x_eval, y_eval, metric, data, preprocessor, label_encoder):
+def _fit_and_score(
+    model,
+    x_train,
+    y_train,
+    x_eval,
+    y_eval,
+    metric,
+    data,
+    preprocessor,
+    label_encoder,
+    target_transform: TargetTransform | None,
+):
     x_train_proc, x_eval_proc = _apply_preprocessor(preprocessor, x_train, x_eval)
-    model.fit(x_train_proc, _encode_target(data, y_train, label_encoder))
-    preds = _predict_for_metric(model, x_eval_proc, data, metric)
-    score = compute_metric(metric, _encode_target(data, y_eval, label_encoder), preds)
+    y_train_enc = _encode_target(data, y_train, label_encoder, target_transform=target_transform, apply_transform=True)
+    fit_kwargs = _catboost_fit_kwargs(model, x_train_proc)
+    model.fit(x_train_proc, y_train_enc, **fit_kwargs)
+    preds = _predict_for_metric(model, x_eval_proc, data, metric, target_transform)
+    y_eval_enc = _encode_target(data, y_eval, label_encoder, target_transform=None, apply_transform=False)
+    score = compute_metric(metric, y_eval_enc, preds)
     return model, score
 
 
-def _fit_torch_and_score(x_train, y_train, x_eval, y_eval, metric, data, label_encoder):
+def _catboost_fit_kwargs(model, x):
+    if not model.__class__.__name__.startswith("CatBoost"):
+        return {}
+    if not hasattr(x, "columns"):
+        return {}
+    cat_features = [
+        idx
+        for idx, col in enumerate(x.columns)
+        if pd.api.types.is_object_dtype(x[col]) or pd.api.types.is_categorical_dtype(x[col])
+    ]
+    if not cat_features:
+        return {}
+    return {"cat_features": cat_features}
+
+
+def _fit_torch_and_score(
+    x_train,
+    y_train,
+    x_eval,
+    y_eval,
+    metric,
+    data,
+    label_encoder,
+    target_transform: TargetTransform | None,
+):
     import torch
     import torch.nn as nn
     from torch.utils.data import DataLoader, TensorDataset
 
     x_train_proc = _dense_array(x_train)
     x_eval_proc = _dense_array(x_eval)
-    y_train_enc = _encode_target(data, y_train, label_encoder)
-    y_eval_enc = _encode_target(data, y_eval, label_encoder)
+    y_train_enc = _encode_target(data, y_train, label_encoder, target_transform=target_transform, apply_transform=True)
+    y_eval_enc = _encode_target(data, y_eval, label_encoder, target_transform=None, apply_transform=False)
 
     device = torch.device("mps")
     x_tensor = torch.tensor(x_train_proc, dtype=torch.float32).to(device)
@@ -479,6 +605,8 @@ def _fit_torch_and_score(x_train, y_train, x_eval, y_eval, metric, data, label_e
         outputs = model(eval_tensor).cpu().numpy()
 
     preds = _torch_outputs_to_preds(outputs, data, metric, prediction_kind=None)
+    if data.task == "regression" and target_transform is not None:
+        preds = target_transform.inverse(preds)
     score = compute_metric(metric, y_eval_enc, preds)
     return preds, score
 
@@ -497,16 +625,32 @@ def _dense_array(matrix):
     return matrix
 
 
-def _encode_target(data: CompetitionData, y, label_encoder: LabelEncoder | None):
+def _encode_target(
+    data: CompetitionData,
+    y,
+    label_encoder: LabelEncoder | None,
+    *,
+    target_transform: TargetTransform | None,
+    apply_transform: bool,
+):
     if data.task != "classification":
-        return np.asarray(y)
+        arr = np.asarray(y, dtype=float)
+        if apply_transform and target_transform is not None:
+            return target_transform.forward(arr)
+        return arr
     if label_encoder is None:
         encoder = LabelEncoder()
         return encoder.fit_transform(y)
     return label_encoder.transform(y)
 
 
-def _predict_for_metric(model, x, data: CompetitionData, metric: str):
+def _predict_for_metric(
+    model,
+    x,
+    data: CompetitionData,
+    metric: str,
+    target_transform: TargetTransform | None,
+):
     if data.task == "classification" and metric_requires_proba(metric):
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(x)
@@ -519,10 +663,20 @@ def _predict_for_metric(model, x, data: CompetitionData, metric: str):
             if scores.ndim == 1:
                 return 1 / (1 + np.exp(-scores))
             return scores
-    return model.predict(x)
+    preds = model.predict(x)
+    if data.task == "regression" and target_transform is not None:
+        return target_transform.inverse(preds)
+    return preds
 
 
-def _predict_for_submission(model, x, data: CompetitionData, metric: str, prediction_kind: str):
+def _predict_for_submission(
+    model,
+    x,
+    data: CompetitionData,
+    metric: str,
+    prediction_kind: str,
+    target_transform: TargetTransform | None,
+):
     if data.task == "classification" and (metric_requires_proba(metric) or prediction_kind == "probability"):
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(x)
@@ -534,7 +688,10 @@ def _predict_for_submission(model, x, data: CompetitionData, metric: str, predic
             if scores.ndim == 1:
                 return 1 / (1 + np.exp(-scores))
             return scores
-    return model.predict(x)
+    preds = model.predict(x)
+    if data.task == "regression" and target_transform is not None:
+        return target_transform.inverse(preds)
+    return preds
 
 
 def _torch_outputs_to_preds(outputs, data: CompetitionData, metric: str, prediction_kind: str | None):
@@ -589,6 +746,7 @@ def _predict_with_model(
     selection: ScoreSelection,
     prediction_kind: str,
     label_encoder: LabelEncoder | None,
+    target_transform: TargetTransform | None,
 ):
     x_train = data.train[data.feature_columns]
     x_test = data.test[data.feature_columns]
@@ -598,9 +756,17 @@ def _predict_with_model(
         x_train = _dense_array(x_train)
         x_test = _dense_array(x_test)
     if model is None:
-        return _predict_torch_full(data, metric, x_train, x_test, label_encoder)
-    model.fit(x_train, _encode_target(data, data.train[data.target_column], label_encoder))
-    preds = _predict_for_submission(model, x_test, data, metric, prediction_kind)
+        return _predict_torch_full(data, metric, x_train, x_test, label_encoder, target_transform)
+    y_train_enc = _encode_target(
+        data,
+        data.train[data.target_column],
+        label_encoder,
+        target_transform=target_transform,
+        apply_transform=True,
+    )
+    fit_kwargs = _catboost_fit_kwargs(model, x_train)
+    model.fit(x_train, y_train_enc, **fit_kwargs)
+    preds = _predict_for_submission(model, x_test, data, metric, prediction_kind, target_transform)
     if data.task == "classification" and prediction_kind == "class":
         if preds.ndim > 1:
             preds = preds.argmax(axis=1)
@@ -609,7 +775,14 @@ def _predict_with_model(
     return preds
 
 
-def _predict_torch_full(data: CompetitionData, metric: str, x_train, x_test, label_encoder: LabelEncoder | None):
+def _predict_torch_full(
+    data: CompetitionData,
+    metric: str,
+    x_train,
+    x_test,
+    label_encoder: LabelEncoder | None,
+    target_transform: TargetTransform | None,
+):
     import torch
     import torch.nn as nn
     from torch.utils.data import DataLoader, TensorDataset
@@ -617,7 +790,13 @@ def _predict_torch_full(data: CompetitionData, metric: str, x_train, x_test, lab
     device = torch.device("mps")
     x_train = _dense_array(x_train)
     x_test = _dense_array(x_test)
-    y_train_enc = _encode_target(data, data.train[data.target_column], label_encoder)
+    y_train_enc = _encode_target(
+        data,
+        data.train[data.target_column],
+        label_encoder,
+        target_transform=target_transform,
+        apply_transform=True,
+    )
 
     x_tensor = torch.tensor(x_train, dtype=torch.float32).to(device)
     y_tensor = torch.tensor(y_train_enc).to(device)
@@ -655,6 +834,8 @@ def _predict_torch_full(data: CompetitionData, metric: str, x_train, x_test, lab
         outputs = model(x_test_tensor).cpu().numpy()
 
     preds = _torch_outputs_to_preds(outputs, data, metric, prediction_kind=data.prediction_kind)
+    if data.task == "regression" and target_transform is not None:
+        preds = target_transform.inverse(preds)
     if data.task == "classification" and data.prediction_kind == "class" and label_encoder is not None:
         if preds.ndim > 1:
             preds = preds.argmax(axis=1)

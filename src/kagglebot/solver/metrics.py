@@ -13,9 +13,9 @@ def infer_direction(metric: str, explicit: str | None = None) -> Direction:
         return explicit  # type: ignore[return-value]
 
     metric_lower = metric.lower()
-    if any(key in metric_lower for key in ["rmse", "rmsle", "mae", "mape", "logloss", "loss", "error"]):
+    if any(key in metric_lower for key in ["rmse", "rmsle", "mae", "mape", "mse", "logloss", "loss", "error"]):
         return "minimize"
-    if any(key in metric_lower for key in ["auc", "accuracy", "f1", "precision", "recall"]):
+    if any(key in metric_lower for key in ["auc", "accuracy", "f1", "precision", "recall", "r2", "r_squared"]):
         return "maximize"
     return "minimize"
 

@@ -1,20 +1,236 @@
-{
-  "tags": [
-    "tabular",
-    "text",
-    "image",
-    "timeseries",
-    "regression",
-    "binary",
-    "multiclass",
-    "n_rows_small",
-    "n_rows_medium",
-    "n_rows_large",
-    "missingness_high",
-    "high_cardinality_cats"
-  ],
-  "aliases": {
-    "binary_classification": "binary",
-    "multiclass_classification": "multiclass"
-  }
-}
+# Kagglebot Taxonomy
+#
+# This file defines the controlled vocabulary for tagging competitions in the Knowledge Base.
+# Tags enable similarity search: "Show me past runs on similar tabular competitions."
+#
+# USAGE:
+#   - Tags are auto-inferred during bootstrap (via dataset profiling)
+#   - Tags can be manually added/edited in meta.json
+#   - Aliases map common variations to canonical tags
+#
+# EXTENSION POLICY:
+#   - Add new tags when a competition characteristic affects solution strategy
+#   - Avoid overly specific tags (e.g., "titanic" - use "binary", "tabular" instead)
+#   - Use aliases for common synonyms to reduce fragmentation
+#   - Update docs/taxonomy.md when adding new categories
+
+# Data Modality
+# Primary type of input data in the competition
+data_modality:
+  - tabular          # CSV/Parquet tables with rows and columns
+  - text             # NLP tasks (sentiment, classification, generation)
+  - image            # Computer vision (classification, segmentation, detection)
+  - timeseries       # Sequential data with temporal ordering
+  - audio            # Speech/sound classification or generation
+  - video            # Video classification or detection
+  - graph            # Network/graph-structured data
+  - multi_modal      # Multiple data types (e.g., image + text)
+
+# Problem Type
+# The machine learning task category
+problem_type:
+  - regression       # Predict continuous values
+  - binary           # Two-class classification
+  - multiclass       # 3+ class classification
+  - multilabel       # Multiple labels per instance
+  - ranking          # Learning to rank
+  - forecasting      # Time series prediction
+  - clustering       # Unsupervised grouping
+  - generation       # Text/image generation
+  - anomaly_detection # Outlier detection
+  - recommendation   # Recommender systems
+
+# Dataset Scale (Rows)
+# Number of training examples
+n_rows:
+  - n_rows_tiny      # < 1K rows
+  - n_rows_small     # 1K - 10K rows
+  - n_rows_medium    # 10K - 100K rows
+  - n_rows_large     # 100K - 1M rows
+  - n_rows_huge      # > 1M rows
+
+# Dataset Scale (Features)
+# Number of input features/columns
+n_features:
+  - n_features_few   # < 10 features
+  - n_features_medium # 10 - 100 features
+  - n_features_many  # 100 - 1000 features
+  - n_features_wide  # > 1000 features
+
+# Data Characteristics
+# Notable properties that affect solution approach
+data_characteristics:
+  - missingness_low     # < 5% missing values
+  - missingness_medium  # 5-20% missing values
+  - missingness_high    # > 20% missing values
+  - high_cardinality_cats  # Categorical features with many unique values
+  - imbalanced_classes  # Skewed class distribution (for classification)
+  - sparse_features     # Many zero values (e.g., TF-IDF, one-hot)
+  - temporal_leakage    # Risk of future info leaking into training
+  - mixed_types         # Numeric + categorical features
+  - nested_structure    # Hierarchical or nested data (JSON, nested tables)
+  - noisy_labels        # Uncertain or inconsistent target labels
+
+# Domain/Application Area
+# Subject matter of the competition
+domain:
+  - finance          # Stock prices, fraud detection, credit scoring
+  - healthcare       # Medical imaging, disease prediction, genomics
+  - ecommerce        # Product recommendation, demand forecasting
+  - social_media     # Sentiment analysis, user engagement
+  - transportation   # Route optimization, traffic prediction
+  - energy           # Load forecasting, renewable energy
+  - agriculture      # Crop yield, disease detection
+  - sports           # Player performance, game prediction
+  - education        # Student performance, dropout prediction
+  - environment      # Climate, pollution, disaster prediction
+  - security         # Fraud, intrusion detection, malware
+  - media            # Content recommendation, ad targeting
+  - manufacturing    # Quality control, predictive maintenance
+  - research         # Scientific datasets, benchmarks
+
+# Evaluation Metric
+# Primary competition metric (affects loss function choice)
+metric:
+  - rmse             # Root Mean Squared Error
+  - mae              # Mean Absolute Error
+  - mape             # Mean Absolute Percentage Error
+  - r2               # R-squared
+  - accuracy         # Classification accuracy
+  - logloss          # Log loss (cross-entropy)
+  - auc_roc          # Area Under ROC Curve
+  - auc_pr           # Area Under Precision-Recall Curve
+  - f1               # F1 score (harmonic mean of precision/recall)
+  - mcc              # Matthews Correlation Coefficient
+  - cohen_kappa      # Cohen's kappa (inter-rater agreement)
+  - ndcg             # Normalized Discounted Cumulative Gain (ranking)
+  - map              # Mean Average Precision
+  - hamming_loss     # Hamming loss (multilabel)
+  - dice             # Dice coefficient (segmentation)
+  - iou              # Intersection over Union (segmentation)
+  - bleu             # BLEU score (text generation)
+  - perplexity       # Perplexity (language models)
+
+# Successful Techniques (Post-Run Tagging)
+# What worked well in this competition (added after autopilot completes)
+techniques:
+  - linear_model     # Linear/logistic regression, Ridge, Lasso
+  - tree_ensemble    # Random Forest, XGBoost, LightGBM, CatBoost
+  - neural_network   # Deep learning (MLP, CNN, RNN, Transformer)
+  - svm              # Support Vector Machines
+  - knn              # K-Nearest Neighbors
+  - naive_bayes      # Naive Bayes classifier
+  - feature_engineering  # Heavy manual feature creation
+  - auto_feature_selection  # Automatic feature selection helped
+  - stacking         # Stacking/blending ensembles
+  - cv_strategy_important  # Cross-validation strategy was critical
+  - text_embeddings  # Pre-trained embeddings (Word2Vec, BERT, etc.)
+  - image_augmentation  # Data augmentation for images
+  - transfer_learning  # Fine-tuning pre-trained models
+  - hyperparameter_tuning  # Extensive tuning was necessary
+
+# Aliases
+# Common variations that map to canonical tags
+aliases:
+  # Problem type aliases
+  binary_classification: binary
+  multiclass_classification: multiclass
+  multi_class: multiclass
+  multi_label: multilabel
+  time_series: timeseries
+  ts: timeseries
+  nlp: text
+  cv: image
+  computer_vision: image
+
+  # Dataset scale aliases
+  small: n_rows_small
+  medium: n_rows_medium
+  large: n_rows_large
+  huge: n_rows_huge
+
+  # Data characteristic aliases
+  missing_data: missingness_high
+  high_cardinality: high_cardinality_cats
+  imbalanced: imbalanced_classes
+  class_imbalance: imbalanced_classes
+
+  # Metric aliases
+  root_mean_squared_error: rmse
+  mean_absolute_error: mae
+  log_loss: logloss
+  roc_auc: auc_roc
+  f1_score: f1
+  accuracy_score: accuracy
+
+  # Technique aliases
+  xgboost: tree_ensemble
+  lightgbm: tree_ensemble
+  catboost: tree_ensemble
+  random_forest: tree_ensemble
+  rf: tree_ensemble
+  gbm: tree_ensemble
+  deep_learning: neural_network
+  dl: neural_network
+  cnn: neural_network
+  rnn: neural_network
+  transformer: neural_network
+  bert: text_embeddings
+
+# Tag Inference Rules (for auto-tagging during bootstrap)
+# These are read by src/kagglebot/knowledge/inference.py
+inference_rules:
+  data_modality:
+    tabular:
+      - has_csv: true
+      - file_extension: [".csv", ".parquet", ".tsv"]
+    image:
+      - file_extension: [".jpg", ".png", ".jpeg", ".tiff"]
+    text:
+      - column_type: "text"
+      - avg_token_count: ">= 10"
+
+  n_rows:
+    n_rows_tiny:
+      - row_count: "< 1000"
+    n_rows_small:
+      - row_count: ">= 1000 and < 10000"
+    n_rows_medium:
+      - row_count: ">= 10000 and < 100000"
+    n_rows_large:
+      - row_count: ">= 100000 and < 1000000"
+    n_rows_huge:
+      - row_count: ">= 1000000"
+
+  n_features:
+    n_features_few:
+      - feature_count: "< 10"
+    n_features_medium:
+      - feature_count: ">= 10 and < 100"
+    n_features_many:
+      - feature_count: ">= 100 and < 1000"
+    n_features_wide:
+      - feature_count: ">= 1000"
+
+  data_characteristics:
+    missingness_low:
+      - missing_pct: "< 5"
+    missingness_medium:
+      - missing_pct: ">= 5 and < 20"
+    missingness_high:
+      - missing_pct: ">= 20"
+    high_cardinality_cats:
+      - max_cardinality: "> 50"
+    imbalanced_classes:
+      - class_ratio: "> 3"  # Majority class > 3x minority
+
+  problem_type:
+    binary:
+      - target_unique_count: "== 2"
+      - target_type: "categorical"
+    multiclass:
+      - target_unique_count: "> 2 and <= 20"
+      - target_type: "categorical"
+    regression:
+      - target_type: "numeric"
+      - target_unique_count: "> 20"

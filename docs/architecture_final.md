@@ -93,20 +93,35 @@ kaggle-autopilot/
 │       ├── history.jsonl    # Submission ledger (dedupe)
 │       └── <run_id>_submission.csv
 │
-├── docs/                    # Design documentation
-│   ├── AUTOPILOT_SINGLE_SUBMIT.md  # Autopilot spec (1687 lines)
-│   └── AUTOPILOT_SUMMARY.md        # Autopilot summary
+├── docs/                         # Design documentation
+│   ├── README.md                 # Documentation index
+│   ├── spec_autopilot.md         # Autopilot spec
+│   ├── architecture.md           # Autopilot control flow
+│   ├── architecture_final.md     # Full architecture reference
+│   ├── guardrails_checklist.md   # Safety checklist
+│   ├── autopilot.md              # Autopilot walkthrough
+│   ├── AUTOPILOT_SINGLE_SUBMIT.md
+│   ├── AUTOPILOT_SUMMARY.md
+│   ├── safety/
+│   │   ├── submission_checklist.md
+│   │   └── failure_modes.md
+│   ├── compute/
+│   │   ├── architecture.md
+│   │   ├── spec.md
+│   │   ├── plan.md
+│   │   └── tasks.md
+│   ├── notebook_runner/
+│   │   ├── design.md
+│   │   └── tasks.md
+│   └── agents/
+│       ├── codex_prompt.md
+│       └── codex_implementation_plan.md
 │
-├── AGENTS.md                # Agent instructions (Codex)
-├── ARCHITECTURE.md          # Architecture docs
-├── ARCHITECTURE_REVIEW.md   # Critical gaps analysis
-├── CHECKLIST_SUBMIT.md      # Pre-submission checklist
-├── CLAUDE.md                # Claude Code working rules
-├── CODEX_PROMPT.md          # Codex implementation guide
-├── FAILURE_MODES.md         # Known failure modes
-├── README.md                # User documentation
-├── SECURITY.md              # Security guidelines
-└── pyproject.toml           # uv project config
+├── AGENTS.md                     # Agent instructions (Codex)
+├── CLAUDE.md                     # Claude Code working rules
+├── README.md                     # User documentation
+├── SECURITY.md                   # Security guidelines
+└── pyproject.toml                # uv project config
 ```
 
 ---
@@ -873,12 +888,11 @@ subprocess.run(f"kaggle competitions download -c {slug}", shell=True)
 ## References
 
 **Internal Documentation:**
-- [AGENTS.md](./AGENTS.md) - Agent instructions
-- [CHECKLIST_SUBMIT.md](./CHECKLIST_SUBMIT.md) - Pre-submission checklist
-- [FAILURE_MODES.md](./FAILURE_MODES.md) - Known failure modes (761 lines)
-- [ARCHITECTURE_REVIEW.md](./ARCHITECTURE_REVIEW.md) - Critical gaps analysis
-- [docs/AUTOPILOT_SINGLE_SUBMIT.md](./docs/AUTOPILOT_SINGLE_SUBMIT.md) - Autopilot spec (1687 lines)
-- [docs/AUTOPILOT_SUMMARY.md](./docs/AUTOPILOT_SUMMARY.md) - Autopilot summary
+- [AGENTS.md](../AGENTS.md) - Agent instructions
+- [safety/submission_checklist.md](./safety/submission_checklist.md) - Pre-submission checklist
+- [safety/failure_modes.md](./safety/failure_modes.md) - Known failure modes
+- [AUTOPILOT_SINGLE_SUBMIT.md](./AUTOPILOT_SINGLE_SUBMIT.md) - Autopilot spec
+- [AUTOPILOT_SUMMARY.md](./AUTOPILOT_SUMMARY.md) - Autopilot summary
 
 **External References:**
 - [Kaggle API Docs](https://www.kaggle.com/docs/api)

@@ -33,13 +33,13 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
         cv_folds=3,
         seed=42,
         dry_run=True,
-        timeout_minutes=1,
+        timeout_minutes=None,
     )
-    meta_path = tmp_path / "demo" / "runs" / "run-1" / "kernel" / "kernel-metadata.json"
+    meta_path = tmp_path / "demo" / "kernels" / "run-1" / "kernel-metadata.json"
     payload = json.loads(meta_path.read_text(encoding="utf-8"))
     assert payload["enable_gpu"] is True
     assert payload["enable_tpu"] is False
-    assert (tmp_path / "demo" / "runs" / "run-1" / "kernel" / "kernel.py").exists()
+    assert (tmp_path / "demo" / "kernels" / "run-1" / "kernel.py").exists()
 
 
 def test_find_submission_file(tmp_path: Path) -> None:
@@ -69,9 +69,9 @@ def test_kernel_metadata_tpu(tmp_path: Path) -> None:
         cv_folds=3,
         seed=42,
         dry_run=True,
-        timeout_minutes=1,
+        timeout_minutes=None,
     )
-    meta_path = tmp_path / "demo" / "runs" / "run-2" / "kernel" / "kernel-metadata.json"
+    meta_path = tmp_path / "demo" / "kernels" / "run-2" / "kernel-metadata.json"
     payload = json.loads(meta_path.read_text(encoding="utf-8"))
     assert payload["enable_tpu"] is True
     assert payload["enable_gpu"] is False

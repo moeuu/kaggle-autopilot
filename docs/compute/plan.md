@@ -16,7 +16,7 @@ This document outlines the phased implementation plan for compute switching func
 
 **Timeline**: 6 weeks (assumes 1 developer, full-time)
 
-**Prerequisites**: Phase 3 (Training Engine) from main PLAN.md must be complete
+**Prerequisites**: Core training engine (baseline training + validation) must be complete
 
 ---
 
@@ -241,7 +241,7 @@ This document outlines the phased implementation plan for compute switching func
 **Dependencies**:
 - Phase C5 (both runners complete)
 - Phase C1 (compute planning)
-- Existing orchestrator from main PLAN.md
+- Existing orchestrator from the current CLI
 
 ---
 
@@ -814,10 +814,10 @@ After stable release:
 ## Reference
 
 **Related Documents**:
-- SPEC_COMPUTE.md: CLI flags, exit codes, artifact layout
-- ARCHITECTURE_COMPUTE.md: Module boundaries, runner interface
-- DESIGN_NOTEBOOK_RUNNER.md: Detailed notebook runner design
-- TASKS_NOTEBOOK_RUNNER.md: Alternative task breakdown (more granular)
+- spec.md: CLI flags, exit codes, artifact layout
+- architecture.md: Module boundaries, runner interface
+- ../notebook_runner/design.md: Detailed notebook runner design
+- ../notebook_runner/tasks.md: Alternative task breakdown (more granular)
 
 **Key Decisions**:
 - Single `--compute` flag (not separate --runner/--accelerator)

@@ -27,7 +27,7 @@ def bootstrap_competition(
     competition_url: str | None,
     paths: CompetitionPaths,
     knowledge_paths: KnowledgePaths,
-    rules_source: str = "url",
+    rules_source: str = "fetch",
     rules_file: Path | None = None,
     download: bool = False,
     quiet: bool = True,
@@ -44,6 +44,7 @@ def bootstrap_competition(
     paths.runs_dir.mkdir(parents=True, exist_ok=True)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.submissions_dir.mkdir(parents=True, exist_ok=True)
+    paths.kernels_dir.mkdir(parents=True, exist_ok=True)
 
     rules_url = rules_url_for_slug(slug)
     rules_info = RulesInfo(url=rules_url, source=rules_source, file=str(rules_file) if rules_file else None)
@@ -64,7 +65,7 @@ def bootstrap_competition(
                 "DRY RUN: download skipped.\n", encoding="utf-8"
             )
         else:
-            download_competition(slug, paths.data_dir, force=force, quiet=quiet)
+            download_competition(slug, paths.data_dir, force=True, quiet=quiet)
             _unzip_downloads(paths.data_dir)
 
     profile = _write_dataset_profile(paths)
@@ -76,6 +77,7 @@ def bootstrap_competition(
         taxonomy=taxonomy,
         tags=profile.get("tags", []),
     )
+    _write_knowledge_hints(paths, similar)
     record_competition_profile(
         knowledge_paths=knowledge_paths,
         taxonomy=taxonomy,
@@ -127,9 +129,10 @@ def _capture_rules(
         try:
             with urllib.request.urlopen(rules_url, timeout=10) as resp:
                 html = resp.read().decode("utf-8", errors="ignore")
-            (paths.context_dir / "rules.html").write_text(html, encoding="utf-8")
+            paths.rules_html_path.write_text(html, encoding="utf-8")
         except (urllib.error.URLError, TimeoutError) as exc:
             (paths.context_dir / "fetch_error.txt").write_text(str(exc), encoding="utf-8")
+            print(f"rules fetch failed: {exc}")
         return
     raise ValueError(f"Unknown rules source: {rules_source}")
 
@@ -171,6 +174,8 @@ def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
 
 def _cache_sample_submission(paths: CompetitionPaths) -> None:
     if paths.sample_submission_path.exists():
+        if not paths.sample_submission_head_path.exists():
+            _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
         return
     csvs = sorted([p for p in paths.data_dir.rglob("*.csv") if p.is_file()])
     if not csvs:
@@ -178,7 +183,35 @@ def _cache_sample_submission(paths: CompetitionPaths) -> None:
     for path in csvs:
         if "sample_submission" in path.name.lower():
             shutil.copy2(path, paths.sample_submission_path)
+            _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
             return
+
+
+def _write_sample_head(sample_path: Path, head_path: Path, rows: int = 5) -> None:
+    try:
+        import pandas as pd
+    except Exception:  # pragma: no cover - optional dependency in tests
+        return
+    try:
+        sample = pd.read_csv(sample_path)
+    except Exception:
+        return
+    head_path.write_text(sample.head(rows).to_csv(index=False), encoding="utf-8")
+
+
+def _write_knowledge_hints(paths: CompetitionPaths, similar: list[dict[str, object]]) -> None:
+    lines = ["# Knowledge Hints", ""]
+    if not similar:
+        lines.append("No similar competitions found in knowledge base.")
+    else:
+        lines.append("Similar competitions and what improved score:")
+        lines.append("")
+        for item in similar:
+            slug = item.get("slug", "unknown")
+            overlap = item.get("overlap", 0)
+            summary = item.get("summary", "No summary recorded.")
+            lines.append(f"- {slug} ({overlap} tag overlap): {summary}")
+    paths.knowledge_hints_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _unzip_downloads(data_dir: Path) -> None:

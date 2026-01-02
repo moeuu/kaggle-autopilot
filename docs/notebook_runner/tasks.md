@@ -255,7 +255,7 @@
   - Add security rules for kernels
 - [ ] **N075**: Update AGENTS.md:
   - Add notebook runner implementation notes
-- [ ] **N076**: Update SPEC.md:
+- [ ] **N076**: Update docs/spec_autopilot.md:
   - Document new CLI flags
   - Add kernel artifacts layout
   - Update exit codes

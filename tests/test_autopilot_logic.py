@@ -1,0 +1,200 @@
+"""Tests for autopilot logic functions (met_target, improvement tracking)."""
+
+from __future__ import annotations
+
+import pytest
+
+from kagglebot.autopilot import _is_top1_tier, _meets_target, _update_best_score
+
+
+class TestMeetsTarget:
+    """Test the _meets_target function for direction-aware comparison."""
+
+    def test_minimize_target_met(self) -> None:
+        """For minimize metrics, value <= target should return True."""
+        assert _meets_target(value=0.4, target=0.5, direction="minimize") is True
+        assert _meets_target(value=0.5, target=0.5, direction="minimize") is True  # Equal counts as met
+
+    def test_minimize_target_not_met(self) -> None:
+        """For minimize metrics, value > target should return False."""
+        assert _meets_target(value=0.6, target=0.5, direction="minimize") is False
+        assert _meets_target(value=1.0, target=0.5, direction="minimize") is False
+
+    def test_maximize_target_met(self) -> None:
+        """For maximize metrics, value >= target should return True."""
+        assert _meets_target(value=0.9, target=0.8, direction="maximize") is True
+        assert _meets_target(value=0.8, target=0.8, direction="maximize") is True  # Equal counts as met
+
+    def test_maximize_target_not_met(self) -> None:
+        """For maximize metrics, value < target should return False."""
+        assert _meets_target(value=0.7, target=0.8, direction="maximize") is False
+        assert _meets_target(value=0.5, target=0.8, direction="maximize") is False
+
+    def test_edge_cases(self) -> None:
+        """Test edge cases like very small/large values."""
+        # Very small improvements should still count
+        assert _meets_target(value=0.50001, target=0.5, direction="minimize") is False
+        assert _meets_target(value=0.49999, target=0.5, direction="minimize") is True
+        assert _meets_target(value=0.80001, target=0.8, direction="maximize") is True
+        assert _meets_target(value=0.79999, target=0.8, direction="maximize") is False
+
+        # Negative values
+        assert _meets_target(value=-0.1, target=0.0, direction="minimize") is True
+        assert _meets_target(value=-0.1, target=-0.2, direction="maximize") is True
+
+        # Very large values
+        assert _meets_target(value=1e6, target=1e5, direction="minimize") is False
+        assert _meets_target(value=1e6, target=1e5, direction="maximize") is True
+
+
+class TestUpdateBestScore:
+    """Test the _update_best_score function for improvement tracking."""
+
+    def test_first_iteration_always_improves(self) -> None:
+        """First iteration (best=None) should always count as improvement."""
+        assert _update_best_score(best=None, current=0.5, direction="minimize", min_improvement=0.0) is True
+        assert _update_best_score(best=None, current=0.5, direction="maximize", min_improvement=0.0) is True
+        assert _update_best_score(best=None, current=0.5, direction="minimize", min_improvement=0.1) is True
+
+    def test_minimize_improvement(self) -> None:
+        """For minimize, lower score is better."""
+        # Improvement with min_improvement=0.0 (any improvement counts)
+        assert _update_best_score(best=0.5, current=0.4, direction="minimize", min_improvement=0.0) is True
+        assert _update_best_score(best=0.5, current=0.3, direction="minimize", min_improvement=0.0) is True
+
+        # Equal score counts as "not worse" with min_improvement=0.0 (prevents patience increment)
+        assert _update_best_score(best=0.5, current=0.5, direction="minimize", min_improvement=0.0) is True
+
+        # Worse score is not improvement
+        assert _update_best_score(best=0.5, current=0.6, direction="minimize", min_improvement=0.0) is False
+
+        # With min_improvement threshold
+        assert _update_best_score(best=0.5, current=0.4, direction="minimize", min_improvement=0.1) is True
+        assert _update_best_score(best=0.5, current=0.41, direction="minimize", min_improvement=0.1) is False
+        assert _update_best_score(best=0.5, current=0.39, direction="minimize", min_improvement=0.1) is True
+
+    def test_maximize_improvement(self) -> None:
+        """For maximize, higher score is better."""
+        # Improvement with min_improvement=0.0 (any improvement counts)
+        assert _update_best_score(best=0.8, current=0.9, direction="maximize", min_improvement=0.0) is True
+        assert _update_best_score(best=0.8, current=0.85, direction="maximize", min_improvement=0.0) is True
+
+        # Equal score counts as "not worse" with min_improvement=0.0 (prevents patience increment)
+        assert _update_best_score(best=0.8, current=0.8, direction="maximize", min_improvement=0.0) is True
+
+        # Worse score is not improvement
+        assert _update_best_score(best=0.8, current=0.7, direction="maximize", min_improvement=0.0) is False
+
+        # With min_improvement threshold
+        assert _update_best_score(best=0.8, current=0.9, direction="maximize", min_improvement=0.1) is True
+        assert _update_best_score(best=0.8, current=0.89, direction="maximize", min_improvement=0.1) is False
+        assert _update_best_score(best=0.8, current=0.91, direction="maximize", min_improvement=0.1) is True
+
+    def test_edge_cases_improvement(self) -> None:
+        """Test edge cases for improvement tracking."""
+        # Exact threshold boundary (use values that avoid floating point precision issues)
+        # For minimize: improvement = best - current = 1.0 - 0.9 = 0.1 >= 0.1 → True
+        assert _update_best_score(best=1.0, current=0.9, direction="minimize", min_improvement=0.1) is True
+        # For maximize: improvement = current - best = 0.9 - 0.8 = 0.1 >= 0.1 → True
+        assert _update_best_score(best=0.8, current=0.9, direction="maximize", min_improvement=0.1) is True
+
+        # Very small improvements
+        assert _update_best_score(best=0.5, current=0.499999, direction="minimize", min_improvement=0.0) is True
+        assert _update_best_score(best=0.5, current=0.500001, direction="maximize", min_improvement=0.0) is True
+
+        # Negative values
+        assert _update_best_score(best=-0.1, current=-0.2, direction="minimize", min_improvement=0.0) is True
+        assert _update_best_score(best=-0.2, current=-0.1, direction="maximize", min_improvement=0.0) is True
+
+        # Test exact boundary with clearer values
+        # Just meeting threshold should count
+        assert _update_best_score(best=0.5, current=0.4, direction="minimize", min_improvement=0.1) is True
+        assert _update_best_score(best=0.4, current=0.5, direction="maximize", min_improvement=0.1) is True
+
+
+class TestPatienceLogic:
+    """Integration tests for patience/early stopping logic."""
+
+    def test_patience_stops_after_n_no_improvements(self) -> None:
+        """Verify patience counter works correctly."""
+        # Simulate iterations with no improvement
+        best = 0.5
+        patience_counter = 0
+        patience = 2
+        min_improvement = 0.01
+
+        # Iteration 1: no improvement (0.52 worse than 0.5 for minimize)
+        current = 0.52
+        if _update_best_score(best, current, "minimize", min_improvement):
+            best = current
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        assert patience_counter == 1
+
+        # Iteration 2: no improvement (0.51 only 0.01 better, threshold is 0.01, so marginal)
+        current = 0.51
+        if _update_best_score(best, current, "minimize", min_improvement):
+            best = current
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        assert patience_counter == 2
+
+        # Should stop now (patience_counter >= patience)
+        assert patience_counter >= patience
+
+    def test_patience_resets_on_improvement(self) -> None:
+        """Verify patience counter resets when improvement happens."""
+        best = 0.5
+        patience_counter = 1
+        min_improvement = 0.0
+
+        # Improvement happens (0.45 < 0.5 for minimize)
+        current = 0.45
+        if _update_best_score(best, current, "minimize", min_improvement):
+            best = current
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        assert patience_counter == 0
+        assert best == 0.45
+
+
+class TestDirectionInference:
+    """Test that direction is correctly inferred and used."""
+
+    @pytest.mark.parametrize(
+        "metric,expected_direction",
+        [
+            ("rmse", "minimize"),
+            ("mae", "minimize"),
+            ("mse", "minimize"),
+            ("logloss", "minimize"),
+            ("accuracy", "maximize"),
+            ("auc_roc", "maximize"),
+            ("f1", "maximize"),
+            ("r2", "maximize"),
+        ],
+    )
+    def test_metric_direction_mapping(self, metric: str, expected_direction: str) -> None:
+        """Verify common metrics have correct direction."""
+        from kagglebot.solver.metrics import infer_direction
+
+        assert infer_direction(metric) == expected_direction
+
+
+class TestTop1Tier:
+    """Test the top1-tier heuristic."""
+
+    def test_top1_none(self) -> None:
+        assert _is_top1_tier(0.5, None, "minimize") is False
+
+    def test_top1_minimize(self) -> None:
+        assert _is_top1_tier(0.4, 0.5, "minimize") is True
+        assert _is_top1_tier(0.6, 0.5, "minimize") is False
+
+    def test_top1_maximize(self) -> None:
+        assert _is_top1_tier(0.9, 0.8, "maximize") is True
+        assert _is_top1_tier(0.7, 0.8, "maximize") is False
