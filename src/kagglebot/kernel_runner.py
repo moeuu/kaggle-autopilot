@@ -259,7 +259,7 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, roc_auc_score
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
@@ -457,8 +457,8 @@ def build_model(task: str):
         except Exception:
             pass
     if task == "classification":
-        return LogisticRegression(max_iter=2000)
-    return Ridge()
+        return HistGradientBoostingClassifier()
+    return HistGradientBoostingRegressor()
 
 
 def train_tpu(x_train, y_train, x_eval, task: str):

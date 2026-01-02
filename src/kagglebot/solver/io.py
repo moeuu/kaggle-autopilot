@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -130,6 +131,28 @@ def write_submission(
         if len(preds) != len(submission):
             raise ValueError("Prediction length does not match sample_submission rows.")
         submission[target_column] = preds
+    submission[target_column] = _coerce_prediction_dtype(
+        sample[target_column],
+        submission[target_column],
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(output_path, index=False)
     return output_path
+
+
+def _coerce_prediction_dtype(sample_series: pd.Series, pred_series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(sample_series.dtype):
+        if pd.api.types.is_bool_dtype(pred_series.dtype):
+            return pred_series
+        if pd.api.types.is_numeric_dtype(pred_series.dtype):
+            values = pred_series.dropna().to_numpy()
+            if values.size == 0:
+                return pred_series
+            binary_mask = np.isclose(values, 0.0) | np.isclose(values, 1.0)
+            if binary_mask.all():
+                return pred_series.astype(bool)
+            return pred_series
+        lowered = pred_series.astype(str).str.lower()
+        if set(lowered.dropna().unique()).issubset({"true", "false"}):
+            return lowered == "true"
+    return pred_series
