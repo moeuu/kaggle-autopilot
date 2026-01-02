@@ -9,7 +9,14 @@ from pathlib import Path
 
 from kagglebot.competition import rules_url_for_slug
 from kagglebot.kaggle_api import download_competition
-from kagglebot.paths import CompetitionPaths, repo_root
+from kagglebot.knowledge import (
+    build_improve_template,
+    build_plan_and_baseline_prompt,
+    ensure_taxonomy,
+    record_competition_profile,
+    resolve_similar_improvements,
+)
+from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.types import BootstrapMeta, PlanConfig, RulesInfo
 from kagglebot.validators import safe_extract_zip
 
@@ -17,20 +24,21 @@ from kagglebot.validators import safe_extract_zip
 def bootstrap_competition(
     *,
     slug: str,
-    force: bool = False,
-    root: Path | None = None,
+    competition_url: str | None,
+    paths: CompetitionPaths,
+    knowledge_paths: KnowledgePaths,
     rules_source: str = "url",
     rules_file: Path | None = None,
     download: bool = False,
     quiet: bool = True,
+    force: bool = False,
+    dry_run: bool = False,
 ) -> Path:
     """
     Prepare local workspace directories and write meta + plan files.
     Does not join competitions or accept rules automatically.
     """
-    base_root = root if root is not None else repo_root()
-    paths = CompetitionPaths(slug=slug, repo_root=base_root)
-
+    paths.base_dir.mkdir(parents=True, exist_ok=True)
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     paths.prompts_dir.mkdir(parents=True, exist_ok=True)
     paths.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -47,14 +55,43 @@ def bootstrap_competition(
     _write_json(paths.meta_path, meta.to_dict(), force=force)
     paths.rules_url_path.write_text(rules_url + "\n", encoding="utf-8")
 
-    _capture_rules(paths, rules_source=rules_source, rules_file=rules_file, rules_url=rules_url)
+    _capture_rules(paths, rules_source=rules_source, rules_file=rules_file, rules_url=rules_url, dry_run=dry_run)
     _write_plan(paths, force=force)
-    _write_prompts(paths, slug=slug)
-    _write_dataset_summary(paths)
 
     if download:
-        download_competition(slug, paths.data_dir, force=force, quiet=quiet)
-        _unzip_downloads(paths.data_dir)
+        if dry_run:
+            paths.context_dir.joinpath("download_skipped.txt").write_text(
+                "DRY RUN: download skipped.\n", encoding="utf-8"
+            )
+        else:
+            download_competition(slug, paths.data_dir, force=force, quiet=quiet)
+            _unzip_downloads(paths.data_dir)
+
+    profile = _write_dataset_profile(paths)
+    _cache_sample_submission(paths)
+
+    taxonomy = ensure_taxonomy(knowledge_paths)
+    similar = resolve_similar_improvements(
+        knowledge_paths=knowledge_paths,
+        taxonomy=taxonomy,
+        tags=profile.get("tags", []),
+    )
+    record_competition_profile(
+        knowledge_paths=knowledge_paths,
+        taxonomy=taxonomy,
+        slug=slug,
+        competition_url=competition_url,
+        profile=profile,
+    )
+
+    _write_prompts(
+        paths=paths,
+        slug=slug,
+        rules_url=rules_url,
+        profile=profile,
+        taxonomy=taxonomy,
+        similar_improvements=similar,
+    )
 
     return paths.meta_path
 
@@ -65,7 +102,14 @@ def _write_json(path: Path, payload: dict[str, object], *, force: bool) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _capture_rules(paths: CompetitionPaths, *, rules_source: str, rules_file: Path | None, rules_url: str) -> None:
+def _capture_rules(
+    paths: CompetitionPaths,
+    *,
+    rules_source: str,
+    rules_file: Path | None,
+    rules_url: str,
+    dry_run: bool,
+) -> None:
     if rules_source == "none":
         return
     if rules_source == "url":
@@ -77,6 +121,9 @@ def _capture_rules(paths: CompetitionPaths, *, rules_source: str, rules_file: Pa
         shutil.copy2(rules_file, dest)
         return
     if rules_source == "fetch":
+        if dry_run:
+            (paths.context_dir / "fetch_skipped.txt").write_text("DRY RUN: rules fetch skipped.\n", encoding="utf-8")
+            return
         try:
             with urllib.request.urlopen(rules_url, timeout=10) as resp:
                 html = resp.read().decode("utf-8", errors="ignore")
@@ -92,53 +139,46 @@ def _write_plan(paths: CompetitionPaths, *, force: bool) -> None:
     _write_json(paths.plan_path, plan.to_dict(), force=force)
 
 
-def _write_prompts(paths: CompetitionPaths, *, slug: str) -> None:
-    codex_prompt = paths.prompts_dir / "codex.md"
-    claude_prompt = paths.prompts_dir / "claude.md"
-
-    codex_prompt.write_text(_render_prompt(slug, agent_name="Codex"), encoding="utf-8")
-    claude_prompt.write_text(_render_prompt(slug, agent_name="Claude"), encoding="utf-8")
-
-
-def _render_prompt(slug: str, *, agent_name: str) -> str:
-    return (
-        f"# Kagglebot {agent_name} Prompt\n\n"
-        f"Competition slug: {slug}\n\n"
-        "You are implementing a competition baseline in this repo.\n\n"
-        "Instructions:\n"
-        "1) Read artifacts/<slug>/context/meta.json and plan.json.\n"
-        "2) Read artifacts/<slug>/context/dataset_summary.txt.\n"
-        "3) Refer to artifacts/<slug>/context/rules_url.txt (or rules.* if provided).\n"
-        "4) Decide missing plan values (time_budget_min, seed, kernel_name, internet, accelerator, kaggle_username).\n"
-        "5) Implement a robust baseline under kagglebot/solver/.\n"
-        "6) Ensure tests pass (uv run pytest -q).\n"
+def _write_prompts(
+    *,
+    paths: CompetitionPaths,
+    slug: str,
+    rules_url: str,
+    profile: dict[str, object],
+    taxonomy: dict[str, object],
+    similar_improvements: list[dict[str, object]],
+) -> None:
+    baseline = build_plan_and_baseline_prompt(
+        slug=slug,
+        rules_url=rules_url,
+        profile=profile,
+        taxonomy=taxonomy,
+        similar_improvements=similar_improvements,
     )
+    improve_template = build_improve_template()
+    paths.codex_plan_and_baseline_prompt.write_text(baseline, encoding="utf-8")
+    paths.codex_improve_template.write_text(improve_template, encoding="utf-8")
 
 
-def _write_dataset_summary(paths: CompetitionPaths) -> None:
-    data_dir = paths.data_dir
-    summary_path = paths.dataset_summary_path
-    if not data_dir.exists():
-        summary_path.write_text("Data directory not found.\n", encoding="utf-8")
+def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
+    from kagglebot.knowledge import build_dataset_profile
+
+    profile = build_dataset_profile(paths.data_dir)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+    return profile
+
+
+def _cache_sample_submission(paths: CompetitionPaths) -> None:
+    if paths.sample_submission_path.exists():
         return
-
-    lines = ["Dataset summary:"]
-    csvs = sorted([p for p in data_dir.rglob("*.csv") if p.is_file()])
+    csvs = sorted([p for p in paths.data_dir.rglob("*.csv") if p.is_file()])
     if not csvs:
-        lines.append("No CSV files found.")
-        summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
-
     for path in csvs:
-        try:
-            import pandas as pd
-
-            df = pd.read_csv(path, nrows=5)
-            lines.append(f"- {path.name}: columns={list(df.columns)}")
-        except Exception:
-            lines.append(f"- {path.name}: unable to read columns")
-
-    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if "sample_submission" in path.name.lower():
+            shutil.copy2(path, paths.sample_submission_path)
+            return
 
 
 def _unzip_downloads(data_dir: Path) -> None:

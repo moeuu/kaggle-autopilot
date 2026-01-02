@@ -80,13 +80,20 @@ def infer_task(y: pd.Series) -> str:
     return "regression"
 
 
-def load_competition_data(data_dir: Path) -> CompetitionData:
+def load_competition_data(data_dir: Path, *, target_column_override: str | None = None) -> CompetitionData:
     train_path, test_path, sample_path = find_competition_files(data_dir)
     train = pd.read_csv(train_path)
     test = pd.read_csv(test_path)
     sample = pd.read_csv(sample_path)
 
-    id_col, target_col, feature_cols = infer_target(train, test, sample)
+    if target_column_override and target_column_override in train.columns:
+        id_col = sample.columns[0]
+        target_col = target_column_override
+        feature_cols = [c for c in train.columns if c != target_col]
+        if id_col in feature_cols:
+            feature_cols.remove(id_col)
+    else:
+        id_col, target_col, feature_cols = infer_target(train, test, sample)
     task = infer_task(train[target_col])
     prediction_kind = "probability" if sample[target_col].dtype.kind in {"f", "c"} else "class"
 

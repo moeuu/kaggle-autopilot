@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from enum import Enum
+
+from kagglebot.exec_utils import run_command
 
 
 class Compute(str, Enum):
@@ -54,12 +55,7 @@ def detect_local_gpu() -> GpuAvailability:
         mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
     if not cuda:
         try:
-            result = subprocess.run(
-                ["nvidia-smi"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            result = run_command(["nvidia-smi"])
             cuda = result.returncode == 0
         except FileNotFoundError:
             cuda = False

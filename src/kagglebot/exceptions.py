@@ -18,9 +18,13 @@ class KaggleCliError(KaggleBotError):
 
     exit_code = 4
 
-    def __init__(self, message: str, output: str = "") -> None:
+    def __init__(
+        self, message: str, command: list[str] | None = None, exit_code: int | None = None, output: str = ""
+    ) -> None:
         super().__init__(message)
         self.message = message
+        self.command = command
+        self.exit_code = exit_code or 4
         self.output = output
 
 
@@ -42,6 +46,12 @@ class SubmissionRateLimitError(KaggleBotError):
     exit_code = 9
 
 
+class MaxSubmissionsError(KaggleBotError):
+    """Max submissions quota exceeded for autopilot run."""
+
+    exit_code = 14
+
+
 class GPUNotAvailableError(KaggleBotError):
     """Requested GPU is not available locally."""
 
@@ -59,8 +69,3 @@ class KernelFailedError(KaggleBotError):
 
     exit_code = 12
 
-
-class GitError(KaggleBotError):
-    """Git command failed."""
-
-    exit_code = 1

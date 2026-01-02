@@ -58,13 +58,26 @@ def scan_text_for_secrets(text: str) -> list[str]:
 
 
 def validate_kernel_package(package_dir: Path) -> None:
-    main_path = package_dir / "main.py"
     meta_path = package_dir / "kernel-metadata.json"
     content = []
-    if main_path.exists():
-        content.append(main_path.read_text(encoding="utf-8", errors="ignore"))
+    code_file = None
     if meta_path.exists():
-        content.append(meta_path.read_text(encoding="utf-8", errors="ignore"))
+        meta_text = meta_path.read_text(encoding="utf-8", errors="ignore")
+        content.append(meta_text)
+        try:
+            import json
+
+            payload = json.loads(meta_text)
+            code_file = payload.get("code_file")
+        except json.JSONDecodeError:
+            code_file = None
+
+    for candidate in ("main.py", "kernel.py", code_file):
+        if not candidate:
+            continue
+        path = package_dir / candidate
+        if path.exists():
+            content.append(path.read_text(encoding="utf-8", errors="ignore"))
     matches = []
     for text in content:
         matches.extend(scan_text_for_secrets(text))

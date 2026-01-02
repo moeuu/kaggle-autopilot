@@ -109,7 +109,7 @@ def test_validate_submission_duplicate_id():
 
 
 def test_submission_rate_limit(tmp_path):
-    ledger = SubmissionLedger.for_slug("demo", root=tmp_path)
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
     now = datetime.now(UTC)
     entries = [
         {

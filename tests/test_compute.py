@@ -30,10 +30,7 @@ def test_detect_local_gpu_with_torch(monkeypatch: pytest.MonkeyPatch) -> None:
         backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
     )
     monkeypatch.setattr("kagglebot.compute.torch", fake_torch)
-    monkeypatch.setattr(
-        "kagglebot.compute.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1),
-    )
+    monkeypatch.setattr("kagglebot.compute.run_command", lambda *args, **kwargs: SimpleNamespace(returncode=1))
     availability = detect_local_gpu()
     assert availability.cuda is True
     assert availability.mps is False
@@ -45,10 +42,7 @@ def test_detect_local_gpu_with_mps(monkeypatch: pytest.MonkeyPatch) -> None:
         backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
     )
     monkeypatch.setattr("kagglebot.compute.torch", fake_torch)
-    monkeypatch.setattr(
-        "kagglebot.compute.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1),
-    )
+    monkeypatch.setattr("kagglebot.compute.run_command", lambda *args, **kwargs: SimpleNamespace(returncode=1))
     availability = detect_local_gpu()
     assert availability.cuda is False
     assert availability.mps is True

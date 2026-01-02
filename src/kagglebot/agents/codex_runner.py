@@ -1,69 +1,57 @@
 from __future__ import annotations
 
-import json
-import subprocess
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.types import AgentResult
+from kagglebot.exec_utils import run_command
 
 
-def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> AgentResult:
+@dataclass(frozen=True)
+class CodexResult:
+    transcript_path: Path
+    last_message_path: Path
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> CodexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_text = prompt_path.read_text(encoding="utf-8")
+    transcript_path = output_dir / "codex_exec.jsonl"
+    last_message_path = output_dir / "codex_last_message.txt"
 
     if dry_run:
-        transcript = {
-            "command": ["codex", "exec"],
-            "prompt_path": str(prompt_path),
-            "dry_run": True,
-            "returncode": 0,
-            "stdout": "",
-            "stderr": "",
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
-        transcript_path = output_dir / "transcript.json"
-        transcript_path.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
-        last_message_path = output_dir / "last_message.txt"
+        transcript_path.write_text("", encoding="utf-8")
         last_message_path.write_text("DRY RUN: codex not executed.\n", encoding="utf-8")
-        return AgentResult(
-            transcript_path=str(transcript_path),
-            last_message_path=str(last_message_path),
+        return CodexResult(
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
             returncode=0,
             stdout="",
             stderr="",
         )
 
-    completed = subprocess.run(
-        ["codex", "exec"],
-        input=prompt_text,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    transcript = {
-        "command": ["codex", "exec"],
-        "prompt_path": str(prompt_path),
-        "returncode": completed.returncode,
-        "stdout": completed.stdout or "",
-        "stderr": completed.stderr or "",
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
-    transcript_path = output_dir / "transcript.json"
-    transcript_path.write_text(json.dumps(transcript, indent=2), encoding="utf-8")
-
-    last_message_path = output_dir / "last_message.txt"
-    last_line = ""
-    for line in (completed.stdout or "").splitlines():
-        if line.strip():
-            last_line = line
-    last_message_path.write_text(last_line + "\n", encoding="utf-8")
-
-    return AgentResult(
-        transcript_path=str(transcript_path),
-        last_message_path=str(last_message_path),
-        returncode=completed.returncode,
-        stdout=completed.stdout or "",
-        stderr=completed.stderr or "",
+    args = [
+        "codex",
+        "exec",
+        "-a",
+        "never",
+        "--sandbox",
+        "workspace-write",
+        "--json",
+        "--output-last-message",
+        str(last_message_path),
+        "-",
+    ]
+    result = run_command(args, input_text=prompt_text)
+    transcript_path.write_text(result.stdout, encoding="utf-8")
+    if not last_message_path.exists():
+        last_message_path.write_text("", encoding="utf-8")
+    return CodexResult(
+        transcript_path=transcript_path,
+        last_message_path=last_message_path,
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
     )

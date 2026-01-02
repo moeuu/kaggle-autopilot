@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -62,9 +62,12 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
 
 def ensure_not_duplicate_submission(
     ledger: SubmissionLedger,
+    *,
+    slug: str,
+    message: str,
     submission_path: str,
 ) -> None:
-    if ledger.is_duplicate(submission_path):
+    if ledger.is_duplicate(slug=slug, message=message, submission_path=Path(submission_path)):
         raise DuplicateSubmissionError("Duplicate submission detected (hash already recorded).")
 
 
@@ -74,31 +77,9 @@ def ensure_submission_rate_limit(
     max_submissions_per_day: int = 5,
     min_hours_between: float = 1.0,
 ) -> None:
-    if not ledger.ledger_path.exists():
-        return
-
     now = datetime.now(UTC)
-    cutoff = now - timedelta(days=1)
-    last_ts: datetime | None = None
-    recent = 0
-
-    for line in ledger.ledger_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        rec = json.loads(line)
-        ts_str = rec.get("ts")
-        if not ts_str:
-            continue
-        try:
-            ts = datetime.fromisoformat(ts_str)
-        except ValueError:
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        if ts >= cutoff:
-            recent += 1
-        if last_ts is None or ts > last_ts:
-            last_ts = ts
+    last_ts = ledger.last_submission_time()
+    recent = ledger.recent_submission_count(hours=24)
 
     if recent >= max_submissions_per_day:
         raise SubmissionRateLimitError("Submission rate limit exceeded (max per day).")

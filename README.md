@@ -1,122 +1,88 @@
-# Kaggle Autopilot
+# kagglebot
 
-A CLI tool that automates Kaggle competition workflows with safety guardrails and compute switching (local CPU/GPU or Kaggle notebook GPU/TPU).
-
-## Features
-
-- **End-to-end pipeline**: bootstrap → implement (agent) → train → submit
-- **Compute switching**: local CPU/GPU or Kaggle notebook GPU/TPU
-- **GPU auto-detection**: detects CUDA/MPS for local GPU runs
-- **Guardrails**: explicit submission flags, dedupe ledger, strict validation
-- **Non-interactive**: no prompts by default
-- **Artifacts & logs**: structured run metadata and agent transcripts
+Safe, non-interactive automation for Kaggle competitions:
+bootstrap → implement → train → submit, plus a score-gated autopilot loop.
 
 ## Prerequisites
 
-- **Python**: 3.11+
-- **uv**: https://astral.sh/uv
-- **Kaggle CLI**: `kaggle --version`
-- **Kaggle auth**: `~/.kaggle/kaggle.json` or `KAGGLE_USERNAME`/`KAGGLE_KEY`
-- **Rules acceptance**: manually accept rules in the browser
+- Python 3.11+
+- `uv` installed
+- Kaggle CLI on PATH
+- Kaggle credentials (`~/.kaggle/kaggle.json` or env vars)
+- Rules accepted manually in Kaggle UI
 
-## Setup
+## Install
 
 ```bash
 uv sync
 ```
 
-## Commands
-
-### Bootstrap
-Creates artifacts, prompts, and plan.json. Optionally downloads data.
+## Core Commands
 
 ```bash
-uv run kagglebot bootstrap titanic --rules-source url
-uv run kagglebot bootstrap titanic --download --rules-source url --force
-```
-
-### Implement (agent)
-Runs Codex or Claude on a clean git worktree, verifies, and optionally commits.
-
-```bash
-uv run kagglebot implement titanic --agent codex --no-commit
-```
-
-### Train
-Trains locally or in a Kaggle notebook. Local runs write to `artifacts/<slug>/submissions/<runid>_submission.csv`.
-
-```bash
-uv run kagglebot train titanic --compute local_cpu
-uv run kagglebot train titanic --compute local_gpu --strict-accelerator
-uv run kagglebot train titanic --compute kaggle_gpu --kaggle-username <user> --force
-```
-
-### Submit
-Validates submission, checks dedupe ledger, then submits via Kaggle CLI.
-
-```bash
-uv run kagglebot submit titanic \
-  -f artifacts/titanic/submissions/<runid>_submission.csv \
-  -m "baseline v1" \
-  --force
-```
-
-### Run (orchestrated)
-Bootstrap → implement → train → optional submit.
-
-```bash
-uv run kagglebot run titanic \
+uv run kagglebot bootstrap <competition>
+uv run kagglebot implement <competition> --agent codex
+uv run kagglebot train <competition> --compute local_cpu
+uv run kagglebot submit <competition> -f <csv> -m "message" --force-submit
+uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
   --agent codex \
-  --compute local_cpu \
-  --submit \
-  --message "baseline v1" \
-  --force
+  --compute kaggle_gpu \
+  --submit
 ```
 
-## Compute Modes
+## Autopilot Plan
 
-- **local_cpu**: Train locally on CPU (default)
-- **local_gpu**: Train locally on GPU (CUDA/MPS if available)
-- **kaggle_gpu**: Train in a Kaggle Notebook with GPU
-- **kaggle_tpu**: Train in a Kaggle Notebook with TPU
+Autopilot lets the agent decide target metric/score/direction and stores them in
+`artifacts/<slug>/plan.json`. Edit that file to override targets or evaluation settings
+before re-running.
 
-Optional flags:
-```bash
---strict-accelerator   # Fail if local GPU not available
---enable-internet      # Kaggle kernel internet access (only if rules allow)
---kaggle-username      # Required for kaggle_* if not in env/config
---dry-run              # Skip external commands
-```
+## Compute Targets
 
-## Safety Guardrails
+- `local_cpu`
+- `local_gpu` (CUDA/MPS if available)
+- `kaggle_gpu` (Kaggle notebook GPU)
+- `kaggle_tpu` (Kaggle notebook TPU)
 
-- **Rules acceptance**: Never automated; exits with rules URL if missing
-- **Submission validation**: Columns + row count + ID alignment
-- **Deduplication**: SHA256 ledger under `artifacts/<slug>/submissions/history.jsonl`
-- **Rate limiting**: Prevents rapid repeated submissions
-- **Explicit submission**: Requires `--submit` and `--message`
-- **Force flags**: `--force` for Kaggle CLI side effects, `--force-duplicate` to bypass dedupe
+Use `--accelerator auto|cpu|gpu|tpu` to keep compute/accelerator consistent.
+
+## Safety Defaults
+
+- `--dry-run` skips external commands (Kaggle CLI, Codex).
+- Submission is gated by target score in autopilot unless the agent sets a submit-at-final policy in `plan.json`.
+- Dedupe ledger stored in `artifacts/<slug>/submissions/ledger.jsonl`.
 
 ## Artifacts Layout
 
 ```
 artifacts/<slug>/
-├── context/            # meta.json, plan.json, rules
-├── prompts/            # codex.md, claude.md
-├── data/               # downloaded CSV/ZIP files
-├── runs/
-│   └── <run_id>/
-│       ├── kernel/     # kernel package (kaggle_* compute)
-│       ├── output/     # kernel outputs
-│       └── <agent>/    # transcripts + last_message
-└── submissions/
-    └── history.jsonl   # submission ledger
+  meta.json
+  context/
+    rules_url.txt
+    dataset_profile.json
+    sample_submission.csv
+    top1_public.json
+  prompts/
+    codex_plan_and_baseline.md
+    codex_improve.md
+  runs/<runid>/
+    run.json
+    iter-<k>/
+      metrics.json
+      diagnostics.md
+      submission.csv
+      agent/
+  submissions/
+    ledger.jsonl
 ```
+
+## Docs
+
+- `docs/autopilot.md`
+- `docs/knowledge.md`
+- `docs/taxonomy.md`
 
 ## Testing
 
 ```bash
-uv run ruff format .
-uv run ruff check .
 uv run pytest -q
 ```

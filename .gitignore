@@ -41,6 +41,9 @@ artifacts/**/*.csv
 /submission.csv
 *.zip
 
+# Knowledge base
+knowledge/kb.sqlite
+
 # Kaggle API credentials (NEVER commit)
 .kaggle/
 

@@ -1,0 +1,20 @@
+{
+  "tags": [
+    "tabular",
+    "text",
+    "image",
+    "timeseries",
+    "regression",
+    "binary",
+    "multiclass",
+    "n_rows_small",
+    "n_rows_medium",
+    "n_rows_large",
+    "missingness_high",
+    "high_cardinality_cats"
+  ],
+  "aliases": {
+    "binary_classification": "binary",
+    "multiclass_classification": "multiclass"
+  }
+}
