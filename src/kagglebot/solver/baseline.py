@@ -547,31 +547,46 @@ def _best_by_metric(records: list[dict[str, object]], direction: str) -> dict[st
     return best
 
 
-def _linear_clearly_better(linear: dict[str, object], torch: dict[str, object], direction: str) -> bool:
-    linear_score = float(linear["mean"])
-    torch_score = float(torch["mean"])
+def _record_std(record: dict[str, object]) -> float:
+    return float(record["std"]) if isinstance(record.get("std"), (int, float)) else 0.0
+
+
+def _clearly_better(candidate: dict[str, object], baseline: dict[str, object], direction: str) -> bool:
+    candidate_score = float(candidate["mean"])
+    baseline_score = float(baseline["mean"])
     if direction == "minimize":
-        delta = torch_score - linear_score
+        improvement = baseline_score - candidate_score
     else:
-        delta = linear_score - torch_score
-    linear_std = float(linear["std"]) if isinstance(linear.get("std"), (int, float)) else 0.0
-    torch_std = float(torch["std"]) if isinstance(torch.get("std"), (int, float)) else 0.0
-    margin = max(linear_std, torch_std)
-    return delta > margin
+        improvement = candidate_score - baseline_score
+    margin = max(_record_std(candidate), _record_std(baseline))
+    return improvement > margin
 
 
 def _select_best_candidate(records: list[dict[str, object]], direction: str) -> dict[str, object]:
-    primary = [r for r in records if _candidate_family(r["candidate"]) in {"torch", "linear"}]
-    if primary:
-        best_primary = _best_by_metric(primary, direction)
-        if _candidate_family(best_primary["candidate"]) == "linear":
-            torch_records = [r for r in primary if _candidate_family(r["candidate"]) == "torch"]
-            if torch_records:
-                best_torch = _best_by_metric(torch_records, direction)
-                if not _linear_clearly_better(best_primary, best_torch, direction):
-                    return best_torch
-        return best_primary
-    return _best_by_metric(records, direction)
+    torch_records = [r for r in records if _candidate_family(r["candidate"]) == "torch"]
+    linear_records = [r for r in records if _candidate_family(r["candidate"]) == "linear"]
+    other_records = [r for r in records if _candidate_family(r["candidate"]) == "other"]
+
+    preferred = None
+    if torch_records:
+        best_torch = _best_by_metric(torch_records, direction)
+        preferred = best_torch
+        if linear_records:
+            best_linear = _best_by_metric(linear_records, direction)
+            if _clearly_better(best_linear, best_torch, direction):
+                preferred = best_linear
+    elif linear_records:
+        preferred = _best_by_metric(linear_records, direction)
+
+    if preferred is None:
+        return _best_by_metric(records, direction)
+
+    if other_records:
+        best_other = _best_by_metric(other_records, direction)
+        if _clearly_better(best_other, preferred, direction):
+            return best_other
+
+    return preferred
 
 
 def _evaluate_sklearn_or_catboost(

@@ -143,22 +143,18 @@ def _capture_rules(
         pages = _fetch_competition_pages(slug=paths.slug, rules_url=rules_url)
         if pages:
             rules_md = _select_page_markdown(pages, names=("rules",), keywords=("rule",))
-            overview_md = _select_page_markdown(
-                pages,
-                names=("description", "overview"),
-                keywords=("overview", "description"),
-            )
+            overview_md = _build_overview_markdown(pages)
             data_md = _select_page_markdown(
                 pages,
                 names=("data-description", "data"),
                 keywords=("data",),
             )
             if rules_md:
-                _write_rules_markdown(paths, rules_md)
+                _write_rules_markdown(paths, _normalize_page_markdown(rules_md))
             if overview_md:
                 _write_overview_markdown(paths, overview_md)
             if data_md:
-                _write_data_markdown(paths, data_md)
+                _write_data_markdown(paths, _normalize_page_markdown(data_md))
         return
     if rules_source != "file":
         raise ValueError(f"Unknown rules source: {rules_source}")
@@ -265,6 +261,36 @@ def _select_page_markdown(
             if isinstance(content, str) and content.strip():
                 return content.strip()
     return None
+
+
+def _build_overview_markdown(pages: list[dict[str, object]]) -> str | None:
+    excluded = {"rules", "data-description", "data"}
+    sections: list[str] = []
+    for page in pages:
+        name = str(page.get("name") or "").strip()
+        if not name:
+            continue
+        if name.lower() in excluded:
+            continue
+        content = page.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        title = str(page.get("title") or name).strip()
+        body = _normalize_page_markdown(content)
+        sections.append(f"## {title}\n\n{body}")
+    if not sections:
+        return None
+    return "\n\n".join(sections).strip()
+
+
+def _normalize_page_markdown(text: str) -> str:
+    if "<" in text and ">" in text:
+        parser = _RulesHtmlToMarkdown()
+        parser.feed(text)
+        converted = parser.to_markdown()
+        if converted:
+            return converted
+    return text.strip()
 
 
 def _fetch_json_with_retry(url: str, *, timeout: int, attempts: int = 3) -> dict[str, object] | None:

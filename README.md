@@ -32,9 +32,16 @@ Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
 2. **Plan**: Agent generates `plan.json` with target metric/score/direction
+<<<<<<< ours
 3. **Baseline**: Agent implements initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel_overrides.py`)
 4. **Iterate**: Train → evaluate → diagnose → improve (default 3 iterations; override with `--max-iterations`)
 5. **Submit**: Auto-submit when top1-tier (or at final iteration if `--submit`)
+=======
+3. **Baseline**: Agent implements initial solution in `kagglebot/solver/`
+4. **Iterate**: Train → evaluate → diagnose → improve (up to 5 iterations)
+5. **Submit**: Auto-submit when top1-tier (or at iteration 5 if `--submit`)
+6. **Log**: Print Top1 public score and agent prompt/response to the terminal
+>>>>>>> theirs
 
 **Safe defaults**:
 - Default max iterations: 3 (`--max-iterations` to override)

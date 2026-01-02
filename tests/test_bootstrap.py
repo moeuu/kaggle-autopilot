@@ -54,7 +54,9 @@ def test_rules_overview_data_from_url(tmp_path, monkeypatch) -> None:
         return [
             {"name": "rules", "content": "Rules text"},
             {"name": "description", "content": "Overview text"},
+            {"name": "evaluation", "content": "Evaluation text"},
             {"name": "data-description", "content": "Data text"},
+            {"name": "Frequently Asked Questions", "content": "<h3>FAQ</h3><p>Answer</p>"},
         ]
 
     monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_pages", fake_pages)
@@ -71,5 +73,8 @@ def test_rules_overview_data_from_url(tmp_path, monkeypatch) -> None:
     )
 
     assert "Rules text" in paths.rules_md_path.read_text(encoding="utf-8")
-    assert "Overview text" in paths.overview_md_path.read_text(encoding="utf-8")
+    overview_text = paths.overview_md_path.read_text(encoding="utf-8")
+    assert "Overview text" in overview_text
+    assert "Evaluation text" in overview_text
+    assert "FAQ" in overview_text
     assert "Data text" in paths.data_md_path.read_text(encoding="utf-8")

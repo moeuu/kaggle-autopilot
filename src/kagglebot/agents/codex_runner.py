@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -55,7 +56,8 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
     if "--search" in args:
         print("codex: search enabled")
     stop_event = threading.Event()
-    heartbeat = threading.Thread(target=_heartbeat, args=(stop_event,), daemon=True)
+    start_time = time.monotonic()
+    heartbeat = threading.Thread(target=_heartbeat, args=(stop_event, start_time), daemon=True)
     heartbeat.start()
     stdout_chunks: list[str] = []
     stderr_text = ""
@@ -94,9 +96,10 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
     )
 
 
-def _heartbeat(stop_event: threading.Event, interval: float = 30.0) -> None:
+def _heartbeat(stop_event: threading.Event, start_time: float, interval: float = 30.0) -> None:
     while not stop_event.wait(interval):
-        print("codex: still running...")
+        elapsed = int(time.monotonic() - start_time)
+        print(f"codex: still running... ({elapsed}s)")
 
 
 def _emit_codex_event(line: str) -> None:
