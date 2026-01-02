@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -49,17 +52,88 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
         str(last_message_path),
         "-",
     ]
-    result = run_command(args, input_text=prompt_text)
-    transcript_path.write_text(result.stdout, encoding="utf-8")
+    if "--search" in args:
+        print("codex: search enabled")
+    stop_event = threading.Event()
+    heartbeat = threading.Thread(target=_heartbeat, args=(stop_event,), daemon=True)
+    heartbeat.start()
+    stdout_chunks: list[str] = []
+    stderr_text = ""
+    returncode = 0
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.stdin is not None:
+            proc.stdin.write(prompt_text)
+            proc.stdin.close()
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                stdout_chunks.append(line)
+                _emit_codex_event(line)
+        if proc.stderr is not None:
+            stderr_text = proc.stderr.read()
+        returncode = proc.wait()
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=1.0)
+    stdout_text = "".join(stdout_chunks)
+    transcript_path.write_text(stdout_text, encoding="utf-8")
     if not last_message_path.exists():
         last_message_path.write_text("", encoding="utf-8")
     return CodexResult(
         transcript_path=transcript_path,
         last_message_path=last_message_path,
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        returncode=returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
     )
+
+
+def _heartbeat(stop_event: threading.Event, interval: float = 30.0) -> None:
+    while not stop_event.wait(interval):
+        print("codex: still running...")
+
+
+def _emit_codex_event(line: str) -> None:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    item = payload.get("item") if isinstance(payload, dict) else None
+    if not isinstance(item, dict):
+        return
+    item_type = item.get("type")
+    if item_type == "reasoning":
+        return
+    if item_type == "command_execution":
+        command = item.get("command", "").strip()
+        status = item.get("status", "")
+        exit_code = item.get("exit_code")
+        output = item.get("aggregated_output") or item.get("stdout") or ""
+        if status == "completed":
+            suffix = f" (exit {exit_code})" if exit_code is not None else ""
+            print(f"codex: command completed: {command}{suffix}")
+            if output:
+                print(output.rstrip())
+        elif status:
+            print(f"codex: command {status}: {command}")
+        return
+    if item_type == "file_change":
+        changes = item.get("changes", [])
+        if isinstance(changes, list):
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                path = change.get("path")
+                kind = change.get("kind")
+                if path and kind:
+                    print(f"codex: {kind} {path}")
+        return
 
 
 @lru_cache(maxsize=1)

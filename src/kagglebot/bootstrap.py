@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
-import urllib.error
-import urllib.request
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 from kagglebot.competition import rules_url_for_slug
@@ -27,7 +26,7 @@ def bootstrap_competition(
     competition_url: str | None,
     paths: CompetitionPaths,
     knowledge_paths: KnowledgePaths,
-    rules_source: str = "fetch",
+    rules_source: str = "none",
     rules_file: Path | None = None,
     download: bool = False,
     quiet: bool = True,
@@ -57,6 +56,12 @@ def bootstrap_competition(
     paths.rules_url_path.write_text(rules_url + "\n", encoding="utf-8")
 
     _capture_rules(paths, rules_source=rules_source, rules_file=rules_file, rules_url=rules_url, dry_run=dry_run)
+    if not paths.rules_md_path.exists():
+        _write_rules_markdown(
+            paths,
+            f"Rules content not provided. See: {rules_url}\n",
+        )
+    _ensure_kernel_overrides(paths)
     _write_plan(paths, force=force)
 
     if download:
@@ -112,29 +117,92 @@ def _capture_rules(
     rules_url: str,
     dry_run: bool,
 ) -> None:
-    if rules_source == "none":
+    if rules_source in {"none", "url"}:
         return
-    if rules_source == "url":
+    if rules_source != "file":
+        raise ValueError(f"Unknown rules source: {rules_source}")
+    if not rules_file:
+        raise ValueError("--rules-file is required when --rules-source file.")
+    if dry_run:
+        (paths.context_dir / "rules_file_skipped.txt").write_text("DRY RUN: rules file skipped.\n", encoding="utf-8")
         return
-    if rules_source == "file":
-        if not rules_file:
-            raise ValueError("--rules-file is required when --rules-source file.")
-        dest = paths.context_dir / f"rules{rules_file.suffix}"
-        shutil.copy2(rules_file, dest)
-        return
-    if rules_source == "fetch":
-        if dry_run:
-            (paths.context_dir / "fetch_skipped.txt").write_text("DRY RUN: rules fetch skipped.\n", encoding="utf-8")
+    _write_rules_from_file(paths, rules_file, rules_url=rules_url)
+
+
+class _RulesHtmlToMarkdown(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._lines: list[str] = []
+        self._current: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if tag in {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._flush()
+        if tag == "li":
+            self._current.append("- ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._flush()
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self._current.append(data)
+
+    def _flush(self) -> None:
+        if not self._current:
             return
-        try:
-            with urllib.request.urlopen(rules_url, timeout=10) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
-            paths.rules_html_path.write_text(html, encoding="utf-8")
-        except (urllib.error.URLError, TimeoutError) as exc:
-            (paths.context_dir / "fetch_error.txt").write_text(str(exc), encoding="utf-8")
-            print(f"rules fetch failed: {exc}")
+        line = " ".join(" ".join(self._current).split())
+        if line:
+            self._lines.append(line)
+        self._current = []
+
+    def to_markdown(self) -> str:
+        self._flush()
+        return "\n".join(self._lines).strip()
+
+
+def _write_rules_from_file(paths: CompetitionPaths, rules_file: Path, *, rules_url: str) -> None:
+    suffix = rules_file.suffix.lower()
+    text = rules_file.read_text(encoding="utf-8", errors="ignore")
+    if suffix in {".html", ".htm"}:
+        paths.rules_html_path.write_text(text, encoding="utf-8")
+        parser = _RulesHtmlToMarkdown()
+        parser.feed(text)
+        md_text = parser.to_markdown()
+        _write_rules_markdown(paths, md_text or f"Rules URL: {rules_url}")
         return
-    raise ValueError(f"Unknown rules source: {rules_source}")
+    _write_rules_markdown(paths, text or f"Rules URL: {rules_url}")
+
+
+def _write_rules_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Rules content unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.rules_md_path.write_text(normalized, encoding="utf-8")
+
+
+def _ensure_kernel_overrides(paths: CompetitionPaths) -> None:
+    if paths.kernel_overrides_path.exists():
+        return
+    stub = """\
+\"\"\"Kernel overrides for kaggle_gpu / kaggle_tpu runs.
+
+Define any of the following functions to override defaults in kernel.py:
+- feature_engineering(train, test, id_col, target_col, features)
+- build_preprocessor(features, train)
+- build_model(task)
+- predict_for_metric(model, x, task, metric)
+- predict_for_submission(model, x, task, metric, prediction_kind)
+- train_tpu(x_train, y_train, x_eval, task)
+
+Prefer a Torch-based supervised model by default. Use simpler linear models
+only when you have a clear, data-driven reason they will outperform.
+\"\"\"
+"""
+    paths.kernel_overrides_path.write_text(stub, encoding="utf-8")
 
 
 def _write_plan(paths: CompetitionPaths, *, force: bool) -> None:

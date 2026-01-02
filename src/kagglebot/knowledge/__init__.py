@@ -271,7 +271,9 @@ def build_plan_and_baseline_prompt(
         f"- artifacts/{slug}/context/sample_submission_head.csv",
         f"- artifacts/{slug}/context/top1_public.json",
         f"- artifacts/{slug}/context/rules_url.txt",
+        f"- artifacts/{slug}/context/rules.md (if present)",
         f"- artifacts/{slug}/context/rules.html (if present)",
+        f"- artifacts/{slug}/kernel_overrides.py (for kaggle_gpu/kaggle_tpu)",
         f"- artifacts/{slug}/context/knowledge_hints.txt",
         "",
         "## Knowledge Base: Similar Competitions",
@@ -301,21 +303,22 @@ def build_plan_and_baseline_prompt(
         "",
         "```json",
         "{",
-        '  "target_metric": "rmse",',
-        '  "target_score": 0.13,',
-        '  "target_direction": "minimize",',
+        '  "target_metric": "<derive_from_rules>",',
+        '  "target_score": 0.0,',
+        '  "target_direction": "<minimize|maximize>",',
         '  "score_source": "holdout",',
         '  "holdout_frac": 0.2,',
         '  "cv_folds": 5,',
         '  "seed": 42,',
+        '  "internet": "on",',
         '  "max_iterations": 5,',
         '  "submit_policy": "on_target_only"',
         "}",
         "```",
         "",
         "Guidance:",
-        "- Derive target_metric and direction from the rules.html and sample_submission.csv.",
-        "- Use top1_public.json to set a realistic target_score.",
+        "- Derive target_metric and direction from rules.md/rules.html and sample_submission.csv.",
+        "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV for small datasets or high variance; otherwise holdout.",
         "- Do NOT change submit_policy; autopilot controls submission gating.",
         "",
@@ -324,14 +327,15 @@ def build_plan_and_baseline_prompt(
         "Implement a robust baseline in kagglebot/solver/ that:",
         "- Loads train/test and sample_submission correctly.",
         "- Handles missing values and encodes categoricals.",
-        "- Trains a strong baseline model (tree ensemble for tabular).",
+        "- Trains a Torch-based supervised baseline by default.",
+        "- Falls back to a simpler linear model only when data/rules justify it.",
         "- Evaluates with the score_source from plan.json.",
         "- Writes submission.csv matching sample_submission.csv exactly.",
         "",
         "Compute-specific notes:",
-        "- local_gpu: use GPU-capable libs (xgboost gpu_hist, catboost GPU, or torch cuda).",
-        "- kaggle_gpu/kaggle_tpu: update kernel_runner.py kernel script to use GPU/TPU.",
-        "- TPU: if full TPU usage is not feasible, still produce a correct baseline.",
+        "- local_cpu/local_gpu: update kagglebot/solver/ as usual.",
+        "- kaggle_gpu/kaggle_tpu: implement model + features in artifacts/{slug}/kernel_overrides.py.",
+        "- Do NOT edit kernel_runner.py for competition-specific changes.",
         "",
         "### 3) Safety + verification",
         "",
@@ -365,6 +369,13 @@ def build_improve_template() -> str:
 **Goal**: Improve offline score toward top1-tier or best possible within 5 iterations
 **Compute**: {compute} ({accelerator})
 
+## Current Score Context
+
+- **Metric**: {metric} ({direction})
+- **Current score**: {current_score}
+- **Target score**: {target_score}
+- **Top1 public**: {top1_score} (source: {top1_source})
+
 ## Input Files
 
 - **Plan**: `{plan_path}` - Target metric/score/direction, evaluation strategy
@@ -373,6 +384,12 @@ def build_improve_template() -> str:
 - **Diagnostics**: `{diagnostics_path}` - Agent-readable analysis of current performance
 - **Logs**: `{logs_dir}` - Training logs and error messages (if any)
 - **Knowledge Hints**: `{knowledge_hints}`
+- **Rules URL**: `{rules_url}`
+- **Rules Markdown**: `{rules_md}` (preferred)
+- **Rules HTML**: `{rules_html}` (fallback)
+- **Dataset Profile**: `{dataset_profile}`
+- **Sample Submission**: `{sample_submission}`
+- **Kernel Overrides**: `{kernel_overrides}` (use this for kaggle_gpu/kaggle_tpu)
 
 ## Your Task
 
@@ -399,7 +416,17 @@ Read the diagnostics and metrics files to understand:
 
 ### Step 2: Implement Improvements
 
-Make **targeted, incremental changes** to `kagglebot/solver/` to improve the offline score.
+Make **targeted, incremental changes** to improve the offline score.
+
+**Where to implement**:
+- If `compute` starts with `kaggle_`: edit `{kernel_overrides}` only.
+- Otherwise: edit `kagglebot/solver/`.
+
+**Modeling policy**:
+- Use rules.md + dataset_profile.json to decide the best supervised approach.
+- Prefer Torch-based models by default.
+- Use simpler linear models only when data/rules make them clearly better.
+- Avoid generic metric heuristics; derive metric choices from the rules.
 
 **Recommended strategies** (pick 1-2 per iteration):
 

@@ -9,6 +9,7 @@ Safe, non-interactive automation for Kaggle competitions with top1-gated autopil
 - Kaggle CLI on PATH
 - Kaggle credentials (`~/.kaggle/kaggle.json` or env vars)
 - **Competition rules accepted manually in browser** (required once per competition)
+- Optional: provide rules text via `--rules-file` (md/txt/html). Rules scraping is disabled.
 
 ## Install
 
@@ -24,20 +25,21 @@ Run autopilot with a single command:
 uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
   --agent codex \
   --compute kaggle_gpu \
+  --rules-file /path/to/rules.md \
   --submit
 ```
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
 2. **Plan**: Agent generates `plan.json` with target metric/score/direction
-3. **Baseline**: Agent implements initial solution in `kagglebot/solver/` (simple feature engineering + model sweep)
+3. **Baseline**: Agent implements initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel_overrides.py`)
 4. **Iterate**: Train → evaluate → diagnose → improve (up to 5 iterations)
 5. **Submit**: Auto-submit when top1-tier (or at iteration 5 if `--submit`)
 
 **Safe defaults**:
 - Max 5 iterations
 - No training time limit (accuracy-first)
-- Internet OFF for Kaggle kernels
+- Internet ON by default (disable with `--internet off`)
 - Submit only when top1-tier or at iteration 5 (with `--submit`)
 
 ## Manual Commands
@@ -71,6 +73,7 @@ Autopilot creates `artifacts/<slug>/plan.json` with agent-defined targets:
   "holdout_frac": 0.2,
   "cv_folds": 5,
   "seed": 42,
+  "internet": "on",
   "submit_policy": "on_target_only"
 }
 ```
@@ -117,8 +120,10 @@ artifacts/<slug>/
     sample_submission_head.csv   # Head of sample submission
     top1_public.json             # Leaderboard leader snapshot
     rules_url.txt                # Competition rules URL
-    rules.html                   # Rules HTML (best effort)
+    rules.md                     # Rules markdown (from --rules-file)
+    rules.html                   # Rules HTML (if provided)
     knowledge_hints.txt          # Similar competitions + hints
+  kernel_overrides.py            # Kaggle kernel override hooks
   prompts/
     codex_plan_and_baseline.md   # Baseline generation prompt
     codex_improve.md             # Improvement iteration prompt

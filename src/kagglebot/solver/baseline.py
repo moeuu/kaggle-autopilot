@@ -39,6 +39,30 @@ class TargetTransform:
     inverse: Callable[[np.ndarray], np.ndarray]
 
 
+def _torch_available() -> bool:
+    try:
+        import torch  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def _torch_device_for_accelerator(accelerator: str) -> str:
+    if accelerator in {"cuda", "mps"}:
+        return accelerator
+    return "cpu"
+
+
+def _resolve_torch_device(device: str):
+    import torch
+
+    if device == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if device == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def train_evaluate_and_predict(
     *,
     data_dir: Path,
@@ -87,6 +111,9 @@ def train_evaluate_and_predict(
         label_encoder=label_encoder,
         target_transform=target_transform,
     )
+    torch_device = None
+    if best_candidate.get("framework") == "torch":
+        torch_device = str(best_candidate.get("device", "cpu"))
 
     preds = _predict_with_model(
         data,
@@ -97,6 +124,8 @@ def train_evaluate_and_predict(
         prediction_kind=data.prediction_kind,
         label_encoder=label_encoder,
         target_transform=target_transform,
+        seed=seed,
+        torch_device=torch_device,
     )
 
     submission_path = write_submission(
@@ -118,6 +147,7 @@ def train_evaluate_and_predict(
             "preprocessing": best_candidate.get("preprocessing", {}),
             "target_transform": target_transform.name if target_transform else None,
             "feature_engineering": feature_report,
+            "device": torch_device,
         },
         accelerator=selection,
     )
@@ -154,6 +184,18 @@ def _resolve_target_transform(metric: str, data: CompetitionData) -> TargetTrans
 def _build_candidates(data: CompetitionData, accelerator: str, *, seed: int) -> list[dict[str, object]]:
     candidates: list[dict[str, object]] = []
     if data.task == "classification":
+        if _torch_available():
+            torch_device = _torch_device_for_accelerator(accelerator)
+            candidates.append(
+                {
+                    "name": f"torch_mlp_{torch_device}",
+                    "framework": "torch",
+                    "device": torch_device,
+                    "model": None,
+                    "params": {"epochs": 5, "hidden_dim": 128, "dropout": 0.2},
+                    "preprocessing": _build_linear_preprocessor(data),
+                }
+            )
         candidates.append(
             {
                 "name": "logreg",
@@ -188,10 +230,6 @@ def _build_candidates(data: CompetitionData, accelerator: str, *, seed: int) -> 
                     "preprocessing": None,
                 }
             )
-        elif accelerator == "mps":
-            candidates.append(
-                {"name": "torch_mlp_mps", "model": None, "preprocessing": _build_linear_preprocessor(data)}
-            )
         else:
             candidates.append(
                 {
@@ -213,6 +251,18 @@ def _build_candidates(data: CompetitionData, accelerator: str, *, seed: int) -> 
                 }
             )
     else:
+        if _torch_available():
+            torch_device = _torch_device_for_accelerator(accelerator)
+            candidates.append(
+                {
+                    "name": f"torch_mlp_{torch_device}",
+                    "framework": "torch",
+                    "device": torch_device,
+                    "model": None,
+                    "params": {"epochs": 5, "hidden_dim": 128, "dropout": 0.2},
+                    "preprocessing": _build_linear_preprocessor(data),
+                }
+            )
         candidates.append({"name": "ridge", "model": Ridge(), "preprocessing": _build_linear_preprocessor(data)})
         candidates.append(
             {
@@ -239,10 +289,6 @@ def _build_candidates(data: CompetitionData, accelerator: str, *, seed: int) -> 
                     ),
                     "preprocessing": None,
                 }
-            )
-        elif accelerator == "mps":
-            candidates.append(
-                {"name": "torch_mlp_mps", "model": None, "preprocessing": _build_linear_preprocessor(data)}
             )
         else:
             candidates.append(
@@ -401,76 +447,131 @@ def _evaluate_candidates(
     label_encoder: LabelEncoder | None,
     target_transform: TargetTransform | None,
 ) -> tuple[EvaluationResult, dict[str, object], object, ColumnTransformer | None]:
-    best_score: float | None = None
-    best_candidate: dict[str, object] | None = None
-    best_model = None
-    best_preprocessor = None
-    best_train_score: float | None = None
-    best_val_score: float | None = None
-    best_std: float | None = None
-    best_fold_scores: list[float] | None = None
+    results: list[dict[str, object]] = []
+    failures: list[tuple[str, Exception]] = []
 
     for candidate in candidates:
-        name = candidate["name"]
-        if name == "torch_mlp_mps":
-            scores, train_score, val_score = _evaluate_torch(
-                data,
-                selection=selection,
-                metric=metric,
-                seed=seed,
-                holdout_frac=holdout_frac,
-                cv_folds=cv_folds,
-                direction=direction,
-                label_encoder=label_encoder,
-                target_transform=target_transform,
+        name = str(candidate["name"])
+        preprocessor = candidate.get("preprocessing")
+        model = candidate.get("model")
+        try:
+            if candidate.get("framework") == "torch":
+                scores, train_score, val_score = _evaluate_torch(
+                    data,
+                    selection=selection,
+                    metric=metric,
+                    seed=seed,
+                    holdout_frac=holdout_frac,
+                    cv_folds=cv_folds,
+                    direction=direction,
+                    label_encoder=label_encoder,
+                    target_transform=target_transform,
+                    preprocessor=preprocessor,
+                    device=str(candidate.get("device", "cpu")),
+                )
+                model = None
+            else:
+                scores, train_score, val_score = _evaluate_sklearn_or_catboost(
+                    data,
+                    model=model,
+                    preprocessor=preprocessor,  # type: ignore[arg-type]
+                    selection=selection,
+                    metric=metric,
+                    seed=seed,
+                    holdout_frac=holdout_frac,
+                    cv_folds=cv_folds,
+                    label_encoder=label_encoder,
+                    target_transform=target_transform,
+                )
+            mean_score = float(np.mean(scores)) if scores else float("nan")
+            std_score = float(np.std(scores)) if scores else None
+            results.append(
+                {
+                    "candidate": candidate,
+                    "model": model,
+                    "preprocessor": preprocessor,
+                    "scores": scores,
+                    "mean": mean_score,
+                    "std": std_score,
+                    "train_score": train_score,
+                    "val_score": val_score,
+                }
             )
-            model = None
-            preprocessor = candidate["preprocessing"]
-        else:
-            model = candidate["model"]
-            preprocessor = candidate["preprocessing"]
-            scores, train_score, val_score = _evaluate_sklearn_or_catboost(
-                data,
-                model=model,
-                preprocessor=preprocessor,
-                selection=selection,
-                metric=metric,
-                seed=seed,
-                holdout_frac=holdout_frac,
-                cv_folds=cv_folds,
-                label_encoder=label_encoder,
-                target_transform=target_transform,
-            )
+        except Exception as exc:  # noqa: BLE001
+            failures.append((name, exc))
+            continue
 
-        mean_score = float(np.mean(scores)) if scores else float("nan")
-        std_score = float(np.std(scores)) if scores else None
+    if not results:
+        detail = ", ".join(name for name, _ in failures) if failures else "unknown"
+        raise RuntimeError(f"No candidate models were evaluated. Failed: {detail}")
 
-        if best_score is None or _is_better(mean_score, best_score, direction):
-            best_score = mean_score
-            best_std = std_score
-            best_candidate = candidate
-            best_model = model
-            best_preprocessor = preprocessor
-            best_train_score = train_score
-            best_val_score = val_score
-            best_fold_scores = scores
-
-    if best_candidate is None:
-        raise RuntimeError("No candidate models were evaluated.")
+    best_record = _select_best_candidate(results, direction)
+    best_candidate = best_record["candidate"]
+    best_model = best_record["model"]
+    best_preprocessor = best_record["preprocessor"]
+    best_score = float(best_record["mean"])
+    best_std = best_record["std"]
+    best_train_score = best_record["train_score"]
+    best_val_score = best_record["val_score"]
+    best_fold_scores = best_record["scores"]
 
     evaluation = EvaluationResult(
         score_source=selection.source,
         metric=metric,
         direction=direction,  # type: ignore[arg-type]
-        value=float(best_score),
-        std=best_std,
-        train_score=best_train_score,
-        val_score=best_val_score,
-        fold_scores=best_fold_scores,
+        value=best_score,
+        std=best_std if isinstance(best_std, float) else None,
+        train_score=best_train_score if isinstance(best_train_score, float) else None,
+        val_score=best_val_score if isinstance(best_val_score, float) else None,
+        fold_scores=best_fold_scores if isinstance(best_fold_scores, list) else None,
     )
-    if best_candidate["name"] == "torch_mlp_mps":
-        return evaluation, best_candidate, None, best_preprocessor
     return evaluation, best_candidate, best_model, best_preprocessor
+
+
+def _candidate_family(candidate: dict[str, object]) -> str:
+    if candidate.get("framework") == "torch":
+        return "torch"
+    if candidate.get("name") in {"logreg", "ridge"}:
+        return "linear"
+    return "other"
+
+
+def _best_by_metric(records: list[dict[str, object]], direction: str) -> dict[str, object]:
+    best: dict[str, object] | None = None
+    for record in records:
+        score = float(record["mean"])
+        if best is None or _is_better(score, float(best["mean"]), direction):
+            best = record
+    if best is None:
+        raise RuntimeError("No candidates to select.")
+    return best
+
+
+def _linear_clearly_better(linear: dict[str, object], torch: dict[str, object], direction: str) -> bool:
+    linear_score = float(linear["mean"])
+    torch_score = float(torch["mean"])
+    if direction == "minimize":
+        delta = torch_score - linear_score
+    else:
+        delta = linear_score - torch_score
+    linear_std = float(linear["std"]) if isinstance(linear.get("std"), (int, float)) else 0.0
+    torch_std = float(torch["std"]) if isinstance(torch.get("std"), (int, float)) else 0.0
+    margin = max(linear_std, torch_std)
+    return delta > margin
+
+
+def _select_best_candidate(records: list[dict[str, object]], direction: str) -> dict[str, object]:
+    primary = [r for r in records if _candidate_family(r["candidate"]) in {"torch", "linear"}]
+    if primary:
+        best_primary = _best_by_metric(primary, direction)
+        if _candidate_family(best_primary["candidate"]) == "linear":
+            torch_records = [r for r in primary if _candidate_family(r["candidate"]) == "torch"]
+            if torch_records:
+                best_torch = _best_by_metric(torch_records, direction)
+                if not _linear_clearly_better(best_primary, best_torch, direction):
+                    return best_torch
+        return best_primary
+    return _best_by_metric(records, direction)
 
 
 def _evaluate_sklearn_or_catboost(
@@ -576,24 +677,64 @@ def _evaluate_torch(
     direction: str,
     label_encoder: LabelEncoder | None,
     target_transform: TargetTransform | None,
+    preprocessor: ColumnTransformer | None,
+    device: str,
 ) -> tuple[list[float], float | None, float | None]:
     if selection.source == "test":
-        x_train, y_train, x_eval, y_eval = _prepare_test_split(data, selection, None)
-        preds_eval, train_score = _fit_torch_and_score(
-            x_train, y_train, x_train, y_train, metric, data, label_encoder, target_transform
+        x_train, y_train, x_eval, y_eval = _prepare_test_split(data, selection, preprocessor)
+        x_train_proc, x_eval_proc = _apply_preprocessor(preprocessor, x_train, x_eval)
+        _, train_score = _fit_torch_and_score(
+            x_train_proc,
+            y_train,
+            x_train_proc,
+            y_train,
+            metric,
+            data,
+            label_encoder,
+            target_transform,
+            seed=seed,
+            device=device,
         )
-        preds_eval, eval_score = _fit_torch_and_score(
-            x_train, y_train, x_eval, y_eval, metric, data, label_encoder, target_transform
+        _, eval_score = _fit_torch_and_score(
+            x_train_proc,
+            y_train,
+            x_eval_proc,
+            y_eval,
+            metric,
+            data,
+            label_encoder,
+            target_transform,
+            seed=seed,
+            device=device,
         )
         return [eval_score], train_score, eval_score
 
     if selection.source == "holdout":
         x_train, x_val, y_train, y_val = _holdout_split(data, seed, holdout_frac)
-        preds_train, train_score = _fit_torch_and_score(
-            x_train, y_train, x_train, y_train, metric, data, label_encoder, target_transform
+        x_train_proc, x_val_proc = _apply_preprocessor(preprocessor, x_train, x_val)
+        _, train_score = _fit_torch_and_score(
+            x_train_proc,
+            y_train,
+            x_train_proc,
+            y_train,
+            metric,
+            data,
+            label_encoder,
+            target_transform,
+            seed=seed,
+            device=device,
         )
-        preds_val, val_score = _fit_torch_and_score(
-            x_train, y_train, x_val, y_val, metric, data, label_encoder, target_transform
+        _, val_score = _fit_torch_and_score(
+            x_train_proc,
+            y_train,
+            x_val_proc,
+            y_val,
+            metric,
+            data,
+            label_encoder,
+            target_transform,
+            seed=seed,
+            device=device,
         )
         return [val_score], train_score, val_score
 
@@ -604,7 +745,19 @@ def _evaluate_torch(
         x_val = data.train.iloc[val_idx][data.feature_columns]
         y_tr = data.train.iloc[train_idx][data.target_column]
         y_val = data.train.iloc[val_idx][data.target_column]
-        _, fold_score = _fit_torch_and_score(x_tr, y_tr, x_val, y_val, metric, data, label_encoder, target_transform)
+        x_tr_proc, x_val_proc = _apply_preprocessor(preprocessor, x_tr, x_val)
+        _, fold_score = _fit_torch_and_score(
+            x_tr_proc,
+            y_tr,
+            x_val_proc,
+            y_val,
+            metric,
+            data,
+            label_encoder,
+            target_transform,
+            seed=seed,
+            device=device,
+        )
         scores.append(fold_score)
     return scores, None, float(np.mean(scores)) if scores else None
 
@@ -673,33 +826,41 @@ def _fit_torch_and_score(
     data,
     label_encoder,
     target_transform: TargetTransform | None,
+    *,
+    seed: int,
+    device: str,
 ):
     import torch
     import torch.nn as nn
     from torch.utils.data import DataLoader, TensorDataset
 
-    x_train_proc = _dense_array(x_train)
-    x_eval_proc = _dense_array(x_eval)
+    torch.manual_seed(seed)
+    resolved_device = _resolve_torch_device(device)
+    if resolved_device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    x_train_proc = np.asarray(_dense_array(x_train), dtype=np.float32)
+    x_eval_proc = np.asarray(_dense_array(x_eval), dtype=np.float32)
     y_train_enc = _encode_target(data, y_train, label_encoder, target_transform=target_transform, apply_transform=True)
     y_eval_enc = _encode_target(data, y_eval, label_encoder, target_transform=None, apply_transform=False)
 
-    device = torch.device("mps")
-    x_tensor = torch.tensor(x_train_proc, dtype=torch.float32).to(device)
-    y_tensor = torch.tensor(y_train_enc).to(device)
+    x_tensor = torch.tensor(x_train_proc, dtype=torch.float32).to(resolved_device)
+    y_tensor = torch.tensor(y_train_enc).to(resolved_device)
     dataset = TensorDataset(x_tensor, y_tensor)
     loader = DataLoader(dataset, batch_size=256, shuffle=True)
 
     input_dim = x_tensor.shape[1]
-    output_dim = 1 if data.task == "regression" else int(np.unique(y_train_enc).size)
+    num_classes = int(np.unique(y_train_enc).size) if data.task == "classification" else 0
+    output_dim = 1 if data.task == "regression" or num_classes <= 2 else num_classes
     model = nn.Sequential(
         nn.Linear(input_dim, 128),
         nn.ReLU(),
         nn.Dropout(0.2),
         nn.Linear(128, output_dim),
-    ).to(device)
+    ).to(resolved_device)
 
     if data.task == "classification":
-        loss_fn = nn.CrossEntropyLoss() if output_dim > 2 else nn.BCEWithLogitsLoss()
+        loss_fn = nn.CrossEntropyLoss() if num_classes > 2 else nn.BCEWithLogitsLoss()
     else:
         loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -716,7 +877,7 @@ def _fit_torch_and_score(
 
     model.eval()
     with torch.no_grad():
-        eval_tensor = torch.tensor(x_eval_proc, dtype=torch.float32).to(device)
+        eval_tensor = torch.tensor(x_eval_proc, dtype=torch.float32).to(resolved_device)
         outputs = model(eval_tensor).cpu().numpy()
 
     preds = _torch_outputs_to_preds(outputs, data, metric, prediction_kind=None)
@@ -862,6 +1023,8 @@ def _predict_with_model(
     prediction_kind: str,
     label_encoder: LabelEncoder | None,
     target_transform: TargetTransform | None,
+    seed: int,
+    torch_device: str | None,
 ):
     x_train = data.train[data.feature_columns]
     x_test = data.test[data.feature_columns]
@@ -873,7 +1036,16 @@ def _predict_with_model(
     x_train = _prepare_catboost_frame(model, x_train)
     x_test = _prepare_catboost_frame(model, x_test)
     if model is None:
-        return _predict_torch_full(data, metric, x_train, x_test, label_encoder, target_transform)
+        return _predict_torch_full(
+            data,
+            metric,
+            x_train,
+            x_test,
+            label_encoder,
+            target_transform,
+            seed=seed,
+            device=torch_device or "cpu",
+        )
     y_train_enc = _encode_target(
         data,
         data.train[data.target_column],
@@ -899,14 +1071,21 @@ def _predict_torch_full(
     x_test,
     label_encoder: LabelEncoder | None,
     target_transform: TargetTransform | None,
+    *,
+    seed: int,
+    device: str,
 ):
     import torch
     import torch.nn as nn
     from torch.utils.data import DataLoader, TensorDataset
 
-    device = torch.device("mps")
-    x_train = _dense_array(x_train)
-    x_test = _dense_array(x_test)
+    torch.manual_seed(seed)
+    resolved_device = _resolve_torch_device(device)
+    if resolved_device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    x_train = np.asarray(_dense_array(x_train), dtype=np.float32)
+    x_test = np.asarray(_dense_array(x_test), dtype=np.float32)
     y_train_enc = _encode_target(
         data,
         data.train[data.target_column],
@@ -915,22 +1094,23 @@ def _predict_torch_full(
         apply_transform=True,
     )
 
-    x_tensor = torch.tensor(x_train, dtype=torch.float32).to(device)
-    y_tensor = torch.tensor(y_train_enc).to(device)
+    x_tensor = torch.tensor(x_train, dtype=torch.float32).to(resolved_device)
+    y_tensor = torch.tensor(y_train_enc).to(resolved_device)
     dataset = TensorDataset(x_tensor, y_tensor)
     loader = DataLoader(dataset, batch_size=256, shuffle=True)
 
     input_dim = x_tensor.shape[1]
-    output_dim = 1 if data.task == "regression" else int(np.unique(y_train_enc).size)
+    num_classes = int(np.unique(y_train_enc).size) if data.task == "classification" else 0
+    output_dim = 1 if data.task == "regression" or num_classes <= 2 else num_classes
     model = nn.Sequential(
         nn.Linear(input_dim, 128),
         nn.ReLU(),
         nn.Dropout(0.2),
         nn.Linear(128, output_dim),
-    ).to(device)
+    ).to(resolved_device)
 
     if data.task == "classification":
-        loss_fn = nn.CrossEntropyLoss() if output_dim > 2 else nn.BCEWithLogitsLoss()
+        loss_fn = nn.CrossEntropyLoss() if num_classes > 2 else nn.BCEWithLogitsLoss()
     else:
         loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -947,7 +1127,7 @@ def _predict_torch_full(
 
     model.eval()
     with torch.no_grad():
-        x_test_tensor = torch.tensor(x_test, dtype=torch.float32).to(device)
+        x_test_tensor = torch.tensor(x_test, dtype=torch.float32).to(resolved_device)
         outputs = model(x_test_tensor).cpu().numpy()
 
     preds = _torch_outputs_to_preds(outputs, data, metric, prediction_kind=data.prediction_kind)

@@ -10,8 +10,11 @@ Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **v
 uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
   --agent codex \
   --compute kaggle_gpu \
+  --rules-file /path/to/rules.md \
   --submit
 ```
+
+Use `--rules-file` (md/txt/html) to supply competition rules; scraping is disabled.
 
 ## How It Works
 
@@ -23,7 +26,7 @@ When autopilot starts, it:
 3. Queries the Knowledge Base for similar competitions
 4. Calls the agent (Codex) to:
    - Generate `plan.json` with target metric/score/direction
-   - Implement a baseline solution in `kagglebot/solver/`
+   - Implement a baseline solution (`kagglebot/solver/` for local, `artifacts/<slug>/kernel_overrides.py` for kaggle_gpu/kaggle_tpu)
 5. Runs initial verification (tests)
 
 **Output**: `plan.json` defines your success criteria.
@@ -47,7 +50,7 @@ Example `plan.json`:
 For each iteration:
 
 1. **Verify**: Run `pytest` to ensure code quality
-2. **Train**: Execute `kagglebot/solver/solution.py` with the specified compute target
+2. **Train**: Run local solver or Kaggle kernel (kaggle_gpu/kaggle_tpu uses `kernel_overrides.py`)
 3. **Evaluate**: Compute offline score using the evaluation strategy (holdout/CV/test)
 4. **Check Top1**: Compare offline score to public Top1 (direction-aware)
 5. **Diagnose**: Generate `diagnostics.md` with actionable improvement hints
@@ -183,6 +186,7 @@ artifacts/<slug>/
     sample_submission.csv        # Required submission format
     top1_public.json             # Public leaderboard leader (context only)
     rules_url.txt                # Competition rules URL
+    rules.md                     # Rules markdown (from --rules-file)
 
   prompts/
     codex_plan_and_baseline.md   # Baseline generation prompt
@@ -202,6 +206,8 @@ artifacts/<slug>/
 
   submissions/
     ledger.jsonl                 # Deduplication log (append-only)
+
+  kernel_overrides.py            # Kaggle kernel override hooks
 ```
 
 ### Key Files

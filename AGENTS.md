@@ -14,7 +14,6 @@ Build a Kaggle competition automation CLI:
 
 ## Hard constraints (must follow)
 - Do NOT automate accepting rules / joining competitions in the browser.
-- Do NOT scrape Kaggle pages.
 - Do NOT bypass limits, spam submissions, or encourage multi-account behavior.
 - Do NOT write or commit secrets:
   - API credentials, tokens

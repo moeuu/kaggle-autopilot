@@ -63,6 +63,10 @@ class CompetitionPaths:
         return self.context_dir / "rules.html"
 
     @property
+    def rules_md_path(self) -> Path:
+        return self.context_dir / "rules.md"
+
+    @property
     def knowledge_hints_path(self) -> Path:
         return self.context_dir / "knowledge_hints.txt"
 
@@ -109,6 +113,10 @@ class CompetitionPaths:
     @property
     def kernels_dir(self) -> Path:
         return self.base_dir / "kernels"
+
+    @property
+    def kernel_overrides_path(self) -> Path:
+        return self.base_dir / "kernel_overrides.py"
 
     @property
     def submission_ledger_path(self) -> Path:

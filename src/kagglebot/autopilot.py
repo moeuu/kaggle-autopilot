@@ -291,6 +291,9 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 run_id=run_id,
                 iteration=iteration,
                 iter_dir=iter_dir,
+                evaluation=evaluation,
+                top1_info=top1_info,
+                target_score=target_score,
                 delta_offline=delta_offline,
             )
     except KeyboardInterrupt:
@@ -317,6 +320,8 @@ def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
 
 
 def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
+    if config.agent == "codex" and config.compute.startswith("kaggle_"):
+        return True
     target_metric = config.target_metric or plan.target_metric
     target_score = config.target_score if config.target_score is not None else plan.target_score
     target_direction = config.target_direction or plan.target_direction
@@ -342,9 +347,9 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     seed = choose(config.seed, plan.seed, 42)
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
-    internet = choose(config.internet, plan.internet, "auto")
+    internet = choose(config.internet, plan.internet, "on")
     if internet in (None, "auto"):
-        internet = "off"
+        internet = "on"
     max_iterations = choose(config.max_iterations, plan.max_iterations, 5)
     max_total_min = choose(config.max_total_min, plan.max_total_min, 240)
     patience = choose(config.patience, plan.patience, 2)
@@ -381,7 +386,7 @@ def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
         seed=resolved.get("seed"),  # type: ignore[arg-type]
         time_budget_min=resolved.get("time_budget_min"),  # type: ignore[arg-type]
         kernel_name=resolved.get("kernel_name"),  # type: ignore[arg-type]
-        internet=str(resolved.get("internet") or "auto"),
+        internet=str(resolved.get("internet") or "on"),
         max_iterations=int(resolved.get("max_iterations") or 5),
         max_total_min=int(resolved.get("max_total_min") or 240),
         patience=int(resolved.get("patience") or 2),
@@ -641,6 +646,9 @@ def _run_improvement(
     run_id: str,
     iteration: int,
     iter_dir: Path,
+    evaluation: EvaluationResult,
+    top1_info: dict[str, object],
+    target_score: float,
     delta_offline: float | None,
 ) -> None:
     prompt_template = config.paths.codex_improve_template.read_text(encoding="utf-8")
@@ -658,6 +666,18 @@ def _run_improvement(
         compute=config.compute,
         accelerator=config.accelerator,
         knowledge_hints=str(config.paths.knowledge_hints_path),
+        metric=evaluation.metric,
+        direction=evaluation.direction,
+        current_score=f"{evaluation.value:.6f}",
+        target_score=f"{target_score:.6f}",
+        top1_score=str(top1_info.get("score") or "unavailable"),
+        top1_source=str(top1_info.get("source") or "unknown"),
+        rules_url=str(config.paths.rules_url_path),
+        rules_md=str(config.paths.rules_md_path),
+        rules_html=str(config.paths.rules_html_path),
+        dataset_profile=str(config.paths.dataset_profile_path),
+        sample_submission=str(config.paths.sample_submission_path),
+        kernel_overrides=str(config.paths.kernel_overrides_path),
     )
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)

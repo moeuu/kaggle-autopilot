@@ -67,7 +67,7 @@ def bootstrap(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
     download: bool = typer.Option(False, "--download/--no-download", help="Download competition data."),
-    rules_source: str = typer.Option("fetch", "--rules-source", help="Rules capture source: none, url, fetch, file."),
+    rules_source: str = typer.Option("none", "--rules-source", help="Rules capture source: none, url, file."),
     rules_file: Path | None = typer.Option(None, "--rules-file", help="Rules file path when rules-source=file."),
     quiet: bool = typer.Option(True, "--quiet/--no-quiet", help="Use --quiet for Kaggle CLI download."),
 ) -> None:
@@ -268,6 +268,7 @@ def autopilot(
     agent: str = typer.Option(..., "--agent", help="Agent to run (codex or claude)."),
     compute: Compute = typer.Option(..., "--compute", help="Compute target."),
     submit: bool = typer.Option(False, "--submit/--no-submit", help="Submit when target met."),
+    rules_file: Path | None = typer.Option(None, "--rules-file", help="Path to rules file (md/txt/html)."),
     target_metric: str | None = typer.Option(None, "--target-metric", help="Target metric override."),
     target_score: float | None = typer.Option(None, "--target-score", help="Target score override."),
     target_direction: str | None = typer.Option(None, "--target-direction", help="minimize|maximize|auto"),
@@ -282,7 +283,7 @@ def autopilot(
     accelerator: str = typer.Option("auto", "--accelerator", help="auto|cpu|gpu|tpu"),
     kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username."),
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
-    internet: str | None = typer.Option(None, "--internet", help="auto|off|on"),
+    internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
     time_budget_min: int | None = typer.Option(None, "--time-budget-min", help="Time budget in minutes."),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
@@ -300,12 +301,14 @@ def autopilot(
     else:
         print(f"[cyan]downloading data[/cyan]: {paths.data_dir}")
 
+    rules_source = "file" if rules_file else "none"
     bootstrap_competition(
         slug=slug,
         competition_url=competition if "kaggle.com" in competition else None,
         paths=paths,
         knowledge_paths=knowledge_paths,
-        rules_source="fetch",
+        rules_source=rules_source,
+        rules_file=rules_file,
         download=not cfg.dry_run,
         force=False,
         dry_run=cfg.dry_run,

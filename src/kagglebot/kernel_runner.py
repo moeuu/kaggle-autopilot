@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +101,7 @@ def run_kernel(
         run_id=run_id,
         iteration=iteration,
     )
+    _copy_kernel_overrides(kernel_dir=kernel_dir, base_dir=base_dir, slug=slug)
 
     validate_kernel_package(kernel_dir)
 
@@ -201,6 +203,12 @@ def _write_kernel_script(
     (kernel_dir / "kernel.py").write_text(script, encoding="utf-8")
 
 
+def _copy_kernel_overrides(*, kernel_dir: Path, base_dir: Path, slug: str) -> None:
+    overrides_path = base_dir / slug / "kernel_overrides.py"
+    if overrides_path.exists():
+        shutil.copy2(overrides_path, kernel_dir / "kernel_overrides.py")
+
+
 def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None) -> None:
     deadline = None
     if timeout_minutes is not None:
@@ -264,6 +272,16 @@ from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, roc_au
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
+
+try:
+    import torch
+    from torch import nn
+    from torch.utils.data import DataLoader, TensorDataset
+except Exception:
+    torch = None
+    nn = None
+    DataLoader = None
+    TensorDataset = None
 
 CONFIG = {{
     "slug": "{slug}",
@@ -348,6 +366,103 @@ def compute_metric(metric: str, y_true, y_pred) -> float:
     if metric == "accuracy":
         return float(accuracy_score(y_true, y_pred))
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def _as_numpy(x):
+    if hasattr(x, "toarray"):
+        x = x.toarray()
+    return np.asarray(x)
+
+
+class TorchMLP:
+    def __init__(self, task: str, hidden: int = 128, epochs: int = 20, lr: float = 1e-3, batch_size: int = 256):
+        self.task = task
+        self.hidden = hidden
+        self.epochs = epochs
+        self.lr = lr
+        self.batch_size = batch_size
+        self.model = None
+        self.num_classes = None
+        self.device = None
+
+    def _init_model(self, input_dim: int, num_classes: int):
+        if torch is None or nn is None:
+            raise RuntimeError("torch is not available")
+        self.num_classes = num_classes
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        output_dim = 1 if (self.task == "regression" or num_classes <= 2) else num_classes
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, self.hidden),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(self.hidden, output_dim),
+        ).to(self.device)
+
+    def fit(self, x, y):
+        if torch is None or DataLoader is None or TensorDataset is None:
+            raise RuntimeError("torch is not available")
+        x_np = _as_numpy(x).astype(np.float32)
+        y_np = np.asarray(y)
+        num_classes = int(np.unique(y_np).size) if self.task != "regression" else 1
+        if self.model is None:
+            self._init_model(x_np.shape[1], num_classes)
+        torch.manual_seed(CONFIG["seed"])
+        if self.task == "regression":
+            y_tensor = torch.tensor(y_np.astype(np.float32).reshape(-1, 1))
+            loss_fn = nn.MSELoss()
+        elif num_classes <= 2:
+            y_tensor = torch.tensor(y_np.astype(np.float32).reshape(-1, 1))
+            loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            y_tensor = torch.tensor(y_np.astype(np.int64))
+            loss_fn = nn.CrossEntropyLoss()
+        dataset = TensorDataset(torch.tensor(x_np), y_tensor)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.model.train()
+        for _ in range(self.epochs):
+            for batch_x, batch_y in loader:
+                batch_x = batch_x.to(self.device)
+                batch_y = batch_y.to(self.device)
+                optimizer.zero_grad()
+                logits = self.model(batch_x)
+                loss = loss_fn(logits, batch_y)
+                loss.backward()
+                optimizer.step()
+        return self
+
+    def predict_proba(self, x):
+        if torch is None:
+            raise RuntimeError("torch is not available")
+        x_np = _as_numpy(x).astype(np.float32)
+        self.model.eval()
+        with torch.no_grad():
+            logits = self.model(torch.tensor(x_np).to(self.device))
+            if self.task == "regression":
+                return logits.cpu().numpy().reshape(-1)
+            if self.num_classes is None or self.num_classes <= 2:
+                probs = torch.sigmoid(logits).cpu().numpy().reshape(-1)
+                return probs
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
+            return probs
+
+    def predict(self, x):
+        if self.task == "regression":
+            return self.predict_proba(x)
+        probs = self.predict_proba(x)
+        if self.num_classes is None or self.num_classes <= 2:
+            return (probs >= 0.5).astype(int)
+        return probs.argmax(axis=1)
+
+
+def feature_engineering(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    id_col: str,
+    target_col: str,
+    features: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    return train, test, features
 
 
 def build_preprocessor(features: list[str], train: pd.DataFrame) -> ColumnTransformer:
@@ -448,6 +563,8 @@ def evaluate_cv(model, pre, x, y, task: str, metric: str, prediction_kind: str):
 
 
 def build_model(task: str):
+    if torch is not None:
+        return TorchMLP(task)
     if CONFIG["accelerator"] == "gpu":
         try:
             import xgboost as xgb
@@ -493,6 +610,26 @@ def train_tpu(x_train, y_train, x_eval, task: str):
     return outputs
 
 
+def apply_overrides() -> None:
+    try:
+        import kernel_overrides as _overrides
+    except Exception:
+        return
+    for name in (
+        "feature_engineering",
+        "build_preprocessor",
+        "build_model",
+        "predict_for_metric",
+        "predict_for_submission",
+        "train_tpu",
+    ):
+        if hasattr(_overrides, name):
+            globals()[name] = getattr(_overrides, name)
+
+
+apply_overrides()
+
+
 def main() -> None:
     train_path, test_path, sample_path = pick_files(find_csvs(INPUT_ROOT))
     train = pd.read_csv(train_path)
@@ -500,6 +637,7 @@ def main() -> None:
     sample = pd.read_csv(sample_path)
 
     id_col, target_col, features = infer_target(train, test, sample)
+    train, test, features = feature_engineering(train, test, id_col, target_col, features)
     task = infer_task(train[target_col])
     prediction_kind = "probability" if sample[target_col].dtype.kind in {{"f", "c"}} else "class"
 
@@ -507,7 +645,7 @@ def main() -> None:
     y = train[target_col]
     if task == "classification":
         label_encoder = LabelEncoder()
-        y = label_encoder.fit_transform(y)
+        y = pd.Series(label_encoder.fit_transform(y), index=train.index, name=target_col)
 
     x = train[features]
     pre = build_preprocessor(features, train)

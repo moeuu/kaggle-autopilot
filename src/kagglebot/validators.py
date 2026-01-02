@@ -72,7 +72,7 @@ def validate_kernel_package(package_dir: Path) -> None:
         except json.JSONDecodeError:
             code_file = None
 
-    for candidate in ("main.py", "kernel.py", code_file):
+    for candidate in ("main.py", "kernel.py", "kernel_overrides.py", code_file):
         if not candidate:
             continue
         path = package_dir / candidate
