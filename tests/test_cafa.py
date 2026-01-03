@@ -4,7 +4,9 @@ from pathlib import Path
 
 import networkx as nx
 import numpy as np
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from kagglebot.cafa.data_loader import create_multilabel_targets, parse_fasta
 from kagglebot.cafa.inference import propagate_go_predictions, run_inference

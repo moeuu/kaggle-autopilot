@@ -322,13 +322,13 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     assert (iter_dir / "agent" / "prompt.md").exists()
 
 
-def test_autopilot_runs_strategy_pipeline(monkeypatch, tmp_path: Path) -> None:
+def test_autopilot_runs_agent_pipeline(monkeypatch, tmp_path: Path) -> None:
     called = {"run": False}
 
     def fake_pipeline(*args, **kwargs):  # noqa: ARG001
         called["run"] = True
 
-    monkeypatch.setattr("kagglebot.autopilot.run_strategy_pipeline", fake_pipeline)
+    monkeypatch.setattr("kagglebot.autopilot.run_agent_pipeline", fake_pipeline)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path)

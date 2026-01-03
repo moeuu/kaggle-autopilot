@@ -82,18 +82,12 @@ def run_kernel(
 
     kernel_slug = _resolve_kernel_slug(kernel_name, slug, run_id, iteration)
     kernel_id = f"{kaggle_username}/{kernel_slug}"
-    _write_kernel_metadata(
-        kernel_dir=kernel_dir,
-        kernel_id=kernel_id,
-        title=kernel_slug,
-        code_file="kernel.py",
-        accelerator=accelerator,
-        enable_internet=enable_internet,
-        competition_slug=slug,
-    )
-    custom_kernel_path = base_dir / slug / "kernel.py"
-    if custom_kernel_path.exists():
-        shutil.copy2(custom_kernel_path, kernel_dir / "kernel.py")
+    custom_kernel_dir = base_dir / slug / "kernel"
+    legacy_kernel_path = base_dir / slug / "kernel.py"
+    if custom_kernel_dir.exists():
+        _copy_kernel_sources(custom_kernel_dir, kernel_dir)
+    elif legacy_kernel_path.exists():
+        shutil.copy2(legacy_kernel_path, kernel_dir / "kernel.py")
     else:
         _write_kernel_script(
             kernel_dir=kernel_dir,
@@ -108,6 +102,15 @@ def run_kernel(
             run_id=run_id,
             iteration=iteration,
         )
+    _write_kernel_metadata(
+        kernel_dir=kernel_dir,
+        kernel_id=kernel_id,
+        title=kernel_slug,
+        code_file="kernel.py",
+        accelerator=accelerator,
+        enable_internet=enable_internet,
+        competition_slug=slug,
+    )
     validate_kernel_package(kernel_dir)
 
     if dry_run:
@@ -206,6 +209,12 @@ def _write_kernel_script(
         iteration=iteration,
     )
     (kernel_dir / "kernel.py").write_text(script, encoding="utf-8")
+
+
+def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
+    for path in source_dir.iterdir():
+        if path.is_file():
+            shutil.copy2(path, dest_dir / path.name)
 
 
 LOG_POLL_INTERVAL = 15.0

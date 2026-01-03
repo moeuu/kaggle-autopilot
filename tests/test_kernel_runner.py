@@ -17,7 +17,7 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
     kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
-    kernel_path = tmp_path / "demo" / "kernel.py"
+    kernel_path = tmp_path / "demo" / "kernel" / "kernel.py"
     kernel_path.parent.mkdir(parents=True, exist_ok=True)
     kernel_path.write_text("# custom\n", encoding="utf-8")
     run_kernel(
@@ -82,7 +82,7 @@ def test_kernel_metadata_tpu(tmp_path: Path) -> None:
 
 
 def test_run_kernel_uses_custom_kernel(tmp_path: Path) -> None:
-    custom_kernel = tmp_path / "demo" / "kernel.py"
+    custom_kernel = tmp_path / "demo" / "kernel" / "kernel.py"
     custom_kernel.parent.mkdir(parents=True, exist_ok=True)
     custom_kernel.write_text("print('custom')\n", encoding="utf-8")
     run_kernel(

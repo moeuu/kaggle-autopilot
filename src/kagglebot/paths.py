@@ -131,6 +131,10 @@ class CompetitionPaths:
         return self.base_dir / "kernels"
 
     @property
+    def kernel_source_dir(self) -> Path:
+        return self.base_dir / "kernel"
+
+    @property
     def submission_ledger_path(self) -> Path:
         return self.submissions_dir / "ledger.jsonl"
 

@@ -18,7 +18,7 @@ from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
 from kagglebot.knowledge import record_improvement, record_iteration, record_run
-from kagglebot.orchestrator.strategy_loop import StrategyConfig, run_strategy_pipeline
+from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig, run_agent_pipeline
 from kagglebot.solver.initial_model import train_evaluate_and_predict
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.types import PlanConfig
@@ -477,7 +477,7 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
     print("[cyan]plan[/cyan]: codex -> claude -> codex")
-    strategy_config = StrategyConfig(
+    pipeline_config = AgentPipelineConfig(
         slug=config.slug,
         competition_url=config.competition_url,
         compute=config.compute,
@@ -487,7 +487,7 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         dry_run=config.dry_run,
         repo_root=config.paths.repo_root,
     )
-    run_strategy_pipeline(paths=config.paths, config=strategy_config)
+    run_agent_pipeline(paths=config.paths, config=pipeline_config)
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
 

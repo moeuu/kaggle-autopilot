@@ -39,22 +39,18 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
 
     args = ["codex", "exec"]
     supported = _supported_flags()
-    if "--full-auto" in supported:
-        args.append("--full-auto")
-    elif "-a" in supported:
+    if "-a" in supported:
         args += ["-a", "never"]
-    if "--sandbox" in supported:
+    elif "--full-auto" in supported:
+        args.append("--full-auto")
+    if "--sandbox" in supported or "-s" in supported:
         args += ["--sandbox", "workspace-write"]
-    if "--search" in supported:
-        args.append("--search")
     args += [
         "--json",
         "--output-last-message",
         str(last_message_path),
         "-",
     ]
-    if "--search" in args:
-        print("codex: search enabled")
     stop_event = threading.Event()
     start_time = time.monotonic()
     heartbeat = threading.Thread(target=_heartbeat, args=(stop_event, start_time), daemon=True)
