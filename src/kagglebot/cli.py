@@ -19,7 +19,7 @@ from kagglebot.kaggle_api import check_rules_accepted, submit_competition
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
-from kagglebot.solver.baseline import train_evaluate_and_predict
+from kagglebot.solver.initial_model import train_evaluate_and_predict
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.validation import ensure_not_duplicate_submission, ensure_submission_rate_limit, validate_submission
 
@@ -116,7 +116,7 @@ def implement(
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     agent_dir = run_dir / agent
-    prompt_path = paths.codex_plan_and_baseline_prompt
+    prompt_path = paths.codex_plan_and_implement_prompt
 
     if agent != "codex":
         print("[yellow]agent override[/yellow]: using codex exec per safety policy.")

@@ -1,4 +1,4 @@
-# Kagglebot Codex: Plan + Baseline Implementation
+# Kagglebot Codex: Plan + Initial Model Implementation
 
 ## Competition Overview
 
@@ -31,6 +31,7 @@
 - `{rules_html_path}` - Rules HTML (if present)
 - `artifacts/{slug}/context/overview.md` - Competition overview (if present)
 - `artifacts/{slug}/context/data.md` - Data description (if present)
+- `{submission_format_path}` - Submission format details (if present)
 {kb_hints_section}
 
 ## Knowledge Base: Similar Competitions
@@ -69,9 +70,16 @@ Update `{plan_path}` with the following fields:
 - **score_source**: Use `holdout` by default; only use `cv` if you need robust estimates (small datasets, high variance)
 - **submit_policy**: Keep as `on_target_only` (only submit when target met OR at final iteration)
 
-### Step 2: Implement Baseline Solution
+### Step 2: Implement Strong Initial Solution
 
-Create a robust baseline in `kagglebot/solver/solution.py` that:
+Implement a strong initial model based on overview/data/rules + web research.
+
+**Where to implement**:
+- `local_cpu` / `local_gpu`: update `kagglebot/solver/initial_model.py` (use the same best‑model flow).
+- `kaggle_gpu` / `kaggle_tpu`: create `artifacts/{slug}/kernel.py` from scratch.
+- If the data is non‑tabular (images/text/FASTA/etc.), create `artifacts/{slug}/kernel.py` with a `custom_main()` entrypoint.
+
+Your implementation should:
 
 #### 2a) Data Loading and Preprocessing
 
@@ -108,20 +116,18 @@ X_train, X_val, y_train, y_val = train_test_split(
 
 #### 2b) Model Selection and Training
 
-**For Regression** ({task_type} == "regression"):
-- Start with Ridge or Random Forest
-- If dataset is large (>10K rows) and you have GPU: Try XGBoost or LightGBM
-- Hyperparameters: Use conservative defaults (avoid overfitting on small data)
+Use web search to identify the strongest known approach for this competition and task.
+Prefer GPU-accelerated supervised models when available.
 
-**For Binary Classification** ({task_type} == "binary"):
-- Start with Logistic Regression or Random Forest
-- If dataset is large: Try XGBoost or LightGBM with `objective='binary:logistic'`
-- Handle class imbalance: Use `class_weight='balanced'` or SMOTE
+**Recommended families** (choose based on research + data traits):
+- Gradient-boosted trees with native categorical handling (CatBoost) for mixed tabular data
+- GPU-accelerated GBDT (XGBoost / LightGBM) for large/tabular datasets
+- Deep models only if the competition trend or data type supports it
 
-**For Multiclass Classification** ({task_type} == "multiclass"):
-- Start with Logistic Regression (multi_class='multinomial') or Random Forest
-- If dataset is large: Try XGBoost with `objective='multi:softprob'`
-- Stratify splits to preserve class distribution
+**Classification/Regression notes**:
+- Pick loss/metric consistent with rules and sample_submission
+- Address class imbalance (class weights / focal loss) if indicated
+- Set enough iterations/trees to fully use GPU (avoid tiny training jobs)
 
 **GPU/TPU Utilization**:
 - For `local_gpu` or `kaggle_gpu`: Use XGBoost/LightGBM with `tree_method='gpu_hist'`
@@ -217,7 +223,7 @@ submission.to_csv("{submission_path}", index=False)
 
 **Quality Checklist**:
 - [ ] plan.json created with all required fields and realistic target_score
-- [ ] Baseline solution runs end-to-end without errors
+- [ ] Initial model runs end-to-end without errors
 - [ ] submission.csv format matches sample_submission.csv exactly (columns, rows, types)
 - [ ] Offline evaluation produces a numeric score in metrics.json
 - [ ] GPU/TPU utilization >80% (GPU) or >70% (TPU MXU) during training
@@ -232,7 +238,7 @@ Before finishing, verify:
 # Run tests (must pass)
 uv run pytest -q
 
-# Train and evaluate baseline
+# Train and evaluate initial model
 uv run kagglebot train {slug} --compute {compute_mode}
 
 # Check metrics
@@ -252,7 +258,7 @@ diff <(head -1 {sample_submission_path}) <(head -1 {submission_path})
 
 ## Acceptance Criteria
 
-Your baseline will be accepted if:
+Your initial model will be accepted if:
 
 1. ✅ **Tests pass**: `uv run pytest -q` returns 0 exit code
 2. ✅ **Offline score computed**: metrics.json has valid `value` field
@@ -292,4 +298,4 @@ If any criterion fails, the autopilot will retry or abort.
 - If submission fails validation: Check column names and row count
 - If tests fail: Read error messages carefully
 
-Good luck with the baseline! 🚀
+Good luck with the initial model! 🚀

@@ -6,6 +6,8 @@
 
 **Status**: Production-ready with autopilot feature
 
+**Note**: Git integration has been removed from the implementation; any references to git operations are historical.
+
 ---
 
 ## Table of Contents
@@ -52,7 +54,7 @@ kaggle-autopilot/
 │   ├── agents/              # Agent runners (codex, claude)
 │   ├── analyzer/            # Data profiling
 │   ├── runners/             # Training runners (local, kaggle)
-│   ├── solver/              # ML baseline implementations
+│   ├── solver/              # ML initial model implementations
 │   ├── training/            # Training utilities
 │   ├── autopilot.py         # Autopilot core logic
 │   ├── autopilot_runner.py  # Autopilot main loop
@@ -60,7 +62,6 @@ kaggle-autopilot/
 │   ├── cli.py               # Typer CLI commands
 │   ├── compute.py           # Compute mode selection
 │   ├── exceptions.py        # Custom exceptions
-│   ├── git_ops.py           # Git operations
 │   ├── hashing.py           # SHA256 hashing
 │   ├── history.py           # Run/submission ledgers
 │   ├── kaggle_api.py        # Kaggle Python API wrapper
@@ -216,7 +217,7 @@ User: uv run kagglebot train titanic --compute local_gpu --force
 ### 4. Submit Flow
 
 ```
-User: uv run kagglebot submit titanic -f sub.csv -m "baseline v1" --force
+User: uv run kagglebot submit titanic -f sub.csv -m "initial model v1" --force
 
 1. Load submission file
 2. Validate against sample_submission.csv:
@@ -412,7 +413,7 @@ SECRET_PATTERNS = [
 
 **SHA256-Based Ledger:**
 ```jsonl
-{"timestamp": "2026-01-02T12:00:00", "sha256": "abc123...", "message": "baseline v1", "run_id": "20260102_120000", "slug": "titanic"}
+{"timestamp": "2026-01-02T12:00:00", "sha256": "abc123...", "message": "initial model v1", "run_id": "20260102_120000", "slug": "titanic"}
 ```
 
 **Bypass Options:**

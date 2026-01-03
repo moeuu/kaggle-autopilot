@@ -1,5 +1,7 @@
 # Autopilot: Single-Submit with Top1 Heuristic
 
+> Note: References to "initial model" in this document should be read as "strong initial model" (web‑researched, not a simplistic initial model).
+
 **Method 1 Implementation Specification**
 
 ## Overview
@@ -20,7 +22,7 @@ This document specifies the "single-submit autopilot" approach (Method 1) for ka
 4. Metrics.json contract updates
 5. Guardrails (max-submissions=1, dedupe, timeouts, secrets)
 6. Knowledge Base integration (unchanged but capture top1/offline)
-7. Prompt templates for Codex (baseline + improvement with KB)
+7. Prompt templates for Codex (initial model + improvement with KB)
 
 ---
 
@@ -926,7 +928,7 @@ def rank_kb_entries(query_tags: set[str], kb_entries: list[dict]) -> list[dict]:
 
 **Retrieval in prompt:**
 ```python
-# In baseline prompt generation
+# In initial model prompt generation
 kb_entries = load_kb_entries()  # From artifacts/kb/*.json
 query_tags = {"tabular", "classification", "small-dataset"}
 ranked_entries = rank_kb_entries(query_tags, kb_entries)
@@ -991,9 +993,9 @@ if improvement_observed and diagnostics_exists:
 
 ## 7. Codex Prompt Templates
 
-### 7.1 Baseline Prompt
+### 7.1 Initial model Prompt
 
-**File:** `artifacts/<slug>/prompts/codex_autopilot_baseline.md`
+**File:** `artifacts/<slug>/prompts/codex_autopilot_initial.md`
 
 **Length:** ~250 lines
 
@@ -1009,9 +1011,9 @@ if improvement_observed and diagnostics_exists:
 **Template:**
 
 ```markdown
-# Task: Build Baseline Model (Autopilot Iteration 1)
+# Task: Build Initial model Model (Autopilot Iteration 1)
 
-You are Codex, a coding agent tasked with building a baseline machine learning model for a Kaggle competition.
+You are Codex, a coding agent tasked with building a initial model machine learning model for a Kaggle competition.
 
 ## Competition: {{competition_slug}}
 
@@ -1072,7 +1074,7 @@ No previous knowledge base entries found. You're starting fresh!
 **Code Requirements:**
 - Read data from `{{data_dir}}/train.csv` and `{{data_dir}}/test.csv`
 - Output submission to `/kaggle/working/submission.csv` (Kaggle kernel paths)
-- Use scikit-learn or similar (no deep learning for baseline)
+- Use scikit-learn or similar (no deep learning for initial model)
 - Set random_seed={{random_seed}} for reproducibility
 - Handle missing data appropriately
 - Match sample_submission.csv format exactly
@@ -1090,7 +1092,7 @@ No previous knowledge base entries found. You're starting fresh!
 
 ## Acceptance Criteria
 
-Your baseline is acceptable if:
+Your initial model is acceptable if:
 1. ✅ Code runs without errors
 2. ✅ Produces valid submission.csv
 3. ✅ Offline score reported in metrics.json
@@ -1146,7 +1148,7 @@ Your baseline is acceptable if:
 
 ## Notes
 
-- This is iteration 1 (baseline). Keep it simple.
+- This is iteration 1 (initial model). Keep it simple.
 - Focus on data quality (missing values, encoding) over complex models.
 - Use LogisticRegression or RandomForest for tabular data.
 - Learn from KB entries but don't blindly copy (different competitions may differ).
@@ -1312,9 +1314,9 @@ Good luck with iteration {{iteration}}!
 
 ### 7.3 Template Variable Population
 
-**Baseline template variables (35+):**
+**Initial model template variables (35+):**
 ```python
-baseline_vars = {
+initial_vars = {
     # Competition info
     "competition_slug": slug,
     "objective_summary": meta["objective"],
@@ -1407,7 +1409,7 @@ improvement_vars = {
 - [ ] Add iteration history tracking
 
 **A2: Offline Evaluation**
-- [ ] Extend `src/kagglebot/solver/baseline.py`
+- [ ] Extend `src/kagglebot/solver/initial_model.py`
 - [ ] Add holdout evaluation (train_test_split)
 - [ ] Add CV evaluation (cross_val_score)
 - [ ] Auto-select source based on dataset size
@@ -1474,8 +1476,8 @@ improvement_vars = {
 
 ### Phase D: Prompt Templates
 
-**D1: Baseline Prompt**
-- [ ] Create `codex_autopilot_baseline.md` template
+**D1: Initial model Prompt**
+- [ ] Create `codex_autopilot_initial.md` template
 - [ ] Implement template variable population
 - [ ] Integrate KB retrieval (top 3 entries)
 - [ ] Test rendering with real competition data
@@ -1561,7 +1563,7 @@ $ uv run kagglebot run titanic \
 
 [Bootstrap] Creating artifacts/titanic...
 [Leaderboard] Top1: 0.95 by user123
-[Iteration 1/5] Training baseline...
+[Iteration 1/5] Training initial model...
 [Offline] Holdout accuracy: 0.9567
 [Heuristic] 0.9567 >= 0.931 (rel threshold) ✓
 [Iteration 2/5] Generating improvement prompt...
@@ -1681,7 +1683,7 @@ uv run kagglebot run titanic \
 - ✅ Metrics.json contract updated (3 new blocks)
 - ✅ Guardrails specified (MAX_SUBMISSIONS=1, dedup, time cap, secrets)
 - ✅ KB integration specified (schema, retrieval, capture)
-- ✅ Prompt templates created (baseline + improvement)
+- ✅ Prompt templates created (initial model + improvement)
 - ✅ Implementation phases outlined (A-F, ~40 tasks)
 
 **Ready for implementation by Codex or manual coding.**

@@ -20,9 +20,9 @@ class CompetitionData:
 
 
 def find_competition_files(data_dir: Path) -> tuple[Path, Path, Path]:
-    csvs = [p for p in data_dir.rglob("*.csv") if p.is_file()]
-    if not csvs:
-        raise FileNotFoundError(f"No CSV files found under {data_dir}.")
+    files = _find_tabular_files(data_dir)
+    if not files:
+        raise FileNotFoundError(f"No tabular files found under {data_dir}.")
 
     def score_sample(path: Path) -> int:
         name = path.name.lower()
@@ -34,12 +34,12 @@ def find_competition_files(data_dir: Path) -> tuple[Path, Path, Path]:
             return 1
         return 0
 
-    sample_candidates = sorted(csvs, key=score_sample, reverse=True)
+    sample_candidates = sorted(files, key=score_sample, reverse=True)
     sample_path = sample_candidates[0] if score_sample(sample_candidates[0]) > 0 else None
 
     train_path = None
     test_path = None
-    for path in csvs:
+    for path in files:
         name = path.name.lower()
         if "train" in name and train_path is None:
             train_path = path
@@ -47,9 +47,9 @@ def find_competition_files(data_dir: Path) -> tuple[Path, Path, Path]:
             test_path = path
 
     if train_path is None or test_path is None:
-        raise FileNotFoundError("Unable to locate train.csv or test.csv in competition data.")
+        raise FileNotFoundError("Unable to locate train/test files in competition data.")
     if sample_path is None:
-        raise FileNotFoundError("Unable to locate sample_submission.csv in competition data.")
+        raise FileNotFoundError("Unable to locate sample submission file in competition data.")
 
     return train_path, test_path, sample_path
 
@@ -60,10 +60,10 @@ def infer_target(train: pd.DataFrame, test: pd.DataFrame, sample: pd.DataFrame) 
     candidates = [c for c in train.columns if c not in test.columns and c in sample.columns]
     target_cols = candidates or sample_targets
     if len(target_cols) != 1:
-        raise ValueError("This baseline only supports single-target competitions.")
+        raise ValueError("This solver only supports single-target competitions.")
     target_col = target_cols[0]
     if target_col not in train.columns:
-        raise ValueError(f"Target column '{target_col}' not found in train.csv.")
+        raise ValueError(f"Target column '{target_col}' not found in training data.")
     feature_cols = [c for c in train.columns if c not in target_cols]
     if id_col in feature_cols:
         feature_cols.remove(id_col)
@@ -83,9 +83,9 @@ def infer_task(y: pd.Series) -> str:
 
 def load_competition_data(data_dir: Path, *, target_column_override: str | None = None) -> CompetitionData:
     train_path, test_path, sample_path = find_competition_files(data_dir)
-    train = pd.read_csv(train_path)
-    test = pd.read_csv(test_path)
-    sample = pd.read_csv(sample_path)
+    train = _read_table(train_path)
+    test = _read_table(test_path)
+    sample = _read_table(sample_path)
 
     if target_column_override and target_column_override in train.columns:
         id_col = sample.columns[0]
@@ -138,6 +138,25 @@ def write_submission(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(output_path, index=False)
     return output_path
+
+
+def _find_tabular_files(root: Path) -> list[Path]:
+    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+    if suffix in {".json", ".jsonl"}:
+        try:
+            return pd.read_json(path, lines=True)
+        except ValueError:
+            return pd.read_json(path)
+    if suffix in {".tsv", ".txt"}:
+        return pd.read_csv(path, sep="\t")
+    return pd.read_csv(path)
 
 
 def _coerce_prediction_dtype(sample_series: pd.Series, pred_series: pd.Series) -> pd.Series:

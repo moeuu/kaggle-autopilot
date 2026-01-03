@@ -55,6 +55,10 @@ class CompetitionPaths:
         return self.base_dir / "context"
 
     @property
+    def context_agent_dir(self) -> Path:
+        return self.context_dir / "agent"
+
+    @property
     def rules_url_path(self) -> Path:
         return self.context_dir / "rules_url.txt"
 
@@ -73,6 +77,10 @@ class CompetitionPaths:
     @property
     def data_md_path(self) -> Path:
         return self.context_dir / "data.md"
+
+    @property
+    def submission_format_md_path(self) -> Path:
+        return self.context_dir / "submission_format.md"
 
     @property
     def knowledge_hints_path(self) -> Path:
@@ -99,16 +107,16 @@ class CompetitionPaths:
         return self.base_dir / "prompts"
 
     @property
-    def codex_plan_and_baseline_prompt(self) -> Path:
-        return self.prompts_dir / "codex_plan_and_baseline.md"
-
-    @property
-    def codex_baseline_prompt(self) -> Path:
-        return self.codex_plan_and_baseline_prompt
+    def codex_plan_and_implement_prompt(self) -> Path:
+        return self.prompts_dir / "codex_plan_and_implement.md"
 
     @property
     def codex_improve_template(self) -> Path:
         return self.prompts_dir / "codex_improve.md"
+
+    @property
+    def codex_kernel_fix_template(self) -> Path:
+        return self.prompts_dir / "codex_kernel_fix.md"
 
     @property
     def runs_dir(self) -> Path:
@@ -121,10 +129,6 @@ class CompetitionPaths:
     @property
     def kernels_dir(self) -> Path:
         return self.base_dir / "kernels"
-
-    @property
-    def kernel_overrides_path(self) -> Path:
-        return self.base_dir / "kernel_overrides.py"
 
     @property
     def submission_ledger_path(self) -> Path:

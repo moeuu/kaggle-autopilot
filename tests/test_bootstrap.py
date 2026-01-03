@@ -25,7 +25,6 @@ def test_rules_file_written_to_markdown(tmp_path) -> None:
     assert paths.rules_url_path.exists()
     assert paths.rules_md_path.exists()
     assert "Rules text." in paths.rules_md_path.read_text(encoding="utf-8")
-    assert paths.kernel_overrides_path.exists()
 
 
 def test_rules_html_converts_to_markdown(tmp_path) -> None:

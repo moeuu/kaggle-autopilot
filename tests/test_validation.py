@@ -108,6 +108,21 @@ def test_validate_submission_duplicate_id():
             validate_submission(str(sample_path), str(submission_path))
 
 
+def test_validate_submission_handles_irregular_tsv(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.tsv"
+    submission_path = tmp_path / "submission.csv"
+    format_path = tmp_path / "submission_format.md"
+
+    format_path.write_text("## Submission Format\n\nid,term,score\n", encoding="utf-8")
+    sample_path.write_text(
+        "A0A0C5B5G6\tGO:0000001\t0.123\nA0A0C5B5G6\tText\t0.456\tExtra text column\n",
+        encoding="utf-8",
+    )
+    submission_path.write_text("id,term,score\nA0A0C5B5G6,GO:0000001,0.999\n", encoding="utf-8")
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
 def test_submission_rate_limit(tmp_path):
     ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
     now = datetime.now(UTC)

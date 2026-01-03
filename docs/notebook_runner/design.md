@@ -58,7 +58,7 @@ kagglebot run titanic \
   --runner kaggle_notebook \
   --accelerator tpu \
   --submit \
-  --message "TPU baseline v1"
+  --message "TPU initial model v1"
 
 # Use internet (ONLY if competition allows external data)
 kagglebot run my-nlp-comp \
@@ -687,7 +687,7 @@ artifacts/<slug>/
   "accelerator": "gpu",
   "submission_hash": "a1b2c3d4",
   "file_path": "artifacts/titanic/runs/7f8e9d2a/submission.csv",
-  "message": "GPU baseline v1",
+  "message": "GPU initial model v1",
   "kaggle_submission_id": "12345678",
   "kaggle_score": 0.77511,
   "cv_score": 0.854,

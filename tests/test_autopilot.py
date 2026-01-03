@@ -8,9 +8,11 @@ from pathlib import Path
 import pandas as pd
 
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
+from kagglebot.exceptions import KernelFailedError
+from kagglebot.kernel_runner import KernelRunResult
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
-from kagglebot.solver.baseline import TrainingOutcome
 from kagglebot.solver.evaluate import EvaluationResult
+from kagglebot.solver.initial_model import TrainingOutcome
 from kagglebot.types import PlanConfig
 
 
@@ -34,7 +36,8 @@ def _make_config(tmp_path: Path, **overrides) -> AutopilotConfig:
     _write_sample_submission(paths.sample_submission_path)
     paths.prompts_dir.mkdir(parents=True, exist_ok=True)
     paths.codex_improve_template.write_text("improve {slug} {iteration}\n", encoding="utf-8")
-    paths.codex_plan_and_baseline_prompt.write_text("plan+baseline\n", encoding="utf-8")
+    paths.codex_kernel_fix_template.write_text("fix {slug} {iteration}\n", encoding="utf-8")
+    paths.codex_plan_and_implement_prompt.write_text("plan+implement\n", encoding="utf-8")
     base = AutopilotConfig(
         run_id="run-1",
         slug="demo",
@@ -99,12 +102,10 @@ def test_autopilot_uses_plan_from_agent(monkeypatch, tmp_path: Path) -> None:
             accelerator="cpu",
         )
 
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_baseline", fake_plan)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", fake_plan)
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
 
     config = _make_config(tmp_path)
     run_autopilot(config)
@@ -152,8 +153,7 @@ def test_autopilot_submit_when_top1_tier(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
     )
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=3)
     run_autopilot(config)
@@ -198,8 +198,7 @@ def test_autopilot_no_submit_when_top1_tier_without_submit(monkeypatch, tmp_path
     monkeypatch.setattr(
         "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
     )
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=False, max_iterations=1)
     run_autopilot(config)
@@ -244,8 +243,7 @@ def test_autopilot_submit_at_final_iteration(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr(
         "kagglebot.autopilot.submit_competition", lambda *args, **kwargs: submission_calls.append(args[1])
     )
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -259,12 +257,10 @@ def test_autopilot_stops_when_target_missing(monkeypatch, tmp_path: Path) -> Non
         calls["train"] += 1
         raise AssertionError("train should not be called when target missing")
 
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_baseline", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot.submit_competition", lambda *args, **kwargs: calls.update(submit=1))
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
 
     config = _make_config(tmp_path, submit=True)
     run_autopilot(config)
@@ -318,13 +314,100 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, max_iterations=2)
     run_autopilot(config)
     iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
     assert (iter_dir / "agent" / "prompt.md").exists()
+
+
+def test_autopilot_runs_strategy_pipeline(monkeypatch, tmp_path: Path) -> None:
+    called = {"run": False}
+
+    def fake_pipeline(*args, **kwargs):  # noqa: ARG001
+        called["run"] = True
+
+    monkeypatch.setattr("kagglebot.autopilot.run_strategy_pipeline", fake_pipeline)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+
+    config = _make_config(tmp_path)
+    from kagglebot.autopilot import _run_plan_and_initial
+
+    _run_plan_and_initial(config, config.run_id or "run-1")
+    assert called["run"] is True
+
+
+def test_autopilot_retries_kernel_failure(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+        score_source="cv",
+        cv_folds=3,
+        seed=42,
+    )
+
+    calls = {"run_kernel": 0, "codex": 0, "kernel_fix": 0}
+
+    def fake_run_kernel(**kwargs):
+        calls["run_kernel"] += 1
+        if calls["run_kernel"] == 1:
+            raise KernelFailedError("kernel failed")
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = output_dir / "metrics.json"
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": "rmse",
+                    "direction": "minimize",
+                    "offline_value": 0.4,
+                    "offline_std": 0.01,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        submission_path = output_dir / "submission.csv"
+        submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        return KernelRunResult(
+            kernel_id="user/kernel",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool):  # noqa: ARG001
+        calls["codex"] += 1
+        if prompt_path.name == "kernel_fix_prompt.md":
+            calls["kernel_fix"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / "codex_last_message.txt"
+        last_msg.write_text("kernel fix applied\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel", lambda **kwargs: fake_run_kernel(**kwargs))
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+
+    config = _make_config(tmp_path, compute="kaggle_gpu", accelerator="gpu", max_iterations=1)
+    run_autopilot(config)
+
+    assert calls["run_kernel"] == 2
+    assert calls["kernel_fix"] == 1
 
 
 def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
@@ -364,8 +447,7 @@ def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.ensure_main_branch", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.write_working_diff", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, max_iterations=10)
     run_autopilot(config)

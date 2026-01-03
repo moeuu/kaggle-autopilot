@@ -13,7 +13,7 @@ Kagglebot autopilot runs a score-gated improvement loop that **never submits unl
 │ 1. Bootstrap & Plan Generation                 │
 │    - Download competition data                  │
 │    - Agent creates plan.json with targets       │
-│    - Generate baseline solution                 │
+│    - Generate initial model solution                 │
 └──────────────────┬──────────────────────────────┘
                    │
                    ▼
@@ -215,12 +215,12 @@ artifacts/<slug>/
 
   context/
     rules_url.txt
-    dataset_profile.json
+    dataset_profile.json       # Dataset stats + file format summary
     sample_submission.csv
     top1_public.json           # Top1 score (context only)
 
   prompts/
-    codex_plan_and_baseline.md # Baseline generation template
+    codex_plan_and_implement.md # Initial plan + implementation template
     codex_improve.md           # Improvement template
 
   runs/<run-id>/

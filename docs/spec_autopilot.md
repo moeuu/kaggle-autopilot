@@ -6,6 +6,9 @@
 
 ---
 
+> Note: Git integration has been removed from the implementation. Any sections describing git stashing, branch enforcement, or diff capture are historical and no longer apply.
+> Note: Any "initial model" references in this spec should be read as "strong initial model" (web‑researched, not a simplistic initial model).
+
 ## Executive Summary
 
 Kagglebot autopilot is a fully automated Kaggle competition workflow system that implements a 5-iteration improvement loop with score-gated submission. The system operates non-interactively with minimal user arguments, leveraging a Knowledge Base for cross-competition learning and supporting multiple compute backends (local GPU, Kaggle GPU/TPU).
@@ -87,10 +90,10 @@ uv run kagglebot autopilot <competition_url> \
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ STEP 2: PLAN & BASELINE (Iteration 0)                      │
+│ STEP 2: PLAN & INITIAL MODEL (Iteration 0)                 │
 │  - Send context pack to Codex agent                         │
 │  - Agent decides: approach, model, features, eval strategy  │
-│  - Agent implements baseline solution in kagglebot/solver/  │
+│  - Agent implements initial model solution in kagglebot/solver/  │
 │  - Agent generates plan.json with:                          │
 │    * target_metric (auto-detected or inferred)              │
 │    * target_score (based on Top1 + margin)                  │
@@ -212,7 +215,7 @@ artifacts/<slug>/
   context/
     rules_url.txt                    # Always present
     rules.html                       # Best-effort fetch
-    dataset_profile.json             # Dataset statistics
+    dataset_profile.json             # Dataset stats + file format summary
     sample_submission.csv            # First 10 rows preview
     top1_snapshot.json               # Top1 at bootstrap time
     kb_hints.json                    # Similar competitions from KB
@@ -222,7 +225,7 @@ artifacts/<slug>/
 
     iter-0/                          # Bootstrap iteration
       agent/
-        prompt.md                    # baseline_plan_and_implement.md
+        prompt.md                    # initial_plan_and_implement.md
         response.txt                 # Agent output
 
     iter-{1..5}/
@@ -328,7 +331,7 @@ knowledge/
 4. Try stacking with Ridge as meta-model
 
 ## Previous Attempts
-- Iter 1: Baseline linear model (RMSE=0.145)
+- Iter 1: Initial model linear model (RMSE=0.145)
 - Iter 2: Added XGBoost (RMSE=0.130, improved by 0.015)
 - Iter 3: Tuned hyperparameters (RMSE=0.125, improved by 0.005)
 ```
@@ -842,123 +845,10 @@ def update_kb(run_id, slug, iterations):
 
 ---
 
-## 8. Main-Only Git Guardrails
+## 8. Version Control
 
-### 8.1 Branch Policy
-
-**Rule**: ONLY use `main` branch. Never create feature branches.
-
-**Enforcement**:
-```python
-def ensure_main_branch():
-    current = subprocess.check_output(["git", "branch", "--show-current"]).decode().strip()
-    if current != "main":
-        print(f"[yellow]Switching from '{current}' to 'main'[/yellow]")
-        subprocess.run(["git", "checkout", "main"], check=True)
-```
-
-### 8.2 Dirty State Handling
-
-**Rule**: Auto-stash (including untracked) at start, restore at end.
-
-```python
-def auto_stash_if_dirty():
-    # Check if dirty
-    try:
-        subprocess.run(["git", "diff-index", "--quiet", "HEAD"], check=True)
-        dirty = False
-    except subprocess.CalledProcessError:
-        dirty = True
-
-    # Check untracked
-    untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"]).decode().strip()
-
-    if dirty or untracked:
-        print("[yellow]Stashing dirty state (including untracked)[/yellow]")
-        subprocess.run(["git", "stash", "push", "--include-untracked", "-m", "kagglebot-auto-stash"], check=True)
-        return True
-
-    return False
-
-def restore_stash_if_created(stashed):
-    if stashed:
-        print("[yellow]Restoring stash[/yellow]")
-        subprocess.run(["git", "stash", "pop"], check=True)
-```
-
-### 8.3 Commit Policy
-
-**Default**: Do NOT auto-commit. Save diffs instead.
-
-**Rationale**:
-- Let user review changes before committing
-- Avoid polluting git history with experimental iterations
-- User can manually commit after reviewing diffs
-
-**Implementation**:
-```python
-def save_code_diff(run_id, artifacts_dir):
-    """Save git diff to artifacts for user review."""
-    diff = subprocess.check_output(["git", "diff", "HEAD"]).decode()
-
-    diff_path = artifacts_dir / "diffs" / f"{run_id}.diff"
-    diff_path.parent.mkdir(parents=True, exist_ok=True)
-    diff_path.write_text(diff, encoding="utf-8")
-
-    print(f"[green]Code diff saved to {diff_path}[/green]")
-    print("[blue]Review changes and commit manually if desired[/blue]")
-```
-
-**Optional Flag** (for future):
-```bash
---auto-commit           # Auto-commit after each iteration (advanced users)
---commit-msg "MSG"      # Custom commit message
-```
-
-### 8.4 Test Verification Loop
-
-**Rule**: If Codex changes fail tests, revert or retry until tests pass.
-
-```python
-def verify_tests_or_revert(verify_cmd, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            subprocess.run(verify_cmd, shell=True, check=True, capture_output=True)
-            print("[green]✓ Tests passed[/green]")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"[red]✗ Tests failed (attempt {attempt+1}/{max_retries})[/red]")
-            print(e.stderr.decode())
-
-            if attempt < max_retries - 1:
-                # Ask Codex to fix
-                print("[yellow]Asking agent to fix test failures...[/yellow]")
-                fix_test_failures(e.stderr.decode())
-            else:
-                # Final attempt failed: revert changes
-                print("[red]Tests failed after 3 attempts. Reverting changes.[/red]")
-                subprocess.run(["git", "checkout", "."], check=True)
-                return False
-```
-
-### 8.5 Final State Guarantee
-
-At the end of autopilot:
-
-```python
-def finalize_git_state(stashed, run_id, artifacts_dir):
-    # 1. Save diff
-    save_code_diff(run_id, artifacts_dir)
-
-    # 2. Restore stash
-    restore_stash_if_created(stashed)
-
-    # 3. Ensure on main
-    ensure_main_branch()
-
-    # 4. Verify clean state (no uncommitted Codex changes)
-    # User can manually commit from diffs if desired
-```
+Git integration has been removed from the implementation. Autopilot does not run any git commands, does not stash,
+and does not capture diffs. Users manage version control manually.
 
 ---
 
@@ -1103,7 +993,7 @@ Exit code: 2
 | Metric | Target | Notes |
 |--------|--------|-------|
 | Bootstrap time | < 5 min | Data download + profiling + KB query |
-| Agent response (baseline) | < 15 min | Codex implementation of baseline |
+| Agent response (initial model) | < 15 min | Codex implementation of initial model |
 | Agent response (improve) | < 10 min | Codex iteration improvement |
 | Local GPU training | Variable | Depends on dataset size, no limit |
 | Kaggle kernel | < 2 hours | Timeout enforced |
@@ -1185,7 +1075,7 @@ Before deployment, verify:
 ### 13.5 Performance
 
 - [ ] Bootstrap < 5 min
-- [ ] Agent baseline < 15 min
+- [ ] Agent initial model < 15 min
 - [ ] Agent improve < 10 min
 - [ ] GPU/TPU utilization > 80%
 

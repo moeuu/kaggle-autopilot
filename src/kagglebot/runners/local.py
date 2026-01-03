@@ -40,8 +40,8 @@ class LocalRunner:
             if availability.cuda:
                 print("[cyan]local GPU detected[/cyan]: CUDA available")
                 if model_names is None:
-                    baseline = "logreg" if analysis.metadata.task == "classification" else "ridge"
-                    model_names = ["catboost_gpu", baseline]
+                    fallback_model = "logreg" if analysis.metadata.task == "classification" else "ridge"
+                    model_names = ["catboost_gpu", fallback_model]
                 elif "catboost_gpu" not in model_names:
                     print("[yellow]GPU available but no GPU model requested; using provided models[/yellow]")
             elif availability.mps:

@@ -110,9 +110,14 @@ def _taxonomy_from_dict(payload: dict[str, object]) -> Taxonomy:
 
 def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     profile: dict[str, object] = {"data_dir": str(data_dir)}
-    csvs = list(data_dir.rglob("*.csv"))
-    if not csvs:
-        profile["status"] = "missing_data"
+    file_count, extension_counts, file_samples = _summarize_files(data_dir)
+    profile["file_count"] = file_count
+    profile["file_extension_counts"] = dict(sorted(extension_counts.items()))
+    profile["file_samples"] = file_samples
+
+    tabular_files = _find_tabular_files(data_dir)
+    if not tabular_files:
+        profile["status"] = "non_tabular_data"
         profile["tags"] = []
         return profile
 
@@ -124,9 +129,15 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         profile["tags"] = []
         return profile
 
-    train = pd.read_csv(train_path)
-    test = pd.read_csv(test_path)
-    sample = pd.read_csv(sample_path)
+    try:
+        train = _read_table(train_path)
+        test = _read_table(test_path)
+        sample = _read_table(sample_path)
+    except Exception as exc:  # noqa: BLE001
+        profile["status"] = "unreadable_tabular"
+        profile["error"] = str(exc)
+        profile["tags"] = []
+        return profile
 
     id_col, target_col, feature_cols = infer_target(train, test, sample)
     task = infer_task(train[target_col])
@@ -177,6 +188,50 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         }
     )
     return profile
+
+
+def _find_tabular_files(root: Path) -> list[Path]:
+    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+    if suffix in {".json", ".jsonl"}:
+        try:
+            return pd.read_json(path, lines=True)
+        except ValueError:
+            return pd.read_json(path)
+    if suffix in {".tsv", ".txt"}:
+        return pd.read_csv(path, sep="\t")
+    return pd.read_csv(path)
+
+
+def _summarize_files(
+    data_dir: Path,
+    *,
+    max_files: int = 20000,
+    max_samples: int = 30,
+) -> tuple[int, dict[str, int], list[str]]:
+    counts: dict[str, int] = {}
+    samples: list[str] = []
+    total = 0
+    for path in data_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        total += 1
+        ext = path.suffix.lower() or "<none>"
+        counts[ext] = counts.get(ext, 0) + 1
+        if len(samples) < max_samples:
+            try:
+                samples.append(str(path.relative_to(data_dir)))
+            except ValueError:
+                samples.append(path.name)
+        if total >= max_files:
+            break
+    return total, counts, samples
 
 
 def _target_stats(target: pd.Series, task: str) -> dict[str, object]:
@@ -230,7 +285,7 @@ def _size_tag(n_rows: int) -> str:
     return "n_rows_large"
 
 
-def build_plan_and_baseline_prompt(
+def build_plan_and_initial_prompt(
     *,
     slug: str,
     rules_url: str,
@@ -245,7 +300,7 @@ def build_plan_and_baseline_prompt(
     n_cols = profile.get("train_cols", 0)
 
     lines = [
-        "# Kagglebot Codex: Plan + Baseline",
+        "# Kagglebot Codex: Plan + Implement (Iteration 1)",
         "",
         "## Competition Overview",
         "",
@@ -275,7 +330,8 @@ def build_plan_and_baseline_prompt(
         f"- artifacts/{slug}/context/rules.html (if present)",
         f"- artifacts/{slug}/context/overview.md (if present)",
         f"- artifacts/{slug}/context/data.md (if present)",
-        f"- artifacts/{slug}/kernel_overrides.py (for kaggle_gpu/kaggle_tpu)",
+        f"- artifacts/{slug}/context/submission_format.md (if present)",
+        f"- artifacts/{slug}/kernel.py (for kaggle_gpu/kaggle_tpu)",
         f"- artifacts/{slug}/context/knowledge_hints.txt",
         "",
         "## Knowledge Base: Similar Competitions",
@@ -321,23 +377,32 @@ def build_plan_and_baseline_prompt(
         "Guidance:",
         "- Derive target_metric and direction from rules.md/rules.html and sample_submission.csv.",
         "- Read overview.md/data.md for problem framing and data caveats.",
+        "- If sample_submission is ambiguous, use submission_format.md for the required columns.",
+        "- Use overview.md/data.md plus dataset_profile.json (file_extension_counts/file_samples)",
+        "  to identify data format.",
+        "- Use web search to choose the strongest initial approach; prefer official docs and competition discussions.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV for small datasets or high variance; otherwise holdout.",
         "- Do NOT change submit_policy; autopilot controls submission gating.",
         "",
-        "### 2) Implement baseline pipeline",
+        "### 2) Implement the strongest initial model",
         "",
-        "Implement a robust baseline in kagglebot/solver/ that:",
+        "Implement the best initial approach based on overview/data/rules + web research:",
         "- Loads train/test and sample_submission correctly.",
         "- Handles missing values and encodes categoricals.",
-        "- Trains a Torch-based supervised baseline by default.",
-        "- Falls back to a simpler linear model only when data/rules justify it.",
+        "- Uses a GPU-optimized supervised model if available.",
+        "- Avoid simplistic starters; aim for competition-appropriate strength from the start.",
+        "- Do NOT leave the default starter in place; replace it with a competition-specific model.",
         "- Evaluates with the score_source from plan.json.",
         "- Writes submission.csv matching sample_submission.csv exactly.",
+        "- Cite the key sources you used (short notes).",
         "",
         "Compute-specific notes:",
-        "- local_cpu/local_gpu: update kagglebot/solver/ as usual.",
-        "- kaggle_gpu/kaggle_tpu: implement model + features in artifacts/{slug}/kernel_overrides.py.",
+        "- local_cpu/local_gpu: update kagglebot/solver/ as usual (same best-model flow).",
+        "- kaggle_gpu/kaggle_tpu: create artifacts/{slug}/kernel.py from scratch if missing.",
+        "- kaggle_gpu/kaggle_tpu: implement model + features directly in artifacts/{slug}/kernel.py.",
+        "- If data is non-tabular or requires custom parsing, implement custom_main() in kernel.py.",
+        "- If GPU runs finish in under ~1 minute, increase model iterations/trees or use CV to better utilize GPU.",
         "- Do NOT edit kernel_runner.py for competition-specific changes.",
         "",
         "### 3) Safety + verification",
@@ -372,6 +437,9 @@ def build_improve_template() -> str:
 **Iteration**: {iteration}
 **Goal**: Improve offline score toward top1-tier or best possible within the max_iterations budget (default 3)
 **Compute**: {compute} ({accelerator})
+**Top1 gap**: {top1_gap}
+**Delta vs previous best**: {delta_offline}
+**Improvement mode**: {improvement_mode}
 
 ## Current Score Context
 
@@ -393,9 +461,10 @@ def build_improve_template() -> str:
 - **Rules HTML**: `{rules_html}` (fallback)
 - **Overview Markdown**: `{overview_md}` (read this)
 - **Data Markdown**: `{data_md}` (read this)
+- **Submission Format**: `{submission_format}` (read this if present)
 - **Dataset Profile**: `{dataset_profile}`
 - **Sample Submission**: `{sample_submission}`
-- **Kernel Overrides**: `{kernel_overrides}` (use this for kaggle_gpu/kaggle_tpu)
+- **Kernel Main**: `{kernel_main}` (edit this for kaggle_gpu/kaggle_tpu)
 
 ## Your Task
 
@@ -427,14 +496,23 @@ Make **targeted, incremental changes** to improve the offline score.
 Before changing the model, read overview.md/data.md and respect any constraints or data caveats.
 
 **Where to implement**:
-- If `compute` starts with `kaggle_`: edit `{kernel_overrides}` only.
+- If `compute` starts with `kaggle_`: edit `{kernel_main}` (create if missing).
 - Otherwise: edit `kagglebot/solver/`.
+- For non-tabular inputs, implement `custom_main()` in `{kernel_main}`.
 
 **Modeling policy**:
-- Use rules.md + dataset_profile.json to decide the best supervised approach.
-- Prefer Torch-based models by default.
-- Use simpler linear models only when data/rules make them clearly better.
+- Use rules.md + dataset_profile.json + overview/data to decide the best supervised approach.
+- Use dataset_profile.json (file_extension_counts/file_samples) to confirm the data format.
+- Avoid weak starter implementations.
 - Avoid generic metric heuristics; derive metric choices from the rules.
+- Use web search each iteration to validate model/feature choices; prefer official docs or top Kaggle discussions.
+
+**Mode guidance**:
+- `major_overhaul`: switch model family or core feature strategy; remove dead code paths.
+- `moderate_update`: add meaningful features + tune key hyperparameters.
+- `minor_tuning`: small hyperparameter/feature tweaks, calibration, or ensembling.
+
+If the score did not improve (delta <= 0), treat it as `major_overhaul` even if the default mode is weaker.
 
 **Recommended strategies** (pick 1-2 per iteration):
 
@@ -478,6 +556,8 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 Before finalizing:
 
 1. **Run offline evaluation**:
+   - If `compute` starts with `kaggle_`, do NOT run local_cpu; rely on kernel metrics/logs.
+   - Otherwise, run:
    ```bash
    uv run kagglebot train {{slug}} --compute local_cpu
    ```
@@ -795,3 +875,47 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def build_kernel_fix_template() -> str:
+    """Build the kernel-failure fix prompt template."""
+    return """\
+# Kagglebot Codex: Kernel Failure Fix
+
+## Context
+
+**Competition**: `{slug}`
+**Run ID**: {run_id}
+**Iteration**: {iteration}
+**Compute**: {compute} ({accelerator})
+
+## Error Summary
+
+```
+{error_message}
+```
+
+## Input Files
+
+- **Kernel Main**: `{kernel_main}`
+- **Kernel Script**: `{kernel_script}` (generated copy for this run)
+- **Kernel Logs**: `{logs_dir}` (check for runtime traces)
+- **Rules URL**: `{rules_url}`
+- **Rules Markdown**: `{rules_md}` (preferred)
+- **Overview Markdown**: `{overview_md}` (read this)
+- **Data Markdown**: `{data_md}` (read this)
+- **Submission Format**: `{submission_format}` (read this if present)
+- **Dataset Profile**: `{dataset_profile}`
+- **Sample Submission**: `{sample_submission}`
+
+## Your Task
+
+1) Identify the root cause of the kernel failure from logs and traceback.
+2) Fix the issue with minimal, targeted changes.
+   - Edit `kernel.py` for competition-specific fixes.
+   - Use `custom_main()` when data is non-CSV or default loader is inadequate.
+3) Do NOT introduce secrets or network side-effects.
+4) Keep the change small and explain what you changed in your response.
+
+The autopilot will re-push the kernel after your fix.
+"""

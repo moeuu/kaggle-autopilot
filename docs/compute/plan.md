@@ -16,7 +16,7 @@ This document outlines the phased implementation plan for compute switching func
 
 **Timeline**: 6 weeks (assumes 1 developer, full-time)
 
-**Prerequisites**: Core training engine (baseline training + validation) must be complete
+**Prerequisites**: Core training engine (initial model training + validation) must be complete
 
 ---
 

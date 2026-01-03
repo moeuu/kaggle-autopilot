@@ -60,8 +60,8 @@ uv run kagglebot run titanic \
 ## How It Works
 
 ```
-Iteration 1: Baseline
-├─ Train model (LogisticRegression)
+Iteration 1: Initial model
+├─ Train model (strongest-first approach)
 ├─ Evaluate offline (holdout or CV)
 ├─ Fetch Top1 from Kaggle leaderboard
 ├─ Check heuristic: 0.9567 >= 0.931? ✓
@@ -185,7 +185,7 @@ Three new blocks added to metrics.json:
 
 ## Codex Prompt Templates
 
-### Baseline Prompt (~250 lines)
+### Initial Model Prompt (~250 lines)
 - Competition context (rules, Top1, target)
 - Retrieved KB entries (top 3 by Jaccard similarity)
 - Dataset profile (features, missing data, distributions)

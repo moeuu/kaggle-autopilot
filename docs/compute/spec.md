@@ -82,7 +82,7 @@ kagglebot run <competition> [OPTIONS]
 kagglebot run titanic
 
 # With submission
-kagglebot run titanic --submit --message "baseline v1"
+kagglebot run titanic --submit --message "initial model v1"
 
 # Dry-run first
 kagglebot run titanic --dry-run
@@ -261,8 +261,8 @@ artifacts/<slug>/<run_id>/
 ### Submission Ledger
 
 ```jsonl
-{"timestamp": "2026-01-01T12:45:00Z", "run_id": "7f8e9d2a", "compute": "kaggle_gpu", "kernel_id": "moritaeiji/kb-titanic-7f8e9d2a", "hash": "a1b2c3d4", "kaggle_id": "12345678", "score": 0.77511, "message": "GPU baseline"}
-{"timestamp": "2026-01-01T14:20:00Z", "run_id": "8g9f0e1b", "compute": "local_cpu", "kernel_id": null, "hash": "b2c3d4e5", "kaggle_id": "12345679", "score": 0.76076, "message": "CPU baseline"}
+{"timestamp": "2026-01-01T12:45:00Z", "run_id": "7f8e9d2a", "compute": "kaggle_gpu", "kernel_id": "moritaeiji/kb-titanic-7f8e9d2a", "hash": "a1b2c3d4", "kaggle_id": "12345678", "score": 0.77511, "message": "GPU initial model"}
+{"timestamp": "2026-01-01T14:20:00Z", "run_id": "8g9f0e1b", "compute": "local_cpu", "kernel_id": null, "hash": "b2c3d4e5", "kaggle_id": "12345679", "score": 0.76076, "message": "CPU initial model"}
 ```
 
 ---

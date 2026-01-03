@@ -1,6 +1,7 @@
 # Autopilot
 
 Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **verify → train → evaluate → diagnose → improve → repeat** until top1-tier is reached or `max_iterations` (default 3) complete.
+Iteration 0 is expected to implement a **strong initial model** (web‑researched), not a simplistic initial model.
 
 **Key principle**: Submission happens **only** when offline score is top1-tier (direction-aware) or at the final iteration when `--submit` is set.
 
@@ -13,7 +14,7 @@ uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-adva
   --submit
 ```
 
-Rules/overview/data are fetched from Kaggle during download. Use `--rules-file` (md/txt/html) to override rules.
+Rules/overview/data/submission format are fetched from Kaggle during download. Use `--rules-file` (md/txt/html) to override rules.
 
 ## How It Works
 
@@ -23,9 +24,10 @@ When autopilot starts, it:
 1. Downloads competition data
 2. Profiles the dataset (rows, columns, missing values, etc.)
 3. Queries the Knowledge Base for similar competitions
-4. Calls the agent (Codex) to:
-   - Generate `plan.json` with target metric/score/direction
-   - Implement a baseline solution (`kagglebot/solver/` for local, `artifacts/<slug>/kernel_overrides.py` for kaggle_gpu/kaggle_tpu)
+4. Runs a three-stage agent pipeline:
+   - **Codex brief**: summarizes overview/data/rules into a compact brief
+   - **Claude strategy**: deep plan with web search and references
+   - **Codex implement**: applies Claude’s plan to the repo
 5. Runs initial verification (tests)
 
 **Output**: `plan.json` defines your success criteria.
@@ -49,18 +51,23 @@ Example `plan.json`:
 For each iteration:
 
 1. **Verify**: Run `pytest` to ensure code quality
-2. **Train**: Run local solver or Kaggle kernel (kaggle_gpu/kaggle_tpu uses `kernel_overrides.py`)
+2. **Train**: Run local solver or Kaggle kernel (kaggle_gpu/kaggle_tpu uses `kernel.py`)
 3. **Evaluate**: Compute offline score using the evaluation strategy (holdout/CV/test)
 4. **Check Top1**: Compare offline score to public Top1 (direction-aware)
 5. **Diagnose**: Generate `diagnostics.md` with actionable improvement hints
 6. **Improve** (if not top1-tier):
    - Call agent with diagnostics
-   - Agent modifies code in `kagglebot/solver/`
+   - Improvement mode is selected by top1 gap:
+     - `major_overhaul`: large redesign if far from top1
+     - `moderate_update`: meaningful changes if mid-gap
+     - `minor_tuning`: small adjustments if close to top1
+   - Agent modifies code in `kagglebot/solver/` (or `kernel.py` on kaggle_gpu)
    - Repeat from step 1
 
 The loop stops when:
 - **Top1-tier reached** → Submit if `--submit` flag is set
 - **Max iterations reached** → Submit best offline candidate at the final iteration (if `--submit`)
+- **Kernel failure** → Codex attempts to fix and re-push until resolved (no fixed cap)
 
 ### 3. Submission (Optional)
 
@@ -112,7 +119,7 @@ Offline evaluation is a pseudo-test and not directly comparable to the public le
 
 ## Agent-Defined Targets
 
-The agent (Codex) generates `plan.json` during iteration 0 with:
+The agent pipeline generates `plan.json` during iteration 0 with:
 
 - **`target_metric`**: Metric to optimize (rmse, mae, accuracy, logloss, auc_roc, f1, etc.)
 - **`target_score`**: Realistic target based on dataset complexity and Top1 public
@@ -181,7 +188,7 @@ artifacts/<slug>/
   plan.json                      # Agent-defined targets (editable)
 
   context/
-    dataset_profile.json         # Dataset statistics
+    dataset_profile.json         # Dataset stats + file format summary
     sample_submission.csv        # Required submission format
     top1_public.json             # Public leaderboard leader (context only)
     rules_url.txt                # Competition rules URL
@@ -190,7 +197,7 @@ artifacts/<slug>/
     data.md                      # Data description (if available)
 
   prompts/
-    codex_plan_and_baseline.md   # Baseline generation prompt
+    codex_plan_and_implement.md   # Initial plan + implementation prompt
     codex_improve.md             # Improvement iteration prompt
 
   runs/<run-id>/
@@ -208,7 +215,7 @@ artifacts/<slug>/
   submissions/
     ledger.jsonl                 # Deduplication log (append-only)
 
-  kernel_overrides.py            # Kaggle kernel override hooks
+  kernel.py                      # Kaggle kernel entrypoint
 ```
 
 ### Key Files
@@ -293,7 +300,7 @@ uv run kagglebot autopilot titanic --agent codex --compute local_cpu
 ```
 
 Output:
-- Generates plan.json and baseline
+- Generates plan.json and initial model implementation
 - Runs up to `max_iterations` (default 3)
 - Stops when target met or patience exhausted
 - Does **not** submit (missing `--submit` flag)
@@ -386,7 +393,7 @@ Kagglebot **never** automates rule acceptance for safety.
 
 **Possible causes**:
 1. Target score is too ambitious (edit `plan.json` to relax target)
-2. Dataset is too difficult for baseline models
+2. Dataset is too difficult for simplistic models
 3. Agent improvements aren't effective
 
 **Solutions**:

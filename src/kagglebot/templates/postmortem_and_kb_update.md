@@ -31,7 +31,7 @@
 {full_iteration_history}
 
 **Score Progression**:
-- Baseline (iter 0): {baseline_score}
+- Initial model (iter 0): {initial_score}
 - Best: {best_offline_score} (iteration {best_iteration})
 - Final: {final_score}
 - Improvement: {total_improvement} ({improvement_percentage}%)
@@ -150,7 +150,7 @@ Create a structured summary for the knowledge base:
     "target_score": {target_score},
     "target_met": {target_met},
     "submitted": {submitted},
-    "improvement_from_baseline": {total_improvement}
+    "improvement_from_initial_model": {total_improvement}
   }},
   "successful_strategies": [
     {{
@@ -326,7 +326,7 @@ When kagglebot encounters a new competition, it will:
 1. Infer tags from dataset_profile.json
 2. Query KB for competitions with max tag overlap
 3. Surface successful/failed strategies from similar runs
-4. Use insights to inform baseline planning
+4. Use insights to inform initial-model planning
 
 **Your Impact**:
 This postmortem helps kagglebot get better over time! 🚀

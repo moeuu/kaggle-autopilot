@@ -8,12 +8,12 @@ _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 
 SECRET_PATTERNS = [
     r"kaggle\.json",
-    r"kaggle_key",
-    r"kaggle_username",
-    r"api_key",
-    r"password",
-    r"token",
-    r"secret",
+    r"\bkaggle[_-]?key\b\s*[:=]\s*['\"]?[^\s'\"]{3,}",
+    r"\bkaggle[_-]?username\b\s*[:=]\s*['\"]?[^\s'\"]{3,}",
+    r"\bapi[_-]?key\b\s*[:=]\s*['\"]?[^\s'\"]{8,}",
+    r"\bpassword\b\s*[:=]\s*['\"]?[^\s'\"]{4,}",
+    r"\bsecret\b\s*[:=]\s*['\"]?[^\s'\"]{4,}",
+    r"\b(?:access|refresh|auth|bearer)?_?token\b\s*[:=]\s*['\"]?[^\s'\"]{8,}",
 ]
 
 
@@ -72,7 +72,7 @@ def validate_kernel_package(package_dir: Path) -> None:
         except json.JSONDecodeError:
             code_file = None
 
-    for candidate in ("main.py", "kernel.py", "kernel_overrides.py", code_file):
+    for candidate in ("main.py", "kernel.py", code_file):
         if not candidate:
             continue
         path = package_dir / candidate

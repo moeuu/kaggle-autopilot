@@ -2,6 +2,8 @@
 
 This document provides a comprehensive checklist for ensuring safety, correctness, and ethical operation of kagglebot autopilot. Review this checklist before every code change, deployment, and autopilot run.
 
+Note: Git integration has been removed from the implementation; section 4 is historical.
+
 ---
 
 ## 1. Safety Guardrails

@@ -104,7 +104,7 @@ kaggle competitions list
 
 **Ledger format**:
 ```jsonl
-{"hash": "abc123...", "timestamp": "2026-01-02T10:30:00Z", "message": "baseline v1", "file": "submission.csv"}
+{"hash": "abc123...", "timestamp": "2026-01-02T10:30:00Z", "message": "initial model v1", "file": "submission.csv"}
 ```
 
 ---
@@ -141,7 +141,7 @@ kaggle competitions list
 uv run kagglebot run titanic --submit --message "test" --dry-run
 
 # Actual submission (requires explicit flags)
-uv run kagglebot run titanic --submit --message "baseline v1" --force
+uv run kagglebot run titanic --submit --message "initial model v1" --force
 ```
 
 **Dry-run behavior**:

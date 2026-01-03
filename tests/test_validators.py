@@ -39,3 +39,10 @@ def test_validate_kernel_package_secret_scan(tmp_path: Path) -> None:
     (tmp_path / "kernel-metadata.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="Secret pattern detected"):
         validate_kernel_package(tmp_path)
+
+
+def test_validate_kernel_package_scans_kernel(tmp_path: Path) -> None:
+    (tmp_path / "kernel.py").write_text("KAGGLE_KEY = 'abc'\n", encoding="utf-8")
+    (tmp_path / "kernel-metadata.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="Secret pattern detected"):
+        validate_kernel_package(tmp_path)

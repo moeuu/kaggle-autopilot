@@ -12,14 +12,14 @@ from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.compute import Compute
-from kagglebot.exceptions import RulesNotAcceptedError
+from kagglebot.exceptions import KernelFailedError, RulesNotAcceptedError
 from kagglebot.exec_utils import run_command
-from kagglebot.git_utils import ensure_main_branch, write_working_diff
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
 from kagglebot.knowledge import record_improvement, record_iteration, record_run
-from kagglebot.solver.baseline import train_evaluate_and_predict
+from kagglebot.orchestrator.strategy_loop import StrategyConfig, run_strategy_pipeline
+from kagglebot.solver.initial_model import train_evaluate_and_predict
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.types import PlanConfig
 from kagglebot.validation import ensure_not_duplicate_submission, ensure_submission_rate_limit, validate_submission
@@ -62,14 +62,16 @@ class AutopilotConfig:
     dry_run: bool
 
 
+MAX_KERNEL_FIX_ATTEMPTS: int | None = None
+MAJOR_TOP1_GAP = 0.03
+MODERATE_TOP1_GAP = 0.01
+
+
 def run_autopilot(config: AutopilotConfig) -> None:
     run_id = config.run_id or new_run_id()
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[green]run started[/green]: {run_id}")
-    if not config.dry_run:
-        ensure_main_branch(config.paths.repo_root, slug=config.slug, run_id=run_id)
-
     plan = _load_plan(config.paths)
     if not config.paths.plan_path.exists():
         _write_plan(config.paths, plan)
@@ -80,8 +82,8 @@ def run_autopilot(config: AutopilotConfig) -> None:
     _print_top1_info(top1_info)
 
     if _needs_planning(plan, config):
-        print("[cyan]plan[/cyan]: generating baseline plan")
-        _run_plan_and_baseline(config, run_id)
+        print("[cyan]plan[/cyan]: generating initial plan")
+        _run_plan_and_initial(config, run_id)
         plan = _load_plan(config.paths)
 
     resolved = _resolve_plan(plan, config)
@@ -154,28 +156,52 @@ def run_autopilot(config: AutopilotConfig) -> None:
             if config.compute.startswith("kaggle_"):
                 kaggle_user = resolve_kaggle_username(config.kaggle_username)
                 print(f"[cyan]kernel run[/cyan]: {config.compute}")
-                kernel_result = run_kernel(
-                    slug=config.slug,
-                    run_id=run_id,
-                    iteration=iteration,
-                    base_dir=config.paths.base_dir.parent,
-                    kaggle_username=kaggle_user,
-                    kernel_name=kernel_name,
-                    accelerator=config.accelerator,
-                    enable_internet=enable_internet,
-                    score_source=score_source,
-                    metric=target_metric,
-                    direction=metric_direction,
-                    holdout_frac=holdout_frac,
-                    cv_folds=cv_folds,
-                    seed=seed,
-                    dry_run=config.dry_run,
-                    timeout_minutes=None,
-                )
+                kernel_attempts = 0
+                while True:
+                    try:
+                        kernel_result = run_kernel(
+                            slug=config.slug,
+                            run_id=run_id,
+                            iteration=iteration,
+                            base_dir=config.paths.base_dir.parent,
+                            kaggle_username=kaggle_user,
+                            kernel_name=kernel_name,
+                            accelerator=config.accelerator,
+                            enable_internet=enable_internet,
+                            score_source=score_source,
+                            metric=target_metric,
+                            direction=metric_direction,
+                            holdout_frac=holdout_frac,
+                            cv_folds=cv_folds,
+                            seed=seed,
+                            dry_run=config.dry_run,
+                            timeout_minutes=None,
+                        )
+                        break
+                    except KernelFailedError as exc:
+                        kernel_attempts += 1
+                        error_text = str(exc)
+                        (logs_dir / "kernel_error.txt").write_text(error_text + "\n", encoding="utf-8")
+                        if config.dry_run:
+                            raise
+                        if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
+                            raise
+                        print("[yellow]kernel failed[/yellow]: invoking codex to fix")
+                        _run_kernel_fix(
+                            config=config,
+                            run_id=run_id,
+                            iteration=iteration,
+                            iter_dir=iter_dir,
+                            error_message=error_text,
+                        )
                 if kernel_result.submission_path:
                     submission_path.write_bytes(kernel_result.submission_path.read_bytes())
                 if kernel_result.metrics_path and kernel_result.metrics_path.exists():
-                    evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction)
+                    evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction, target_metric)
+                if evaluation is None:
+                    raise KernelFailedError(
+                        "Kernel metrics missing expected score; ensure metrics.json includes a numeric metric value."
+                    )
             else:
                 compute_enum = Compute(config.compute)
                 print(f"[cyan]training[/cyan]: {config.compute}")
@@ -220,9 +246,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
             )
             (iter_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
 
-            diff_summary = write_working_diff(config.paths.repo_root, iter_dir / "code.diff")
-            if not diff_summary:
-                diff_summary = "No code changes."
+            diff_summary = "Diff tracking disabled (git integration removed)."
             diagnostics = _build_diagnostics(
                 evaluation=evaluation,
                 model_summary=model_summary,
@@ -320,7 +344,7 @@ def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
 
 
 def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
-    if config.agent == "codex" and config.compute.startswith("kaggle_"):
+    if config.agent == "codex":
         return True
     target_metric = config.target_metric or plan.target_metric
     target_score = config.target_score if config.target_score is not None else plan.target_score
@@ -451,43 +475,20 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
         raise RuntimeError(f"Verification failed: {result.output}")
 
 
-def _run_plan_and_baseline(config: AutopilotConfig, run_id: str) -> None:
-    iter_dir = config.paths.iter_dir(run_id, 0)
-    agent_dir = iter_dir / "agent"
-    iter_dir.mkdir(parents=True, exist_ok=True)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    template = config.paths.codex_plan_and_baseline_prompt.read_text(encoding="utf-8")
-    prompt_text = _render_prompt(
-        template,
-        {
-            "slug": config.slug,
-            "competition_url": config.competition_url or "unknown",
-            "compute_mode": config.compute,
-            "accelerator": config.accelerator,
-            "internet": str(config.internet or "auto"),
-            "run_id": run_id,
-        },
+def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
+    print("[cyan]plan[/cyan]: codex -> claude -> codex")
+    strategy_config = StrategyConfig(
+        slug=config.slug,
+        competition_url=config.competition_url,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        internet=str(config.internet or "auto"),
+        run_id=run_id,
+        dry_run=config.dry_run,
+        repo_root=config.paths.repo_root,
     )
-    prompt_path = agent_dir / "prompt.md"
-    prompt_path.write_text(prompt_text, encoding="utf-8")
-    _print_agent_prompt(prompt_path, prompt_text)
-
-    if config.dry_run:
-        return
-    print("[cyan]plan[/cyan]: running agent")
-    result = run_codex(prompt_path, agent_dir, dry_run=False)
-    response_text = _read_agent_response(result.last_message_path)
-    _print_agent_response(result.last_message_path, response_text)
-    if result.returncode != 0:
-        raise RuntimeError(f"Codex planning/baseline step failed: {result.stderr}")
+    run_strategy_pipeline(paths=config.paths, config=strategy_config)
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
-
-
-def _render_prompt(template: str, mapping: dict[str, str]) -> str:
-    rendered = template
-    for key, value in mapping.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", value)
-    return rendered
 
 
 def _print_top1_info(top1_info: dict[str, object]) -> None:
@@ -518,20 +519,81 @@ def _print_agent_response(response_path: Path, response_text: str) -> None:
     builtins.print("")
 
 
-def _load_kernel_metrics(metrics_path: Path, direction: str):
+def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str | None) -> EvaluationResult | None:
     payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     from kagglebot.solver.evaluate import EvaluationResult
 
+    metric_name, value = _extract_kernel_metric(payload, target_metric)
+    if value is None:
+        return None
+
+    std = payload.get("offline_std")
+    if std is None:
+        std = payload.get("std")
+
     return EvaluationResult(
         score_source=payload.get("score_source", "holdout"),
-        metric=payload.get("metric", "rmse"),
+        metric=metric_name or target_metric or "unknown",
         direction=direction,  # type: ignore[arg-type]
-        value=float(payload.get("offline_value", 0.0)),
-        std=payload.get("offline_std"),
+        value=float(value),
+        std=std,
         train_score=None,
         val_score=None,
         fold_scores=None,
     )
+
+
+def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:
+    def is_number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def normalize(text: str) -> str:
+        return "".join(ch for ch in text.lower() if ch.isalnum())
+
+    if is_number(payload.get("offline_value")):
+        return (str(payload.get("metric") or target_metric or "unknown"), float(payload["offline_value"]))
+    if is_number(payload.get("value")):
+        return (str(payload.get("metric") or target_metric or "unknown"), float(payload["value"]))
+    if is_number(payload.get("score")):
+        return (str(payload.get("metric") or target_metric or "unknown"), float(payload["score"]))
+
+    aliases: dict[str, tuple[str, ...]] = {
+        "accuracy": ("accuracy", "acc"),
+        "auc": ("auc", "rocauc", "roc_auc"),
+        "fmax": ("fmax", "proxyfmax"),
+        "f1": ("f1", "f1score"),
+        "logloss": ("logloss", "log_loss"),
+        "mae": ("mae",),
+        "mape": ("mape",),
+        "rmse": ("rmse",),
+        "rmsle": ("rmsle",),
+        "r2": ("r2", "r2score"),
+    }
+
+    target_key = normalize(target_metric) if target_metric else ""
+    if target_key:
+        wanted = set()
+        for key, values in aliases.items():
+            if target_key == normalize(key) or target_key in {normalize(v) for v in values}:
+                wanted.update({normalize(v) for v in values})
+                wanted.add(normalize(key))
+                break
+        if wanted:
+            for key, val in payload.items():
+                if not is_number(val):
+                    continue
+                if normalize(str(key)) in wanted:
+                    return (str(target_metric), float(val))
+
+    for key, val in payload.items():
+        if not is_number(val):
+            continue
+        normalized_key = normalize(str(key))
+        for metric_name, values in aliases.items():
+            if normalized_key in {normalize(v) for v in values} or normalized_key == normalize(metric_name):
+                return (metric_name, float(val))
+
+    return (str(target_metric) if target_metric else None, None)
 
 
 def _build_metrics_payload(
@@ -655,6 +717,8 @@ def _run_improvement(
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "prompt.md"
+    top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
+    improvement_mode, top1_gap = _classify_improvement_mode(evaluation.value, top1_score, evaluation.direction)
     prompt_text = prompt_template.format(
         slug=config.slug,
         iteration=iteration,
@@ -670,16 +734,20 @@ def _run_improvement(
         direction=evaluation.direction,
         current_score=f"{evaluation.value:.6f}",
         target_score=f"{target_score:.6f}",
-        top1_score=str(top1_info.get("score") or "unavailable"),
+        top1_score=str(top1_score or "unavailable"),
         top1_source=str(top1_info.get("source") or "unknown"),
+        top1_gap="unavailable" if top1_gap is None else f"{top1_gap:.6f}",
+        delta_offline="unavailable" if delta_offline is None else f"{delta_offline:.6f}",
+        improvement_mode=improvement_mode,
         rules_url=str(config.paths.rules_url_path),
         rules_md=str(config.paths.rules_md_path),
         rules_html=str(config.paths.rules_html_path),
         overview_md=str(config.paths.overview_md_path),
         data_md=str(config.paths.data_md_path),
+        submission_format=str(config.paths.submission_format_md_path),
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
-        kernel_overrides=str(config.paths.kernel_overrides_path),
+        kernel_main=str(config.paths.base_dir / "kernel.py"),
     )
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
@@ -700,6 +768,48 @@ def _run_improvement(
         summary=summary.strip(),
         delta_offline=delta_offline,
     )
+
+
+def _run_kernel_fix(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    iter_dir: Path,
+    error_message: str,
+) -> None:
+    prompt_template = config.paths.codex_kernel_fix_template.read_text(encoding="utf-8")
+    agent_dir = iter_dir / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = agent_dir / "kernel_fix_prompt.md"
+    prompt_text = prompt_template.format(
+        slug=config.slug,
+        run_id=run_id,
+        iteration=iteration,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        error_message=error_message,
+        logs_dir=str(iter_dir / "logs"),
+        kernel_main=str(config.paths.base_dir / "kernel.py"),
+        kernel_script=str(config.paths.kernel_run_dir(run_id) / "kernel.py"),
+        rules_url=str(config.paths.rules_url_path),
+        rules_md=str(config.paths.rules_md_path),
+        overview_md=str(config.paths.overview_md_path),
+        data_md=str(config.paths.data_md_path),
+        submission_format=str(config.paths.submission_format_md_path),
+        dataset_profile=str(config.paths.dataset_profile_path),
+        sample_submission=str(config.paths.sample_submission_path),
+    )
+    prompt_path.write_text(prompt_text, encoding="utf-8")
+    _print_agent_prompt(prompt_path, prompt_text)
+
+    print("[cyan]kernel fix[/cyan]: running agent")
+    result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run)
+    response_text = _read_agent_response(result.last_message_path)
+    _print_agent_response(result.last_message_path, response_text)
+    if result.returncode != 0:
+        raise RuntimeError("Codex kernel-fix step failed.")
+    _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
 
 def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Path, best_score: float | None) -> None:
@@ -755,6 +865,17 @@ def _is_top1_tier(value: float, top1_score: float | None, direction: str) -> boo
     if direction == "minimize":
         return value <= top1_score
     return value >= top1_score
+
+
+def _classify_improvement_mode(value: float, top1_score: float | None, direction: str) -> tuple[str, float | None]:
+    if top1_score is None:
+        return "major_overhaul", None
+    gap = top1_score - value if direction == "maximize" else value - top1_score
+    if gap >= MAJOR_TOP1_GAP:
+        return "major_overhaul", gap
+    if gap >= MODERATE_TOP1_GAP:
+        return "moderate_update", gap
+    return "minor_tuning", gap
 
 
 def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:

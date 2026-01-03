@@ -5,12 +5,12 @@ import os
 import re
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich import print
 
-from kagglebot.exceptions import KernelFailedError, KernelTimeoutError, RulesNotAcceptedError
+from kagglebot.exceptions import KaggleCliError, KernelFailedError, KernelTimeoutError, RulesNotAcceptedError
 from kagglebot.kaggle_api import check_rules_accepted, kernels_init, kernels_output, kernels_push, kernels_status
 from kagglebot.validators import validate_kernel_package
 
@@ -29,7 +29,10 @@ def sanitize_kernel_slug(value: str) -> str:
 
 
 def find_submission_file(output_dir: Path) -> Path | None:
-    return _find_output_file(output_dir, "submission.csv")
+    candidate = _find_output_file(output_dir, "submission.csv")
+    if candidate:
+        return candidate
+    return _find_submission_by_extension(output_dir)
 
 
 def resolve_kaggle_username(explicit: str | None) -> str:
@@ -88,21 +91,23 @@ def run_kernel(
         enable_internet=enable_internet,
         competition_slug=slug,
     )
-    _write_kernel_script(
-        kernel_dir=kernel_dir,
-        slug=slug,
-        accelerator=accelerator,
-        score_source=score_source,
-        metric=metric,
-        direction=direction,
-        holdout_frac=holdout_frac,
-        cv_folds=cv_folds,
-        seed=seed,
-        run_id=run_id,
-        iteration=iteration,
-    )
-    _copy_kernel_overrides(kernel_dir=kernel_dir, base_dir=base_dir, slug=slug)
-
+    custom_kernel_path = base_dir / slug / "kernel.py"
+    if custom_kernel_path.exists():
+        shutil.copy2(custom_kernel_path, kernel_dir / "kernel.py")
+    else:
+        _write_kernel_script(
+            kernel_dir=kernel_dir,
+            slug=slug,
+            accelerator=accelerator,
+            score_source=score_source,
+            metric=metric,
+            direction=direction,
+            holdout_frac=holdout_frac,
+            cv_folds=cv_folds,
+            seed=seed,
+            run_id=run_id,
+            iteration=iteration,
+        )
     validate_kernel_package(kernel_dir)
 
     if dry_run:
@@ -111,11 +116,11 @@ def run_kernel(
     print(f"[cyan]kernel push[/cyan]: {kernel_dir}")
     kernels_push(kernel_dir, slug=slug, dry_run=False)
     print(f"[cyan]kernel status[/cyan]: {kernel_id}")
-    _wait_for_kernel(kernel_id, slug, timeout_minutes)
+    _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=output_dir)
     print(f"[cyan]kernel output[/cyan]: {output_dir}")
     kernels_output(kernel_id, output_dir, slug=slug, dry_run=False)
 
-    submission_path = _find_output_file(output_dir, "submission.csv")
+    submission_path = find_submission_file(output_dir)
     metrics_path = _find_output_file(output_dir, "metrics.json")
     return KernelRunResult(
         kernel_id=kernel_id, output_dir=output_dir, submission_path=submission_path, metrics_path=metrics_path
@@ -203,30 +208,46 @@ def _write_kernel_script(
     (kernel_dir / "kernel.py").write_text(script, encoding="utf-8")
 
 
-def _copy_kernel_overrides(*, kernel_dir: Path, base_dir: Path, slug: str) -> None:
-    overrides_path = base_dir / slug / "kernel_overrides.py"
-    if overrides_path.exists():
-        shutil.copy2(overrides_path, kernel_dir / "kernel_overrides.py")
+LOG_POLL_INTERVAL = 15.0
 
 
-def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None) -> None:
+def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, output_dir: Path) -> None:
     deadline = None
     if timeout_minutes is not None:
         deadline = time.monotonic() + max(timeout_minutes, 1) * 60
     last_status = None
+    last_log_fetch = 0.0
+    log_state = _KernelLogState()
     while True:
         output = kernels_status(kernel_id, slug=slug, dry_run=False)
         status = _parse_kernel_status(output).lower()
         if status != last_status:
             print(f"[cyan]kernel status[/cyan]: {status}")
             last_status = status
+        now = time.monotonic()
+        if now - last_log_fetch >= LOG_POLL_INTERVAL:
+            _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
+            _print_kernel_logs(output_dir, log_state)
+            last_log_fetch = now
         if "complete" in status:
             return
         if "error" in status or "fail" in status:
-            raise KernelFailedError(f"Kaggle kernel failed: {output}")
+            _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
+            log_tail = _collect_log_tail(output_dir)
+            message = f"Kaggle kernel failed: {output}"
+            if log_tail:
+                message = f"{message}\n\n--- kernel log tail ---\n{log_tail}"
+            raise KernelFailedError(message)
         time.sleep(10)
         if deadline is not None and time.monotonic() > deadline:
             raise KernelTimeoutError("Kaggle kernel did not complete within timeout.")
+
+
+@dataclass
+class _KernelLogState:
+    seen_lines: dict[Path, int] = field(default_factory=dict)
+    seen_json: dict[Path, int] = field(default_factory=dict)
+    seen_size: dict[Path, int] = field(default_factory=dict)
 
 
 def _parse_kernel_status(output: str) -> str:
@@ -236,6 +257,117 @@ def _parse_kernel_status(output: str) -> str:
     return output.strip() or "unknown"
 
 
+def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> None:
+    try:
+        kernels_output(kernel_id, output_dir, slug=slug, dry_run=False)
+    except KaggleCliError:
+        return
+
+
+def _log_candidates(output_dir: Path) -> list[Path]:
+    candidates = []
+    for name in ("stdout.txt", "stderr.txt", "output.log", "log.txt", "logs.txt"):
+        path = output_dir / name
+        if path.exists():
+            candidates.append(path)
+    candidates.extend(sorted(output_dir.rglob("*.log")))
+    return candidates
+
+
+def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> None:
+    for path in _log_candidates(output_dir):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        size = len(text)
+        prev_size = state.seen_size.get(path, 0)
+        if size < prev_size:
+            state.seen_lines[path] = 0
+            state.seen_json[path] = 0
+        state.seen_size[path] = size
+
+        json_events = _parse_json_log(text)
+        if json_events is not None:
+            last = state.seen_json.get(path, 0)
+            if len(json_events) <= last:
+                continue
+            new_events = json_events[last:]
+            state.seen_json[path] = len(json_events)
+            formatted = _format_log_events(new_events)
+            if not formatted:
+                continue
+            print(f"[cyan]kernel log[/cyan]: {path.name}")
+            print("\n".join(formatted))
+            continue
+
+        lines = text.splitlines()
+        last = state.seen_lines.get(path, 0)
+        if len(lines) <= last:
+            continue
+        new_lines = lines[last:]
+        state.seen_lines[path] = len(lines)
+        print(f"[cyan]kernel log[/cyan]: {path.name}")
+        print("\n".join(new_lines))
+
+
+def _collect_log_tail(output_dir: Path, max_lines: int = 50) -> str | None:
+    for path in _log_candidates(output_dir):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        json_events = _parse_json_log(text)
+        if json_events is not None:
+            formatted = _format_log_events(json_events)
+            if not formatted:
+                continue
+            tail = "\n".join(formatted[-max_lines:])
+            return f"{path.name}\n{tail}".strip()
+        lines = text.splitlines()
+        if not lines:
+            continue
+        tail = "\n".join(lines[-max_lines:])
+        return f"{path.name}\n{tail}".strip()
+    return None
+
+
+def _parse_json_log(text: str) -> list[dict[str, object]] | None:
+    stripped = text.lstrip()
+    if not stripped:
+        return None
+    if stripped.startswith("["):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return None
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict) and isinstance(payload.get("logs"), list):
+            return [item for item in payload["logs"] if isinstance(item, dict)]
+        return None
+    return None
+
+
+def _format_log_events(events: list[dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for event in events:
+        data = event.get("data")
+        if not isinstance(data, str) or not data:
+            continue
+        stream = event.get("stream_name")
+        prefix = f"[{stream}] " if isinstance(stream, str) and stream else ""
+        for line in data.splitlines():
+            lines.append(f"{prefix}{line}")
+    return lines
+
+
 def _find_output_file(output_dir: Path, filename: str) -> Path | None:
     candidate = output_dir / filename
     if candidate.exists():
@@ -243,6 +375,20 @@ def _find_output_file(output_dir: Path, filename: str) -> Path | None:
     matches = list(output_dir.rglob(filename))
     if matches:
         return matches[0]
+    return None
+
+
+def _find_submission_by_extension(output_dir: Path) -> Path | None:
+    suffixes = [".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"]
+    for suffix in suffixes:
+        candidate = output_dir / f"submission{suffix}"
+        if candidate.exists():
+            return candidate
+    for path in output_dir.rglob("submission.*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() in suffixes:
+            return path
     return None
 
 
@@ -302,13 +448,28 @@ SUBMISSION_PATH = WORKING / "submission.csv"
 METRICS_PATH = WORKING / "metrics.json"
 
 
-def find_csvs(root: Path) -> list[Path]:
-    return [p for p in root.rglob("*.csv") if p.is_file()]
+def find_tabular_files(root: Path) -> list[Path]:
+    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
 
 
-def pick_files(csvs: list[Path]) -> tuple[Path, Path, Path]:
-    if not csvs:
-        raise FileNotFoundError("No CSV files found.")
+def read_table(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+    if suffix in {".json", ".jsonl"}:
+        try:
+            return pd.read_json(path, lines=True)
+        except ValueError:
+            return pd.read_json(path)
+    if suffix in {".tsv", ".txt"}:
+        return pd.read_csv(path, sep="\\t")
+    return pd.read_csv(path)
+
+
+def pick_files(files: list[Path]) -> tuple[Path, Path, Path]:
+    if not files:
+        raise FileNotFoundError("No tabular files found.")
     def score_sample(path: Path) -> int:
         name = path.name.lower()
         if "sample_submission" in name:
@@ -316,11 +477,11 @@ def pick_files(csvs: list[Path]) -> tuple[Path, Path, Path]:
         if "submission" in name:
             return 1
         return 0
-    sample = sorted(csvs, key=score_sample, reverse=True)[0]
-    train = next((p for p in csvs if "train" in p.name.lower()), None)
-    test = next((p for p in csvs if "test" in p.name.lower()), None)
+    sample = sorted(files, key=score_sample, reverse=True)[0]
+    train = next((p for p in files if "train" in p.name.lower()), None)
+    test = next((p for p in files if "test" in p.name.lower()), None)
     if train is None or test is None:
-        raise FileNotFoundError("train.csv or test.csv not found.")
+        raise FileNotFoundError("train/test files not found.")
     return train, test, sample
 
 
@@ -532,6 +693,12 @@ def predict_for_submission(model, x, task: str, metric: str, prediction_kind: st
     return model.predict(x)
 
 
+def _slice_rows(values, idx):
+    if hasattr(values, "iloc"):
+        return values.iloc[idx]
+    return values[idx]
+
+
 def evaluate_holdout(model, pre, x, y, task: str, metric: str, prediction_kind: str):
     stratify = y if task == "classification" else None
     x_tr, x_val, y_tr, y_val = train_test_split(
@@ -544,7 +711,7 @@ def evaluate_holdout(model, pre, x, y, task: str, metric: str, prediction_kind: 
     return compute_metric(metric, y_val, preds), None
 
 
-def evaluate_cv(model, pre, x, y, task: str, metric: str, prediction_kind: str):
+def evaluate_cv(model_builder, pre, x, y, task: str, metric: str, prediction_kind: str):
     splitter = (
         StratifiedKFold(n_splits=CONFIG["cv_folds"], shuffle=True, random_state=CONFIG["seed"])
         if task == "classification"
@@ -552,10 +719,11 @@ def evaluate_cv(model, pre, x, y, task: str, metric: str, prediction_kind: str):
     )
     scores = []
     for train_idx, val_idx in splitter.split(x, y):
-        x_tr, x_val = x.iloc[train_idx], x.iloc[val_idx]
-        y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        x_tr, x_val = _slice_rows(x, train_idx), _slice_rows(x, val_idx)
+        y_tr, y_val = _slice_rows(y, train_idx), _slice_rows(y, val_idx)
         x_tr_p = pre.fit_transform(x_tr)
         x_val_p = pre.transform(x_val)
+        model = model_builder(task)
         model.fit(x_tr_p, y_tr)
         preds = predict_for_metric(model, x_val_p, task, metric)
         scores.append(compute_metric(metric, y_val, preds))
@@ -610,31 +778,16 @@ def train_tpu(x_train, y_train, x_eval, task: str):
     return outputs
 
 
-def apply_overrides() -> None:
-    try:
-        import kernel_overrides as _overrides
-    except Exception:
-        return
-    for name in (
-        "feature_engineering",
-        "build_preprocessor",
-        "build_model",
-        "predict_for_metric",
-        "predict_for_submission",
-        "train_tpu",
-    ):
-        if hasattr(_overrides, name):
-            globals()[name] = getattr(_overrides, name)
-
-
-apply_overrides()
-
-
 def main() -> None:
-    train_path, test_path, sample_path = pick_files(find_csvs(INPUT_ROOT))
-    train = pd.read_csv(train_path)
-    test = pd.read_csv(test_path)
-    sample = pd.read_csv(sample_path)
+    if "custom_main" in globals():
+        custom_main = globals()["custom_main"]
+        if callable(custom_main):
+            custom_main()
+            return
+    train_path, test_path, sample_path = pick_files(find_tabular_files(INPUT_ROOT))
+    train = read_table(train_path)
+    test = read_table(test_path)
+    sample = read_table(sample_path)
 
     id_col, target_col, features = infer_target(train, test, sample)
     train, test, features = feature_engineering(train, test, id_col, target_col, features)
@@ -672,16 +825,17 @@ def main() -> None:
             preds = train_tpu(x_full, y, x_full, task)
             score = compute_metric(CONFIG["metric"], y, preds)
     else:
-        model = build_model(task)
         if score_source == "cv":
-            score, std = evaluate_cv(model, pre, x, y, task, CONFIG["metric"], prediction_kind)
+            score, std = evaluate_cv(build_model, pre, x, y, task, CONFIG["metric"], prediction_kind)
         elif score_source == "test" and test_labels is not None:
+            model = build_model(task)
             x_train_p = pre.fit_transform(x)
             x_test_p = pre.transform(test[features])
             model.fit(x_train_p, y)
             preds = predict_for_metric(model, x_test_p, task, CONFIG["metric"])
             score = compute_metric(CONFIG["metric"], test_labels, preds)
         else:
+            model = build_model(task)
             score, std = evaluate_holdout(model, pre, x, y, task, CONFIG["metric"], prediction_kind)
 
     x_full = pre.fit_transform(x)

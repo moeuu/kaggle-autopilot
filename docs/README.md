@@ -89,14 +89,12 @@ kaggle-autopilot/
 │       ├── autopilot.py           # Autopilot orchestration
 │       ├── solver/                # Generic ML pipelines
 │       ├── knowledge/             # KB management
-│       ├── git_utils.py           # Main-only git workflow
 │       └── templates/             # Agent prompt templates
-│           ├── baseline_plan_and_implement.md
+│           ├── initial_plan_and_implement.md
 │           ├── improve_iteration.md
 │           └── postmortem_and_kb_update.md
 ├── tests/                         # pytest test suite
 ├── artifacts/                     # Competition-specific runs (gitignored)
-│   ├── diffs/                     # Git diffs from autopilot runs
 │   └── <slug>/
 │       ├── meta.json              # Competition metadata
 │       ├── plan.json              # Agent-defined targets
@@ -244,14 +242,14 @@ Controlled vocabulary for competition tags:
 
 Located in `src/kagglebot/templates/`:
 
-### baseline_plan_and_implement.md
+### initial_plan_and_implement.md
 
-Template for iteration 0 (plan + baseline):
+Template for iteration 0 (plan + initial model):
 - Competition overview and context
 - Compute environment and constraints
 - Available context files and KB hints
 - Step-by-step plan creation guidance
-- Baseline implementation guide (data loading, preprocessing, modeling, evaluation, submission)
+- Initial model guide (data loading, preprocessing, modeling, evaluation, submission)
 - Safety rules and quality checklist
 - Acceptance criteria (tests pass, offline score, submission valid, GPU utilized)
 

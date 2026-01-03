@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import time
@@ -13,12 +14,14 @@ from kagglebot.competition import rules_url_for_slug
 from kagglebot.kaggle_api import download_competition
 from kagglebot.knowledge import (
     build_improve_template,
-    build_plan_and_baseline_prompt,
+    build_kernel_fix_template,
+    build_plan_and_initial_prompt,
     ensure_taxonomy,
     record_competition_profile,
     resolve_similar_improvements,
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.submission_format import extract_submission_section, load_submission_format_hint
 from kagglebot.types import BootstrapMeta, PlanConfig, RulesInfo
 from kagglebot.validators import safe_extract_zip
 
@@ -68,7 +71,8 @@ def bootstrap_competition(
         _write_overview_markdown(paths, f"Overview content not provided. See: {rules_url}\n")
     if not paths.data_md_path.exists():
         _write_data_markdown(paths, f"Data content not provided. See: {rules_url}\n")
-    _ensure_kernel_overrides(paths)
+    if not paths.submission_format_md_path.exists():
+        _write_submission_format_markdown(paths, f"Submission format not provided. See: {rules_url}\n")
     _write_plan(paths, force=force)
 
     if download:
@@ -79,7 +83,7 @@ def bootstrap_competition(
         else:
             download_competition(slug, paths.data_dir, force=True, quiet=quiet)
             _unzip_downloads(paths.data_dir)
-            if rules_source == "url" and _pages_need_refresh(paths, rules_url):
+            if rules_source == "url":
                 _capture_rules(
                     paths,
                     rules_source=rules_source,
@@ -134,7 +138,7 @@ def _capture_rules(
 ) -> None:
     if rules_source == "none":
         return
-    if rules_source == "url":
+    if rules_source in {"url", "fetch"}:
         if dry_run:
             (paths.context_dir / "rules_url_skipped.txt").write_text(
                 "DRY RUN: rules download skipped.\n", encoding="utf-8"
@@ -147,14 +151,35 @@ def _capture_rules(
             data_md = _select_page_markdown(
                 pages,
                 names=("data-description", "data"),
-                keywords=("data",),
+                keywords=("data", "dataset"),
             )
             if rules_md:
                 _write_rules_markdown(paths, _normalize_page_markdown(rules_md))
+            normalized_overview = ""
+            normalized_data = ""
             if overview_md:
-                _write_overview_markdown(paths, overview_md)
+                normalized_overview = _normalize_page_markdown(overview_md)
+                _write_overview_markdown(paths, normalized_overview)
             if data_md:
-                _write_data_markdown(paths, _normalize_page_markdown(data_md))
+                normalized_data = _normalize_page_markdown(data_md)
+                _write_data_markdown(paths, normalized_data)
+
+            submission_section = None
+            if normalized_data:
+                submission_section = extract_submission_section(normalized_data)
+            if not submission_section and normalized_overview:
+                submission_section = extract_submission_section(normalized_overview)
+            if not submission_section:
+                for page in pages:
+                    content = page.get("content")
+                    if not isinstance(content, str) or not content.strip():
+                        continue
+                    section = extract_submission_section(_normalize_page_markdown(content))
+                    if section:
+                        submission_section = section
+                        break
+            if submission_section:
+                _write_submission_format_markdown(paths, submission_section)
         return
     if rules_source != "file":
         raise ValueError(f"Unknown rules source: {rules_source}")
@@ -283,14 +308,41 @@ def _build_overview_markdown(pages: list[dict[str, object]]) -> str | None:
     return "\n\n".join(sections).strip()
 
 
+def _looks_like_html(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        tag in lowered
+        for tag in (
+            "<p",
+            "<div",
+            "<br",
+            "<li",
+            "<h1",
+            "<h2",
+            "<h3",
+            "<ul",
+            "<ol",
+            "<table",
+            "<span",
+            "<a ",
+            "<strong",
+            "<em",
+        )
+    )
+
+
 def _normalize_page_markdown(text: str) -> str:
-    if "<" in text and ">" in text:
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+    if _looks_like_html(cleaned):
         parser = _RulesHtmlToMarkdown()
-        parser.feed(text)
+        parser.feed(cleaned)
         converted = parser.to_markdown()
         if converted:
-            return converted
-    return text.strip()
+            if len(cleaned) < 400 or len(converted) >= int(len(cleaned) * 0.6):
+                return converted
+    return cleaned
 
 
 def _fetch_json_with_retry(url: str, *, timeout: int, attempts: int = 3) -> dict[str, object] | None:
@@ -342,6 +394,15 @@ def _write_data_markdown(paths: CompetitionPaths, text: str) -> None:
     paths.data_md_path.write_text(normalized, encoding="utf-8")
 
 
+def _write_submission_format_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Submission format unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.submission_format_md_path.write_text(normalized, encoding="utf-8")
+
+
 def _pages_need_refresh(paths: CompetitionPaths, rules_url: str) -> bool:
     def needs_refresh(path: Path, markers: tuple[str, ...]) -> bool:
         if not path.exists():
@@ -357,28 +418,9 @@ def _pages_need_refresh(paths: CompetitionPaths, rules_url: str) -> bool:
         return True
     if needs_refresh(paths.data_md_path, ("Data content not provided.",)):
         return True
+    if needs_refresh(paths.submission_format_md_path, ("Submission format not provided.",)):
+        return True
     return False
-
-
-def _ensure_kernel_overrides(paths: CompetitionPaths) -> None:
-    if paths.kernel_overrides_path.exists():
-        return
-    stub = """\
-\"\"\"Kernel overrides for kaggle_gpu / kaggle_tpu runs.
-
-Define any of the following functions to override defaults in kernel.py:
-- feature_engineering(train, test, id_col, target_col, features)
-- build_preprocessor(features, train)
-- build_model(task)
-- predict_for_metric(model, x, task, metric)
-- predict_for_submission(model, x, task, metric, prediction_kind)
-- train_tpu(x_train, y_train, x_eval, task)
-
-Prefer a Torch-based supervised model by default. Use simpler linear models
-only when you have a clear, data-driven reason they will outperform.
-\"\"\"
-"""
-    paths.kernel_overrides_path.write_text(stub, encoding="utf-8")
 
 
 def _write_plan(paths: CompetitionPaths, *, force: bool) -> None:
@@ -395,7 +437,7 @@ def _write_prompts(
     taxonomy: dict[str, object],
     similar_improvements: list[dict[str, object]],
 ) -> None:
-    baseline = build_plan_and_baseline_prompt(
+    initial_prompt = build_plan_and_initial_prompt(
         slug=slug,
         rules_url=rules_url,
         profile=profile,
@@ -403,8 +445,10 @@ def _write_prompts(
         similar_improvements=similar_improvements,
     )
     improve_template = build_improve_template()
-    paths.codex_plan_and_baseline_prompt.write_text(baseline, encoding="utf-8")
+    kernel_fix_template = build_kernel_fix_template()
+    paths.codex_plan_and_implement_prompt.write_text(initial_prompt, encoding="utf-8")
     paths.codex_improve_template.write_text(improve_template, encoding="utf-8")
+    paths.codex_kernel_fix_template.write_text(kernel_fix_template, encoding="utf-8")
 
 
 def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
@@ -417,18 +461,130 @@ def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
 
 
 def _cache_sample_submission(paths: CompetitionPaths) -> None:
+    format_hint = load_submission_format_hint(paths.submission_format_md_path)
     if paths.sample_submission_path.exists():
         if not paths.sample_submission_head_path.exists():
             _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
         return
-    csvs = sorted([p for p in paths.data_dir.rglob("*.csv") if p.is_file()])
-    if not csvs:
+    tabular = _find_tabular_files(paths.data_dir)
+    if not tabular:
         return
-    for path in csvs:
+    for path in tabular:
         if "sample_submission" in path.name.lower():
-            shutil.copy2(path, paths.sample_submission_path)
+            if path.suffix.lower() == ".csv":
+                shutil.copy2(path, paths.sample_submission_path)
+            else:
+                try:
+                    frame = _read_table(path, format_hint=format_hint)
+                except Exception:
+                    return
+                frame.to_csv(paths.sample_submission_path, index=False)
             _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
             return
+
+
+def _find_tabular_files(root: Path) -> list[Path]:
+    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
+
+
+def _read_table(path: Path, *, format_hint=None):
+    try:
+        import pandas as pd
+    except Exception:  # pragma: no cover - optional dependency in tests
+        raise
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+    if suffix in {".json", ".jsonl"}:
+        try:
+            return pd.read_json(path, lines=True)
+        except ValueError:
+            return pd.read_json(path)
+    if suffix == ".tsv":
+        return _read_delimited_table(path, sep="\t", format_hint=format_hint)
+    if suffix == ".txt":
+        hint_sep = getattr(format_hint, "delimiter", None) if format_hint is not None else None
+        return _read_delimited_table(path, sep=hint_sep or "\t", format_hint=format_hint)
+    if suffix == ".csv":
+        return _read_delimited_table(path, sep=",", format_hint=format_hint)
+    return pd.read_csv(path)
+
+
+def _read_delimited_table(path: Path, *, sep: str, format_hint=None):
+    try:
+        import pandas as pd
+    except Exception:  # pragma: no cover - optional dependency in tests
+        raise
+    try:
+        return pd.read_csv(path, sep=sep)
+    except Exception:
+        pass
+    columns = getattr(format_hint, "columns", None) if format_hint is not None else None
+    expected_cols = len(columns) if columns else _infer_column_count(path, sep)
+    if expected_cols is None:
+        return pd.read_csv(path, sep=sep, engine="python", on_bad_lines="skip")
+    names = columns or [f"col{i}" for i in range(expected_cols)]
+    filtered = _filter_delimited_text(path, sep=sep, expected_cols=expected_cols)
+    if filtered is None:
+        df = pd.read_csv(
+            path,
+            sep=sep,
+            header=None,
+            names=names,
+            usecols=list(range(expected_cols)),
+            engine="python",
+            on_bad_lines="skip",
+        )
+    else:
+        df = pd.read_csv(
+            io.StringIO(filtered),
+            sep=sep,
+            header=None,
+            names=names,
+            engine="python",
+        )
+    if columns and not df.empty and list(df.iloc[0].astype(str)) == columns:
+        df = df.iloc[1:].reset_index(drop=True)
+    return df
+
+
+def _infer_column_count(path: Path, sep: str, max_lines: int = 200) -> int | None:
+    from collections import Counter
+
+    counts: Counter[int] = Counter()
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                counts[len(line.rstrip("\n").split(sep))] += 1
+                if sum(counts.values()) >= max_lines:
+                    break
+    except OSError:
+        return None
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
+def _filter_delimited_text(path: Path, *, sep: str, expected_cols: int, max_lines: int | None = None) -> str | None:
+    lines: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                if len(line.rstrip("\n").split(sep)) != expected_cols:
+                    continue
+                lines.append(line)
+                if max_lines is not None and len(lines) >= max_lines:
+                    break
+    except OSError:
+        return None
+    if not lines:
+        return None
+    return "".join(lines)
 
 
 def _write_sample_head(sample_path: Path, head_path: Path, rows: int = 5) -> None:

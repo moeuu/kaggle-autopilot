@@ -39,6 +39,10 @@
 - `{dataset_profile_path}` - Dataset statistics
 - `{sample_submission_path}` - Required submission format
 - `{top1_public_path}` - Top1 leaderboard score (context only)
+- `{rules_url_path}` - Competition rules URL
+- `{rules_html_path}` - Rules HTML (if present)
+- `{submission_format_path}` - Submission format details (if present)
+- `{kernel_main_path}` - Kernel entrypoint for kaggle_gpu/tpu
 {kb_hints_section}
 
 ## Performance Analysis
@@ -80,7 +84,7 @@ Read diagnostics and metrics to identify why the current score doesn't meet targ
    - Solutions: Add regularization, simplify model, improve CV, feature selection
 
 3. **Poor Feature Engineering**:
-   - Symptoms: Baseline model underperforms expected range
+   - Symptoms: Current model underperforms expected range
    - Causes: Missing important signals, poor encoding, no domain features
    - Solutions: Create interactions, transform skewed features, domain engineering
 
@@ -114,6 +118,11 @@ Read diagnostics and metrics to identify why the current score doesn't meet targ
 ### Step 2: Implement Targeted Improvements
 
 Make **1-2 focused changes** per iteration. Avoid changing too many things at once.
+
+Use the top1 gap as a guide:
+- **Far from top1** → major overhaul (model family/feature strategy)
+- **Mid gap** → moderate update (features + key hyperparameters)
+- **Near top1** → minor tuning (small hyperparameter tweaks)
 
 **Recommended Strategies** (pick based on diagnosis):
 

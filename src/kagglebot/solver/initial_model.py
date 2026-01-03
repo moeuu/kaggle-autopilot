@@ -551,14 +551,14 @@ def _record_std(record: dict[str, object]) -> float:
     return float(record["std"]) if isinstance(record.get("std"), (int, float)) else 0.0
 
 
-def _clearly_better(candidate: dict[str, object], baseline: dict[str, object], direction: str) -> bool:
+def _clearly_better(candidate: dict[str, object], reference: dict[str, object], direction: str) -> bool:
     candidate_score = float(candidate["mean"])
-    baseline_score = float(baseline["mean"])
+    reference_score = float(reference["mean"])
     if direction == "minimize":
-        improvement = baseline_score - candidate_score
+        improvement = reference_score - candidate_score
     else:
-        improvement = candidate_score - baseline_score
-    margin = max(_record_std(candidate), _record_std(baseline))
+        improvement = candidate_score - reference_score
+    margin = max(_record_std(candidate), _record_std(reference))
     return improvement > margin
 
 

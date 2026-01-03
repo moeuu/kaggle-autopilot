@@ -11,7 +11,7 @@ The KB answers questions like:
 - **"What improvements worked on tabular binary classification?"** → Surface successful strategies
 - **"How did we perform on datasets with high missing values?"** → Learn from past challenges
 
-During autopilot bootstrap, the KB is queried to find similar competitions and inject successful improvement strategies into the baseline prompt.
+During autopilot bootstrap, the KB is queried to find similar competitions and inject successful improvement strategies into the initial-model prompt.
 
 ## Storage
 
@@ -228,7 +228,7 @@ uv run kagglebot bootstrap titanic
 When you bootstrap a new competition:
 1. Dataset is profiled → tags inferred
 2. KB is queried for similar competitions (by tag overlap)
-3. Top-K similar competitions' improvements are injected into baseline prompt
+3. Top-K similar competitions' improvements are injected into the initial-model prompt
 4. Competition metadata is inserted into KB
 
 ### 2. Autopilot Run
@@ -259,10 +259,10 @@ uv run kagglebot autopilot house-prices --agent codex --submit
 1. KB query finds similar competitions:
    - `titanic` (overlap: 3 tags - `tabular`, `regression`, `n_rows_small`)
    - `bike-sharing` (overlap: 2 tags - `tabular`, `regression`)
-2. Improvements from those competitions are included in the baseline prompt:
+2. Improvements from those competitions are included in the initial-model prompt:
    - "titanic: Added polynomial features (degree 2), improved RMSE by 0.03"
    - "bike-sharing: Log-transformed target, improved RMSE by 0.05"
-3. Agent uses these hints to create a better baseline for `house-prices`
+3. Agent uses these hints to create a stronger initial model for `house-prices`
 
 ### Scenario: Manual Tagging
 

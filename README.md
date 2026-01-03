@@ -31,17 +31,11 @@ Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
-2. **Plan**: Agent generates `plan.json` with target metric/score/direction
-<<<<<<< ours
-3. **Baseline**: Agent implements initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel_overrides.py`)
+2. **Plan**: Codex summarizes context, Claude designs a strategy, Codex implements it
+3. **Initial model**: Agent implements an initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel.py`)
 4. **Iterate**: Train → evaluate → diagnose → improve (default 3 iterations; override with `--max-iterations`)
 5. **Submit**: Auto-submit when top1-tier (or at final iteration if `--submit`)
-=======
-3. **Baseline**: Agent implements initial solution in `kagglebot/solver/`
-4. **Iterate**: Train → evaluate → diagnose → improve (up to 5 iterations)
-5. **Submit**: Auto-submit when top1-tier (or at iteration 5 if `--submit`)
 6. **Log**: Print Top1 public score and agent prompt/response to the terminal
->>>>>>> theirs
 
 **Safe defaults**:
 - Default max iterations: 3 (`--max-iterations` to override)
@@ -131,10 +125,11 @@ artifacts/<slug>/
     rules.html                   # Rules HTML (if provided)
     overview.md                  # Competition overview (if available)
     data.md                      # Data description (if available)
+    submission_format.md         # Submission format (if available)
     knowledge_hints.txt          # Similar competitions + hints
-  kernel_overrides.py            # Kaggle kernel override hooks
+  kernel.py                      # Kaggle kernel entrypoint (for kaggle_gpu/kaggle_tpu)
   prompts/
-    codex_plan_and_baseline.md   # Baseline generation prompt
+    codex_plan_and_implement.md   # Initial plan + implementation prompt
     codex_improve.md             # Improvement iteration prompt
   kernels/
     <run-id>/                    # Kaggle kernel workspace

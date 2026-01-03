@@ -17,6 +17,9 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
     kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    kernel_path = tmp_path / "demo" / "kernel.py"
+    kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    kernel_path.write_text("# custom\n", encoding="utf-8")
     run_kernel(
         slug="demo",
         run_id="run-1",
@@ -39,6 +42,7 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     payload = json.loads(meta_path.read_text(encoding="utf-8"))
     assert payload["enable_gpu"] is True
     assert payload["enable_tpu"] is False
+    assert (tmp_path / "demo" / "kernels" / "run-1" / "kernel.py").exists()
     assert (tmp_path / "demo" / "kernels" / "run-1" / "kernel.py").exists()
 
 
@@ -75,3 +79,29 @@ def test_kernel_metadata_tpu(tmp_path: Path) -> None:
     payload = json.loads(meta_path.read_text(encoding="utf-8"))
     assert payload["enable_tpu"] is True
     assert payload["enable_gpu"] is False
+
+
+def test_run_kernel_uses_custom_kernel(tmp_path: Path) -> None:
+    custom_kernel = tmp_path / "demo" / "kernel.py"
+    custom_kernel.parent.mkdir(parents=True, exist_ok=True)
+    custom_kernel.write_text("print('custom')\n", encoding="utf-8")
+    run_kernel(
+        slug="demo",
+        run_id="run-3",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=False,
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+    kernel_path = tmp_path / "demo" / "kernels" / "run-3" / "kernel.py"
+    assert kernel_path.read_text(encoding="utf-8") == "print('custom')\n"
