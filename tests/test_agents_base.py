@@ -104,9 +104,7 @@ def test_render_prompt_template_basic(tmp_path: Path):
     template_path = tmp_path / "template.md"
     template_path.write_text("Hello {{name}}, your age is {{age}}.")
 
-    rendered = render_prompt_template(
-        template_path, {"name": "Alice", "age": "30"}
-    )
+    rendered = render_prompt_template(template_path, {"name": "Alice", "age": "30"})
 
     assert rendered == "Hello Alice, your age is 30."
 

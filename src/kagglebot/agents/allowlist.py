@@ -73,9 +73,7 @@ class WriteAllowlist:
         try:
             rel_path = file_path.relative_to(self.base_dir)
         except ValueError as e:
-            raise ValueError(
-                f"Path {file_path} is not under base directory {self.base_dir}"
-            ) from e
+            raise ValueError(f"Path {file_path} is not under base directory {self.base_dir}") from e
 
         # Use PurePosixPath for consistent Unix-style matching
         posix_path = PurePosixPath(rel_path)

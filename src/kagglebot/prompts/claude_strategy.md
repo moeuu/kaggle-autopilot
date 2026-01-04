@@ -1,48 +1,64 @@
 # Claude Strategy Request
 
-You are Claude Code. Use web search as needed. Follow Kaggle rules:
+You are Claude Code. This is a hard problem: think deeply and prioritize maximum accuracy.
+Use web search and cite sources unless internet is explicitly off. Follow Kaggle rules:
 no external data unless explicitly allowed. Do not include secrets.
 
 Competition: {{slug}}
 Compute: {{compute}}
 Accelerator: {{accelerator}}
 Internet: {{internet}}
+Rules URL: {{rules_url}}
 
-Brief (from Codex):
+Codex interpretation (summary of overview/data/rules + dataset profile):
 <<<
-{{brief_content}}
+{{interpretation}}
 >>>
 
-Overview (content):
-<<<
-{{overview_content}}
->>>
-
-Data description (content):
-<<<
-{{data_content}}
->>>
-
-Rules (content):
-<<<
-{{rules_content}}
->>>
-
-Dataset profile (JSON):
+Dataset profile (JSON, trimmed):
 <<<
 {{dataset_profile}}
 >>>
 
-Sample submission (CSV):
+Submission format (from competition page, trimmed):
 <<<
-{{sample_submission}}
+{{submission_format}}
 >>>
 
-Return output with exact delimiters:
+Sample submission head (CSV, trimmed):
+<<<
+{{sample_submission_head}}
+>>>
+
+Return output with exact delimiters. Do NOT include chain-of-thought; provide concise, actionable steps only.
 
 ===STRATEGY===
-Provide a strong baseline plan and improvements. Include model choice, preprocessing, CV plan, and risks.
+Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings and include:
+- Problem framing + task/metric
+- Data & submission format interpretation
+- Candidate approaches (>=3) with pros/cons
+- Final approach + rationale
+- Training & evaluation plan (CV/holdout + metrics)
+- Compute/GPU plan + time budget
+- Error analysis + ablation plan
+- Risks, constraints, and rule compliance
+- Search notes (queries & key findings)
+- Sources (>=3). Provide title + domain; URLs are acceptable.
+
+===PLAN_JSON===
+Provide a JSON object with these keys (do not wrap in markdown):
+- target_metric (string, from rules)
+- target_direction ("minimize" or "maximize")
+- target_score (number; use top1 public score as a realistic target)
+- score_source ("holdout" or "cv")
+- holdout_frac (number, e.g. 0.2)
+- cv_folds (int, e.g. 5)
+- seed (int)
+- max_iterations (int)
+- patience (int)
+- min_improvement (number)
 
 ===CODEX_INSTRUCTIONS===
 Give Codex step-by-step instructions to update only:
 artifacts/<slug>/kernel/ (especially kernel.py). Mention any helper files to add under that dir.
+Be explicit about files, functions, and training/eval flow.

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from kagglebot.exec_utils import run_command
+
+_DEFAULT_MODEL = "opus"
 
 
 @dataclass(frozen=True)
@@ -32,8 +36,16 @@ def run_claude(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) ->
             stderr="",
         )
 
-    args = ["claude", "-p", prompt_text]
-    result = run_command(args)
+    args = ["claude", "-p", "--model", _DEFAULT_MODEL, prompt_text]
+    stop_event = threading.Event()
+    start_time = time.monotonic()
+    heartbeat = threading.Thread(target=_heartbeat, args=(stop_event, start_time), daemon=True)
+    heartbeat.start()
+    try:
+        result = run_command(args)
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=1.0)
     transcript_path.write_text(result.stdout, encoding="utf-8")
     last_line = ""
     for line in result.stdout.splitlines():
@@ -47,3 +59,9 @@ def run_claude(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) ->
         stdout=result.stdout,
         stderr=result.stderr,
     )
+
+
+def _heartbeat(stop_event: threading.Event, start_time: float, interval: float = 30.0) -> None:
+    while not stop_event.wait(interval):
+        elapsed = int(time.monotonic() - start_time)
+        print(f"claude: still running... ({elapsed}s)")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import py_compile
 import re
 import zipfile
 from pathlib import Path
@@ -84,3 +85,48 @@ def validate_kernel_package(package_dir: Path) -> None:
     if matches:
         unique = sorted(set(matches))
         raise ValueError(f"Secret pattern detected in kernel package: {unique}")
+
+
+def validate_kernel_sources(kernel_dir: Path) -> list[str]:
+    issues: list[str] = []
+    if not kernel_dir.exists():
+        return [f"Kernel directory not found: {kernel_dir}"]
+
+    py_files = sorted(kernel_dir.rglob("*.py"))
+    if not py_files:
+        issues.append("No Python files found in kernel directory.")
+        return issues
+
+    kernel_py = kernel_dir / "kernel.py"
+    if not kernel_py.exists():
+        issues.append("kernel.py not found in kernel directory.")
+
+    for path in py_files:
+        try:
+            py_compile.compile(str(path), doraise=True)
+        except py_compile.PyCompileError as exc:
+            issues.append(f"Syntax error in {path.name}: {exc.msg}")
+
+    content = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in py_files if path.is_file())
+    if "/kaggle/input/" not in content:
+        issues.append("Kernel sources do not reference /kaggle/input/ for data loading.")
+    if "submission.csv" not in content:
+        issues.append("Kernel sources do not reference submission.csv output.")
+    if "metrics.json" not in content:
+        issues.append("Kernel sources do not reference metrics.json output.")
+
+    lowered = content.lower()
+    if "prot_t5" in lowered or "t5" in lowered:
+        if "automodel.from_pretrained" in lowered and "t5encodermodel" not in lowered and ".get_encoder" not in lowered:
+            issues.append(
+                "Detected T5/ProtT5 with AutoModel; use T5EncoderModel or "
+                "model.get_encoder() to avoid decoder_input_ids errors."
+            )
+    return issues
+
+
+def ensure_kernel_sources_valid(kernel_dir: Path) -> None:
+    issues = validate_kernel_sources(kernel_dir)
+    if issues:
+        detail = "\n".join(f"- {issue}" for issue in issues)
+        raise ValueError(f"Kernel source validation failed:\n{detail}")

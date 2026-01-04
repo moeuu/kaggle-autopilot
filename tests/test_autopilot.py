@@ -402,6 +402,7 @@ def test_autopilot_retries_kernel_failure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.kernel_runner.ensure_kernel_sources_valid", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, compute="kaggle_gpu", accelerator="gpu", max_iterations=1)
     run_autopilot(config)

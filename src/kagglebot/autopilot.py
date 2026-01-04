@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import json
 import shlex
+import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +19,13 @@ from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
 from kagglebot.knowledge import record_improvement, record_iteration, record_run
-from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig, run_agent_pipeline
+from kagglebot.orchestrator.agent_pipeline import (
+    AgentPipelineConfig,
+    _backup_guarded_files,
+    _enforce_allowlist_changes,
+    _snapshot_tree,
+    run_agent_pipeline,
+)
 from kagglebot.solver.initial_model import train_evaluate_and_predict
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.types import PlanConfig
@@ -63,12 +70,32 @@ class AutopilotConfig:
 
 
 MAX_KERNEL_FIX_ATTEMPTS: int | None = None
+MAX_AUTOFIX_ATTEMPTS = 2
 MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
 
 
 def run_autopilot(config: AutopilotConfig) -> None:
     run_id = config.run_id or new_run_id()
+    attempt = 0
+    while True:
+        try:
+            return _run_autopilot_core(config, run_id)
+        except RulesNotAcceptedError:
+            raise
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if config.dry_run:
+                raise
+            attempt += 1
+            if attempt > MAX_AUTOFIX_ATTEMPTS:
+                raise
+            print("[yellow]autofix[/yellow]: invoking codex to repair error")
+            _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+
+
+def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[green]run started[/green]: {run_id}")
@@ -178,9 +205,11 @@ def run_autopilot(config: AutopilotConfig) -> None:
                             timeout_minutes=None,
                         )
                         break
-                    except KernelFailedError as exc:
+                    except RulesNotAcceptedError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
                         kernel_attempts += 1
-                        error_text = str(exc)
+                        error_text = _format_kernel_error(exc)
                         (logs_dir / "kernel_error.txt").write_text(error_text + "\n", encoding="utf-8")
                         if config.dry_run:
                             raise
@@ -703,6 +732,14 @@ def _build_diagnostics(
     return "\n".join(lines) + "\n"
 
 
+def _format_kernel_error(exc: Exception) -> str:
+    trace = traceback.format_exc()
+    header = f"{exc.__class__.__name__}: {exc}".strip()
+    if trace and trace != "NoneType: None\n":
+        return f"{header}\n{trace}".strip()
+    return header
+
+
 def _run_improvement(
     config: AutopilotConfig,
     run_id: str,
@@ -810,6 +847,105 @@ def _run_kernel_fix(
     if result.returncode != 0:
         raise RuntimeError("Codex kernel-fix step failed.")
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
+
+
+def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception) -> None:
+    run_dir = config.paths.run_dir(run_id)
+    autofix_dir = run_dir / "autofix" / f"attempt-{attempt}"
+    autofix_dir.mkdir(parents=True, exist_ok=True)
+    error_text = "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip()
+    error_path = autofix_dir / "error.txt"
+    error_path.write_text(error_text + "\n", encoding="utf-8")
+
+    allowed_prefixes = [
+        config.paths.repo_root / "src",
+        config.paths.repo_root / "docs",
+        config.paths.repo_root / "tests",
+        config.paths.kernel_source_dir,
+        config.paths.context_dir,
+        config.paths.runs_dir,
+        config.paths.prompts_dir,
+    ]
+    prompt_text = _build_autofix_prompt(
+        config=config,
+        run_id=run_id,
+        attempt=attempt,
+        error_text=error_text,
+        error_path=error_path,
+        allowed_prefixes=allowed_prefixes,
+    )
+    prompt_path = autofix_dir / "prompt.md"
+    prompt_path.write_text(prompt_text, encoding="utf-8")
+    _print_agent_prompt(prompt_path, prompt_text)
+
+    guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
+    before = _snapshot_tree(config.paths.repo_root)
+    result = run_codex(prompt_path, autofix_dir, dry_run=config.dry_run)
+    after = _snapshot_tree(config.paths.repo_root)
+    _enforce_allowlist_changes(
+        root=config.paths.repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage=f"autofix_attempt_{attempt}",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+    response_text = _read_agent_response(result.last_message_path)
+    _print_agent_response(result.last_message_path, response_text)
+    if result.returncode != 0:
+        raise RuntimeError("Codex autofix step failed.")
+    _run_verify(config.verify_cmd, dry_run=config.dry_run)
+
+
+def _build_autofix_prompt(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    attempt: int,
+    error_text: str,
+    error_path: Path,
+    allowed_prefixes: list[Path],
+) -> str:
+    allowed_list = "\n".join(f"- {path}" for path in allowed_prefixes)
+    return f"""\
+# Kagglebot Codex: Auto-Fix
+
+## Context
+
+Competition: {config.slug}
+Run ID: {run_id}
+Attempt: {attempt}
+Compute: {config.compute} ({config.accelerator})
+
+## Error
+
+```
+{error_text}
+```
+
+Error log file: {error_path}
+
+## Relevant Paths
+
+- repo_root: {config.paths.repo_root}
+- run_dir: {config.paths.run_dir(run_id)}
+- kernel_dir: {config.paths.kernel_source_dir}
+- context_dir: {config.paths.context_dir}
+- prompts_dir: {config.paths.prompts_dir}
+- autopilot: {Path(__file__).resolve()}
+
+## Allowed Edit Scope
+
+{allowed_list}
+
+## Task
+
+1) Identify root cause of the failure.
+2) Apply minimal, targeted fixes so autopilot can continue.
+3) Do not touch datasets or credentials. Do not add new dependencies without justification.
+4) Explain what you changed in your response.
+"""
 
 
 def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Path, best_score: float | None) -> None:

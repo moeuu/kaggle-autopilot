@@ -24,9 +24,10 @@ When autopilot starts, it:
 1. Downloads competition data
 2. Profiles the dataset (rows, columns, missing values, etc.)
 3. Queries the Knowledge Base for similar competitions
-4. Runs a three-stage agent pipeline:
-   - **Codex brief**: summarizes overview/data/rules into a compact brief
-   - **Claude strategy**: deep plan with web search and references
+4. Generates competition-specific code only under `artifacts/<slug>/kernel/` (never under `src/`)
+5. Runs a three-stage agent pipeline:
+   - **Codex brief**: reads local context files (overview/data/rules + dataset_profile + submission_format) and produces a concise interpretation (no raw content forwarded)
+   - **Claude strategy**: deep plan with web search and references (Claude model: `opus`). Output must include candidates, evaluation plan, risks, ablation plan, sources, and a `PLAN_JSON` block; otherwise the pipeline retries.
    - **Codex implement**: applies Claude’s plan to the repo
 5. Runs initial verification (tests)
 
@@ -52,6 +53,7 @@ For each iteration:
 
 1. **Verify**: Run `pytest` to ensure code quality
 2. **Train**: Run local solver or Kaggle kernel (kaggle_gpu/kaggle_tpu uses `kernel.py`)
+   - Before kernel push, sources are validated for syntax and required outputs (submission/metrics paths).
 3. **Evaluate**: Compute offline score using the evaluation strategy (holdout/CV/test)
 4. **Check Top1**: Compare offline score to public Top1 (direction-aware)
 5. **Diagnose**: Generate `diagnostics.md` with actionable improvement hints
@@ -68,6 +70,7 @@ The loop stops when:
 - **Top1-tier reached** → Submit if `--submit` flag is set
 - **Max iterations reached** → Submit best offline candidate at the final iteration (if `--submit`)
 - **Kernel failure** → Codex attempts to fix and re-push until resolved (no fixed cap)
+- **Other runtime errors** → Codex auto-fix runs up to 2 attempts, then surfaces the error
 
 ### 3. Submission (Optional)
 

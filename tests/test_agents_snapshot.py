@@ -6,8 +6,6 @@ Uses tmp_path fixtures to avoid touching real artifacts.
 
 from pathlib import Path
 
-import pytest
-
 from kagglebot.agents import FileSnapshot, WriteAllowlist
 
 

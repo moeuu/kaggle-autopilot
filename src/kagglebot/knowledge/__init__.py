@@ -914,6 +914,9 @@ def build_kernel_fix_template() -> str:
 2) Fix the issue with minimal, targeted changes.
    - Edit `kernel.py` for competition-specific fixes.
    - Use `custom_main()` when data is non-CSV or default loader is inadequate.
+   - If the error mentions `decoder_input_ids` or `decoder_inputs_embeds`, you likely loaded a T5/ProtT5
+     encoder-decoder with `AutoModel`. Use `T5EncoderModel` or `model.get_encoder()` and pass only
+     `input_ids`/`attention_mask`.
 3) Do NOT introduce secrets or network side-effects.
 4) Keep the change small and explain what you changed in your response.
 

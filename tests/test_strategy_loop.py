@@ -25,6 +25,65 @@ class DummyClaudeResult:
         self.stderr = ""
 
 
+def _long_strategy_text() -> str:
+    base = "\n".join(
+        [
+            "## Problem",
+            "This section frames the problem and target metric.",
+            "## Data",
+            "We summarize data structure and submission format.",
+            "## Candidate Approaches",
+            "Candidate models and alternatives with pros/cons.",
+            "## Final Approach",
+            "Final model choice and rationale.",
+            "## Training & Evaluation",
+            "Train/validation plan and evaluation strategy.",
+            "## Compute Plan",
+            "GPU usage plan and time budget.",
+            "## Error Analysis & Ablation",
+            "Ablation plan and error analysis steps.",
+            "## Risks",
+            "Risks and rule constraints.",
+            "## Search Notes",
+            "Search queries and key findings.",
+            "## Sources",
+            "- Source A (example.com)",
+            "- Source B (example.org)",
+            "- Source C (example.net)",
+        ]
+    )
+    filler = "Details and rationale. " * 80
+    return base + "\n" + filler
+
+
+def _long_instructions_text() -> str:
+    steps = [
+        "1) Update kernel.py with the new model pipeline.",
+        "2) Add helper modules under kernel/ for parsing and preprocessing.",
+        "3) Ensure training/evaluation flow uses the chosen metric.",
+        "4) Write outputs to submission.csv with correct format.",
+        "5) Validate against sample submission and log metrics.",
+    ]
+    return "\n".join(steps) + "\n" + ("More detail. " * 40)
+
+
+def _plan_json_text() -> str:
+    return "\n".join(
+        [
+            '{"target_metric": "accuracy",',
+            ' "target_direction": "maximize",',
+            ' "target_score": 0.9,',
+            ' "score_source": "holdout",',
+            ' "holdout_frac": 0.2,',
+            ' "cv_folds": 5,',
+            ' "seed": 42,',
+            ' "max_iterations": 3,',
+            ' "patience": 2,',
+            ' "min_improvement": 0.0}',
+        ]
+    )
+
+
 def _write_context(paths: CompetitionPaths) -> None:
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     paths.rules_url_path.write_text("https://example.com/rules\n", encoding="utf-8")
@@ -55,9 +114,11 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
         text = "\n".join(
             [
                 "===STRATEGY===",
-                "strategy text",
+                _long_strategy_text(),
+                "===PLAN_JSON===",
+                _plan_json_text(),
                 "===CODEX_INSTRUCTIONS===",
-                "update kernel.py",
+                _long_instructions_text(),
             ]
         )
         return DummyClaudeResult(text)
@@ -84,9 +145,9 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
     assert (agent_dir / "claude_transcript.txt").exists()
     assert len(codex_calls) == 2
     brief_prompt = (agent_dir / "brief" / "prompt.md").read_text(encoding="utf-8")
-    assert "overview text" in brief_prompt
-    assert "data text" in brief_prompt
-    assert "rules text" in brief_prompt
+    assert str(paths.overview_md_path) in brief_prompt
+    assert str(paths.data_md_path) in brief_prompt
+    assert str(paths.rules_md_path) in brief_prompt
 
 
 def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path: Path) -> None:
@@ -103,9 +164,11 @@ def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path:
         text = "\n".join(
             [
                 "===STRATEGY===",
-                "strategy text",
+                _long_strategy_text(),
+                "===PLAN_JSON===",
+                _plan_json_text(),
                 "===CODEX_INSTRUCTIONS===",
-                "update kernel.py",
+                _long_instructions_text(),
             ]
         )
         return DummyClaudeResult(text)
@@ -124,12 +187,8 @@ def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path:
         repo_root=tmp_path,
     )
 
-    try:
-        run_agent_pipeline(paths=paths, config=config)
-    except Exception as exc:  # noqa: BLE001
-        assert "Agent write-guard failed" in str(exc)
-    else:
-        raise AssertionError("Expected write-guard failure for out-of-allowlist write.")
+    run_agent_pipeline(paths=paths, config=config)
+    assert not (tmp_path / "oops.txt").exists()
 
 
 def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None:
@@ -148,9 +207,11 @@ def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None
         text = "\n".join(
             [
                 "===STRATEGY===",
-                "strategy text",
+                _long_strategy_text(),
+                "===PLAN_JSON===",
+                _plan_json_text(),
                 "===CODEX_INSTRUCTIONS===",
-                "update kernel.py",
+                _long_instructions_text(),
             ]
         )
         return DummyClaudeResult(text)

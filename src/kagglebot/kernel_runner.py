@@ -12,7 +12,8 @@ from rich import print
 
 from kagglebot.exceptions import KaggleCliError, KernelFailedError, KernelTimeoutError, RulesNotAcceptedError
 from kagglebot.kaggle_api import check_rules_accepted, kernels_init, kernels_output, kernels_push, kernels_status
-from kagglebot.validators import validate_kernel_package
+from kagglebot.solution_guard import ensure_solution_path_allowed
+from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
 
 @dataclass(frozen=True)
@@ -83,11 +84,11 @@ def run_kernel(
     kernel_slug = _resolve_kernel_slug(kernel_name, slug, run_id, iteration)
     kernel_id = f"{kaggle_username}/{kernel_slug}"
     custom_kernel_dir = base_dir / slug / "kernel"
-    legacy_kernel_path = base_dir / slug / "kernel.py"
+    ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=base_dir, slug=slug)
     if custom_kernel_dir.exists():
         _copy_kernel_sources(custom_kernel_dir, kernel_dir)
-    elif legacy_kernel_path.exists():
-        shutil.copy2(legacy_kernel_path, kernel_dir / "kernel.py")
+        _ensure_kernel_import_path(kernel_dir)
+        ensure_kernel_sources_valid(kernel_dir)
     else:
         _write_kernel_script(
             kernel_dir=kernel_dir,
@@ -217,7 +218,30 @@ def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
             shutil.copy2(path, dest_dir / path.name)
 
 
-LOG_POLL_INTERVAL = 15.0
+_KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
+
+
+def _ensure_kernel_import_path(kernel_dir: Path) -> None:
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_BOOTSTRAP_MARKER in text:
+        return
+    bootstrap = (
+        f"{_KERNEL_BOOTSTRAP_MARKER}\n"
+        "import os as _os\n"
+        "import sys as _sys\n"
+        "_KROOT = _os.path.dirname(_os.path.abspath(__file__))\n"
+        "if _KROOT not in _sys.path:\n"
+        "    _sys.path.insert(0, _KROOT)\n"
+        "del _os, _sys, _KROOT\n\n"
+    )
+    kernel_path.write_text(bootstrap + text, encoding="utf-8")
+
+
+LOG_POLL_INTERVAL = 10.0
+HEARTBEAT_INTERVAL = 30.0
 
 
 def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, output_dir: Path) -> None:
@@ -236,8 +260,22 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
         now = time.monotonic()
         if now - last_log_fetch >= LOG_POLL_INTERVAL:
             _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
-            _print_kernel_logs(output_dir, log_state)
+            had_logs = _print_kernel_logs(output_dir, log_state)
+            if had_logs:
+                log_state.last_log_at = now
             last_log_fetch = now
+            log_failure = _detect_failure_in_logs(output_dir)
+            if log_failure:
+                message = f"Kaggle kernel error detected in logs.\n\n--- kernel log tail ---\n{log_failure}"
+                raise KernelFailedError(message)
+        if status in {"running", "queued"}:
+            if log_state.last_heartbeat == 0.0 or now - log_state.last_heartbeat >= HEARTBEAT_INTERVAL:
+                since = now - log_state.last_log_at if log_state.last_log_at is not None else None
+                if since is None:
+                    print("[cyan]kernel[/cyan]: still running (no logs yet)")
+                else:
+                    print(f"[cyan]kernel[/cyan]: still running (no new logs for {since:.0f}s)")
+                log_state.last_heartbeat = now
         if "complete" in status:
             return
         if "error" in status or "fail" in status:
@@ -257,6 +295,8 @@ class _KernelLogState:
     seen_lines: dict[Path, int] = field(default_factory=dict)
     seen_json: dict[Path, int] = field(default_factory=dict)
     seen_size: dict[Path, int] = field(default_factory=dict)
+    last_log_at: float | None = None
+    last_heartbeat: float = 0.0
 
 
 def _parse_kernel_status(output: str) -> str:
@@ -283,7 +323,8 @@ def _log_candidates(output_dir: Path) -> list[Path]:
     return candidates
 
 
-def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> None:
+def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> bool:
+    printed = False
     for path in _log_candidates(output_dir):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -308,6 +349,7 @@ def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> None:
                 continue
             print(f"[cyan]kernel log[/cyan]: {path.name}")
             print("\n".join(formatted))
+            printed = True
             continue
 
         lines = text.splitlines()
@@ -318,6 +360,23 @@ def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> None:
         state.seen_lines[path] = len(lines)
         print(f"[cyan]kernel log[/cyan]: {path.name}")
         print("\n".join(new_lines))
+        printed = True
+    return printed
+
+
+def _detect_failure_in_logs(output_dir: Path) -> str | None:
+    for path in _log_candidates(output_dir):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "Traceback (most recent call last)" not in text:
+            continue
+        tail = _collect_log_tail(output_dir)
+        if tail:
+            return tail
+        return f"{path.name}\nTraceback detected"
+    return None
 
 
 def _collect_log_tail(output_dir: Path, max_lines: int = 50) -> str | None:

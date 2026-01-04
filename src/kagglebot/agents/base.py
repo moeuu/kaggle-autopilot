@@ -75,9 +75,7 @@ def parse_claude_strategy_output(output: str) -> ClaudeStrategyOutput:
     if not seen["strategy"]:
         raise DelimiterParseError("Missing ===CLAUDE_STRATEGY=== section")
     if not seen["instructions"]:
-        raise DelimiterParseError(
-            "Missing ===CODEX_IMPLEMENTATION_INSTRUCTIONS=== section"
-        )
+        raise DelimiterParseError("Missing ===CODEX_IMPLEMENTATION_INSTRUCTIONS=== section")
 
     strategy = "\n".join(sections["strategy"]).strip()
     instructions = "\n".join(sections["instructions"]).strip()
@@ -143,6 +141,4 @@ def verify_outputs_exist(output_dir: Path, required_files: list[str]) -> None:
             missing.append(file_path)
 
     if missing:
-        raise FileNotFoundError(
-            f"Agent failed to create required outputs: {', '.join(missing)}"
-        )
+        raise FileNotFoundError(f"Agent failed to create required outputs: {', '.join(missing)}")

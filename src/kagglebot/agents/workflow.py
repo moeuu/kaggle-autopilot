@@ -11,7 +11,6 @@ All stages enforce write allowlists and detect unauthorized file modifications.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from kagglebot.agents.allowlist import WriteAllowlist
@@ -168,9 +167,9 @@ def _run_codex_brief(
     snapshot_pre = FileSnapshot.create(competition_dir)
 
     # Execute Codex
-    print(f"Running Codex brief extraction...")
+    print("Running Codex brief extraction...")
     output_dir = runs_dir / "01_codex_brief"
-    result = run_codex(prompt_path, output_dir, dry_run=dry_run)
+    run_codex(prompt_path, output_dir, dry_run=dry_run)
 
     # Post-snapshot and enforce allowlist
     snapshot_post = FileSnapshot.create(competition_dir)
@@ -201,9 +200,7 @@ def _run_claude_strategy(
     brief_json = (agent_dir / "brief.json").read_text(encoding="utf-8")
 
     # Build prompt
-    prompt_template = (
-        Path(__file__).parent.parent / "prompts/templates/claude_strategy.md"
-    )
+    prompt_template = Path(__file__).parent.parent / "prompts/templates/claude_strategy.md"
     variables = {
         "brief_content": brief_md,
         "brief_json_content": brief_json,
@@ -233,7 +230,7 @@ def _run_claude_strategy(
     snapshot_pre = FileSnapshot.create(competition_dir)
 
     # Execute Claude
-    print(f"Running Claude strategy generation...")
+    print("Running Claude strategy generation...")
     output_dir = runs_dir / "02_claude_strategy"
     result = run_claude(prompt_path, output_dir, dry_run=dry_run)
 
@@ -243,9 +240,7 @@ def _run_claude_strategy(
 
         # Write parsed sections to files
         (agent_dir / "strategy.md").write_text(parsed.strategy, encoding="utf-8")
-        (agent_dir / "codex_instructions.md").write_text(
-            parsed.codex_instructions, encoding="utf-8"
-        )
+        (agent_dir / "codex_instructions.md").write_text(parsed.codex_instructions, encoding="utf-8")
         (agent_dir / "references.md").write_text(parsed.references, encoding="utf-8")
 
     # Post-snapshot and enforce allowlist
@@ -256,9 +251,7 @@ def _run_claude_strategy(
 
     # Verify outputs exist
     if not dry_run:
-        verify_outputs_exist(
-            agent_dir, ["strategy.md", "codex_instructions.md", "references.md"]
-        )
+        verify_outputs_exist(agent_dir, ["strategy.md", "codex_instructions.md", "references.md"])
 
     print(f"✓ Strategy created: {agent_dir / 'strategy.md'}")
     return agent_dir / "strategy.md"
@@ -275,15 +268,10 @@ def _run_codex_implementation(
     runs_dir = competition_dir / "runs"
 
     # Read Claude's instructions
-    codex_instructions = (agent_dir / "codex_instructions.md").read_text(
-        encoding="utf-8"
-    )
+    codex_instructions = (agent_dir / "codex_instructions.md").read_text(encoding="utf-8")
 
     # Build prompt
-    prompt_template = (
-        Path(__file__).parent.parent
-        / "prompts/templates/codex_implement_from_claude.md"
-    )
+    prompt_template = Path(__file__).parent.parent / "prompts/templates/codex_implement_from_claude.md"
     variables = {
         "claude_instructions": codex_instructions,
     }
@@ -299,9 +287,9 @@ def _run_codex_implementation(
     snapshot_pre = FileSnapshot.create(competition_dir)
 
     # Execute Codex
-    print(f"Running Codex kernel implementation...")
+    print("Running Codex kernel implementation...")
     output_dir = runs_dir / "03_codex_implementation"
-    result = run_codex(prompt_path, output_dir, dry_run=dry_run)
+    run_codex(prompt_path, output_dir, dry_run=dry_run)
 
     # Post-snapshot and enforce allowlist
     snapshot_post = FileSnapshot.create(competition_dir)
