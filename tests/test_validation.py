@@ -108,6 +108,32 @@ def test_validate_submission_duplicate_id():
             validate_submission(str(sample_path), str(submission_path))
 
 
+def test_validate_submission_long_format_allows_row_mismatch_and_duplicates(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.tsv"
+    submission_path = tmp_path / "submission.tsv"
+
+    sample_path.write_text(
+        "id\tterm\tscore\nP1\tGO:0000001\t0.123\nP1\tGO:0000002\t0.456\n",
+        encoding="utf-8",
+    )
+    submission_path.write_text(
+        "P1\tGO:0000001\t0.999\nP1\tGO:0000003\t0.888\nP2\tGO:0000002\t0.777\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_header_only_sample_allows_row_mismatch(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+
+    sample_path.write_text("id,target\n", encoding="utf-8")
+    pd.DataFrame({"id": [1, 2, 3], "target": [0.1, 0.2, 0.3]}).to_csv(submission_path, index=False)
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
 def test_validate_submission_handles_irregular_tsv(tmp_path: Path) -> None:
     sample_path = tmp_path / "sample_submission.tsv"
     submission_path = tmp_path / "submission.csv"
@@ -119,6 +145,19 @@ def test_validate_submission_handles_irregular_tsv(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     submission_path.write_text("id,term,score\nA0A0C5B5G6,GO:0000001,0.999\n", encoding="utf-8")
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_handles_tabbed_csv_with_commas(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+
+    sample_path.write_text(
+        "A0A0C5B5G6\tGO:0000001\t0.123\nA0A0C5B5G6\tText\t0.456\tInhibits, something\n",
+        encoding="utf-8",
+    )
+    submission_path.write_text("A0A0C5B5G6\tGO:0000001\t0.999\n", encoding="utf-8")
 
     validate_submission(str(sample_path), str(submission_path))
 

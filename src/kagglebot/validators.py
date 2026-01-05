@@ -14,7 +14,7 @@ SECRET_PATTERNS = [
     r"\bapi[_-]?key\b\s*[:=]\s*['\"]?[^\s'\"]{8,}",
     r"\bpassword\b\s*[:=]\s*['\"]?[^\s'\"]{4,}",
     r"\bsecret\b\s*[:=]\s*['\"]?[^\s'\"]{4,}",
-    r"\b(?:access|refresh|auth|bearer)?_?token\b\s*[:=]\s*['\"]?[^\s'\"]{8,}",
+    r"\b(?:access|refresh|auth|bearer)?_?token\b\s*[:=]\s*['\"][^'\"]{8,}",
 ]
 
 

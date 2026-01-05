@@ -91,6 +91,34 @@ def test_kernel_metadata_tpu(tmp_path: Path) -> None:
     assert payload["enable_gpu"] is False
 
 
+def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python",
+                "# -*- coding: utf-8 -*-",
+                '"""docstring"""',
+                "from __future__ import annotations",
+                "",
+                "print('ok')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    kernel_runner._ensure_kernel_import_path(kernel_dir)
+    lines = kernel_path.read_text(encoding="utf-8").splitlines()
+    future_idx = next(i for i, line in enumerate(lines) if "from __future__ import annotations" in line)
+    marker_idx = next(i for i, line in enumerate(lines) if "kagglebot:kernel_sys_path" in line)
+    assert marker_idx > future_idx
+
+
 def test_run_kernel_uses_custom_kernel(tmp_path: Path) -> None:
     custom_kernel = tmp_path / "demo" / "kernel" / "kernel.py"
     custom_kernel.parent.mkdir(parents=True, exist_ok=True)

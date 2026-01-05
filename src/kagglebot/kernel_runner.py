@@ -10,8 +10,22 @@ from pathlib import Path
 
 from rich import print
 
-from kagglebot.exceptions import KaggleCliError, KernelFailedError, KernelTimeoutError, RulesNotAcceptedError
-from kagglebot.kaggle_api import check_rules_accepted, kernels_init, kernels_output, kernels_push, kernels_status
+from kagglebot.exceptions import (
+    KaggleCliError,
+    KaggleNetworkError,
+    KernelFailedError,
+    KernelTimeoutError,
+    RulesNotAcceptedError,
+)
+from kagglebot.kaggle_api import (
+    check_rules_accepted,
+    kernel_exists,
+    kernel_id_by_title,
+    kernels_init,
+    kernels_output,
+    kernels_push,
+    kernels_status,
+)
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
@@ -27,6 +41,27 @@ class KernelRunResult:
 def sanitize_kernel_slug(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
     return cleaned[:50]
+
+
+_KERNEL_URL_RE = re.compile(
+    r"https?://(?:www\.)?kaggle\.com/(?:code/)?(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)"
+)
+_KERNEL_ID_RE = re.compile(r"(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)")
+
+
+def _extract_kernel_id_from_push(output: str) -> str | None:
+    if not output:
+        return None
+    match = _KERNEL_URL_RE.search(output)
+    if match:
+        return f"{match.group('user')}/{match.group('slug')}"
+    for line in output.splitlines():
+        if "kernel" not in line.lower():
+            continue
+        match = _KERNEL_ID_RE.search(line)
+        if match:
+            return f"{match.group('user')}/{match.group('slug')}"
+    return None
 
 
 def find_submission_file(output_dir: Path) -> Path | None:
@@ -71,8 +106,10 @@ def run_kernel(
 ) -> KernelRunResult:
     kernel_dir = base_dir / slug / "kernels" / run_id
     output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
+    logs_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "logs"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     if not dry_run and not check_rules_accepted(slug, dry_run=False):
         raise RulesNotAcceptedError("Competition rules not accepted.")
@@ -88,6 +125,8 @@ def run_kernel(
     if custom_kernel_dir.exists():
         _copy_kernel_sources(custom_kernel_dir, kernel_dir)
         _ensure_kernel_import_path(kernel_dir)
+        _inline_kernel_modules(kernel_dir)
+        _inject_data_dir_resolver(kernel_dir)
         ensure_kernel_sources_valid(kernel_dir)
     else:
         _write_kernel_script(
@@ -118,7 +157,31 @@ def run_kernel(
         return KernelRunResult(kernel_id=kernel_id, output_dir=output_dir, submission_path=None, metrics_path=None)
 
     print(f"[cyan]kernel push[/cyan]: {kernel_dir}")
-    kernels_push(kernel_dir, slug=slug, dry_run=False)
+    push_attempt = 1
+    push_output = kernels_push(kernel_dir, slug=slug, dry_run=False)
+    _write_push_log(logs_dir, push_attempt, push_output)
+    pushed_kernel_id = _extract_kernel_id_from_push(push_output)
+    if pushed_kernel_id and pushed_kernel_id != kernel_id:
+        print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
+        kernel_id = pushed_kernel_id
+    kernel_id = _resolve_kernel_id(kernel_id, kernel_slug)
+    resolved_id = _wait_for_kernel_registration(kernel_id, kernel_slug)
+    if not resolved_id:
+        print("[yellow]kernel not found after push[/yellow]: retrying once")
+        push_attempt += 1
+        push_output = kernels_push(kernel_dir, slug=slug, dry_run=False)
+        _write_push_log(logs_dir, push_attempt, push_output)
+        pushed_kernel_id = _extract_kernel_id_from_push(push_output)
+        if pushed_kernel_id and pushed_kernel_id != kernel_id:
+            print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
+            kernel_id = pushed_kernel_id
+        kernel_id = _resolve_kernel_id(kernel_id, kernel_slug)
+        resolved_id = _wait_for_kernel_registration(kernel_id, kernel_slug)
+        if not resolved_id:
+            raise KernelFailedError("Kaggle kernel not found after push; aborting.")
+        kernel_id = resolved_id
+    else:
+        kernel_id = resolved_id
     print(f"[cyan]kernel status[/cyan]: {kernel_id}")
     _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=output_dir)
     print(f"[cyan]kernel output[/cyan]: {output_dir}")
@@ -219,6 +282,26 @@ def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
 
 
 _KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
+_KERNEL_BOOTSTRAP_END = "del _os, _sys, _KROOT, _KWORK"
+_KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
+_DATA_DIR_JOIN_RE = re.compile(r"(\bdata_dir\s*/\s*)(['\"])([^'\"]+)\2")
+
+
+def _strip_kernel_bootstrap(lines: list[str]) -> list[str]:
+    stripped = lines
+    while _KERNEL_BOOTSTRAP_MARKER in stripped:
+        start = stripped.index(_KERNEL_BOOTSTRAP_MARKER)
+        end = None
+        search_end = min(start + 20, len(stripped))
+        for idx in range(start + 1, search_end):
+            if stripped[idx].strip() == _KERNEL_BOOTSTRAP_END:
+                end = idx + 1
+                break
+        if end is None:
+            stripped = stripped[:start] + stripped[start + 1 :]
+        else:
+            stripped = stripped[:start] + stripped[end:]
+    return stripped
 
 
 def _ensure_kernel_import_path(kernel_dir: Path) -> None:
@@ -226,22 +309,233 @@ def _ensure_kernel_import_path(kernel_dir: Path) -> None:
     if not kernel_path.exists():
         return
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_BOOTSTRAP_MARKER in text:
-        return
     bootstrap = (
         f"{_KERNEL_BOOTSTRAP_MARKER}\n"
         "import os as _os\n"
         "import sys as _sys\n"
-        "_KROOT = _os.path.dirname(_os.path.abspath(__file__))\n"
+        "try:\n"
+        "    _KROOT = _os.path.dirname(_os.path.abspath(__file__))\n"
+        "except NameError:\n"
+        "    _KROOT = _os.getcwd()\n"
         "if _KROOT not in _sys.path:\n"
         "    _sys.path.insert(0, _KROOT)\n"
-        "del _os, _sys, _KROOT\n\n"
+        "_KWORK = '/kaggle/working'\n"
+        "if _KWORK not in _sys.path:\n"
+        "    _sys.path.insert(0, _KWORK)\n"
+        "del _os, _sys, _KROOT, _KWORK\n"
     )
-    kernel_path.write_text(bootstrap + text, encoding="utf-8")
+    lines = _strip_kernel_bootstrap(text.splitlines())
+    insert_at = _find_bootstrap_insertion_index(lines)
+    bootstrap_lines = bootstrap.splitlines()
+    new_lines = lines[:insert_at] + bootstrap_lines + lines[insert_at:]
+    new_text = "\n".join(new_lines)
+    if text.endswith("\n"):
+        new_text += "\n"
+    kernel_path.write_text(new_text, encoding="utf-8")
+
+
+def _inject_data_dir_resolver(kernel_dir: Path) -> None:
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_DATA_RESOLVER_MARKER in text:
+        return
+    if not _DATA_DIR_JOIN_RE.search(text):
+        return
+    resolver_block = [
+        _KERNEL_DATA_RESOLVER_MARKER,
+        "from pathlib import Path as _KBPath",
+        "",
+        "def _kb_find_file(base: _KBPath, name: str) -> _KBPath:",
+        "    candidate = base / name",
+        "    if candidate.exists():",
+        "        return candidate",
+        "    try:",
+        "        matches = list(base.rglob(name))",
+        "    except Exception:",
+        "        matches = []",
+        "    if matches:",
+        "        return matches[0]",
+        "    return candidate",
+        "",
+    ]
+    lines = text.splitlines()
+    insert_at = _find_bootstrap_block_end(lines)
+    if insert_at is None:
+        insert_at = _find_bootstrap_insertion_index(lines)
+    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
+    updated = "\n".join(lines)
+    updated = _DATA_DIR_JOIN_RE.sub(r"_kb_find_file(data_dir, '\3')", updated)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _find_bootstrap_block_end(lines: list[str]) -> int | None:
+    if _KERNEL_BOOTSTRAP_MARKER not in lines:
+        return None
+    start = lines.index(_KERNEL_BOOTSTRAP_MARKER)
+    search_end = min(start + 30, len(lines))
+    for idx in range(start + 1, search_end):
+        if lines[idx].strip() == _KERNEL_BOOTSTRAP_END:
+            return idx + 1
+    return None
+
+
+def _find_bootstrap_insertion_index(lines: list[str]) -> int:
+    idx = 0
+    if idx < len(lines) and lines[idx].startswith("#!"):
+        idx += 1
+    for _ in range(2):
+        if idx < len(lines) and re.match(r"^#.*coding[:=]\s*[-\w.]+", lines[idx]):
+            idx += 1
+    while idx < len(lines) and (lines[idx].strip() == "" or lines[idx].lstrip().startswith("#")):
+        idx += 1
+    if idx < len(lines):
+        stripped = lines[idx].lstrip()
+        if stripped.startswith('"""') or stripped.startswith("'''"):
+            quote = '"""' if stripped.startswith('"""') else "'''"
+            if stripped.count(quote) >= 2:
+                idx += 1
+            else:
+                idx += 1
+                while idx < len(lines) and quote not in lines[idx]:
+                    idx += 1
+                if idx < len(lines):
+                    idx += 1
+    while idx < len(lines) and (lines[idx].strip() == "" or lines[idx].lstrip().startswith("#")):
+        idx += 1
+    while idx < len(lines) and re.match(r"^\s*from\s+__future__\s+import\s+", lines[idx]):
+        idx += 1
+    return idx
+
+
+def _inline_kernel_modules(kernel_dir: Path, modules: tuple[str, ...] | None = None) -> None:
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    lines = text.splitlines()
+    if modules is None:
+        modules = _discover_inline_modules(kernel_dir, lines)
+    if not modules or not _kernel_imports_local_modules(lines, modules):
+        return
+
+    stripped = lines
+    for module in modules:
+        stripped = _strip_module_import(stripped, module)
+
+    module_blocks: list[str] = []
+    for module in modules:
+        module_path = kernel_dir / f"{module}.py"
+        if not module_path.exists():
+            continue
+        module_lines = module_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        cleaned = _strip_module_headers(module_lines)
+        cleaned = _strip_local_module_imports(cleaned, modules)
+        if not cleaned:
+            continue
+        module_blocks.append(f"# --- Begin inlined module: {module}.py ---")
+        module_blocks.extend(cleaned)
+        module_blocks.append(f"# --- End inlined module: {module}.py ---")
+
+    if not module_blocks:
+        return
+
+    insert_at = _find_main_guard_index(stripped)
+    new_lines = stripped[:insert_at] + [""] + module_blocks + [""] + stripped[insert_at:]
+    new_text = "\n".join(new_lines)
+    if text.endswith("\n"):
+        new_text += "\n"
+    kernel_path.write_text(new_text, encoding="utf-8")
+
+
+def _kernel_imports_local_modules(lines: list[str], modules: tuple[str, ...]) -> bool:
+    for line in lines:
+        for module in modules:
+            if re.match(rf"^\s*from\s+\.?{re.escape(module)}\s+import\b", line):
+                return True
+            if re.match(rf"^\s*import\s+{re.escape(module)}\b", line):
+                return True
+    return False
+
+
+def _strip_module_import(lines: list[str], module: str) -> list[str]:
+    output: list[str] = []
+    skipping = False
+    paren_depth = 0
+    for line in lines:
+        if not skipping:
+            if re.match(rf"^\s*from\s+\.?{re.escape(module)}\s+import\b", line):
+                skipping = True
+                paren_depth = line.count("(") - line.count(")")
+                if paren_depth <= 0 and not line.rstrip().endswith("\\"):
+                    skipping = False
+                continue
+            if re.match(rf"^\s*import\s+{re.escape(module)}\b", line):
+                continue
+            output.append(line)
+            continue
+        paren_depth += line.count("(") - line.count(")")
+        if paren_depth <= 0 and not line.rstrip().endswith("\\"):
+            skipping = False
+        continue
+    return output
+
+
+def _discover_inline_modules(kernel_dir: Path, lines: list[str]) -> tuple[str, ...]:
+    module_names: list[str] = []
+    for path in kernel_dir.glob("*.py"):
+        if path.name == "kernel.py":
+            continue
+        name = path.stem
+        if name.isidentifier():
+            module_names.append(name)
+    if not module_names:
+        return ()
+    used: list[str] = []
+    for name in module_names:
+        if _kernel_imports_local_modules(lines, (name,)):
+            used.append(name)
+    return tuple(used)
+
+
+def _strip_module_headers(lines: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for line in lines:
+        if not cleaned and line.startswith("#!"):
+            continue
+        if not cleaned and re.match(r"^#.*coding[:=]\s*[-\w.]+", line):
+            continue
+        if re.match(r"^\s*from\s+__future__\s+import\s+", line):
+            continue
+        cleaned.append(line)
+    while cleaned and cleaned[0].strip() == "":
+        cleaned.pop(0)
+    return cleaned
+
+
+def _strip_local_module_imports(lines: list[str], modules: tuple[str, ...]) -> list[str]:
+    cleaned = lines
+    for module in modules:
+        cleaned = _strip_module_import(cleaned, module)
+    return cleaned
+
+
+def _find_main_guard_index(lines: list[str]) -> int:
+    for idx, line in enumerate(lines):
+        if re.match(r"^\s*if\s+__name__\s*==\s*['\"]__main__['\"]\s*:", line):
+            return idx
+    return len(lines)
 
 
 LOG_POLL_INTERVAL = 10.0
 HEARTBEAT_INTERVAL = 30.0
+STATUS_ERROR_SLEEP = 10.0
+MAX_STATUS_ERRORS = 6
+KERNEL_REGISTER_RETRIES = 24
+KERNEL_REGISTER_SLEEP = 5.0
 
 
 def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, output_dir: Path) -> None:
@@ -251,8 +545,45 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
     last_status = None
     last_log_fetch = 0.0
     log_state = _KernelLogState()
+    status_errors = 0
     while True:
-        output = kernels_status(kernel_id, slug=slug, dry_run=False)
+        try:
+            output = kernels_status(kernel_id, slug=slug, dry_run=False)
+            status_errors = 0
+        except KaggleCliError as exc:
+            status_errors += 1
+            detail = (exc.output or str(exc)).strip()
+            if detail:
+                detail = detail.replace("\n", " ")
+            if isinstance(exc, KaggleNetworkError):
+                message = (
+                    f"[yellow]kernel status network error[/yellow]: {detail or 'unknown error'} "
+                    f"(attempt {status_errors})"
+                )
+                print(message)
+                if deadline is not None and time.monotonic() > deadline:
+                    raise KernelTimeoutError("Kaggle kernel did not complete within timeout.") from exc
+                if MAX_STATUS_ERRORS is not None and status_errors >= MAX_STATUS_ERRORS:
+                    kernel_url = f"https://www.kaggle.com/code/{kernel_id}"
+                    raise KaggleNetworkError(
+                        "Kaggle API unreachable while polling kernel status. "
+                        f"Check network/DNS and monitor the kernel at {kernel_url}.",
+                        getattr(exc, "command", None),
+                        exit_code=getattr(exc, "exit_code", None),
+                        output=getattr(exc, "output", ""),
+                    ) from exc
+                time.sleep(STATUS_ERROR_SLEEP)
+                continue
+            message = f"[yellow]kernel status failed[/yellow]: {detail or 'unknown error'} (attempt {status_errors})"
+            print(message)
+            if deadline is not None and time.monotonic() > deadline:
+                raise KernelTimeoutError("Kaggle kernel did not complete within timeout.") from exc
+            if MAX_STATUS_ERRORS is not None and status_errors >= MAX_STATUS_ERRORS:
+                raise KernelFailedError(
+                    f"Kaggle kernel status failed {status_errors} times. Last error: {detail or 'unknown error'}"
+                ) from exc
+            time.sleep(STATUS_ERROR_SLEEP)
+            continue
         status = _parse_kernel_status(output).lower()
         if status != last_status:
             print(f"[cyan]kernel status[/cyan]: {status}")
@@ -285,7 +616,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
             if log_tail:
                 message = f"{message}\n\n--- kernel log tail ---\n{log_tail}"
             raise KernelFailedError(message)
-        time.sleep(10)
+        time.sleep(STATUS_ERROR_SLEEP)
         if deadline is not None and time.monotonic() > deadline:
             raise KernelTimeoutError("Kaggle kernel did not complete within timeout.")
 
@@ -297,6 +628,45 @@ class _KernelLogState:
     seen_size: dict[Path, int] = field(default_factory=dict)
     last_log_at: float | None = None
     last_heartbeat: float = 0.0
+
+
+def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | None:
+    for attempt in range(1, KERNEL_REGISTER_RETRIES + 1):
+        try:
+            kernels_status(kernel_id, dry_run=False)
+            return kernel_id
+        except KaggleCliError as exc:
+            detail = (exc.output or str(exc)).strip().replace("\n", " ")
+            if detail:
+                print(f"[yellow]kernel status unavailable[/yellow]: {detail} (attempt {attempt})")
+        try:
+            if kernel_exists(kernel_id):
+                return kernel_id
+            resolved = kernel_id_by_title(kernel_slug)
+            if resolved:
+                return resolved
+        except KaggleCliError as exc:
+            detail = (exc.output or str(exc)).strip().replace("\n", " ")
+            if detail:
+                print(f"[yellow]kernel list failed[/yellow]: {detail} (attempt {attempt})")
+        time.sleep(KERNEL_REGISTER_SLEEP)
+    return None
+
+
+def _resolve_kernel_id(kernel_id: str, kernel_slug: str) -> str:
+    try:
+        resolved = kernel_id_by_title(kernel_slug)
+    except KaggleCliError:
+        return kernel_id
+    if resolved and resolved != kernel_id:
+        print(f"[cyan]kernel id[/cyan]: {resolved}")
+        return resolved
+    return kernel_id
+
+
+def _write_push_log(logs_dir: Path, attempt: int, output: str) -> None:
+    path = logs_dir / f"kernel_push-{attempt:02d}.txt"
+    path.write_text(output.strip() + "\n", encoding="utf-8")
 
 
 def _parse_kernel_status(output: str) -> str:

@@ -331,7 +331,7 @@ def build_plan_and_initial_prompt(
         f"- artifacts/{slug}/context/overview.md (if present)",
         f"- artifacts/{slug}/context/data.md (if present)",
         f"- artifacts/{slug}/context/submission_format.md (if present)",
-        f"- artifacts/{slug}/kernel.py (for kaggle_gpu/kaggle_tpu)",
+        f"- artifacts/{slug}/kernel/kernel.py (for kaggle_gpu/kaggle_tpu)",
         f"- artifacts/{slug}/context/knowledge_hints.txt",
         "",
         "## Knowledge Base: Similar Competitions",
@@ -399,8 +399,8 @@ def build_plan_and_initial_prompt(
         "",
         "Compute-specific notes:",
         "- local_cpu/local_gpu: update kagglebot/solver/ as usual (same best-model flow).",
-        "- kaggle_gpu/kaggle_tpu: create artifacts/{slug}/kernel.py from scratch if missing.",
-        "- kaggle_gpu/kaggle_tpu: implement model + features directly in artifacts/{slug}/kernel.py.",
+        "- kaggle_gpu/kaggle_tpu: create artifacts/{slug}/kernel/kernel.py from scratch if missing.",
+        "- kaggle_gpu/kaggle_tpu: implement model + features directly in artifacts/{slug}/kernel/kernel.py.",
         "- If data is non-tabular or requires custom parsing, implement custom_main() in kernel.py.",
         "- If GPU runs finish in under ~1 minute, increase model iterations/trees or use CV to better utilize GPU.",
         "- Do NOT edit kernel_runner.py for competition-specific changes.",
@@ -705,7 +705,9 @@ def record_run(
     with _connect(knowledge_paths.kb_path) as conn:
         conn.execute(
             """
-            INSERT INTO runs (run_id, slug, started_at, compute, goal_metric, goal_score, direction)
+            INSERT OR IGNORE INTO runs (
+                run_id, slug, started_at, compute, goal_metric, goal_score, direction
+            )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (run_id, slug, now, compute, goal_metric, goal_score, direction),
@@ -897,8 +899,9 @@ def build_kernel_fix_template() -> str:
 
 ## Input Files
 
-- **Kernel Main**: `{kernel_main}`
-- **Kernel Script**: `{kernel_script}` (generated copy for this run)
+- **Kernel Main (authoritative)**: `{kernel_main}`
+- **Kernel Script (generated copy; read-only)**: `{kernel_script}`
+  Do **NOT** edit this file. It is regenerated on each run and any edits will be discarded.
 - **Kernel Logs**: `{logs_dir}` (check for runtime traces)
 - **Rules URL**: `{rules_url}`
 - **Rules Markdown**: `{rules_md}` (preferred)
@@ -912,7 +915,11 @@ def build_kernel_fix_template() -> str:
 
 1) Identify the root cause of the kernel failure from logs and traceback.
 2) Fix the issue with minimal, targeted changes.
-   - Edit `kernel.py` for competition-specific fixes.
+   - Edit **only** the authoritative `kernel.py` (`Kernel Main` above) for competition-specific fixes.
+   - Do **NOT** edit the generated `Kernel Script` copy (it will be overwritten).
+   - If the failure is in the **runner/validators/CLI plumbing** (e.g., kernel packaging,
+     path injection, validation, or Kaggle CLI status/output handling), you may edit **src/**
+     to fix the root cause.
    - Use `custom_main()` when data is non-CSV or default loader is inadequate.
    - If the error mentions `decoder_input_ids` or `decoder_inputs_embeds`, you likely loaded a T5/ProtT5
      encoder-decoder with `AutoModel`. Use `T5EncoderModel` or `model.get_encoder()` and pass only

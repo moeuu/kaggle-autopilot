@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import builtins
+import hashlib
 import json
+import os
 import shlex
+import shutil
+import sys
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,7 +18,13 @@ from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.compute import Compute
-from kagglebot.exceptions import KernelFailedError, RulesNotAcceptedError
+from kagglebot.exceptions import (
+    KaggleCliError,
+    KaggleNetworkError,
+    KernelCapacityError,
+    KernelFailedError,
+    RulesNotAcceptedError,
+)
 from kagglebot.exec_utils import run_command
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
@@ -22,6 +33,7 @@ from kagglebot.knowledge import record_improvement, record_iteration, record_run
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
     _backup_guarded_files,
+    _diff_snapshots,
     _enforce_allowlist_changes,
     _snapshot_tree,
     run_agent_pipeline,
@@ -70,7 +82,14 @@ class AutopilotConfig:
 
 
 MAX_KERNEL_FIX_ATTEMPTS: int | None = None
+MAX_SAME_KERNEL_ERROR_REPEATS = 2
+MAX_KERNEL_CAPACITY_RETRIES = 3
+KERNEL_CAPACITY_RETRY_SLEEP = 30.0
+MAX_KERNEL_CAPACITY_REPEAT = 6
+MAX_KERNEL_REGISTRATION_RETRIES = 2
+KERNEL_REGISTRATION_RETRY_SLEEP = 15.0
 MAX_AUTOFIX_ATTEMPTS = 2
+MAX_AUTOFIX_RESTARTS = 1
 MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
 
@@ -82,6 +101,8 @@ def run_autopilot(config: AutopilotConfig) -> None:
         try:
             return _run_autopilot_core(config, run_id)
         except RulesNotAcceptedError:
+            raise
+        except KernelCapacityError:
             raise
         except KeyboardInterrupt:
             raise
@@ -184,6 +205,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
                 kaggle_user = resolve_kaggle_username(config.kaggle_username)
                 print(f"[cyan]kernel run[/cyan]: {config.compute}")
                 kernel_attempts = 0
+                error_fingerprints: dict[str, int] = {}
                 while True:
                     try:
                         kernel_result = run_kernel(
@@ -207,21 +229,74 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
                         break
                     except RulesNotAcceptedError:
                         raise
-                    except Exception as exc:  # noqa: BLE001
+                    except KaggleNetworkError as exc:
                         kernel_attempts += 1
                         error_text = _format_kernel_error(exc)
-                        (logs_dir / "kernel_error.txt").write_text(error_text + "\n", encoding="utf-8")
+                        _record_kernel_error(
+                            logs_dir=logs_dir,
+                            attempt=kernel_attempts,
+                            error_text=error_text,
+                            error_fingerprints=error_fingerprints,
+                        )
+                        raise
+                    except KernelCapacityError as exc:
+                        kernel_attempts += 1
+                        error_text = _format_kernel_error(exc)
+                        _record_kernel_error(
+                            logs_dir=logs_dir,
+                            attempt=kernel_attempts,
+                            error_text=error_text,
+                            error_fingerprints=error_fingerprints,
+                            max_repeats=MAX_KERNEL_CAPACITY_REPEAT,
+                        )
+                        if kernel_attempts > MAX_KERNEL_CAPACITY_RETRIES:
+                            raise
+                        wait_seconds = KERNEL_CAPACITY_RETRY_SLEEP * kernel_attempts
+                        print(
+                            "[yellow]kaggle gpu limit reached[/yellow]: "
+                            f"retrying in {wait_seconds:.0f}s (attempt {kernel_attempts})"
+                        )
+                        time.sleep(wait_seconds)
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        if _is_kernel_registration_error(exc):
+                            kernel_attempts += 1
+                            error_text = _format_kernel_error(exc)
+                            _record_kernel_error(
+                                logs_dir=logs_dir,
+                                attempt=kernel_attempts,
+                                error_text=error_text,
+                                error_fingerprints=error_fingerprints,
+                            )
+                            if kernel_attempts > MAX_KERNEL_REGISTRATION_RETRIES:
+                                raise
+                            wait_seconds = KERNEL_REGISTRATION_RETRY_SLEEP * kernel_attempts
+                            print(
+                                "[yellow]kernel registration pending[/yellow]: "
+                                f"retrying in {wait_seconds:.0f}s (attempt {kernel_attempts})"
+                            )
+                            time.sleep(wait_seconds)
+                            continue
+                        kernel_attempts += 1
+                        error_text = _format_kernel_error(exc)
+                        _record_kernel_error(
+                            logs_dir=logs_dir,
+                            attempt=kernel_attempts,
+                            error_text=error_text,
+                            error_fingerprints=error_fingerprints,
+                        )
                         if config.dry_run:
                             raise
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
                             raise
-                        print("[yellow]kernel failed[/yellow]: invoking codex to fix")
+                        print(f"[yellow]kernel failed[/yellow]: invoking codex to fix (attempt {kernel_attempts})")
                         _run_kernel_fix(
                             config=config,
                             run_id=run_id,
                             iteration=iteration,
                             iter_dir=iter_dir,
                             error_message=error_text,
+                            attempt=kernel_attempts,
                         )
                 if kernel_result.submission_path:
                     submission_path.write_bytes(kernel_result.submission_path.read_bytes())
@@ -735,9 +810,50 @@ def _build_diagnostics(
 def _format_kernel_error(exc: Exception) -> str:
     trace = traceback.format_exc()
     header = f"{exc.__class__.__name__}: {exc}".strip()
+    if isinstance(exc, KaggleCliError) and getattr(exc, "output", ""):
+        header = f"{header}\nKaggle CLI output:\n{exc.output}".strip()
     if trace and trace != "NoneType: None\n":
         return f"{header}\n{trace}".strip()
     return header
+
+
+def _fingerprint_error(message: str) -> str:
+    normalized = " ".join(message.split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _record_kernel_error(
+    *,
+    logs_dir: Path,
+    attempt: int,
+    error_text: str,
+    error_fingerprints: dict[str, int],
+    max_repeats: int | None = None,
+) -> None:
+    fingerprint = _fingerprint_error(error_text)
+    error_fingerprints[fingerprint] = error_fingerprints.get(fingerprint, 0) + 1
+    repeat_limit = MAX_SAME_KERNEL_ERROR_REPEATS if max_repeats is None else max_repeats
+    if repeat_limit is not None and error_fingerprints[fingerprint] > repeat_limit:
+        raise KernelFailedError(
+            "Kernel failure repeated with the same error; aborting auto-fix loop to avoid an infinite retry."
+        )
+    attempt_tag = f"{attempt:02d}"
+    header = (
+        f"kernel_attempt: {attempt}\n"
+        f"error_fingerprint: {fingerprint}\n"
+        f"error_repeat: {error_fingerprints[fingerprint]}\n"
+    )
+    numbered_path = logs_dir / f"kernel_error-{attempt_tag}.txt"
+    numbered_path.write_text(header + error_text + "\n", encoding="utf-8")
+    (logs_dir / "kernel_error.txt").write_text(header + error_text + "\n", encoding="utf-8")
+
+
+def _is_kernel_registration_error(exc: Exception) -> bool:
+    if isinstance(exc, KernelFailedError) and "kernel not found after push" in str(exc).lower():
+        return True
+    if isinstance(exc, KaggleCliError) and "kernels/status" in str(getattr(exc, "output", "")).lower():
+        return True
+    return False
 
 
 def _run_improvement(
@@ -784,7 +900,7 @@ def _run_improvement(
         submission_format=str(config.paths.submission_format_md_path),
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
-        kernel_main=str(config.paths.base_dir / "kernel.py"),
+        kernel_main=str(config.paths.kernel_source_dir / "kernel.py"),
     )
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
@@ -814,6 +930,7 @@ def _run_kernel_fix(
     iteration: int,
     iter_dir: Path,
     error_message: str,
+    attempt: int,
 ) -> None:
     prompt_template = config.paths.codex_kernel_fix_template.read_text(encoding="utf-8")
     agent_dir = iter_dir / "agent"
@@ -827,7 +944,7 @@ def _run_kernel_fix(
         accelerator=config.accelerator,
         error_message=error_message,
         logs_dir=str(iter_dir / "logs"),
-        kernel_main=str(config.paths.base_dir / "kernel.py"),
+        kernel_main=str(config.paths.kernel_source_dir / "kernel.py"),
         kernel_script=str(config.paths.kernel_run_dir(run_id) / "kernel.py"),
         rules_url=str(config.paths.rules_url_path),
         rules_md=str(config.paths.rules_md_path),
@@ -837,11 +954,43 @@ def _run_kernel_fix(
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
     )
+    prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
     prompt_path.write_text(prompt_text, encoding="utf-8")
+    attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
+    attempt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
+
+    allowed_prefixes = [
+        config.paths.repo_root / "src",
+        config.paths.repo_root / "docs",
+        config.paths.repo_root / "tests",
+        config.paths.kernel_source_dir,
+        config.paths.context_dir,
+        config.paths.runs_dir,
+        config.paths.prompts_dir,
+    ]
+    guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
+    before = _snapshot_tree(config.paths.repo_root)
 
     print("[cyan]kernel fix[/cyan]: running agent")
     result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run)
+    after = _snapshot_tree(config.paths.repo_root)
+    changed = _diff_snapshots(before, after)
+    _enforce_allowlist_changes(
+        root=config.paths.repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage=f"kernel_fix_attempt_{attempt}",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+    _maybe_restart_for_src_changes(
+        config=config,
+        run_id=run_id,
+        changed=changed,
+        stage=f"kernel_fix_attempt_{attempt}",
+    )
     response_text = _read_agent_response(result.last_message_path)
     _print_agent_response(result.last_message_path, response_text)
     if result.returncode != 0:
@@ -854,8 +1003,16 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     autofix_dir = run_dir / "autofix" / f"attempt-{attempt}"
     autofix_dir.mkdir(parents=True, exist_ok=True)
     error_text = "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip()
-    error_path = autofix_dir / "error.txt"
-    error_path.write_text(error_text + "\n", encoding="utf-8")
+    if isinstance(error, KaggleCliError):
+        if error.command:
+            error_text = f"{error_text}\n\nKaggle CLI command:\n{shlex.join(error.command)}"
+        if error.output:
+            error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
+    attempt_tag = f"{attempt:02d}"
+    header = f"autofix_attempt: {attempt}\n"
+    error_path = autofix_dir / f"error-{attempt_tag}.txt"
+    error_path.write_text(header + error_text + "\n", encoding="utf-8")
+    (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
     allowed_prefixes = [
         config.paths.repo_root / "src",
@@ -882,6 +1039,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     before = _snapshot_tree(config.paths.repo_root)
     result = run_codex(prompt_path, autofix_dir, dry_run=config.dry_run)
     after = _snapshot_tree(config.paths.repo_root)
+    changed = _diff_snapshots(before, after)
     _enforce_allowlist_changes(
         root=config.paths.repo_root,
         before=before,
@@ -890,6 +1048,12 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         stage=f"autofix_attempt_{attempt}",
         guard_snapshot=guard_snapshot,
         auto_repair=True,
+    )
+    _maybe_restart_for_src_changes(
+        config=config,
+        run_id=run_id,
+        changed=changed,
+        stage=f"autofix_attempt_{attempt}",
     )
     response_text = _read_agent_response(result.last_message_path)
     _print_agent_response(result.last_message_path, response_text)
@@ -948,6 +1112,32 @@ Error log file: {error_path}
 """
 
 
+def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:
+    if config.dry_run:
+        return
+    if os.environ.get("KAGGLEBOT_NO_RESTART") == "1":
+        return
+    if not any(path.startswith("src/") for path in changed):
+        return
+    run_dir = config.paths.run_dir(run_id)
+    state_path = run_dir / "autofix_restart.json"
+    state = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            state = {}
+    count = int(state.get("count", 0))
+    if count >= MAX_AUTOFIX_RESTARTS:
+        print(f"[yellow]autofix[/yellow]: src changes detected in {stage}, restart limit reached")
+        return
+    state["count"] = count + 1
+    state["last_stage"] = stage
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    print(f"[yellow]autofix[/yellow]: src changes detected in {stage}; restarting to reload code")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
 def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Path, best_score: float | None) -> None:
     if not config.submit or config.dry_run:
         return
@@ -959,6 +1149,7 @@ def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Pa
 
         _, _, sample_path = find_competition_files(config.paths.data_dir)
     validate_submission(str(sample_path), str(submission_path))
+    submission_for_submit = _prepare_submission_for_submit(sample_path, submission_path)
     ledger = SubmissionLedger(config.paths.submission_ledger_path)
     ensure_submission_rate_limit(ledger)
     if not config.force_submit:
@@ -966,19 +1157,61 @@ def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Pa
             ledger,
             slug=config.slug,
             message=_submission_message(config, run_id, best_score),
-            submission_path=str(submission_path),
+            submission_path=str(submission_for_submit),
         )
     print(f"[cyan]submit[/cyan]: {config.slug}")
     submit_competition(
-        config.slug, submission_path, _submission_message(config, run_id, best_score), dry_run=config.dry_run
+        config.slug, submission_for_submit, _submission_message(config, run_id, best_score), dry_run=config.dry_run
     )
     ledger.record(
         slug=config.slug,
         message=_submission_message(config, run_id, best_score),
-        submission_path=submission_path,
+        submission_path=submission_for_submit,
         run_id=run_id,
     )
     print("[green]submission recorded[/green]")
+
+
+def _prepare_submission_for_submit(sample_path: Path, submission_path: Path) -> Path:
+    if not sample_path.exists() or not submission_path.exists():
+        return submission_path
+    sample_delim = _sniff_delimiter_for_submit(sample_path)
+    submission_delim = _sniff_delimiter_for_submit(submission_path)
+    if sample_delim == "\t" and submission_delim == "\t" and submission_path.suffix.lower() != ".tsv":
+        tsv_path = submission_path.with_suffix(".tsv")
+        if tsv_path != submission_path:
+            shutil.copy2(submission_path, tsv_path)
+        return tsv_path
+    return submission_path
+
+
+def _sniff_delimiter_for_submit(path: Path, default: str = ",") -> str:
+    candidates = []
+    for sep in (default, "\t", ","):
+        if sep and sep not in candidates:
+            candidates.append(sep)
+    counts = {sep: 0 for sep in candidates}
+    lines_seen = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                lines_seen += 1
+                for sep in candidates:
+                    counts[sep] += line.count(sep)
+                if lines_seen >= 100:
+                    break
+    except OSError:
+        return default
+    if lines_seen == 0:
+        return default
+    best = max(candidates, key=lambda sep: counts[sep])
+    if counts[best] == 0:
+        return default
+    if counts.get(default, 0) >= counts[best]:
+        return default
+    return best
 
 
 def _submission_message(config: AutopilotConfig, run_id: str, best_score: float | None) -> str:

@@ -1,13 +1,35 @@
 from __future__ import annotations
 
 import csv
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.competition import parse_competition_slug
-from kagglebot.exceptions import KaggleCliError, RulesNotAcceptedError
+from kagglebot.exceptions import KaggleCliError, KaggleNetworkError, KernelCapacityError, RulesNotAcceptedError
 from kagglebot.exec_utils import run_command
 from kagglebot.validators import safe_extract_zip
+
+_KERNEL_URL_RE = re.compile(
+    r"https?://(?:www\.)?kaggle\.com/(?:code/)?(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
+_KERNEL_ID_RE = re.compile(r"^(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)$")
+
+
+def _normalize_kernel_title(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
+def _get_row_value(row: dict[str, str], key: str) -> str | None:
+    target = key.lower()
+    for k, v in row.items():
+        if k and k.strip().lower() == target:
+            return v
+    return None
 
 
 def download_competition(slug: str, dest_dir: Path, *, force: bool, quiet: bool, dry_run: bool = False) -> str:
@@ -73,6 +95,73 @@ def kernels_status(kernel_id: str, *, slug: str | None = None, dry_run: bool = F
 def kernels_output(kernel_id: str, output_dir: Path, *, slug: str | None = None, dry_run: bool = False) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
     return _run_kaggle(["kaggle", "kernels", "output", kernel_id, "-p", str(output_dir)], slug, dry_run=dry_run)
+
+
+def kernels_list(
+    *, mine: bool = False, user: str | None = None, sort_by: str = "dateCreated", dry_run: bool = False
+) -> str:
+    args = ["kaggle", "kernels", "list"]
+    if mine:
+        args.append("-m")
+    elif user:
+        args += ["-u", user]
+    if sort_by:
+        args += ["--sort-by", sort_by]
+    args.append("--csv")
+    return _run_kaggle(args, slug=None, dry_run=dry_run)
+
+
+def kernel_exists(kernel_id: str, *, dry_run: bool = False) -> bool:
+    output = kernels_list(mine=True, sort_by="dateCreated", dry_run=dry_run)
+    if dry_run:
+        return True
+    target = kernel_id.strip().lower()
+    rows = [row for row in csv.DictReader(output.splitlines()) if row]
+    for row in rows:
+        for key in ("ref", "url", "link"):
+            ref = _normalize_kernel_ref(row.get(key))
+            if ref and ref.lower() == target:
+                return True
+        raw_ref = row.get("ref")
+        if raw_ref and target in str(raw_ref).lower():
+            return True
+    return False
+
+
+def kernel_id_by_title(title: str, *, dry_run: bool = False) -> str | None:
+    output = kernels_list(mine=True, sort_by="dateCreated", dry_run=dry_run)
+    if dry_run:
+        return None
+    rows = [row for row in csv.DictReader(output.splitlines()) if row]
+    target = _normalize_kernel_title(title)
+    for row in rows:
+        row_title = _get_row_value(row, "title")
+        if not row_title:
+            continue
+        if _normalize_kernel_title(row_title) != target:
+            continue
+        ref_value = row.get("ref") or row.get("url") or row.get("link")
+        normalized = _normalize_kernel_ref(ref_value)
+        if normalized:
+            return normalized
+        if ref_value:
+            return str(ref_value)
+    return None
+
+
+def _normalize_kernel_ref(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = _KERNEL_URL_RE.search(text)
+    if match:
+        return f"{match.group('user')}/{match.group('slug')}"
+    match = _KERNEL_ID_RE.match(text)
+    if match:
+        return f"{match.group('user')}/{match.group('slug')}"
+    return None
 
 
 def competitions_files(slug: str, *, dry_run: bool = False) -> str:
@@ -207,6 +296,20 @@ def _run_kaggle(args: list[str], slug: str | None, *, dry_run: bool) -> str:
 
     output = result.output
     if result.returncode != 0:
+        if _is_kernel_capacity_limit(output):
+            raise KernelCapacityError(
+                "Kaggle GPU session limit reached; free running GPU sessions and retry.",
+                args,
+                exit_code=result.returncode,
+                output=output,
+            )
+        if _is_network_error(output):
+            raise KaggleNetworkError(
+                "Kaggle CLI failed due to a network or DNS error. Check connectivity to www.kaggle.com and retry.",
+                args,
+                exit_code=result.returncode,
+                output=output,
+            )
         if slug and _is_rules_not_accepted(output):
             raise RulesNotAcceptedError("Competition rules not accepted.")
         raise KaggleCliError(
@@ -227,3 +330,28 @@ def _is_rules_not_accepted(output: str) -> bool:
     if "forbidden" in text and "competition" in text:
         return True
     return False
+
+
+def _is_network_error(output: str) -> bool:
+    text = output.lower()
+    tokens = (
+        "nameresolutionerror",
+        "failed to resolve",
+        "temporary failure in name resolution",
+        "nodename nor servname provided",
+        "no address associated with hostname",
+        "getaddrinfo failed",
+        "connectionerror",
+        "newconnectionerror",
+        "max retries exceeded",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "failed to establish a new connection",
+    )
+    return any(token in text for token in tokens)
+
+
+def _is_kernel_capacity_limit(output: str) -> bool:
+    text = output.lower()
+    return "maximum batch gpu session count" in text

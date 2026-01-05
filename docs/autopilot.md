@@ -24,7 +24,7 @@ When autopilot starts, it:
 1. Downloads competition data
 2. Profiles the dataset (rows, columns, missing values, etc.)
 3. Queries the Knowledge Base for similar competitions
-4. Generates competition-specific code only under `artifacts/<slug>/kernel/` (never under `src/`)
+4. Generates competition-specific code under `artifacts/<slug>/kernel/`. Runner/validation fixes may update `src/` during auto-fix.
 5. Runs a three-stage agent pipeline:
    - **Codex brief**: reads local context files (overview/data/rules + dataset_profile + submission_format) and produces a concise interpretation (no raw content forwarded)
    - **Claude strategy**: deep plan with web search and references (Claude model: `opus`). Output must include candidates, evaluation plan, risks, ablation plan, sources, and a `PLAN_JSON` block; otherwise the pipeline retries.
@@ -54,6 +54,7 @@ For each iteration:
 1. **Verify**: Run `pytest` to ensure code quality
 2. **Train**: Run local solver or Kaggle kernel (kaggle_gpu/kaggle_tpu uses `kernel.py`)
    - Before kernel push, sources are validated for syntax and required outputs (submission/metrics paths).
+   - After kernel push, kernel registration is verified; if not found, a single re-push is attempted.
 3. **Evaluate**: Compute offline score using the evaluation strategy (holdout/CV/test)
 4. **Check Top1**: Compare offline score to public Top1 (direction-aware)
 5. **Diagnose**: Generate `diagnostics.md` with actionable improvement hints
@@ -63,13 +64,15 @@ For each iteration:
      - `major_overhaul`: large redesign if far from top1
      - `moderate_update`: meaningful changes if mid-gap
      - `minor_tuning`: small adjustments if close to top1
-   - Agent modifies code in `kagglebot/solver/` (or `kernel.py` on kaggle_gpu)
+   - Agent modifies code in `kagglebot/solver/` (or `artifacts/<slug>/kernel/kernel.py` on kaggle_gpu)
    - Repeat from step 1
 
 The loop stops when:
 - **Top1-tier reached** → Submit if `--submit` flag is set
 - **Max iterations reached** → Submit best offline candidate at the final iteration (if `--submit`)
-- **Kernel failure** → Codex attempts to fix and re-push until resolved (no fixed cap)
+- **Kernel failure** → Codex attempts to fix and re-push; repeated identical kernel errors are capped to avoid infinite loops
+- **Kaggle GPU capacity limit** → Autopilot waits and retries a few times, then exits with a message to stop running GPU sessions
+- **Kernel registration delay** → If the kernel isn’t visible after push, autopilot waits and retries the push before giving up
 - **Other runtime errors** → Codex auto-fix runs up to 2 attempts, then surfaces the error
 
 ### 3. Submission (Optional)

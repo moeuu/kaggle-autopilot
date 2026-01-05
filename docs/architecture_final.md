@@ -798,9 +798,8 @@ subprocess.run(f"kaggle competitions download -c {slug}", shell=True)
 - Some competitions only specify format in description
 
 **Tool Behavior**:
-- Skip validation if sample_submission.csv missing
-- Warn user
-- Proceed with submission (at user's risk)
+- If sample_submission.csv is missing or header-only, enforce column/NaN checks only
+- Skip row-count/id-set checks because no reference rows exist
 
 ### 5. Schema Mismatch
 

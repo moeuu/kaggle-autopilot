@@ -28,6 +28,18 @@ class KaggleCliError(KaggleBotError):
         self.output = output
 
 
+class KaggleNetworkError(KaggleCliError):
+    """Kaggle CLI failed due to network connectivity issues."""
+
+    exit_code = 16
+
+
+class KernelCapacityError(KaggleCliError):
+    """Kaggle GPU session capacity limit reached."""
+
+    exit_code = 15
+
+
 class ValidationError(KaggleBotError):
     """Submission validation failed."""
 

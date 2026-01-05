@@ -90,6 +90,8 @@ def _run_codex_brief_with_retry(
     attempt = 0
     last_error = ""
     while attempt <= retries:
+        allowed_prefixes = [paths.context_agent_dir]
+        guard_snapshot = _backup_guarded_files(config.repo_root, allowed_prefixes)
         before = _snapshot_tree(config.repo_root)
         result = run_codex(prompt_path, output_dir, dry_run=config.dry_run)
         after = _snapshot_tree(config.repo_root)
@@ -97,8 +99,10 @@ def _run_codex_brief_with_retry(
             root=config.repo_root,
             before=before,
             after=after,
-            allowed_prefixes=[paths.context_agent_dir],
+            allowed_prefixes=allowed_prefixes,
             stage="codex_brief",
+            guard_snapshot=guard_snapshot,
+            auto_repair=True,
         )
         brief_text = _read_text(result.last_message_path).strip()
         if result.returncode == 0 and brief_text:
@@ -781,7 +785,7 @@ def _infer_metric_from_context(paths: CompetitionPaths) -> str | None:
         (r"mae|mean\\s+absolute\\s+error", "mae"),
         (r"mse|mean\\s+squared\\s+error", "mse"),
         (r"mean\\s+average\\s+precision|\\bmap\\b", "map"),
-        (r"r\\^?2|r-?squared", "r2"),
+        (r"r\^?2|r-?squared", "r2"),
     ]
     for pattern, metric in patterns:
         if re.search(pattern, context):
