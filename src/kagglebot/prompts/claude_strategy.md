@@ -31,6 +31,10 @@ Sample submission head (CSV, trimmed):
 >>>
 
 Return output with exact delimiters. Do NOT include chain-of-thought; provide concise, actionable steps only.
+Avoid baseline-only solutions. Propose a high-capacity, competition-appropriate approach.
+If compute is kaggle_gpu/kaggle_tpu, prefer GPU/TPU-accelerated training and longer schedules.
+If the gap to top1 is large, recommend a major model upgrade (architecture or feature strategy).
+If near top1, recommend targeted tuning/ablations.
 
 ===STRATEGY===
 Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings and include:
@@ -39,9 +43,10 @@ Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings a
 - Candidate approaches (>=3) with pros/cons
 - Final approach + rationale
 - Training & evaluation plan (CV/holdout + metrics)
-- Compute/GPU plan + time budget
+- Compute/GPU plan + time budget (include how to scale training time/epochs/iterations)
 - Error analysis + ablation plan
 - Risks, constraints, and rule compliance
+- Dependency sanity: prefer Kaggle-default libraries; if you suggest niche libs, give a fallback.
 - Search notes (queries & key findings)
 - Sources (>=3). Provide title + domain; URLs are acceptable.
 
@@ -62,3 +67,4 @@ Provide a JSON object with these keys (do not wrap in markdown):
 Give Codex step-by-step instructions to update only:
 artifacts/<slug>/kernel/ (especially kernel.py). Mention any helper files to add under that dir.
 Be explicit about files, functions, and training/eval flow.
+Include concrete training hyperparameters and how to scale them up for stronger accuracy.

@@ -11,9 +11,9 @@
 
 ## Executive Summary
 
-Kagglebot autopilot is a fully automated Kaggle competition workflow system that implements a 5-iteration improvement loop with score-gated submission. The system operates non-interactively with minimal user arguments, leveraging a Knowledge Base for cross-competition learning and supporting multiple compute backends (local GPU, Kaggle GPU/TPU).
+Kagglebot autopilot is a fully automated Kaggle competition workflow system that implements a 1-iteration improvement loop (default) with score-gated submission. The system operates non-interactively with minimal user arguments, leveraging a Knowledge Base for cross-competition learning and supporting multiple compute backends (local GPU, Kaggle GPU/TPU).
 
-**Core Principle**: Accuracy-first, no training time limits, submit when Top1 heuristic met OR after 5 iterations.
+**Core Principle**: Accuracy-first, no training time limits, submit when Top1 heuristic met OR after 1 iteration by default.
 
 ---
 
@@ -39,7 +39,7 @@ uv run kagglebot autopilot <competition_url> \
 ### 1.2 Optional Flags (Advanced)
 
 ```bash
---max-iterations N        # Default: 5
+--max-iterations N        # Default: 1
 --margin-abs FLOAT        # Top1 comparison absolute margin, default: 0.0
 --margin-rel FLOAT        # Top1 comparison relative margin, default: 0.0
 --verify-cmd "CMD"        # Test command, default: "uv run pytest -q"
@@ -104,9 +104,9 @@ uv run kagglebot autopilot <competition_url> \
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ STEP 3: ITERATION LOOP (Iterations 1-5)                    │
+│ STEP 3: ITERATION LOOP (Iterations 1..max_iterations)      │
 │                                                             │
-│  FOR iteration IN [1..5]:                                   │
+│  FOR iteration IN [1..max_iterations]:                      │
 │                                                             │
 │    3a) TRAIN                                                │
 │        - Execute solver with specified compute backend      │
@@ -169,17 +169,17 @@ uv run kagglebot autopilot <competition_url> \
 
 The loop stops when ANY of these is true:
 
-1. ✅ **Heuristic met early** (iteration 1-4): offline score meets Top1 heuristic → submit and stop
-2. ✅ **Max iterations** (iteration 5): submit best candidate and stop
+1. ✅ **Heuristic met early** (iteration < max_iterations): offline score meets Top1 heuristic → submit and stop
+2. ✅ **Max iterations** (iteration == max_iterations): submit best candidate and stop
 3. ❌ **Error conditions**:
    - Rules not accepted → exit code 2
    - Kernel failed 3 times → exit code 12
    - Tests fail after 3 retry attempts → exit code 1
 
-### 2.4 Submission Rule: "Top1 OR 5 Loops"
+### 2.4 Submission Rule: "Top1 OR max_iterations"
 
 ```python
-for iteration in range(1, 6):  # 1..5
+for iteration in range(1, max_iterations + 1):
     train()
     evaluate()  # offline score on validation
     top1 = fetch_top1()
@@ -198,7 +198,7 @@ for iteration in range(1, 6):  # 1..5
 
 **Guarantees**:
 - Exactly **1 submission per autopilot run**
-- Submit happens when Top1 met OR after iteration 5
+- Submit happens when Top1 met OR after iteration max_iterations
 - No submissions if rules not accepted or errors occur
 
 ---
@@ -228,7 +228,7 @@ artifacts/<slug>/
         prompt.md                    # initial_plan_and_implement.md
         response.txt                 # Agent output
 
-    iter-{1..5}/
+    iter-{1..max_iterations}/
       submission.csv                 # Predictions for this iteration
       metrics.json                   # Offline + Top1 scores
       diagnostics.md                 # Agent-readable analysis
@@ -1043,9 +1043,9 @@ Before deployment, verify:
 - [ ] Minimal CLI works: `autopilot <url> --agent codex --compute <mode> --submit`
 - [ ] Bootstrap downloads data, rules, leaderboard
 - [ ] Agent generates plan.json in iteration 0
-- [ ] Iteration loop runs 1-5 times
+- [ ] Iteration loop runs 1..max_iterations times
 - [ ] Top1 heuristic comparison is direction-aware
-- [ ] Submits when heuristic met OR at iteration 5
+- [ ] Submits when heuristic met OR at iteration max_iterations
 - [ ] Exactly 1 submission per run
 - [ ] Knowledge Base queries and updates work
 - [ ] Git stays on main, auto-stashes, saves diffs
@@ -1085,7 +1085,7 @@ Before deployment, verify:
 
 | Decision | Rationale |
 |----------|-----------|
-| 5 iterations max | Balance exploration vs time; most improvements plateau by 5 |
+| 1 iteration max (default) | Balance exploration vs time; override with `--max-iterations` if needed |
 | No training time limit | Accuracy-first; user can interrupt if needed |
 | Submit when Top1 met OR iter 5 | Guarantees 1 submission; early exit when heuristic satisfied |
 | Main-only git | Simplicity; avoid branch sprawl; user commits manually |

@@ -3,6 +3,7 @@
 You are Codex. Produce a concise, human-readable brief for Claude from local context files.
 Do not modify any files or code. Output only the brief text.
 Summarize; do not paste raw data, long quotes, or large tables.
+Focus on: task/metric, submission format, data schema & file types, and rules.
 
 Competition: {{slug}}
 URL: {{competition_url}}
@@ -21,7 +22,7 @@ Read and summarize these local files (paths). Do not paste raw content:
 
 If a file is missing or empty, note it explicitly.
 
-Brief requirements:
+Brief requirements (use short headings):
 - Task type and evaluation metric (with confidence)
 - Target column guess and ID column (if any)
 - Submission format (columns, delimiter, row expectations)

@@ -95,7 +95,7 @@ def bootstrap(
 def implement(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    agent: str = typer.Option(..., "--agent", help="Agent to run (codex or claude)."),
+    agent: str = typer.Option("codex", "--agent", help="Agent to run (codex or claude)."),
     verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
 ) -> None:
     cfg = ctx.obj
@@ -265,7 +265,7 @@ def submit(
 def autopilot(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    agent: str = typer.Option(..., "--agent", help="Agent to run (codex or claude)."),
+    agent: str = typer.Option("pipeline", "--agent", help="Agent to run (pipeline, codex, or claude)."),
     compute: Compute = typer.Option(..., "--compute", help="Compute target."),
     submit: bool = typer.Option(False, "--submit/--no-submit", help="Submit when target met."),
     rules_file: Path | None = typer.Option(None, "--rules-file", help="Path to rules file (md/txt/html)."),
@@ -275,7 +275,14 @@ def autopilot(
     score_source: str | None = typer.Option(None, "--score-source", help="auto|holdout|cv|test"),
     holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
     cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
-    max_iterations: int | None = typer.Option(None, "--max-iterations", help="Max iterations."),
+    max_iterations: int | None = typer.Option(
+        None,
+        "--max-iterations",
+        "--max-iteration",
+        "--max-iter",
+        "--iter",
+        help="Max iterations.",
+    ),
     max_total_min: int | None = typer.Option(None, "--max-total-min", help="Max total minutes."),
     patience: int | None = typer.Option(None, "--patience", help="Patience iterations."),
     min_improvement: float | None = typer.Option(None, "--min-improvement", help="Minimum improvement."),

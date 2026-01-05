@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from kagglebot.exec_utils import run_command
+from kagglebot.logging_utils import truncate_lines
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,13 @@ class CodexResult:
     stderr: str
 
 
-def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> CodexResult:
+def run_codex(
+    prompt_path: Path,
+    output_dir: Path,
+    *,
+    dry_run: bool = False,
+    heartbeat_label: str = "still thinking",
+) -> CodexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_text = prompt_path.read_text(encoding="utf-8")
     transcript_path = output_dir / "codex_exec.jsonl"
@@ -53,7 +60,11 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
     ]
     stop_event = threading.Event()
     start_time = time.monotonic()
-    heartbeat = threading.Thread(target=_heartbeat, args=(stop_event, start_time), daemon=True)
+    heartbeat = threading.Thread(
+        target=_heartbeat,
+        args=(stop_event, start_time, heartbeat_label),
+        daemon=True,
+    )
     heartbeat.start()
     stdout_chunks: list[str] = []
     stderr_text = ""
@@ -92,10 +103,15 @@ def run_codex(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> 
     )
 
 
-def _heartbeat(stop_event: threading.Event, start_time: float, interval: float = 30.0) -> None:
+def _heartbeat(
+    stop_event: threading.Event,
+    start_time: float,
+    label: str,
+    interval: float = 30.0,
+) -> None:
     while not stop_event.wait(interval):
         elapsed = int(time.monotonic() - start_time)
-        print(f"codex: still running... ({elapsed}s)")
+        print(f"codex: {label}... ({elapsed}s)")
 
 
 def _emit_codex_event(line: str) -> None:
@@ -118,7 +134,7 @@ def _emit_codex_event(line: str) -> None:
             suffix = f" (exit {exit_code})" if exit_code is not None else ""
             print(f"codex: command completed: {command}{suffix}")
             if output:
-                print(output.rstrip())
+                print(truncate_lines(output.rstrip(), max_lines=5))
         elif status:
             print(f"codex: command {status}: {command}")
         return

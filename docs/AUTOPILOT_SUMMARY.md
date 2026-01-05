@@ -7,7 +7,7 @@ The **Autopilot Single-Submit** feature (Method 1) enables kagglebot to iterativ
 ## Key Features
 
 ### 1. Offline Iteration Loop
-- **Default 3 iterations** (configurable via `max_iterations`)
+- **Default 1 iteration** (configurable via `max_iterations`)
 - Train → Evaluate offline → Diagnose → Improve → Repeat
 - No submissions during loop (offline-only evaluation)
 
@@ -38,7 +38,7 @@ The **Autopilot Single-Submit** feature (Method 1) enables kagglebot to iterativ
 ## Quick Start
 
 ```bash
-# Basic autopilot run (default 3 iterations, submit best)
+# Basic autopilot run (default 1 iteration, submit best)
 uv run kagglebot run titanic \
   --agent codex \
   --autopilot \

@@ -77,7 +77,7 @@ def _plan_json_text() -> str:
             ' "holdout_frac": 0.2,',
             ' "cv_folds": 5,',
             ' "seed": 42,',
-            ' "max_iterations": 3,',
+            ' "max_iterations": 1,',
             ' "patience": 2,',
             ' "min_improvement": 0.0}',
         ]
@@ -100,7 +100,7 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
 
     codex_calls: list[Path] = []
 
-    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyCodexResult:  # noqa: ARG001
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         codex_calls.append(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if len(codex_calls) == 2:
@@ -154,7 +154,7 @@ def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
 
-    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyCodexResult:  # noqa: ARG001
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
             (tmp_path / "oops.txt").write_text("nope", encoding="utf-8")
@@ -195,7 +195,7 @@ def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
 
-    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyCodexResult:  # noqa: ARG001
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
             kernel_path = paths.kernel_source_dir / "kernel.py"

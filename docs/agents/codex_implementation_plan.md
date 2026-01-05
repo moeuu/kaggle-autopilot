@@ -457,7 +457,7 @@ def autopilot(
     compares to Kaggle Public Top1 score, and submits at most once.
 
     Examples:
-        # Basic autopilot (5 iterations, submit best)
+        # Basic autopilot (max_iterations, submit best)
         uv run kagglebot autopilot titanic --force
 
         # Early submit when heuristic met
@@ -643,7 +643,7 @@ Before release:
 
 ### Functionality
 - [ ] All 6 CLI commands work end-to-end
-- [ ] Autopilot completes 5 iterations (local CPU)
+- [ ] Autopilot completes max_iterations (local CPU)
 - [ ] Autopilot fetches Top1 and evaluates heuristic
 - [ ] Submission validation prevents invalid CSVs
 - [ ] Deduplication prevents duplicate submissions

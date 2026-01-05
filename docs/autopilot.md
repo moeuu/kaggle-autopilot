@@ -1,6 +1,6 @@
 # Autopilot
 
-Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **verify → train → evaluate → diagnose → improve → repeat** until top1-tier is reached or `max_iterations` (default 3) complete.
+Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **verify → train → evaluate → diagnose → improve → repeat** until top1-tier is reached or `max_iterations` (default 1) complete.
 Iteration 0 is expected to implement a **strong initial model** (web‑researched), not a simplistic initial model.
 
 **Key principle**: Submission happens **only** when offline score is top1-tier (direction-aware) or at the final iteration when `--submit` is set.
@@ -26,8 +26,8 @@ When autopilot starts, it:
 3. Queries the Knowledge Base for similar competitions
 4. Generates competition-specific code under `artifacts/<slug>/kernel/`. Runner/validation fixes may update `src/` during auto-fix.
 5. Runs a three-stage agent pipeline:
-   - **Codex brief**: reads local context files (overview/data/rules + dataset_profile + submission_format) and produces a concise interpretation (no raw content forwarded)
-   - **Claude strategy**: deep plan with web search and references (Claude model: `opus`). Output must include candidates, evaluation plan, risks, ablation plan, sources, and a `PLAN_JSON` block; otherwise the pipeline retries.
+   - **Codex brief**: reads local context files (overview/data/rules + dataset_profile + submission_format) and produces a concise interpretation (no raw content forwarded; summaries only).
+   - **Claude strategy**: deep plan with web search and references (Claude model: `opus`). Prompt includes trimmed dataset/profile + submission format plus Codex interpretation. Output must include candidates, evaluation plan, risks, ablation plan, sources, and a `PLAN_JSON` block; otherwise the pipeline retries.
    - **Codex implement**: applies Claude’s plan to the repo
 5. Runs initial verification (tests)
 
@@ -60,10 +60,11 @@ For each iteration:
 5. **Diagnose**: Generate `diagnostics.md` with actionable improvement hints
 6. **Improve** (if not top1-tier):
    - Call agent with diagnostics
-   - Improvement mode is selected by top1 gap:
+  - Improvement mode is selected by top1 gap:
      - `major_overhaul`: large redesign if far from top1
      - `moderate_update`: meaningful changes if mid-gap
      - `minor_tuning`: small adjustments if close to top1
+  - If iteration 1 is tree-only and far from top1, iteration 2 must add an NN family (MLP or FT-Transformer) alongside the tree baseline.
    - Agent modifies code in `kagglebot/solver/` (or `artifacts/<slug>/kernel/kernel.py` on kaggle_gpu)
    - Repeat from step 1
 
@@ -143,8 +144,8 @@ You can **manually edit** `plan.json` to override these choices before re-runnin
 
 ### Hard Caps
 
-- **Max iterations**: Default 3, configurable via `--max-iterations`
-- **Max total time**: Default 2 hours, configurable via `--max-total-min`
+- **Max iterations**: Default 1, configurable via `--max-iterations`
+- **Max total time**: Disabled by default (no wall-clock limit). You can set `--max-total-min` if you want a cap.
 - **Patience**: Default 2 iterations without improvement, configurable via `--patience`
 - **Min improvement**: Default 0.0 (any improvement counts), configurable via `--min-improvement`
 - **Max submissions**: Default 5 per autopilot run
@@ -258,7 +259,7 @@ Required:
   competition-url                Kaggle competition URL or slug
 
 Agent:
-  --agent codex                  Agent to use (default: codex)
+  --agent pipeline               Agent to use (default: pipeline; codex→claude→codex)
 
 Compute:
   --compute local_cpu|local_gpu|kaggle_gpu|kaggle_tpu
@@ -273,8 +274,8 @@ Evaluation:
   --seed INT                     Random seed (default: 42)
 
 Iteration Control:
-  --max-iterations INT           Max improvement cycles (default: 3)
-  --max-total-min INT            Max wall-clock time in minutes (default: 120)
+  --max-iterations INT           Max improvement cycles (default: 1). Aliases: --max-iteration, --max-iter, --iter
+  --max-total-min INT            Max wall-clock time in minutes (default: none)
   --patience INT                 Early stopping patience (default: 2)
   --min-improvement FLOAT        Minimum score improvement threshold (default: 0.0)
 
@@ -307,7 +308,7 @@ uv run kagglebot autopilot titanic --agent codex --compute local_cpu
 
 Output:
 - Generates plan.json and initial model implementation
-- Runs up to `max_iterations` (default 3)
+- Runs up to `max_iterations` (default 1)
 - Stops when target met or patience exhausted
 - Does **not** submit (missing `--submit` flag)
 

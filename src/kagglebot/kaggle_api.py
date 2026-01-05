@@ -92,9 +92,22 @@ def kernels_status(kernel_id: str, *, slug: str | None = None, dry_run: bool = F
     return _run_kaggle(["kaggle", "kernels", "status", kernel_id], slug, dry_run=dry_run)
 
 
-def kernels_output(kernel_id: str, output_dir: Path, *, slug: str | None = None, dry_run: bool = False) -> str:
+def kernels_output(
+    kernel_id: str,
+    output_dir: Path,
+    *,
+    slug: str | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    quiet: bool = False,
+) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
-    return _run_kaggle(["kaggle", "kernels", "output", kernel_id, "-p", str(output_dir)], slug, dry_run=dry_run)
+    args = ["kaggle", "kernels", "output", kernel_id, "-p", str(output_dir)]
+    if force:
+        args.append("--force")
+    if quiet:
+        args.append("--quiet")
+    return _run_kaggle(args, slug, dry_run=dry_run)
 
 
 def kernels_list(

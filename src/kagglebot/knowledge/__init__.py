@@ -369,7 +369,7 @@ def build_plan_and_initial_prompt(
         '  "cv_folds": 5,',
         '  "seed": 42,',
         '  "internet": "on",',
-        '  "max_iterations": 3,',
+        '  "max_iterations": 1,',
         '  "submit_policy": "on_target_only"',
         "}",
         "```",
@@ -416,7 +416,7 @@ def build_plan_and_initial_prompt(
         "uv run pytest -q",
         "```",
         "",
-        "The autopilot will iterate up to max_iterations (default 3)",
+        "The autopilot will iterate up to max_iterations (default 1)",
         "and submit only when top1-tier or at the final iteration.",
     ]
     return "\n".join(lines) + "\n"
@@ -435,11 +435,14 @@ def build_improve_template() -> str:
 
 **Competition**: `{slug}`
 **Iteration**: {iteration}
-**Goal**: Improve offline score toward top1-tier or best possible within the max_iterations budget (default 3)
+**Goal**: Improve offline score toward top1-tier or best possible within the max_iterations budget (default 1)
 **Compute**: {compute} ({accelerator})
 **Top1 gap**: {top1_gap}
 **Delta vs previous best**: {delta_offline}
 **Improvement mode**: {improvement_mode}
+**Next iteration**: {next_iteration}
+**Model family hint**: {model_family_hint}
+**NN upgrade required**: {nn_upgrade_required}
 
 ## Current Score Context
 
@@ -513,6 +516,13 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 - `minor_tuning`: small hyperparameter/feature tweaks, calibration, or ensembling.
 
 If the score did not improve (delta <= 0), treat it as `major_overhaul` even if the default mode is weaker.
+
+**Upgrade rule**:
+- If `nn_upgrade_required` is `yes`, the previous iteration was tree-only and far from top1.
+  Add a neural model family (MLP or FT-Transformer) in the next iteration,
+  while keeping the tree baseline for comparison.
+  Do not introduce non-Kaggle-default dependencies.
+- If `improvement_mode` is `minor_tuning`, keep the current model family and only tweak.
 
 **Recommended strategies** (pick 1-2 per iteration):
 
@@ -890,6 +900,10 @@ def build_kernel_fix_template() -> str:
 **Run ID**: {run_id}
 **Iteration**: {iteration}
 **Compute**: {compute} ({accelerator})
+
+## Blocked Modules (do NOT import)
+
+{blocked_modules}
 
 ## Error Summary
 

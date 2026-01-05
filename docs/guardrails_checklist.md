@@ -93,7 +93,7 @@ Note: Git integration has been removed from the implementation; section 4 is his
 
 ### 3.1 Hard Caps
 
-- [ ] **Max iterations**: Default 5, configurable, enforced
+- [ ] **Max iterations**: Default 1, configurable, enforced
 - [ ] **Max total time**: Default 120 min (2 hours), enforced with wall-clock check
 - [ ] **Max submissions per run**: Default 5, enforced in submission counter
 - [ ] **Timeout per iteration**: Reasonable timeout (e.g., 60 min per training run)

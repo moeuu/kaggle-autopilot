@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -26,8 +27,12 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
+from kagglebot.logging_utils import truncate_lines
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
+
+_COLUMN_MAP_FILENAME = "column_map.json"
+_COLUMN_MAP_SHIM_MARKER = "# kagglebot: column-map-shim"
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,7 @@ def run_kernel(
         _ensure_kernel_import_path(kernel_dir)
         _inline_kernel_modules(kernel_dir)
         _inject_data_dir_resolver(kernel_dir)
+        _inject_column_map_shim(kernel_dir, base_dir / slug / "context")
         ensure_kernel_sources_valid(kernel_dir)
     else:
         _write_kernel_script(
@@ -372,6 +378,63 @@ def _inject_data_dir_resolver(kernel_dir: Path) -> None:
     kernel_path.write_text(updated, encoding="utf-8")
 
 
+def _inject_column_map_shim(kernel_dir: Path, context_dir: Path) -> None:
+    map_path = context_dir / _COLUMN_MAP_FILENAME
+    if not map_path.exists():
+        return
+    kernel_map_path = kernel_dir / _COLUMN_MAP_FILENAME
+    shutil.copy2(map_path, kernel_map_path)
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _COLUMN_MAP_SHIM_MARKER,
+        "import json",
+        "from pathlib import Path",
+        "",
+        "def _kb_load_map() -> dict:",
+        "    candidates = [",
+        f"        Path(__file__).with_name('{_COLUMN_MAP_FILENAME}'),",
+        f"        Path('/kaggle/working/{_COLUMN_MAP_FILENAME}'),",
+        "    ]",
+        "    for path in candidates:",
+        "        if path.exists():",
+        "            try:",
+        "                payload = json.loads(path.read_text(encoding='utf-8'))",
+        "            except Exception:",
+        "                continue",
+        "            mapping = payload.get('mapping') if isinstance(payload, dict) else None",
+        "            if isinstance(mapping, dict) and mapping:",
+        "                return mapping",
+        "    return {}",
+        "",
+        "def _kb_patch_pandas() -> None:",
+        "    try:",
+        "        import pandas as _pd",
+        "    except Exception:",
+        "        return",
+        "    mapping = _kb_load_map()",
+        "    if not mapping:",
+        "        return",
+        "    _orig = _pd.read_csv",
+        "    def _patched(*args, **kwargs):",
+        "        df = _orig(*args, **kwargs)",
+        "        try:",
+        "            return df.rename(columns=mapping)",
+        "        except Exception:",
+        "            return df",
+        "    _pd.read_csv = _patched",
+        "",
+        "_kb_patch_pandas()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _COLUMN_MAP_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\n".join(shim), encoding="utf-8")
+
+
 def _find_bootstrap_block_end(lines: list[str]) -> int | None:
     if _KERNEL_BOOTSTRAP_MARKER not in lines:
         return None
@@ -421,6 +484,11 @@ def _inline_kernel_modules(kernel_dir: Path, modules: tuple[str, ...] | None = N
         modules = _discover_inline_modules(kernel_dir, lines)
     if not modules or not _kernel_imports_local_modules(lines, modules):
         return
+    alias_modules = _modules_with_alias_imports(lines, modules)
+    if alias_modules:
+        modules = tuple(module for module in modules if module not in alias_modules)
+        if not modules:
+            return
 
     stripped = lines
     for module in modules:
@@ -459,6 +527,49 @@ def _kernel_imports_local_modules(lines: list[str], modules: tuple[str, ...]) ->
             if re.match(rf"^\s*import\s+{re.escape(module)}\b", line):
                 return True
     return False
+
+
+def _modules_with_alias_imports(lines: list[str], modules: tuple[str, ...]) -> set[str]:
+    if not modules:
+        return set()
+    text = "\n".join(lines)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _modules_with_alias_imports_fallback(lines, modules)
+
+    alias_modules: set[str] = set()
+    module_set = set(modules)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                base = alias.name.split(".", 1)[0]
+                if base in module_set and alias.asname:
+                    alias_modules.add(base)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is None:
+                continue
+            base = node.module.split(".", 1)[0]
+            if base not in module_set:
+                continue
+            for alias in node.names:
+                if alias.asname:
+                    alias_modules.add(base)
+                    break
+    return alias_modules
+
+
+def _modules_with_alias_imports_fallback(lines: list[str], modules: tuple[str, ...]) -> set[str]:
+    alias_modules: set[str] = set()
+    for line in lines:
+        for module in modules:
+            if re.match(rf"^\s*import\s+{re.escape(module)}\s+as\s+\w+", line):
+                alias_modules.add(module)
+                continue
+            if re.match(rf"^\s*from\s+\.?{re.escape(module)}\s+import\b", line):
+                if " as " in line:
+                    alias_modules.add(module)
+    return alias_modules
 
 
 def _strip_module_import(lines: list[str], module: str) -> list[str]:
@@ -530,7 +641,7 @@ def _find_main_guard_index(lines: list[str]) -> int:
     return len(lines)
 
 
-LOG_POLL_INTERVAL = 10.0
+LOG_POLL_INTERVAL = 2.0
 HEARTBEAT_INTERVAL = 30.0
 STATUS_ERROR_SLEEP = 10.0
 MAX_STATUS_ERRORS = 6
@@ -597,6 +708,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
             last_log_fetch = now
             log_failure = _detect_failure_in_logs(output_dir)
             if log_failure:
+                log_failure = truncate_lines(log_failure, max_lines=5)
                 message = f"Kaggle kernel error detected in logs.\n\n--- kernel log tail ---\n{log_failure}"
                 raise KernelFailedError(message)
         if status in {"running", "queued"}:
@@ -614,6 +726,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
             log_tail = _collect_log_tail(output_dir)
             message = f"Kaggle kernel failed: {output}"
             if log_tail:
+                log_tail = truncate_lines(log_tail, max_lines=5)
                 message = f"{message}\n\n--- kernel log tail ---\n{log_tail}"
             raise KernelFailedError(message)
         time.sleep(STATUS_ERROR_SLEEP)
@@ -678,7 +791,7 @@ def _parse_kernel_status(output: str) -> str:
 
 def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> None:
     try:
-        kernels_output(kernel_id, output_dir, slug=slug, dry_run=False)
+        kernels_output(kernel_id, output_dir, slug=slug, dry_run=False, force=True, quiet=True)
     except KaggleCliError:
         return
 
@@ -718,7 +831,7 @@ def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> bool:
             if not formatted:
                 continue
             print(f"[cyan]kernel log[/cyan]: {path.name}")
-            print("\n".join(formatted))
+            print(truncate_lines("\n".join(formatted), max_lines=5))
             printed = True
             continue
 
@@ -729,7 +842,7 @@ def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> bool:
         new_lines = lines[last:]
         state.seen_lines[path] = len(lines)
         print(f"[cyan]kernel log[/cyan]: {path.name}")
-        print("\n".join(new_lines))
+        print(truncate_lines("\n".join(new_lines), max_lines=5))
         printed = True
     return printed
 

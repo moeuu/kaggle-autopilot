@@ -141,7 +141,7 @@ uv run kagglebot run titanic \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--autopilot` | bool | False | Enable autopilot mode (5 iterations) |
+| `--autopilot` | bool | False | Enable autopilot mode (default 1 iteration) |
 | `--target-metric` | str | auto | Metric name (e.g., accuracy, rmse) |
 | `--target-direction` | str | auto | "maximize" or "minimize" (auto-infer from metric) |
 | `--top1-margin-abs` | float | 0.05 | Absolute margin for Top1 heuristic |
@@ -160,7 +160,7 @@ uv run kagglebot run titanic \
 ### 1.4 Exit Conditions
 
 The loop stops when:
-1. **Max iterations reached** (5 iterations always)
+1. **Max iterations reached** (`max_iterations`, default 1)
 2. **Early submit triggered** (if `--early-submit` and heuristic met)
 3. **User interrupt** (Ctrl+C, save state)
 4. **Time limit exceeded** (if `--max-time` set)
@@ -620,7 +620,7 @@ Extend existing `metrics.json` with three new blocks:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `iteration` | int | Best iteration number (1-5) |
+| `iteration` | int | Best iteration number (1..max_iterations) |
 | `reason` | str | Selection reason: "best_offline_score", "early_submit", "only_valid" |
 | `submitted` | bool | True if submission occurred |
 | `submission_path` | str\|null | Path to submitted file, null if not submitted |
@@ -967,7 +967,7 @@ for item in top3:
 ### 6.4 Capture Trigger
 
 **When to create KB entry:**
-1. Autopilot completes (5 iterations or early submit)
+1. Autopilot completes (max_iterations or early submit)
 2. Improvement observed (any `delta > 0` for maximize, `delta < 0` for minimize)
 3. Diagnostics.md exists (required for why_it_worked)
 
@@ -1285,7 +1285,7 @@ No similar improvement patterns found in KB.
 
 ## Template Variables
 
-- `{{iteration}}`: Current iteration (2-5)
+- `{{iteration}}`: Current iteration (2..max_iterations)
 - `{{prev_iteration}}`: Previous iteration (1-4)
 - `{{prev_offline_score}}`: Previous offline score
 - `{{prev_meets_heuristic}}`: True/False
@@ -1424,7 +1424,7 @@ improvement_vars = {
 - [ ] Update metrics.json with top1_comparison block
 
 **A4: Autopilot Loop**
-- [ ] Implement main autopilot loop (5 iterations)
+- [ ] Implement main autopilot loop (max_iterations iterations)
 - [ ] Add early-submit trigger (`--early-submit` flag)
 - [ ] Add final-submit trigger (default, `--no-final-submit` to disable)
 - [ ] Add best-iteration selection (`select_best_iteration()`)
@@ -1509,7 +1509,7 @@ improvement_vars = {
 - [ ] Add `tests/test_autopilot.py`
 - [ ] Test single iteration (no submit)
 - [ ] Test early submit (heuristic met at iteration 2)
-- [ ] Test final submit (best of 5)
+- [ ] Test final submit (best of max_iterations)
 - [ ] Test max submissions enforcement
 - [ ] Test time cap
 
@@ -1551,7 +1551,7 @@ improvement_vars = {
 
 ## Appendix B: Example CLI Sessions
 
-### B1: Basic Autopilot (5 iterations, final submit)
+### B1: Basic Autopilot (max_iterations, final submit)
 
 ```bash
 $ uv run kagglebot run titanic \
@@ -1566,7 +1566,7 @@ $ uv run kagglebot run titanic \
 [Iteration 1/5] Training initial model...
 [Offline] Holdout accuracy: 0.9567
 [Heuristic] 0.9567 >= 0.931 (rel threshold) ✓
-[Iteration 2/5] Generating improvement prompt...
+[Iteration 2] Generating improvement prompt...
 [Offline] Holdout accuracy: 0.9601
 [Iteration 3/5] ...
 [Iteration 4/5] ...
@@ -1585,9 +1585,9 @@ $ uv run kagglebot run titanic \
   --force
 
 [Iteration 1/5] Offline: 0.93 (does not meet heuristic)
-[Iteration 2/5] Offline: 0.9567 (meets heuristic) ✓
+[Iteration 2] Offline: 0.9567 (meets heuristic) ✓
 [Early Submit] Submitting iteration 2...
-[Success] Autopilot stopped early (2/5 iterations)
+[Success] Autopilot stopped early (iteration 2)
 ```
 
 ### B3: No Final Submit (Exploration)
@@ -1598,7 +1598,7 @@ $ uv run kagglebot run titanic \
   --no-final-submit
 
 [Iteration 1/5] Offline: 0.93
-[Iteration 2/5] Offline: 0.9567
+[Iteration 2] Offline: 0.9567
 [Iteration 3/5] Offline: 0.9601
 [Iteration 4/5] Offline: 0.9589
 [Iteration 5/5] Offline: 0.9612
@@ -1637,7 +1637,7 @@ uv run kagglebot bootstrap titanic --download --force
 
 **Day 2: First Autopilot Run**
 ```bash
-# Run autopilot (5 iterations, final submit)
+# Run autopilot (max_iterations, final submit)
 uv run kagglebot run titanic \
   --agent codex \
   --autopilot \
@@ -1677,7 +1677,7 @@ uv run kagglebot run titanic \
 **End of Specification**
 
 **Summary:**
-- ✅ Autopilot policy defined (single-submit, max 5 iterations)
+- ✅ Autopilot policy defined (single-submit, max_iterations)
 - ✅ Compare rule defined (both margins, AND condition, defaults)
 - ✅ Top1 fetch specified (CSV download, 60-min cache)
 - ✅ Metrics.json contract updated (3 new blocks)

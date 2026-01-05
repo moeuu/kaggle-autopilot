@@ -475,7 +475,7 @@ class KaggleNotebookRunner:
         print(f"[cyan]waiting for kernel[/cyan]: {kernel_id}")
         _wait_for_kernel(kernel_id, logs_dir=logs_dir, slug=slug)
         print(f"[cyan]downloading kernel output[/cyan]: {output_dir}")
-        kaggle_cli.kernels_output(kernel_id, output_dir, slug=slug, stream_output=True)
+        kaggle_cli.kernels_output(kernel_id, output_dir, slug=slug, stream_output=True, force=True)
 
         submission_path = find_submission_file(output_dir)
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,7 @@ from pathlib import Path
 from kagglebot.agents.claude_runner import run_claude
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.exceptions import KaggleBotError
+from kagglebot.logging_utils import truncate_lines
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
@@ -240,6 +241,8 @@ def _run_codex_kernel_implementation(
 
     template = _load_template("codex_kernel_impl.md")
     strategy_path = paths.context_agent_dir / "claude_strategy.md"
+    blocked_modules = _load_blocked_modules(paths.context_dir)
+    blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = _render_template(
         template,
         {
@@ -248,6 +251,7 @@ def _run_codex_kernel_implementation(
             "kernel_path": str(kernel_path),
             "instructions": _read_text(instructions_path),
             "strategy": _read_text(strategy_path),
+            "blocked_modules": blocked_text,
         },
     )
     _assert_no_secrets(prompt_text)
@@ -328,6 +332,19 @@ def _read_text(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _load_blocked_modules(context_dir: Path) -> list[str]:
+    path = context_dir / "blocked_modules.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    if isinstance(payload, list):
+        return [str(item) for item in payload if item]
+    return []
 
 
 def _split_claude_output(text: str) -> tuple[str, str]:
@@ -455,6 +472,7 @@ _QUALITY_RETRY_LIMIT = 1
 _MAX_GUARD_FILE_BYTES = 2_000_000
 _PROTECTED_PATHS = (
     "src/",
+    "tests/",
     "docs/",
     "README.md",
     "pyproject.toml",
@@ -634,15 +652,15 @@ def _build_fallback_strategy(
     error_text: str,
 ) -> tuple[str, str, dict[str, object]]:
     rules_url = _read_text(paths.rules_url_path).strip() or config.competition_url or "unknown"
-    dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 1200)
-    submission_format = _truncate(_read_text(paths.submission_format_md_path), 800)
+    dataset_profile = _summarize_dataset_profile(_read_text(paths.dataset_profile_path))
+    submission_format = _summarize_submission_format(_read_text(paths.submission_format_md_path))
     sample_submission_head = _truncate(_read_sample_submission_head(paths), 400)
 
     strategy_lines = [
         "# Fallback Strategy (Claude unavailable)",
         "",
         "## Problem",
-        "Use the local context to implement a safe, valid baseline submission. This is a fallback path only.",
+        "Use the local context to implement a strong, competition-appropriate model and a valid submission.",
         "",
         "## Data",
         "Use dataset_profile.json, submission_format.md, and sample_submission to infer schema and target.",
@@ -659,15 +677,15 @@ def _build_fallback_strategy(
         sample_submission_head or "Sample submission head unavailable.",
         "",
         "## Candidate Approaches",
-        "- Candidate 1: Standard tabular baseline (impute + one-hot + tree-based model).",
-        "- Candidate 2: Simple linear baseline (logistic/linear regression) if trees are slow.",
-        "- Candidate 3: If non-tabular, produce a valid submission using sample_submission.",
+        "- Candidate 1: Strong tabular model (CatBoost/LightGBM/XGBoost) with tuned hyperparams.",
+        "- Candidate 2: Neural model (MLP/transformer) with embeddings for high-cardinality features.",
+        "- Candidate 3: Modality-specific approach (CNN for images, transformer for text, seq2seq for sequences).",
         "",
         "## Final",
-        "Pick the strongest feasible baseline given file formats and time budget.",
+        "Pick the strongest feasible approach given file formats and time budget.",
         "",
         "## Train",
-        "Use a holdout split with a fixed seed and log parameters. Favor deterministic settings.",
+        "Use a holdout/CV split with a fixed seed and log parameters. Prefer high-capacity models when compute allows.",
         "",
         "## Evaluation",
         "Compute an offline metric when possible; otherwise emit a numeric placeholder to keep the pipeline moving.",
@@ -690,23 +708,23 @@ def _build_fallback_strategy(
     instructions_lines = [
         "# Fallback Codex Instructions",
         "",
-        "Claude was rate-limited. Follow these steps to implement a safe baseline in kernel.py.",
+        "Claude was rate-limited. Follow these steps to implement a strong model in kernel.py.",
         "",
         "1) Inspect `/kaggle/input/{slug}/` to locate train/test files and the sample submission.",
         "2) If train/test CSV files exist (tabular):",
         "   - Load train/test with pandas; identify target as column present in train but not test.",
         "   - Identify ID column from sample_submission (first column) if present.",
         "   - Split train into train/valid with a fixed seed.",
-        "   - Preprocess: SimpleImputer for numerics, OneHotEncoder for categoricals.",
-        "   - Model: HistGradientBoosting (classifier/regressor) or RandomForest if HGB unavailable.",
-        "   - Metric: use accuracy/F1 for classification, RMSE/MAE for regression if unknown.",
+        "   - Preprocess: SimpleImputer for numerics, OneHotEncoder/TargetEncoder for categoricals.",
+        "   - Model: CatBoost/LightGBM/XGBoost (GPU if available) with tuned hyperparams.",
+        "   - Metric: use accuracy/F1/AUC for classification, RMSE/MAE for regression if unknown.",
         "3) If data is non-tabular or target is unclear:",
-        "   - Read sample_submission.csv and emit it as submission.csv.",
-        "   - Write metrics.json with a numeric offline_value (e.g., 0.0) and a note field explaining the fallback.",
+        "   - Use modality-appropriate models (CNN/transformer/sequence model).",
+        "   - Only fall back to sample_submission if no valid training path exists.",
         "4) Always write:",
         "   - `/kaggle/working/submission.csv` matching sample_submission columns and row count.",
         "   - `/kaggle/working/metrics.json` with `offline_value` (numeric) and `metric` name.",
-        "5) Keep changes confined to `kernel.py` and any helper files under the kernel directory.",
+        "5) Keep changes confined to `kernel.py` and helper files under the kernel directory.",
     ]
     instructions_text = "\n".join(instructions_lines).replace("{slug}", config.slug).strip()
     return strategy_text, instructions_text, plan_payload
@@ -728,7 +746,7 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
         "holdout_frac": 0.2,
         "cv_folds": 5,
         "seed": 42,
-        "max_iterations": 3,
+        "max_iterations": 1,
         "patience": 2,
         "min_improvement": 0.0,
     }
@@ -772,12 +790,19 @@ def _infer_metric_from_context(paths: CompetitionPaths) -> str | None:
     ).lower()
     if not context.strip():
         return None
+    recall_match = re.search(r"recall\\s*@\\s*(\\d+)", context)
+    if recall_match:
+        return f"recall_at_{recall_match.group(1)}"
+    recall_at_match = re.search(r"recall\\s+at\\s+(\\d+)", context)
+    if recall_at_match:
+        return f"recall_at_{recall_at_match.group(1)}"
     patterns = [
         (r"mean[_\\s-]?ia[_\\s-]?weighted[_\\s-]?fmax", "mean_ia_weighted_fmax"),
         (r"mean[_\\s-]?weighted[_\\s-]?fmax", "mean_weighted_fmax"),
         (r"\\bfmax\\b|f-?max", "fmax"),
         (r"\\bf1\\b|f1[-\\s]?score", "f1"),
         (r"\\baccuracy\\b", "accuracy"),
+        (r"\\brecall\\b", "recall"),
         (r"\\bauc\\b|roc\\s*auc|area\\s+under\\s+the\\s+curve", "auc"),
         (r"log\\s*loss|logloss|cross\\s*entropy", "logloss"),
         (r"rmsle", "rmsle"),
@@ -801,10 +826,67 @@ def _print_block(title: str, content: str, *, max_chars: int = _LOG_MAX_CHARS) -
         print(f"[yellow]{title}[/yellow]: (empty)")
         return
     if len(trimmed) > max_chars:
-        preview = trimmed[:max_chars].rstrip()
-        print(f"[cyan]{title}[/cyan]:\n{preview}\n... (truncated, {len(trimmed)} chars)")
-        return
-    print(f"[cyan]{title}[/cyan]:\n{trimmed}")
+        trimmed = trimmed[:max_chars].rstrip()
+    preview = truncate_lines(trimmed, max_lines=5)
+    print(f"[cyan]{title}[/cyan]:\n{preview}")
+
+
+def _summarize_dataset_profile(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return _truncate(text, 1600)
+    if not isinstance(payload, dict):
+        return _truncate(text, 1600)
+    lines: list[str] = []
+    for key in (
+        "status",
+        "metric",
+        "target_column",
+        "id_column",
+        "train_rows",
+        "train_cols",
+        "test_rows",
+        "test_cols",
+        "file_count",
+    ):
+        if key in payload:
+            lines.append(f"- {key}: {payload.get(key)}")
+    if "file_extension_counts" in payload:
+        lines.append(f"- file_extension_counts: {payload.get('file_extension_counts')}")
+    if "file_samples" in payload:
+        samples = payload.get("file_samples") or []
+        if isinstance(samples, list):
+            lines.append(f"- file_samples: {samples[:8]}")
+    if "missingness" in payload:
+        lines.append(f"- missingness: {payload.get('missingness')}")
+    if "categorical_columns" in payload:
+        cols = payload.get("categorical_columns") or []
+        if isinstance(cols, list):
+            lines.append(f"- categorical_columns: {len(cols)}")
+    if "high_cardinality_columns" in payload:
+        cols = payload.get("high_cardinality_columns") or []
+        if isinstance(cols, list):
+            lines.append(f"- high_cardinality_columns: {len(cols)}")
+    if "tags" in payload:
+        lines.append(f"- tags: {payload.get('tags')}")
+    if "error" in payload:
+        lines.append(f"- error: {payload.get('error')}")
+    return "\n".join(lines).strip() or _truncate(text, 1600)
+
+
+def _summarize_submission_format(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) <= 80 and len(text) <= 2000:
+        return text
+    preview = "\n".join(lines[:80])
+    return _truncate(preview, 2000)
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -1034,7 +1116,8 @@ def _is_noise_path(path: str) -> bool:
 
 def _is_protected_path(path: str) -> bool:
     if path.startswith("artifacts/"):
-        return False
+        # Protect kernel artifacts so stray edits can be restored by the guard.
+        return "/kernel/" in path
     for entry in _PROTECTED_PATHS:
         if entry.endswith("/"):
             if path.startswith(entry):

@@ -37,8 +37,8 @@ class PlanConfig:
     time_budget_min: int | None = None
     kernel_name: str | None = None
     internet: str = "on"
-    max_iterations: int = 3
-    max_total_min: int = 240
+    max_iterations: int = 1
+    max_total_min: int | None = None
     patience: int = 2
     min_improvement: float = 0.0
     submit_policy: str = "on_target_only"
@@ -59,8 +59,8 @@ class PlanConfig:
             time_budget_min=payload.get("time_budget_min"),
             kernel_name=payload.get("kernel_name"),
             internet=payload.get("internet") or "on",
-            max_iterations=payload.get("max_iterations") or 3,
-            max_total_min=payload.get("max_total_min") or 240,
+            max_iterations=payload.get("max_iterations") or 1,
+            max_total_min=payload.get("max_total_min"),
             patience=payload.get("patience") or 2,
             min_improvement=payload.get("min_improvement") or 0.0,
             submit_policy=payload.get("submit_policy") or "on_target_only",

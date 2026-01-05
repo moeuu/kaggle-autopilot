@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import builtins
+import csv
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -95,7 +97,15 @@ MODERATE_TOP1_GAP = 0.01
 
 
 def run_autopilot(config: AutopilotConfig) -> None:
-    run_id = config.run_id or new_run_id()
+    resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
+    resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
+    if config.run_id is None and resume_id and resume_slug == config.slug:
+        run_id = resume_id
+    else:
+        run_id = config.run_id or new_run_id()
+    if resume_id:
+        os.environ.pop("KAGGLEBOT_RESUME_RUN_ID", None)
+        os.environ.pop("KAGGLEBOT_RESUME_SLUG", None)
     attempt = 0
     while True:
         try:
@@ -182,9 +192,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
     score_source = str(resolved["score_source"] or "auto")
     kernel_name = resolved["kernel_name"]
     enable_internet = str(resolved["internet"]) == "on"
+    start_iteration, best_score, best_submission = _resume_iteration_state(
+        paths=config.paths,
+        run_id=run_id,
+        metric_direction=metric_direction,
+        target_metric=target_metric,
+        max_iterations=max_iterations,
+    )
+    if start_iteration > 1:
+        print(f"[yellow]resume[/yellow]: found completed iterations; resuming at {start_iteration}/{max_iterations}")
 
     try:
-        for iteration in range(1, max_iterations + 1):
+        for iteration in range(start_iteration, max_iterations + 1):
             iter_dir = config.paths.iter_dir(run_id, iteration)
             logs_dir = iter_dir / "logs"
             agent_dir = iter_dir / "agent"
@@ -329,6 +348,38 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
 
             if evaluation is None:
                 raise RuntimeError("No evaluation metrics produced.")
+            if evaluation.metric and target_metric:
+                normalized_eval = _normalize_metric_name(evaluation.metric)
+                normalized_target = _normalize_metric_name(target_metric)
+                if normalized_eval and normalized_eval != normalized_target:
+                    corrected_direction = infer_direction(evaluation.metric, "auto")
+                    if corrected_direction != metric_direction or evaluation.metric != target_metric:
+                        print(
+                            "[yellow]metric mismatch[/yellow]: "
+                            f"plan={target_metric}/{metric_direction}, "
+                            f"kernel={evaluation.metric}/{corrected_direction}. "
+                            "Updating plan to match kernel metric."
+                        )
+                        metric_direction = corrected_direction
+                        target_metric = evaluation.metric
+                        resolved["target_metric"] = target_metric
+                        resolved["target_direction"] = metric_direction
+                        if isinstance(top1_info, dict) and isinstance(top1_info.get("score"), (int, float)):
+                            target_score = float(top1_info["score"])
+                            resolved["target_score"] = target_score
+                        _write_plan(config.paths, _resolved_plan(resolved))
+                        from kagglebot.solver.evaluate import EvaluationResult
+
+                        evaluation = EvaluationResult(
+                            score_source=evaluation.score_source,
+                            metric=target_metric,
+                            direction=metric_direction,  # type: ignore[arg-type]
+                            value=evaluation.value,
+                            std=evaluation.std,
+                            train_score=evaluation.train_score,
+                            val_score=evaluation.val_score,
+                            fold_scores=evaluation.fold_scores,
+                        )
             print(f"[green]iteration complete[/green]: {evaluation.metric}={evaluation.value:.6f}")
 
             met_target = _meets_target(evaluation.value, target_score, metric_direction)
@@ -448,7 +499,7 @@ def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
 
 
 def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
-    if config.agent == "codex":
+    if config.agent in ("codex", "pipeline"):
         return True
     target_metric = config.target_metric or plan.target_metric
     target_score = config.target_score if config.target_score is not None else plan.target_score
@@ -478,8 +529,18 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     internet = choose(config.internet, plan.internet, "on")
     if internet in (None, "auto"):
         internet = "on"
-    max_iterations = choose(config.max_iterations, plan.max_iterations, 3)
-    max_total_min = choose(config.max_total_min, plan.max_total_min, 240)
+    default_max_iterations = 1
+    if config.max_iterations is None:
+        max_iterations = default_max_iterations
+        if plan.max_iterations not in (None, default_max_iterations):
+            print(
+                f"[yellow]note[/yellow]: plan max_iterations={plan.max_iterations} ignored; "
+                f"using default {default_max_iterations}. "
+                "Use --max-iterations to override."
+            )
+    else:
+        max_iterations = config.max_iterations
+    max_total_min = choose(config.max_total_min, plan.max_total_min, None)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
     submit_policy = choose(None, plan.submit_policy, "on_target_only")
@@ -515,8 +576,8 @@ def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
         time_budget_min=resolved.get("time_budget_min"),  # type: ignore[arg-type]
         kernel_name=resolved.get("kernel_name"),  # type: ignore[arg-type]
         internet=str(resolved.get("internet") or "on"),
-        max_iterations=int(resolved.get("max_iterations") or 3),
-        max_total_min=int(resolved.get("max_total_min") or 240),
+        max_iterations=int(resolved.get("max_iterations") or 1),
+        max_total_min=resolved.get("max_total_min"),  # type: ignore[arg-type]
         patience=int(resolved.get("patience") or 2),
         min_improvement=float(resolved.get("min_improvement") or 0.0),
         submit_policy=str(resolved.get("submit_policy") or "on_target_only"),
@@ -635,8 +696,15 @@ def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str 
     if std is None:
         std = payload.get("std")
 
+    score_source = payload.get("score_source", "holdout")
+    if score_source == "holdout":
+        for key in payload.keys():
+            if isinstance(key, str) and key.lower().startswith("oof_"):
+                score_source = "cv"
+                break
+
     return EvaluationResult(
-        score_source=payload.get("score_source", "holdout"),
+        score_source=score_source,
         metric=metric_name or target_metric or "unknown",
         direction=direction,  # type: ignore[arg-type]
         value=float(value),
@@ -654,12 +722,43 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
     def normalize(text: str) -> str:
         return "".join(ch for ch in text.lower() if ch.isalnum())
 
+    def prefers_lower(metric: str) -> bool:
+        return normalize(metric) in {"rmse", "rmsle", "mae", "mape", "logloss", "loss"}
+
+    def pick_from_dict(metric_key: str, values: dict[str, object]) -> float | None:
+        selection = payload.get("selection")
+        if isinstance(selection, str) and selection in values and is_number(values[selection]):
+            return float(values[selection])
+        for key in ("selected", "average", "stacked", "best", "val", "oof", "score"):
+            if key in values and is_number(values[key]):
+                return float(values[key])
+        numeric = [float(v) for v in values.values() if is_number(v)]
+        if not numeric:
+            return None
+        return min(numeric) if prefers_lower(metric_key) else max(numeric)
+
     if is_number(payload.get("offline_value")):
         return (str(payload.get("metric") or target_metric or "unknown"), float(payload["offline_value"]))
     if is_number(payload.get("value")):
         return (str(payload.get("metric") or target_metric or "unknown"), float(payload["value"]))
     if is_number(payload.get("score")):
         return (str(payload.get("metric") or target_metric or "unknown"), float(payload["score"]))
+
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            continue
+        metric_key = None
+        if isinstance(key, str) and key.lower().startswith("oof_"):
+            metric_key = key[4:]
+        elif isinstance(key, str):
+            metric_key = key
+        if metric_key is None:
+            continue
+        if target_metric is not None and normalize(metric_key) != normalize(target_metric):
+            continue
+        picked = pick_from_dict(metric_key, value)
+        if picked is not None:
+            return (metric_key, picked)
 
     aliases: dict[str, tuple[str, ...]] = {
         "accuracy": ("accuracy", "acc"),
@@ -872,6 +971,15 @@ def _run_improvement(
     prompt_path = agent_dir / "prompt.md"
     top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
     improvement_mode, top1_gap = _classify_improvement_mode(evaluation.value, top1_score, evaluation.direction)
+    kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
+    model_family = _infer_kernel_model_family(kernel_main_path)
+    nn_upgrade_required = (
+        iteration == 1
+        and improvement_mode == "major_overhaul"
+        and model_family == "tree_only"
+        and top1_gap is not None
+        and top1_gap > 0
+    )
     prompt_text = prompt_template.format(
         slug=config.slug,
         iteration=iteration,
@@ -892,6 +1000,9 @@ def _run_improvement(
         top1_gap="unavailable" if top1_gap is None else f"{top1_gap:.6f}",
         delta_offline="unavailable" if delta_offline is None else f"{delta_offline:.6f}",
         improvement_mode=improvement_mode,
+        model_family_hint=model_family,
+        nn_upgrade_required="yes" if nn_upgrade_required else "no",
+        next_iteration=str(iteration + 1),
         rules_url=str(config.paths.rules_url_path),
         rules_md=str(config.paths.rules_md_path),
         rules_html=str(config.paths.rules_html_path),
@@ -900,7 +1011,7 @@ def _run_improvement(
         submission_format=str(config.paths.submission_format_md_path),
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
-        kernel_main=str(config.paths.kernel_source_dir / "kernel.py"),
+        kernel_main=str(kernel_main_path),
     )
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
@@ -936,6 +1047,11 @@ def _run_kernel_fix(
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "kernel_fix_prompt.md"
+    missing_module = _extract_missing_module(error_message)
+    blocked_modules = _load_blocked_modules(config.paths.context_dir)
+    if missing_module:
+        blocked_modules = _record_blocked_module(config.paths.context_dir, missing_module)
+    blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = prompt_template.format(
         slug=config.slug,
         run_id=run_id,
@@ -943,6 +1059,7 @@ def _run_kernel_fix(
         compute=config.compute,
         accelerator=config.accelerator,
         error_message=error_message,
+        blocked_modules=blocked_text,
         logs_dir=str(iter_dir / "logs"),
         kernel_main=str(config.paths.kernel_source_dir / "kernel.py"),
         kernel_script=str(config.paths.kernel_run_dir(run_id) / "kernel.py"),
@@ -954,6 +1071,11 @@ def _run_kernel_fix(
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
     )
+    if missing_module:
+        prompt_text = (
+            f"Missing dependency detected: {missing_module}\n"
+            "Avoid this package or guard it with a fallback; prefer Kaggle-default libraries.\n\n" + prompt_text
+        )
     prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
@@ -973,7 +1095,7 @@ def _run_kernel_fix(
     before = _snapshot_tree(config.paths.repo_root)
 
     print("[cyan]kernel fix[/cyan]: running agent")
-    result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run)
+    result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run, heartbeat_label="fixing error")
     after = _snapshot_tree(config.paths.repo_root)
     changed = _diff_snapshots(before, after)
     _enforce_allowlist_changes(
@@ -1014,6 +1136,16 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     error_path.write_text(header + error_text + "\n", encoding="utf-8")
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
+    if _maybe_write_column_map(config, error_text):
+        note_path = autofix_dir / "note.txt"
+        note = (
+            "autofix_note: column_map.json created for missing column error.\n"
+            "autofix will retry without modifying kernel sources.\n"
+        )
+        note_path.write_text(note, encoding="utf-8")
+        print("[yellow]autofix[/yellow]: wrote column_map.json; retrying without kernel edits")
+        return
+
     allowed_prefixes = [
         config.paths.repo_root / "src",
         config.paths.repo_root / "docs",
@@ -1037,7 +1169,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
 
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.paths.repo_root)
-    result = run_codex(prompt_path, autofix_dir, dry_run=config.dry_run)
+    result = run_codex(prompt_path, autofix_dir, dry_run=config.dry_run, heartbeat_label="fixing error")
     after = _snapshot_tree(config.paths.repo_root)
     changed = _diff_snapshots(before, after)
     _enforce_allowlist_changes(
@@ -1112,6 +1244,249 @@ Error log file: {error_path}
 """
 
 
+_COLUMN_MAP_FILENAME = "column_map.json"
+_BLOCKED_MODULES_FILENAME = "blocked_modules.json"
+_MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]")
+_COLUMN_ERROR_PATTERNS = (
+    "could not resolve column",
+    "unable to locate session",
+    "missing columns",
+)
+
+
+def _maybe_write_column_map(config: AutopilotConfig, error_text: str) -> bool:
+    lowered = error_text.lower()
+    if not any(pattern in lowered for pattern in _COLUMN_ERROR_PATTERNS):
+        return False
+    context_dir = config.paths.context_dir
+    map_path = context_dir / _COLUMN_MAP_FILENAME
+    if map_path.exists():
+        return False
+    columns_by_file = _scan_tabular_headers(config.paths.data_dir)
+    if not columns_by_file:
+        return False
+    candidate_groups = _extract_candidate_groups(error_text)
+    if not candidate_groups:
+        return False
+    mapping = _infer_column_mapping(columns_by_file, candidate_groups)
+    if not mapping:
+        return False
+    payload = {
+        "mapping": mapping,
+        "source": "autofix",
+        "created_at": datetime.now(UTC).isoformat(),
+        "candidates": candidate_groups,
+        "files": columns_by_file,
+    }
+    context_dir.mkdir(parents=True, exist_ok=True)
+    map_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return True
+
+
+def _scan_tabular_headers(data_dir: Path) -> dict[str, list[str]]:
+    columns: dict[str, list[str]] = {}
+    if not data_dir.exists():
+        return columns
+    for path in data_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in {".csv", ".tsv"}:
+            continue
+        header = _read_header(path)
+        if not header:
+            continue
+        try:
+            rel = str(path.relative_to(data_dir))
+        except ValueError:
+            rel = str(path)
+        columns[rel] = header
+    return columns
+
+
+def _read_header(path: Path) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            line = handle.readline()
+    except OSError:
+        return []
+    if not line:
+        return []
+    sep = "\t" if "\t" in line and path.suffix.lower() == ".tsv" else ","
+    try:
+        row = next(csv.reader([line], delimiter=sep))
+    except Exception:
+        return []
+    return [col.strip().strip('"').strip("'") for col in row if col.strip()]
+
+
+def _extract_candidate_groups(error_text: str) -> list[list[str]]:
+    groups: list[list[str]] = []
+    list_match = re.findall(r"candidates:\s*\[([^\]]+)\]", error_text, flags=re.IGNORECASE)
+    for match in list_match:
+        try:
+            items = [item.strip().strip("'\"") for item in match.split(",") if item.strip()]
+        except Exception:
+            items = []
+        if items:
+            groups.append(items)
+    slash_match = re.findall(r"([A-Za-z0-9_]+)\s*/\s*([A-Za-z0-9_]+)", error_text)
+    for left, right in slash_match:
+        groups.append([left, right])
+    lowered = error_text.lower()
+    if "session" in lowered or "visit" in lowered:
+        groups.append(["session_id", "visit_id"])
+    if "product" in lowered or "item" in lowered:
+        groups.append(["product_id", "item_id", "sku"])
+    deduped: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for group in groups:
+        norm = tuple(group)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        deduped.append(group)
+    return deduped
+
+
+def _infer_column_mapping(columns_by_file: dict[str, list[str]], groups: list[list[str]]) -> dict[str, str]:
+    all_columns = []
+    for cols in columns_by_file.values():
+        all_columns.extend(cols)
+    mapping: dict[str, str] = {}
+    normalized = {_normalize_column(col): col for col in all_columns}
+    for group in groups:
+        canonical = group[0]
+        match = _match_column(group, normalized, all_columns)
+        if match and match not in mapping:
+            mapping[match] = canonical
+    return mapping
+
+
+def _match_column(group: list[str], normalized: dict[str, str], all_columns: list[str]) -> str | None:
+    for cand in group:
+        norm = _normalize_column(cand)
+        if norm in normalized:
+            return normalized[norm]
+    keywords = _keywords_from_group(group)
+    if not keywords:
+        return None
+    best: tuple[int, str] | None = None
+    for col in all_columns:
+        score = _keyword_score(col, keywords)
+        if score <= 0:
+            continue
+        if best is None or score > best[0]:
+            best = (score, col)
+    return best[1] if best else None
+
+
+def _normalize_column(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _keywords_from_group(group: list[str]) -> set[str]:
+    keywords: set[str] = set()
+    for cand in group:
+        for token in re.split(r"[^a-zA-Z0-9]+", cand):
+            if token:
+                keywords.add(token.lower())
+    return keywords
+
+
+def _keyword_score(column: str, keywords: set[str]) -> int:
+    lowered = column.lower()
+    return sum(1 for key in keywords if key in lowered)
+
+
+def _extract_missing_module(error_text: str) -> str | None:
+    match = _MISSING_MODULE_RE.search(error_text or "")
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _load_blocked_modules(context_dir: Path) -> list[str]:
+    path = context_dir / _BLOCKED_MODULES_FILENAME
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    if isinstance(payload, list):
+        return [str(item) for item in payload if item]
+    return []
+
+
+def _record_blocked_module(context_dir: Path, module: str) -> list[str]:
+    context_dir.mkdir(parents=True, exist_ok=True)
+    existing = _load_blocked_modules(context_dir)
+    if module not in existing:
+        existing.append(module)
+        path = context_dir / _BLOCKED_MODULES_FILENAME
+        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    return existing
+
+
+def _resume_iteration_state(
+    *,
+    paths: CompetitionPaths,
+    run_id: str,
+    metric_direction: str,
+    target_metric: str,
+    max_iterations: int,
+) -> tuple[int, float | None, Path | None]:
+    run_dir = paths.run_dir(run_id)
+    if not run_dir.exists():
+        return 1, None, None
+    best_score: float | None = None
+    best_submission: Path | None = None
+    completed_iters: list[int] = []
+    for iter_dir in sorted(run_dir.glob("iter-*")):
+        if not iter_dir.is_dir():
+            continue
+        try:
+            iteration = int(iter_dir.name.split("-")[1])
+        except (IndexError, ValueError):
+            continue
+        if iteration > max_iterations:
+            continue
+        submission_path = iter_dir / "submission.csv"
+        metrics_path = iter_dir / "metrics.json"
+        evaluation = None
+        if metrics_path.exists():
+            try:
+                evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
+            except Exception:  # noqa: BLE001
+                evaluation = None
+        if evaluation is None and submission_path.exists():
+            completed_iters.append(iteration)
+            if best_submission is None:
+                best_submission = submission_path
+            print(
+                "[yellow]resume[/yellow]: "
+                f"{metrics_path} missing; treating iter-{iteration} as complete based on submission.csv."
+            )
+            continue
+        if evaluation is None:
+            continue
+        completed_iters.append(iteration)
+        if best_submission is None and submission_path.exists():
+            best_submission = submission_path
+        if best_score is None:
+            best_score = evaluation.value
+        else:
+            if _meets_target(evaluation.value, best_score, metric_direction):
+                best_score = evaluation.value
+                if submission_path.exists():
+                    best_submission = submission_path
+    if not completed_iters:
+        return 1, best_score, best_submission
+    next_iter = max(completed_iters) + 1
+    return next_iter, best_score, best_submission
+
+
 def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:
     if config.dry_run:
         return
@@ -1135,6 +1510,8 @@ def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, chan
     state["last_stage"] = stage
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     print(f"[yellow]autofix[/yellow]: src changes detected in {stage}; restarting to reload code")
+    os.environ["KAGGLEBOT_RESUME_RUN_ID"] = run_id
+    os.environ["KAGGLEBOT_RESUME_SLUG"] = config.slug
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
@@ -1222,6 +1599,12 @@ def _submission_message(config: AutopilotConfig, run_id: str, best_score: float 
     return f"kagglebot {config.slug} {run_id} best_offline={best_score:.6f}"
 
 
+def _normalize_metric_name(name: str | None) -> str:
+    if not name:
+        return ""
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
 def _meets_target(value: float, target: float, direction: str) -> bool:
     if direction == "minimize":
         return value <= target
@@ -1245,6 +1628,43 @@ def _classify_improvement_mode(value: float, top1_score: float | None, direction
     if gap >= MODERATE_TOP1_GAP:
         return "moderate_update", gap
     return "minor_tuning", gap
+
+
+def _infer_kernel_model_family(kernel_main: Path) -> str:
+    if not kernel_main.exists():
+        return "unknown"
+    text = kernel_main.read_text(encoding="utf-8", errors="ignore").lower()
+    tree_markers = (
+        "lightgbm",
+        "lgbm",
+        "xgboost",
+        "catboost",
+        "randomforest",
+        "gradientboosting",
+        "histgradientboosting",
+        "xgb.",
+        "lgb.",
+    )
+    nn_markers = (
+        "torch",
+        "tensorflow",
+        "keras",
+        "pytorch",
+        "tabnet",
+        "ft-transformer",
+        "ft_transformer",
+        "transformer",
+        "mlp",
+    )
+    has_tree = any(marker in text for marker in tree_markers)
+    has_nn = any(marker in text for marker in nn_markers)
+    if has_tree and has_nn:
+        return "hybrid(tree+nn)"
+    if has_tree:
+        return "tree_only"
+    if has_nn:
+        return "nn_only"
+    return "unknown"
 
 
 def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:

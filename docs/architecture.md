@@ -151,8 +151,8 @@ Checks performed before submission:
 ```python
 @dataclass
 class AutopilotConfig:
-    max_iterations: int = 5      # Max improvement cycles
-    max_total_min: int = 120      # Max wall-clock time (2 hours)
+    max_iterations: int = 1      # Max improvement cycles
+    max_total_min: int | None = None  # Max wall-clock time (disabled by default)
     patience: int = 2             # Early stopping
     max_submissions: int = 5      # Submission quota per run
 ```

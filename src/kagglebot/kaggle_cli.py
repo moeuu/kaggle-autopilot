@@ -5,12 +5,14 @@ from pathlib import Path
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     competitions_files,
-    kernels_output,
     kernels_push,
     kernels_status,
 )
 from kagglebot.kaggle_api import (
     download_competition as _download_competition,
+)
+from kagglebot.kaggle_api import (
+    kernels_output as _kernels_output,
 )
 from kagglebot.kaggle_api import (
     submit_competition as _submit_competition,
@@ -54,3 +56,22 @@ def submit_competition(
 ) -> str:
     _ = stream_output
     return _submit_competition(slug, submission_file, message, dry_run=dry_run)
+
+
+def kernels_output(
+    kernel_id: str,
+    output_dir: Path,
+    *,
+    slug: str | None = None,
+    stream_output: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+) -> str:
+    return _kernels_output(
+        kernel_id,
+        output_dir,
+        slug=slug,
+        dry_run=dry_run,
+        force=force,
+        quiet=not stream_output,
+    )

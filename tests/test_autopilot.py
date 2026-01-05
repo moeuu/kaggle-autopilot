@@ -160,6 +160,25 @@ def test_autopilot_submit_when_top1_tier(monkeypatch, tmp_path: Path) -> None:
     assert len(submission_calls) == 1
 
 
+def test_extract_kernel_metric_from_oof_dict() -> None:
+    from kagglebot.autopilot import _extract_kernel_metric
+
+    payload = {
+        "oof_rmse": {
+            "lgb": 8.75,
+            "catboost": 8.79,
+            "xgboost": 8.84,
+            "stacked": 8.76,
+            "average": 8.77,
+            "selected": 8.76,
+        },
+        "selection": "selected",
+    }
+    metric, value = _extract_kernel_metric(payload, "rmse")
+    assert metric == "rmse"
+    assert value == 8.76
+
+
 def test_autopilot_no_submit_when_top1_tier_without_submit(monkeypatch, tmp_path: Path) -> None:
     submission_calls: list[Path] = []
 
@@ -304,7 +323,7 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
             self.returncode = 0
             self.last_message_path = path
 
-    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool):  # noqa: ARG001
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         last_msg = output_dir / "codex_last_message.txt"
         last_msg.write_text("improved features\n", encoding="utf-8")
@@ -387,7 +406,7 @@ def test_autopilot_retries_kernel_failure(monkeypatch, tmp_path: Path) -> None:
             self.returncode = 0
             self.last_message_path = path
 
-    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool):  # noqa: ARG001
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
         calls["codex"] += 1
         if prompt_path.name == "kernel_fix_prompt.md":
             calls["kernel_fix"] += 1

@@ -249,7 +249,7 @@ User: uv run kagglebot autopilot titanic --agent codex --force
 
 1. Bootstrap
 2. Fetch Kaggle Top1 public score (via leaderboard CSV)
-3. For iteration 1..max_iterations (default: 5):
+3. For iteration 1..max_iterations (default: 1):
    a. Train model (local or Kaggle)
    b. Evaluate offline (holdout or CV)
    c. Compare offline to Top1 using heuristic:
@@ -652,13 +652,13 @@ meets = (offline <= abs_threshold) AND (offline <= rel_threshold)
    - Use case: Get submission ASAP
 
 2. **Final Submit** (`--submit-at-final`, default: true):
-   - Complete all 5 iterations
+   - Complete all max_iterations
    - Select best iteration (by offline score)
    - Submit once at end
    - Use case: Explore full iteration space
 
 **Exploration Mode** (`--no-submit-at-final`):
-- Complete all 5 iterations
+- Complete all max_iterations
 - Do NOT submit
 - Use case: Offline tuning, KB building
 
