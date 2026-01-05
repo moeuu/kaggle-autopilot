@@ -722,6 +722,24 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
     def normalize(text: str) -> str:
         return "".join(ch for ch in text.lower() if ch.isalnum())
 
+    def strip_prefixes(text: str) -> str:
+        lowered = text.lower()
+        for prefix in (
+            "val_",
+            "train_",
+            "test_",
+            "oof_",
+            "cv_",
+            "holdout_",
+            "offline_",
+            "online_",
+            "public_",
+            "private_",
+        ):
+            if lowered.startswith(prefix):
+                return text[len(prefix) :]
+        return text
+
     def prefers_lower(metric: str) -> bool:
         return normalize(metric) in {"rmse", "rmsle", "mae", "mape", "logloss", "loss"}
 
@@ -785,15 +803,20 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
             for key, val in payload.items():
                 if not is_number(val):
                     continue
-                if normalize(str(key)) in wanted:
+                normalized_key = normalize(str(key))
+                normalized_base = normalize(strip_prefixes(str(key)))
+                if normalized_key in wanted or normalized_base in wanted:
                     return (str(target_metric), float(val))
 
     for key, val in payload.items():
         if not is_number(val):
             continue
         normalized_key = normalize(str(key))
+        normalized_base = normalize(strip_prefixes(str(key)))
         for metric_name, values in aliases.items():
-            if normalized_key in {normalize(v) for v in values} or normalized_key == normalize(metric_name):
+            normalized_aliases = {normalize(v) for v in values}
+            normalized_aliases.add(normalize(metric_name))
+            if normalized_key in normalized_aliases or normalized_base in normalized_aliases:
                 return (metric_name, float(val))
 
     return (str(target_metric) if target_metric else None, None)

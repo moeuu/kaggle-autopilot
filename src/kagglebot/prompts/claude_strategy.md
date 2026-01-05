@@ -68,3 +68,6 @@ Give Codex step-by-step instructions to update only:
 artifacts/<slug>/kernel/ (especially kernel.py). Mention any helper files to add under that dir.
 Be explicit about files, functions, and training/eval flow.
 Include concrete training hyperparameters and how to scale them up for stronger accuracy.
+Call out robust categorical missing-value handling:
+- If using pandas Categorical dtype, add "Unknown" to categories before fillna, or cast to string/object.
+- Avoid `fillna("Unknown")` directly on categoricals (it raises TypeError).

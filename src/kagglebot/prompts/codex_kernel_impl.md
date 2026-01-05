@@ -32,6 +32,11 @@ Ensure kernel.py:
 - Writes /kaggle/working/submission.csv
 - Writes /kaggle/working/metrics.json with offline split metric
 - Logs whether GPU/TPU is actually used (device + training time)
+ - Handles categorical missing values safely:
+   - If any column is pandas Categorical, add "Unknown" before fillna:
+     `col = col.cat.add_categories(["Unknown"]).fillna("Unknown")`
+   - Or cast to string/object before fillna.
+   - Do not call `fillna("Unknown")` directly on categoricals (raises TypeError).
 
 Embedding/model safety:
 - If you use an encoder-decoder model (e.g. ProtT5/T5), load the encoder-only variant:
