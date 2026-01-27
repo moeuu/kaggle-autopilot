@@ -32,6 +32,15 @@ Ensure kernel.py:
 - Writes /kaggle/working/submission.csv
 - Writes /kaggle/working/metrics.json with offline split metric
 - Logs whether GPU/TPU is actually used (device + training time)
+- Fit-on-train, apply-to-test for ALL feature stats/encoders/bins:
+  - Any frequency/target/quantile/bin/median/mode encodings must be computed on train only,
+    stored (dicts/arrays), then applied to test.
+  - Never recompute these statistics on the test set.
+  - Do not leak target into features (no target-derived encodings unless explicitly CV-safe).
+- Handle train/test column mismatches safely:
+  - If a column exists in train but not test, add it to test with NA/0 (or drop it from train).
+  - If a column exists in test but not train, ignore it unless explicitly required.
+  - Never raise hard errors due to missing columns.
  - Handles categorical missing values safely:
    - If any column is pandas Categorical, add "Unknown" before fillna:
      `col = col.cat.add_categories(["Unknown"]).fillna("Unknown")`

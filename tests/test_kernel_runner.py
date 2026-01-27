@@ -91,6 +91,69 @@ def test_kernel_metadata_tpu(tmp_path: Path) -> None:
     assert payload["enable_gpu"] is False
 
 
+def test_inject_column_fill_shim(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"files": {"test.csv": ["A", "B"]}}
+    (context_dir / "column_fill.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    kernel_runner._inject_column_fill_shim(kernel_dir, context_dir)
+
+    site_path = kernel_dir / "sitecustomize.py"
+    assert site_path.exists()
+    text = site_path.read_text(encoding="utf-8")
+    assert "column-fill-shim" in text
+    assert "column_fill.json" in text
+    assert (kernel_dir / "column_fill.json").exists()
+
+
+def test_inject_object_coerce_shim(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"enabled": True}
+    (context_dir / "object_coerce.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    kernel_runner._inject_object_coerce_shim(kernel_dir, context_dir)
+
+    site_path = kernel_dir / "sitecustomize.py"
+    assert site_path.exists()
+    text = site_path.read_text(encoding="utf-8")
+    assert "object-coerce-shim" in text
+    assert "object_coerce.json" in text
+    assert (kernel_dir / "object_coerce.json").exists()
+
+
+def test_inject_device_coerce_shim(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"enabled": True}
+    (context_dir / "device_coerce.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    kernel_runner._inject_device_coerce_shim(kernel_dir, context_dir)
+
+    site_path = kernel_dir / "sitecustomize.py"
+    assert site_path.exists()
+    text = site_path.read_text(encoding="utf-8")
+    assert "device-coerce-shim" in text
+    assert "device_coerce.json" in text
+    assert (kernel_dir / "device_coerce.json").exists()
+
+
 def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 

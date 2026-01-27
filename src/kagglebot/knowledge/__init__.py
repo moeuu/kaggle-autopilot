@@ -162,6 +162,9 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     metric = "accuracy" if task != "regression" else "rmse"
     target_stats = _target_stats(train[target_col], task)
 
+    train_only = [c for c in train.columns if c not in test.columns and c != target_col]
+    test_only = [c for c in test.columns if c not in train.columns]
+
     profile.update(
         {
             "status": "ok",
@@ -185,6 +188,8 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             "modality": modality,
             "tags": tags,
             "target_stats": target_stats,
+            "train_only_columns": train_only,
+            "test_only_columns": test_only,
         }
     )
     return profile

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import builtins
 import csv
 import hashlib
@@ -30,7 +31,7 @@ from kagglebot.exceptions import (
 from kagglebot.exec_utils import run_command
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
-from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
+from kagglebot.kernel_runner import _collect_log_tail, resolve_kaggle_username, run_kernel
 from kagglebot.knowledge import record_improvement, record_iteration, record_run
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
@@ -99,7 +100,8 @@ MODERATE_TOP1_GAP = 0.01
 def run_autopilot(config: AutopilotConfig) -> None:
     resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
     resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
-    if config.run_id is None and resume_id and resume_slug == config.slug:
+    resume_run = bool(config.run_id is None and resume_id and resume_slug == config.slug)
+    if resume_run:
         run_id = resume_id
     else:
         run_id = config.run_id or new_run_id()
@@ -109,7 +111,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
     attempt = 0
     while True:
         try:
-            return _run_autopilot_core(config, run_id)
+            return _run_autopilot_core(config, run_id, resume_run=resume_run)
         except RulesNotAcceptedError:
             raise
         except KernelCapacityError:
@@ -126,7 +128,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
             _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
 
 
-def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
+def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[green]run started[/green]: {run_id}")
@@ -139,7 +141,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
     _print_top1_info(top1_info)
 
-    if _needs_planning(plan, config):
+    if _should_skip_planning(resume_run=resume_run, paths=config.paths):
+        print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
+    elif _needs_planning(plan, config):
         print("[cyan]plan[/cyan]: generating initial plan")
         _run_plan_and_initial(config, run_id)
         plan = _load_plan(config.paths)
@@ -207,6 +211,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
             iter_dir = config.paths.iter_dir(run_id, iteration)
             logs_dir = iter_dir / "logs"
             agent_dir = iter_dir / "agent"
+            output_dir = iter_dir / "output"
             iter_dir.mkdir(parents=True, exist_ok=True)
             logs_dir.mkdir(parents=True, exist_ok=True)
             agent_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +261,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
                             attempt=kernel_attempts,
                             error_text=error_text,
                             error_fingerprints=error_fingerprints,
+                            output_dir=output_dir,
                         )
                         raise
                     except KernelCapacityError as exc:
@@ -267,6 +273,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
                             error_text=error_text,
                             error_fingerprints=error_fingerprints,
                             max_repeats=MAX_KERNEL_CAPACITY_REPEAT,
+                            output_dir=output_dir,
                         )
                         if kernel_attempts > MAX_KERNEL_CAPACITY_RETRIES:
                             raise
@@ -286,6 +293,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
                                 attempt=kernel_attempts,
                                 error_text=error_text,
                                 error_fingerprints=error_fingerprints,
+                                output_dir=output_dir,
                             )
                             if kernel_attempts > MAX_KERNEL_REGISTRATION_RETRIES:
                                 raise
@@ -303,6 +311,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str) -> None:
                             attempt=kernel_attempts,
                             error_text=error_text,
                             error_fingerprints=error_fingerprints,
+                            output_dir=output_dir,
                         )
                         if config.dry_run:
                             raise
@@ -507,6 +516,17 @@ def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
     if target_metric is None or target_score is None:
         return True
     return target_direction in (None, "auto")
+
+
+def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
+    if not resume_run:
+        return False
+    if paths.plan_path.exists():
+        agent_dir = paths.context_dir / "agent"
+        kernel_path = paths.kernel_source_dir / "kernel.py"
+        if agent_dir.exists() or kernel_path.exists():
+            return True
+    return False
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
@@ -951,8 +971,14 @@ def _record_kernel_error(
     error_text: str,
     error_fingerprints: dict[str, int],
     max_repeats: int | None = None,
+    output_dir: Path | None = None,
 ) -> None:
-    fingerprint = _fingerprint_error(error_text)
+    enriched_error = error_text
+    if output_dir is not None and output_dir.exists():
+        log_tail = _collect_log_tail(output_dir, max_lines=200)
+        if log_tail and log_tail not in enriched_error:
+            enriched_error = f"{enriched_error}\n\n--- kernel log tail ---\n{log_tail}"
+    fingerprint = _fingerprint_error(enriched_error)
     error_fingerprints[fingerprint] = error_fingerprints.get(fingerprint, 0) + 1
     repeat_limit = MAX_SAME_KERNEL_ERROR_REPEATS if max_repeats is None else max_repeats
     if repeat_limit is not None and error_fingerprints[fingerprint] > repeat_limit:
@@ -966,8 +992,8 @@ def _record_kernel_error(
         f"error_repeat: {error_fingerprints[fingerprint]}\n"
     )
     numbered_path = logs_dir / f"kernel_error-{attempt_tag}.txt"
-    numbered_path.write_text(header + error_text + "\n", encoding="utf-8")
-    (logs_dir / "kernel_error.txt").write_text(header + error_text + "\n", encoding="utf-8")
+    numbered_path.write_text(header + enriched_error + "\n", encoding="utf-8")
+    (logs_dir / "kernel_error.txt").write_text(header + enriched_error + "\n", encoding="utf-8")
 
 
 def _is_kernel_registration_error(exc: Exception) -> bool:
@@ -1159,6 +1185,36 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     error_path.write_text(header + error_text + "\n", encoding="utf-8")
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
+    if _maybe_write_column_fill(config, error_text):
+        note_path = autofix_dir / "note.txt"
+        note = (
+            "autofix_note: column_fill.json created for missing column error.\n"
+            "autofix will retry without modifying kernel sources.\n"
+        )
+        note_path.write_text(note, encoding="utf-8")
+        print("[yellow]autofix[/yellow]: wrote column_fill.json; retrying without kernel edits")
+        return
+
+    if _maybe_write_object_coerce(config, error_text):
+        note_path = autofix_dir / "note.txt"
+        note = (
+            "autofix_note: object_coerce.json created for numpy.object_ conversion error.\n"
+            "autofix will retry without modifying kernel sources.\n"
+        )
+        note_path.write_text(note, encoding="utf-8")
+        print("[yellow]autofix[/yellow]: wrote object_coerce.json; retrying without kernel edits")
+        return
+
+    if _maybe_write_device_coerce(config, error_text):
+        note_path = autofix_dir / "note.txt"
+        note = (
+            "autofix_note: device_coerce.json created for torch device mismatch error.\n"
+            "autofix will retry without modifying kernel sources.\n"
+        )
+        note_path.write_text(note, encoding="utf-8")
+        print("[yellow]autofix[/yellow]: wrote device_coerce.json; retrying without kernel edits")
+        return
+
     if _maybe_write_column_map(config, error_text):
         note_path = autofix_dir / "note.txt"
         note = (
@@ -1268,13 +1324,102 @@ Error log file: {error_path}
 
 
 _COLUMN_MAP_FILENAME = "column_map.json"
+_COLUMN_FILL_FILENAME = "column_fill.json"
+_OBJECT_COERCE_FILENAME = "object_coerce.json"
+_DEVICE_COERCE_FILENAME = "device_coerce.json"
 _BLOCKED_MODULES_FILENAME = "blocked_modules.json"
 _MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]")
+_MISSING_COLUMNS_RE = re.compile(r"missing columns?:\s*\[([^\]]+)\]", re.IGNORECASE)
+_MISSING_COLUMNS_FILE_RE = re.compile(
+    r"([A-Za-z0-9_.-]+\.(?:csv|tsv|txt|parquet|json|jsonl))\s+missing columns",
+    re.IGNORECASE,
+)
+_OBJECT_DTYPE_RE = re.compile(r"numpy\.object_", re.IGNORECASE)
+_DEVICE_MISMATCH_RE = re.compile(
+    r"Expected all tensors to be on the same device|found at least two devices",
+    re.IGNORECASE,
+)
 _COLUMN_ERROR_PATTERNS = (
     "could not resolve column",
     "unable to locate session",
     "missing columns",
 )
+
+
+def _maybe_write_column_fill(config: AutopilotConfig, error_text: str) -> bool:
+    match = _MISSING_COLUMNS_RE.search(error_text or "")
+    if not match:
+        return False
+    missing_columns = _parse_missing_columns(match.group(1))
+    if not missing_columns:
+        return False
+    context_dir = config.paths.context_dir
+    fill_path = context_dir / _COLUMN_FILL_FILENAME
+    if fill_path.exists():
+        return False
+    file_match = _MISSING_COLUMNS_FILE_RE.search(error_text or "")
+    file_name = file_match.group(1) if file_match else None
+    payload = {
+        "source": "autofix",
+        "created_at": datetime.now(UTC).isoformat(),
+        "files": {file_name: missing_columns} if file_name else {},
+        "missing_columns": [] if file_name else missing_columns,
+    }
+    context_dir.mkdir(parents=True, exist_ok=True)
+    fill_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return True
+
+
+def _maybe_write_object_coerce(config: AutopilotConfig, error_text: str) -> bool:
+    if not _OBJECT_DTYPE_RE.search(error_text or ""):
+        return False
+    context_dir = config.paths.context_dir
+    coerce_path = context_dir / _OBJECT_COERCE_FILENAME
+    if coerce_path.exists():
+        return False
+    payload = {
+        "source": "autofix",
+        "created_at": datetime.now(UTC).isoformat(),
+        "enabled": True,
+        "reason": "numpy.object_ conversion error",
+    }
+    context_dir.mkdir(parents=True, exist_ok=True)
+    coerce_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return True
+
+
+def _maybe_write_device_coerce(config: AutopilotConfig, error_text: str) -> bool:
+    if not _DEVICE_MISMATCH_RE.search(error_text or ""):
+        return False
+    context_dir = config.paths.context_dir
+    coerce_path = context_dir / _DEVICE_COERCE_FILENAME
+    if coerce_path.exists():
+        return False
+    payload = {
+        "source": "autofix",
+        "created_at": datetime.now(UTC).isoformat(),
+        "enabled": True,
+        "prefer": "cuda",
+        "reason": "torch device mismatch error",
+    }
+    context_dir.mkdir(parents=True, exist_ok=True)
+    coerce_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return True
+
+
+def _parse_missing_columns(raw: str) -> list[str]:
+    text = raw.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if not text:
+        return []
+    try:
+        parsed = ast.literal_eval(f"[{text}]")
+    except Exception:
+        parsed = [item.strip().strip("'\"") for item in text.split(",") if item.strip()]
+    if isinstance(parsed, (list, tuple)):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return []
 
 
 def _maybe_write_column_map(config: AutopilotConfig, error_text: str) -> bool:

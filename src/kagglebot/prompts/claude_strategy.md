@@ -35,6 +35,11 @@ Avoid baseline-only solutions. Propose a high-capacity, competition-appropriate 
 If compute is kaggle_gpu/kaggle_tpu, prefer GPU/TPU-accelerated training and longer schedules.
 If the gap to top1 is large, recommend a major model upgrade (architecture or feature strategy).
 If near top1, recommend targeted tuning/ablations.
+Always require a train-fit → test-apply pipeline for all feature statistics/encoders/bins.
+Handle train/test column mismatches safely:
+- If a feature exists in train but not test, drop it or add it to test with NA/0; never raise.
+- If a column exists in test but not train, ignore it unless explicitly required for inference.
+- Use dataset_profile.json `train_only_columns` / `test_only_columns` if present.
 
 ===STRATEGY===
 Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings and include:
@@ -44,6 +49,7 @@ Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings a
 - Final approach + rationale
 - Training & evaluation plan (CV/holdout + metrics)
 - Compute/GPU plan + time budget (include how to scale training time/epochs/iterations)
+- Feature engineering protocol: explicitly state how train statistics are fit and then applied to test
 - Error analysis + ablation plan
 - Risks, constraints, and rule compliance
 - Dependency sanity: prefer Kaggle-default libraries; if you suggest niche libs, give a fallback.
@@ -68,6 +74,8 @@ Give Codex step-by-step instructions to update only:
 artifacts/<slug>/kernel/ (especially kernel.py). Mention any helper files to add under that dir.
 Be explicit about files, functions, and training/eval flow.
 Include concrete training hyperparameters and how to scale them up for stronger accuracy.
+Require feature encoders/bins/statistics to be fit on train and applied to test (no test-side recompute).
 Call out robust categorical missing-value handling:
 - If using pandas Categorical dtype, add "Unknown" to categories before fillna, or cast to string/object.
 - Avoid `fillna("Unknown")` directly on categoricals (it raises TypeError).
+Enforce column-mismatch safety (never hard-fail if test is missing train-only columns).

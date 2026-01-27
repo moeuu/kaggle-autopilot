@@ -162,6 +162,23 @@ def test_validate_submission_handles_tabbed_csv_with_commas(tmp_path: Path) -> N
     validate_submission(str(sample_path), str(submission_path))
 
 
+def test_validate_submission_ignores_noisy_format_hint(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    format_path = tmp_path / "submission_format.md"
+
+    format_path.write_text(
+        "## Ahoy, welcome to Kaggle! You're in the right place. "
+        "This is the legendary Titanic ML competition -- the best, first challenge. "
+        "PassengerId,Survived\n",
+        encoding="utf-8",
+    )
+    sample_path.write_text("PassengerId,Survived\n1,0\n", encoding="utf-8")
+    submission_path.write_text("PassengerId,Survived\n1,0\n", encoding="utf-8")
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
 def test_submission_rate_limit(tmp_path):
     ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
     now = datetime.now(UTC)

@@ -464,7 +464,7 @@ def _write_claude_outputs(
 
 
 _CLAUDE_PROMPT_MAX_CHARS = 12000
-_LOG_MAX_CHARS = 4000
+_LOG_MAX_CHARS = 500
 _MIN_STRATEGY_CHARS = 1200
 _MIN_INSTRUCTIONS_CHARS = 200
 _MIN_SOURCES = 3
@@ -871,11 +871,29 @@ def _summarize_dataset_profile(raw: str) -> str:
         cols = payload.get("high_cardinality_columns") or []
         if isinstance(cols, list):
             lines.append(f"- high_cardinality_columns: {len(cols)}")
+    if "train_only_columns" in payload:
+        cols = payload.get("train_only_columns") or []
+        if isinstance(cols, list):
+            lines.append(f"- train_only_columns: {_format_column_list(cols)}")
+    if "test_only_columns" in payload:
+        cols = payload.get("test_only_columns") or []
+        if isinstance(cols, list):
+            lines.append(f"- test_only_columns: {_format_column_list(cols)}")
     if "tags" in payload:
         lines.append(f"- tags: {payload.get('tags')}")
     if "error" in payload:
         lines.append(f"- error: {payload.get('error')}")
     return "\n".join(lines).strip() or _truncate(text, 1600)
+
+
+def _format_column_list(values: list[object], *, max_items: int = 12) -> str:
+    cleaned = [str(v) for v in values if str(v)]
+    if not cleaned:
+        return "[]"
+    if len(cleaned) <= max_items:
+        return str(cleaned)
+    remainder = len(cleaned) - max_items
+    return f"{cleaned[:max_items]} ... +{remainder} more"
 
 
 def _summarize_submission_format(raw: str) -> str:

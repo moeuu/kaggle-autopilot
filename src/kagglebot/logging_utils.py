@@ -5,7 +5,7 @@ def truncate_lines(
     text: str,
     max_lines: int = 5,
     suffix: str = " ... (truncated)",
-    max_chars: int = 2000,
+    max_chars: int = 500,
 ) -> str:
     if max_lines <= 0 or max_chars <= 0:
         return ""

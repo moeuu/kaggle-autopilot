@@ -60,8 +60,12 @@ def load_submission_format_hint(path: Path) -> SubmissionFormatHint | None:
         return None
     text = path.read_text(encoding="utf-8", errors="ignore")
     hint = parse_submission_format(text)
-    if hint.columns or hint.delimiter:
-        return hint
+    columns = hint.columns
+    delimiter = hint.delimiter
+    if columns and not _columns_look_plausible(columns):
+        columns = None
+    if columns or delimiter:
+        return SubmissionFormatHint(columns=columns, delimiter=delimiter)
     return None
 
 
@@ -125,3 +129,23 @@ def _clean_columns(cols: list[str]) -> list[str] | None:
     if len(cleaned) < 2:
         return None
     return cleaned
+
+
+def _columns_look_plausible(columns: list[str]) -> bool:
+    if len(columns) < 2:
+        return False
+    for col in columns:
+        value = str(col).strip()
+        if not value:
+            return False
+        if len(value) > 80:
+            return False
+        if value.count(" ") > 4:
+            return False
+        if not any(ch.isalnum() for ch in value):
+            return False
+        for ch in value:
+            if ch.isalnum() or ch in " _-./():":  # allow common header punctuation
+                continue
+            return False
+    return True

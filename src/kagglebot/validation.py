@@ -16,15 +16,18 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
     format_hint = load_submission_format_hint(sample_path_obj.with_name("submission_format.md"))
     sample = _read_submission_table(sample_path_obj, format_hint=format_hint)
     expected_columns = list(sample.columns)
+    if _looks_like_markdown_file(sample_path_obj) or _columns_look_like_markdown(expected_columns):
+        sample = pd.DataFrame()
+        expected_columns = []
     placeholder_sample = False
+    sample_has_data_rows = _has_data_rows(sample_path_obj)
     if format_hint is not None and format_hint.columns:
         hint_columns = list(format_hint.columns)
-        if not expected_columns or expected_columns != hint_columns or sample.empty:
+        if not expected_columns or sample.empty or not sample_has_data_rows:
             placeholder_sample = True
             expected_columns = hint_columns
             sample = pd.DataFrame(columns=expected_columns)
     sub = _read_submission_table(Path(submission_path), format_hint=format_hint, expected_columns=expected_columns)
-    sample_has_data_rows = _has_data_rows(sample_path_obj)
 
     # 1) Columns must match (including order).
     if expected_columns != list(sub.columns):
@@ -83,6 +86,41 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
     for c in sample.columns[1:]:
         if sub[c].isna().all():
             raise ValueError(f"All values are NaN for target column '{c}'.")
+
+
+def _looks_like_markdown_file(path: Path, *, max_lines: int = 5) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            lines_checked = 0
+            for line in handle:
+                if not line.strip():
+                    continue
+                lines_checked += 1
+                stripped = line.lstrip()
+                if stripped.startswith("#") or stripped.startswith(">"):
+                    return True
+                if lines_checked >= max_lines:
+                    break
+    except OSError:
+        return False
+    return False
+
+
+def _columns_look_like_markdown(columns: list[str]) -> bool:
+    if not columns:
+        return False
+    for col in columns:
+        text = str(col).strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if text.startswith("#") or "kaggle" in lowered:
+            return True
+        if "welcome to" in lowered or "competition" in lowered:
+            return True
+        if len(text) > 30 and " " in text:
+            return True
+    return False
 
 
 def _has_data_rows(path: Path) -> bool:

@@ -55,6 +55,7 @@ For each iteration:
 2. **Train**: Run local solver or Kaggle kernel (kaggle_gpu/kaggle_tpu uses `kernel.py`)
    - Before kernel push, sources are validated for syntax and required outputs (submission/metrics paths).
    - After kernel push, kernel registration is verified; if not found, a single re-push is attempted.
+   - Feature engineering must be **fit on train and applied to test**; do not recompute stats/encoders on test.
 3. **Evaluate**: Compute offline score using the evaluation strategy (holdout/CV/test)
 4. **Check Top1**: Compare offline score to public Top1 (direction-aware)
 5. **Diagnose**: Generate `diagnostics.md` with actionable improvement hints

@@ -33,6 +33,12 @@ from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_pa
 
 _COLUMN_MAP_FILENAME = "column_map.json"
 _COLUMN_MAP_SHIM_MARKER = "# kagglebot: column-map-shim"
+_COLUMN_FILL_FILENAME = "column_fill.json"
+_COLUMN_FILL_SHIM_MARKER = "# kagglebot: column-fill-shim"
+_OBJECT_COERCE_FILENAME = "object_coerce.json"
+_OBJECT_COERCE_SHIM_MARKER = "# kagglebot: object-coerce-shim"
+_DEVICE_COERCE_FILENAME = "device_coerce.json"
+_DEVICE_COERCE_SHIM_MARKER = "# kagglebot: device-coerce-shim"
 
 
 @dataclass(frozen=True)
@@ -133,6 +139,9 @@ def run_kernel(
         _inline_kernel_modules(kernel_dir)
         _inject_data_dir_resolver(kernel_dir)
         _inject_column_map_shim(kernel_dir, base_dir / slug / "context")
+        _inject_column_fill_shim(kernel_dir, base_dir / slug / "context")
+        _inject_object_coerce_shim(kernel_dir, base_dir / slug / "context")
+        _inject_device_coerce_shim(kernel_dir, base_dir / slug / "context")
         ensure_kernel_sources_valid(kernel_dir)
     else:
         _write_kernel_script(
@@ -433,6 +442,267 @@ def _inject_column_map_shim(kernel_dir: Path, context_dir: Path) -> None:
         site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
     site_path.write_text("\n".join(shim), encoding="utf-8")
+
+
+def _inject_column_fill_shim(kernel_dir: Path, context_dir: Path) -> None:
+    fill_path = context_dir / _COLUMN_FILL_FILENAME
+    if not fill_path.exists():
+        return
+    kernel_fill_path = kernel_dir / _COLUMN_FILL_FILENAME
+    shutil.copy2(fill_path, kernel_fill_path)
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _COLUMN_FILL_SHIM_MARKER,
+        "import json",
+        "from pathlib import Path",
+        "",
+        "def _kb_load_fill() -> dict:",
+        "    candidates = [",
+        f"        Path(__file__).with_name('{_COLUMN_FILL_FILENAME}'),",
+        f"        Path('/kaggle/working/{_COLUMN_FILL_FILENAME}'),",
+        "    ]",
+        "    for path in candidates:",
+        "        if path.exists():",
+        "            try:",
+        "                payload = json.loads(path.read_text(encoding='utf-8'))",
+        "            except Exception:",
+        "                continue",
+        "            if isinstance(payload, dict):",
+        "                return payload",
+        "    return {}",
+        "",
+        "def _kb_missing_columns_for(path_value) -> list[str]:",
+        "    payload = _kb_load_fill()",
+        "    if not payload:",
+        "        return []",
+        "    file_map = payload.get('files') if isinstance(payload, dict) else None",
+        "    try:",
+        "        name = Path(str(path_value)).name",
+        "    except Exception:",
+        "        name = ''",
+        "    if isinstance(file_map, dict) and name in file_map:",
+        "        cols = file_map.get(name)",
+        "        if isinstance(cols, list):",
+        "            return [str(c) for c in cols if str(c).strip()]",
+        "    cols = payload.get('missing_columns') if isinstance(payload, dict) else None",
+        "    if isinstance(cols, list):",
+        "        return [str(c) for c in cols if str(c).strip()]",
+        "    return []",
+        "",
+        "def _kb_patch_pandas_fill() -> None:",
+        "    try:",
+        "        import pandas as _pd",
+        "    except Exception:",
+        "        return",
+        "    _orig = _pd.read_csv",
+        "    def _patched(*args, **kwargs):",
+        "        df = _orig(*args, **kwargs)",
+        "        try:",
+        "            path_value = args[0] if args else kwargs.get('filepath_or_buffer')",
+        "            missing_cols = _kb_missing_columns_for(path_value)",
+        "            for col in missing_cols:",
+        "                if col not in df.columns:",
+        "                    df[col] = _pd.NA",
+        "        except Exception:",
+        "            return df",
+        "        return df",
+        "    _pd.read_csv = _patched",
+        "",
+        "_kb_patch_pandas_fill()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _COLUMN_FILL_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\n".join(shim), encoding="utf-8")
+
+
+def _inject_object_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
+    coerce_path = context_dir / _OBJECT_COERCE_FILENAME
+    if not coerce_path.exists():
+        return
+    kernel_coerce_path = kernel_dir / _OBJECT_COERCE_FILENAME
+    shutil.copy2(coerce_path, kernel_coerce_path)
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _OBJECT_COERCE_SHIM_MARKER,
+        "import json",
+        "from pathlib import Path",
+        "",
+        "def _kb_object_coerce_enabled() -> bool:",
+        "    candidates = [",
+        f"        Path(__file__).with_name('{_OBJECT_COERCE_FILENAME}'),",
+        f"        Path('/kaggle/working/{_OBJECT_COERCE_FILENAME}'),",
+        "    ]",
+        "    for path in candidates:",
+        "        if path.exists():",
+        "            try:",
+        "                payload = json.loads(path.read_text(encoding='utf-8'))",
+        "            except Exception:",
+        "                return True",
+        "            if isinstance(payload, dict):",
+        "                return bool(payload.get('enabled', True))",
+        "            return True",
+        "    return False",
+        "",
+        "def _kb_coerce_ndarray(value):",
+        "    try:",
+        "        import numpy as _np",
+        "    except Exception:",
+        "        return value",
+        "    if not isinstance(value, _np.ndarray) or value.dtype != object:",
+        "        return value",
+        "    try:",
+        "        return value.astype('float32')",
+        "    except Exception:",
+        "        try:",
+        "            import pandas as _pd",
+        "            flat = _pd.to_numeric(value.ravel(), errors='coerce').to_numpy()",
+        "            flat = _np.nan_to_num(flat, nan=0.0)",
+        "            return flat.reshape(value.shape).astype('float32')",
+        "        except Exception:",
+        "            try:",
+        "                flat = _np.array([0.0 if v is None else v for v in value.ravel()], dtype='float32')",
+        "                return flat.reshape(value.shape)",
+        "            except Exception:",
+        "                return value",
+        "",
+        "def _kb_patch_torch() -> None:",
+        "    if not _kb_object_coerce_enabled():",
+        "        return",
+        "    try:",
+        "        import torch as _torch",
+        "    except Exception:",
+        "        return",
+        "    _orig_tensor = _torch.tensor",
+        "    def _tensor(data, *args, **kwargs):",
+        "        return _orig_tensor(_kb_coerce_ndarray(data), *args, **kwargs)",
+        "    _torch.tensor = _tensor",
+        "    try:",
+        "        _orig_as_tensor = _torch.as_tensor",
+        "    except Exception:",
+        "        _orig_as_tensor = None",
+        "    if _orig_as_tensor is not None:",
+        "        def _as_tensor(data, *args, **kwargs):",
+        "            return _orig_as_tensor(_kb_coerce_ndarray(data), *args, **kwargs)",
+        "        _torch.as_tensor = _as_tensor",
+        "    try:",
+        "        _orig_from_numpy = _torch.from_numpy",
+        "    except Exception:",
+        "        _orig_from_numpy = None",
+        "    if _orig_from_numpy is not None:",
+        "        def _from_numpy(arr):",
+        "            return _orig_from_numpy(_kb_coerce_ndarray(arr))",
+        "        _torch.from_numpy = _from_numpy",
+        "",
+        "_kb_patch_torch()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _OBJECT_COERCE_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\n".join(shim), encoding="utf-8")
+
+
+def _inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
+    coerce_path = context_dir / _DEVICE_COERCE_FILENAME
+    if not coerce_path.exists():
+        return
+    kernel_coerce_path = kernel_dir / _DEVICE_COERCE_FILENAME
+    shutil.copy2(coerce_path, kernel_coerce_path)
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _DEVICE_COERCE_SHIM_MARKER,
+        "import json",
+        "from pathlib import Path",
+        "",
+        "def _kb_device_coerce_enabled() -> bool:",
+        "    candidates = [",
+        f"        Path(__file__).with_name('{_DEVICE_COERCE_FILENAME}'),",
+        f"        Path('/kaggle/working/{_DEVICE_COERCE_FILENAME}'),",
+        "    ]",
+        "    for path in candidates:",
+        "        if path.exists():",
+        "            try:",
+        "                payload = json.loads(path.read_text(encoding='utf-8'))",
+        "            except Exception:",
+        "                return True",
+        "            if isinstance(payload, dict):",
+        "                return bool(payload.get('enabled', True))",
+        "            return True",
+        "    return False",
+        "",
+        "def _kb_default_device():",
+        "    try:",
+        "        import torch as _torch",
+        "    except Exception:",
+        "        return None",
+        "    if _torch.cuda.is_available():",
+        "        return _torch.device('cuda')",
+        "    return None",
+        "",
+        "def _kb_patch_torch_device() -> None:",
+        "    if not _kb_device_coerce_enabled():",
+        "        return",
+        "    try:",
+        "        import torch as _torch",
+        "    except Exception:",
+        "        return",
+        "    device = _kb_default_device()",
+        "    if device is None:",
+        "        return",
+        "    def _wrap_factory(fn):",
+        "        def _wrapped(*args, **kwargs):",
+        "            if 'device' not in kwargs:",
+        "                kwargs['device'] = device",
+        "            return fn(*args, **kwargs)",
+        "        return _wrapped",
+        "    factories = (",
+        "        'tensor', 'as_tensor', 'from_numpy', 'zeros', 'ones', 'full', 'rand',",
+        "        'randn', 'arange', 'zeros_like', 'ones_like', 'full_like',",
+        "    )",
+        "    for name in factories:",
+        "        fn = getattr(_torch, name, None)",
+        "        if fn is None:",
+        "            continue",
+        "        if name == 'from_numpy':",
+        "            def _from_numpy(arr, _fn=fn):",
+        "                out = _fn(arr)",
+        "                try:",
+        "                    return out.to(device)",
+        "                except Exception:",
+        "                    return out",
+        "            setattr(_torch, name, _from_numpy)",
+        "        else:",
+        "            setattr(_torch, name, _wrap_factory(fn))",
+        "",
+        "    _orig_setattr = _torch.nn.Module.__setattr__",
+        "    def _module_setattr(self, name, value):",
+        "        if isinstance(value, _torch.Tensor):",
+        "            try:",
+        "                if value.device.type == 'cpu':",
+        "                    value = value.to(device)",
+        "            except Exception:",
+        "                pass",
+        "        return _orig_setattr(self, name, value)",
+        "    _torch.nn.Module.__setattr__ = _module_setattr",
+        "",
+        "_kb_patch_torch_device()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _DEVICE_COERCE_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\\n".join(shim), encoding="utf-8")
 
 
 def _find_bootstrap_block_end(lines: list[str]) -> int | None:
@@ -855,7 +1125,7 @@ def _detect_failure_in_logs(output_dir: Path) -> str | None:
             continue
         if "Traceback (most recent call last)" not in text:
             continue
-        tail = _collect_log_tail(output_dir)
+        tail = _collect_log_tail_from_text(path, text)
         if tail:
             return tail
         return f"{path.name}\nTraceback detected"
@@ -863,23 +1133,67 @@ def _detect_failure_in_logs(output_dir: Path) -> str | None:
 
 
 def _collect_log_tail(output_dir: Path, max_lines: int = 50) -> str | None:
-    for path in _log_candidates(output_dir):
+    candidates = _log_candidates(output_dir)
+    if not candidates:
+        return None
+    for path in candidates:
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        json_events = _parse_json_log(text)
-        if json_events is not None:
-            formatted = _format_log_events(json_events)
-            if not formatted:
-                continue
-            tail = "\n".join(formatted[-max_lines:])
-            return f"{path.name}\n{tail}".strip()
-        lines = text.splitlines()
-        if not lines:
+        if "Traceback (most recent call last)" in text:
+            return _collect_log_tail_from_text(path, text, max_lines=max_lines)
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
             continue
-        tail = "\n".join(lines[-max_lines:])
+        if "Error" in text or "Exception" in text:
+            return _collect_log_tail_from_text(path, text, max_lines=max_lines)
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        tail = _collect_log_tail_from_text(path, text, max_lines=max_lines)
+        if tail:
+            return tail
+    return None
+
+
+def _collect_log_tail_from_text(path: Path, text: str, max_lines: int = 50) -> str | None:
+    json_events = _parse_json_log(text)
+    if json_events is not None:
+        formatted = _format_log_events(json_events)
+        if not formatted:
+            return None
+        start = _find_error_marker_index(formatted)
+        if start is None:
+            start = max(len(formatted) - max_lines, 0)
+        else:
+            if len(formatted) - start > max_lines:
+                start = max(len(formatted) - max_lines, start)
+        tail = "\n".join(formatted[start:])
         return f"{path.name}\n{tail}".strip()
+    lines = text.splitlines()
+    if not lines:
+        return None
+    start = _find_error_marker_index(lines)
+    if start is None:
+        start = max(len(lines) - max_lines, 0)
+    else:
+        if len(lines) - start > max_lines:
+            start = max(len(lines) - max_lines, start)
+    tail = "\n".join(lines[start:])
+    return f"{path.name}\n{tail}".strip()
+
+
+def _find_error_marker_index(lines: list[str]) -> int | None:
+    markers = ("Traceback", "Error", "Exception")
+    for idx in range(len(lines) - 1, -1, -1):
+        line = lines[idx]
+        if any(marker in line for marker in markers):
+            return idx
     return None
 
 

@@ -472,3 +472,41 @@ def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path, max_iterations=10)
     run_autopilot(config)
     assert calls["train"] == 10
+
+
+def test_autofix_writes_column_fill(tmp_path: Path) -> None:
+    from kagglebot.autopilot import _maybe_write_column_fill
+
+    config = _make_config(tmp_path)
+    error_text = "ValueError: test.csv missing columns: ['col_a', 'col_b']"
+    assert _maybe_write_column_fill(config, error_text) is True
+    fill_path = config.paths.context_dir / "column_fill.json"
+    assert fill_path.exists()
+    payload = json.loads(fill_path.read_text(encoding="utf-8"))
+    assert payload["files"]["test.csv"] == ["col_a", "col_b"]
+
+
+def test_autofix_writes_object_coerce(tmp_path: Path) -> None:
+    from kagglebot.autopilot import _maybe_write_object_coerce
+
+    config = _make_config(tmp_path)
+    error_text = "TypeError: can't convert np.ndarray of type numpy.object_"
+    assert _maybe_write_object_coerce(config, error_text) is True
+    coerce_path = config.paths.context_dir / "object_coerce.json"
+    assert coerce_path.exists()
+    payload = json.loads(coerce_path.read_text(encoding="utf-8"))
+    assert payload["enabled"] is True
+
+
+def test_autofix_writes_device_coerce(tmp_path: Path) -> None:
+    from kagglebot.autopilot import _maybe_write_device_coerce
+
+    config = _make_config(tmp_path)
+    error_text = (
+        "RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!"
+    )
+    assert _maybe_write_device_coerce(config, error_text) is True
+    coerce_path = config.paths.context_dir / "device_coerce.json"
+    assert coerce_path.exists()
+    payload = json.loads(coerce_path.read_text(encoding="utf-8"))
+    assert payload["enabled"] is True

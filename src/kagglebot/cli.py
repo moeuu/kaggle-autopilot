@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -303,27 +304,34 @@ def autopilot(
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
 
     resolved_accelerator = _resolve_accelerator(compute.value, accelerator)
-    if cfg.dry_run:
-        print(f"[yellow]DRY RUN[/yellow]: would download data to {paths.data_dir}")
+    resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
+    resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
+    resume_run = bool(resume_id and resume_slug == slug)
+
+    if resume_run and paths.context_dir.exists():
+        print("[yellow]resume[/yellow]: skipping bootstrap; reusing existing context")
     else:
-        print(f"[cyan]downloading data[/cyan]: {paths.data_dir}")
+        if cfg.dry_run:
+            print(f"[yellow]DRY RUN[/yellow]: would download data to {paths.data_dir}")
+        else:
+            print(f"[cyan]downloading data[/cyan]: {paths.data_dir}")
 
-    rules_source = "file" if rules_file else "url"
-    bootstrap_competition(
-        slug=slug,
-        competition_url=competition if "kaggle.com" in competition else None,
-        paths=paths,
-        knowledge_paths=knowledge_paths,
-        rules_source=rules_source,
-        rules_file=rules_file,
-        download=not cfg.dry_run,
-        force=False,
-        dry_run=cfg.dry_run,
-    )
-    if not cfg.dry_run:
-        print(f"[green]download complete[/green]: {paths.data_dir}")
+        rules_source = "file" if rules_file else "url"
+        bootstrap_competition(
+            slug=slug,
+            competition_url=competition if "kaggle.com" in competition else None,
+            paths=paths,
+            knowledge_paths=knowledge_paths,
+            rules_source=rules_source,
+            rules_file=rules_file,
+            download=not cfg.dry_run,
+            force=False,
+            dry_run=cfg.dry_run,
+        )
+        if not cfg.dry_run:
+            print(f"[green]download complete[/green]: {paths.data_dir}")
 
-    run_id = new_run_id()
+    run_id = None if resume_run else new_run_id()
     config = AutopilotConfig(
         run_id=run_id,
         slug=slug,
