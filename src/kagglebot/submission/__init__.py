@@ -6,6 +6,7 @@ from kagglebot.submission.guard import (
     normalize_error_text,
     run_kaggle_submit,
 )
+from kagglebot.submission.outcome_service import SubmissionOutcomeService
 from kagglebot.submission.validate import validate_submission
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "compute_error_fingerprint",
     "classify_submit_error",
     "run_kaggle_submit",
+    "SubmissionOutcomeService",
 ]

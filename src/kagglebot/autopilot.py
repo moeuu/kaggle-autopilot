@@ -72,6 +72,7 @@ from kagglebot.submission.guard import (
     compute_error_fingerprint,
     normalize_error_text,
 )
+from kagglebot.submission.outcome_service import SubmissionOutcomeService
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.types import PlanConfig
 
@@ -167,10 +168,74 @@ def run_autopilot(config: AutopilotConfig) -> None:
             _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
 
 
+@dataclass(frozen=True)
+class PlanningPhase:
+    config: AutopilotConfig
+    run_id: str
+    resume_run: bool
+
+    def execute(self, plan: PlanConfig) -> PlanConfig:
+        if _should_skip_planning(resume_run=self.resume_run, paths=self.config.paths):
+            print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
+            return plan
+        if _needs_planning(plan, self.config):
+            print("[cyan]plan[/cyan]: generating initial plan")
+            _run_plan_and_initial(self.config, self.run_id)
+            return _load_plan(self.config.paths)
+        return plan
+
+
+@dataclass(frozen=True)
+class KnowledgePhase:
+    config: AutopilotConfig
+
+    def refresh(self) -> None:
+        _refresh_knowledge_hints(self.config)
+
+    def load_dataset_profile(self) -> dict[str, object]:
+        return _load_dataset_profile(self.config.paths)
+
+    def derive_problem_types(self) -> list[str]:
+        return derive_problem_types(self.load_dataset_profile())
+
+
+@dataclass(frozen=True)
+class IterationPhase:
+    metric_direction: str
+
+    def delta_from_best(self, best_score: float | None, current_score: float) -> float | None:
+        if best_score is None:
+            return None
+        if self.metric_direction == "minimize":
+            return best_score - current_score
+        return current_score - best_score
+
+    def should_update_best(self, best_score: float | None, current_score: float, min_improvement: float) -> bool:
+        return _update_best_score(best_score, current_score, self.metric_direction, min_improvement)
+
+
+@dataclass(frozen=True)
+class SubmissionPhase:
+    config: AutopilotConfig
+    run_id: str
+    problem_types: list[str]
+
+    def attempt(self, *, submission_path: Path, best_score: float | None) -> dict[str, object] | None:
+        return _attempt_submit(
+            config=self.config,
+            run_id=self.run_id,
+            submission_path=submission_path,
+            best_score=best_score,
+            problem_types=self.problem_types,
+        )
+
+
 def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[green]run started[/green]: {run_id}")
+    planning_phase = PlanningPhase(config=config, run_id=run_id, resume_run=resume_run)
+    knowledge_phase = KnowledgePhase(config=config)
     plan = _load_plan(config.paths)
     if not config.paths.plan_path.exists():
         _write_plan(config.paths, plan)
@@ -179,14 +244,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     top1_info = leaderboard_top1(config.slug, config.paths.context_dir, dry_run=config.dry_run)
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
     _print_top1_info(top1_info)
-    _refresh_knowledge_hints(config)
-
-    if _should_skip_planning(resume_run=resume_run, paths=config.paths):
-        print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
-    elif _needs_planning(plan, config):
-        print("[cyan]plan[/cyan]: generating initial plan")
-        _run_plan_and_initial(config, run_id)
-        plan = _load_plan(config.paths)
+    knowledge_phase.refresh()
+    plan = planning_phase.execute(plan)
 
     resolved = _resolve_plan(plan, config)
     target_metric = resolved["target_metric"]
@@ -224,8 +283,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         goal_score=target_score,
         direction=metric_direction,
     )
-    dataset_profile = _load_dataset_profile(config.paths)
-    problem_types = derive_problem_types(dataset_profile)
+    dataset_profile = knowledge_phase.load_dataset_profile()
+    problem_types = knowledge_phase.derive_problem_types()
+    submission_phase = SubmissionPhase(config=config, run_id=run_id, problem_types=problem_types)
     best_score = None
     best_submission: Path | None = None
     submitted = False
@@ -236,6 +296,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     submit_top1_score: float | None = None
 
     max_iterations = max(1, int(resolved["max_iterations"]))
+    iteration_phase = IterationPhase(metric_direction=metric_direction)
     holdout_frac = float(resolved["holdout_frac"])
     cv_folds = int(resolved["cv_folds"])
     seed = int(resolved["seed"])
@@ -263,7 +324,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             agent_dir.mkdir(parents=True, exist_ok=True)
 
             print(f"[cyan]iteration[/cyan]: {iteration}/{max_iterations}")
-            _refresh_knowledge_hints(config)
+            knowledge_phase.refresh()
 
             _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
@@ -484,12 +545,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
 
             prev_best = best_score
-            delta_offline = None
-            if prev_best is not None:
-                delta_offline = (
-                    prev_best - evaluation.value if metric_direction == "minimize" else evaluation.value - prev_best
-                )
-            improved = _update_best_score(best_score, evaluation.value, metric_direction, 0.0)
+            delta_offline = iteration_phase.delta_from_best(prev_best, evaluation.value)
+            improved = iteration_phase.should_update_best(best_score, evaluation.value, 0.0)
             if improved:
                 best_score = evaluation.value
                 best_submission = submission_path
@@ -532,12 +589,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
     if config.submit and submit_candidate and not submitted:
         try:
-            submission_result = _attempt_submit(
-                config=config,
-                run_id=run_id,
+            submission_result = submission_phase.attempt(
                 submission_path=submit_candidate,
                 best_score=submit_candidate_score,
-                problem_types=problem_types,
             )
         except SubmitAbortedError:
             run_payload["status"] = "submit_failed"
@@ -2545,129 +2599,16 @@ def _wait_for_submission_outcome(
     max_attempts: int = _SUBMISSION_POLL_MAX_ATTEMPTS,
     poll_interval_sec: float = _SUBMISSION_POLL_INTERVAL_SEC,
 ) -> dict[str, object] | None:
-    for attempt in range(1, max_attempts + 1):
-        try:
-            rows = list_competition_submissions(slug, dry_run=False)
-        except Exception:  # noqa: BLE001
-            return None
-        match = _select_submission_row(rows=rows, message=message, submitted_at=submitted_at)
-        if match is not None:
-            status = _extract_submission_status(match)
-            score = _extract_submission_score(match)
-            if score is not None:
-                return {
-                    "status": status,
-                    "score": score,
-                    "raw": match,
-                    "checked_at": datetime.now(UTC).isoformat(),
-                }
-            if status in {"complete", "completed", "error", "failed", "cancelled"}:
-                return {
-                    "status": status,
-                    "score": None,
-                    "raw": match,
-                    "checked_at": datetime.now(UTC).isoformat(),
-                }
-        if attempt < max_attempts:
-            time.sleep(poll_interval_sec)
-    return None
-
-
-def _select_submission_row(
-    *,
-    rows: list[dict[str, str]],
-    message: str,
-    submitted_at: datetime,
-) -> dict[str, str] | None:
-    if not rows:
-        return None
-    target = message.strip()
-    with_message = [row for row in rows if _row_matches_submission_message(row, target)]
-    candidates = with_message if with_message else rows
-    rows_with_ts: list[tuple[datetime, dict[str, str]]] = []
-    for row in candidates:
-        ts = _parse_submission_row_time(row)
-        if ts is None:
-            continue
-        rows_with_ts.append((ts, row))
-    if rows_with_ts:
-        window_start = submitted_at.timestamp() - 3600
-        recent = [item for item in rows_with_ts if item[0].timestamp() >= window_start]
-        source = recent or rows_with_ts
-        source.sort(key=lambda item: item[0], reverse=True)
-        return source[0][1]
-    return candidates[0]
-
-
-def _row_matches_submission_message(row: dict[str, str], message: str) -> bool:
-    if not message:
-        return False
-    for key in ("description", "message", "comments", "comment"):
-        value = _get_row_value_ci(row, key)
-        if value and value.strip() == message:
-            return True
-    return False
-
-
-def _parse_submission_row_time(row: dict[str, str]) -> datetime | None:
-    for key in ("date", "submittedDate", "submitted_date", "createdAt", "created_at", "timestamp"):
-        value = _get_row_value_ci(row, key)
-        if not value:
-            continue
-        parsed = _parse_datetime(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _extract_submission_status(row: dict[str, str]) -> str:
-    for key in ("status", "state"):
-        value = _get_row_value_ci(row, key)
-        if value:
-            return value.strip().lower()
-    return "unknown"
-
-
-def _extract_submission_score(row: dict[str, str]) -> float | None:
-    for key in ("publicScore", "public_score", "score", "privateScore", "private_score"):
-        value = _get_row_value_ci(row, key)
-        parsed = _to_float(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _get_row_value_ci(row: dict[str, str], key: str) -> str | None:
-    target = key.strip().lower()
-    for current_key, value in row.items():
-        if current_key.strip().lower() == target:
-            return value
-    return None
-
-
-def _parse_datetime(value: str) -> datetime | None:
-    raw = str(value).strip()
-    if not raw:
-        return None
-    normalized = raw.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(normalized)
-    except ValueError:
-        for fmt in (
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M:%S%z",
-            "%Y/%m/%d %H:%M:%S",
-        ):
-            try:
-                dt = datetime.strptime(raw, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+    service = SubmissionOutcomeService(
+        fetch_rows=list_competition_submissions,
+        max_attempts=max_attempts,
+        poll_interval_sec=poll_interval_sec,
+    )
+    return service.wait_for_outcome(
+        slug=slug,
+        message=message,
+        submitted_at=submitted_at,
+    )
 
 
 def _to_float(value: object) -> float | None:

@@ -49,6 +49,149 @@ class KernelRunResult:
     metrics_path: Path | None
 
 
+@dataclass(frozen=True)
+class KernelPreparation:
+    kernel_dir: Path
+    output_dir: Path
+    logs_dir: Path
+    kernel_slug: str
+    kernel_id: str
+
+
+@dataclass(frozen=True)
+class KernelBuildConfig:
+    slug: str
+    run_id: str
+    iteration: int
+    base_dir: Path
+    kaggle_username: str
+    kernel_name: str | None
+    accelerator: str
+    enable_internet: bool
+    score_source: str
+    metric: str
+    direction: str
+    holdout_frac: float
+    cv_folds: int
+    seed: int
+    dry_run: bool
+
+
+@dataclass(frozen=True)
+class KernelPackageBuilder:
+    def prepare(self, config: KernelBuildConfig) -> KernelPreparation:
+        kernel_dir = config.base_dir / config.slug / "kernels" / config.run_id
+        output_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "output"
+        logs_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "logs"
+        kernel_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        if not config.dry_run and not check_rules_accepted(config.slug, dry_run=False):
+            raise RulesNotAcceptedError("Competition rules not accepted.")
+
+        if not config.dry_run:
+            print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
+            kernels_init(kernel_dir, dry_run=False)
+
+        kernel_slug = _resolve_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
+        kernel_id = f"{config.kaggle_username}/{kernel_slug}"
+        custom_kernel_dir = config.base_dir / config.slug / "kernel"
+        ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=config.base_dir, slug=config.slug)
+        if custom_kernel_dir.exists():
+            _copy_kernel_sources(custom_kernel_dir, kernel_dir)
+            _ensure_kernel_import_path(kernel_dir)
+            _inline_kernel_modules(kernel_dir)
+            _inject_data_dir_resolver(kernel_dir)
+            _inject_column_map_shim(kernel_dir, config.base_dir / config.slug / "context")
+            _inject_column_fill_shim(kernel_dir, config.base_dir / config.slug / "context")
+            _inject_object_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
+            _inject_device_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
+            ensure_kernel_sources_valid(kernel_dir)
+        else:
+            _write_kernel_script(
+                kernel_dir=kernel_dir,
+                slug=config.slug,
+                accelerator=config.accelerator,
+                score_source=config.score_source,
+                metric=config.metric,
+                direction=config.direction,
+                holdout_frac=config.holdout_frac,
+                cv_folds=config.cv_folds,
+                seed=config.seed,
+                run_id=config.run_id,
+                iteration=config.iteration,
+            )
+        _write_kernel_metadata(
+            kernel_dir=kernel_dir,
+            kernel_id=kernel_id,
+            title=kernel_slug,
+            code_file="kernel.py",
+            accelerator=config.accelerator,
+            enable_internet=config.enable_internet,
+            competition_slug=config.slug,
+        )
+        validate_kernel_package(kernel_dir)
+        return KernelPreparation(
+            kernel_dir=kernel_dir,
+            output_dir=output_dir,
+            logs_dir=logs_dir,
+            kernel_slug=kernel_slug,
+            kernel_id=kernel_id,
+        )
+
+
+@dataclass(frozen=True)
+class KernelJobMonitor:
+    def push_and_wait(
+        self,
+        *,
+        preparation: KernelPreparation,
+        slug: str,
+        timeout_minutes: int | None,
+    ) -> str:
+        print(f"[cyan]kernel push[/cyan]: {preparation.kernel_dir}")
+        push_attempt = 1
+        kernel_id = preparation.kernel_id
+        push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
+        _write_push_log(preparation.logs_dir, push_attempt, push_output)
+        pushed_kernel_id = _extract_kernel_id_from_push(push_output)
+        if pushed_kernel_id and pushed_kernel_id != kernel_id:
+            print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
+            kernel_id = pushed_kernel_id
+        kernel_id = _resolve_kernel_id(kernel_id, preparation.kernel_slug)
+        resolved_id = _wait_for_kernel_registration(kernel_id, preparation.kernel_slug)
+        if not resolved_id:
+            print("[yellow]kernel not found after push[/yellow]: retrying once")
+            push_attempt += 1
+            push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
+            _write_push_log(preparation.logs_dir, push_attempt, push_output)
+            pushed_kernel_id = _extract_kernel_id_from_push(push_output)
+            if pushed_kernel_id and pushed_kernel_id != kernel_id:
+                print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
+                kernel_id = pushed_kernel_id
+            kernel_id = _resolve_kernel_id(kernel_id, preparation.kernel_slug)
+            resolved_id = _wait_for_kernel_registration(kernel_id, preparation.kernel_slug)
+            if not resolved_id:
+                raise KernelFailedError("Kaggle kernel not found after push; aborting.")
+            kernel_id = resolved_id
+        else:
+            kernel_id = resolved_id
+
+        print(f"[cyan]kernel status[/cyan]: {kernel_id}")
+        _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=preparation.output_dir)
+        print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
+        kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
+        return kernel_id
+
+
+@dataclass(frozen=True)
+class KernelLogParser:
+    @staticmethod
+    def collect_tail(output_dir: Path, max_lines: int = 50) -> str | None:
+        return _collect_log_tail(output_dir, max_lines=max_lines)
+
+
 def sanitize_kernel_slug(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
     return cleaned[:50]

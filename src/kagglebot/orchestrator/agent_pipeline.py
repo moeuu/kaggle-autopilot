@@ -38,6 +38,36 @@ class AgentPipelineConfig:
     repo_root: Path
 
 
+@dataclass(frozen=True)
+class CodexBriefStage:
+    paths: CompetitionPaths
+    config: AgentPipelineConfig
+    output_dir: Path
+
+    def run(self) -> Path:
+        return _run_codex_brief(self.paths, self.config, self.output_dir)
+
+
+@dataclass(frozen=True)
+class StrategyStage:
+    paths: CompetitionPaths
+    config: AgentPipelineConfig
+    output_dir: Path
+
+    def run(self, *, brief_path: Path) -> Path:
+        return _run_strategy_plan(self.paths, self.config, self.output_dir, brief_path)
+
+
+@dataclass(frozen=True)
+class CodexImplementationStage:
+    paths: CompetitionPaths
+    config: AgentPipelineConfig
+    output_dir: Path
+
+    def run(self, *, instructions_path: Path) -> None:
+        _run_codex_kernel_implementation(self.paths, self.config, self.output_dir, instructions_path)
+
+
 def run_agent_pipeline(*, paths: CompetitionPaths, config: AgentPipelineConfig) -> None:
     paths.context_agent_dir.mkdir(parents=True, exist_ok=True)
     _ensure_context_materials(paths)
@@ -49,9 +79,13 @@ def run_agent_pipeline(*, paths: CompetitionPaths, config: AgentPipelineConfig) 
     strategy_dir.mkdir(parents=True, exist_ok=True)
     implement_dir.mkdir(parents=True, exist_ok=True)
 
-    brief_path = _run_codex_brief(paths, config, brief_dir)
-    instructions_path = _run_strategy_plan(paths, config, strategy_dir, brief_path)
-    _run_codex_kernel_implementation(paths, config, implement_dir, instructions_path)
+    brief_stage = CodexBriefStage(paths=paths, config=config, output_dir=brief_dir)
+    strategy_stage = StrategyStage(paths=paths, config=config, output_dir=strategy_dir)
+    implement_stage = CodexImplementationStage(paths=paths, config=config, output_dir=implement_dir)
+
+    brief_path = brief_stage.run()
+    instructions_path = strategy_stage.run(brief_path=brief_path)
+    implement_stage.run(instructions_path=instructions_path)
 
 
 def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, output_dir: Path) -> Path:
