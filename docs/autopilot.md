@@ -3,15 +3,13 @@
 Autopilot runs a top1-gated, non-interactive improvement loop that iterates: **verify → train → evaluate → diagnose → improve → repeat** until top1-tier is reached or `max_iterations` (default 1) complete.
 Iteration 0 is expected to implement a **strong initial model** (web‑researched), not a simplistic initial model.
 
-**Key principle**: Submission happens **only** when offline score is top1-tier (direction-aware) or at the final iteration when `--submit` is set.
+**Key principle**: Submission happens **only** when offline score is top1-tier (direction-aware) or at the final iteration.
 
 ## Usage
 
 ```bash
 uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
-  --agent codex \
-  --compute kaggle_gpu \
-  --submit
+  --compute kaggle_gpu
 ```
 
 Rules/overview/data/submission format are fetched from Kaggle during download. Use `--rules-file` (md/txt/html) to override rules.
@@ -25,11 +23,11 @@ When autopilot starts, it:
 2. Profiles the dataset (rows, columns, missing values, etc.)
 3. Queries the Knowledge Base for similar competitions
 4. Generates competition-specific code under `artifacts/<slug>/kernel/`. Runner/validation fixes may update `src/` during auto-fix.
-5. Runs a three-stage agent pipeline:
-   - **Codex brief**: reads local context files (overview/data/rules + dataset_profile + submission_format) and produces a concise interpretation (no raw content forwarded; summaries only).
-   - **Claude strategy**: deep plan with web search and references (Claude model: `opus`). Prompt includes trimmed dataset/profile + submission format plus Codex interpretation. Output must include candidates, evaluation plan, risks, ablation plan, sources, and a `PLAN_JSON` block; otherwise the pipeline retries.
-   - **Codex implement**: applies Claude’s plan to the repo
-5. Runs initial verification (tests)
+5. Runs a three-stage planning pipeline:
+   - Codex (`gpt-5.3-codex`, extra high): context brief
+   - GPT (`gpt-5.2`, extra high): strategy + `PLAN_JSON`
+   - Codex (`gpt-5.3-codex`, extra high): implementation
+6. Runs initial verification (tests)
 
 **Output**: `plan.json` defines your success criteria.
 
@@ -70,23 +68,22 @@ For each iteration:
    - Repeat from step 1
 
 The loop stops when:
-- **Top1-tier reached** → Submit if `--submit` flag is set
-- **Max iterations reached** → Submit best offline candidate at the final iteration (if `--submit`)
-- **Kernel failure** → Codex attempts to fix and re-push; repeated identical kernel errors are capped to avoid infinite loops
+- **Top1-tier reached** → Submit
+- **Max iterations reached** → Submit best offline candidate at the final iteration
+- **Kernel failure** → GPT proposes fix strategy, then Codex applies edits and re-pushes; repeated identical kernel errors are capped to avoid infinite loops
 - **Kaggle GPU capacity limit** → Autopilot waits and retries a few times, then exits with a message to stop running GPU sessions
 - **Kernel registration delay** → If the kernel isn’t visible after push, autopilot waits and retries the push before giving up
-- **Other runtime errors** → Codex auto-fix runs up to 2 attempts, then surfaces the error
+- **Other runtime errors** → GPT proposes fix strategy, then Codex auto-fix runs up to 2 attempts before surfacing the error
 
-### 3. Submission (Optional)
+### 3. Submission
 
-If `--submit` is set AND top1-tier is reached:
+If top1-tier is reached:
 1. Check competition rules are accepted (manual browser action required)
 2. Check submission is not a duplicate (SHA256 hash check)
 3. Enforce rate limit (default: 5 min cooldown between submissions)
 5. Submit via Kaggle CLI
 
-**Important**: Submission never happens automatically. You must:
-- Pass `--submit` flag
+**Important**: Submission is guarded. You must:
 - Reach top1-tier or finish the final iteration (best candidate)
 - Have accepted competition rules manually in your browser
 
@@ -127,7 +124,7 @@ Offline evaluation is a pseudo-test and not directly comparable to the public le
 
 ## Agent-Defined Targets
 
-The agent pipeline generates `plan.json` during iteration 0 with:
+The planning pipeline generates `plan.json` during iteration 0 with:
 
 - **`target_metric`**: Metric to optimize (rmse, mae, accuracy, logloss, auc_roc, f1, etc.)
 - **`target_score`**: Realistic target based on dataset complexity and Top1 public
@@ -176,7 +173,7 @@ Autopilot runs completely non-interactively:
 
 ## Dry Run Mode
 
-Use `--dry-run` (or omit `--submit`) to:
+Use `--dry-run` to:
 - Skip Kaggle CLI submission calls
 - Skip Codex API calls (uses dummy responses)
 - Test the full autopilot loop without external API usage
@@ -259,13 +256,10 @@ uv run kagglebot autopilot <competition-url> [OPTIONS]
 Required:
   competition-url                Kaggle competition URL or slug
 
-Agent:
-  --agent pipeline               Agent to use (default: pipeline; codex→claude→codex)
-
 Compute:
-  --compute local_cpu|local_gpu|kaggle_gpu|kaggle_tpu
-                                 Training environment (default: local_cpu)
-  --accelerator auto|cpu|gpu|tpu Accelerator override (optional)
+  --compute local_gpu|kaggle_gpu|kaggle_tpu
+                                 Training environment (required)
+  --accelerator auto|gpu|tpu     Accelerator override (optional)
 
 Evaluation:
   --score-source auto|holdout|cv|test
@@ -281,7 +275,6 @@ Iteration Control:
   --min-improvement FLOAT        Minimum score improvement threshold (default: 0.0)
 
 Submission:
-  --submit                       Enable submission when target met
   --force-submit                 Bypass deduplication and rate limit (DANGEROUS)
   --message TEXT                 Custom submission message
 
@@ -301,25 +294,23 @@ uv run kagglebot autopilot titanic --target-metric mae --target-score 0.15
 
 ## Examples
 
-### Basic Autopilot Run (No Submission)
+### Basic Autopilot Run
 
 ```bash
-uv run kagglebot autopilot titanic --agent codex --compute local_cpu
+uv run kagglebot autopilot titanic --compute local_gpu
 ```
 
 Output:
 - Generates plan.json and initial model implementation
 - Runs up to `max_iterations` (default 1)
 - Stops when target met or patience exhausted
-- Does **not** submit (missing `--submit` flag)
+- Submits when top1-tier is reached or at final iteration
 
-### Autopilot with Submission
+### Autopilot (Default Submission Flow)
 
 ```bash
 uv run kagglebot autopilot titanic \
-  --agent codex \
-  --compute kaggle_gpu \
-  --submit
+  --compute kaggle_gpu
 ```
 
 Requirements:
@@ -333,8 +324,7 @@ Requirements:
 uv run kagglebot autopilot titanic \
   --max-iterations 10 \
   --patience 3 \
-  --min-improvement 0.01 \
-  --submit
+  --min-improvement 0.01
 ```
 
 Settings:
@@ -346,7 +336,7 @@ Settings:
 
 ```bash
 uv run kagglebot autopilot titanic \
-  --compute local_cpu \
+  --compute local_gpu \
   --score-source holdout \
   --max-iterations 3 \
   --max-total-min 30
@@ -363,8 +353,7 @@ Settings:
 uv run kagglebot autopilot house-prices \
   --score-source cv \
   --cv-folds 10 \
-  --compute kaggle_gpu \
-  --submit
+  --compute kaggle_gpu
 ```
 
 Settings:
@@ -426,7 +415,7 @@ Kagglebot **never** automates rule acceptance for safety.
 **Problem**: `GPUNotAvailableError` when using `--compute local_gpu`.
 
 **Solution**:
-- Use `--compute local_cpu` instead
+- Use `--compute local_gpu` without `--strict-accelerator` to allow CPU fallback
 - Install CUDA/cuDNN for GPU support
 - Use `--compute kaggle_gpu` to run on Kaggle's infrastructure
 

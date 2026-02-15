@@ -23,25 +23,23 @@ Run autopilot with a single command:
 
 ```bash
 uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
-  --agent codex \
-  --compute kaggle_gpu \
-  --submit
+  --compute kaggle_gpu
 ```
 Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched rules text.
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
-2. **Plan**: Codex summarizes context, Claude designs a strategy, Codex implements it
+2. **Plan**: Codex (gpt-5.3-codex, extra high) summarizes context, GPT (gpt-5.2, extra high) designs strategy, Codex (gpt-5.3-codex, extra high) implements it
 3. **Initial model**: Agent implements an initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel.py`)
-4. **Iterate**: Train → evaluate → diagnose → improve (default 3 iterations; override with `--max-iterations`)
-5. **Submit**: Auto-submit when top1-tier (or at final iteration if `--submit`)
+4. **Iterate**: Train → evaluate → diagnose → improve (default 1 iteration; override with `--max-iterations`)
+5. **Submit**: Auto-submit when top1-tier (or at final iteration)
 6. **Log**: Print Top1 public score and agent prompt/response to the terminal
 
 **Safe defaults**:
-- Default max iterations: 3 (`--max-iterations` to override)
+- Default max iterations: 1 (`--max-iterations` to override)
 - No training time limit (accuracy-first)
 - Internet ON by default (disable with `--internet off`)
-- Submit only when top1-tier or at final iteration (with `--submit`)
+- Submit only when top1-tier or at final iteration
 
 ## Manual Commands
 
@@ -52,10 +50,10 @@ For more control, use individual commands:
 uv run kagglebot bootstrap <competition>
 
 # Implement solution
-uv run kagglebot implement <competition> --agent codex
+uv run kagglebot implement <competition>
 
 # Train locally
-uv run kagglebot train <competition> --compute local_cpu
+uv run kagglebot train <competition> --compute local_gpu
 
 # Submit manually
 uv run kagglebot submit <competition> -f submission.csv -m "message"
@@ -83,19 +81,20 @@ Autopilot creates `artifacts/<slug>/plan.json` with agent-defined targets:
 
 ## Compute Targets
 
-- `local_cpu` - Local CPU training
-- `local_gpu` - Local GPU (CUDA/MPS if available)
+- `local_gpu` - Local training (GPU preferred; falls back to CPU when unavailable)
 - `kaggle_gpu` - Kaggle notebook with GPU (T4)
 - `kaggle_tpu` - Kaggle notebook with TPU (v3-8)
 
-Use `--accelerator auto|cpu|gpu|tpu` to force specific accelerator.
+Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 
 ## Safety Guardrails
 
 - ✅ **Top1-gated submission**: Submit only when offline score meets/exceeds top1 (direction-aware)
+- ✅ **Strict local validation before submit**: Column order, row count, ID integrity, numeric prediction checks
 - ✅ **Duplicate prevention**: SHA256 hash check against `submissions/ledger.jsonl`
 - ✅ **Rate limiting**: 5-min cooldown between submissions
-- ✅ **Max submissions**: One submission per run
+- ✅ **No infinite submit loop**: Same submit-error fingerprint aborts the run immediately
+- ✅ **Controlled retries**: Transient submit errors retry up to 3 times with backoff; permanent errors abort immediately
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
 
@@ -107,7 +106,7 @@ Autopilot uses it as a heuristic gate:
 - Maximize metrics: submit when offline score >= top1
 
 Offline evaluation is a pseudo-test (holdout/CV) and is **not directly comparable** to the public leaderboard; the heuristic gate is a safety check, not a guarantee.
-If top1-tier is not reached, autopilot iterates up to `max_iterations` (default 3) and submits the best offline candidate on the final iteration (when `--submit` is set).
+If top1-tier is not reached, autopilot iterates up to `max_iterations` (default 1) and submits the best offline candidate on the final iteration.
 
 ## Artifacts Layout
 
@@ -135,11 +134,12 @@ artifacts/<slug>/
     <run-id>/                    # Kaggle kernel workspace
   runs/<run-id>/
     run.json                     # Run configuration and status
+    run_state.json               # Submit stage state (attempted/ok/last fingerprint)
+    submit_attempts.jsonl        # Submit attempts (success/failure/retry/abort/skip)
     iter-<k>/
       metrics.json               # Offline evaluation results
       diagnostics.md             # Agent-readable performance analysis
       submission.csv             # Predictions for this iteration
-      code.diff                  # Git diff snapshot
       agent/
         prompt.md                # Codex input
         codex_last_message.txt   # Codex output summary
@@ -169,13 +169,13 @@ uv run pytest -q
 
 ```bash
 # 1. Run autopilot (will bootstrap, plan, iterate, and submit when target met)
-uv run kagglebot autopilot titanic --agent codex --compute kaggle_gpu --submit
+uv run kagglebot autopilot titanic --compute kaggle_gpu
 
 # 2. If needed, edit plan.json to adjust target_score or evaluation strategy
 nano artifacts/titanic/plan.json
 
 # 3. Re-run autopilot with adjusted target
-uv run kagglebot autopilot titanic --agent codex --compute kaggle_gpu --submit
+uv run kagglebot autopilot titanic --compute kaggle_gpu
 
 # 4. Check Knowledge Base for learnings
 uv run kagglebot knowledge show titanic
@@ -187,4 +187,4 @@ uv run kagglebot knowledge search --tag tabular --tag binary --limit 5
 ## Notes
 
 - **Non-interactive**: No prompts for input. All decisions via CLI flags or `plan.json`.
-- **Git policy**: Autopilot stashes dirty state and ensures the repo is on `main`. No branches or commits are created; diffs are saved in artifacts.
+- **Submit resume behavior**: If a run already attempted submit once, resume will skip submit in that same run. Override only with `--force-submit` (or `KAGGLEBOT_FORCE_RESUBMIT=1`).

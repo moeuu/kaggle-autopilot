@@ -10,12 +10,12 @@ IMPORTANT:
 - Prefer strong, high-capacity models over baselines. Use GPU/TPU acceleration when available.
 - Expose training-intensity knobs (epochs/iterations/model size) near the top of kernel.py.
 
-Instructions from Claude:
+Instructions from Strategy:
 <<<
 {{instructions}}
 >>>
 
-Strategy from Claude:
+Strategy from Strategy:
 <<<
 {{strategy}}
 >>>

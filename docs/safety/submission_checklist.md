@@ -138,10 +138,10 @@ kaggle competitions list
 **Usage**:
 ```bash
 # Dry-run (no Kaggle API calls)
-uv run kagglebot run titanic --submit --message "test" --dry-run
+uv run kagglebot run titanic --message "test" --dry-run
 
-# Actual submission (requires explicit flags)
-uv run kagglebot run titanic --submit --message "initial model v1" --force
+# Actual submission
+uv run kagglebot run titanic --message "initial model v1" --force
 ```
 
 **Dry-run behavior**:
@@ -278,7 +278,7 @@ uv run kagglebot run titanic --compute kaggle_gpu --enable-internet
 
 ## Pre-Submission Checklist (Human)
 
-Before running `--submit --force`, verify:
+Before running `--force`, verify:
 
 - [ ] Competition rules accepted in browser
 - [ ] Kaggle credentials configured (`kaggle competitions list` works)
@@ -351,4 +351,4 @@ Before first use, verify:
 - **Kaggle API Docs**: https://github.com/Kaggle/kaggle-api
 - **Competition Rules**: https://www.kaggle.com/competitions/<slug>/rules
 - **SECURITY.md**: Security guidelines for this repo
-- **../compute/spec.md**: Exit codes and error messages
+- **../architecture.md**: Exit codes and error messages

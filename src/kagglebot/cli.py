@@ -15,14 +15,14 @@ from kagglebot.competition import parse_competition_slug
 from kagglebot.compute import Compute
 from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError
 from kagglebot.exec_utils import run_command
-from kagglebot.history import SubmissionLedger, new_run_id
-from kagglebot.kaggle_api import check_rules_accepted, submit_competition
+from kagglebot.history import new_run_id
+from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
 from kagglebot.solver.initial_model import train_evaluate_and_predict
 from kagglebot.solver.metrics import infer_direction
-from kagglebot.validation import ensure_not_duplicate_submission, ensure_submission_rate_limit, validate_submission
+from kagglebot.submission_service import SubmissionConfig, SubmissionService
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
 knowledge_app = typer.Typer(add_completion=False, help="Knowledge base commands.")
@@ -96,7 +96,6 @@ def bootstrap(
 def implement(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    agent: str = typer.Option("codex", "--agent", help="Agent to run (codex or claude)."),
     verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
 ) -> None:
     cfg = ctx.obj
@@ -116,11 +115,9 @@ def implement(
     run_id = new_run_id()
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-    agent_dir = run_dir / agent
+    agent_dir = run_dir / "codex"
     prompt_path = paths.codex_plan_and_implement_prompt
 
-    if agent != "codex":
-        print("[yellow]agent override[/yellow]: using codex exec per safety policy.")
     run_codex(prompt_path, agent_dir, dry_run=cfg.dry_run)
 
     _run_verify(verify_cmd, cfg.dry_run)
@@ -131,8 +128,8 @@ def implement(
 def train(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    compute: Compute = typer.Option(Compute.local_cpu, "--compute", help="Compute target for training."),
-    accelerator: str = typer.Option("auto", "--accelerator", help="Accelerator: auto, cpu, gpu, tpu."),
+    compute: Compute = typer.Option(Compute.local_gpu, "--compute", help="Compute target for training."),
+    accelerator: str = typer.Option("auto", "--accelerator", help="Accelerator: auto, gpu, tpu."),
     kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username for kernels."),
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel slug override."),
     internet: str = typer.Option("off", "--internet", help="Kernel internet: auto|off|on."),
@@ -244,21 +241,17 @@ def submit(
         _print_rules(slug)
         raise typer.Exit(code=2)
 
-    sample = paths.sample_submission_path
-    if not sample.exists():
-        from kagglebot.solver.io import find_competition_files
-
-        _, _, sample = find_competition_files(paths.data_dir)
-
-    validate_submission(str(sample), str(file))
-
-    ledger = SubmissionLedger(paths.submission_ledger_path)
-    ensure_submission_rate_limit(ledger)
-    if not force_submit:
-        ensure_not_duplicate_submission(ledger, slug=slug, message=message, submission_path=str(file))
-
-    submit_competition(slug, file, message, dry_run=cfg.dry_run)
-    ledger.record(slug=slug, message=message, submission_path=file, run_id=None)
+    submission_service = SubmissionService(
+        SubmissionConfig(
+            slug=slug,
+            data_dir=paths.data_dir,
+            sample_submission_path=paths.sample_submission_path,
+            submission_ledger_path=paths.submission_ledger_path,
+            dry_run=cfg.dry_run,
+            force_submit=force_submit,
+        )
+    )
+    submission_service.submit(submission_path=file, message=message, run_id=None)
     print("[green]submission complete[/green]")
 
 
@@ -266,9 +259,7 @@ def submit(
 def autopilot(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    agent: str = typer.Option("pipeline", "--agent", help="Agent to run (pipeline, codex, or claude)."),
     compute: Compute = typer.Option(..., "--compute", help="Compute target."),
-    submit: bool = typer.Option(False, "--submit/--no-submit", help="Submit when target met."),
     rules_file: Path | None = typer.Option(None, "--rules-file", help="Path to rules file (md/txt/html)."),
     target_metric: str | None = typer.Option(None, "--target-metric", help="Target metric override."),
     target_score: float | None = typer.Option(None, "--target-score", help="Target score override."),
@@ -288,7 +279,7 @@ def autopilot(
     patience: int | None = typer.Option(None, "--patience", help="Patience iterations."),
     min_improvement: float | None = typer.Option(None, "--min-improvement", help="Minimum improvement."),
     force_submit: bool = typer.Option(False, "--force-submit", help="Allow duplicate submissions."),
-    accelerator: str = typer.Option("auto", "--accelerator", help="auto|cpu|gpu|tpu"),
+    accelerator: str = typer.Option("auto", "--accelerator", help="auto|gpu|tpu"),
     kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username."),
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
     internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
@@ -338,7 +329,7 @@ def autopilot(
         competition_url=competition if "kaggle.com" in competition else None,
         paths=paths,
         knowledge_paths=knowledge_paths,
-        agent=agent,
+        agent="codex",
         compute=compute.value,
         accelerator=resolved_accelerator,
         strict_accelerator=strict_accelerator,
@@ -357,7 +348,7 @@ def autopilot(
         max_total_min=max_total_min,
         patience=patience,
         min_improvement=min_improvement,
-        submit=submit,
+        submit=True,
         force_submit=force_submit,
         message=message,
         verify_cmd=verify_cmd,
@@ -405,16 +396,12 @@ def _run_verify(cmd: str, dry_run: bool) -> None:
 
 def _resolve_accelerator(compute: str, accelerator: str) -> str:
     if accelerator == "auto":
-        if compute == "local_cpu":
-            return "cpu"
         if compute == "local_gpu":
             return "gpu"
         if compute == "kaggle_gpu":
             return "gpu"
         if compute == "kaggle_tpu":
             return "tpu"
-    if compute == "local_cpu" and accelerator not in {"cpu"}:
-        raise typer.BadParameter("--accelerator must be cpu for local_cpu.")
     if compute == "local_gpu" and accelerator not in {"gpu"}:
         raise typer.BadParameter("--accelerator must be gpu for local_gpu.")
     if compute == "kaggle_gpu" and accelerator not in {"gpu"}:

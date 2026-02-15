@@ -15,7 +15,6 @@ class RunContext:
     paths: CompetitionPaths
     workdir: Path
     dry_run: bool
-    submit: bool
     force: bool
     force_submit: bool
     message: str

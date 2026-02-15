@@ -1,6 +1,6 @@
-# Codex Brief for Claude
+# Codex Brief for Strategy
 
-You are Codex. Read the context files and write a concise brief for Claude.
+You are Codex. Read the context files and write a concise brief for Strategy.
 
 Files to read:
 - {{overview_md}}

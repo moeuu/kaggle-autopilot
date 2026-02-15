@@ -75,7 +75,7 @@ Update `{plan_path}` with the following fields:
 Implement a strong initial model based on overview/data/rules + web research.
 
 **Where to implement**:
-- `local_cpu` / `local_gpu`: update `kagglebot/solver/initial_model.py` (use the same best‑model flow).
+- `local_gpu`: update `kagglebot/solver/initial_model.py` (use the same best-model flow).
 - `kaggle_gpu` / `kaggle_tpu`: create `artifacts/{slug}/kernel/kernel.py` from scratch.
 - If the data is non‑tabular (images/text/FASTA/etc.), create `artifacts/{slug}/kernel/kernel.py` with a `custom_main()` entrypoint.
 

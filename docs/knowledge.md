@@ -10,12 +10,14 @@ The KB answers questions like:
 - **"What similar competitions have we run before?"** → Find competitions with overlapping tags
 - **"What improvements worked on tabular binary classification?"** → Surface successful strategies
 - **"How did we perform on datasets with high missing values?"** → Learn from past challenges
+- **"What errors happened before, and how were they fixed?"** → Reuse proven fixes
 
 During autopilot bootstrap, the KB is queried to find similar competitions and inject successful improvement strategies into the initial-model prompt.
+Problem/error insights are persisted only after a submission result (online score) is known, and each record is labeled as `good` or `low`.
 
 ## Storage
 
-- **Location**: `knowledge/kagglebot.db` (SQLite database)
+- **Location**: `knowledge/kb.sqlite` (SQLite database)
 - **Taxonomy**: `knowledge/taxonomy.yml` (controlled tag vocabulary)
 - **Size**: Typically <10MB for hundreds of competitions (only metadata)
 
@@ -113,6 +115,22 @@ CREATE TABLE improvements (
 ```
 
 Agent-generated summaries of what was changed and the score delta. Most valuable for similarity search.
+
+### `problem_type_insights`
+
+Stores per-problem-type lessons with submission outcome labels:
+- why the score was poor (`why_poor`)
+- what changed (`how_improved`)
+- final outcome bucket (`good` / `low`)
+- known online submission score
+
+### `error_fix_insights`
+
+Stores error-resolution knowledge:
+- error category + normalized error text
+- fix summary
+- whether the error was resolved
+- final submission outcome bucket and online score
 
 Example:
 ```json
@@ -252,7 +270,7 @@ After autopilot completes:
 
 ```bash
 # Bootstrap and autopilot
-uv run kagglebot autopilot house-prices --agent codex --submit
+uv run kagglebot autopilot house-prices
 ```
 
 **Behind the scenes**:

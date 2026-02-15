@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -106,6 +107,392 @@ def _taxonomy_from_dict(payload: dict[str, object]) -> Taxonomy:
     tags = set(payload.get("tags", []) or [])
     aliases = payload.get("aliases", {}) or {}
     return Taxonomy(tags=tags, aliases=dict(aliases))
+
+
+def derive_problem_types(profile: dict[str, object]) -> list[str]:
+    modality = str(profile.get("modality") or "").strip().lower()
+    task = str(profile.get("task") or "").strip().lower()
+    raw_tags = profile.get("tags", [])
+    tags = [str(tag).strip().lower() for tag in raw_tags if isinstance(tag, str) and str(tag).strip()]
+
+    problem_types: list[str] = []
+    if modality and task:
+        problem_types.append(f"{modality}:{task}")
+    if modality:
+        problem_types.append(modality)
+    if task:
+        problem_types.append(task)
+
+    allowed_tags = {
+        "tabular",
+        "text",
+        "image",
+        "timeseries",
+        "regression",
+        "binary",
+        "multiclass",
+        "missingness_high",
+        "high_cardinality_cats",
+    }
+    for tag in tags:
+        if tag in allowed_tags:
+            problem_types.append(tag)
+
+    if not problem_types:
+        return ["unknown"]
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in problem_types:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def resolve_problem_type_insights(
+    knowledge_paths: KnowledgePaths,
+    problem_types: Iterable[str],
+    *,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    _ensure_db(knowledge_paths)
+    normalized = [str(item).strip().lower() for item in problem_types if str(item).strip()]
+    if not normalized:
+        return []
+    with _connect(knowledge_paths.kb_path) as conn:
+        placeholders = ",".join("?" for _ in normalized)
+        rows = conn.execute(
+            f"""
+            SELECT
+                slug,
+                run_id,
+                iter,
+                problem_type,
+                cause_category,
+                fix_category,
+                why_poor,
+                how_improved,
+                delta_offline,
+                outcome_bucket,
+                submission_score,
+                created_at
+            FROM problem_type_insights
+            WHERE problem_type IN ({placeholders})
+            ORDER BY
+                CASE outcome_bucket WHEN 'good' THEN 0 WHEN 'low' THEN 1 ELSE 2 END,
+                created_at DESC
+            LIMIT ?
+            """,
+            [*normalized, limit],
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def format_problem_type_insights(insights: list[dict[str, object]], *, limit: int = 5) -> str:
+    if not insights:
+        return "No prior problem-type insights available."
+    lines = ["Problem-type knowledge (past failures and successful fixes):", ""]
+    for item in insights[:limit]:
+        problem_type = item.get("problem_type", "unknown")
+        cause = item.get("cause_category", "unknown")
+        fix = item.get("fix_category", "unknown")
+        delta = item.get("delta_offline")
+        outcome_bucket = str(item.get("outcome_bucket") or "unknown")
+        submission_score = item.get("submission_score")
+        slug = item.get("slug", "unknown")
+        why = _shorten_text(str(item.get("why_poor") or ""), 220)
+        how = _shorten_text(str(item.get("how_improved") or ""), 220)
+        delta_text = "n/a" if delta is None else f"{float(delta):+.6f}"
+        score_text = "n/a" if submission_score is None else f"{float(submission_score):.6f}"
+        lines.append(
+            f"- [{problem_type}] outcome={outcome_bucket} cause={cause} -> fix={fix} "
+            f"(online={score_text}, delta={delta_text}, slug={slug})"
+        )
+        if why:
+            lines.append(f"  why: {why}")
+        if how:
+            lines.append(f"  fix: {how}")
+    return "\n".join(lines)
+
+
+def record_problem_type_insight(
+    *,
+    knowledge_paths: KnowledgePaths,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    problem_types: Iterable[str],
+    why_poor: str,
+    how_improved: str,
+    delta_offline: float | None,
+    outcome_bucket: str | None = None,
+    submission_score: float | None = None,
+) -> None:
+    _ensure_db(knowledge_paths)
+    types = [str(item).strip().lower() for item in problem_types if str(item).strip()]
+    if not types:
+        types = ["unknown"]
+
+    cause_category = _classify_cause_category(why_poor)
+    fix_category = _classify_fix_category(how_improved)
+    if cause_category == "unknown":
+        cause_category = _classify_cause_category(f"{why_poor}\n{how_improved}")
+    if fix_category == "unknown":
+        fix_category = _classify_fix_category(f"{how_improved}\n{why_poor}")
+    normalized_outcome = _normalize_outcome_bucket(outcome_bucket)
+
+    now = int(time.time())
+    why_text = _shorten_text(why_poor, 2000)
+    fix_text = _shorten_text(how_improved, 2000)
+    with _connect(knowledge_paths.kb_path) as conn:
+        for problem_type in types:
+            conn.execute(
+                """
+                INSERT INTO problem_type_insights (
+                    slug,
+                    run_id,
+                    iter,
+                    problem_type,
+                    cause_category,
+                    fix_category,
+                    why_poor,
+                    how_improved,
+                    delta_offline,
+                    outcome_bucket,
+                    submission_score,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, iter, problem_type) DO UPDATE SET
+                    slug=excluded.slug,
+                    cause_category=excluded.cause_category,
+                    fix_category=excluded.fix_category,
+                    why_poor=excluded.why_poor,
+                    how_improved=excluded.how_improved,
+                    delta_offline=excluded.delta_offline,
+                    outcome_bucket=excluded.outcome_bucket,
+                    submission_score=excluded.submission_score,
+                    created_at=excluded.created_at
+                """,
+                (
+                    slug,
+                    run_id,
+                    iteration,
+                    problem_type,
+                    cause_category,
+                    fix_category,
+                    why_text,
+                    fix_text,
+                    delta_offline,
+                    normalized_outcome,
+                    submission_score,
+                    now,
+                ),
+            )
+
+
+def resolve_error_fix_insights(
+    knowledge_paths: KnowledgePaths,
+    problem_types: Iterable[str],
+    *,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    _ensure_db(knowledge_paths)
+    normalized = [str(item).strip().lower() for item in problem_types if str(item).strip()]
+    if not normalized:
+        return []
+    with _connect(knowledge_paths.kb_path) as conn:
+        placeholders = ",".join("?" for _ in normalized)
+        rows = conn.execute(
+            f"""
+            SELECT
+                slug,
+                run_id,
+                iter,
+                problem_type,
+                error_category,
+                error_message,
+                fix_summary,
+                resolved,
+                outcome_bucket,
+                submission_score,
+                created_at
+            FROM error_fix_insights
+            WHERE problem_type IN ({placeholders})
+            ORDER BY
+                CASE outcome_bucket WHEN 'good' THEN 0 WHEN 'low' THEN 1 ELSE 2 END,
+                CASE resolved WHEN 1 THEN 0 ELSE 1 END,
+                created_at DESC
+            LIMIT ?
+            """,
+            [*normalized, limit],
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def format_error_fix_insights(insights: list[dict[str, object]], *, limit: int = 5) -> str:
+    if not insights:
+        return "No prior error-fix insights available."
+    lines = ["Error-fix knowledge (errors and how they were fixed):", ""]
+    for item in insights[:limit]:
+        problem_type = item.get("problem_type", "unknown")
+        category = item.get("error_category", "unknown")
+        resolved = bool(item.get("resolved"))
+        outcome_bucket = str(item.get("outcome_bucket") or "unknown")
+        submission_score = item.get("submission_score")
+        error_text = _shorten_text(str(item.get("error_message") or ""), 180)
+        fix_text = _shorten_text(str(item.get("fix_summary") or ""), 220)
+        score_text = "n/a" if submission_score is None else f"{float(submission_score):.6f}"
+        lines.append(
+            f"- [{problem_type}] outcome={outcome_bucket} resolved={resolved} error={category} (online={score_text})"
+        )
+        if error_text:
+            lines.append(f"  issue: {error_text}")
+        if fix_text:
+            lines.append(f"  fix: {fix_text}")
+    return "\n".join(lines)
+
+
+def record_error_fix_insight(
+    *,
+    knowledge_paths: KnowledgePaths,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    problem_types: Iterable[str],
+    error_message: str,
+    fix_summary: str,
+    resolved: bool,
+    outcome_bucket: str | None = None,
+    submission_score: float | None = None,
+) -> None:
+    _ensure_db(knowledge_paths)
+    types = [str(item).strip().lower() for item in problem_types if str(item).strip()]
+    if not types:
+        types = ["unknown"]
+
+    normalized_outcome = _normalize_outcome_bucket(outcome_bucket)
+    category = _classify_error_category(error_message)
+    error_text = _shorten_text(error_message, 2000)
+    fix_text = _shorten_text(fix_summary, 2000)
+    fingerprint = hashlib.sha256(" ".join(error_text.split()).encode("utf-8")).hexdigest()[:16]
+    now = int(time.time())
+    with _connect(knowledge_paths.kb_path) as conn:
+        for problem_type in types:
+            conn.execute(
+                """
+                INSERT INTO error_fix_insights (
+                    slug,
+                    run_id,
+                    iter,
+                    problem_type,
+                    error_fingerprint,
+                    error_category,
+                    error_message,
+                    fix_summary,
+                    resolved,
+                    outcome_bucket,
+                    submission_score,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, iter, problem_type, error_fingerprint) DO UPDATE SET
+                    slug=excluded.slug,
+                    error_category=excluded.error_category,
+                    error_message=excluded.error_message,
+                    fix_summary=excluded.fix_summary,
+                    resolved=excluded.resolved,
+                    outcome_bucket=excluded.outcome_bucket,
+                    submission_score=excluded.submission_score,
+                    created_at=excluded.created_at
+                """,
+                (
+                    slug,
+                    run_id,
+                    iteration,
+                    problem_type,
+                    fingerprint,
+                    category,
+                    error_text,
+                    fix_text,
+                    int(resolved),
+                    normalized_outcome,
+                    submission_score,
+                    now,
+                ),
+            )
+
+
+def _shorten_text(text: str, max_chars: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3].rstrip() + "..."
+
+
+def _classify_cause_category(text: str) -> str:
+    normalized = text.lower()
+    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("data_leakage", ("leak", "target leak", "leakage")),
+        ("overfitting", ("overfit", "train/val gap", "generalization gap")),
+        ("underfitting", ("underfit", "model too simple", "high bias")),
+        ("feature_engineering", ("feature", "encoding", "missing value", "imputation")),
+        ("hyperparameter", ("hyperparameter", "learning rate", "max_depth", "n_estimators", "regularization")),
+        ("validation_strategy", ("cross-validation", "cv", "fold", "holdout", "split strategy")),
+        ("class_imbalance", ("imbalance", "minority class", "class weight", "threshold")),
+        ("resource_constraints", ("gpu utilization", "resource", "timeout", "batch size")),
+    )
+    for category, keywords in rules:
+        if any(keyword in normalized for keyword in keywords):
+            return category
+    return "unknown"
+
+
+def _classify_fix_category(text: str) -> str:
+    normalized = text.lower()
+    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("stronger_model", ("catboost", "xgboost", "lightgbm", "transformer", "neural network", "model upgrade")),
+        ("feature_engineering", ("feature", "encoding", "imputation", "interaction", "transformation")),
+        ("hyperparameter_tuning", ("hyperparameter", "learning rate", "max_depth", "n_estimators", "tuning")),
+        ("regularization", ("regularization", "dropout", "early stopping", "l1", "l2")),
+        ("validation_strategy", ("cross-validation", "cv", "fold", "holdout", "split")),
+        ("ensembling", ("ensemble", "stacking", "blending", "average")),
+        ("data_cleaning", ("outlier", "duplicate", "cleaning", "leakage fix")),
+        ("training_budget", ("epoch", "iterations", "batch size", "training budget")),
+    )
+    for category, keywords in rules:
+        if any(keyword in normalized for keyword in keywords):
+            return category
+    return "unknown"
+
+
+def _classify_error_category(text: str) -> str:
+    normalized = text.lower()
+    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("dependency_missing", ("modulenotfounderror", "no module named", "importerror")),
+        ("schema_mismatch", ("missing columns", "column", "schema", "keyerror")),
+        ("device_mismatch", ("same device", "cuda", "cpu", "device")),
+        ("oom", ("out of memory", "cuda out of memory", "oom")),
+        ("network", ("connectionerror", "dns", "network", "name resolution")),
+        ("kaggle_cli", ("kaggle cli", "competitions submit", "kernels push")),
+        ("timeout", ("timeout", "timed out", "deadline exceeded")),
+        ("validation", ("row count mismatch", "submission", "validation error")),
+    )
+    for category, keywords in rules:
+        if any(keyword in normalized for keyword in keywords):
+            return category
+    return "unknown"
+
+
+def _normalize_outcome_bucket(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    lowered = str(value).strip().lower()
+    if lowered in {"good", "low", "unknown"}:
+        return lowered
+    return "unknown"
 
 
 def build_dataset_profile(data_dir: Path) -> dict[str, object]:
@@ -403,7 +790,7 @@ def build_plan_and_initial_prompt(
         "- Cite the key sources you used (short notes).",
         "",
         "Compute-specific notes:",
-        "- local_cpu/local_gpu: update kagglebot/solver/ as usual (same best-model flow).",
+        "- local_gpu: update kagglebot/solver/ as usual (same best-model flow).",
         "- kaggle_gpu/kaggle_tpu: create artifacts/{slug}/kernel/kernel.py from scratch if missing.",
         "- kaggle_gpu/kaggle_tpu: implement model + features directly in artifacts/{slug}/kernel/kernel.py.",
         "- If data is non-tabular or requires custom parsing, implement custom_main() in kernel.py.",
@@ -571,10 +958,10 @@ If the score did not improve (delta <= 0), treat it as `major_overhaul` even if 
 Before finalizing:
 
 1. **Run offline evaluation**:
-   - If `compute` starts with `kaggle_`, do NOT run local_cpu; rely on kernel metrics/logs.
+   - If `compute` starts with `kaggle_`, do NOT run local training; rely on kernel metrics/logs.
    - Otherwise, run:
    ```bash
-   uv run kagglebot train {{slug}} --compute local_cpu
+   uv run kagglebot train {{slug}} --compute local_gpu
    ```
 
 2. **Check metrics**:
@@ -884,14 +1271,63 @@ def _ensure_db(paths: KnowledgePaths) -> None:
                 created_at INTEGER,
                 PRIMARY KEY (run_id, iter)
             );
+            CREATE TABLE IF NOT EXISTS problem_type_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                iter INTEGER NOT NULL,
+                problem_type TEXT NOT NULL,
+                cause_category TEXT NOT NULL,
+                fix_category TEXT NOT NULL,
+                why_poor TEXT,
+                how_improved TEXT,
+                delta_offline REAL,
+                outcome_bucket TEXT,
+                submission_score REAL,
+                created_at INTEGER,
+                UNIQUE (run_id, iter, problem_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_problem_type_insights_problem_type
+                ON problem_type_insights(problem_type, created_at DESC);
+            CREATE TABLE IF NOT EXISTS error_fix_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                iter INTEGER NOT NULL,
+                problem_type TEXT NOT NULL,
+                error_fingerprint TEXT NOT NULL,
+                error_category TEXT NOT NULL,
+                error_message TEXT,
+                fix_summary TEXT,
+                resolved INTEGER NOT NULL DEFAULT 0,
+                outcome_bucket TEXT,
+                submission_score REAL,
+                created_at INTEGER,
+                UNIQUE (run_id, iter, problem_type, error_fingerprint)
+            );
+            CREATE INDEX IF NOT EXISTS idx_error_fix_insights_problem_type
+                ON error_fix_insights(problem_type, created_at DESC);
             """
         )
+        _ensure_table_column(conn, "problem_type_insights", "outcome_bucket", "TEXT")
+        _ensure_table_column(conn, "problem_type_insights", "submission_score", "REAL")
+        _ensure_table_column(conn, "error_fix_insights", "resolved", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_table_column(conn, "error_fix_insights", "outcome_bucket", "TEXT")
+        _ensure_table_column(conn, "error_fix_insights", "submission_score", "REAL")
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _ensure_table_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {str(row["name"]) for row in rows}
+    if column in existing:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def build_kernel_fix_template() -> str:

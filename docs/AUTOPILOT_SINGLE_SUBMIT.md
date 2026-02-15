@@ -1519,7 +1519,7 @@ improvement_vars = {
 - [ ] Add autopilot section with example CLI
 - [ ] Link to `docs/AUTOPILOT_SINGLE_SUBMIT.md`
 
-**F2: Update CLAUDE.md**
+**F2: Update STRATEGY.md**
 - [ ] Add autopilot design principles
 - [ ] Add single-submit policy
 
@@ -1603,7 +1603,7 @@ $ uv run kagglebot run titanic \
 [Iteration 4/5] Offline: 0.9589
 [Iteration 5/5] Offline: 0.9612
 [Best] Iteration 5 (accuracy: 0.9612)
-[No Submit] Exploration mode (use --submit for final submission)
+[No Submit] Exploration mode (use the manual `submit` command for final submission)
 ```
 
 ---

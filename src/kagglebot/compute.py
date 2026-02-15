@@ -7,7 +7,6 @@ from kagglebot.exec_utils import run_command
 
 
 class Compute(str, Enum):
-    local_cpu = "local_cpu"
     local_gpu = "local_gpu"
     kaggle_gpu = "kaggle_gpu"
     kaggle_tpu = "kaggle_tpu"
@@ -20,8 +19,6 @@ class RunnerSelection:
 
 
 def compute_to_runner_and_accelerator(compute: Compute) -> RunnerSelection:
-    if compute == Compute.local_cpu:
-        return RunnerSelection(runner="local", accelerator="none")
     if compute == Compute.local_gpu:
         return RunnerSelection(runner="local", accelerator="gpu")
     if compute == Compute.kaggle_gpu:

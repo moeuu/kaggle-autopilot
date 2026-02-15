@@ -1,6 +1,6 @@
 # Codex Brief Extraction
 
-You are Codex. Produce a concise, human-readable brief for Claude from local context files.
+You are Codex. Produce a concise, human-readable brief for Strategy from local context files.
 Do not modify any files or code. Output only the brief text.
 Summarize; do not paste raw data, long quotes, or large tables.
 Focus on: task/metric, submission format, data schema & file types, and rules.

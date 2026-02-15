@@ -77,7 +77,7 @@ Kagglebot autopilot runs a score-gated improvement loop that **never submits unl
 │       ▼                                         │
 │  ┌──────────────────────────────────────────┐  │
 │  │ 3. Attempt Submit (Safety Gate #3)       │  │
-│  │    - Only if --submit flag set           │  │
+│  │    - Only through guarded submit path    │  │
 │  │    - Only if met_target=true             │  │
 │  │    - Check rules accepted                │  │
 │  │    - Check deduplication ledger          │  │
@@ -137,7 +137,7 @@ for iteration in range(max_iterations):
 **Location**: `src/kagglebot/autopilot.py:_attempt_submit()`
 
 Checks performed before submission:
-1. **Flag check**: `--submit` must be explicitly set
+1. **Path check**: submission must be triggered through guarded code path
 2. **Target check**: `met_target` must be True
 3. **Rules check**: Competition rules must be accepted (via `check_rules_accepted()`)
 4. **Deduplication**: SHA256 hash must not exist in ledger.jsonl
@@ -320,7 +320,7 @@ RulesNotAcceptedError: Competition rules not accepted
 ### Consistent Defaults
 
 - `--dry-run`: Default for `submit` command (require `--no-dry-run` to actually submit)
-- `--compute local_cpu`: Safe default (no GPU assumptions)
+- `--compute local_gpu`: Local training mode (uses GPU when available, can fall back to CPU)
 - `--score-source auto`: Use holdout unless test is labeled
 - `--max-iterations 5`: Reasonable cap
 - `--patience 2`: Stop if 2 iterations show no improvement
@@ -331,7 +331,7 @@ Every command has:
 - Clear description
 - Required vs optional arguments
 - Examples
-- Safety warnings (e.g., "--submit will submit to Kaggle")
+- Safety warnings for any submission-triggering command
 
 ```bash
 uv run kagglebot autopilot --help

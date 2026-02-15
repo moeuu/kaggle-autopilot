@@ -24,15 +24,13 @@ Kagglebot autopilot is a fully automated Kaggle competition workflow system that
 ```bash
 uv run kagglebot autopilot <competition_url> \
   --agent codex \
-  --compute <local_gpu|kaggle_gpu|kaggle_tpu> \
-  --submit
+  --compute <local_gpu|kaggle_gpu|kaggle_tpu>
 ```
 
 **Required Arguments**:
 - `<competition_url>`: Full Kaggle competition URL or slug
 - `--agent codex`: Agent backend (only codex supported in v1)
 - `--compute <mode>`: Training compute backend
-- `--submit`: Enable submission (required for safety)
 
 **No Other Flags Required**: All other parameters have safe defaults or are auto-detected.
 
@@ -981,7 +979,7 @@ Competition rules have not been accepted for 'house-prices-advanced-regression-t
 Action required:
 1. Visit: https://www.kaggle.com/competitions/house-prices.../rules
 2. Click "I Understand and Accept"
-3. Re-run: uv run kagglebot autopilot house-prices... --agent codex --compute local_gpu --submit
+3. Re-run: uv run kagglebot autopilot house-prices... --agent codex --compute local_gpu
 
 Exit code: 2
 ```
@@ -1040,7 +1038,7 @@ Before deployment, verify:
 
 ### 13.1 Functional Requirements
 
-- [ ] Minimal CLI works: `autopilot <url> --agent codex --compute <mode> --submit`
+- [ ] Minimal CLI works: `autopilot <url> --agent codex --compute <mode>`
 - [ ] Bootstrap downloads data, rules, leaderboard
 - [ ] Agent generates plan.json in iteration 0
 - [ ] Iteration loop runs 1..max_iterations times

@@ -11,7 +11,7 @@ Note: Git integration has been removed from the implementation; section 4 is his
 ### 1.1 Submission Safety
 
 - [ ] **Default to dry-run**: All commands that could submit default to dry-run mode
-- [ ] **Explicit submit flag**: Submissions require `--submit` flag explicitly set by user
+- [ ] **Submission gate explicit**: Submissions run only through guarded autopilot/submit paths
 - [ ] **Deduplication enforced**: SHA256 hash checked against `ledger.jsonl` before submission
 - [ ] **Rate limiting active**: Cooldown period (default 5 min) enforced between submissions
 - [ ] **Max submissions cap**: Hard limit per autopilot run (default 5) cannot be bypassed
@@ -102,7 +102,7 @@ Note: Git integration has been removed from the implementation; section 4 is his
 
 ### 3.2 Compute Modes
 
-- [ ] **local_cpu safe default**: Default to local_cpu if no compute specified
+- [ ] **local_gpu mode**: Use local_gpu for local training; handle GPU absence safely
 - [ ] **GPU availability check**: local_gpu errors gracefully if no GPU available
 - [ ] **Kaggle kernel timeout**: Handle Kaggle kernel timeouts (exit code 11)
 - [ ] **Kaggle kernel failure**: Handle kernel failures (exit code 12)
@@ -180,7 +180,7 @@ Note: Git integration has been removed from the implementation; section 4 is his
 - [ ] **ValidationError (6)**: Show submission vs sample diff, suggest fixes
 - [ ] **DuplicateSubmissionError (8)**: Show ledger entry, explain deduplication
 - [ ] **SubmissionRateLimitError (9)**: Show cooldown time remaining
-- [ ] **GPUNotAvailableError (10)**: Suggest switching to local_cpu or kaggle_gpu
+- [ ] **GPUNotAvailableError (10)**: Suggest local_gpu CPU fallback or switching to kaggle_gpu
 - [ ] **KernelTimeoutError (11)**: Suggest reducing dataset size or model complexity
 - [ ] **MaxSubmissionsError (14)**: Show submission count, explain quota
 
@@ -239,7 +239,7 @@ Note: Git integration has been removed from the implementation; section 4 is his
 ### 9.2 Developer Docs
 
 - [ ] **Architecture doc**: docs/architecture.md up to date
-- [ ] **CLAUDE.md current**: Project instructions for Claude Code up to date
+- [ ] **STRATEGY.md current**: Project instructions for Strategy Code up to date
 - [ ] **Changelog maintained**: CHANGELOG.md has all notable changes
 - [ ] **Decision log**: Major architectural decisions documented in docs/spec_autopilot.md
 - [ ] **API docs**: Public functions have docstrings with examples
@@ -252,7 +252,7 @@ Before every commit, verify:
 
 - [ ] No `kaggle.json`, `.env`, API keys, or secrets in diff
 - [ ] No large CSV/zip files committed (check .gitignore)
-- [ ] All submission code paths guarded by `--submit` flag
+- [ ] All submission code paths guarded by rules, validation, deduplication, and rate limits
 - [ ] Duplicate submission check cannot be bypassed
 - [ ] Validation runs before any Kaggle CLI submit call
 - [ ] Error messages include actionable next steps
@@ -323,7 +323,7 @@ If an incident occurs (e.g., unintended submission, secret leak):
 ### Every Autopilot Run
 
 1. Rules accepted (manual browser)
-2. `--submit` flag explicitly set by user
+2. Submission path explicitly chosen by user (autopilot or `submit` command)
 3. Deduplication check passes
 4. Validation check passes
 5. Rate limit respected
@@ -334,7 +334,7 @@ If an incident occurs (e.g., unintended submission, secret leak):
 2. Format matches sample_submission.csv
 3. Cooldown period elapsed
 4. Max submissions not exceeded
-5. User explicitly set `--submit`
+5. User explicitly triggered a submission path
 
 ---
 

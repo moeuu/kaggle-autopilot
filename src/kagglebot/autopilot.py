@@ -6,9 +6,9 @@ import csv
 import hashlib
 import json
 import os
+import random
 import re
 import shlex
-import shutil
 import sys
 import time
 import traceback
@@ -20,19 +20,43 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
+from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.compute import Compute
 from kagglebot.exceptions import (
+    DuplicateSubmissionError,
     KaggleCliError,
     KaggleNetworkError,
     KernelCapacityError,
     KernelFailedError,
     RulesNotAcceptedError,
+    SubmissionCliError,
+    SubmissionRateLimitError,
+    SubmissionValidationError,
+    SubmitAbortedError,
 )
 from kagglebot.exec_utils import run_command
-from kagglebot.history import SubmissionLedger, new_run_id
-from kagglebot.kaggle_api import check_rules_accepted, leaderboard_top1, submit_competition
+from kagglebot.hashing import sha256_file
+from kagglebot.history import new_run_id
+from kagglebot.kaggle_api import (
+    check_rules_accepted,
+    leaderboard_top1,
+    list_competition_submissions,
+)
 from kagglebot.kernel_runner import _collect_log_tail, resolve_kaggle_username, run_kernel
-from kagglebot.knowledge import record_improvement, record_iteration, record_run
+from kagglebot.knowledge import (
+    derive_problem_types,
+    ensure_taxonomy,
+    format_error_fix_insights,
+    format_problem_type_insights,
+    record_error_fix_insight,
+    record_improvement,
+    record_iteration,
+    record_problem_type_insight,
+    record_run,
+    resolve_error_fix_insights,
+    resolve_problem_type_insights,
+    resolve_similar_improvements,
+)
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
     _backup_guarded_files,
@@ -43,8 +67,13 @@ from kagglebot.orchestrator.agent_pipeline import (
 )
 from kagglebot.solver.initial_model import train_evaluate_and_predict
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.submission.guard import (
+    classify_submit_error,
+    compute_error_fingerprint,
+    normalize_error_text,
+)
+from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.types import PlanConfig
-from kagglebot.validation import ensure_not_duplicate_submission, ensure_submission_rate_limit, validate_submission
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -95,6 +124,14 @@ MAX_AUTOFIX_ATTEMPTS = 2
 MAX_AUTOFIX_RESTARTS = 1
 MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
+_ERROR_FIX_CODEX_MODEL = "gpt-5.3-codex"
+_ERROR_FIX_REASONING_EFFORT = "extra_high"
+_SUBMISSION_POLL_MAX_ATTEMPTS = 20
+_SUBMISSION_POLL_INTERVAL_SEC = 30.0
+_SUBMIT_MAX_TRANSIENT_RETRIES = 3
+_SUBMIT_BACKOFF_BASE_SEC = 2.0
+_SUBMIT_STDERR_TAIL_CHARS = 1200
+_SUBMIT_STDOUT_TAIL_CHARS = 1200
 
 
 def run_autopilot(config: AutopilotConfig) -> None:
@@ -113,6 +150,8 @@ def run_autopilot(config: AutopilotConfig) -> None:
         try:
             return _run_autopilot_core(config, run_id, resume_run=resume_run)
         except RulesNotAcceptedError:
+            raise
+        except SubmitAbortedError:
             raise
         except KernelCapacityError:
             raise
@@ -140,6 +179,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     top1_info = leaderboard_top1(config.slug, config.paths.context_dir, dry_run=config.dry_run)
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
     _print_top1_info(top1_info)
+    _refresh_knowledge_hints(config)
 
     if _should_skip_planning(resume_run=resume_run, paths=config.paths):
         print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
@@ -185,9 +225,15 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         direction=metric_direction,
     )
     dataset_profile = _load_dataset_profile(config.paths)
+    problem_types = derive_problem_types(dataset_profile)
     best_score = None
     best_submission: Path | None = None
     submitted = False
+    pending_problem_insights: list[dict[str, object]] = []
+    pending_error_fixes: list[dict[str, object]] = []
+    submit_candidate: Path | None = None
+    submit_candidate_score: float | None = None
+    submit_top1_score: float | None = None
 
     max_iterations = max(1, int(resolved["max_iterations"]))
     holdout_frac = float(resolved["holdout_frac"])
@@ -217,6 +263,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             agent_dir.mkdir(parents=True, exist_ok=True)
 
             print(f"[cyan]iteration[/cyan]: {iteration}/{max_iterations}")
+            _refresh_knowledge_hints(config)
 
             _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
@@ -325,6 +372,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             iter_dir=iter_dir,
                             error_message=error_text,
                             attempt=kernel_attempts,
+                            pending_error_fixes=pending_error_fixes,
                         )
                 if kernel_result.submission_path:
                     submission_path.write_bytes(kernel_result.submission_path.read_bytes())
@@ -448,28 +496,19 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
             if top1_tier:
                 if config.submit:
-                    _attempt_submit(
-                        config=config,
-                        run_id=run_id,
-                        submission_path=submission_path,
-                        best_score=best_score or evaluation.value,
-                    )
-                    submitted = True
-                    run_payload["status"] = "submitted"
+                    submit_candidate = submission_path
+                    submit_candidate_score = best_score or evaluation.value
+                    submit_top1_score = top1_score if isinstance(top1_score, (int, float)) else None
                 else:
                     run_payload["status"] = "completed"
                 break
 
             if iteration >= max_iterations:
                 if config.submit and best_submission and not submitted:
-                    _attempt_submit(
-                        config=config,
-                        run_id=run_id,
-                        submission_path=best_submission,
-                        best_score=best_score,
-                    )
-                    run_payload["status"] = "submitted"
-                else:
+                    submit_candidate = best_submission
+                    submit_candidate_score = best_score
+                    submit_top1_score = top1_score if isinstance(top1_score, (int, float)) else None
+                elif not submitted:
                     run_payload["status"] = "completed"
                 break
 
@@ -483,12 +522,43 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 top1_info=top1_info,
                 target_score=target_score,
                 delta_offline=delta_offline,
+                pending_problem_insights=pending_problem_insights,
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
         (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
         print("[yellow]run interrupted[/yellow]")
         return
+
+    if config.submit and submit_candidate and not submitted:
+        try:
+            submission_result = _attempt_submit(
+                config=config,
+                run_id=run_id,
+                submission_path=submit_candidate,
+                best_score=submit_candidate_score,
+                problem_types=problem_types,
+            )
+        except SubmitAbortedError:
+            run_payload["status"] = "submit_failed"
+            (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+            raise
+        if submission_result:
+            _record_submission_knowledge(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                pending_problem_insights=pending_problem_insights,
+                pending_error_fixes=pending_error_fixes,
+                submission_result=submission_result,
+                metric_direction=metric_direction,
+                target_score=target_score,
+                top1_score=submit_top1_score,
+            )
+            submitted = True
+            run_payload["status"] = "submitted"
+        else:
+            run_payload["status"] = "completed"
 
     (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
 
@@ -651,6 +721,55 @@ def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
         return {}
 
 
+def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
+    profile = _load_dataset_profile(config.paths)
+    raw_tags = profile.get("tags", []) if isinstance(profile, dict) else []
+    tags = [str(tag).strip() for tag in raw_tags if isinstance(tag, str) and str(tag).strip()]
+
+    lines = ["# Knowledge Hints", ""]
+    try:
+        if not tags:
+            lines.append("No dataset tags available yet; knowledge suggestions pending dataset profiling.")
+        else:
+            taxonomy = ensure_taxonomy(config.knowledge_paths)
+            similar = resolve_similar_improvements(
+                knowledge_paths=config.knowledge_paths,
+                taxonomy=taxonomy,
+                tags=tags,
+            )
+            if not similar:
+                lines.append("No similar competitions found in knowledge base.")
+            else:
+                lines.append("Similar competitions and what improved score:")
+                lines.append("")
+                for item in similar:
+                    slug = item.get("slug", "unknown")
+                    overlap = item.get("overlap", 0)
+                    summary = item.get("summary", "No summary recorded.")
+                    lines.append(f"- {slug} ({overlap} tag overlap): {summary}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"Knowledge lookup failed: {exc}")
+
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.knowledge_hints_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5) -> str:
+    profile = _load_dataset_profile(config.paths)
+    problem_types = derive_problem_types(profile)
+    try:
+        insights = resolve_problem_type_insights(config.knowledge_paths, problem_types, limit=limit)
+        error_insights = resolve_error_fix_insights(config.knowledge_paths, problem_types, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return f"Problem-type knowledge unavailable: {exc}"
+    sections = [
+        format_problem_type_insights(insights, limit=limit),
+        "",
+        format_error_fix_insights(error_insights, limit=limit),
+    ]
+    return "\n".join(section for section in sections if section is not None)
+
+
 def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
     if dry_run:
         return
@@ -661,7 +780,7 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
 
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
-    print("[cyan]plan[/cyan]: codex -> claude -> codex")
+    print("[cyan]plan[/cyan]: codex(5.3) -> gpt(5.2) -> codex(5.3)")
     pipeline_config = AgentPipelineConfig(
         slug=config.slug,
         competition_url=config.competition_url,
@@ -1013,6 +1132,7 @@ def _run_improvement(
     top1_info: dict[str, object],
     target_score: float,
     delta_offline: float | None,
+    pending_problem_insights: list[dict[str, object]],
 ) -> None:
     prompt_template = config.paths.codex_improve_template.read_text(encoding="utf-8")
     agent_dir = iter_dir / "agent"
@@ -1029,7 +1149,7 @@ def _run_improvement(
         and top1_gap is not None
         and top1_gap > 0
     )
-    prompt_text = prompt_template.format(
+    base_prompt_text = prompt_template.format(
         slug=config.slug,
         iteration=iteration,
         plan_path=str(config.paths.plan_path),
@@ -1062,11 +1182,54 @@ def _run_improvement(
         sample_submission=str(config.paths.sample_submission_path),
         kernel_main=str(kernel_main_path),
     )
+    problem_type_knowledge = _load_problem_type_knowledge_text(config)
+    strategy_prompt = _build_improvement_strategy_prompt(
+        slug=config.slug,
+        run_id=run_id,
+        iteration=iteration,
+        metric=evaluation.metric,
+        direction=evaluation.direction,
+        current_score=evaluation.value,
+        target_score=target_score,
+        top1_score=top1_score,
+        top1_source=str(top1_info.get("source") or "unknown"),
+        top1_gap=top1_gap,
+        delta_offline=delta_offline,
+        improvement_mode=improvement_mode,
+        model_family=model_family,
+        nn_upgrade_required=nn_upgrade_required,
+        codex_prompt=base_prompt_text,
+        problem_type_knowledge=problem_type_knowledge,
+    )
+    strategy_dir = agent_dir / f"improve_strategy-{iteration:02d}"
+    strategy_text = _run_improvement_strategy(
+        prompt_text=strategy_prompt,
+        output_dir=strategy_dir,
+        dry_run=config.dry_run,
+    )
+
+    prompt_text = base_prompt_text
+    if strategy_text:
+        prompt_text = (
+            "# Codex Improvement Implementation\n\n"
+            "Implement the GPT-authored improvement prompt below as the primary plan.\n\n"
+            "## GPT 5.2 Extra-High Improvement Prompt\n"
+            f"{strategy_text}\n\n"
+            "## Local Context (for file paths and constraints)\n"
+            f"{base_prompt_text}\n"
+        )
+
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
 
-    print("[cyan]improve[/cyan]: running agent")
-    result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run)
+    print("[cyan]improve[/cyan]: running codex implementer")
+    result = run_codex(
+        prompt_path,
+        agent_dir,
+        dry_run=config.dry_run,
+        model=_ERROR_FIX_CODEX_MODEL,
+        reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+    )
     response_text = _read_agent_response(result.last_message_path)
     _print_agent_response(result.last_message_path, response_text)
     if result.returncode != 0:
@@ -1074,6 +1237,10 @@ def _run_improvement(
 
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
     summary = response_text
+    diagnostics_text = ""
+    diagnostics_path = iter_dir / "diagnostics.md"
+    if diagnostics_path.exists():
+        diagnostics_text = diagnostics_path.read_text(encoding="utf-8", errors="ignore")
     record_improvement(
         knowledge_paths=config.knowledge_paths,
         run_id=run_id,
@@ -1081,6 +1248,91 @@ def _run_improvement(
         summary=summary.strip(),
         delta_offline=delta_offline,
     )
+    pending_problem_insights.append(
+        {
+            "iteration": iteration,
+            "why_poor": diagnostics_text,
+            "how_improved": strategy_text or summary,
+            "delta_offline": delta_offline,
+        }
+    )
+
+
+def _build_improvement_strategy_prompt(
+    *,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    metric: str,
+    direction: str,
+    current_score: float,
+    target_score: float,
+    top1_score: float | None,
+    top1_source: str,
+    top1_gap: float | None,
+    delta_offline: float | None,
+    improvement_mode: str,
+    model_family: str,
+    nn_upgrade_required: bool,
+    codex_prompt: str,
+    problem_type_knowledge: str,
+) -> str:
+    return f"""\
+# Kagglebot Improvement Strategy
+
+You are GPT 5.2 in extra-high reasoning mode.
+Design a concrete improvement prompt for Codex 5.3 (extra-high), which will implement changes.
+
+Competition: {slug}
+Run ID: {run_id}
+Iteration: {iteration}
+Metric: {metric} ({direction})
+Current score: {current_score:.6f}
+Target score: {target_score:.6f}
+Top1 score: {"unavailable" if top1_score is None else f"{top1_score:.6f}"}
+Top1 source: {top1_source}
+Top1 gap: {"unavailable" if top1_gap is None else f"{top1_gap:.6f}"}
+Delta offline: {"unavailable" if delta_offline is None else f"{delta_offline:.6f}"}
+Improvement mode: {improvement_mode}
+Model family hint: {model_family}
+NN upgrade required: {"yes" if nn_upgrade_required else "no"}
+
+## Existing Codex Improvement Prompt Draft
+
+```
+{codex_prompt}
+```
+
+## Problem-Type Knowledge (Past Causes and Fixes)
+
+{problem_type_knowledge}
+
+## Required Output
+
+Return concise, actionable implementation instructions for Codex:
+1) What to change and why (root-cause hypothesis of current gap).
+2) Exact file-level edits and model/training changes.
+3) Validation checks after edits (what metrics/logs to confirm).
+4) Fallback if the first plan fails.
+
+Do not include chain-of-thought.
+"""
+
+
+def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bool) -> str:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = output_dir / "gpt_improvement_prompt.md"
+    prompt_path.write_text(prompt_text, encoding="utf-8")
+    print("[cyan]improve[/cyan]: gpt drafting improvement prompt")
+    result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
+    strategy_text = _read_agent_response(result.last_message_path).strip()
+    if result.returncode != 0:
+        print("[yellow]improve[/yellow]: gpt improvement strategy failed, falling back to direct codex prompt")
+        return ""
+    if not strategy_text:
+        print("[yellow]improve[/yellow]: gpt improvement strategy empty, falling back to direct codex prompt")
+        return ""
+    return strategy_text
 
 
 def _run_kernel_fix(
@@ -1091,6 +1343,7 @@ def _run_kernel_fix(
     iter_dir: Path,
     error_message: str,
     attempt: int,
+    pending_error_fixes: list[dict[str, object]] | None = None,
 ) -> None:
     prompt_template = config.paths.codex_kernel_fix_template.read_text(encoding="utf-8")
     agent_dir = iter_dir / "agent"
@@ -1125,6 +1378,31 @@ def _run_kernel_fix(
             f"Missing dependency detected: {missing_module}\n"
             "Avoid this package or guard it with a fallback; prefer Kaggle-default libraries.\n\n" + prompt_text
         )
+
+    strategy_prompt = _build_error_strategy_prompt(
+        stage="kernel_fix",
+        slug=config.slug,
+        run_id=run_id,
+        attempt=attempt,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        error_text=error_message,
+        codex_prompt=prompt_text,
+    )
+    strategy_dir = agent_dir / f"kernel_fix_strategy-{attempt:02d}"
+    strategy_text = _run_error_strategy(
+        prompt_text=strategy_prompt,
+        output_dir=strategy_dir,
+        dry_run=config.dry_run,
+        stage_label="kernel fix",
+    )
+    if strategy_text:
+        prompt_text += (
+            "\n\n## GPT 5.2 Extra-High Error-Fix Strategy\n"
+            "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
+            f"{strategy_text}\n"
+        )
+
     prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
@@ -1143,8 +1421,15 @@ def _run_kernel_fix(
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.paths.repo_root)
 
-    print("[cyan]kernel fix[/cyan]: running agent")
-    result = run_codex(prompt_path, agent_dir, dry_run=config.dry_run, heartbeat_label="fixing error")
+    print("[cyan]kernel fix[/cyan]: running codex fixer")
+    result = run_codex(
+        prompt_path,
+        agent_dir,
+        dry_run=config.dry_run,
+        heartbeat_label="fixing error",
+        model=_ERROR_FIX_CODEX_MODEL,
+        reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+    )
     after = _snapshot_tree(config.paths.repo_root)
     changed = _diff_snapshots(before, after)
     _enforce_allowlist_changes(
@@ -1167,6 +1452,15 @@ def _run_kernel_fix(
     if result.returncode != 0:
         raise RuntimeError("Codex kernel-fix step failed.")
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
+    if pending_error_fixes is not None:
+        pending_error_fixes.append(
+            {
+                "iteration": iteration,
+                "error_message": error_message,
+                "fix_summary": strategy_text or response_text,
+                "resolved": True,
+            }
+        )
 
 
 def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception) -> None:
@@ -1242,13 +1536,42 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         error_path=error_path,
         allowed_prefixes=allowed_prefixes,
     )
+    strategy_prompt = _build_error_strategy_prompt(
+        stage="autofix",
+        slug=config.slug,
+        run_id=run_id,
+        attempt=attempt,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        error_text=error_text,
+        codex_prompt=prompt_text,
+    )
+    strategy_text = _run_error_strategy(
+        prompt_text=strategy_prompt,
+        output_dir=autofix_dir / "gpt_strategy",
+        dry_run=config.dry_run,
+        stage_label="autofix",
+    )
+    if strategy_text:
+        prompt_text += (
+            "\n\n## GPT 5.2 Extra-High Error-Fix Strategy\n"
+            "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
+            f"{strategy_text}\n"
+        )
     prompt_path = autofix_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
 
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.paths.repo_root)
-    result = run_codex(prompt_path, autofix_dir, dry_run=config.dry_run, heartbeat_label="fixing error")
+    result = run_codex(
+        prompt_path,
+        autofix_dir,
+        dry_run=config.dry_run,
+        heartbeat_label="fixing error",
+        model=_ERROR_FIX_CODEX_MODEL,
+        reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+    )
     after = _snapshot_tree(config.paths.repo_root)
     changed = _diff_snapshots(before, after)
     _enforce_allowlist_changes(
@@ -1321,6 +1644,73 @@ Error log file: {error_path}
 3) Do not touch datasets or credentials. Do not add new dependencies without justification.
 4) Explain what you changed in your response.
 """
+
+
+def _build_error_strategy_prompt(
+    *,
+    stage: str,
+    slug: str,
+    run_id: str,
+    attempt: int,
+    compute: str,
+    accelerator: str,
+    error_text: str,
+    codex_prompt: str,
+) -> str:
+    return f"""\
+# Kagglebot GPT Error Strategy
+
+You are GPT 5.2 in extra-high reasoning mode.
+Think through the failure and produce a concrete fix strategy for Codex 5.3 (extra high), which will apply edits.
+
+Stage: {stage}
+Competition: {slug}
+Run ID: {run_id}
+Attempt: {attempt}
+Compute: {compute} ({accelerator})
+
+## Error
+
+```
+{error_text}
+```
+
+## Codex Fix Prompt (current)
+
+```
+{codex_prompt}
+```
+
+## Required Output
+
+Return concise, actionable instructions for Codex:
+1) Root cause hypothesis.
+2) Minimal file edits (paths + what to change).
+3) Safety checks to run after edits.
+4) Fallback if the first fix does not work.
+"""
+
+
+def _run_error_strategy(
+    *,
+    prompt_text: str,
+    output_dir: Path,
+    dry_run: bool,
+    stage_label: str,
+) -> str:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = output_dir / "gpt_strategy_prompt.md"
+    prompt_path.write_text(prompt_text, encoding="utf-8")
+    print(f"[cyan]{stage_label}[/cyan]: gpt analyzing error")
+    result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
+    strategy_text = _read_agent_response(result.last_message_path).strip()
+    if result.returncode != 0:
+        print(f"[yellow]{stage_label}[/yellow]: gpt strategy failed, continuing with direct codex fix")
+        return ""
+    if not strategy_text:
+        print(f"[yellow]{stage_label}[/yellow]: gpt strategy empty, continuing with direct codex fix")
+        return ""
+    return strategy_text
 
 
 _COLUMN_MAP_FILENAME = "column_map.json"
@@ -1683,80 +2073,721 @@ def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, chan
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
-def _attempt_submit(*, config: AutopilotConfig, run_id: str, submission_path: Path, best_score: float | None) -> None:
+def _attempt_submit(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    submission_path: Path,
+    best_score: float | None,
+    problem_types: list[str],
+) -> dict[str, object] | None:
     if not config.submit or config.dry_run:
-        return
-    if not check_rules_accepted(config.slug, dry_run=config.dry_run):
-        raise RulesNotAcceptedError("Competition rules not accepted.")
-    sample_path = config.paths.sample_submission_path
-    if not sample_path.exists():
-        from kagglebot.solver.io import find_competition_files
-
-        _, _, sample_path = find_competition_files(config.paths.data_dir)
-    validate_submission(str(sample_path), str(submission_path))
-    submission_for_submit = _prepare_submission_for_submit(sample_path, submission_path)
-    ledger = SubmissionLedger(config.paths.submission_ledger_path)
-    ensure_submission_rate_limit(ledger)
-    if not config.force_submit:
-        ensure_not_duplicate_submission(
-            ledger,
-            slug=config.slug,
-            message=_submission_message(config, run_id, best_score),
-            submission_path=str(submission_for_submit),
+        return None
+    run_dir = config.paths.run_dir(run_id)
+    run_state = _load_run_state(run_dir)
+    allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
+    if run_state.get("submit_attempted") and not allow_force:
+        print("[yellow]submit skipped[/yellow]: this run already attempted submission; use --force-submit to override")
+        _append_submit_attempt(
+            run_dir=run_dir,
+            payload={
+                "run_id": run_id,
+                "sub_path": str(submission_path),
+                "sub_sha256": _sha256_or_none(submission_path),
+                "exit_code": None,
+                "ok": False,
+                "fingerprint": str(run_state.get("last_fingerprint") or ""),
+                "error_kind": "unknown",
+                "action_taken": "skip",
+                "reason": "submit_already_attempted_in_run",
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
         )
-    print(f"[cyan]submit[/cyan]: {config.slug}")
-    submit_competition(
-        config.slug, submission_for_submit, _submission_message(config, run_id, best_score), dry_run=config.dry_run
+        return None
+
+    try:
+        rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)
+    except KaggleCliError as exc:
+        if _is_missing_kaggle_credentials_error(exc):
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_path=submission_path,
+                fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
+                error_kind="permanent",
+                reason="kaggle_credentials_missing",
+                message=("Kaggle credentials not configured. Set ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY."),
+                stdout_tail=exc.stdout,
+                stderr_tail=exc.stderr or exc.output,
+                exit_code=exc.exit_code,
+            )
+        raise
+    if not rules_accepted:
+        return _abort_submit_for_run(
+            config=config,
+            run_id=run_id,
+            problem_types=problem_types,
+            submission_path=submission_path,
+            fingerprint=compute_error_fingerprint("", "rules_not_accepted"),
+            error_kind="permanent",
+            reason="rules_not_accepted",
+            message="Competition rules are not accepted; aborting submit stage for this run.",
+            stdout_tail="",
+            stderr_tail="rules_not_accepted",
+            exit_code=RulesNotAcceptedError.exit_code,
+        )
+
+    message = _submission_message(config, run_id, best_score)
+    submission_service = SubmissionService(
+        SubmissionConfig(
+            slug=config.slug,
+            data_dir=config.paths.data_dir,
+            sample_submission_path=config.paths.sample_submission_path,
+            submission_ledger_path=config.paths.submission_ledger_path,
+            dry_run=config.dry_run,
+            force_submit=config.force_submit,
+        )
     )
-    ledger.record(
-        slug=config.slug,
-        message=_submission_message(config, run_id, best_score),
-        submission_path=submission_for_submit,
-        run_id=run_id,
+    print(f"[cyan]submit[/cyan]: {config.slug}")
+    submitted_at = datetime.now(UTC)
+    seen_fingerprints = set(_load_submit_fingerprints(run_dir))
+    max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            submission_result = submission_service.submit(
+                submission_path=submission_path,
+                message=message,
+                run_id=run_id,
+            )
+        except SubmissionValidationError as exc:
+            fingerprint = compute_error_fingerprint("", str(exc))
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_path=submission_path,
+                fingerprint=fingerprint,
+                error_kind="validation",
+                reason="local_submission_validation_failed",
+                message="Local submission validation failed; Kaggle CLI submit is skipped.",
+                stdout_tail="",
+                stderr_tail=str(exc),
+                exit_code=SubmissionValidationError.exit_code,
+            )
+        except SubmissionCliError as exc:
+            classification = classify_submit_error(exc.stdout, exc.stderr, exc.exit_code)
+            fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
+            if fingerprint in seen_fingerprints:
+                return _abort_submit_for_run(
+                    config=config,
+                    run_id=run_id,
+                    problem_types=problem_types,
+                    submission_path=submission_path,
+                    fingerprint=fingerprint,
+                    error_kind=classification.kind,
+                    reason="same_error_fingerprint_recurred",
+                    message="Same submit error fingerprint recurred; aborting this run to prevent infinite loop.",
+                    stdout_tail=exc.stdout,
+                    stderr_tail=exc.stderr,
+                    exit_code=exc.exit_code,
+                )
+            seen_fingerprints.add(fingerprint)
+            if classification.kind == "transient" and attempt < max_attempts:
+                wait_seconds = _compute_submit_backoff(attempt)
+                print(
+                    "[yellow]submit retry[/yellow]: transient submit error "
+                    f"(reason={classification.reason}, attempt={attempt}/{max_attempts}, wait={wait_seconds:.1f}s)"
+                )
+                _append_submit_attempt(
+                    run_dir=run_dir,
+                    payload={
+                        "run_id": run_id,
+                        "sub_path": str(submission_path),
+                        "sub_sha256": _sha256_or_none(submission_path),
+                        "exit_code": exc.exit_code,
+                        "ok": False,
+                        "fingerprint": fingerprint,
+                        "error_kind": "transient",
+                        "action_taken": "retry",
+                        "reason": classification.reason,
+                        "stdout_tail": exc.stdout[-_SUBMIT_STDOUT_TAIL_CHARS:],
+                        "stderr_tail": exc.stderr[-_SUBMIT_STDERR_TAIL_CHARS:],
+                    },
+                )
+                _record_submit_reason_knowledge(
+                    config=config,
+                    run_id=run_id,
+                    problem_types=problem_types,
+                    submission_path=submission_path,
+                    error_kind="transient",
+                    reason=classification.reason,
+                    action_taken="retry",
+                    fingerprint=fingerprint,
+                    details=f"attempt={attempt}; wait={wait_seconds:.1f}s",
+                )
+                time.sleep(wait_seconds)
+                continue
+            print(
+                "[red]submit aborted[/red]: "
+                f"{classification.kind} submit error (reason={classification.reason}); no further retries in this run."
+            )
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_path=submission_path,
+                fingerprint=fingerprint,
+                error_kind=classification.kind,
+                reason=classification.reason,
+                message=(
+                    "Submit failed and is not retryable in this run."
+                    if classification.kind != "transient"
+                    else "Transient submit error exceeded retry budget; aborting this run."
+                ),
+                stdout_tail=exc.stdout,
+                stderr_tail=exc.stderr,
+                exit_code=exc.exit_code,
+            )
+        except (DuplicateSubmissionError, SubmissionRateLimitError) as exc:
+            fingerprint = compute_error_fingerprint("", str(exc))
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_path=submission_path,
+                fingerprint=fingerprint,
+                error_kind="permanent",
+                reason="local_submission_guardrail",
+                message=f"Local submission guardrail blocked submit: {exc}",
+                stdout_tail="",
+                stderr_tail=str(exc),
+                exit_code=getattr(exc, "exit_code", 1),
+            )
+        except KaggleCliError as exc:
+            if _is_missing_kaggle_credentials_error(exc):
+                return _abort_submit_for_run(
+                    config=config,
+                    run_id=run_id,
+                    problem_types=problem_types,
+                    submission_path=submission_path,
+                    fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
+                    error_kind="permanent",
+                    reason="kaggle_credentials_missing",
+                    message=(
+                        "Kaggle credentials not configured. Set ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY."
+                    ),
+                    stdout_tail=exc.stdout,
+                    stderr_tail=exc.stderr or exc.output,
+                    exit_code=exc.exit_code,
+                )
+            raise
+        break
+
+    submission_for_submit = submission_result.submission_path
+    stdout_tail = submission_result.stdout[-_SUBMIT_STDOUT_TAIL_CHARS:]
+    stderr_tail = submission_result.stderr[-_SUBMIT_STDERR_TAIL_CHARS:]
+    fingerprint = compute_error_fingerprint(submission_result.stdout, submission_result.stderr)
+    _append_submit_attempt(
+        run_dir=run_dir,
+        payload={
+            "run_id": run_id,
+            "sub_path": str(submission_for_submit),
+            "sub_sha256": _sha256_or_none(submission_for_submit),
+            "exit_code": submission_result.exit_code,
+            "ok": True,
+            "fingerprint": fingerprint,
+            "error_kind": "none",
+            "action_taken": "submit",
+            "reason": "submitted",
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
+        },
+    )
+    _save_run_state(
+        run_dir,
+        {
+            "submit_attempted": True,
+            "submit_ok": True,
+            "last_fingerprint": fingerprint,
+            "last_error_kind": "none",
+            "last_action": "submit",
+            "last_reason": "submitted",
+            "last_submission_path": str(submission_for_submit),
+            "submit_attempts_count": int(_load_run_state(run_dir).get("submit_attempts_count", 0)) + 1,
+        },
     )
     print("[green]submission recorded[/green]")
+    outcome = _wait_for_submission_outcome(
+        slug=config.slug,
+        message=message,
+        submitted_at=submitted_at,
+    )
+    if outcome and outcome.get("score") is not None:
+        print(
+            "[cyan]submission result[/cyan]: "
+            f"status={outcome.get('status') or 'unknown'} score={float(outcome['score']):.6f}"
+        )
+    else:
+        print("[yellow]submission result[/yellow]: score not available yet; knowledge update skipped")
+    return {
+        "message": message,
+        "submission_path": str(submission_for_submit),
+        "submitted_at": submitted_at.isoformat(),
+        "iteration": _infer_iteration_from_submission_path(submission_path),
+        "outcome": outcome,
+    }
 
 
-def _prepare_submission_for_submit(sample_path: Path, submission_path: Path) -> Path:
-    if not sample_path.exists() or not submission_path.exists():
-        return submission_path
-    sample_delim = _sniff_delimiter_for_submit(sample_path)
-    submission_delim = _sniff_delimiter_for_submit(submission_path)
-    if sample_delim == "\t" and submission_delim == "\t" and submission_path.suffix.lower() != ".tsv":
-        tsv_path = submission_path.with_suffix(".tsv")
-        if tsv_path != submission_path:
-            shutil.copy2(submission_path, tsv_path)
-        return tsv_path
-    return submission_path
+def _abort_submit_for_run(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    problem_types: list[str],
+    submission_path: Path,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    message: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    exit_code: int | None,
+) -> None:
+    run_dir = config.paths.run_dir(run_id)
+    _append_submit_attempt(
+        run_dir=run_dir,
+        payload={
+            "run_id": run_id,
+            "sub_path": str(submission_path),
+            "sub_sha256": _sha256_or_none(submission_path),
+            "exit_code": exit_code,
+            "ok": False,
+            "fingerprint": fingerprint,
+            "error_kind": error_kind,
+            "action_taken": "abort",
+            "reason": reason,
+            "stdout_tail": stdout_tail[-_SUBMIT_STDOUT_TAIL_CHARS:],
+            "stderr_tail": stderr_tail[-_SUBMIT_STDERR_TAIL_CHARS:],
+        },
+    )
+    prior = _load_run_state(run_dir)
+    _save_run_state(
+        run_dir,
+        {
+            "submit_attempted": True,
+            "submit_ok": False,
+            "last_fingerprint": fingerprint,
+            "last_error_kind": error_kind,
+            "last_action": "abort",
+            "last_reason": reason,
+            "last_submission_path": str(submission_path),
+            "submit_attempts_count": int(prior.get("submit_attempts_count", 0)) + 1,
+        },
+    )
+    _record_submit_reason_knowledge(
+        config=config,
+        run_id=run_id,
+        problem_types=problem_types,
+        submission_path=submission_path,
+        error_kind=error_kind,
+        reason=reason,
+        action_taken="abort",
+        fingerprint=fingerprint,
+        details=message,
+    )
+    print(f"[red]submit aborted[/red]: {message}")
+    raise SubmitAbortedError(message)
 
 
-def _sniff_delimiter_for_submit(path: Path, default: str = ",") -> str:
-    candidates = []
-    for sep in (default, "\t", ","):
-        if sep and sep not in candidates:
-            candidates.append(sep)
-    counts = {sep: 0 for sep in candidates}
-    lines_seen = 0
+def _append_submit_attempt(*, run_dir: Path, payload: dict[str, object]) -> None:
+    record = {
+        "ts": datetime.now(UTC).isoformat(),
+        **payload,
+    }
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    attempts_path.parent.mkdir(parents=True, exist_ok=True)
+    with attempts_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def _load_run_state(run_dir: Path) -> dict[str, object]:
+    state_path = run_dir / "run_state.json"
+    if not state_path.exists():
+        attempted = _has_submit_attempt_records(run_dir)
+        return {"submit_attempted": attempted}
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                lines_seen += 1
-                for sep in candidates:
-                    counts[sep] += line.count(sep)
-                if lines_seen >= 100:
-                    break
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if not payload.get("submit_attempted"):
+        payload["submit_attempted"] = _has_submit_attempt_records(run_dir)
+    return payload
+
+
+def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
+    state = _load_run_state(run_dir)
+    state.update(updates)
+    state["updated_at"] = datetime.now(UTC).isoformat()
+    state_path = run_dir / "run_state.json"
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _has_submit_attempt_records(run_dir: Path) -> bool:
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return False
+    try:
+        for line in attempts_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                return True
     except OSError:
-        return default
-    if lines_seen == 0:
-        return default
-    best = max(candidates, key=lambda sep: counts[sep])
-    if counts[best] == 0:
-        return default
-    if counts.get(default, 0) >= counts[best]:
-        return default
-    return best
+        return False
+    return False
+
+
+def _load_submit_fingerprints(run_dir: Path) -> list[str]:
+    fingerprints: list[str] = []
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return fingerprints
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return fingerprints
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fingerprint = str(row.get("fingerprint") or "").strip()
+        if not fingerprint:
+            continue
+        fingerprints.append(fingerprint)
+    return fingerprints
+
+
+def _sha256_or_none(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return sha256_file(str(path))
+    except OSError:
+        return None
+
+
+def _compute_submit_backoff(attempt: int) -> float:
+    base = _SUBMIT_BACKOFF_BASE_SEC * (2 ** max(0, attempt - 1))
+    jitter = random.uniform(0.0, 0.75)
+    return base + jitter
+
+
+def _env_truthy(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _record_submit_reason_knowledge(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    problem_types: list[str],
+    submission_path: Path,
+    error_kind: str,
+    reason: str,
+    action_taken: str,
+    fingerprint: str,
+    details: str,
+) -> None:
+    iteration = _infer_iteration_from_submission_path(submission_path) or 1
+    summary = normalize_error_text(details, max_chars=1200)
+    message = f"submit_error kind={error_kind} reason={reason} fingerprint={fingerprint}"
+    fix = f"submit_action={action_taken}; detail={summary}"
+    try:
+        record_error_fix_insight(
+            knowledge_paths=config.knowledge_paths,
+            slug=config.slug,
+            run_id=run_id,
+            iteration=iteration,
+            problem_types=problem_types,
+            error_message=message,
+            fix_summary=fix,
+            resolved=False,
+            outcome_bucket="unknown",
+            submission_score=None,
+        )
+    except Exception:  # noqa: BLE001
+        # Knowledge recording must not block submit abort/retry control.
+        return
+
+
+def _is_missing_kaggle_credentials_error(exc: KaggleCliError) -> bool:
+    text = (exc.message or "") + "\n" + (exc.output or "")
+    lowered = text.lower()
+    if "kaggle.json" in lowered and "could not find" in lowered:
+        return True
+    if "kaggle.json" in lowered and "environment method" in lowered:
+        return True
+    if "api.authenticate" in lowered and "kaggle.json" in lowered:
+        return True
+    return False
+
+
+def _wait_for_submission_outcome(
+    *,
+    slug: str,
+    message: str,
+    submitted_at: datetime,
+    max_attempts: int = _SUBMISSION_POLL_MAX_ATTEMPTS,
+    poll_interval_sec: float = _SUBMISSION_POLL_INTERVAL_SEC,
+) -> dict[str, object] | None:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            rows = list_competition_submissions(slug, dry_run=False)
+        except Exception:  # noqa: BLE001
+            return None
+        match = _select_submission_row(rows=rows, message=message, submitted_at=submitted_at)
+        if match is not None:
+            status = _extract_submission_status(match)
+            score = _extract_submission_score(match)
+            if score is not None:
+                return {
+                    "status": status,
+                    "score": score,
+                    "raw": match,
+                    "checked_at": datetime.now(UTC).isoformat(),
+                }
+            if status in {"complete", "completed", "error", "failed", "cancelled"}:
+                return {
+                    "status": status,
+                    "score": None,
+                    "raw": match,
+                    "checked_at": datetime.now(UTC).isoformat(),
+                }
+        if attempt < max_attempts:
+            time.sleep(poll_interval_sec)
+    return None
+
+
+def _select_submission_row(
+    *,
+    rows: list[dict[str, str]],
+    message: str,
+    submitted_at: datetime,
+) -> dict[str, str] | None:
+    if not rows:
+        return None
+    target = message.strip()
+    with_message = [row for row in rows if _row_matches_submission_message(row, target)]
+    candidates = with_message if with_message else rows
+    rows_with_ts: list[tuple[datetime, dict[str, str]]] = []
+    for row in candidates:
+        ts = _parse_submission_row_time(row)
+        if ts is None:
+            continue
+        rows_with_ts.append((ts, row))
+    if rows_with_ts:
+        window_start = submitted_at.timestamp() - 3600
+        recent = [item for item in rows_with_ts if item[0].timestamp() >= window_start]
+        source = recent or rows_with_ts
+        source.sort(key=lambda item: item[0], reverse=True)
+        return source[0][1]
+    return candidates[0]
+
+
+def _row_matches_submission_message(row: dict[str, str], message: str) -> bool:
+    if not message:
+        return False
+    for key in ("description", "message", "comments", "comment"):
+        value = _get_row_value_ci(row, key)
+        if value and value.strip() == message:
+            return True
+    return False
+
+
+def _parse_submission_row_time(row: dict[str, str]) -> datetime | None:
+    for key in ("date", "submittedDate", "submitted_date", "createdAt", "created_at", "timestamp"):
+        value = _get_row_value_ci(row, key)
+        if not value:
+            continue
+        parsed = _parse_datetime(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _extract_submission_status(row: dict[str, str]) -> str:
+    for key in ("status", "state"):
+        value = _get_row_value_ci(row, key)
+        if value:
+            return value.strip().lower()
+    return "unknown"
+
+
+def _extract_submission_score(row: dict[str, str]) -> float | None:
+    for key in ("publicScore", "public_score", "score", "privateScore", "private_score"):
+        value = _get_row_value_ci(row, key)
+        parsed = _to_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _get_row_value_ci(row: dict[str, str], key: str) -> str | None:
+    target = key.strip().lower()
+    for current_key, value in row.items():
+        if current_key.strip().lower() == target:
+            return value
+    return None
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    raw = str(value).strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y/%m/%d %H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _to_float(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _infer_iteration_from_submission_path(path: Path) -> int | None:
+    try:
+        name = path.parent.name
+        if not name.startswith("iter-"):
+            return None
+        return int(name.split("-", 1)[1])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _record_submission_knowledge(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    problem_types: list[str],
+    pending_problem_insights: list[dict[str, object]],
+    pending_error_fixes: list[dict[str, object]],
+    submission_result: dict[str, object] | None,
+    metric_direction: str,
+    target_score: float | None,
+    top1_score: float | None,
+) -> None:
+    if not submission_result:
+        return
+    outcome_payload = submission_result.get("outcome")
+    if not isinstance(outcome_payload, dict):
+        return
+    online_score = _to_float(outcome_payload.get("score"))
+    if online_score is None:
+        return
+    outcome_bucket = _classify_submission_outcome(
+        score=online_score,
+        direction=metric_direction,
+        target_score=target_score,
+        top1_score=top1_score,
+    )
+    submitted_iteration = submission_result.get("iteration")
+    iteration_value = submitted_iteration if isinstance(submitted_iteration, int) else None
+    if not pending_problem_insights:
+        diagnostics_text = ""
+        if iteration_value is not None:
+            diagnostics_path = config.paths.iter_dir(run_id, iteration_value) / "diagnostics.md"
+            if diagnostics_path.exists():
+                diagnostics_text = diagnostics_path.read_text(encoding="utf-8", errors="ignore")
+        pending_problem_insights.append(
+            {
+                "iteration": iteration_value or 1,
+                "why_poor": diagnostics_text,
+                "how_improved": f"Submitted iteration {iteration_value or 1} result after validation.",
+                "delta_offline": None,
+            }
+        )
+    for item in pending_problem_insights:
+        try:
+            iteration = int(item.get("iteration") or (iteration_value or 1))
+        except (TypeError, ValueError):
+            iteration = iteration_value or 1
+        record_problem_type_insight(
+            knowledge_paths=config.knowledge_paths,
+            slug=config.slug,
+            run_id=run_id,
+            iteration=iteration,
+            problem_types=problem_types,
+            why_poor=str(item.get("why_poor") or ""),
+            how_improved=str(item.get("how_improved") or ""),
+            delta_offline=item.get("delta_offline") if isinstance(item.get("delta_offline"), (int, float)) else None,
+            outcome_bucket=outcome_bucket,
+            submission_score=online_score,
+        )
+    for item in pending_error_fixes:
+        try:
+            iteration = int(item.get("iteration") or (iteration_value or 1))
+        except (TypeError, ValueError):
+            iteration = iteration_value or 1
+        record_error_fix_insight(
+            knowledge_paths=config.knowledge_paths,
+            slug=config.slug,
+            run_id=run_id,
+            iteration=iteration,
+            problem_types=problem_types,
+            error_message=str(item.get("error_message") or ""),
+            fix_summary=str(item.get("fix_summary") or ""),
+            resolved=bool(item.get("resolved", True)),
+            outcome_bucket=outcome_bucket,
+            submission_score=online_score,
+        )
+
+
+def _classify_submission_outcome(
+    *,
+    score: float,
+    direction: str,
+    target_score: float | None,
+    top1_score: float | None,
+) -> str:
+    if target_score is not None and _meets_target(score, target_score, direction):
+        return "good"
+    if top1_score is not None:
+        if direction == "minimize":
+            gap = score - top1_score
+        else:
+            gap = top1_score - score
+        scale = max(abs(top1_score), 1.0)
+        if max(gap, 0.0) / scale <= 0.1:
+            return "good"
+    return "low"
 
 
 def _submission_message(config: AutopilotConfig, run_id: str, best_score: float | None) -> str:

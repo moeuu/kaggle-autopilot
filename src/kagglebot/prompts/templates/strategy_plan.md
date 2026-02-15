@@ -1,6 +1,6 @@
-# Claude Strategy Request
+# Strategy Plan Request
 
-You are Claude Code. Use web search as needed to propose a strong solution plan.
+You are Strategy Code. Use web search as needed to propose a strong solution plan.
 Follow Kaggle rules: no external data unless explicitly allowed. No secrets.
 
 Brief content (read this first):
@@ -26,7 +26,7 @@ Compute:
 
 Return output with these exact section markers:
 
-===CLAUDE_STRATEGY===
+===STRATEGY_PLAN===
 Provide a deep solution strategy. Include model choices, preprocessing, CV plan, and risk notes.
 
 ===CODEX_IMPLEMENTATION_INSTRUCTIONS===

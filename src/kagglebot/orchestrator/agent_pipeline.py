@@ -5,15 +5,25 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.agents.claude_runner import run_claude
 from kagglebot.agents.codex_runner import run_codex
+from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exceptions import KaggleBotError
+from kagglebot.knowledge import (
+    derive_problem_types,
+    format_error_fix_insights,
+    format_problem_type_insights,
+    resolve_error_fix_insights,
+    resolve_problem_type_insights,
+)
 from kagglebot.logging_utils import truncate_lines
-from kagglebot.paths import CompetitionPaths
+from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.types import PlanConfig
 from kagglebot.validators import scan_text_for_secrets
+
+_PLANNING_CODEX_MODEL = "gpt-5.3-codex"
+_PLANNING_REASONING_EFFORT = "extra_high"
 
 
 @dataclass(frozen=True)
@@ -33,14 +43,14 @@ def run_agent_pipeline(*, paths: CompetitionPaths, config: AgentPipelineConfig) 
     _ensure_context_materials(paths)
 
     brief_dir = paths.context_agent_dir / "brief"
-    claude_dir = paths.context_agent_dir / "claude"
+    strategy_dir = paths.context_agent_dir / "strategy"
     implement_dir = paths.context_agent_dir / "implement"
     brief_dir.mkdir(parents=True, exist_ok=True)
-    claude_dir.mkdir(parents=True, exist_ok=True)
+    strategy_dir.mkdir(parents=True, exist_ok=True)
     implement_dir.mkdir(parents=True, exist_ok=True)
 
     brief_path = _run_codex_brief(paths, config, brief_dir)
-    instructions_path = _run_claude_strategy(paths, config, claude_dir, brief_path)
+    instructions_path = _run_strategy_plan(paths, config, strategy_dir, brief_path)
     _run_codex_kernel_implementation(paths, config, implement_dir, instructions_path)
 
 
@@ -61,12 +71,16 @@ def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, outpu
             "sample_submission_path": str(paths.sample_submission_path),
         },
     )
+    prompt_text = _append_problem_type_knowledge(
+        prompt_text,
+        _load_problem_type_knowledge_text(paths=paths, repo_root=config.repo_root),
+    )
     _assert_no_secrets(prompt_text)
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_block("codex brief prompt (sent)", prompt_text)
 
-    brief_path = paths.context_agent_dir / "brief_for_claude.md"
+    brief_path = paths.context_agent_dir / "brief_for_strategy.md"
     brief_text, error_text = _run_codex_brief_with_retry(
         prompt_path=prompt_path,
         output_dir=output_dir,
@@ -75,7 +89,7 @@ def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, outpu
     )
     if not brief_text:
         brief_text = _build_fallback_brief(paths, config, error_text)
-    _print_block("codex brief (used for Claude)", brief_text)
+    _print_block("codex brief (used for GPT)", brief_text)
     brief_path.write_text(brief_text + "\n", encoding="utf-8")
     return brief_path
 
@@ -94,7 +108,13 @@ def _run_codex_brief_with_retry(
         allowed_prefixes = [paths.context_agent_dir]
         guard_snapshot = _backup_guarded_files(config.repo_root, allowed_prefixes)
         before = _snapshot_tree(config.repo_root)
-        result = run_codex(prompt_path, output_dir, dry_run=config.dry_run)
+        result = run_codex(
+            prompt_path,
+            output_dir,
+            dry_run=config.dry_run,
+            model=_PLANNING_CODEX_MODEL,
+            reasoning_effort=_PLANNING_REASONING_EFFORT,
+        )
         after = _snapshot_tree(config.repo_root)
         _enforce_allowlist_changes(
             root=config.repo_root,
@@ -113,32 +133,35 @@ def _run_codex_brief_with_retry(
     return "", last_error
 
 
-def _run_claude_strategy(
+def _run_strategy_plan(
     paths: CompetitionPaths,
     config: AgentPipelineConfig,
     output_dir: Path,
     brief_path: Path,
 ) -> Path:
-    template = _load_template("claude_strategy.md")
+    template = _load_template("strategy_plan.md")
     brief_content = _read_text(brief_path)
+    knowledge_text = _load_problem_type_knowledge_text(paths=paths, repo_root=config.repo_root)
     compact_mode = False
-    prompt_text = _build_claude_prompt(
+    prompt_text = _build_strategy_prompt(
         template=template,
         config=config,
         paths=paths,
         brief_content=brief_content,
         compact=compact_mode,
     )
-    if len(prompt_text) > _CLAUDE_PROMPT_MAX_CHARS:
+    prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+    if len(prompt_text) > _STRATEGY_PROMPT_MAX_CHARS:
         compact_mode = True
-        print("[yellow]note[/yellow]: Claude prompt too large; using compact context to avoid length limits.")
-        prompt_text = _build_claude_prompt(
+        print("[yellow]note[/yellow]: GPT prompt too large; using compact context to avoid length limits.")
+        prompt_text = _build_strategy_prompt(
             template=template,
             config=config,
             paths=paths,
             brief_content=brief_content,
             compact=compact_mode,
         )
+        prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
 
     attempt = 0
     plan_payload: dict[str, object] | None = None
@@ -147,24 +170,25 @@ def _run_claude_strategy(
         _assert_no_secrets(prompt_text)
         prompt_path = output_dir / "prompt.md"
         prompt_path.write_text(prompt_text, encoding="utf-8")
-        _print_block("claude prompt (sent)", prompt_text)
+        _print_block("gpt strategy prompt (sent)", prompt_text)
 
-        result = run_claude(prompt_path, output_dir, dry_run=config.dry_run)
+        result = run_strategy(prompt_path, output_dir, dry_run=config.dry_run)
         if result.returncode != 0:
             if "Prompt is too long" in result.stdout and not compact_mode:
                 compact_mode = True
-                print("[yellow]note[/yellow]: Claude prompt too long; retrying with compact context.")
-                prompt_text = _build_claude_prompt(
+                print("[yellow]note[/yellow]: GPT prompt too long; retrying with compact context.")
+                prompt_text = _build_strategy_prompt(
                     template=template,
                     config=config,
                     paths=paths,
                     brief_content=brief_content,
                     compact=compact_mode,
                 )
+                prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
                 continue
-            if _is_claude_rate_limited(result.stdout, result.stderr):
+            if _is_strategy_rate_limited(result.stdout, result.stderr):
                 error_text = (result.stderr or result.stdout).strip()
-                print("[yellow]note[/yellow]: Claude rate-limited; using fallback strategy.")
+                print("[yellow]note[/yellow]: GPT rate-limited; using fallback strategy.")
                 strategy_text, instructions_text, plan_payload = _build_fallback_strategy(
                     paths=paths,
                     config=config,
@@ -172,18 +196,18 @@ def _run_claude_strategy(
                     error_text=error_text,
                 )
                 transcript = _format_fallback_transcript(error_text)
-                return _write_claude_outputs(
+                return _write_strategy_outputs(
                     paths=paths,
                     strategy_text=strategy_text,
                     instructions_text=instructions_text,
                     transcript_text=transcript,
                     plan_payload=plan_payload,
                 )
-            raise KaggleBotError(f"Claude strategy failed: {result.stderr or result.stdout}")
+            raise KaggleBotError(f"GPT strategy failed: {result.stderr or result.stdout}")
 
-        strategy_text, instructions_text = _split_claude_output(result.stdout)
+        strategy_text, instructions_text = _split_strategy_output(result.stdout)
         plan_payload, plan_issue = _extract_plan_json(result.stdout)
-        issues = _validate_claude_output(
+        issues = _validate_strategy_output(
             strategy_text,
             instructions_text,
             plan_payload,
@@ -193,9 +217,9 @@ def _run_claude_strategy(
         if issues:
             if attempt >= _QUALITY_RETRY_LIMIT:
                 issue_text = "\n".join(f"- {issue}" for issue in issues)
-                raise KaggleBotError(f"Claude strategy failed quality gate:\n{issue_text}")
+                raise KaggleBotError(f"GPT strategy failed quality gate:\n{issue_text}")
             attempt += 1
-            print("[yellow]note[/yellow]: Claude output failed quality gate; retrying with stricter instructions.")
+            print("[yellow]note[/yellow]: GPT output failed quality gate; retrying with stricter instructions.")
             prompt_text = _apply_quality_gate(
                 template=template,
                 config=config,
@@ -204,7 +228,8 @@ def _run_claude_strategy(
                 compact=compact_mode,
                 issues=issues,
             )
-            if len(prompt_text) > _CLAUDE_PROMPT_MAX_CHARS and not compact_mode:
+            prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+            if len(prompt_text) > _STRATEGY_PROMPT_MAX_CHARS and not compact_mode:
                 compact_mode = True
                 prompt_text = _apply_quality_gate(
                     template=template,
@@ -214,10 +239,11 @@ def _run_claude_strategy(
                     compact=compact_mode,
                     issues=issues,
                 )
+                prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
             continue
         break
 
-    return _write_claude_outputs(
+    return _write_strategy_outputs(
         paths=paths,
         strategy_text=strategy_text,
         instructions_text=instructions_text,
@@ -240,7 +266,7 @@ def _run_codex_kernel_implementation(
         kernel_path.write_text("# kagglebot kernel\n", encoding="utf-8")
 
     template = _load_template("codex_kernel_impl.md")
-    strategy_path = paths.context_agent_dir / "claude_strategy.md"
+    strategy_path = paths.context_agent_dir / "strategy_plan.md"
     blocked_modules = _load_blocked_modules(paths.context_dir)
     blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = _render_template(
@@ -261,7 +287,13 @@ def _run_codex_kernel_implementation(
     allowed_prefixes = [paths.kernel_source_dir, paths.runs_dir, paths.context_dir]
     guard_snapshot = _backup_guarded_files(config.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.repo_root)
-    result = run_codex(prompt_path, output_dir, dry_run=config.dry_run)
+    result = run_codex(
+        prompt_path,
+        output_dir,
+        dry_run=config.dry_run,
+        model=_PLANNING_CODEX_MODEL,
+        reasoning_effort=_PLANNING_REASONING_EFFORT,
+    )
     after = _snapshot_tree(config.repo_root)
     _enforce_allowlist_changes(
         root=config.repo_root,
@@ -347,7 +379,7 @@ def _load_blocked_modules(context_dir: Path) -> list[str]:
     return []
 
 
-def _split_claude_output(text: str) -> tuple[str, str]:
+def _split_strategy_output(text: str) -> tuple[str, str]:
     strategy_marker = "===STRATEGY==="
     instructions_marker = "===CODEX_INSTRUCTIONS==="
     strategy_lines: list[str] = []
@@ -440,7 +472,7 @@ def _write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> 
     paths.plan_path.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
 
 
-def _write_claude_outputs(
+def _write_strategy_outputs(
     *,
     paths: CompetitionPaths,
     strategy_text: str,
@@ -451,19 +483,19 @@ def _write_claude_outputs(
     if plan_payload is not None:
         _write_plan_payload(paths, plan_payload)
 
-    transcript_path = paths.context_agent_dir / "claude_transcript.txt"
+    transcript_path = paths.context_agent_dir / "strategy_transcript.txt"
     transcript_path.write_text(transcript_text, encoding="utf-8")
 
-    _print_block("claude strategy (human-readable)", strategy_text)
-    _print_block("claude instructions for codex", instructions_text)
-    strategy_path = paths.context_agent_dir / "claude_strategy.md"
+    _print_block("gpt strategy (human-readable)", strategy_text)
+    _print_block("gpt instructions for codex", instructions_text)
+    strategy_path = paths.context_agent_dir / "strategy_plan.md"
     instructions_path = paths.context_agent_dir / "codex_instructions.md"
     strategy_path.write_text(strategy_text + "\n", encoding="utf-8")
     instructions_path.write_text(instructions_text + "\n", encoding="utf-8")
     return instructions_path
 
 
-_CLAUDE_PROMPT_MAX_CHARS = 12000
+_STRATEGY_PROMPT_MAX_CHARS = 12000
 _LOG_MAX_CHARS = 500
 _MIN_STRATEGY_CHARS = 1200
 _MIN_INSTRUCTIONS_CHARS = 200
@@ -478,10 +510,10 @@ _PROTECTED_PATHS = (
     "pyproject.toml",
     ".gitignore",
     "AGENTS.md",
-    "CLAUDE.md",
+    "STRATEGY.md",
     "SECURITY.md",
 )
-_CLAUDE_RATE_LIMIT_MARKERS = (
+_STRATEGY_RATE_LIMIT_MARKERS = (
     "you've hit your limit",
     "rate limit",
     "too many requests",
@@ -492,7 +524,7 @@ _CLAUDE_RATE_LIMIT_MARKERS = (
 )
 
 
-def _build_claude_prompt(
+def _build_strategy_prompt(
     *,
     template: str,
     config: AgentPipelineConfig,
@@ -538,7 +570,7 @@ def _apply_quality_gate(
     compact: bool,
     issues: list[str],
 ) -> str:
-    base_prompt = _build_claude_prompt(
+    base_prompt = _build_strategy_prompt(
         template=template,
         config=config,
         paths=paths,
@@ -555,23 +587,58 @@ def _apply_quality_gate(
     return base_prompt + gate
 
 
-def _is_claude_rate_limited(stdout: str, stderr: str) -> bool:
+def _append_problem_type_knowledge(prompt_text: str, knowledge_text: str) -> str:
+    clean = knowledge_text.strip()
+    if not clean:
+        return prompt_text
+    return f"{prompt_text}\n\n## Problem-Type Knowledge\n{clean}\n"
+
+
+def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Path, limit: int = 5) -> str:
+    try:
+        profile_text = _read_text(paths.dataset_profile_path)
+        profile = json.loads(profile_text) if profile_text else {}
+        if not isinstance(profile, dict):
+            profile = {}
+        problem_types = derive_problem_types(profile)
+        knowledge_paths = KnowledgePaths(workdir=repo_root)
+        insights = resolve_problem_type_insights(
+            knowledge_paths,
+            problem_types,
+            limit=limit,
+        )
+        error_insights = resolve_error_fix_insights(
+            knowledge_paths,
+            problem_types,
+            limit=limit,
+        )
+        sections = [
+            format_problem_type_insights(insights, limit=limit),
+            "",
+            format_error_fix_insights(error_insights, limit=limit),
+        ]
+        return "\n".join(section for section in sections if section is not None)
+    except Exception:  # noqa: BLE001
+        return "No prior problem-type insights available."
+
+
+def _is_strategy_rate_limited(stdout: str, stderr: str) -> bool:
     haystack = f"{stdout}\n{stderr}".lower()
-    return any(marker in haystack for marker in _CLAUDE_RATE_LIMIT_MARKERS)
+    return any(marker in haystack for marker in _STRATEGY_RATE_LIMIT_MARKERS)
 
 
 def _format_fallback_transcript(error_text: str) -> str:
     lines = [
-        "Claude unavailable; using fallback strategy.",
+        "GPT unavailable; using fallback strategy.",
     ]
     if error_text:
         lines.append("")
-        lines.append("Claude error:")
+        lines.append("GPT error:")
         lines.append(error_text)
     return "\n".join(lines).strip() + "\n"
 
 
-def _validate_claude_output(
+def _validate_strategy_output(
     strategy_text: str,
     instructions_text: str,
     plan_payload: dict[str, object] | None,
@@ -657,7 +724,7 @@ def _build_fallback_strategy(
     sample_submission_head = _truncate(_read_sample_submission_head(paths), 400)
 
     strategy_lines = [
-        "# Fallback Strategy (Claude unavailable)",
+        "# Fallback Strategy (GPT unavailable)",
         "",
         "## Problem",
         "Use the local context to implement a strong, competition-appropriate model and a valid submission.",
@@ -700,7 +767,7 @@ def _build_fallback_strategy(
         f"- Rules URL: {rules_url}",
         f"- Local dataset profile: {paths.dataset_profile_path}",
         f"- Sample submission: {paths.sample_submission_path}",
-        f"- Error: {error_text or 'Claude rate limit'}",
+        f"- Error: {error_text or 'GPT rate limit'}",
     ]
     strategy_text = "\n".join(strategy_lines).strip()
     plan_payload = _build_fallback_plan_payload(paths)
@@ -708,7 +775,7 @@ def _build_fallback_strategy(
     instructions_lines = [
         "# Fallback Codex Instructions",
         "",
-        "Claude was rate-limited. Follow these steps to implement a strong model in kernel.py.",
+        "GPT was rate-limited. Follow these steps to implement a strong model in kernel.py.",
         "",
         "1) Inspect `/kaggle/input/{slug}/` to locate train/test files and the sample submission.",
         "2) If train/test CSV files exist (tabular):",

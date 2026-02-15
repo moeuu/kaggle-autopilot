@@ -1,6 +1,6 @@
-# Claude Strategy Request
+# Strategy Plan Request
 
-You are Claude Code. This is a hard problem: think deeply and prioritize maximum accuracy.
+You are Strategy Code. This is a hard problem: think deeply and prioritize maximum accuracy.
 Use web search and cite sources unless internet is explicitly off. Follow Kaggle rules:
 no external data unless explicitly allowed. Do not include secrets.
 

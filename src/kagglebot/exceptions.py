@@ -19,13 +19,21 @@ class KaggleCliError(KaggleBotError):
     exit_code = 4
 
     def __init__(
-        self, message: str, command: list[str] | None = None, exit_code: int | None = None, output: str = ""
+        self,
+        message: str,
+        command: list[str] | None = None,
+        exit_code: int | None = None,
+        output: str = "",
+        stdout: str = "",
+        stderr: str = "",
     ) -> None:
         super().__init__(message)
         self.message = message
         self.command = command
         self.exit_code = exit_code or 4
         self.output = output
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class KaggleNetworkError(KaggleCliError):
@@ -46,6 +54,14 @@ class ValidationError(KaggleBotError):
     exit_code = 6
 
 
+class SubmissionValidationError(ValidationError):
+    """Submission validation failed before calling Kaggle CLI."""
+
+
+class SubmissionCliError(KaggleCliError):
+    """Kaggle CLI submit command failed."""
+
+
 class DuplicateSubmissionError(KaggleBotError):
     """Submission hash already exists in the local ledger."""
 
@@ -62,6 +78,12 @@ class MaxSubmissionsError(KaggleBotError):
     """Max submissions quota exceeded for autopilot run."""
 
     exit_code = 14
+
+
+class SubmitAbortedError(KaggleBotError):
+    """Submission flow aborted and must not be retried in the same run."""
+
+    exit_code = 4
 
 
 class GPUNotAvailableError(KaggleBotError):

@@ -3,7 +3,7 @@
 ## Role
 You are the implementer/tester for this repo.
 - Prefer small, testable changes with clear diffs.
-- If asked for architecture or design review, ask for guidance or route to Claude Code (see CLAUDE.md).
+- If asked for architecture or design review, ask for guidance or route to Strategy Code (see STRATEGY.md).
 
 ## Repository purpose
 Build a Kaggle competition automation CLI:
@@ -21,7 +21,7 @@ Build a Kaggle competition automation CLI:
 
 ## Operational safety defaults
 - Default to NO DRY RUN for end-to-end command; use `--dry-run` for previews.
-- Submissions require an explicit flag (e.g., `--submit`) AND a human-readable message.
+- Submissions require a human-readable message.
 - Require `--force` to allow side effects beyond local validation/ledgers.
 - Implement duplicate submission detection (hash + local history).
 - Implement strict submission validation:
@@ -33,7 +33,7 @@ Build a Kaggle competition automation CLI:
 1) Before large changes, produce a short plan and list touched files.
 2) Keep changes minimal and well-tested.
 3) Run unit tests (`uv run pytest -q`) and linters (`uv run ruff check .`, `uv run ruff format .`) before concluding.
-4) Update docs (README/CLAUDE.md) if behavior changes.
+4) Update docs (README/STRATEGY.md) if behavior changes.
 
 ## Tooling
 - Use `uv` for dependency management and command execution only (no pip/poetry).
@@ -52,8 +52,8 @@ Build a Kaggle competition automation CLI:
 - If a CLI call fails due to missing rule acceptance, print the Rules URL and exit.
 
 ## What "done" looks like for MVP
-- `kagglebot autopilot <slug> --agent codex --compute local_cpu` downloads, trains, and produces a valid submission.csv in artifacts/
-- `kagglebot autopilot <slug> --agent codex --compute local_cpu --submit` submits once (with guardrails)
+- `kagglebot autopilot <slug> --compute local_gpu` downloads, trains, and produces a valid submission.csv in artifacts/
+- `kagglebot autopilot <slug> --compute local_gpu` submits once (with guardrails)
 - Works on a common tabular competition (e.g., Titanic-like structure)
 
 ---

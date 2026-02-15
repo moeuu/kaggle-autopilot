@@ -65,6 +65,24 @@ def submit_competition(slug: str, submission_file: Path, message: str, *, dry_ru
     return _run_kaggle(args, slug=slug, dry_run=dry_run)
 
 
+def list_competition_submissions(slug: str, *, dry_run: bool = False) -> list[dict[str, str]]:
+    output = _run_kaggle(
+        ["kaggle", "competitions", "submissions", "-c", slug, "--csv"],
+        slug=slug,
+        dry_run=dry_run,
+    )
+    if dry_run:
+        return []
+    rows: list[dict[str, str]] = []
+    for row in csv.DictReader(output.splitlines()):
+        if not row:
+            continue
+        normalized = {str(key): "" if value is None else str(value) for key, value in row.items() if key}
+        if normalized:
+            rows.append(normalized)
+    return rows
+
+
 def check_rules_accepted(slug: str, *, dry_run: bool = False) -> bool:
     args = ["kaggle", "competitions", "list", "--search", slug, "--csv"]
     output = _run_kaggle(args, slug=None, dry_run=dry_run)

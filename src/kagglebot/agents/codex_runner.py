@@ -9,7 +9,6 @@ from functools import lru_cache
 from pathlib import Path
 
 from kagglebot.exec_utils import run_command
-from kagglebot.logging_utils import truncate_lines
 
 
 @dataclass(frozen=True)
@@ -26,7 +25,9 @@ def run_codex(
     output_dir: Path,
     *,
     dry_run: bool = False,
-    heartbeat_label: str = "still thinking",
+    heartbeat_label: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> CodexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_text = prompt_path.read_text(encoding="utf-8")
@@ -45,6 +46,11 @@ def run_codex(
         )
 
     args = ["codex", "exec"]
+    if model:
+        args += ["-m", model]
+    normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+    if normalized_effort:
+        args += ["-c", f'model_reasoning_effort="{normalized_effort}"']
     supported = _supported_flags()
     if "-a" in supported:
         args += ["-a", "never"]
@@ -60,9 +66,12 @@ def run_codex(
     ]
     stop_event = threading.Event()
     start_time = time.monotonic()
+    label = heartbeat_label.strip() if heartbeat_label else None
+    label_suffix = f" [{label}]" if label else ""
+    print(f"codex running... (0s total){label_suffix}", flush=True)
     heartbeat = threading.Thread(
         target=_heartbeat,
-        args=(stop_event, start_time, heartbeat_label),
+        args=(stop_event, start_time, label),
         daemon=True,
     )
     heartbeat.start()
@@ -90,6 +99,8 @@ def run_codex(
     finally:
         stop_event.set()
         heartbeat.join(timeout=1.0)
+    total_elapsed = int(time.monotonic() - start_time)
+    print(f"codex done... ({total_elapsed}s total, exit={returncode}){label_suffix}", flush=True)
     stdout_text = "".join(stdout_chunks)
     transcript_path.write_text(stdout_text, encoding="utf-8")
     if not last_message_path.exists():
@@ -103,15 +114,28 @@ def run_codex(
     )
 
 
+def _normalize_reasoning_effort(effort: str | None) -> str | None:
+    if effort is None:
+        return None
+    normalized = effort.strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return None
+    # Codex CLI accepts low/medium/high; map user-facing "extra high" to high.
+    if normalized == "extra_high":
+        return "high"
+    return normalized
+
+
 def _heartbeat(
     stop_event: threading.Event,
     start_time: float,
-    label: str,
+    label: str | None,
     interval: float = 30.0,
 ) -> None:
     while not stop_event.wait(interval):
         elapsed = int(time.monotonic() - start_time)
-        print(f"codex: {label}... ({elapsed}s)")
+        label_suffix = f" [{label}]" if label else ""
+        print(f"codex running... ({elapsed}s total){label_suffix}", flush=True)
 
 
 def _emit_codex_event(line: str) -> None:
@@ -129,12 +153,9 @@ def _emit_codex_event(line: str) -> None:
         command = item.get("command", "").strip()
         status = item.get("status", "")
         exit_code = item.get("exit_code")
-        output = item.get("aggregated_output") or item.get("stdout") or ""
         if status == "completed":
             suffix = f" (exit {exit_code})" if exit_code is not None else ""
             print(f"codex: command completed: {command}{suffix}")
-            if output:
-                print(truncate_lines(output.rstrip(), max_lines=5))
         elif status:
             print(f"codex: command {status}: {command}")
         return

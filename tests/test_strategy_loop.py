@@ -1,4 +1,4 @@
-"""Tests for the codex -> claude -> codex agent pipeline."""
+"""Tests for the codex -> gpt -> codex agent pipeline."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class DummyCodexResult:
         self.last_message_path.write_text(message + "\n", encoding="utf-8")
 
 
-class DummyClaudeResult:
+class DummyStrategyResult:
     def __init__(self, output: str) -> None:
         self.returncode = 0
         self.stdout = output
@@ -109,7 +109,7 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
             kernel_path.write_text("print('kernel')\n", encoding="utf-8")
         return DummyCodexResult(output_dir)
 
-    def fake_run_claude(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyClaudeResult:  # noqa: ARG001
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         text = "\n".join(
             [
@@ -121,16 +121,20 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
                 _long_instructions_text(),
             ]
         )
-        return DummyClaudeResult(text)
+        return DummyStrategyResult(text)
 
     monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_claude", fake_run_claude)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+    monkeypatch.setattr(
+        "kagglebot.orchestrator.agent_pipeline._load_problem_type_knowledge_text",
+        lambda *args, **kwargs: "Problem-type knowledge (test fixture)",
+    )
 
     config = AgentPipelineConfig(
         slug="demo",
         competition_url="https://www.kaggle.com/competitions/demo",
-        compute="local_cpu",
-        accelerator="cpu",
+        compute="local_gpu",
+        accelerator="gpu",
         internet="off",
         run_id="run-1",
         dry_run=False,
@@ -139,15 +143,16 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
     run_agent_pipeline(paths=paths, config=config)
 
     agent_dir = paths.context_agent_dir
-    assert (agent_dir / "brief_for_claude.md").exists()
-    assert (agent_dir / "claude_strategy.md").exists()
+    assert (agent_dir / "brief_for_strategy.md").exists()
+    assert (agent_dir / "strategy_plan.md").exists()
     assert (agent_dir / "codex_instructions.md").exists()
-    assert (agent_dir / "claude_transcript.txt").exists()
+    assert (agent_dir / "strategy_transcript.txt").exists()
     assert len(codex_calls) == 2
     brief_prompt = (agent_dir / "brief" / "prompt.md").read_text(encoding="utf-8")
     assert str(paths.overview_md_path) in brief_prompt
     assert str(paths.data_md_path) in brief_prompt
     assert str(paths.rules_md_path) in brief_prompt
+    assert "Problem-type knowledge (test fixture)" in brief_prompt
 
 
 def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path: Path) -> None:
@@ -160,7 +165,7 @@ def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path:
             (tmp_path / "oops.txt").write_text("nope", encoding="utf-8")
         return DummyCodexResult(output_dir)
 
-    def fake_run_claude(*args, **kwargs):  # noqa: ARG001
+    def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
         text = "\n".join(
             [
                 "===STRATEGY===",
@@ -171,16 +176,16 @@ def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path:
                 _long_instructions_text(),
             ]
         )
-        return DummyClaudeResult(text)
+        return DummyStrategyResult(text)
 
     monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_claude", fake_run_claude)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
 
     config = AgentPipelineConfig(
         slug="demo",
         competition_url=None,
-        compute="local_cpu",
-        accelerator="cpu",
+        compute="local_gpu",
+        accelerator="gpu",
         internet="off",
         run_id="run-1",
         dry_run=False,
@@ -203,7 +208,7 @@ def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None
             kernel_path.write_text("print('ok')\n", encoding="utf-8")
         return DummyCodexResult(output_dir)
 
-    def fake_run_claude(*args, **kwargs):  # noqa: ARG001
+    def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
         text = "\n".join(
             [
                 "===STRATEGY===",
@@ -214,16 +219,16 @@ def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None
                 _long_instructions_text(),
             ]
         )
-        return DummyClaudeResult(text)
+        return DummyStrategyResult(text)
 
     monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_claude", fake_run_claude)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
 
     config = AgentPipelineConfig(
         slug="demo",
         competition_url=None,
-        compute="local_cpu",
-        accelerator="cpu",
+        compute="local_gpu",
+        accelerator="gpu",
         internet="off",
         run_id="run-1",
         dry_run=False,
