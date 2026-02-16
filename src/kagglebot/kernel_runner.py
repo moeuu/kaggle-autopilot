@@ -5,12 +5,16 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich import print
 
+from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
     KaggleCliError,
     KaggleNetworkError,
@@ -18,6 +22,7 @@ from kagglebot.exceptions import (
     KernelTimeoutError,
     RulesNotAcceptedError,
 )
+from kagglebot.exec_utils import run_command
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -39,6 +44,13 @@ _OBJECT_COERCE_FILENAME = "object_coerce.json"
 _OBJECT_COERCE_SHIM_MARKER = "# kagglebot: object-coerce-shim"
 _DEVICE_COERCE_FILENAME = "device_coerce.json"
 _DEVICE_COERCE_SHIM_MARKER = "# kagglebot: device-coerce-shim"
+_LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
+_LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
+
+_PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_seed(?P<seed>\d+)_fold(?P<fold>\d+)")
+_PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
+    r"\b(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*seed=(?P<seed>\d+)\s+fold=(?P<fold>\d+)\b"
+)
 
 
 @dataclass(frozen=True)
@@ -97,31 +109,27 @@ class KernelPackageBuilder:
         kernel_slug = _resolve_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
         custom_kernel_dir = config.base_dir / config.slug / "kernel"
+        custom_kernel_path = custom_kernel_dir / "kernel.py"
         ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=config.base_dir, slug=config.slug)
-        if custom_kernel_dir.exists():
-            _copy_kernel_sources(custom_kernel_dir, kernel_dir)
-            _ensure_kernel_import_path(kernel_dir)
-            _inline_kernel_modules(kernel_dir)
-            _inject_data_dir_resolver(kernel_dir)
-            _inject_column_map_shim(kernel_dir, config.base_dir / config.slug / "context")
-            _inject_column_fill_shim(kernel_dir, config.base_dir / config.slug / "context")
-            _inject_object_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
-            _inject_device_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
-            ensure_kernel_sources_valid(kernel_dir)
-        else:
-            _write_kernel_script(
-                kernel_dir=kernel_dir,
-                slug=config.slug,
-                accelerator=config.accelerator,
-                score_source=config.score_source,
-                metric=config.metric,
-                direction=config.direction,
-                holdout_frac=config.holdout_frac,
-                cv_folds=config.cv_folds,
-                seed=config.seed,
-                run_id=config.run_id,
-                iteration=config.iteration,
+        if not custom_kernel_path.exists():
+            raise KernelFailedError(
+                "Authoritative kernel entrypoint is missing. "
+                f"Expected: {custom_kernel_path}. "
+                "Generate/update artifacts/<slug>/kernel/kernel.py before running training."
             )
+        _copy_kernel_sources(custom_kernel_dir, kernel_dir)
+        _sync_plan_snapshot(
+            plan_path=config.base_dir / config.slug / "plan.json",
+            targets=[kernel_dir / "plan.json"],
+        )
+        _ensure_kernel_import_path(kernel_dir)
+        _inline_kernel_modules(kernel_dir)
+        _inject_data_dir_resolver(kernel_dir)
+        _inject_column_map_shim(kernel_dir, config.base_dir / config.slug / "context")
+        _inject_column_fill_shim(kernel_dir, config.base_dir / config.slug / "context")
+        _inject_object_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
+        _inject_device_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
+        ensure_kernel_sources_valid(kernel_dir)
         _write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
@@ -258,98 +266,506 @@ def run_kernel(
     dry_run: bool,
     timeout_minutes: int | None,
 ) -> KernelRunResult:
-    kernel_dir = base_dir / slug / "kernels" / run_id
-    output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
-    logs_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "logs"
-    kernel_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir.mkdir(parents=True, exist_ok=True)
-
-    if not dry_run and not check_rules_accepted(slug, dry_run=False):
-        raise RulesNotAcceptedError("Competition rules not accepted.")
-
-    if not dry_run:
-        print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
-        kernels_init(kernel_dir, dry_run=False)
-
-    kernel_slug = _resolve_kernel_slug(kernel_name, slug, run_id, iteration)
-    kernel_id = f"{kaggle_username}/{kernel_slug}"
-    custom_kernel_dir = base_dir / slug / "kernel"
-    ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=base_dir, slug=slug)
-    if custom_kernel_dir.exists():
-        _copy_kernel_sources(custom_kernel_dir, kernel_dir)
-        _ensure_kernel_import_path(kernel_dir)
-        _inline_kernel_modules(kernel_dir)
-        _inject_data_dir_resolver(kernel_dir)
-        _inject_column_map_shim(kernel_dir, base_dir / slug / "context")
-        _inject_column_fill_shim(kernel_dir, base_dir / slug / "context")
-        _inject_object_coerce_shim(kernel_dir, base_dir / slug / "context")
-        _inject_device_coerce_shim(kernel_dir, base_dir / slug / "context")
-        ensure_kernel_sources_valid(kernel_dir)
-    else:
-        _write_kernel_script(
-            kernel_dir=kernel_dir,
-            slug=slug,
-            accelerator=accelerator,
-            score_source=score_source,
-            metric=metric,
-            direction=direction,
-            holdout_frac=holdout_frac,
-            cv_folds=cv_folds,
-            seed=seed,
-            run_id=run_id,
-            iteration=iteration,
-        )
-    _write_kernel_metadata(
-        kernel_dir=kernel_dir,
-        kernel_id=kernel_id,
-        title=kernel_slug,
-        code_file="kernel.py",
+    build_config = KernelBuildConfig(
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        base_dir=base_dir,
+        kaggle_username=kaggle_username,
+        kernel_name=kernel_name,
         accelerator=accelerator,
         enable_internet=enable_internet,
-        competition_slug=slug,
+        score_source=score_source,
+        metric=metric,
+        direction=direction,
+        holdout_frac=holdout_frac,
+        cv_folds=cv_folds,
+        seed=seed,
+        dry_run=dry_run,
     )
-    validate_kernel_package(kernel_dir)
+    preparation = KernelPackageBuilder().prepare(build_config)
 
     if dry_run:
-        return KernelRunResult(kernel_id=kernel_id, output_dir=output_dir, submission_path=None, metrics_path=None)
+        return KernelRunResult(
+            kernel_id=preparation.kernel_id,
+            output_dir=preparation.output_dir,
+            submission_path=None,
+            metrics_path=None,
+        )
 
-    print(f"[cyan]kernel push[/cyan]: {kernel_dir}")
-    push_attempt = 1
-    push_output = kernels_push(kernel_dir, slug=slug, dry_run=False)
-    _write_push_log(logs_dir, push_attempt, push_output)
-    pushed_kernel_id = _extract_kernel_id_from_push(push_output)
-    if pushed_kernel_id and pushed_kernel_id != kernel_id:
-        print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
-        kernel_id = pushed_kernel_id
-    kernel_id = _resolve_kernel_id(kernel_id, kernel_slug)
-    resolved_id = _wait_for_kernel_registration(kernel_id, kernel_slug)
-    if not resolved_id:
-        print("[yellow]kernel not found after push[/yellow]: retrying once")
-        push_attempt += 1
-        push_output = kernels_push(kernel_dir, slug=slug, dry_run=False)
-        _write_push_log(logs_dir, push_attempt, push_output)
-        pushed_kernel_id = _extract_kernel_id_from_push(push_output)
-        if pushed_kernel_id and pushed_kernel_id != kernel_id:
-            print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
-            kernel_id = pushed_kernel_id
-        kernel_id = _resolve_kernel_id(kernel_id, kernel_slug)
-        resolved_id = _wait_for_kernel_registration(kernel_id, kernel_slug)
-        if not resolved_id:
-            raise KernelFailedError("Kaggle kernel not found after push; aborting.")
-        kernel_id = resolved_id
-    else:
-        kernel_id = resolved_id
-    print(f"[cyan]kernel status[/cyan]: {kernel_id}")
-    _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=output_dir)
-    print(f"[cyan]kernel output[/cyan]: {output_dir}")
-    kernels_output(kernel_id, output_dir, slug=slug, dry_run=False)
-
-    submission_path = find_submission_file(output_dir)
-    metrics_path = _find_output_file(output_dir, "metrics.json")
-    return KernelRunResult(
-        kernel_id=kernel_id, output_dir=output_dir, submission_path=submission_path, metrics_path=metrics_path
+    kernel_id = KernelJobMonitor().push_and_wait(
+        preparation=preparation,
+        slug=slug,
+        timeout_minutes=timeout_minutes,
     )
+    submission_path = find_submission_file(preparation.output_dir)
+    metrics_path = _find_output_file(preparation.output_dir, "metrics.json")
+    return KernelRunResult(
+        kernel_id=kernel_id,
+        output_dir=preparation.output_dir,
+        submission_path=submission_path,
+        metrics_path=metrics_path,
+    )
+
+
+def run_kernel_local(
+    *,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    base_dir: Path,
+    accelerator: str,
+    score_source: str,
+    metric: str,
+    direction: str,
+    holdout_frac: float,
+    cv_folds: int,
+    seed: int,
+    dry_run: bool,
+    timeout_minutes: int | None,
+    strict_accelerator: bool = False,
+) -> KernelRunResult:
+    del score_source, metric, direction, holdout_frac, cv_folds, seed
+
+    kernel_source_dir = base_dir / slug / "kernel"
+    kernel_stage_dir = base_dir / slug / "kernels" / run_id / f"local-iter-{iteration}"
+    context_dir = base_dir / slug / "context"
+    output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
+    logs_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "logs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    kernel_stage_dir.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_local_sample_submission_file(base_dir=base_dir, slug=slug)
+
+    ensure_solution_path_allowed(kernel_source_dir, artifacts_dir=base_dir, slug=slug)
+    kernel_path = kernel_source_dir / "kernel.py"
+    if not kernel_path.exists():
+        raise KernelFailedError(f"Local kernel execution requires {kernel_path} to exist.")
+    if kernel_stage_dir.exists():
+        shutil.rmtree(kernel_stage_dir)
+    shutil.copytree(kernel_source_dir, kernel_stage_dir)
+    _sync_plan_snapshot(
+        plan_path=base_dir / slug / "plan.json",
+        targets=[
+            kernel_stage_dir / "plan.json",
+            kernel_stage_dir.parent / "plan.json",
+        ],
+    )
+    kernel_path = kernel_stage_dir / "kernel.py"
+
+    if strict_accelerator and accelerator == "gpu":
+        availability = detect_local_gpu()
+        if not availability.any:
+            raise KernelFailedError("No local GPU detected while --strict-accelerator is enabled for local_gpu.")
+
+    # Mirror packaging shims so local and kaggle kernel behavior are aligned.
+    _ensure_kernel_import_path(kernel_stage_dir)
+    _inline_kernel_modules(kernel_stage_dir)
+    _inject_data_dir_resolver(kernel_stage_dir)
+    _inject_column_map_shim(kernel_stage_dir, context_dir)
+    _inject_column_fill_shim(kernel_stage_dir, context_dir)
+    _inject_object_coerce_shim(kernel_stage_dir, context_dir)
+    _inject_device_coerce_shim(kernel_stage_dir, context_dir)
+    ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
+
+    if dry_run:
+        return KernelRunResult(
+            kernel_id=f"local/{slug}",
+            output_dir=output_dir,
+            submission_path=None,
+            metrics_path=None,
+        )
+
+    timeout_sec = None if timeout_minutes is None else max(60, int(timeout_minutes * 60))
+    eta_total_sec, eta_samples = _estimate_local_kernel_duration_seconds(base_dir=base_dir, slug=slug)
+    progress_tracker = _build_local_kernel_progress_tracker(base_dir=base_dir, slug=slug)
+    _print_local_kernel_progress(
+        elapsed_sec=0.0,
+        timeout_sec=timeout_sec,
+        eta_total_sec=eta_total_sec,
+        eta_samples=eta_samples,
+    )
+    started_at = time.time()
+    monotonic_start = time.monotonic()
+    env = os.environ.copy()
+    env.setdefault("KAGGLEBOT_LOCAL_KERNEL", "1")
+    env.setdefault("KAGGLEBOT_SLUG", slug)
+    env.setdefault("KAGGLEBOT_RUN_ID", run_id)
+    env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
+    env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
+
+    heartbeat_stop = threading.Event()
+    heartbeat = threading.Thread(
+        target=_local_kernel_heartbeat,
+        kwargs={
+            "stop_event": heartbeat_stop,
+            "start_monotonic": monotonic_start,
+            "timeout_sec": timeout_sec,
+            "eta_total_sec": eta_total_sec,
+            "eta_samples": eta_samples,
+            "interval_sec": _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC,
+        },
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        result = run_command(
+            [sys.executable, str(kernel_path)],
+            cwd=kernel_stage_dir,
+            env=env,
+            timeout=timeout_sec,
+            stream_output=True,
+            line_callback=progress_tracker.observe_line,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise KernelTimeoutError(f"Local kernel timed out after {timeout_sec}s.") from exc
+    finally:
+        heartbeat_stop.set()
+        heartbeat.join(timeout=1.0)
+
+    (logs_dir / "local_kernel_stdout.log").write_text(result.stdout, encoding="utf-8")
+    (logs_dir / "local_kernel_stderr.log").write_text(result.stderr, encoding="utf-8")
+
+    if result.returncode != 0:
+        stdout_tail = truncate_lines(result.stdout[-4000:], max_lines=80)
+        stderr_tail = truncate_lines(result.stderr[-4000:], max_lines=80)
+        detail = "\n".join(part for part in [stdout_tail, stderr_tail] if part).strip()
+        if detail:
+            detail = f"\n{detail}"
+        raise KernelFailedError(f"Local kernel execution failed with exit code {result.returncode}.{detail}")
+    _append_local_kernel_duration_history(
+        base_dir=base_dir,
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        duration_sec=result.duration_sec,
+    )
+    print(f"[cyan]kernel local complete[/cyan]: elapsed={result.duration_sec:.0f}s")
+
+    submission_src, metrics_src = _resolve_local_kernel_artifacts(
+        kernel_dir=kernel_stage_dir,
+        output_dir=output_dir,
+        started_at=started_at,
+    )
+    if submission_src is None:
+        raise KernelFailedError("Local kernel completed but submission output was not found.")
+
+    submission_dst = _copy_artifact_if_needed(
+        source=submission_src,
+        destination=output_dir / submission_src.name,
+    )
+    metrics_dst = None
+    if metrics_src is not None:
+        metrics_dst = _copy_artifact_if_needed(
+            source=metrics_src,
+            destination=output_dir / "metrics.json",
+        )
+
+    return KernelRunResult(
+        kernel_id=f"local/{slug}",
+        output_dir=output_dir,
+        submission_path=submission_dst,
+        metrics_path=metrics_dst,
+    )
+
+
+def _ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path | None:
+    competition_dir = base_dir / slug
+    data_dir = competition_dir / "data"
+    canonical_path = data_dir / "sample_submission.csv"
+    if canonical_path.exists():
+        return canonical_path
+    source_path = _resolve_sample_submission_source(
+        context_dir=competition_dir / "context",
+        data_dir=data_dir,
+    )
+    if source_path is None:
+        return None
+    data_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, canonical_path)
+    return canonical_path
+
+
+def _resolve_sample_submission_source(*, context_dir: Path, data_dir: Path) -> Path | None:
+    context_sample = context_dir / "sample_submission.csv"
+    if context_sample.exists():
+        return context_sample
+    if not data_dir.exists():
+        return None
+    for path in sorted(data_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        if "sample_submission" not in name:
+            continue
+        if path.suffix.lower() != ".csv":
+            continue
+        return path
+    return None
+
+
+@dataclass
+class _LocalKernelProgressTracker:
+    expected_folds: int | None
+    expected_seeds: list[int]
+    started_at_monotonic: float = field(default_factory=time.monotonic)
+    zero_based_folds: bool = False
+    seen_triplets: set[tuple[str, int, int]] = field(default_factory=set)
+
+    def observe_line(self, line: str) -> None:
+        parsed = _extract_training_stage_from_line(line)
+        if parsed is None:
+            return
+        pipeline, seed, fold_raw = parsed
+        key = (pipeline, seed, fold_raw)
+        if key in self.seen_triplets:
+            return
+        self.seen_triplets.add(key)
+        if fold_raw == 0:
+            self.zero_based_folds = True
+
+        fold_current = _resolve_fold_current(
+            fold_raw=fold_raw,
+            expected_folds=self.expected_folds,
+            zero_based=self.zero_based_folds,
+        )
+        seed_current = _resolve_seed_current(seed=seed, expected_seeds=self.expected_seeds)
+        elapsed_min = max(0.0, (time.monotonic() - self.started_at_monotonic) / 60.0)
+
+        seed_part = (
+            f"{seed_current}/{len(self.expected_seeds)}"
+            if seed_current is not None and self.expected_seeds
+            else str(seed)
+        )
+        fold_total = str(self.expected_folds) if self.expected_folds is not None else "?"
+        fold_part = str(fold_current) if fold_current is not None else str(fold_raw)
+
+        step_part = ""
+        if (
+            self.expected_folds is not None
+            and self.expected_seeds
+            and seed_current is not None
+            and fold_current is not None
+        ):
+            step_current = ((seed_current - 1) * self.expected_folds) + fold_current
+            step_total = self.expected_folds * len(self.expected_seeds)
+            step_part = f" step={step_current}/{step_total}"
+
+        print(
+            "[cyan]kernel local stage[/cyan]: "
+            f"pipeline={pipeline} seed={seed_part} fold={fold_part}/{fold_total}{step_part} "
+            f"(elapsed={elapsed_min:.1f}m)"
+        )
+
+
+def _build_local_kernel_progress_tracker(*, base_dir: Path, slug: str) -> _LocalKernelProgressTracker:
+    expected_folds: int | None = None
+    expected_seeds: list[int] = []
+    plan_path = base_dir / slug / "plan.json"
+    if plan_path.exists():
+        try:
+            payload = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        raw_folds = payload.get("cv_folds")
+        if isinstance(raw_folds, int) and raw_folds > 0:
+            expected_folds = raw_folds
+        raw_eval_seeds = payload.get("eval_seeds")
+        if isinstance(raw_eval_seeds, list):
+            expected_seeds = [int(seed) for seed in raw_eval_seeds if isinstance(seed, int)]
+        if not expected_seeds:
+            raw_seed = payload.get("seed")
+            if isinstance(raw_seed, int):
+                expected_seeds = [raw_seed]
+    return _LocalKernelProgressTracker(expected_folds=expected_folds, expected_seeds=expected_seeds)
+
+
+def _extract_training_stage_from_line(line: str) -> tuple[str, int, int] | None:
+    inline_match = _PIPELINE_SEED_FOLD_INLINE_RE.search(line)
+    if inline_match:
+        return _match_to_stage_tuple(inline_match)
+    path_match = _PIPELINE_SEED_FOLD_RE.search(line)
+    if path_match:
+        return _match_to_stage_tuple(path_match)
+    return None
+
+
+def _match_to_stage_tuple(match: re.Match[str]) -> tuple[str, int, int] | None:
+    try:
+        pipeline = str(match.group("pipeline")).strip()
+        seed = int(match.group("seed"))
+        fold = int(match.group("fold"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not pipeline:
+        return None
+    return pipeline, seed, fold
+
+
+def _resolve_seed_current(*, seed: int, expected_seeds: list[int]) -> int | None:
+    if not expected_seeds:
+        return None
+    try:
+        return expected_seeds.index(seed) + 1
+    except ValueError:
+        return None
+
+
+def _resolve_fold_current(*, fold_raw: int, expected_folds: int | None, zero_based: bool) -> int | None:
+    if expected_folds is None:
+        return None
+    if zero_based:
+        value = fold_raw + 1
+        if 1 <= value <= expected_folds:
+            return value
+    if 1 <= fold_raw <= expected_folds:
+        return fold_raw
+    if 0 <= fold_raw < expected_folds:
+        return fold_raw + 1
+    return None
+
+
+def _local_kernel_history_path(*, base_dir: Path, slug: str) -> Path:
+    return base_dir / slug / "context" / "local_kernel_duration_history.jsonl"
+
+
+def _estimate_local_kernel_duration_seconds(*, base_dir: Path, slug: str) -> tuple[float | None, int]:
+    path = _local_kernel_history_path(base_dir=base_dir, slug=slug)
+    if not path.exists():
+        return None, 0
+    durations: list[float] = []
+    for raw in reversed(path.read_text(encoding="utf-8", errors="ignore").splitlines()):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        value = payload.get("duration_sec")
+        if isinstance(value, (int, float)) and value > 0:
+            durations.append(float(value))
+        if len(durations) >= _LOCAL_KERNEL_DURATION_HISTORY_LIMIT:
+            break
+    if not durations:
+        return None, 0
+    durations_sorted = sorted(durations)
+    mid = len(durations_sorted) // 2
+    if len(durations_sorted) % 2 == 1:
+        median = durations_sorted[mid]
+    else:
+        median = (durations_sorted[mid - 1] + durations_sorted[mid]) / 2.0
+    return median, len(durations_sorted)
+
+
+def _append_local_kernel_duration_history(
+    *,
+    base_dir: Path,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    duration_sec: float,
+) -> None:
+    path = _local_kernel_history_path(base_dir=base_dir, slug=slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": run_id,
+        "iteration": int(iteration),
+        "duration_sec": float(duration_sec),
+        "recorded_at": int(time.time()),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def _local_kernel_heartbeat(
+    *,
+    stop_event: threading.Event,
+    start_monotonic: float,
+    timeout_sec: int | None,
+    eta_total_sec: float | None,
+    eta_samples: int,
+    interval_sec: float,
+) -> None:
+    while not stop_event.wait(interval_sec):
+        elapsed = max(0.0, time.monotonic() - start_monotonic)
+        _print_local_kernel_progress(
+            elapsed_sec=elapsed,
+            timeout_sec=timeout_sec,
+            eta_total_sec=eta_total_sec,
+            eta_samples=eta_samples,
+        )
+
+
+def _print_local_kernel_progress(
+    *,
+    elapsed_sec: float,
+    timeout_sec: int | None,
+    eta_total_sec: float | None,
+    eta_samples: int,
+) -> None:
+    elapsed = max(0, int(elapsed_sec))
+    if eta_total_sec is not None and eta_total_sec > 0:
+        remaining = max(0, int(eta_total_sec - elapsed_sec))
+        print(
+            "[cyan]kernel local running[/cyan]: "
+            f"elapsed={elapsed}s eta~{remaining}s (expected~{int(eta_total_sec)}s from {eta_samples} runs)"
+        )
+        return
+    if timeout_sec is not None:
+        timeout_remaining = max(0, int(timeout_sec - elapsed_sec))
+        print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s)")
+        return
+    print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown")
+
+
+def _resolve_local_kernel_artifacts(
+    *,
+    kernel_dir: Path,
+    output_dir: Path,
+    started_at: float,
+) -> tuple[Path | None, Path | None]:
+    candidates: list[Path] = [
+        output_dir,
+        kernel_dir / "outputs",
+        Path("/kaggle/working"),
+        kernel_dir,
+    ]
+    submission_candidates: list[Path] = []
+    metrics_candidates: list[Path] = []
+    for root in candidates:
+        if not root.exists():
+            continue
+        sub = find_submission_file(root)
+        if sub is not None and sub.exists():
+            submission_candidates.append(sub)
+        metric_path = _find_output_file(root, "metrics.json")
+        if metric_path is not None and metric_path.exists():
+            metrics_candidates.append(metric_path)
+
+    min_mtime = started_at - 1.0
+    submission_path = _pick_latest_artifact(submission_candidates, min_mtime=min_mtime)
+    metrics_path = _pick_latest_artifact(metrics_candidates, min_mtime=min_mtime)
+    return submission_path, metrics_path
+
+
+def _pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return None
+    fresh = [path for path in existing if path.stat().st_mtime >= min_mtime]
+    pool = fresh or existing
+    return max(pool, key=lambda path: path.stat().st_mtime)
+
+
+def _copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
+    source_resolved = source.resolve()
+    destination_resolved = destination.resolve()
+    if source_resolved == destination_resolved:
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
 
 
 def _resolve_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
@@ -404,39 +820,25 @@ def _write_kernel_metadata(
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
-def _write_kernel_script(
-    *,
-    kernel_dir: Path,
-    slug: str,
-    accelerator: str,
-    score_source: str,
-    metric: str,
-    direction: str,
-    holdout_frac: float,
-    cv_folds: int,
-    seed: int,
-    run_id: str,
-    iteration: int,
-) -> None:
-    script = _render_kernel_main(
-        slug=slug,
-        accelerator=accelerator,
-        score_source=score_source,
-        metric=metric,
-        direction=direction,
-        holdout_frac=holdout_frac,
-        cv_folds=cv_folds,
-        seed=seed,
-        run_id=run_id,
-        iteration=iteration,
-    )
-    (kernel_dir / "kernel.py").write_text(script, encoding="utf-8")
-
-
 def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
     for path in source_dir.iterdir():
-        if path.is_file():
-            shutil.copy2(path, dest_dir / path.name)
+        dest_path = dest_dir / path.name
+        if path.is_dir():
+            if dest_path.exists():
+                shutil.rmtree(dest_path)
+            shutil.copytree(path, dest_path)
+        elif path.is_file():
+            shutil.copy2(path, dest_path)
+
+
+def _sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
+    if not plan_path.exists():
+        return
+    for target in targets:
+        if target.resolve() == plan_path.resolve():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(plan_path, target)
 
 
 _KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
@@ -1066,6 +1468,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
     deadline = None
     if timeout_minutes is not None:
         deadline = time.monotonic() + max(timeout_minutes, 1) * 60
+    started_at = time.monotonic()
     last_status = None
     last_log_fetch = 0.0
     log_state = _KernelLogState()
@@ -1126,11 +1529,18 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
                 raise KernelFailedError(message)
         if status in {"running", "queued"}:
             if log_state.last_heartbeat == 0.0 or now - log_state.last_heartbeat >= HEARTBEAT_INTERVAL:
+                elapsed = max(0, int(now - started_at))
+                timeout_hint = ""
+                if deadline is not None:
+                    timeout_hint = f", timeout in <= {max(0, int(deadline - now))}s"
                 since = now - log_state.last_log_at if log_state.last_log_at is not None else None
                 if since is None:
-                    print("[cyan]kernel[/cyan]: still running (no logs yet)")
+                    print(f"[cyan]kernel[/cyan]: still running (elapsed={elapsed}s{timeout_hint}, no logs yet)")
                 else:
-                    print(f"[cyan]kernel[/cyan]: still running (no new logs for {since:.0f}s)")
+                    print(
+                        f"[cyan]kernel[/cyan]: still running "
+                        f"(elapsed={elapsed}s{timeout_hint}, no new logs for {since:.0f}s)"
+                    )
                 log_state.last_heartbeat = now
         if "complete" in status:
             return
@@ -1398,500 +1808,3 @@ def _find_submission_by_extension(output_dir: Path) -> Path | None:
         if path.suffix.lower() in suffixes:
             return path
     return None
-
-
-def _render_kernel_main(
-    *,
-    slug: str,
-    accelerator: str,
-    score_source: str,
-    metric: str,
-    direction: str,
-    holdout_frac: float,
-    cv_folds: int,
-    seed: int,
-    run_id: str,
-    iteration: int,
-) -> str:
-    return f'''import json
-from datetime import datetime
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, roc_auc_score
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
-
-try:
-    import torch
-    from torch import nn
-    from torch.utils.data import DataLoader, TensorDataset
-except Exception:
-    torch = None
-    nn = None
-    DataLoader = None
-    TensorDataset = None
-
-CONFIG = {{
-    "slug": "{slug}",
-    "accelerator": "{accelerator}",
-    "score_source": "{score_source}",
-    "metric": "{metric}",
-    "direction": "{direction}",
-    "holdout_frac": {holdout_frac},
-    "cv_folds": {cv_folds},
-    "seed": {seed},
-    "run_id": "{run_id}",
-    "iteration": {iteration},
-}}
-
-INPUT_ROOT = Path("/kaggle/input") / CONFIG["slug"]
-WORKING = Path("/kaggle/working")
-SUBMISSION_PATH = WORKING / "submission.csv"
-METRICS_PATH = WORKING / "metrics.json"
-
-
-def find_tabular_files(root: Path) -> list[Path]:
-    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
-    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
-
-
-def read_table(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".parquet":
-        return pd.read_parquet(path)
-    if suffix in {".json", ".jsonl"}:
-        try:
-            return pd.read_json(path, lines=True)
-        except ValueError:
-            return pd.read_json(path)
-    if suffix in {".tsv", ".txt"}:
-        return pd.read_csv(path, sep="\\t")
-    return pd.read_csv(path)
-
-
-def pick_files(files: list[Path]) -> tuple[Path, Path, Path]:
-    if not files:
-        raise FileNotFoundError("No tabular files found.")
-    def score_sample(path: Path) -> int:
-        name = path.name.lower()
-        if "sample_submission" in name:
-            return 3
-        if "submission" in name:
-            return 1
-        return 0
-    sample = sorted(files, key=score_sample, reverse=True)[0]
-    train = next((p for p in files if "train" in p.name.lower()), None)
-    test = next((p for p in files if "test" in p.name.lower()), None)
-    if train is None or test is None:
-        raise FileNotFoundError("train/test files not found.")
-    return train, test, sample
-
-
-def infer_target(train: pd.DataFrame, test: pd.DataFrame, sample: pd.DataFrame) -> tuple[str, str, list[str]]:
-    id_col = sample.columns[0]
-    candidates = [c for c in train.columns if c not in test.columns and c in sample.columns]
-    target_cols = candidates or list(sample.columns[1:])
-    if len(target_cols) != 1:
-        raise ValueError("Only single-target competitions supported.")
-    target = target_cols[0]
-    features = [c for c in train.columns if c != target]
-    if id_col in features:
-        features.remove(id_col)
-    return id_col, target, features
-
-
-def infer_task(y: pd.Series) -> str:
-    if y.dtype == "object":
-        return "classification"
-    nunique = y.nunique(dropna=True)
-    if nunique <= 20 or nunique / max(len(y), 1) <= 0.05:
-        return "classification"
-    return "regression"
-
-
-def metric_requires_proba(metric: str) -> bool:
-    metric = metric.lower()
-    return "logloss" in metric or "auc" in metric
-
-
-def compute_metric(metric: str, y_true, y_pred) -> float:
-    metric = metric.lower()
-    if metric == "rmse":
-        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    if metric == "rmsle":
-        y_true = np.clip(np.asarray(y_true, dtype=float), 0, None)
-        y_pred = np.clip(np.asarray(y_pred, dtype=float), 0, None)
-        return float(np.sqrt(mean_squared_error(np.log1p(y_true), np.log1p(y_pred))))
-    if metric in ("logloss", "log_loss"):
-        return float(log_loss(y_true, y_pred))
-    if metric == "auc":
-        return float(roc_auc_score(y_true, y_pred))
-    if metric == "accuracy":
-        return float(accuracy_score(y_true, y_pred))
-    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
-
-
-def _as_numpy(x):
-    if hasattr(x, "toarray"):
-        x = x.toarray()
-    return np.asarray(x)
-
-
-class TorchMLP:
-    def __init__(self, task: str, hidden: int = 128, epochs: int = 20, lr: float = 1e-3, batch_size: int = 256):
-        self.task = task
-        self.hidden = hidden
-        self.epochs = epochs
-        self.lr = lr
-        self.batch_size = batch_size
-        self.model = None
-        self.num_classes = None
-        self.device = None
-
-    def _init_model(self, input_dim: int, num_classes: int):
-        if torch is None or nn is None:
-            raise RuntimeError("torch is not available")
-        self.num_classes = num_classes
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        output_dim = 1 if (self.task == "regression" or num_classes <= 2) else num_classes
-        self.model = nn.Sequential(
-            nn.Linear(input_dim, self.hidden),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(self.hidden, output_dim),
-        ).to(self.device)
-
-    def fit(self, x, y):
-        if torch is None or DataLoader is None or TensorDataset is None:
-            raise RuntimeError("torch is not available")
-        x_np = _as_numpy(x).astype(np.float32)
-        y_np = np.asarray(y)
-        num_classes = int(np.unique(y_np).size) if self.task != "regression" else 1
-        if self.model is None:
-            self._init_model(x_np.shape[1], num_classes)
-        torch.manual_seed(CONFIG["seed"])
-        if self.task == "regression":
-            y_tensor = torch.tensor(y_np.astype(np.float32).reshape(-1, 1))
-            loss_fn = nn.MSELoss()
-        elif num_classes <= 2:
-            y_tensor = torch.tensor(y_np.astype(np.float32).reshape(-1, 1))
-            loss_fn = nn.BCEWithLogitsLoss()
-        else:
-            y_tensor = torch.tensor(y_np.astype(np.int64))
-            loss_fn = nn.CrossEntropyLoss()
-        dataset = TensorDataset(torch.tensor(x_np), y_tensor)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        self.model.train()
-        for _ in range(self.epochs):
-            for batch_x, batch_y in loader:
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y.to(self.device)
-                optimizer.zero_grad()
-                logits = self.model(batch_x)
-                loss = loss_fn(logits, batch_y)
-                loss.backward()
-                optimizer.step()
-        return self
-
-    def predict_proba(self, x):
-        if torch is None:
-            raise RuntimeError("torch is not available")
-        x_np = _as_numpy(x).astype(np.float32)
-        self.model.eval()
-        with torch.no_grad():
-            logits = self.model(torch.tensor(x_np).to(self.device))
-            if self.task == "regression":
-                return logits.cpu().numpy().reshape(-1)
-            if self.num_classes is None or self.num_classes <= 2:
-                probs = torch.sigmoid(logits).cpu().numpy().reshape(-1)
-                return probs
-            probs = torch.softmax(logits, dim=1).cpu().numpy()
-            return probs
-
-    def predict(self, x):
-        if self.task == "regression":
-            return self.predict_proba(x)
-        probs = self.predict_proba(x)
-        if self.num_classes is None or self.num_classes <= 2:
-            return (probs >= 0.5).astype(int)
-        return probs.argmax(axis=1)
-
-
-def feature_engineering(
-    train: pd.DataFrame,
-    test: pd.DataFrame,
-    id_col: str,
-    target_col: str,
-    features: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    return train, test, features
-
-
-def build_preprocessor(features: list[str], train: pd.DataFrame) -> ColumnTransformer:
-    cat_cols = [c for c in features if train[c].dtype == "object"]
-    num_cols = [c for c in features if c not in cat_cols]
-    return ColumnTransformer(
-        transformers=[
-            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), num_cols),
-            (
-                "cat",
-                Pipeline(
-                    [
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("ohe", OneHotEncoder(handle_unknown="ignore")),
-                    ]
-                ),
-                cat_cols,
-            ),
-        ],
-        remainder="drop",
-    )
-
-
-def find_label_file(root: Path) -> Path | None:
-    for name in ["test_labels.csv", "labels.csv", "y_test.csv"]:
-        candidate = root / name
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def select_score_source(test: pd.DataFrame, target_col: str, id_col: str) -> tuple[str, pd.Series | None]:
-    source = CONFIG["score_source"]
-    if source in ("auto", "test"):
-        if target_col in test.columns:
-            return "test", test[target_col]
-        label_path = find_label_file(INPUT_ROOT)
-        if label_path is not None:
-            labels = pd.read_csv(label_path)
-            if target_col in labels.columns and id_col in labels.columns:
-                merged = test.merge(labels[[id_col, target_col]], on=id_col, how="inner")
-                if not merged.empty:
-                    return "test", merged[target_col]
-        if source == "test":
-            raise RuntimeError("score_source=test requested but no labeled test found.")
-        return "holdout", None
-    return source, None
-
-
-def predict_for_metric(model, x, task: str, metric: str):
-    if task == "classification" and metric_requires_proba(metric):
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(x)
-            if proba.ndim == 2 and proba.shape[1] == 2:
-                return proba[:, 1]
-            return proba
-    return model.predict(x)
-
-
-def predict_for_submission(model, x, task: str, metric: str, prediction_kind: str):
-    if task == "classification" and (metric_requires_proba(metric) or prediction_kind == "probability"):
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(x)
-            if proba.ndim == 2 and proba.shape[1] == 2:
-                return proba[:, 1]
-            return proba
-    return model.predict(x)
-
-
-def _slice_rows(values, idx):
-    if hasattr(values, "iloc"):
-        return values.iloc[idx]
-    return values[idx]
-
-
-def evaluate_holdout(model, pre, x, y, task: str, metric: str, prediction_kind: str):
-    stratify = y if task == "classification" else None
-    x_tr, x_val, y_tr, y_val = train_test_split(
-        x, y, test_size=CONFIG["holdout_frac"], random_state=CONFIG["seed"], stratify=stratify
-    )
-    x_tr_p = pre.fit_transform(x_tr)
-    x_val_p = pre.transform(x_val)
-    model.fit(x_tr_p, y_tr)
-    preds = predict_for_metric(model, x_val_p, task, metric)
-    return compute_metric(metric, y_val, preds), None
-
-
-def evaluate_cv(model_builder, pre, x, y, task: str, metric: str, prediction_kind: str):
-    splitter = (
-        StratifiedKFold(n_splits=CONFIG["cv_folds"], shuffle=True, random_state=CONFIG["seed"])
-        if task == "classification"
-        else KFold(n_splits=CONFIG["cv_folds"], shuffle=True, random_state=CONFIG["seed"])
-    )
-    scores = []
-    for train_idx, val_idx in splitter.split(x, y):
-        x_tr, x_val = _slice_rows(x, train_idx), _slice_rows(x, val_idx)
-        y_tr, y_val = _slice_rows(y, train_idx), _slice_rows(y, val_idx)
-        x_tr_p = pre.fit_transform(x_tr)
-        x_val_p = pre.transform(x_val)
-        model = model_builder(task)
-        model.fit(x_tr_p, y_tr)
-        preds = predict_for_metric(model, x_val_p, task, metric)
-        scores.append(compute_metric(metric, y_val, preds))
-    return float(np.mean(scores)), float(np.std(scores))
-
-
-def build_model(task: str):
-    if torch is not None:
-        return TorchMLP(task)
-    if CONFIG["accelerator"] == "gpu":
-        try:
-            import xgboost as xgb
-            if task == "classification":
-                return xgb.XGBClassifier(tree_method="gpu_hist", max_depth=6, n_estimators=200, learning_rate=0.1)
-            return xgb.XGBRegressor(tree_method="gpu_hist", max_depth=6, n_estimators=200, learning_rate=0.1)
-        except Exception:
-            pass
-    if task == "classification":
-        return HistGradientBoostingClassifier()
-    return HistGradientBoostingRegressor()
-
-
-def train_tpu(x_train, y_train, x_eval, task: str):
-    import tensorflow as tf
-    resolver = tf.distribute.cluster_resolver.TPUClusterResolver()
-    tf.config.experimental_connect_to_cluster(resolver)
-    tf.tpu.experimental.initialize_tpu_system(resolver)
-    strategy = tf.distribute.TPUStrategy(resolver)
-
-    with strategy.scope():
-        output_units = 1 if task == "regression" else int(np.unique(y_train).size)
-        model = tf.keras.Sequential(
-            [
-                tf.keras.layers.Input(shape=(x_train.shape[1],)),
-                tf.keras.layers.Dense(128, activation="relu"),
-                tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(output_units),
-            ]
-        )
-        if task == "classification":
-            if output_units > 2:
-                model.add(tf.keras.layers.Activation("softmax"))
-                model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
-            else:
-                model.add(tf.keras.layers.Activation("sigmoid"))
-                model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-        else:
-            model.compile(optimizer="adam", loss="mse")
-
-    model.fit(x_train, y_train, epochs=5, batch_size=256, verbose=0)
-    outputs = model.predict(x_eval, batch_size=256, verbose=0)
-    return outputs
-
-
-def main() -> None:
-    if "custom_main" in globals():
-        custom_main = globals()["custom_main"]
-        if callable(custom_main):
-            custom_main()
-            return
-    train_path, test_path, sample_path = pick_files(find_tabular_files(INPUT_ROOT))
-    train = read_table(train_path)
-    test = read_table(test_path)
-    sample = read_table(sample_path)
-
-    id_col, target_col, features = infer_target(train, test, sample)
-    train, test, features = feature_engineering(train, test, id_col, target_col, features)
-    task = infer_task(train[target_col])
-    prediction_kind = "probability" if sample[target_col].dtype.kind in {{"f", "c"}} else "class"
-
-    label_encoder = None
-    y = train[target_col]
-    if task == "classification":
-        label_encoder = LabelEncoder()
-        y = pd.Series(label_encoder.fit_transform(y), index=train.index, name=target_col)
-
-    x = train[features]
-    pre = build_preprocessor(features, train)
-    score_source, test_labels = select_score_source(test, target_col, id_col)
-
-    std = None
-    if CONFIG["accelerator"] == "tpu":
-        x_full = pre.fit_transform(x)
-        if hasattr(x_full, "toarray"):
-            x_full = x_full.toarray()
-        if score_source == "cv":
-            scores = []
-            splitter = (
-                StratifiedKFold(n_splits=CONFIG["cv_folds"], shuffle=True, random_state=CONFIG["seed"])
-                if task == "classification"
-                else KFold(n_splits=CONFIG["cv_folds"], shuffle=True, random_state=CONFIG["seed"])
-            )
-            for train_idx, val_idx in splitter.split(x_full, y):
-                preds = train_tpu(x_full[train_idx], y[train_idx], x_full[val_idx], task)
-                scores.append(compute_metric(CONFIG["metric"], y[val_idx], preds))
-            score = float(np.mean(scores))
-            std = float(np.std(scores))
-        else:
-            preds = train_tpu(x_full, y, x_full, task)
-            score = compute_metric(CONFIG["metric"], y, preds)
-    else:
-        if score_source == "cv":
-            score, std = evaluate_cv(build_model, pre, x, y, task, CONFIG["metric"], prediction_kind)
-        elif score_source == "test" and test_labels is not None:
-            model = build_model(task)
-            x_train_p = pre.fit_transform(x)
-            x_test_p = pre.transform(test[features])
-            model.fit(x_train_p, y)
-            preds = predict_for_metric(model, x_test_p, task, CONFIG["metric"])
-            score = compute_metric(CONFIG["metric"], test_labels, preds)
-        else:
-            model = build_model(task)
-            score, std = evaluate_holdout(model, pre, x, y, task, CONFIG["metric"], prediction_kind)
-
-    x_full = pre.fit_transform(x)
-    if hasattr(x_full, "toarray"):
-        x_full = x_full.toarray()
-    if CONFIG["accelerator"] == "tpu":
-        test_features = pre.transform(test[features])
-        if hasattr(test_features, "toarray"):
-            test_features = test_features.toarray()
-        preds = train_tpu(x_full, y, test_features, task)
-    else:
-        model = build_model(task)
-        model.fit(x_full, y)
-        test_x = pre.transform(test[features])
-        preds = predict_for_submission(model, test_x, task, CONFIG["metric"], prediction_kind)
-    if task == "classification" and prediction_kind == "class" and label_encoder is not None:
-        if preds.ndim > 1:
-            preds = preds.argmax(axis=1)
-        preds = label_encoder.inverse_transform(np.asarray(preds, dtype=int))
-
-    submission = sample.copy()
-    submission[target_col] = preds
-    submission.to_csv(SUBMISSION_PATH, index=False)
-
-    metrics = {{
-        "run_id": CONFIG["run_id"],
-        "iter": CONFIG["iteration"],
-        "score_source": score_source,
-        "metric": CONFIG["metric"],
-        "direction": CONFIG["direction"],
-        "offline_value": float(score),
-        "offline_std": float(std) if std is not None else None,
-        "folds": CONFIG["cv_folds"] if score_source == "cv" else None,
-        "holdout_frac": CONFIG["holdout_frac"] if score_source == "holdout" else None,
-        "seed": CONFIG["seed"],
-        "target_score": None,
-        "met_target": False,
-        "top1_public_score": None,
-        "top1_public_timestamp": None,
-        "compare_to_top1_note": "heuristic; not directly comparable",
-        "compute": "kaggle_{accelerator}",
-        "accelerator": "{accelerator}",
-        "git_commit": None,
-        "timestamp": int(datetime.utcnow().timestamp()),
-    }}
-    METRICS_PATH.write_text(json.dumps(metrics, indent=2))
-
-
-if __name__ == "__main__":
-    main()
-'''

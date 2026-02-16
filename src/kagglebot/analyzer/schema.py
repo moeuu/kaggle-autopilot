@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from kagglebot.analyzer.types import CompetitionSchema
+from kagglebot.solver.io import infer_submission_layout
 
 
 @dataclass(frozen=True)
@@ -32,20 +33,21 @@ def infer_schema(
     sample_path: Path,
 ) -> CompetitionSchema:
     sample = frames.sample
-    if sample.shape[1] < 2:
-        raise ValueError("sample_submission.csv must have at least 2 columns (id + target).")
+    if sample.shape[1] < 1:
+        raise ValueError("sample submission must contain at least one column.")
 
-    id_column = sample.columns[0]
-    target_columns = list(sample.columns[1:])
+    id_column, target_columns, feature_columns = infer_submission_layout(
+        train=frames.train,
+        test=frames.test,
+        sample=sample,
+    )
+    if not target_columns:
+        raise ValueError("Unable to infer target columns from train/test/sample files.")
 
     train_columns = list(frames.train.columns)
     missing_targets = [col for col in target_columns if col not in train_columns]
     if missing_targets:
         raise ValueError(f"Target columns missing from train.csv: {missing_targets}")
-
-    feature_columns = [col for col in train_columns if col not in target_columns]
-    if id_column in feature_columns:
-        feature_columns.remove(id_column)
 
     if not feature_columns:
         raise ValueError("No feature columns detected after removing target and id columns.")

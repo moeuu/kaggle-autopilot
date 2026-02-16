@@ -11,6 +11,7 @@ from kagglebot.analyzer.schema import infer_schema, load_schema_frames
 from kagglebot.analyzer.strategy import build_strategy
 from kagglebot.analyzer.types import CompetitionMetadata
 from kagglebot.paths import CompetitionPaths
+from kagglebot.solver.io import find_competition_files
 
 
 class UnsupportedCompetitionError(RuntimeError):
@@ -41,15 +42,12 @@ def analyze_competition(
         sample_path=sample_path,
     )
 
-    if len(schema.target_columns) != 1:
-        raise UnsupportedCompetitionError("Multi-target competitions are not supported yet.")
-
     target_col = schema.target_columns[0]
     target_series = frames.train[target_col]
 
     task = _infer_task(target_series)
-    metric, metric_direction = _default_metric(task)
     prediction_kind = _infer_prediction_kind(task, frames.sample[target_col])
+    metric, metric_direction = _default_metric(task, prediction_kind=prediction_kind)
 
     strategy = build_strategy(
         task,
@@ -59,10 +57,16 @@ def analyze_competition(
         use_stacking=use_stacking,
     )
 
-    assumptions = [
-        "tabular competition (train/test/sample_submission CSVs)",
-        "single target column inferred from sample_submission",
-    ]
+    assumptions = ["tabular competition inferred from local train/test/sample files"]
+    if len(schema.target_columns) == 1:
+        assumptions.append("single target column inferred from sample submission")
+    else:
+        assumptions.append(
+            f"multi-target submission detected ({len(schema.target_columns)} targets); "
+            f"primary target for baseline is '{target_col}'"
+        )
+    if schema.id_column is None:
+        assumptions.append("id column not clearly detected; submission alignment defaults to row order")
     if prediction_kind == "probability":
         assumptions.append("probability submission inferred from sample_submission target dtype")
 
@@ -88,16 +92,10 @@ def analyze_competition(
 
 
 def _find_required(paths: CompetitionPaths) -> tuple[Path, Path, Path]:
-    raw = paths.data_raw
-    sample = raw / "sample_submission.csv"
-    train = raw / "train.csv"
-    test = raw / "test.csv"
-    missing = [path for path in (sample, train, test) if not path.exists()]
-    if missing:
-        raise UnsupportedCompetitionError(
-            "Missing required CSVs in data directory: " + ", ".join(str(p) for p in missing)
-        )
-    return train, test, sample
+    try:
+        return find_competition_files(paths.data_raw)
+    except FileNotFoundError as exc:
+        raise UnsupportedCompetitionError(str(exc)) from exc
 
 
 def _infer_task(target: pd.Series) -> str:
@@ -113,8 +111,10 @@ def _infer_task(target: pd.Series) -> str:
     return "regression"
 
 
-def _default_metric(task: str) -> tuple[str, str]:
+def _default_metric(task: str, *, prediction_kind: str) -> tuple[str, str]:
     if task == "classification":
+        if prediction_kind == "probability":
+            return "logloss", "minimize"
         return "accuracy", "maximize"
     return "rmse", "minimize"
 

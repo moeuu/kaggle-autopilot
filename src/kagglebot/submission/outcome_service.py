@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import builtins
+import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Callable
+
+_RANK_PAIR_RE = re.compile(r"(?P<rank>\d+)\s*/\s*(?P<total>\d+)")
 
 
 @dataclass(frozen=True)
 class SubmissionOutcomeService:
-    fetch_rows: Callable[[str, bool], list[dict[str, str]]]
-    max_attempts: int = 20
+    fetch_rows: Callable[[str], list[dict[str, str]]]
+    max_attempts: int | None = None
     poll_interval_sec: float = 30.0
 
     def wait_for_outcome(
@@ -19,32 +23,46 @@ class SubmissionOutcomeService:
         message: str,
         submitted_at: datetime,
     ) -> dict[str, object] | None:
-        for attempt in range(1, self.max_attempts + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             try:
-                rows = self.fetch_rows(slug, False)
+                rows = self.fetch_rows(slug)
             except Exception:  # noqa: BLE001
-                return None
+                rows = []
             match = self._select_submission_row(rows=rows, message=message, submitted_at=submitted_at)
             if match is not None:
                 status = self._extract_submission_status(match)
                 score = self._extract_submission_score(match)
+                rank, total_teams = self._extract_submission_rank(match)
+                rank_payload = self._build_rank_payload(rank=rank, total_teams=total_teams)
                 if score is not None:
-                    return {
+                    payload: dict[str, object] = {
                         "status": status,
                         "score": score,
                         "raw": match,
                         "checked_at": datetime.now(UTC).isoformat(),
                     }
+                    payload.update(rank_payload)
+                    return payload
                 if status in {"complete", "completed", "error", "failed", "cancelled"}:
-                    return {
+                    payload = {
                         "status": status,
                         "score": None,
                         "raw": match,
                         "checked_at": datetime.now(UTC).isoformat(),
                     }
-            if attempt < self.max_attempts:
-                time.sleep(self.poll_interval_sec)
-        return None
+                    payload.update(rank_payload)
+                    return payload
+                builtins.print(
+                    f"submission poll: attempt={attempt} status={status or 'unknown'} waiting",
+                    flush=True,
+                )
+            else:
+                builtins.print(f"submission poll: attempt={attempt} status=not_found waiting", flush=True)
+            if self.max_attempts is not None and self.max_attempts > 0 and attempt >= self.max_attempts:
+                return None
+            time.sleep(self.poll_interval_sec)
 
     def _select_submission_row(
         self,
@@ -111,6 +129,86 @@ class SubmissionOutcomeService:
         return None
 
     @staticmethod
+    def _extract_submission_rank(row: dict[str, str]) -> tuple[int | None, int | None]:
+        rank: int | None = None
+        total_teams: int | None = None
+
+        rank_keys = (
+            "publicLeaderboardRank",
+            "public_rank",
+            "publicRank",
+            "leaderboardRank",
+            "rank",
+            "position",
+        )
+        total_keys = (
+            "publicLeaderboardTotalTeams",
+            "publicLeaderboardSize",
+            "totalTeams",
+            "teamCount",
+            "total_teams",
+            "leaderboardSize",
+            "participants",
+        )
+
+        for key in rank_keys:
+            value = SubmissionOutcomeService._get_row_value_ci(row, key)
+            if not value:
+                continue
+            parsed_rank, parsed_total = SubmissionOutcomeService._parse_rank_value(value)
+            if parsed_rank is not None:
+                rank = parsed_rank
+            if parsed_total is not None:
+                total_teams = parsed_total
+            if rank is not None:
+                break
+
+        for key in total_keys:
+            value = SubmissionOutcomeService._get_row_value_ci(row, key)
+            parsed_total = SubmissionOutcomeService._to_int(value)
+            if parsed_total is not None:
+                total_teams = parsed_total
+                break
+
+        if rank is not None and total_teams is None:
+            for raw_value in row.values():
+                parsed_rank, parsed_total = SubmissionOutcomeService._parse_rank_value(raw_value)
+                if parsed_rank == rank and parsed_total is not None:
+                    total_teams = parsed_total
+                    break
+
+        return rank, total_teams
+
+    @staticmethod
+    def _build_rank_payload(*, rank: int | None, total_teams: int | None) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if rank is not None:
+            payload["rank"] = rank
+            payload["rank_source"] = "submission_row"
+        if total_teams is not None:
+            payload["total_teams"] = total_teams
+        if rank is not None and total_teams is not None and total_teams > 0:
+            payload["rank_percentile"] = rank / total_teams
+        return payload
+
+    @staticmethod
+    def _parse_rank_value(value: object) -> tuple[int | None, int | None]:
+        parsed_int = SubmissionOutcomeService._to_int(value)
+        if parsed_int is not None:
+            return parsed_int, None
+        if value is None:
+            return None, None
+        text = str(value).strip()
+        if not text:
+            return None, None
+        match = _RANK_PAIR_RE.search(text)
+        if match is None:
+            return None, None
+        rank = SubmissionOutcomeService._to_int(match.group("rank"))
+        total = SubmissionOutcomeService._to_int(match.group("total"))
+        return rank, total
+
+    @staticmethod
     def _get_row_value_ci(row: dict[str, str], key: str) -> str | None:
         target = key.strip().lower()
         for current_key, value in row.items():
@@ -154,3 +252,18 @@ class SubmissionOutcomeService:
             return float(text)
         except ValueError:
             return None
+
+    @staticmethod
+    def _to_int(value: object) -> int | None:
+        if value is None:
+            return None
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            try:
+                return int(float(text))
+            except ValueError:
+                return None

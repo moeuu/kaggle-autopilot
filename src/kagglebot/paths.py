@@ -83,6 +83,34 @@ class CompetitionPaths:
         return self.context_dir / "submission_format.md"
 
     @property
+    def code_md_path(self) -> Path:
+        return self.context_dir / "code.md"
+
+    @property
+    def code_notebooks_dir(self) -> Path:
+        return self.context_dir / "code_notebooks"
+
+    @property
+    def code_notebooks_index_path(self) -> Path:
+        return self.context_dir / "code_notebooks_index.json"
+
+    @property
+    def models_md_path(self) -> Path:
+        return self.context_dir / "models.md"
+
+    @property
+    def discussion_md_path(self) -> Path:
+        return self.context_dir / "discussion.md"
+
+    @property
+    def discussion_threads_dir(self) -> Path:
+        return self.context_dir / "discussion_threads"
+
+    @property
+    def discussion_threads_index_path(self) -> Path:
+        return self.context_dir / "discussion_threads_index.json"
+
+    @property
     def knowledge_hints_path(self) -> Path:
         return self.context_dir / "knowledge_hints.txt"
 

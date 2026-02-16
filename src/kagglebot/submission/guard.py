@@ -2,63 +2,69 @@ from __future__ import annotations
 
 import hashlib
 import re
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from re import Pattern
 
 from kagglebot.exceptions import SubmissionCliError
-from kagglebot.exec_utils import CommandResult, run_command
 
-_PERMANENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+_PERMANENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
     (
         "rules_not_accepted",
         (
-            "accept the rules",
-            "you must accept",
-            "rules have not been accepted",
-            "competition rules not accepted",
+            re.compile(r"accept the rules", flags=re.IGNORECASE),
+            re.compile(r"you must accept", flags=re.IGNORECASE),
+            re.compile(r"rules have not been accepted", flags=re.IGNORECASE),
+            re.compile(r"competition rules not accepted", flags=re.IGNORECASE),
         ),
     ),
     (
         "authentication",
         (
-            "kaggle.json",
-            "unauthorized",
-            "401",
-            "api token",
-            "api credentials",
+            re.compile(r"kaggle\.json", flags=re.IGNORECASE),
+            re.compile(r"unauthorized", flags=re.IGNORECASE),
+            re.compile(r"\b401\b", flags=re.IGNORECASE),
+            re.compile(r"api token", flags=re.IGNORECASE),
+            re.compile(r"api credentials", flags=re.IGNORECASE),
+            re.compile(r"no kaggle api credentials", flags=re.IGNORECASE),
         ),
     ),
     (
         "competition_unavailable",
         (
-            "competition is not accepting submissions",
-            "not allowed",
-            "not found",
-            "closed",
+            re.compile(r"competition is not accepting submissions", flags=re.IGNORECASE),
+            re.compile(r"not allowed", flags=re.IGNORECASE),
+            re.compile(r"not found", flags=re.IGNORECASE),
+            re.compile(r"closed", flags=re.IGNORECASE),
         ),
     ),
     (
         "submission_limit",
         (
-            "maximum number of submissions",
-            "submission limit",
-            "max submissions",
+            re.compile(r"maximum number of submissions", flags=re.IGNORECASE),
+            re.compile(r"submission limit", flags=re.IGNORECASE),
+            re.compile(r"max submissions", flags=re.IGNORECASE),
         ),
     ),
 )
 
-_TRANSIENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+_TRANSIENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
     (
         "network_or_timeout",
         (
-            "timed out",
-            "timeout",
-            "connectionerror",
-            "temporarily unavailable",
-            "temporary failure",
-            "502",
-            "503",
-            "504",
+            re.compile(r"timed out", flags=re.IGNORECASE),
+            re.compile(r"timeout", flags=re.IGNORECASE),
+            re.compile(r"connectionerror", flags=re.IGNORECASE),
+            re.compile(r"temporary failure", flags=re.IGNORECASE),
+            re.compile(r"temporarily unavailable", flags=re.IGNORECASE),
+            re.compile(r"\b502\b", flags=re.IGNORECASE),
+            re.compile(r"\b503\b", flags=re.IGNORECASE),
+            re.compile(r"\b504\b", flags=re.IGNORECASE),
+            re.compile(r"bad gateway", flags=re.IGNORECASE),
+            re.compile(r"service unavailable", flags=re.IGNORECASE),
+            re.compile(r"gateway timeout", flags=re.IGNORECASE),
         ),
     ),
 )
@@ -74,15 +80,22 @@ _NORMALIZE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         "<DATETIME>",
     ),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b", flags=re.IGNORECASE), "<DATE>"),
     (re.compile(r"\b\d{8}T\d{6}Z-[a-f0-9]{8}\b", flags=re.IGNORECASE), "<RUN_ID>"),
 )
 
 
 @dataclass(frozen=True)
-class SubmitErrorClassification:
-    kind: str
-    reason: str
-    retry_after_seconds: float | None
+class SubmitResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    command: list[str]
+    duration_sec: float
+
+    @property
+    def output(self) -> str:
+        return (self.stdout + self.stderr).strip()
 
 
 def run_kaggle_submit(
@@ -91,7 +104,7 @@ def run_kaggle_submit(
     submission_file: Path,
     message: str,
     dry_run: bool = False,
-) -> CommandResult:
+) -> SubmitResult:
     args = [
         "kaggle",
         "competitions",
@@ -103,17 +116,65 @@ def run_kaggle_submit(
         "-m",
         message,
     ]
-    result = run_command(args, dry_run=dry_run)
-    if result.returncode != 0:
+    if dry_run:
+        return SubmitResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            command=args,
+            duration_sec=0.0,
+        )
+
+    start = time.monotonic()
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise SubmissionCliError(
+            "Kaggle CLI submit failed: kaggle executable not found on PATH.",
+            command=args,
+            exit_code=127,
+            output="",
+            stdout="",
+            stderr=str(exc),
+        ) from exc
+    duration = time.monotonic() - start
+
+    stdout_text = completed.stdout or ""
+    stderr_text = completed.stderr or ""
+    if completed.returncode != 0:
+        stdout_tail = _tail_text(stdout_text)
+        stderr_tail = _tail_text(stderr_text)
         raise SubmissionCliError(
             "Kaggle CLI submit failed.",
             command=args,
-            exit_code=result.returncode,
-            output=result.output,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            exit_code=completed.returncode,
+            output=_tail_text(f"{stdout_text}\n{stderr_text}"),
+            stdout=stdout_tail,
+            stderr=stderr_tail,
         )
-    return result
+    return SubmitResult(
+        returncode=completed.returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
+        command=args,
+        duration_sec=duration,
+    )
+
+
+def _tail_text(text: str, *, max_lines: int = 200, max_chars: int = 6000) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        text = "\n".join(lines[-max_lines:])
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+    return text
 
 
 def normalize_error_text(text: str, *, max_chars: int = 6000) -> str:
@@ -133,14 +194,14 @@ def compute_error_fingerprint(stdout: str, stderr: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def classify_submit_error(stdout: str, stderr: str, returncode: int) -> SubmitErrorClassification:
-    merged = f"{stdout}\n{stderr}".lower()
-    for reason, needles in _PERMANENT_RULES:
-        if any(needle in merged for needle in needles):
-            return SubmitErrorClassification(kind="permanent", reason=reason, retry_after_seconds=None)
-    for reason, needles in _TRANSIENT_RULES:
-        if any(needle in merged for needle in needles):
-            return SubmitErrorClassification(kind="transient", reason=reason, retry_after_seconds=1.0)
+def classify_submit_error(stdout: str, stderr: str, returncode: int) -> dict[str, object]:
+    merged = f"{stdout}\n{stderr}"
+    for reason, patterns in _PERMANENT_RULES:
+        if any(pattern.search(merged) for pattern in patterns):
+            return {"kind": "permanent", "reason": reason, "retry_after_seconds": None}
+    for reason, patterns in _TRANSIENT_RULES:
+        if any(pattern.search(merged) for pattern in patterns):
+            return {"kind": "transient", "reason": reason, "retry_after_seconds": 2}
     if returncode == 0:
-        return SubmitErrorClassification(kind="unknown", reason="no_error", retry_after_seconds=None)
-    return SubmitErrorClassification(kind="unknown", reason="unclassified_submit_error", retry_after_seconds=None)
+        return {"kind": "unknown", "reason": "no_error", "retry_after_seconds": None}
+    return {"kind": "unknown", "reason": "unclassified_submit_error", "retry_after_seconds": None}

@@ -12,7 +12,7 @@ from kagglebot.compute import Compute, compute_to_runner_and_accelerator, detect
 @pytest.mark.parametrize(
     "compute,runner,accelerator",
     [
-        (Compute.local_gpu, "local", "gpu"),
+        (Compute.local_gpu, "local_kernel", "gpu"),
         (Compute.kaggle_gpu, "kaggle_notebook", "gpu"),
         (Compute.kaggle_tpu, "kaggle_notebook", "tpu"),
     ],

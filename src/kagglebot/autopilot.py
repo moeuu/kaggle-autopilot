@@ -17,11 +17,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.strategy_runner import run_strategy
-from kagglebot.compute import Compute
+from kagglebot.eval import (
+    DriftChecker,
+    EvaluationReport,
+    SplitStrategyFactory,
+    SubmissionReadinessScorer,
+    UncertaintyEstimator,
+    validate_evaluation_spec,
+)
 from kagglebot.exceptions import (
     DuplicateSubmissionError,
     KaggleCliError,
@@ -39,10 +47,11 @@ from kagglebot.hashing import sha256_file
 from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import (
     check_rules_accepted,
+    leaderboard_rank_for_score,
     leaderboard_top1,
     list_competition_submissions,
 )
-from kagglebot.kernel_runner import _collect_log_tail, resolve_kaggle_username, run_kernel
+from kagglebot.kernel_runner import _collect_log_tail, resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import (
     derive_problem_types,
     ensure_taxonomy,
@@ -65,8 +74,8 @@ from kagglebot.orchestrator.agent_pipeline import (
     _snapshot_tree,
     run_agent_pipeline,
 )
-from kagglebot.solver.initial_model import train_evaluate_and_predict
-from kagglebot.solver.metrics import infer_direction
+from kagglebot.solver.io import load_competition_data
+from kagglebot.solver.metrics import canonical_metric, infer_direction
 from kagglebot.submission.guard import (
     classify_submit_error,
     compute_error_fingerprint,
@@ -75,6 +84,15 @@ from kagglebot.submission.guard import (
 from kagglebot.submission.outcome_service import SubmissionOutcomeService
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.types import PlanConfig
+
+
+# Backward-compatible symbol for tests/extensions.
+# Runtime no longer uses the legacy src local trainer path.
+def train_evaluate_and_predict(*args, **kwargs):  # type: ignore[no-untyped-def]
+    raise RuntimeError(
+        "Legacy src local trainer was removed. Use artifacts/<slug>/kernel/kernel.py via autopilot/train commands."
+    )
+
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -127,12 +145,71 @@ MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
 _ERROR_FIX_CODEX_MODEL = "gpt-5.3-codex"
 _ERROR_FIX_REASONING_EFFORT = "extra_high"
-_SUBMISSION_POLL_MAX_ATTEMPTS = 20
+_ERROR_STRATEGY_MODEL = "gpt-5.2"
+_ERROR_STRATEGY_REASONING_EFFORT = "extra_high"
+_SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
+_ITERATION_STATE_FILENAME = "iteration_state.json"
+_LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS = frozenset({"submit"})
+_DEFAULT_EVAL_SEEDS = [42, 2024, 777]
+_DEFAULT_EVAL_REPEATS = 2
+_EVAL_REPEAT_SEED_OFFSET = 1009
+_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
+_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
+
+
+class _TrainingLiveStdout:
+    """Render a single carriage-return live line while preserving regular log lines."""
+
+    def __init__(self, base_stream) -> None:
+        self._base_stream = base_stream
+        self._last_live_text = ""
+        self._live_active = False
+
+    def render_live(self, text: str) -> None:
+        self._last_live_text = text
+        self._base_stream.write(f"\r{text}")
+        self._live_active = True
+
+    def finish_live(self, text: str) -> None:
+        self._last_live_text = text
+        self._base_stream.write(f"\r{text}\n")
+        self._live_active = False
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        interrupted = False
+        if self._live_active and any(ch not in "\r" for ch in s):
+            self._base_stream.write("\n")
+            self._live_active = False
+            interrupted = True
+        written = self._base_stream.write(s)
+        if interrupted and s.endswith("\n") and self._last_live_text:
+            self._base_stream.write(f"\r{self._last_live_text}")
+            self._live_active = True
+        return written
+
+    def flush(self) -> None:
+        self._base_stream.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._base_stream, "isatty", lambda: False)())
+
+    @property
+    def encoding(self) -> str | None:
+        return getattr(self._base_stream, "encoding", None)
+
+    @property
+    def errors(self) -> str | None:
+        return getattr(self._base_stream, "errors", None)
+
+    def fileno(self) -> int:
+        return self._base_stream.fileno()
 
 
 def run_autopilot(config: AutopilotConfig) -> None:
@@ -146,26 +223,44 @@ def run_autopilot(config: AutopilotConfig) -> None:
     if resume_id:
         os.environ.pop("KAGGLEBOT_RESUME_RUN_ID", None)
         os.environ.pop("KAGGLEBOT_RESUME_SLUG", None)
+    session = AutopilotSession(config=config, run_id=run_id, resume_run=resume_run)
     attempt = 0
-    while True:
-        try:
-            return _run_autopilot_core(config, run_id, resume_run=resume_run)
-        except RulesNotAcceptedError:
-            raise
-        except SubmitAbortedError:
-            raise
-        except KernelCapacityError:
-            raise
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            if config.dry_run:
+    submit_force_override = False
+    try:
+        while True:
+            try:
+                return session.run()
+            except RulesNotAcceptedError:
                 raise
-            attempt += 1
-            if attempt > MAX_AUTOFIX_ATTEMPTS:
+            except SubmitAbortedError as exc:
+                if config.dry_run:
+                    raise
+                if not _is_submit_abort_autofixable(config=config, run_id=run_id):
+                    raise
+                attempt += 1
+                if attempt > MAX_AUTOFIX_ATTEMPTS:
+                    raise
+                print("[yellow]autofix[/yellow]: submit stage failed; invoking codex to repair and retry submit")
+                os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
+                submit_force_override = True
+                _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+            except KernelCapacityError:
                 raise
-            print("[yellow]autofix[/yellow]: invoking codex to repair error")
-            _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if config.dry_run:
+                    raise
+                if _is_non_autofixable_runtime_error(exc):
+                    raise
+                attempt += 1
+                if attempt > MAX_AUTOFIX_ATTEMPTS:
+                    raise
+                print("[yellow]autofix[/yellow]: invoking codex to repair error")
+                _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+    finally:
+        if submit_force_override:
+            os.environ.pop("KAGGLEBOT_FORCE_RESUBMIT", None)
 
 
 @dataclass(frozen=True)
@@ -230,6 +325,24 @@ class SubmissionPhase:
         )
 
 
+@dataclass(frozen=True)
+class AutopilotSession:
+    config: AutopilotConfig
+    run_id: str
+    resume_run: bool = False
+
+    @property
+    def planning(self) -> PlanningPhase:
+        return PlanningPhase(config=self.config, run_id=self.run_id, resume_run=self.resume_run)
+
+    @property
+    def knowledge(self) -> KnowledgePhase:
+        return KnowledgePhase(config=self.config)
+
+    def run(self) -> None:
+        _run_autopilot_core(self.config, self.run_id, resume_run=self.resume_run)
+
+
 def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -270,8 +383,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         resolved=resolved,
         status="running",
     )
-    if run_payload.get("status") == "running":
-        run_payload["status"] = "completed"
     (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
 
     record_run(
@@ -291,30 +402,78 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     submitted = False
     pending_problem_insights: list[dict[str, object]] = []
     pending_error_fixes: list[dict[str, object]] = []
-    submit_candidate: Path | None = None
-    submit_candidate_score: float | None = None
-    submit_top1_score: float | None = None
+    last_submission_result: dict[str, object] | None = None
 
     max_iterations = max(1, int(resolved["max_iterations"]))
     iteration_phase = IterationPhase(metric_direction=metric_direction)
     holdout_frac = float(resolved["holdout_frac"])
     cv_folds = int(resolved["cv_folds"])
+    split_strategy = str(resolved.get("split_strategy") or "").strip().lower() or None
     seed = int(resolved["seed"])
+    eval_seeds = _normalize_eval_seeds(resolved.get("eval_seeds"), fallback=[seed])
+    eval_repeats = _normalize_eval_repeats(resolved.get("eval_repeats"), fallback=_DEFAULT_EVAL_REPEATS)
     score_source = str(resolved["score_source"] or "auto")
+    max_total_min_raw = resolved.get("max_total_min")
+    max_total_min = float(max_total_min_raw) if isinstance(max_total_min_raw, (int, float)) else None
     kernel_name = resolved["kernel_name"]
     enable_internet = str(resolved["internet"]) == "on"
+    submission_gate = str(resolved.get("submission_gate") or "always")
+    readiness_target = float(resolved.get("readiness_target_score") or target_score)
+    readiness_method = str(resolved.get("readiness_method") or "ci_bound")
+    readiness_k = float(resolved.get("readiness_k") or 1.0)
+    ci_method = str(resolved.get("ci_method") or "normal")
+    ci_alpha = float(resolved.get("ci_alpha") or 0.05)
+    drift_check_enabled = bool(resolved.get("drift_check", False))
+    drift_weight = float(resolved.get("drift_weight") or 1.0)
+    stop_min_delta = float(resolved.get("stop_min_delta") or 0.0)
+    stop_no_improve_patience = int(resolved.get("stop_no_improve_patience") or 0)
+    stop_same_config_patience = int(resolved.get("stop_same_config_patience") or 0)
+    rank_force_major_max_percentile = _normalize_rank_force_percentile(
+        resolved.get("rank_force_major_max_percentile"),
+        fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+    )
+    rank_force_major_min_teams = _normalize_rank_force_min_teams(
+        resolved.get("rank_force_major_min_teams"),
+        fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+    )
+    no_improve_streak = 0
+    same_config_streak = 0
+    last_config_hash: str | None = None
+    eval_data_cache: dict[str, object] | None = None
+    previous_readiness_score, noise_limited_streak = _resume_noise_guard_state(
+        run_dir=config.paths.run_dir(run_id),
+        max_iterations=max_iterations,
+    )
     start_iteration, best_score, best_submission = _resume_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
+        require_submit_phase=config.submit and not config.dry_run,
     )
+    resumed_best_readiness = _resume_best_readiness_score(
+        run_dir=config.paths.run_dir(run_id),
+        direction=metric_direction,
+        max_iterations=max_iterations,
+    )
+    if resumed_best_readiness is not None:
+        best_score = resumed_best_readiness
     if start_iteration > 1:
         print(f"[yellow]resume[/yellow]: found completed iterations; resuming at {start_iteration}/{max_iterations}")
+    loop_started_at = time.monotonic()
 
     try:
         for iteration in range(start_iteration, max_iterations + 1):
+            if max_total_min is not None and max_total_min > 0:
+                elapsed_total_min = (time.monotonic() - loop_started_at) / 60.0
+                if elapsed_total_min >= float(max_total_min):
+                    run_payload["status"] = "stopped"
+                    run_payload["stop_reason"] = (
+                        f"max_total_min reached: elapsed={elapsed_total_min:.1f}m limit={float(max_total_min):.1f}m"
+                    )
+                    print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
+                    break
             iter_dir = config.paths.iter_dir(run_id, iteration)
             logs_dir = iter_dir / "logs"
             agent_dir = iter_dir / "agent"
@@ -330,6 +489,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
             submission_path = iter_dir / "submission.csv"
             evaluation = None
+            evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
 
@@ -444,25 +604,70 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "Kernel metrics missing expected score; ensure metrics.json includes a numeric metric value."
                     )
             else:
-                compute_enum = Compute(config.compute)
-                print(f"[cyan]training[/cyan]: {config.compute}")
-                outcome = train_evaluate_and_predict(
-                    data_dir=config.paths.data_dir,
-                    output_path=submission_path,
-                    compute=compute_enum,
-                    strict_accelerator=config.strict_accelerator,
-                    seed=seed,
-                    score_source=score_source,
-                    metric=target_metric,
-                    direction=metric_direction,
-                    holdout_frac=holdout_frac,
-                    cv_folds=cv_folds,
-                    plan_score_source=score_source,
-                    target_override=None,
-                )
-                evaluation = outcome.evaluation
-                model_summary = outcome.model_summary
-                accelerator_used = outcome.accelerator
+                kernel_path = config.paths.kernel_source_dir / "kernel.py"
+                if not kernel_path.exists():
+                    raise RuntimeError(
+                        "Local autopilot requires kernel.py, but "
+                        f"{kernel_path} was not found. Run planning/implement to generate kernel.py first."
+                    )
+                print(f"[cyan]kernel local run[/cyan]: {config.compute}")
+                kernel_attempts = 0
+                error_fingerprints = {}
+                while True:
+                    try:
+                        kernel_result = run_kernel_local(
+                            slug=config.slug,
+                            run_id=run_id,
+                            iteration=iteration,
+                            base_dir=config.paths.base_dir.parent,
+                            accelerator=config.accelerator,
+                            score_source=score_source,
+                            metric=target_metric,
+                            direction=metric_direction,
+                            holdout_frac=holdout_frac,
+                            cv_folds=cv_folds,
+                            seed=seed,
+                            dry_run=config.dry_run,
+                            timeout_minutes=config.time_budget_min,
+                            strict_accelerator=config.strict_accelerator,
+                        )
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        kernel_attempts += 1
+                        error_text = _format_kernel_error(exc)
+                        _record_kernel_error(
+                            logs_dir=logs_dir,
+                            attempt=kernel_attempts,
+                            error_text=error_text,
+                            error_fingerprints=error_fingerprints,
+                            output_dir=output_dir,
+                        )
+                        if config.dry_run:
+                            raise
+                        if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
+                            raise
+                        print(
+                            f"[yellow]local kernel failed[/yellow]: invoking codex to fix (attempt {kernel_attempts})"
+                        )
+                        _run_kernel_fix(
+                            config=config,
+                            run_id=run_id,
+                            iteration=iteration,
+                            iter_dir=iter_dir,
+                            error_message=error_text,
+                            attempt=kernel_attempts,
+                            pending_error_fixes=pending_error_fixes,
+                        )
+
+                if kernel_result.submission_path:
+                    submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+                if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+                    evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction, target_metric)
+                if evaluation is None:
+                    raise KernelFailedError(
+                        "Local kernel metrics missing expected score; "
+                        "ensure metrics.json includes a numeric metric value."
+                    )
 
             if evaluation is None:
                 raise RuntimeError("No evaluation metrics produced.")
@@ -470,12 +675,17 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 normalized_eval = _normalize_metric_name(evaluation.metric)
                 normalized_target = _normalize_metric_name(target_metric)
                 if normalized_eval and normalized_eval != normalized_target:
-                    corrected_direction = infer_direction(evaluation.metric, "auto")
+                    corrected_direction, confident = _infer_metric_direction_for_mismatch(
+                        evaluation.metric,
+                        metric_direction,
+                    )
                     if corrected_direction != metric_direction or evaluation.metric != target_metric:
+                        confidence_text = "high" if confident else "fallback"
                         print(
                             "[yellow]metric mismatch[/yellow]: "
                             f"plan={target_metric}/{metric_direction}, "
-                            f"kernel={evaluation.metric}/{corrected_direction}. "
+                            f"kernel={evaluation.metric}/{corrected_direction} "
+                            f"(direction_confidence={confidence_text}). "
                             "Updating plan to match kernel metric."
                         )
                         metric_direction = corrected_direction
@@ -498,11 +708,207 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             val_score=evaluation.val_score,
                             fold_scores=evaluation.fold_scores,
                         )
-            print(f"[green]iteration complete[/green]: {evaluation.metric}={evaluation.value:.6f}")
+            report, report_payload, eval_data_cache = _build_iteration_evaluation_report(
+                config=config,
+                run_id=run_id,
+                iteration=iteration,
+                evaluation=evaluation,
+                evaluation_by_source=evaluation_by_source,
+                metric_direction=metric_direction,
+                cv_folds=cv_folds,
+                split_strategy=split_strategy,
+                seed=seed,
+                eval_seeds=eval_seeds,
+                eval_repeats=eval_repeats,
+                score_source=score_source,
+                ci_method=ci_method,
+                ci_alpha=ci_alpha,
+                readiness_method=readiness_method,
+                readiness_k=readiness_k,
+                drift_check_enabled=drift_check_enabled,
+                drift_weight=drift_weight,
+                eval_data_cache=eval_data_cache,
+            )
+            _append_run_evaluation_report(run_dir=run_dir, iteration=iteration, payload=report_payload)
+            evaluation_report_path = iter_dir / "evaluation_report.json"
+            evaluation_report_path.write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
 
-            met_target = _meets_target(evaluation.value, target_score, metric_direction)
+            readiness_score = report.readiness_score
+            print(
+                f"[green]iteration complete[/green]: {evaluation.metric}={evaluation.value:.6f} "
+                f"(SRS={readiness_score:.6f})"
+            )
+            if evaluation_by_source:
+                values_line = ", ".join(
+                    f"{source}={result.value:.6f}" for source, result in evaluation_by_source.items()
+                )
+                print(f"[cyan]evaluation sources[/cyan]: {values_line}")
             top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
-            top1_tier = _is_top1_tier(evaluation.value, top1_score, metric_direction)
+            decision_score = readiness_score
+            decision_source = "readiness"
+            top1_tier_by_submission = False
+            submission_rank: int | None = None
+            submission_total_teams: int | None = None
+            submission_rank_percentile: float | None = None
+            submission_rank_source: str | None = None
+            submission_rank_estimate: int | None = None
+            submission_total_teams_estimate: int | None = None
+            submission_rank_percentile_estimate: float | None = None
+            submission_rank_estimate_source: str | None = None
+            rank_forced_major_overhaul = False
+            rank_force_reason: str | None = None
+
+            allow_submit = _should_attempt_submit_for_readiness(
+                gate=submission_gate,
+                readiness_score=readiness_score,
+                readiness_target=readiness_target,
+                direction=metric_direction,
+                iteration=iteration,
+                max_iterations=max_iterations,
+            )
+            submission_result: dict[str, object] | None = None
+            submit_phase_state = "disabled"
+            if config.submit and allow_submit:
+                try:
+                    submission_result = submission_phase.attempt(
+                        submission_path=submission_path,
+                        best_score=best_score if best_score is not None else readiness_score,
+                    )
+                except SubmitAbortedError:
+                    run_payload["status"] = "submit_failed"
+                    (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+                    raise
+                if submission_result:
+                    submit_phase_state = "submitted"
+                    submitted = True
+                    last_submission_result = submission_result
+                    outcome_payload = submission_result.get("outcome")
+                    if isinstance(outcome_payload, dict):
+                        online_score = _to_float(outcome_payload.get("score"))
+                        if online_score is not None:
+                            print(f"[cyan]submission score[/cyan]: {online_score:.6f}")
+                            if isinstance(top1_score, (int, float)):
+                                top1_tier_by_submission = _is_top1_tier(
+                                    float(online_score),
+                                    float(top1_score),
+                                    metric_direction,
+                                )
+                        rank_payload = _resolve_submission_rank_payload(
+                            slug=config.slug,
+                            context_dir=config.paths.context_dir,
+                            direction=metric_direction,
+                            outcome=outcome_payload,
+                            dry_run=config.dry_run,
+                        )
+                        if rank_payload:
+                            outcome_payload.update(rank_payload)
+                            submission_rank = _to_int(rank_payload.get("rank"))
+                            submission_total_teams = _to_int(rank_payload.get("total_teams"))
+                            submission_rank_percentile = _to_float(rank_payload.get("rank_percentile"))
+                            submission_rank_estimate = _to_int(rank_payload.get("estimated_rank"))
+                            submission_total_teams_estimate = _to_int(rank_payload.get("estimated_total_teams"))
+                            submission_rank_percentile_estimate = _to_float(
+                                rank_payload.get("estimated_rank_percentile")
+                            )
+                            estimate_source_raw = rank_payload.get("rank_estimate_source")
+                            if isinstance(estimate_source_raw, str) and estimate_source_raw.strip():
+                                submission_rank_estimate_source = estimate_source_raw.strip()
+                            source_raw = rank_payload.get("rank_source")
+                            if source_raw is not None:
+                                submission_rank_source = str(source_raw)
+                            if (
+                                submission_rank is not None
+                                and submission_total_teams is not None
+                                and submission_total_teams > 0
+                            ):
+                                if submission_rank_percentile is None:
+                                    submission_rank_percentile = submission_rank / submission_total_teams
+                                percentile_text = (
+                                    f"{submission_rank_percentile * 100:.2f}%"
+                                    if submission_rank_percentile is not None
+                                    else "n/a"
+                                )
+                                source_text = f" source={submission_rank_source}" if submission_rank_source else ""
+                                print(
+                                    "[cyan]submission rank[/cyan]: "
+                                    f"{submission_rank}/{submission_total_teams} "
+                                    f"(percentile={percentile_text}){source_text}"
+                                )
+                                rank_forced_major_overhaul = _should_force_major_overhaul_by_rank(
+                                    rank=submission_rank,
+                                    total_teams=submission_total_teams,
+                                    max_percentile=rank_force_major_max_percentile,
+                                    min_teams=rank_force_major_min_teams,
+                                )
+                                if rank_forced_major_overhaul:
+                                    rank_force_reason = _build_rank_force_reason(
+                                        rank=submission_rank,
+                                        total_teams=submission_total_teams,
+                                        rank_percentile=submission_rank_percentile,
+                                        max_percentile=rank_force_major_max_percentile,
+                                        min_teams=rank_force_major_min_teams,
+                                        source=submission_rank_source,
+                                    )
+                                    print(f"[yellow]rank guard[/yellow]: {rank_force_reason}")
+                            elif (
+                                submission_rank_estimate is not None
+                                and submission_total_teams_estimate is not None
+                                and submission_total_teams_estimate > 0
+                            ):
+                                if submission_rank_percentile_estimate is None:
+                                    submission_rank_percentile_estimate = (
+                                        submission_rank_estimate / submission_total_teams_estimate
+                                    )
+                                percentile_text = (
+                                    f"{submission_rank_percentile_estimate * 100:.2f}%"
+                                    if submission_rank_percentile_estimate is not None
+                                    else "n/a"
+                                )
+                                source_text = (
+                                    f" source={submission_rank_estimate_source}"
+                                    if submission_rank_estimate_source
+                                    else ""
+                                )
+                                print(
+                                    "[yellow]submission rank estimate[/yellow]: "
+                                    f"{submission_rank_estimate}/{submission_total_teams_estimate} "
+                                    f"(percentile={percentile_text}){source_text}"
+                                )
+                else:
+                    submit_phase_state = "dry_run" if config.dry_run else "attempted_no_result"
+            elif config.submit:
+                submit_phase_state = "skipped_gate"
+                print(
+                    "[yellow]submit gate[/yellow]: "
+                    f"gate={submission_gate} readiness={readiness_score:.6f} target={readiness_target:.6f} -> skipped"
+                )
+
+            met_target = _meets_target(readiness_score, readiness_target, metric_direction)
+            top1_tier = _is_top1_tier(readiness_score, top1_score, metric_direction)
+            delta_srs_vs_prev: float | None = None
+            noise_threshold = 0.5 * max(float(report.std), 0.0)
+            if previous_readiness_score is not None:
+                delta_srs_vs_prev = abs(readiness_score - previous_readiness_score)
+                if delta_srs_vs_prev < noise_threshold:
+                    noise_limited_streak += 1
+                else:
+                    noise_limited_streak = 0
+            previous_readiness_score = readiness_score
+            noise_forced_major_overhaul = noise_limited_streak >= 2
+            force_major_overhaul_next = noise_forced_major_overhaul or rank_forced_major_overhaul
+            forced_major_overhaul_reasons: list[str] = []
+            if noise_forced_major_overhaul:
+                forced_major_overhaul_reasons.append(
+                    "Two consecutive iterations were noise-limited: "
+                    f"|ΔSRS| < 0.5*CV std (streak={noise_limited_streak})."
+                )
+            if rank_forced_major_overhaul:
+                forced_major_overhaul_reasons.append(
+                    rank_force_reason or "Leaderboard rank indicates major improvement is still required."
+                )
+            forced_major_overhaul_reason = (
+                " ".join(forced_major_overhaul_reasons) if forced_major_overhaul_reasons else None
+            )
 
             metrics_payload = _build_metrics_payload(
                 run_id=run_id,
@@ -516,8 +922,39 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 holdout_frac=holdout_frac,
                 cv_folds=cv_folds,
                 seed=seed,
+                evaluation_by_source=evaluation_by_source,
+                evaluation_report=report,
+                readiness_target=readiness_target,
             )
-            (iter_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+            metrics_payload["loop_decision"] = {
+                "source": decision_source,
+                "value": decision_score,
+            }
+            metrics_payload["noise_guard"] = {
+                "delta_srs_vs_prev": delta_srs_vs_prev,
+                "threshold": noise_threshold,
+                "streak": noise_limited_streak,
+                "force_major_overhaul_next": force_major_overhaul_next,
+            }
+            metrics_payload["rank_guard"] = {
+                "rank": submission_rank,
+                "total_teams": submission_total_teams,
+                "rank_percentile": submission_rank_percentile,
+                "rank_source": submission_rank_source,
+                "estimated_rank": submission_rank_estimate,
+                "estimated_total_teams": submission_total_teams_estimate,
+                "estimated_rank_percentile": submission_rank_percentile_estimate,
+                "rank_estimate_source": submission_rank_estimate_source,
+                "max_percentile": rank_force_major_max_percentile,
+                "min_teams": rank_force_major_min_teams,
+                "force_major_overhaul_next": rank_forced_major_overhaul,
+            }
+            metrics_payload["top1_tier"] = {
+                "offline_readiness": top1_tier,
+                "submission_score": top1_tier_by_submission,
+            }
+            metrics_path = iter_dir / "metrics.json"
+            metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
 
             diff_summary = "Diff tracking disabled (git integration removed)."
             diagnostics = _build_diagnostics(
@@ -529,44 +966,112 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 top1_score=top1_score,
                 top1_tier=top1_tier,
                 diff_summary=diff_summary,
+                evaluation_by_source=evaluation_by_source,
+                loop_decision_score=decision_score,
+                loop_decision_source=decision_source,
             )
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
-            record_iteration(
-                knowledge_paths=config.knowledge_paths,
+            submit_phase_required = config.submit and not config.dry_run
+            submit_allowed_by_gate = config.submit and allow_submit
+            submit_phase_finished = (
+                (not submit_phase_required) or (not submit_allowed_by_gate) or (submission_result is not None)
+            )
+
+            iteration_record_kwargs = {
+                "knowledge_paths": config.knowledge_paths,
+                "run_id": run_id,
+                "iteration": iteration,
+                "score_source": evaluation.score_source,
+                "offline_value": evaluation.value,
+                "offline_std": evaluation.std,
+                "top1_public_score": top1_info.get("score") if isinstance(top1_info, dict) else None,
+                "met_target": met_target,
+                "git_commit": None,
+            }
+            try:
+                record_iteration(**iteration_record_kwargs)
+            except TypeError as exc:
+                if "submit_phase_finished" not in str(exc):
+                    raise
+                from kagglebot.knowledge import record_iteration as _record_iteration_canonical
+
+                try:
+                    _record_iteration_canonical(
+                        **iteration_record_kwargs,
+                        submit_phase_finished=submit_phase_finished,
+                    )
+                except TypeError as fallback_exc:
+                    if "submit_phase_finished" not in str(fallback_exc):
+                        raise
+                    _record_iteration_canonical(**iteration_record_kwargs)
+            _write_iteration_state_marker(
+                iter_dir=iter_dir,
                 run_id=run_id,
                 iteration=iteration,
-                score_source=evaluation.score_source,
-                offline_value=evaluation.value,
-                offline_std=evaluation.std,
-                top1_public_score=top1_info.get("score") if isinstance(top1_info, dict) else None,
-                met_target=met_target,
-                git_commit=None,
+                submission_path=submission_path,
+                metrics_path=metrics_path,
+                evaluation_report_path=evaluation_report_path,
+                submit_phase_required=submit_phase_required,
+                submit_phase_finished=submit_phase_finished,
+                submit_allowed_by_gate=submit_allowed_by_gate,
+                submit_phase_state=submit_phase_state,
+                submitted=submission_result is not None,
+                readiness_score=readiness_score,
             )
 
             prev_best = best_score
-            delta_offline = iteration_phase.delta_from_best(prev_best, evaluation.value)
-            improved = iteration_phase.should_update_best(best_score, evaluation.value, 0.0)
+            delta_offline = iteration_phase.delta_from_best(prev_best, readiness_score)
+            improved = iteration_phase.should_update_best(best_score, readiness_score, stop_min_delta)
             if improved:
-                best_score = evaluation.value
+                best_score = readiness_score
                 best_submission = submission_path
+                no_improve_streak = 0
+            else:
+                no_improve_streak += 1
 
-            if top1_tier:
-                if config.submit:
-                    submit_candidate = submission_path
-                    submit_candidate_score = best_score or evaluation.value
-                    submit_top1_score = top1_score if isinstance(top1_score, (int, float)) else None
-                else:
-                    run_payload["status"] = "completed"
+            current_config_hash = _pipeline_config_hash(
+                model_summary=model_summary,
+                metric=evaluation.metric,
+                accelerator=accelerator_used,
+            )
+            if current_config_hash == last_config_hash:
+                same_config_streak += 1
+            else:
+                same_config_streak = 0
+            last_config_hash = current_config_hash
+
+            if (not config.submit) and stop_no_improve_patience > 0 and no_improve_streak >= stop_no_improve_patience:
+                run_payload["status"] = "stopped"
+                run_payload["stop_reason"] = (
+                    f"readiness_score did not improve by >= {stop_min_delta:.6f} "
+                    f"for {no_improve_streak} consecutive iterations"
+                )
+                print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
+                break
+            if (
+                (not config.submit)
+                and stop_same_config_patience > 0
+                and same_config_streak >= stop_same_config_patience
+            ):
+                run_payload["status"] = "stopped"
+                run_payload["stop_reason"] = (
+                    f"model/pipeline config hash unchanged for {same_config_streak} consecutive iterations"
+                )
+                print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 
+            if _is_confirmed_first_place(submission_rank, submission_rank_source):
+                run_payload["status"] = "submitted" if submitted else "completed"
+                run_payload["stop_reason"] = "submission_rank_1"
+                print("[green]stop[/green]: submission rank reached #1")
+                break
+
+            if top1_tier:
+                print("[yellow]note[/yellow]: offline top1-tier reached; awaiting submission-score confirmation")
+
             if iteration >= max_iterations:
-                if config.submit and best_submission and not submitted:
-                    submit_candidate = best_submission
-                    submit_candidate_score = best_score
-                    submit_top1_score = top1_score if isinstance(top1_score, (int, float)) else None
-                elif not submitted:
-                    run_payload["status"] = "completed"
+                run_payload["status"] = "submitted" if submitted else "completed"
                 break
 
             print("[cyan]improve[/cyan]: generating next iteration plan")
@@ -580,6 +1085,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 target_score=target_score,
                 delta_offline=delta_offline,
                 pending_problem_insights=pending_problem_insights,
+                current_score=decision_score,
+                current_score_source=decision_source,
+                forced_improvement_mode="major_overhaul" if force_major_overhaul_next else None,
+                forced_improvement_reason=forced_major_overhaul_reason,
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
@@ -587,34 +1096,69 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         print("[yellow]run interrupted[/yellow]")
         return
 
-    if config.submit and submit_candidate and not submitted:
+    allow_final_submit = _should_attempt_submit_for_readiness(
+        gate=submission_gate,
+        readiness_score=best_score,
+        readiness_target=readiness_target,
+        direction=metric_direction,
+        iteration=max_iterations,
+        max_iterations=max_iterations,
+    )
+    if config.submit and not submitted and best_submission is not None and allow_final_submit:
         try:
-            submission_result = submission_phase.attempt(
-                submission_path=submit_candidate,
-                best_score=submit_candidate_score,
+            fallback_result = submission_phase.attempt(
+                submission_path=best_submission,
+                best_score=best_score,
             )
         except SubmitAbortedError:
             run_payload["status"] = "submit_failed"
             (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
             raise
-        if submission_result:
-            _record_submission_knowledge(
-                config=config,
-                run_id=run_id,
-                problem_types=problem_types,
-                pending_problem_insights=pending_problem_insights,
-                pending_error_fixes=pending_error_fixes,
-                submission_result=submission_result,
-                metric_direction=metric_direction,
-                target_score=target_score,
-                top1_score=submit_top1_score,
-            )
+        if fallback_result:
             submitted = True
-            run_payload["status"] = "submitted"
-        else:
-            run_payload["status"] = "completed"
+            last_submission_result = fallback_result
+    elif config.submit and not submitted and best_submission is not None and not allow_final_submit:
+        print(
+            "[yellow]submit gate[/yellow]: "
+            f"final submit skipped by gate={submission_gate} "
+            f"(best_readiness={best_score if best_score is not None else 'n/a'}, target={readiness_target:.6f})"
+        )
+
+    if submitted and last_submission_result:
+        top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
+        _record_submission_knowledge(
+            config=config,
+            run_id=run_id,
+            problem_types=problem_types,
+            pending_problem_insights=pending_problem_insights,
+            pending_error_fixes=pending_error_fixes,
+            submission_result=last_submission_result,
+            metric_direction=metric_direction,
+            target_score=target_score,
+            top1_score=top1_score if isinstance(top1_score, (int, float)) else None,
+        )
+        run_payload["status"] = "submitted"
+    elif run_payload.get("status") not in {"interrupted", "submit_failed"}:
+        run_payload["status"] = "completed"
 
     (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+
+
+def _evaluation_to_payload(evaluation: EvaluationResult) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "score_source": evaluation.score_source,
+        "metric": evaluation.metric,
+        "direction": evaluation.direction,
+        "value": evaluation.value,
+        "std": evaluation.std,
+    }
+    if evaluation.fold_scores is not None:
+        payload["fold_scores"] = list(evaluation.fold_scores)
+    if evaluation.train_score is not None:
+        payload["train_score"] = evaluation.train_score
+    if evaluation.val_score is not None:
+        payload["val_score"] = evaluation.val_score
+    return payload
 
 
 def _load_plan(paths: CompetitionPaths) -> PlanConfig:
@@ -628,7 +1172,16 @@ def _load_plan(paths: CompetitionPaths) -> PlanConfig:
 
 
 def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
-    paths.plan_path.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+    existing: dict[str, object] = {}
+    if paths.plan_path.exists():
+        try:
+            loaded = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except json.JSONDecodeError:
+            existing = {}
+    payload = {**existing, **plan.to_dict()}
+    paths.plan_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
@@ -645,12 +1198,10 @@ def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
 def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
     if not resume_run:
         return False
-    if paths.plan_path.exists():
-        agent_dir = paths.context_dir / "agent"
-        kernel_path = paths.kernel_source_dir / "kernel.py"
-        if agent_dir.exists() or kernel_path.exists():
-            return True
-    return False
+    if not paths.plan_path.exists():
+        return False
+    kernel_path = paths.kernel_source_dir / "kernel.py"
+    return kernel_path.exists()
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
@@ -661,19 +1212,76 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             return fallback
         return default
 
-    target_metric = choose(config.target_metric, plan.target_metric, None)
-    target_score = choose(config.target_score, plan.target_score, None)
-    target_direction = choose(config.target_direction, plan.target_direction, "auto")
-    score_source = choose(config.score_source, plan.score_source, "auto")
+    eval_spec = _load_evaluation_spec(config.paths)
+    spec_metric = eval_spec.get("metric_name") if isinstance(eval_spec.get("metric_name"), str) else None
+    spec_direction = eval_spec.get("direction") if isinstance(eval_spec.get("direction"), str) else None
+    spec_split = eval_spec.get("split_strategy") if isinstance(eval_spec.get("split_strategy"), str) else None
+    spec_folds = eval_spec.get("n_splits") if isinstance(eval_spec.get("n_splits"), int) else None
+    spec_seed: int | None = None
+    spec_eval_seeds: list[int] = []
+    spec_seeds = eval_spec.get("seeds")
+    if isinstance(spec_seeds, list):
+        for item in spec_seeds:
+            if isinstance(item, int):
+                spec_eval_seeds.append(item)
+                if spec_seed is None:
+                    spec_seed = item
+    spec_repeats = eval_spec.get("repeats") if isinstance(eval_spec.get("repeats"), int) else None
+    spec_ci_method = eval_spec.get("ci_method") if isinstance(eval_spec.get("ci_method"), str) else None
+    spec_ci_alpha = eval_spec.get("ci_alpha") if isinstance(eval_spec.get("ci_alpha"), (int, float)) else None
+    readiness_rule = eval_spec.get("readiness_rule") if isinstance(eval_spec.get("readiness_rule"), dict) else {}
+    spec_readiness_method = readiness_rule.get("method") if isinstance(readiness_rule.get("method"), str) else None
+    spec_readiness_k = readiness_rule.get("k") if isinstance(readiness_rule.get("k"), (int, float)) else None
+    spec_readiness_target = (
+        readiness_rule.get("target_score") if isinstance(readiness_rule.get("target_score"), (int, float)) else None
+    )
+    spec_submission_gate = (
+        readiness_rule.get("submission_gate") if isinstance(readiness_rule.get("submission_gate"), str) else None
+    )
+    drift_cfg = eval_spec.get("drift_check") if isinstance(eval_spec.get("drift_check"), dict) else {}
+    spec_drift_enabled = drift_cfg.get("enabled") if isinstance(drift_cfg.get("enabled"), bool) else None
+    spec_drift_weight = (
+        drift_cfg.get("drift_weight") if isinstance(drift_cfg.get("drift_weight"), (int, float)) else None
+    )
+    stop_policy = eval_spec.get("stop_policy") if isinstance(eval_spec.get("stop_policy"), dict) else {}
+    spec_stop_min_delta = (
+        stop_policy.get("min_delta") if isinstance(stop_policy.get("min_delta"), (int, float)) else None
+    )
+    spec_stop_no_improve = (
+        stop_policy.get("no_improve_patience") if isinstance(stop_policy.get("no_improve_patience"), int) else None
+    )
+    spec_stop_same_config = (
+        stop_policy.get("same_config_patience") if isinstance(stop_policy.get("same_config_patience"), int) else None
+    )
+
+    target_metric = choose(config.target_metric, plan.target_metric, spec_metric)
+    target_score = choose(config.target_score, plan.target_score, spec_readiness_target)
+    target_direction = choose(config.target_direction, plan.target_direction, spec_direction or "auto")
+    score_source = str(choose(config.score_source, plan.score_source, "auto") or "auto")
     holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
-    cv_folds = choose(config.cv_folds, plan.cv_folds, 5)
-    seed = choose(config.seed, plan.seed, 42)
+    cv_folds = choose(config.cv_folds, plan.cv_folds, spec_folds if spec_folds is not None else 5)
+    split_strategy = choose(None, plan.split_strategy, spec_split)
+    seed = choose(config.seed, plan.seed, spec_seed if spec_seed is not None else 42)
+    eval_seeds = _normalize_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
+    if len(eval_seeds) < 2:
+        print(
+            "[yellow]note[/yellow]: evaluation seeds were single-seed; "
+            f"upgrading to multi-seed defaults {_DEFAULT_EVAL_SEEDS}."
+        )
+        eval_seeds = list(_DEFAULT_EVAL_SEEDS)
+    eval_repeats = _normalize_eval_repeats(plan.eval_repeats, fallback=spec_repeats)
+    if eval_repeats < 2:
+        print(
+            "[yellow]note[/yellow]: evaluation repeats were < 2; "
+            f"upgrading to default {_DEFAULT_EVAL_REPEATS} to reduce noise."
+        )
+        eval_repeats = _DEFAULT_EVAL_REPEATS
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
     internet = choose(config.internet, plan.internet, "on")
     if internet in (None, "auto"):
         internet = "on"
-    default_max_iterations = 1
+    default_max_iterations = 3
     if config.max_iterations is None:
         max_iterations = default_max_iterations
         if plan.max_iterations not in (None, default_max_iterations):
@@ -687,7 +1295,49 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     max_total_min = choose(config.max_total_min, plan.max_total_min, None)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
-    submit_policy = choose(None, plan.submit_policy, "on_target_only")
+    submit_policy = str(choose(None, plan.submit_policy, "always") or "always")
+    policy_submission_gate = _submission_gate_for_policy(submit_policy)
+    submission_gate = choose(None, plan.submission_gate, spec_submission_gate or policy_submission_gate)
+    readiness_target_score = choose(
+        None,
+        plan.readiness_target_score,
+        spec_readiness_target if spec_readiness_target is not None else target_score,
+    )
+    readiness_method = choose(None, plan.readiness_method, spec_readiness_method or "ci_bound")
+    readiness_k = choose(None, plan.readiness_k, spec_readiness_k if spec_readiness_k is not None else 1.0)
+    ci_method = choose(None, plan.ci_method, spec_ci_method or "normal")
+    ci_alpha = choose(None, plan.ci_alpha, spec_ci_alpha if spec_ci_alpha is not None else 0.05)
+    drift_check = bool(
+        choose(
+            None,
+            plan.drift_check,
+            spec_drift_enabled if spec_drift_enabled is not None else False,
+        )
+    )
+    drift_weight = choose(None, plan.drift_weight, spec_drift_weight if spec_drift_weight is not None else 1.0)
+    stop_min_delta = choose(
+        None,
+        plan.stop_min_delta,
+        spec_stop_min_delta if spec_stop_min_delta is not None else min_improvement,
+    )
+    stop_no_improve_patience = choose(
+        None,
+        plan.stop_no_improve_patience,
+        spec_stop_no_improve if spec_stop_no_improve is not None else patience,
+    )
+    stop_same_config_patience = choose(
+        None,
+        plan.stop_same_config_patience,
+        spec_stop_same_config if spec_stop_same_config is not None else 0,
+    )
+    rank_force_major_max_percentile = _normalize_rank_force_percentile(
+        plan.rank_force_major_max_percentile,
+        fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+    )
+    rank_force_major_min_teams = _normalize_rank_force_min_teams(
+        plan.rank_force_major_min_teams,
+        fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+    )
 
     return {
         "target_metric": target_metric,
@@ -696,7 +1346,10 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "score_source": score_source,
         "holdout_frac": holdout_frac,
         "cv_folds": cv_folds,
+        "split_strategy": split_strategy,
         "seed": seed,
+        "eval_seeds": eval_seeds,
+        "eval_repeats": eval_repeats,
         "time_budget_min": time_budget_min,
         "kernel_name": kernel_name,
         "internet": internet,
@@ -705,6 +1358,19 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "patience": patience,
         "min_improvement": min_improvement,
         "submit_policy": submit_policy,
+        "submission_gate": submission_gate,
+        "readiness_target_score": readiness_target_score,
+        "readiness_method": readiness_method,
+        "readiness_k": readiness_k,
+        "ci_method": ci_method,
+        "ci_alpha": ci_alpha,
+        "drift_check": drift_check,
+        "drift_weight": drift_weight,
+        "stop_min_delta": stop_min_delta,
+        "stop_no_improve_patience": stop_no_improve_patience,
+        "stop_same_config_patience": stop_same_config_patience,
+        "rank_force_major_max_percentile": rank_force_major_max_percentile,
+        "rank_force_major_min_teams": rank_force_major_min_teams,
     }
 
 
@@ -716,15 +1382,37 @@ def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
         score_source=str(resolved.get("score_source") or "auto"),
         holdout_frac=resolved.get("holdout_frac"),  # type: ignore[arg-type]
         cv_folds=resolved.get("cv_folds"),  # type: ignore[arg-type]
+        split_strategy=resolved.get("split_strategy"),  # type: ignore[arg-type]
         seed=resolved.get("seed"),  # type: ignore[arg-type]
+        eval_seeds=resolved.get("eval_seeds"),  # type: ignore[arg-type]
+        eval_repeats=resolved.get("eval_repeats"),  # type: ignore[arg-type]
         time_budget_min=resolved.get("time_budget_min"),  # type: ignore[arg-type]
         kernel_name=resolved.get("kernel_name"),  # type: ignore[arg-type]
         internet=str(resolved.get("internet") or "on"),
-        max_iterations=int(resolved.get("max_iterations") or 1),
+        max_iterations=int(resolved.get("max_iterations") or 3),
         max_total_min=resolved.get("max_total_min"),  # type: ignore[arg-type]
         patience=int(resolved.get("patience") or 2),
         min_improvement=float(resolved.get("min_improvement") or 0.0),
-        submit_policy=str(resolved.get("submit_policy") or "on_target_only"),
+        submit_policy=str(resolved.get("submit_policy") or "always"),
+        submission_gate=str(resolved.get("submission_gate") or "always"),
+        readiness_target_score=resolved.get("readiness_target_score"),  # type: ignore[arg-type]
+        readiness_method=str(resolved.get("readiness_method") or "ci_bound"),
+        readiness_k=float(resolved.get("readiness_k") or 1.0),
+        ci_method=str(resolved.get("ci_method") or "normal"),
+        ci_alpha=float(resolved.get("ci_alpha") or 0.05),
+        drift_check=bool(resolved.get("drift_check", False)),
+        drift_weight=float(resolved.get("drift_weight") or 1.0),
+        stop_min_delta=float(resolved.get("stop_min_delta") or 0.0),
+        stop_no_improve_patience=int(resolved.get("stop_no_improve_patience") or 0),
+        stop_same_config_patience=int(resolved.get("stop_same_config_patience") or 0),
+        rank_force_major_max_percentile=_normalize_rank_force_percentile(
+            resolved.get("rank_force_major_max_percentile"),
+            fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+        ),
+        rank_force_major_min_teams=_normalize_rank_force_min_teams(
+            resolved.get("rank_force_major_min_teams"),
+            fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+        ),
     )
 
 
@@ -750,6 +1438,7 @@ def _build_run_payload(
             "score_source": resolved.get("score_source"),
             "holdout_frac": resolved.get("holdout_frac"),
             "cv_folds": resolved.get("cv_folds"),
+            "split_strategy": resolved.get("split_strategy"),
             "target_metric": resolved.get("target_metric"),
             "target_score": resolved.get("target_score"),
             "target_direction": resolved.get("target_direction"),
@@ -759,7 +1448,22 @@ def _build_run_payload(
             "min_improvement": resolved.get("min_improvement"),
             "time_budget_min": resolved.get("time_budget_min"),
             "seed": resolved.get("seed"),
+            "eval_seeds": resolved.get("eval_seeds"),
+            "eval_repeats": resolved.get("eval_repeats"),
             "submit_policy": resolved.get("submit_policy"),
+            "submission_gate": resolved.get("submission_gate"),
+            "readiness_target_score": resolved.get("readiness_target_score"),
+            "readiness_method": resolved.get("readiness_method"),
+            "readiness_k": resolved.get("readiness_k"),
+            "ci_method": resolved.get("ci_method"),
+            "ci_alpha": resolved.get("ci_alpha"),
+            "drift_check": resolved.get("drift_check"),
+            "drift_weight": resolved.get("drift_weight"),
+            "stop_min_delta": resolved.get("stop_min_delta"),
+            "stop_no_improve_patience": resolved.get("stop_no_improve_patience"),
+            "stop_same_config_patience": resolved.get("stop_same_config_patience"),
+            "rank_force_major_max_percentile": resolved.get("rank_force_major_max_percentile"),
+            "rank_force_major_min_teams": resolved.get("rank_force_major_min_teams"),
             "submit": config.submit,
             "message": config.message,
         },
@@ -773,6 +1477,77 @@ def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
         return json.loads(paths.dataset_profile_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
+    spec_path = paths.context_dir / "evaluation_spec.json"
+    if not spec_path.exists():
+        return {}
+    try:
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    spec, issues = validate_evaluation_spec(payload)
+    if issues:
+        issue_text = "; ".join(issues)
+        print(f"[yellow]evaluation spec ignored[/yellow]: {issue_text}")
+        return {}
+    return spec or {}
+
+
+def _normalize_eval_seeds(value: object, *, fallback: list[int] | None = None) -> list[int]:
+    candidates: list[int] = []
+    source = value
+    if source is None:
+        source = fallback
+    if isinstance(source, list):
+        for item in source:
+            if isinstance(item, int):
+                candidates.append(int(item))
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for seed in candidates:
+        if seed in seen:
+            continue
+        seen.add(seed)
+        normalized.append(seed)
+    if normalized:
+        return normalized
+    return list(_DEFAULT_EVAL_SEEDS)
+
+
+def _normalize_eval_repeats(value: object, *, fallback: int | None = None) -> int:
+    resolved = value if isinstance(value, int) else fallback
+    if isinstance(resolved, int):
+        return max(1, min(resolved, 10))
+    return _DEFAULT_EVAL_REPEATS
+
+
+def _normalize_rank_force_percentile(value: object, *, fallback: float) -> float:
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if 0.0 < parsed <= 1.0:
+            return parsed
+    return float(fallback)
+
+
+def _normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
+    if isinstance(value, int):
+        return max(1, value)
+    if isinstance(value, float):
+        return max(1, int(value))
+    return max(1, int(fallback))
+
+
+def _expanded_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
+    seeds = _normalize_eval_seeds(base_seeds)
+    repeats_norm = _normalize_eval_repeats(repeats)
+    expanded: list[int] = []
+    for repeat_idx in range(repeats_norm):
+        offset = repeat_idx * _EVAL_REPEAT_SEED_OFFSET
+        for seed in seeds:
+            expanded.append(int(seed + offset))
+    return expanded
 
 
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
@@ -884,10 +1659,25 @@ def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str 
     metric_name, value = _extract_kernel_metric(payload, target_metric)
     if value is None:
         return None
+    payload_direction_raw = payload.get("direction")
+    payload_direction = str(payload_direction_raw).strip().lower() if payload_direction_raw is not None else ""
+    resolved_direction = direction
+    if payload_direction in {"minimize", "maximize"}:
+        resolved_direction = payload_direction
 
     std = payload.get("offline_std")
     if std is None:
         std = payload.get("std")
+    std_value = float(std) if isinstance(std, (int, float)) else None
+
+    fold_scores_raw = payload.get("fold_scores")
+    fold_scores: list[float] | None = None
+    if isinstance(fold_scores_raw, list):
+        parsed_fold_scores = [float(item) for item in fold_scores_raw if isinstance(item, (int, float))]
+        if parsed_fold_scores:
+            fold_scores = parsed_fold_scores
+            if std_value is None and len(parsed_fold_scores) > 1:
+                std_value = float(np.std(parsed_fold_scores, ddof=1))
 
     score_source = payload.get("score_source", "holdout")
     if score_source == "holdout":
@@ -899,12 +1689,12 @@ def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str 
     return EvaluationResult(
         score_source=score_source,
         metric=metric_name or target_metric or "unknown",
-        direction=direction,  # type: ignore[arg-type]
+        direction=resolved_direction,  # type: ignore[arg-type]
         value=float(value),
-        std=std,
+        std=std_value,
         train_score=None,
         val_score=None,
-        fold_scores=None,
+        fold_scores=fold_scores,
     )
 
 
@@ -1028,8 +1818,11 @@ def _build_metrics_payload(
     holdout_frac: float,
     cv_folds: int,
     seed: int,
+    evaluation_by_source: dict[str, EvaluationResult] | None = None,
+    evaluation_report: EvaluationReport | None = None,
+    readiness_target: float | None = None,
 ) -> dict[str, object]:
-    return {
+    payload = {
         "run_id": run_id,
         "iter": iteration,
         "metric": evaluation.metric,
@@ -1044,9 +1837,391 @@ def _build_metrics_payload(
         "compute": compute,
         "accelerator": accelerator,
         "timestamp": int(datetime.now(UTC).timestamp()),
-        "folds": cv_folds if evaluation.score_source == "cv" else None,
-        "holdout_frac": holdout_frac if evaluation.score_source == "holdout" else None,
+        "folds": cv_folds if evaluation.score_source in {"cv", "consensus"} else None,
+        "holdout_frac": holdout_frac if evaluation.score_source in {"holdout", "consensus"} else None,
         "seed": seed,
+    }
+    if evaluation_by_source:
+        payload["offline_by_source"] = {
+            source: _evaluation_to_payload(result) for source, result in evaluation_by_source.items()
+        }
+    if evaluation_report is not None:
+        payload["readiness"] = {
+            "score": evaluation_report.readiness_score,
+            "mean": evaluation_report.mean,
+            "std": evaluation_report.std,
+            "ci_low": evaluation_report.ci_low,
+            "ci_high": evaluation_report.ci_high,
+            "target": readiness_target,
+            "split_strategy": evaluation_report.split_strategy,
+            "n_splits": evaluation_report.n_splits,
+            "seeds": evaluation_report.seeds,
+            "repeats": evaluation_report.repeats,
+            "drift_auc": evaluation_report.drift_auc,
+        }
+    return payload
+
+
+def _build_iteration_evaluation_report(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    evaluation: EvaluationResult,
+    evaluation_by_source: dict[str, EvaluationResult],
+    metric_direction: str,
+    cv_folds: int,
+    split_strategy: str | None,
+    seed: int,
+    eval_seeds: list[int],
+    eval_repeats: int,
+    score_source: str,
+    ci_method: str,
+    ci_alpha: float,
+    readiness_method: str,
+    readiness_k: float,
+    drift_check_enabled: bool,
+    drift_weight: float,
+    eval_data_cache: dict[str, object] | None,
+) -> tuple[EvaluationReport, dict[str, object], dict[str, object] | None]:
+    cache = _ensure_eval_data_cache(
+        config=config,
+        cv_folds=cv_folds,
+        split_strategy=split_strategy,
+        seed=seed,
+        eval_seeds=eval_seeds,
+        eval_repeats=eval_repeats,
+        score_source=score_source,
+        eval_data_cache=eval_data_cache,
+    )
+    fold_scores = _extract_fold_scores_for_report(evaluation=evaluation, evaluation_by_source=evaluation_by_source)
+
+    ci_method_value = "bootstrap" if str(ci_method).lower() == "bootstrap" else "normal"
+    uncertainty = UncertaintyEstimator.estimate(
+        fold_scores,
+        method=ci_method_value,  # type: ignore[arg-type]
+        alpha=max(1e-6, min(float(ci_alpha), 0.5)),
+        random_state=eval_seeds[0],
+    )
+
+    drift_auc = DriftChecker.adversarial_auc(
+        cache.get("drift_train_x"),  # type: ignore[arg-type]
+        cache.get("drift_test_x"),  # type: ignore[arg-type]
+        enabled=bool(drift_check_enabled),
+        random_state=eval_seeds[0],
+        n_splits=max(2, min(cv_folds, 5)),
+    )
+    readiness_method_value = "mean_std" if str(readiness_method).lower() == "mean_std" else "ci_bound"
+    readiness_score = SubmissionReadinessScorer.compute(
+        direction=metric_direction,  # type: ignore[arg-type]
+        mean_score=uncertainty.mean,
+        std_score=uncertainty.std,
+        ci_low=uncertainty.ci_low,
+        ci_high=uncertainty.ci_high,
+        method=readiness_method_value,  # type: ignore[arg-type]
+        k=float(readiness_k),
+        drift_auc=drift_auc,
+        drift_enabled=bool(drift_check_enabled),
+        drift_weight=float(drift_weight),
+    )
+    report = EvaluationReport(
+        metric_name=evaluation.metric,
+        direction=metric_direction,  # type: ignore[arg-type]
+        split_strategy=str(cache.get("split_strategy") or "kfold"),  # type: ignore[arg-type]
+        n_splits=int(cache.get("n_splits") or max(2, cv_folds)),
+        seeds=list(eval_seeds),
+        repeats=int(eval_repeats),
+        per_fold_scores=[float(item) for item in fold_scores],
+        mean=uncertainty.mean,
+        std=uncertainty.std,
+        ci_low=uncertainty.ci_low,
+        ci_high=uncertainty.ci_high,
+        drift_auc=drift_auc,
+        readiness_score=readiness_score,
+    )
+    payload = report.to_dict()
+    payload.update(
+        {
+            "run_id": run_id,
+            "iteration": iteration,
+            "metric_value": evaluation.value,
+            "score_source": evaluation.score_source,
+            "split_index_fingerprints": cache.get("split_index_fingerprints", []),
+        }
+    )
+    return report, payload, cache
+
+
+def _extract_fold_scores_for_report(
+    *,
+    evaluation: EvaluationResult,
+    evaluation_by_source: dict[str, EvaluationResult],
+) -> list[float]:
+    cv_eval = evaluation_by_source.get("cv")
+    if cv_eval is not None and cv_eval.fold_scores:
+        return [float(value) for value in cv_eval.fold_scores]
+    if evaluation.fold_scores:
+        return [float(value) for value in evaluation.fold_scores]
+    if evaluation_by_source:
+        return [float(item.value) for item in evaluation_by_source.values()]
+    return [float(evaluation.value)]
+
+
+def _ensure_eval_data_cache(
+    *,
+    config: AutopilotConfig,
+    cv_folds: int,
+    split_strategy: str | None,
+    seed: int,
+    eval_seeds: list[int],
+    eval_repeats: int,
+    score_source: str,
+    eval_data_cache: dict[str, object] | None,
+) -> dict[str, object]:
+    if eval_data_cache is not None:
+        return eval_data_cache
+    fallback = {
+        "split_strategy": "kfold",
+        "n_splits": max(2, int(cv_folds)),
+        "split_index_fingerprints": [],
+        "drift_train_x": None,
+        "drift_test_x": None,
+    }
+    if score_source == "holdout":
+        return fallback
+    try:
+        data = load_competition_data(config.paths.data_dir)
+    except Exception:  # noqa: BLE001
+        return fallback
+    try:
+        y = np.asarray(data.train[data.target_column])
+        expanded_seeds = _expanded_eval_seeds(base_seeds=eval_seeds, repeats=eval_repeats)
+        split = SplitStrategyFactory.create(y=y, strategy=split_strategy, n_splits=cv_folds, seed=seed)
+        fingerprints: list[dict[str, object]] = []
+        for expanded_seed in expanded_seeds:
+            split_for_seed = SplitStrategyFactory.create(
+                y=y,
+                strategy=split_strategy,
+                n_splits=cv_folds,
+                seed=expanded_seed,
+            )
+            fingerprints.extend(_build_split_index_fingerprints(split=split_for_seed, y=y, seed=expanded_seed))
+    except Exception:  # noqa: BLE001
+        split = SplitStrategyFactory.create(y=[0, 1, 0, 1], strategy="kfold", n_splits=2, seed=seed)
+        fingerprints = []
+    drift_train_x = data.train[data.feature_columns].copy() if data.feature_columns else None
+    drift_test_x = data.test[data.feature_columns].copy() if data.feature_columns else None
+    return {
+        "split_strategy": split.name,
+        "n_splits": split.n_splits,
+        "split_index_fingerprints": fingerprints,
+        "drift_train_x": drift_train_x,
+        "drift_test_x": drift_test_x,
+    }
+
+
+def _build_split_index_fingerprints(*, split: object, y: np.ndarray, seed: int) -> list[dict[str, object]]:
+    split_strategy = split  # local alias for readability
+    name = getattr(split_strategy, "name", "kfold")
+    splitter = getattr(split_strategy, "splitter", None)
+    if splitter is None:
+        return []
+    groups = None
+    x_dummy = np.zeros((len(y), 1), dtype=np.float64)
+    records: list[dict[str, object]] = []
+    split_iter = _iter_split_indices(name=name, splitter=splitter, x=x_dummy, y=y, groups=groups)
+    for fold_idx, (train_idx, valid_idx) in enumerate(split_iter):
+        train_arr = np.asarray(train_idx, dtype=np.int64)
+        valid_arr = np.asarray(valid_idx, dtype=np.int64)
+        records.append(
+            {
+                "seed": seed,
+                "fold": fold_idx,
+                "train_size": int(train_arr.size),
+                "valid_size": int(valid_arr.size),
+                "train_hash": hashlib.sha256(train_arr.tobytes()).hexdigest()[:16],
+                "valid_hash": hashlib.sha256(valid_arr.tobytes()).hexdigest()[:16],
+            }
+        )
+    return records
+
+
+def _iter_split_indices(*, name: str, splitter: object, x: np.ndarray, y: np.ndarray, groups: object):
+    if name == "timeseries_split":
+        yield from splitter.split(x)  # type: ignore[union-attr]
+        return
+    if name == "group_kfold" and groups is not None:
+        yield from splitter.split(x, y, groups=groups)  # type: ignore[union-attr]
+        return
+    if name == "stratified_kfold":
+        yield from splitter.split(x, y)  # type: ignore[union-attr]
+        return
+    yield from splitter.split(x, y)  # type: ignore[union-attr]
+
+
+def _append_run_evaluation_report(*, run_dir: Path, iteration: int, payload: dict[str, object]) -> None:
+    path = run_dir / "evaluation_report.json"
+    state: dict[str, object] = {"latest_iteration": iteration, "latest": payload, "history": [payload]}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                history_raw = existing.get("history", [])
+                if isinstance(history_raw, list):
+                    history = [item for item in history_raw if isinstance(item, dict)]
+                else:
+                    history = []
+                history = [item for item in history if item.get("iteration") != iteration]
+                history.append(payload)
+                history.sort(key=lambda item: int(item.get("iteration", 0)))
+                state["history"] = history
+        except json.JSONDecodeError:
+            pass
+    state["latest_iteration"] = iteration
+    state["latest"] = payload
+    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations: int) -> float | None:
+    path = run_dir / "evaluation_report.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    history = payload.get("history")
+    if not isinstance(history, list):
+        latest = payload.get("latest")
+        history = [latest] if isinstance(latest, dict) else []
+    best: float | None = None
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        iteration = _to_int(item.get("iteration"))
+        if iteration is not None and iteration > max_iterations:
+            continue
+        score = _to_float(item.get("readiness_score"))
+        if score is None:
+            continue
+        if _update_best_score(best, score, direction, 0.0):
+            best = score
+    return best
+
+
+def _resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[float | None, int]:
+    path = run_dir / "evaluation_report.json"
+    if not path.exists():
+        return None, 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None, 0
+    if not isinstance(payload, dict):
+        return None, 0
+    history = payload.get("history")
+    if not isinstance(history, list):
+        latest = payload.get("latest")
+        history = [latest] if isinstance(latest, dict) else []
+    rows: list[dict[str, object]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        iteration = _to_int(item.get("iteration"))
+        if iteration is None or iteration > max_iterations:
+            continue
+        rows.append(item)
+    if not rows:
+        return None, 0
+    rows.sort(key=lambda item: int(_to_int(item.get("iteration")) or 0))
+    streak = 0
+    prev_score: float | None = None
+    for item in rows:
+        score = _to_float(item.get("readiness_score"))
+        std = _to_float(item.get("std"))
+        if score is None:
+            continue
+        if prev_score is not None and std is not None:
+            threshold = 0.5 * max(std, 0.0)
+            if abs(score - prev_score) < threshold:
+                streak += 1
+            else:
+                streak = 0
+        prev_score = score
+    return prev_score, streak
+
+
+def _should_attempt_submit_for_readiness(
+    *,
+    gate: str,
+    readiness_score: float | None,
+    readiness_target: float,
+    direction: str,
+    iteration: int,
+    max_iterations: int,
+) -> bool:
+    normalized = str(gate or "always").strip().lower()
+    if normalized in {"always", "each_iteration"}:
+        return True
+    if normalized in {"final_only", "at_final"}:
+        return iteration >= max_iterations
+    if readiness_score is None:
+        return iteration >= max_iterations
+    met_target = _meets_target(readiness_score, readiness_target, direction)
+    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
+        return met_target
+    if normalized in {"readiness_or_final", "target_or_final"}:
+        return met_target or iteration >= max_iterations
+    return met_target or iteration >= max_iterations
+
+
+def _submission_gate_for_policy(policy: str | None) -> str:
+    normalized = str(policy or "").strip().lower()
+    if normalized in {"always", "each_iteration"}:
+        return "always"
+    if normalized in {"final_only", "at_final"}:
+        return "final_only"
+    if normalized in {"readiness_only", "readiness_target"}:
+        return "readiness_only"
+    if normalized in {"on_target_only", "target_or_final", "readiness_or_final"}:
+        return "readiness_or_final"
+    return "always"
+
+
+def _pipeline_config_hash(*, model_summary: dict[str, object], metric: str, accelerator: str) -> str:
+    stable_payload: dict[str, object] = {
+        "metric": metric,
+        "accelerator": accelerator,
+    }
+    for key, value in model_summary.items():
+        if key in {"evaluation_by_source", "timing", "elapsed", "duration"}:
+            continue
+        stable_payload[key] = value
+    encoded = json.dumps(stable_payload, sort_keys=True, default=_diagnostics_json_default).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _diagnostics_json_default(obj: object) -> object:
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, set):
+        return sorted([str(item) for item in obj])
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    for attr in ("item", "tolist"):
+        func = getattr(obj, attr, None)
+        if callable(func):
+            try:
+                return func()
+            except Exception:  # noqa: BLE001
+                break
+    return {
+        "__type__": f"{obj.__class__.__module__}.{obj.__class__.__qualname__}",
+        "__repr__": repr(obj),
     }
 
 
@@ -1060,14 +2235,18 @@ def _build_diagnostics(
     top1_score: float | None,
     top1_tier: bool,
     diff_summary: str,
+    evaluation_by_source: dict[str, EvaluationResult] | None = None,
+    loop_decision_score: float | None = None,
+    loop_decision_source: str = "offline",
 ) -> str:
     direction = evaluation.direction
-    delta_to_target = target_score - evaluation.value if direction == "minimize" else evaluation.value - target_score
-    best_line = best_score if best_score is not None else evaluation.value
-    trend = "improving" if best_score is None or _meets_target(evaluation.value, best_line, direction) else "stalled"
+    decision_score = evaluation.value if loop_decision_score is None else loop_decision_score
+    delta_to_target = target_score - decision_score if direction == "minimize" else decision_score - target_score
+    best_line = best_score if best_score is not None else decision_score
+    trend = "improving" if best_score is None or _meets_target(decision_score, best_line, direction) else "stalled"
     top1_delta = None
     if top1_score is not None:
-        top1_delta = top1_score - evaluation.value if direction == "minimize" else evaluation.value - top1_score
+        top1_delta = top1_score - decision_score if direction == "minimize" else decision_score - top1_score
     gap = None
     if evaluation.train_score is not None and evaluation.val_score is not None:
         gap = evaluation.train_score - evaluation.val_score
@@ -1087,10 +2266,18 @@ def _build_diagnostics(
     lines = [
         "# Diagnostics",
         "",
-        f"Score: {evaluation.value:.6f} vs target {target_score:.6f} (delta {delta_to_target:.6f})",
+        f"Loop decision: source={loop_decision_source} score={decision_score:.6f}",
+        f"Score vs target: {decision_score:.6f} vs {target_score:.6f} (delta {delta_to_target:.6f})",
         f"Best so far: {best_line:.6f} ({trend})",
         f"Evaluation: {evaluation.score_source}",
     ]
+    if evaluation_by_source:
+        lines.append(
+            "Offline by source: "
+            + ", ".join(f"{source}={result.value:.6f}" for source, result in evaluation_by_source.items())
+        )
+    else:
+        lines.append(f"Offline ({evaluation.score_source}): {evaluation.value:.6f}")
     if top1_score is None:
         lines.append("Top1 public score: unavailable")
     else:
@@ -1105,7 +2292,7 @@ def _build_diagnostics(
         *dataset_lines,
         "",
         "Pipeline summary:",
-        json.dumps(model_summary, indent=2),
+        json.dumps(model_summary, indent=2, default=_diagnostics_json_default),
         "",
         "Suspected causes:",
         "- Underfit if train/val both low; overfit if gap large.",
@@ -1187,22 +2374,29 @@ def _run_improvement(
     target_score: float,
     delta_offline: float | None,
     pending_problem_insights: list[dict[str, object]],
+    current_score: float | None = None,
+    current_score_source: str = "offline",
+    forced_improvement_mode: str | None = None,
+    forced_improvement_reason: str | None = None,
 ) -> None:
     prompt_template = config.paths.codex_improve_template.read_text(encoding="utf-8")
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "prompt.md"
     top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
-    improvement_mode, top1_gap = _classify_improvement_mode(evaluation.value, top1_score, evaluation.direction)
-    kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
-    model_family = _infer_kernel_model_family(kernel_main_path)
-    nn_upgrade_required = (
-        iteration == 1
-        and improvement_mode == "major_overhaul"
-        and model_family == "tree_only"
-        and top1_gap is not None
-        and top1_gap > 0
+    effective_current_score = evaluation.value if current_score is None else current_score
+    improvement_mode, top1_gap = _classify_improvement_mode(
+        effective_current_score,
+        top1_score,
+        evaluation.direction,
     )
+    if forced_improvement_mode:
+        print(
+            "[yellow]improve mode override[/yellow]: "
+            f"{improvement_mode} -> {forced_improvement_mode} ({forced_improvement_reason or 'policy'})"
+        )
+        improvement_mode = forced_improvement_mode
+    kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
     base_prompt_text = prompt_template.format(
         slug=config.slug,
         iteration=iteration,
@@ -1216,15 +2410,14 @@ def _run_improvement(
         knowledge_hints=str(config.paths.knowledge_hints_path),
         metric=evaluation.metric,
         direction=evaluation.direction,
-        current_score=f"{evaluation.value:.6f}",
+        current_score=f"{effective_current_score:.6f}",
+        current_score_source=current_score_source,
         target_score=f"{target_score:.6f}",
         top1_score=str(top1_score or "unavailable"),
         top1_source=str(top1_info.get("source") or "unknown"),
         top1_gap="unavailable" if top1_gap is None else f"{top1_gap:.6f}",
         delta_offline="unavailable" if delta_offline is None else f"{delta_offline:.6f}",
         improvement_mode=improvement_mode,
-        model_family_hint=model_family,
-        nn_upgrade_required="yes" if nn_upgrade_required else "no",
         next_iteration=str(iteration + 1),
         rules_url=str(config.paths.rules_url_path),
         rules_md=str(config.paths.rules_md_path),
@@ -1236,6 +2429,12 @@ def _run_improvement(
         sample_submission=str(config.paths.sample_submission_path),
         kernel_main=str(kernel_main_path),
     )
+    if forced_improvement_reason:
+        base_prompt_text += (
+            "\n\nForced improvement mode policy is active.\n"
+            f"Reason: {forced_improvement_reason}\n"
+            "Do not propose minor_tuning; make a major_overhaul plan.\n"
+        )
     problem_type_knowledge = _load_problem_type_knowledge_text(config)
     strategy_prompt = _build_improvement_strategy_prompt(
         slug=config.slug,
@@ -1243,15 +2442,14 @@ def _run_improvement(
         iteration=iteration,
         metric=evaluation.metric,
         direction=evaluation.direction,
-        current_score=evaluation.value,
+        current_score=effective_current_score,
+        current_score_source=current_score_source,
         target_score=target_score,
         top1_score=top1_score,
         top1_source=str(top1_info.get("source") or "unknown"),
         top1_gap=top1_gap,
         delta_offline=delta_offline,
         improvement_mode=improvement_mode,
-        model_family=model_family,
-        nn_upgrade_required=nn_upgrade_required,
         codex_prompt=base_prompt_text,
         problem_type_knowledge=problem_type_knowledge,
     )
@@ -1277,12 +2475,25 @@ def _run_improvement(
     _print_agent_prompt(prompt_path, prompt_text)
 
     print("[cyan]improve[/cyan]: running codex implementer")
+    allowed_prefixes = [config.paths.kernel_source_dir]
+    guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
+    before = _snapshot_tree(config.paths.repo_root)
     result = run_codex(
         prompt_path,
         agent_dir,
         dry_run=config.dry_run,
         model=_ERROR_FIX_CODEX_MODEL,
         reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+    )
+    after = _snapshot_tree(config.paths.repo_root)
+    _enforce_allowlist_changes(
+        root=config.paths.repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage=f"improve_iteration_{iteration}",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
     )
     response_text = _read_agent_response(result.last_message_path)
     _print_agent_response(result.last_message_path, response_text)
@@ -1320,14 +2531,13 @@ def _build_improvement_strategy_prompt(
     metric: str,
     direction: str,
     current_score: float,
+    current_score_source: str,
     target_score: float,
     top1_score: float | None,
     top1_source: str,
     top1_gap: float | None,
     delta_offline: float | None,
     improvement_mode: str,
-    model_family: str,
-    nn_upgrade_required: bool,
     codex_prompt: str,
     problem_type_knowledge: str,
 ) -> str:
@@ -1341,15 +2551,13 @@ Competition: {slug}
 Run ID: {run_id}
 Iteration: {iteration}
 Metric: {metric} ({direction})
-Current score: {current_score:.6f}
+Current score: {current_score:.6f} (source: {current_score_source})
 Target score: {target_score:.6f}
 Top1 score: {"unavailable" if top1_score is None else f"{top1_score:.6f}"}
 Top1 source: {top1_source}
 Top1 gap: {"unavailable" if top1_gap is None else f"{top1_gap:.6f}"}
-Delta offline: {"unavailable" if delta_offline is None else f"{delta_offline:.6f}"}
+Delta vs previous best: {"unavailable" if delta_offline is None else f"{delta_offline:.6f}"}
 Improvement mode: {improvement_mode}
-Model family hint: {model_family}
-NN upgrade required: {"yes" if nn_upgrade_required else "no"}
 
 ## Existing Codex Improvement Prompt Draft
 
@@ -1522,18 +2730,24 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     autofix_dir = run_dir / "autofix" / f"attempt-{attempt}"
     autofix_dir.mkdir(parents=True, exist_ok=True)
     error_text = "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip()
+    submit_autofix = isinstance(error, SubmitAbortedError)
+    submit_context = ""
     if isinstance(error, KaggleCliError):
         if error.command:
             error_text = f"{error_text}\n\nKaggle CLI command:\n{shlex.join(error.command)}"
         if error.output:
             error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
+    if submit_autofix:
+        submit_context = _build_submit_autofix_context(run_dir)
+        if submit_context:
+            error_text = f"{error_text}\n\nSubmit Failure Context:\n{submit_context}"
     attempt_tag = f"{attempt:02d}"
     header = f"autofix_attempt: {attempt}\n"
     error_path = autofix_dir / f"error-{attempt_tag}.txt"
     error_path.write_text(header + error_text + "\n", encoding="utf-8")
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
-    if _maybe_write_column_fill(config, error_text):
+    if not submit_autofix and _maybe_write_column_fill(config, error_text):
         note_path = autofix_dir / "note.txt"
         note = (
             "autofix_note: column_fill.json created for missing column error.\n"
@@ -1543,7 +2757,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         print("[yellow]autofix[/yellow]: wrote column_fill.json; retrying without kernel edits")
         return
 
-    if _maybe_write_object_coerce(config, error_text):
+    if not submit_autofix and _maybe_write_object_coerce(config, error_text):
         note_path = autofix_dir / "note.txt"
         note = (
             "autofix_note: object_coerce.json created for numpy.object_ conversion error.\n"
@@ -1553,7 +2767,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         print("[yellow]autofix[/yellow]: wrote object_coerce.json; retrying without kernel edits")
         return
 
-    if _maybe_write_device_coerce(config, error_text):
+    if not submit_autofix and _maybe_write_device_coerce(config, error_text):
         note_path = autofix_dir / "note.txt"
         note = (
             "autofix_note: device_coerce.json created for torch device mismatch error.\n"
@@ -1563,7 +2777,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         print("[yellow]autofix[/yellow]: wrote device_coerce.json; retrying without kernel edits")
         return
 
-    if _maybe_write_column_map(config, error_text):
+    if not submit_autofix and _maybe_write_column_map(config, error_text):
         note_path = autofix_dir / "note.txt"
         note = (
             "autofix_note: column_map.json created for missing column error.\n"
@@ -1573,15 +2787,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         print("[yellow]autofix[/yellow]: wrote column_map.json; retrying without kernel edits")
         return
 
-    allowed_prefixes = [
-        config.paths.repo_root / "src",
-        config.paths.repo_root / "docs",
-        config.paths.repo_root / "tests",
-        config.paths.kernel_source_dir,
-        config.paths.context_dir,
-        config.paths.runs_dir,
-        config.paths.prompts_dir,
-    ]
+    allowed_prefixes = _autofix_allowed_prefixes(config)
     prompt_text = _build_autofix_prompt(
         config=config,
         run_id=run_id,
@@ -1589,9 +2795,15 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         error_text=error_text,
         error_path=error_path,
         allowed_prefixes=allowed_prefixes,
+        submit_context=submit_context,
     )
+    if submit_autofix:
+        print(
+            f"[cyan]submit autofix[/cyan]: strategy={_ERROR_STRATEGY_MODEL}({_ERROR_STRATEGY_REASONING_EFFORT}) "
+            f"-> fixer={_ERROR_FIX_CODEX_MODEL}({_ERROR_FIX_REASONING_EFFORT})"
+        )
     strategy_prompt = _build_error_strategy_prompt(
-        stage="autofix",
+        stage="submit_autofix" if submit_autofix else "autofix",
         slug=config.slug,
         run_id=run_id,
         attempt=attempt,
@@ -1604,7 +2816,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         prompt_text=strategy_prompt,
         output_dir=autofix_dir / "gpt_strategy",
         dry_run=config.dry_run,
-        stage_label="autofix",
+        stage_label="submit autofix" if submit_autofix else "autofix",
     )
     if strategy_text:
         prompt_text += (
@@ -1650,6 +2862,36 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
 
+def _autofix_allowed_prefixes(config: AutopilotConfig) -> list[Path]:
+    # Keep src writable during autofix so runtime/framework issues in core code can be repaired.
+    # Do not grant broad competition-root/kernels write access; fixes must target authoritative
+    # sources (src/kernel/context/prompts) rather than generated staged artifacts.
+    candidates = [
+        config.paths.repo_root / "src",
+        config.paths.repo_root / "docs",
+        config.paths.repo_root / "tests",
+        # Allow competition-scoped prompt/context/submission artifacts and authoritative kernel.
+        config.paths.kernel_source_dir,
+        config.paths.context_dir,
+        config.paths.runs_dir,
+        config.paths.prompts_dir,
+        config.paths.submissions_dir,
+    ]
+    module_src_root = Path(__file__).resolve().parents[1]
+    # In some test/runtime setups, config.repo_root can differ from the imported module tree.
+    # Include the active src root so autofix can patch the file that raised the exception.
+    if module_src_root.name == "src":
+        candidates.append(module_src_root)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
 def _build_autofix_prompt(
     *,
     config: AutopilotConfig,
@@ -1658,8 +2900,18 @@ def _build_autofix_prompt(
     error_text: str,
     error_path: Path,
     allowed_prefixes: list[Path],
+    submit_context: str = "",
 ) -> str:
     allowed_list = "\n".join(f"- {path}" for path in allowed_prefixes)
+    submit_context_block = ""
+    if submit_context:
+        submit_context_block = (
+            "\n## Submit Context\n\n"
+            "This is a submit-stage failure. Prioritize fixing the submission path and output format first.\n\n"
+            "```\n"
+            f"{submit_context}\n"
+            "```\n"
+        )
     return f"""\
 # Kagglebot Codex: Auto-Fix
 
@@ -1677,6 +2929,7 @@ Compute: {config.compute} ({config.accelerator})
 ```
 
 Error log file: {error_path}
+{submit_context_block}
 
 ## Relevant Paths
 
@@ -1684,6 +2937,7 @@ Error log file: {error_path}
 - run_dir: {config.paths.run_dir(run_id)}
 - kernel_dir: {config.paths.kernel_source_dir}
 - context_dir: {config.paths.context_dir}
+- data_dir: {config.paths.data_dir}
 - prompts_dir: {config.paths.prompts_dir}
 - autopilot: {Path(__file__).resolve()}
 
@@ -1756,6 +3010,10 @@ def _run_error_strategy(
     prompt_path = output_dir / "gpt_strategy_prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     print(f"[cyan]{stage_label}[/cyan]: gpt analyzing error")
+    print(
+        f"[cyan]{stage_label}[/cyan]: strategy model={_ERROR_STRATEGY_MODEL} "
+        f"reasoning={_ERROR_STRATEGY_REASONING_EFFORT}"
+    )
     result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
     strategy_text = _read_agent_response(result.last_message_path).strip()
     if result.returncode != 0:
@@ -1968,8 +3226,11 @@ def _infer_column_mapping(columns_by_file: dict[str, list[str]], groups: list[li
     mapping: dict[str, str] = {}
     normalized = {_normalize_column(col): col for col in all_columns}
     for group in groups:
-        canonical = group[0]
-        match = _match_column(group, normalized, all_columns)
+        normalized_group = _normalize_group_tokens(group)
+        if not normalized_group:
+            continue
+        canonical = normalized_group[0]
+        match = _match_column(normalized_group, normalized, all_columns)
         if match and match not in mapping:
             mapping[match] = canonical
     return mapping
@@ -1995,6 +3256,18 @@ def _match_column(group: list[str], normalized: dict[str, str], all_columns: lis
 
 def _normalize_column(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _normalize_group_tokens(group: list[object]) -> list[str]:
+    normalized: list[str] = []
+    for cand in group:
+        if cand is None:
+            continue
+        text = cand if isinstance(cand, str) else str(cand)
+        stripped = text.strip()
+        if stripped:
+            normalized.append(stripped)
+    return normalized
 
 
 def _keywords_from_group(group: list[str]) -> set[str]:
@@ -2041,6 +3314,103 @@ def _record_blocked_module(context_dir: Path, module: str) -> list[str]:
     return existing
 
 
+def _write_iteration_state_marker(
+    *,
+    iter_dir: Path,
+    run_id: str,
+    iteration: int,
+    submission_path: Path,
+    metrics_path: Path,
+    evaluation_report_path: Path,
+    submit_phase_required: bool,
+    submit_phase_finished: bool | None = None,
+    submit_allowed_by_gate: bool,
+    submit_phase_state: str,
+    submitted: bool,
+    readiness_score: float,
+) -> None:
+    if submit_phase_finished is None:
+        submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate) or submitted
+
+    payload = {
+        "run_id": run_id,
+        "iteration": iteration,
+        "iteration_complete": True,
+        "trained": True,
+        "submission_exists": submission_path.exists(),
+        "submission_path": str(submission_path),
+        "metrics_exists": metrics_path.exists(),
+        "metrics_path": str(metrics_path),
+        "evaluation_report_exists": evaluation_report_path.exists(),
+        "evaluation_report_path": str(evaluation_report_path),
+        "submit_phase_required": submit_phase_required,
+        "submit_phase_finished": submit_phase_finished,
+        "submit_allowed_by_gate": submit_allowed_by_gate,
+        "submit_phase_state": submit_phase_state,
+        "submitted": submitted,
+        "readiness_score": readiness_score,
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    path = iter_dir / _ITERATION_STATE_FILENAME
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_iteration_state_marker(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _is_iteration_marker_complete(payload: dict[str, object], *, require_submit_phase: bool) -> bool:
+    if not payload:
+        return False
+    if not bool(payload.get("iteration_complete")):
+        return False
+    if require_submit_phase and not bool(payload.get("submit_phase_finished")):
+        return False
+    if require_submit_phase and bool(payload.get("submit_allowed_by_gate")) and not bool(payload.get("submitted")):
+        return False
+    return True
+
+
+def _load_submit_phase_completed_iterations(run_dir: Path) -> set[int]:
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return set()
+    completed: set[int] = set()
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return completed
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        action = str(payload.get("action_taken") or "").strip().lower()
+        if action not in _LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS:
+            continue
+        iteration = _to_int(payload.get("iteration"))
+        if iteration is None:
+            sub_path = str(payload.get("sub_path") or "").strip()
+            if sub_path:
+                iteration = _infer_iteration_from_submission_path(Path(sub_path))
+        if iteration is not None and iteration > 0:
+            completed.add(iteration)
+    return completed
+
+
 def _resume_iteration_state(
     *,
     paths: CompetitionPaths,
@@ -2048,6 +3418,7 @@ def _resume_iteration_state(
     metric_direction: str,
     target_metric: str,
     max_iterations: int,
+    require_submit_phase: bool = False,
 ) -> tuple[int, float | None, Path | None]:
     run_dir = paths.run_dir(run_id)
     if not run_dir.exists():
@@ -2055,6 +3426,7 @@ def _resume_iteration_state(
     best_score: float | None = None
     best_submission: Path | None = None
     completed_iters: list[int] = []
+    legacy_submit_phase_iters = _load_submit_phase_completed_iterations(run_dir) if require_submit_phase else set()
     for iter_dir in sorted(run_dir.glob("iter-*")):
         if not iter_dir.is_dir():
             continue
@@ -2066,33 +3438,63 @@ def _resume_iteration_state(
             continue
         submission_path = iter_dir / "submission.csv"
         metrics_path = iter_dir / "metrics.json"
-        evaluation = None
-        if metrics_path.exists():
-            try:
-                evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
-            except Exception:  # noqa: BLE001
-                evaluation = None
-        if evaluation is None and submission_path.exists():
-            completed_iters.append(iteration)
-            if best_submission is None:
-                best_submission = submission_path
+        if not submission_path.exists() and not metrics_path.exists():
+            continue
+        if submission_path.exists() and not metrics_path.exists():
             print(
                 "[yellow]resume[/yellow]: "
-                f"{metrics_path} missing; treating iter-{iteration} as complete based on submission.csv."
+                f"iter-{iteration} has submission.csv but no metrics.json; treating as incomplete."
             )
             continue
-        if evaluation is None:
+        if metrics_path.exists() and not submission_path.exists():
+            print(
+                "[yellow]resume[/yellow]: "
+                f"iter-{iteration} has metrics.json but no submission.csv; treating as incomplete."
+            )
             continue
+
+        marker_path = iter_dir / _ITERATION_STATE_FILENAME
+        marker_payload = _load_iteration_state_marker(marker_path)
+        marker_complete = _is_iteration_marker_complete(marker_payload, require_submit_phase=require_submit_phase)
+        legacy_complete = False
+        if not marker_complete:
+            if require_submit_phase:
+                legacy_complete = iteration in legacy_submit_phase_iters
+            else:
+                legacy_complete = True
+            if not legacy_complete:
+                phase_note = "submit phase completion" if require_submit_phase else "completion marker"
+                print(
+                    "[yellow]resume[/yellow]: "
+                    f"iter-{iteration} missing {phase_note} ({marker_path.name}); treating as incomplete."
+                )
+                continue
+            print(
+                "[yellow]resume[/yellow]: "
+                f"iter-{iteration} has no {marker_path.name}; inferred completion from legacy artifacts."
+            )
+
+        evaluation = None
+        try:
+            evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
+        except Exception:  # noqa: BLE001
+            evaluation = None
+        if evaluation is None:
+            print(
+                "[yellow]resume[/yellow]: "
+                f"{metrics_path} is missing a valid offline metric; treating iter-{iteration} as incomplete."
+            )
+            continue
+
         completed_iters.append(iteration)
-        if best_submission is None and submission_path.exists():
+        if best_submission is None:
             best_submission = submission_path
         if best_score is None:
             best_score = evaluation.value
         else:
             if _meets_target(evaluation.value, best_score, metric_direction):
                 best_score = evaluation.value
-                if submission_path.exists():
-                    best_submission = submission_path
+                best_submission = submission_path
     if not completed_iters:
         return 1, best_score, best_submission
     next_iter = max(completed_iters) + 1
@@ -2140,8 +3542,10 @@ def _attempt_submit(
     run_dir = config.paths.run_dir(run_id)
     run_state = _load_run_state(run_dir)
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
-    if run_state.get("submit_attempted") and not allow_force:
-        print("[yellow]submit skipped[/yellow]: this run already attempted submission; use --force-submit to override")
+    last_submission_path = str(run_state.get("last_submission_path") or "").strip()
+    if last_submission_path and Path(last_submission_path) == submission_path and not allow_force:
+        print("[yellow]submit skipped[/yellow]: same submission file already attempted in this run")
+        known_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "")
         _append_submit_attempt(
             run_dir=run_dir,
             payload={
@@ -2150,15 +3554,48 @@ def _attempt_submit(
                 "sub_sha256": _sha256_or_none(submission_path),
                 "exit_code": None,
                 "ok": False,
-                "fingerprint": str(run_state.get("last_fingerprint") or ""),
+                "fingerprint": known_fingerprint,
                 "error_kind": "unknown",
                 "action_taken": "skip",
-                "reason": "submit_already_attempted_in_run",
+                "reason": "same_submission_path_reused_in_run",
                 "stdout_tail": "",
                 "stderr_tail": "",
             },
         )
         return None
+
+    message = _submission_message(config, run_id, best_score, submission_path=submission_path)
+    submission_service = SubmissionService(
+        SubmissionConfig(
+            slug=config.slug,
+            data_dir=config.paths.data_dir,
+            sample_submission_path=config.paths.sample_submission_path,
+            submission_ledger_path=config.paths.submission_ledger_path,
+            dry_run=config.dry_run,
+            force_submit=config.force_submit,
+            bypass_rate_limit=True,
+        )
+    )
+    print(f"[cyan]submit[/cyan]: {config.slug}")
+    submitted_at = datetime.now(UTC)
+
+    try:
+        prepared_submission_path = submission_service.validate_and_prepare_submission(submission_path)
+    except SubmissionValidationError as exc:
+        fingerprint = compute_error_fingerprint("", str(exc))
+        return _abort_submit_for_run(
+            config=config,
+            run_id=run_id,
+            problem_types=problem_types,
+            submission_path=submission_path,
+            fingerprint=fingerprint,
+            error_kind="validation",
+            reason="local_submission_validation_failed",
+            message="Local submission validation failed; Kaggle CLI submit is skipped.",
+            stdout_tail="",
+            stderr_tail=str(exc),
+            exit_code=SubmissionValidationError.exit_code,
+        )
 
     try:
         rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)
@@ -2168,7 +3605,7 @@ def _attempt_submit(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
-                submission_path=submission_path,
+                submission_path=prepared_submission_path,
                 fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
                 error_kind="permanent",
                 reason="kaggle_credentials_missing",
@@ -2183,7 +3620,7 @@ def _attempt_submit(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
-            submission_path=submission_path,
+            submission_path=prepared_submission_path,
             fingerprint=compute_error_fingerprint("", "rules_not_accepted"),
             error_kind="permanent",
             reason="rules_not_accepted",
@@ -2193,54 +3630,31 @@ def _attempt_submit(
             exit_code=RulesNotAcceptedError.exit_code,
         )
 
-    message = _submission_message(config, run_id, best_score)
-    submission_service = SubmissionService(
-        SubmissionConfig(
-            slug=config.slug,
-            data_dir=config.paths.data_dir,
-            sample_submission_path=config.paths.sample_submission_path,
-            submission_ledger_path=config.paths.submission_ledger_path,
-            dry_run=config.dry_run,
-            force_submit=config.force_submit,
-        )
-    )
-    print(f"[cyan]submit[/cyan]: {config.slug}")
-    submitted_at = datetime.now(UTC)
     seen_fingerprints = set(_load_submit_fingerprints(run_dir))
+    state_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "").strip()
+    if state_fingerprint:
+        seen_fingerprints.add(state_fingerprint)
     max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)
     for attempt in range(1, max_attempts + 1):
         try:
-            submission_result = submission_service.submit(
-                submission_path=submission_path,
+            submission_result = submission_service.submit_prepared(
+                prepared_path=prepared_submission_path,
                 message=message,
                 run_id=run_id,
             )
-        except SubmissionValidationError as exc:
-            fingerprint = compute_error_fingerprint("", str(exc))
-            return _abort_submit_for_run(
-                config=config,
-                run_id=run_id,
-                problem_types=problem_types,
-                submission_path=submission_path,
-                fingerprint=fingerprint,
-                error_kind="validation",
-                reason="local_submission_validation_failed",
-                message="Local submission validation failed; Kaggle CLI submit is skipped.",
-                stdout_tail="",
-                stderr_tail=str(exc),
-                exit_code=SubmissionValidationError.exit_code,
-            )
         except SubmissionCliError as exc:
             classification = classify_submit_error(exc.stdout, exc.stderr, exc.exit_code)
+            classification_kind = str(classification.get("kind") or "unknown")
+            classification_reason = str(classification.get("reason") or "unclassified_submit_error")
             fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
             if fingerprint in seen_fingerprints:
                 return _abort_submit_for_run(
                     config=config,
                     run_id=run_id,
                     problem_types=problem_types,
-                    submission_path=submission_path,
+                    submission_path=prepared_submission_path,
                     fingerprint=fingerprint,
-                    error_kind=classification.kind,
+                    error_kind=classification_kind,
                     reason="same_error_fingerprint_recurred",
                     message="Same submit error fingerprint recurred; aborting this run to prevent infinite loop.",
                     stdout_tail=exc.stdout,
@@ -2248,24 +3662,26 @@ def _attempt_submit(
                     exit_code=exc.exit_code,
                 )
             seen_fingerprints.add(fingerprint)
-            if classification.kind == "transient" and attempt < max_attempts:
-                wait_seconds = _compute_submit_backoff(attempt)
+            retry_after = classification.get("retry_after_seconds")
+            retry_after_value = float(retry_after) if isinstance(retry_after, (int, float)) else 0.0
+            if classification_kind == "transient" and attempt < max_attempts:
+                wait_seconds = max(_compute_submit_backoff(attempt), retry_after_value)
                 print(
                     "[yellow]submit retry[/yellow]: transient submit error "
-                    f"(reason={classification.reason}, attempt={attempt}/{max_attempts}, wait={wait_seconds:.1f}s)"
+                    f"(reason={classification_reason}, attempt={attempt}/{max_attempts}, wait={wait_seconds:.1f}s)"
                 )
                 _append_submit_attempt(
                     run_dir=run_dir,
                     payload={
                         "run_id": run_id,
-                        "sub_path": str(submission_path),
-                        "sub_sha256": _sha256_or_none(submission_path),
+                        "sub_path": str(prepared_submission_path),
+                        "sub_sha256": _sha256_or_none(prepared_submission_path),
                         "exit_code": exc.exit_code,
                         "ok": False,
                         "fingerprint": fingerprint,
                         "error_kind": "transient",
                         "action_taken": "retry",
-                        "reason": classification.reason,
+                        "reason": classification_reason,
                         "stdout_tail": exc.stdout[-_SUBMIT_STDOUT_TAIL_CHARS:],
                         "stderr_tail": exc.stderr[-_SUBMIT_STDERR_TAIL_CHARS:],
                     },
@@ -2274,9 +3690,9 @@ def _attempt_submit(
                     config=config,
                     run_id=run_id,
                     problem_types=problem_types,
-                    submission_path=submission_path,
+                    submission_path=prepared_submission_path,
                     error_kind="transient",
-                    reason=classification.reason,
+                    reason=classification_reason,
                     action_taken="retry",
                     fingerprint=fingerprint,
                     details=f"attempt={attempt}; wait={wait_seconds:.1f}s",
@@ -2285,19 +3701,19 @@ def _attempt_submit(
                 continue
             print(
                 "[red]submit aborted[/red]: "
-                f"{classification.kind} submit error (reason={classification.reason}); no further retries in this run."
+                f"{classification_kind} submit error (reason={classification_reason}); no further retries in this run."
             )
             return _abort_submit_for_run(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
-                submission_path=submission_path,
+                submission_path=prepared_submission_path,
                 fingerprint=fingerprint,
-                error_kind=classification.kind,
-                reason=classification.reason,
+                error_kind=classification_kind,
+                reason=classification_reason,
                 message=(
                     "Submit failed and is not retryable in this run."
-                    if classification.kind != "transient"
+                    if classification_kind != "transient"
                     else "Transient submit error exceeded retry budget; aborting this run."
                 ),
                 stdout_tail=exc.stdout,
@@ -2310,7 +3726,7 @@ def _attempt_submit(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
-                submission_path=submission_path,
+                submission_path=prepared_submission_path,
                 fingerprint=fingerprint,
                 error_kind="permanent",
                 reason="local_submission_guardrail",
@@ -2325,7 +3741,7 @@ def _attempt_submit(
                     config=config,
                     run_id=run_id,
                     problem_types=problem_types,
-                    submission_path=submission_path,
+                    submission_path=prepared_submission_path,
                     fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
                     error_kind="permanent",
                     reason="kaggle_credentials_missing",
@@ -2364,6 +3780,7 @@ def _attempt_submit(
         {
             "submit_attempted": True,
             "submit_ok": True,
+            "last_submit_fingerprint": fingerprint,
             "last_fingerprint": fingerprint,
             "last_error_kind": "none",
             "last_action": "submit",
@@ -2431,6 +3848,7 @@ def _abort_submit_for_run(
         {
             "submit_attempted": True,
             "submit_ok": False,
+            "last_submit_fingerprint": fingerprint,
             "last_fingerprint": fingerprint,
             "last_error_kind": error_kind,
             "last_action": "abort",
@@ -2469,7 +3887,7 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
     state_path = run_dir / "run_state.json"
     if not state_path.exists():
         attempted = _has_submit_attempt_records(run_dir)
-        return {"submit_attempted": attempted}
+        return {"submit_attempted": attempted, "submit_ok": False}
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
@@ -2478,6 +3896,10 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
         payload = {}
     if not payload.get("submit_attempted"):
         payload["submit_attempted"] = _has_submit_attempt_records(run_dir)
+    if "last_submit_fingerprint" not in payload and payload.get("last_fingerprint"):
+        payload["last_submit_fingerprint"] = payload.get("last_fingerprint")
+    if "last_fingerprint" not in payload and payload.get("last_submit_fingerprint"):
+        payload["last_fingerprint"] = payload.get("last_submit_fingerprint")
     return payload
 
 
@@ -2525,6 +3947,72 @@ def _load_submit_fingerprints(run_dir: Path) -> list[str]:
     return fingerprints
 
 
+def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return {}
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _build_submit_autofix_context(run_dir: Path) -> str:
+    state = _load_run_state(run_dir)
+    latest = _load_latest_submit_attempt(run_dir)
+    lines: list[str] = []
+    state_keys = (
+        "submit_attempted",
+        "submit_ok",
+        "last_error_kind",
+        "last_reason",
+        "last_action",
+        "last_submit_fingerprint",
+        "last_submission_path",
+    )
+    lines.append("run_state:")
+    for key in state_keys:
+        value = state.get(key)
+        if value in (None, ""):
+            continue
+        lines.append(f"- {key}: {value}")
+
+    if latest:
+        lines.append("latest_submit_attempt:")
+        for key in (
+            "ts",
+            "ok",
+            "exit_code",
+            "error_kind",
+            "reason",
+            "action_taken",
+            "fingerprint",
+            "sub_path",
+        ):
+            value = latest.get(key)
+            if value in (None, ""):
+                continue
+            lines.append(f"- {key}: {value}")
+        stdout_tail = normalize_error_text(str(latest.get("stdout_tail") or ""), max_chars=1200)
+        stderr_tail = normalize_error_text(str(latest.get("stderr_tail") or ""), max_chars=1200)
+        if stdout_tail:
+            lines.append(f"- stdout_tail: {stdout_tail}")
+        if stderr_tail:
+            lines.append(f"- stderr_tail: {stderr_tail}")
+    return "\n".join(lines).strip()
+
+
 def _sha256_or_none(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -2536,13 +4024,36 @@ def _sha256_or_none(path: Path) -> str | None:
 
 def _compute_submit_backoff(attempt: int) -> float:
     base = _SUBMIT_BACKOFF_BASE_SEC * (2 ** max(0, attempt - 1))
-    jitter = random.uniform(0.0, 0.75)
+    jitter = random.uniform(0.0, 1.0)
     return base + jitter
 
 
 def _env_truthy(name: str) -> bool:
     value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
+    run_dir = config.paths.run_dir(run_id)
+    state = _load_run_state(run_dir)
+    kind = str(state.get("last_error_kind") or "").strip().lower()
+    reason = str(state.get("last_reason") or "").strip().lower()
+    if kind in {"validation", "transient", "unknown"}:
+        return True
+    if reason == "same_error_fingerprint_recurred":
+        return True
+    print(
+        "[yellow]autofix skipped[/yellow]: submit abort is not safely auto-fixable "
+        f"(kind={kind or 'unknown'}, reason={reason or 'unknown'})"
+    )
+    return False
+
+
+def _is_non_autofixable_runtime_error(error: Exception) -> bool:
+    text = str(error).strip().lower()
+    if not text:
+        return False
+    return "requires kernel.py" in text or "kernel-first training" in text
 
 
 def _record_submit_reason_knowledge(
@@ -2596,11 +4107,12 @@ def _wait_for_submission_outcome(
     slug: str,
     message: str,
     submitted_at: datetime,
-    max_attempts: int = _SUBMISSION_POLL_MAX_ATTEMPTS,
+    max_attempts: int | None = _SUBMISSION_POLL_MAX_ATTEMPTS,
     poll_interval_sec: float = _SUBMISSION_POLL_INTERVAL_SEC,
 ) -> dict[str, object] | None:
+    print(f"[cyan]submission polling[/cyan]: waiting for result (interval={poll_interval_sec:.0f}s)")
     service = SubmissionOutcomeService(
-        fetch_rows=list_competition_submissions,
+        fetch_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
         max_attempts=max_attempts,
         poll_interval_sec=poll_interval_sec,
     )
@@ -2621,6 +4133,112 @@ def _to_float(value: object) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def _to_int(value: object) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+
+
+def _resolve_submission_rank_payload(
+    *,
+    slug: str,
+    context_dir: Path,
+    direction: str,
+    outcome: dict[str, object],
+    dry_run: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    rank = _to_int(outcome.get("rank"))
+    total_teams = _to_int(outcome.get("total_teams"))
+    rank_percentile = _to_float(outcome.get("rank_percentile"))
+    rank_source = outcome.get("rank_source")
+
+    if rank is not None:
+        payload["rank"] = rank
+    if total_teams is not None:
+        payload["total_teams"] = total_teams
+    if rank_percentile is not None:
+        payload["rank_percentile"] = rank_percentile
+    if isinstance(rank_source, str) and rank_source.strip():
+        payload["rank_source"] = rank_source.strip()
+
+    if rank is None or total_teams is None:
+        score = _to_float(outcome.get("score"))
+        if score is not None:
+            try:
+                estimate = leaderboard_rank_for_score(
+                    slug=slug,
+                    output_dir=context_dir,
+                    score=score,
+                    direction=direction,
+                    dry_run=dry_run,
+                )
+            except Exception:  # noqa: BLE001
+                estimate = {}
+            est_rank = _to_int(estimate.get("rank"))
+            est_total = _to_int(estimate.get("total_teams"))
+            est_percentile = _to_float(estimate.get("rank_percentile"))
+            if est_rank is not None:
+                payload["estimated_rank"] = est_rank
+            if est_total is not None:
+                payload["estimated_total_teams"] = est_total
+            if est_percentile is not None:
+                payload["estimated_rank_percentile"] = est_percentile
+            if est_rank is not None and isinstance(estimate.get("source"), str):
+                payload["rank_estimate_source"] = "leaderboard_score_estimate"
+
+    resolved_rank = _to_int(payload.get("rank"))
+    resolved_total = _to_int(payload.get("total_teams"))
+    if resolved_rank is not None and resolved_total is not None and resolved_total > 0:
+        payload.setdefault("rank_percentile", resolved_rank / resolved_total)
+    return payload
+
+
+def _should_force_major_overhaul_by_rank(
+    *,
+    rank: int | None,
+    total_teams: int | None,
+    max_percentile: float,
+    min_teams: int,
+) -> bool:
+    if rank is None or total_teams is None:
+        return False
+    if total_teams < max(1, min_teams):
+        return False
+    if rank <= 0:
+        return False
+    rank_percentile = rank / total_teams
+    return rank_percentile > max_percentile
+
+
+def _build_rank_force_reason(
+    *,
+    rank: int,
+    total_teams: int,
+    rank_percentile: float | None,
+    max_percentile: float,
+    min_teams: int,
+    source: str | None,
+) -> str:
+    resolved_percentile = (rank / total_teams) if rank_percentile is None and total_teams > 0 else rank_percentile
+    percentile_text = f"{(resolved_percentile or 0.0) * 100:.2f}%" if resolved_percentile is not None else "n/a"
+    source_text = f" source={source}" if source else ""
+    return (
+        "Leaderboard rank indicates large headroom for improvement: "
+        f"{rank}/{total_teams} (percentile={percentile_text}, threshold={max_percentile * 100:.2f}%, "
+        f"min_teams={min_teams}).{source_text}"
+    )
 
 
 def _infer_iteration_from_submission_path(path: Path) -> int | None:
@@ -2731,18 +4349,40 @@ def _classify_submission_outcome(
     return "low"
 
 
-def _submission_message(config: AutopilotConfig, run_id: str, best_score: float | None) -> str:
+def _submission_message(
+    config: AutopilotConfig,
+    run_id: str,
+    best_score: float | None,
+    *,
+    submission_path: Path | None = None,
+) -> str:
     if config.message:
         return config.message
+    iteration = _infer_iteration_from_submission_path(submission_path) if submission_path is not None else None
+    iteration_suffix = f" iter={iteration}" if isinstance(iteration, int) else ""
     if best_score is None:
-        return f"kagglebot {config.slug} {run_id}"
-    return f"kagglebot {config.slug} {run_id} best_offline={best_score:.6f}"
+        return f"kagglebot {config.slug} {run_id}{iteration_suffix}"
+    return f"kagglebot {config.slug} {run_id}{iteration_suffix} best_offline={best_score:.6f}"
 
 
 def _normalize_metric_name(name: str | None) -> str:
     if not name:
         return ""
     return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _infer_metric_direction_for_mismatch(metric: str, fallback_direction: str) -> tuple[str, bool]:
+    metric_name = canonical_metric(metric)
+    if metric_name in {"rmse", "rmsle", "mae", "mape", "mse", "logloss"}:
+        return "minimize", True
+    if metric_name in {"auc", "accuracy", "f1", "precision", "recall", "average_precision", "r2", "r_squared"}:
+        return "maximize", True
+    metric_lower = metric.lower()
+    if any(key in metric_lower for key in ["loss", "error"]):
+        return "minimize", True
+    if any(key in metric_lower for key in ["auc", "accuracy", "f1", "precision", "recall", "ap", "r2", "map"]):
+        return "maximize", True
+    return fallback_direction, False
 
 
 def _meets_target(value: float, target: float, direction: str) -> bool:
@@ -2759,6 +4399,15 @@ def _is_top1_tier(value: float, top1_score: float | None, direction: str) -> boo
     return value >= top1_score
 
 
+def _is_confirmed_first_place(rank: int | None, source: str | None) -> bool:
+    if rank != 1:
+        return False
+    if source is None:
+        return True
+    normalized = source.strip().lower()
+    return normalized not in {"leaderboard_score_estimate", "score_estimate"}
+
+
 def _classify_improvement_mode(value: float, top1_score: float | None, direction: str) -> tuple[str, float | None]:
     if top1_score is None:
         return "major_overhaul", None
@@ -2768,43 +4417,6 @@ def _classify_improvement_mode(value: float, top1_score: float | None, direction
     if gap >= MODERATE_TOP1_GAP:
         return "moderate_update", gap
     return "minor_tuning", gap
-
-
-def _infer_kernel_model_family(kernel_main: Path) -> str:
-    if not kernel_main.exists():
-        return "unknown"
-    text = kernel_main.read_text(encoding="utf-8", errors="ignore").lower()
-    tree_markers = (
-        "lightgbm",
-        "lgbm",
-        "xgboost",
-        "catboost",
-        "randomforest",
-        "gradientboosting",
-        "histgradientboosting",
-        "xgb.",
-        "lgb.",
-    )
-    nn_markers = (
-        "torch",
-        "tensorflow",
-        "keras",
-        "pytorch",
-        "tabnet",
-        "ft-transformer",
-        "ft_transformer",
-        "transformer",
-        "mlp",
-    )
-    has_tree = any(marker in text for marker in tree_markers)
-    has_nn = any(marker in text for marker in nn_markers)
-    if has_tree and has_nn:
-        return "hybrid(tree+nn)"
-    if has_tree:
-        return "tree_only"
-    if has_nn:
-        return "nn_only"
-    return "unknown"
 
 
 def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:

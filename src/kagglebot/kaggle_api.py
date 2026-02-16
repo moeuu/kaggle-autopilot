@@ -8,6 +8,7 @@ from pathlib import Path
 from kagglebot.competition import parse_competition_slug
 from kagglebot.exceptions import KaggleCliError, KaggleNetworkError, KernelCapacityError, RulesNotAcceptedError
 from kagglebot.exec_utils import run_command
+from kagglebot.submission.guard import run_kaggle_submit
 from kagglebot.validators import safe_extract_zip
 
 _KERNEL_URL_RE = re.compile(
@@ -51,18 +52,13 @@ def download_competition(slug: str, dest_dir: Path, *, force: bool, quiet: bool,
 
 
 def submit_competition(slug: str, submission_file: Path, message: str, *, dry_run: bool = False) -> str:
-    args = [
-        "kaggle",
-        "competitions",
-        "submit",
-        "-c",
-        slug,
-        "-f",
-        str(submission_file),
-        "-m",
-        message,
-    ]
-    return _run_kaggle(args, slug=slug, dry_run=dry_run)
+    result = run_kaggle_submit(
+        slug=slug,
+        submission_file=submission_file,
+        message=message,
+        dry_run=dry_run,
+    )
+    return result.output
 
 
 def list_competition_submissions(slug: str, *, dry_run: bool = False) -> list[dict[str, str]]:
@@ -128,6 +124,21 @@ def kernels_output(
     return _run_kaggle(args, slug, dry_run=dry_run)
 
 
+def kernels_pull(
+    kernel_id: str,
+    output_dir: Path,
+    *,
+    slug: str | None = None,
+    dry_run: bool = False,
+    metadata: bool = True,
+) -> str:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    args = ["kaggle", "kernels", "pull", kernel_id, "-p", str(output_dir)]
+    if metadata:
+        args.append("-m")
+    return _run_kaggle(args, slug, dry_run=dry_run)
+
+
 def kernels_list(
     *, mine: bool = False, user: str | None = None, sort_by: str = "dateCreated", dry_run: bool = False
 ) -> str:
@@ -140,6 +151,44 @@ def kernels_list(
         args += ["--sort-by", sort_by]
     args.append("--csv")
     return _run_kaggle(args, slug=None, dry_run=dry_run)
+
+
+def list_competition_kernels(
+    slug: str,
+    *,
+    page: int = 1,
+    page_size: int = 200,
+    sort_by: str = "scoreDescending",
+    kernel_type: str = "notebook",
+    dry_run: bool = False,
+) -> list[dict[str, str]]:
+    args = [
+        "kaggle",
+        "kernels",
+        "list",
+        "--competition",
+        slug,
+        "--page",
+        str(page),
+        "--page-size",
+        str(page_size),
+        "--sort-by",
+        sort_by,
+        "--kernel-type",
+        kernel_type,
+        "--csv",
+    ]
+    output = _run_kaggle(args, slug=slug, dry_run=dry_run)
+    if dry_run:
+        return []
+    rows: list[dict[str, str]] = []
+    for row in csv.DictReader(output.splitlines()):
+        if not row:
+            continue
+        normalized = {str(key): "" if value is None else str(value) for key, value in row.items() if key}
+        if normalized:
+            rows.append(normalized)
+    return rows
 
 
 def kernel_exists(kernel_id: str, *, dry_run: bool = False) -> bool:
@@ -200,6 +249,82 @@ def competitions_files(slug: str, *, dry_run: bool = False) -> str:
 
 
 def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> dict[str, object]:
+    rows = _load_leaderboard_rows(slug=slug, output_dir=output_dir, dry_run=dry_run)
+    if not rows:
+        return {
+            "score": None,
+            "timestamp": int(datetime.now(UTC).timestamp()),
+            "source": "kaggle competitions leaderboard --download",
+            "scope": "public",
+        }
+    try:
+        score = _extract_score(rows[0])
+    except ValueError as exc:
+        return {
+            "score": None,
+            "timestamp": int(datetime.now(UTC).timestamp()),
+            "source": "kaggle competitions leaderboard --download",
+            "scope": "public",
+            "error": str(exc),
+        }
+    return {
+        "score": score,
+        "timestamp": int(datetime.now(UTC).timestamp()),
+        "source": "kaggle competitions leaderboard --download",
+        "scope": "public",
+    }
+
+
+def leaderboard_rank_for_score(
+    slug: str,
+    output_dir: Path,
+    *,
+    score: float,
+    direction: str,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    rows = _load_leaderboard_rows(slug=slug, output_dir=output_dir, dry_run=dry_run)
+    if not rows:
+        return {
+            "rank": None,
+            "total_teams": None,
+            "rank_percentile": None,
+            "source": "kaggle competitions leaderboard --download",
+            "scope": "public",
+        }
+
+    scores: list[float] = []
+    for row in rows:
+        parsed = _extract_score_or_none(row)
+        if parsed is not None:
+            scores.append(parsed)
+    if not scores:
+        return {
+            "rank": None,
+            "total_teams": None,
+            "rank_percentile": None,
+            "source": "kaggle competitions leaderboard --download",
+            "scope": "public",
+            "error": "Unable to parse score column from leaderboard CSV.",
+        }
+
+    if direction == "minimize":
+        better = sum(1 for value in scores if value < score)
+    else:
+        better = sum(1 for value in scores if value > score)
+    rank = better + 1
+    total_teams = len(scores)
+    rank_percentile = (rank / total_teams) if total_teams > 0 else None
+    return {
+        "rank": rank,
+        "total_teams": total_teams,
+        "rank_percentile": rank_percentile,
+        "source": "kaggle competitions leaderboard --download",
+        "scope": "public",
+    }
+
+
+def _load_leaderboard_rows(*, slug: str, output_dir: Path, dry_run: bool) -> list[dict[str, str]]:
     leaderboard_dir = output_dir / "leaderboard"
     leaderboard_dir.mkdir(parents=True, exist_ok=True)
     if not dry_run:
@@ -217,6 +342,7 @@ def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> d
             slug=slug,
             dry_run=dry_run,
         )
+
     csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     if csv_path is None:
         zip_paths = list(leaderboard_dir.glob("*.zip"))
@@ -224,34 +350,10 @@ def leaderboard_top1(slug: str, output_dir: Path, *, dry_run: bool = False) -> d
             safe_extract_zip(zip_path, leaderboard_dir)
         csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     if dry_run or csv_path is None or not csv_path.exists():
-        return {
-            "score": None,
-            "timestamp": int(datetime.now(UTC).timestamp()),
-            "source": "kaggle competitions leaderboard --download",
-            "scope": "public",
-        }
+        return []
+
     with csv_path.open("r", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        try:
-            first = next(reader)
-        except StopIteration:
-            raise ValueError("Leaderboard CSV is empty.")
-    try:
-        score = _extract_score(first)
-    except ValueError as exc:
-        return {
-            "score": None,
-            "timestamp": int(datetime.now(UTC).timestamp()),
-            "source": "kaggle competitions leaderboard --download",
-            "scope": "public",
-            "error": str(exc),
-        }
-    return {
-        "score": score,
-        "timestamp": int(datetime.now(UTC).timestamp()),
-        "source": "kaggle competitions leaderboard --download",
-        "scope": "public",
-    }
+        return [row for row in csv.DictReader(handle) if row]
 
 
 def _find_leaderboard_csv(output_dir: Path, slug: str) -> Path | None:
@@ -267,6 +369,13 @@ def _find_leaderboard_csv(output_dir: Path, slug: str) -> Path | None:
 
 
 def _extract_score(row: dict[str, str]) -> float:
+    value = _extract_score_or_none(row)
+    if value is not None:
+        return value
+    raise ValueError("Unable to parse a numeric score from leaderboard CSV.")
+
+
+def _extract_score_or_none(row: dict[str, str]) -> float | None:
     preferred_keys = ("Score", "PublicScore", "Public Score", "PrivateScore", "Private Score")
     for key in preferred_keys:
         if key in row:
@@ -279,7 +388,7 @@ def _extract_score(row: dict[str, str]) -> float:
         parsed = _parse_score_value(value)
         if parsed is not None:
             return parsed
-    raise ValueError("Unable to parse a numeric score from leaderboard CSV.")
+    return None
 
 
 def _parse_score_value(value: str | None) -> float | None:

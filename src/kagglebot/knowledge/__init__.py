@@ -10,8 +10,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from kagglebot.knowledge.repositories import InsightRepository, TaxonomyRepository
 from kagglebot.paths import KnowledgePaths
-from kagglebot.solver.io import find_competition_files, infer_target, infer_task
+from kagglebot.solver.io import find_competition_files, infer_prediction_kind, infer_submission_layout, infer_task
 
 
 @dataclass(frozen=True)
@@ -32,38 +33,11 @@ class Taxonomy:
 
 
 def ensure_taxonomy(paths: KnowledgePaths) -> dict[str, object]:
-    paths.knowledge_dir.mkdir(parents=True, exist_ok=True)
-    if not paths.taxonomy_path.exists():
-        taxonomy = Taxonomy(
-            tags={
-                "tabular",
-                "text",
-                "image",
-                "timeseries",
-                "regression",
-                "binary",
-                "multiclass",
-                "n_rows_small",
-                "n_rows_medium",
-                "n_rows_large",
-                "missingness_high",
-                "high_cardinality_cats",
-            },
-            aliases={
-                "binary_classification": "binary",
-                "multiclass_classification": "multiclass",
-            },
-        )
-        paths.taxonomy_path.write_text(json.dumps(taxonomy.to_dict(), indent=2), encoding="utf-8")
-    return load_taxonomy(paths.taxonomy_path)
+    return TaxonomyRepository(paths).ensure()
 
 
 def load_taxonomy(path: Path) -> dict[str, object]:
-    text = path.read_text(encoding="utf-8")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return _parse_yaml_taxonomy(text)
+    return TaxonomyRepository.load(path)
 
 
 def _parse_yaml_taxonomy(text: str) -> dict[str, object]:
@@ -131,6 +105,7 @@ def derive_problem_types(profile: dict[str, object]) -> list[str]:
         "regression",
         "binary",
         "multiclass",
+        "multitask",
         "missingness_high",
         "high_cardinality_cats",
     }
@@ -526,8 +501,18 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         profile["tags"] = []
         return profile
 
-    id_col, target_col, feature_cols = infer_target(train, test, sample)
-    task = infer_task(train[target_col])
+    id_col, target_cols, feature_cols = infer_submission_layout(train=train, test=test, sample=sample)
+    if not target_cols:
+        profile["status"] = "missing_target_columns"
+        profile["tags"] = []
+        return profile
+    target_col = target_cols[0]
+    task_by_target = {col: infer_task(train[col]) for col in target_cols}
+    unique_tasks = sorted(set(task_by_target.values()))
+    task = unique_tasks[0] if len(unique_tasks) == 1 else "mixed"
+    prediction_kind_by_target = {
+        col: infer_prediction_kind(sample[col]) if col in sample.columns else "continuous" for col in target_cols
+    }
     n_rows = len(train)
     n_cols = len(train.columns)
     missingness = float(train.isna().mean().mean())
@@ -546,10 +531,15 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     if high_cardinality:
         tags.append("high_cardinality_cats")
 
-    metric = "accuracy" if task != "regression" else "rmse"
+    if task == "regression":
+        metric = "rmse"
+    elif prediction_kind_by_target[target_col] == "probability":
+        metric = "logloss"
+    else:
+        metric = "accuracy"
     target_stats = _target_stats(train[target_col], task)
 
-    train_only = [c for c in train.columns if c not in test.columns and c != target_col]
+    train_only = [c for c in train.columns if c not in test.columns and c not in target_cols]
     test_only = [c for c in test.columns if c not in train.columns]
 
     profile.update(
@@ -564,7 +554,10 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             "test_cols": len(test.columns),
             "id_column": id_col,
             "target_column": target_col,
+            "target_columns": target_cols,
             "task": task,
+            "task_by_target": task_by_target,
+            "prediction_kind_by_target": prediction_kind_by_target,
             "metric": metric,
             "missingness": missingness,
             "missingness_by_column": missingness_by_column,
@@ -663,6 +656,8 @@ def _infer_modality(data_dir: Path, train: pd.DataFrame) -> str:
 
 
 def _task_tag(task: str, target: pd.Series) -> str:
+    if task == "mixed":
+        return "multitask"
     if task == "regression":
         return "regression"
     unique = target.nunique(dropna=True)
@@ -723,7 +718,7 @@ def build_plan_and_initial_prompt(
         f"- artifacts/{slug}/context/overview.md (if present)",
         f"- artifacts/{slug}/context/data.md (if present)",
         f"- artifacts/{slug}/context/submission_format.md (if present)",
-        f"- artifacts/{slug}/kernel/kernel.py (for kaggle_gpu/kaggle_tpu)",
+        f"- artifacts/{slug}/kernel/kernel.py (authoritative for all compute modes)",
         f"- artifacts/{slug}/context/knowledge_hints.txt",
         "",
         "## Knowledge Base: Similar Competitions",
@@ -761,8 +756,8 @@ def build_plan_and_initial_prompt(
         '  "cv_folds": 5,',
         '  "seed": 42,',
         '  "internet": "on",',
-        '  "max_iterations": 1,',
-        '  "submit_policy": "on_target_only"',
+        '  "max_iterations": 3,',
+        '  "submit_policy": "always"',
         "}",
         "```",
         "",
@@ -775,7 +770,7 @@ def build_plan_and_initial_prompt(
         "- Use web search to choose the strongest initial approach; prefer official docs and competition discussions.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV for small datasets or high variance; otherwise holdout.",
-        "- Do NOT change submit_policy; autopilot controls submission gating.",
+        "- Do NOT change submit_policy; autopilot controls submission behavior.",
         "",
         "### 2) Implement the strongest initial model",
         "",
@@ -789,13 +784,16 @@ def build_plan_and_initial_prompt(
         "- Writes submission.csv matching sample_submission.csv exactly.",
         "- Cite the key sources you used (short notes).",
         "",
-        "Compute-specific notes:",
-        "- local_gpu: update kagglebot/solver/ as usual (same best-model flow).",
-        "- kaggle_gpu/kaggle_tpu: create artifacts/{slug}/kernel/kernel.py from scratch if missing.",
-        "- kaggle_gpu/kaggle_tpu: implement model + features directly in artifacts/{slug}/kernel/kernel.py.",
+        "Implementation notes:",
+        "- For local_gpu/kaggle_gpu/kaggle_tpu: use artifacts/{slug}/kernel/kernel.py",
+        "  as the only training implementation.",
+        "- local_gpu and kaggle_gpu must keep the same algorithm/pipeline; only execution location may differ.",
+        "- Create artifacts/{slug}/kernel/kernel.py from scratch if missing.",
         "- If data is non-tabular or requires custom parsing, implement custom_main() in kernel.py.",
+        "- If pretrained checkpoints are likely beneficial, implement download + cache logic in kernel.py",
+        "  and provide a fallback path when internet is unavailable.",
         "- If GPU runs finish in under ~1 minute, increase model iterations/trees or use CV to better utilize GPU.",
-        "- Do NOT edit kernel_runner.py for competition-specific changes.",
+        "- Do NOT implement competition-specific logic in src local trainers.",
         "",
         "### 3) Safety + verification",
         "",
@@ -808,8 +806,8 @@ def build_plan_and_initial_prompt(
         "uv run pytest -q",
         "```",
         "",
-        "The autopilot will iterate up to max_iterations (default 1)",
-        "and submit only when top1-tier or at the final iteration.",
+        "The autopilot will iterate up to max_iterations (default 3),",
+        "submit according to submission gate policy, and use readiness score as the primary loop decision signal.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -827,19 +825,18 @@ def build_improve_template() -> str:
 
 **Competition**: `{slug}`
 **Iteration**: {iteration}
-**Goal**: Improve offline score toward top1-tier or best possible within the max_iterations budget (default 1)
+**Goal**: Improve loop-decision score (readiness primary; submission/rank as guardrails) toward top1-tier
+or best possible within the max_iterations budget (default 3)
 **Compute**: {compute} ({accelerator})
 **Top1 gap**: {top1_gap}
 **Delta vs previous best**: {delta_offline}
 **Improvement mode**: {improvement_mode}
 **Next iteration**: {next_iteration}
-**Model family hint**: {model_family_hint}
-**NN upgrade required**: {nn_upgrade_required}
 
 ## Current Score Context
 
 - **Metric**: {metric} ({direction})
-- **Current score**: {current_score}
+- **Current score**: {current_score} (source: {current_score_source})
 - **Target score**: {target_score}
 - **Top1 public**: {top1_score} (source: {top1_source})
 
@@ -847,7 +844,7 @@ def build_improve_template() -> str:
 
 - **Plan**: `{plan_path}` - Target metric/score/direction, evaluation strategy
 - **Run Config**: `{run_path}` - Current run settings and history
-- **Current Metrics**: `{metrics_path}` - Latest offline evaluation results
+- **Current Metrics**: `{metrics_path}` - Latest loop-decision + offline-by-source results
 - **Diagnostics**: `{diagnostics_path}` - Agent-readable analysis of current performance
 - **Logs**: `{logs_dir}` - Training logs and error messages (if any)
 - **Knowledge Hints**: `{knowledge_hints}`
@@ -859,7 +856,7 @@ def build_improve_template() -> str:
 - **Submission Format**: `{submission_format}` (read this if present)
 - **Dataset Profile**: `{dataset_profile}`
 - **Sample Submission**: `{sample_submission}`
-- **Kernel Main**: `{kernel_main}` (edit this for kaggle_gpu/kaggle_tpu)
+- **Kernel Main**: `{kernel_main}` (edit this for all compute modes)
 
 ## Your Task
 
@@ -868,7 +865,8 @@ def build_improve_template() -> str:
 Read the diagnostics and metrics files to understand:
 
 1. **What is the current score?**
-   - Check `metrics.json` for `value`, `direction`, and `target`
+   - Check `metrics.json` for `loop_decision.source` and `loop_decision.value`
+   - Also check offline-by-source metrics for model-quality signal
    - Compare to `target_score` in `plan.json`
 
 2. **Why is the score not meeting target?**
@@ -886,13 +884,14 @@ Read the diagnostics and metrics files to understand:
 
 ### Step 2: Implement Improvements
 
-Make **targeted, incremental changes** to improve the offline score.
+Make **targeted, incremental changes** to improve the current loop-decision score
+(submission preferred; offline fallback).
 
 Before changing the model, read overview.md/data.md and respect any constraints or data caveats.
 
 **Where to implement**:
-- If `compute` starts with `kaggle_`: edit `{kernel_main}` (create if missing).
-- Otherwise: edit `kagglebot/solver/`.
+- Always edit `{kernel_main}` (create if missing).
+- `local_gpu` and `kaggle_gpu` must use the same algorithm/pipeline.
 - For non-tabular inputs, implement `custom_main()` in `{kernel_main}`.
 
 **Modeling policy**:
@@ -907,14 +906,11 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 - `moderate_update`: add meaningful features + tune key hyperparameters.
 - `minor_tuning`: small hyperparameter/feature tweaks, calibration, or ensembling.
 
-If the score did not improve (delta <= 0), treat it as `major_overhaul` even if the default mode is weaker.
+**Pretrained model guidance**:
+- If transfer learning can improve score, add checkpoint download + cache logic in `kernel.py`.
+- Respect rules and internet settings, and include an internet-off fallback model path.
 
-**Upgrade rule**:
-- If `nn_upgrade_required` is `yes`, the previous iteration was tree-only and far from top1.
-  Add a neural model family (MLP or FT-Transformer) in the next iteration,
-  while keeping the tree baseline for comparison.
-  Do not introduce non-Kaggle-default dependencies.
-- If `improvement_mode` is `minor_tuning`, keep the current model family and only tweak.
+If the score did not improve (delta <= 0), treat it as `major_overhaul` even if the default mode is weaker.
 
 **Recommended strategies** (pick 1-2 per iteration):
 
@@ -957,12 +953,9 @@ If the score did not improve (delta <= 0), treat it as `major_overhaul` even if 
 
 Before finalizing:
 
-1. **Run offline evaluation**:
-   - If `compute` starts with `kaggle_`, do NOT run local training; rely on kernel metrics/logs.
-   - Otherwise, run:
-   ```bash
-   uv run kagglebot train {{slug}} --compute local_gpu
-   ```
+1. **Run offline evaluation (supporting signal)**:
+   - Run `kernel.py` via autopilot/train and use kernel metrics/logs for evaluation.
+   - Keep one implementation path in `kernel.py` across local and kaggle execution.
 
 2. **Check metrics**:
    - Is the score improving in the right direction?
@@ -986,7 +979,7 @@ Before finalizing:
 
 **Quality Checklist**:
 - [ ] Changes address root cause from diagnostics
-- [ ] Offline score improves (or provides learning for next iteration)
+- [ ] Loop-decision score improves, or offline diagnostics provide actionable learning
 - [ ] submission.csv format still matches sample_submission.csv
 - [ ] Tests pass: `uv run pytest -q`
 - [ ] No secrets leaked into code/logs
@@ -996,7 +989,7 @@ Before finalizing:
 ## Tips for Effective Improvements
 
 1. **Make one change at a time**: Easier to debug and understand what worked
-2. **Trust offline evaluation**: Don't chase public leaderboard scores
+2. **Optimize loop decision**: prioritize submission score when available; use offline as fallback
 3. **Read diagnostics carefully**: The autopilot generates actionable hints
 4. **Check for data leakage**: If score is "too good to be true", it probably is
 5. **Don't over-optimize**: Diminishing returns after 3-5 iterations are normal
@@ -1102,18 +1095,14 @@ def record_run(
     goal_score: float,
     direction: str,
 ) -> None:
-    _ensure_db(knowledge_paths)
-    now = int(time.time())
-    with _connect(knowledge_paths.kb_path) as conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO runs (
-                run_id, slug, started_at, compute, goal_metric, goal_score, direction
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (run_id, slug, now, compute, goal_metric, goal_score, direction),
-        )
+    InsightRepository(knowledge_paths, ensure_db=_ensure_db, connect=_connect).record_run(
+        run_id=run_id,
+        slug=slug,
+        compute=compute,
+        goal_metric=goal_metric,
+        goal_score=goal_score,
+        direction=direction,
+    )
 
 
 def record_iteration(
@@ -1128,29 +1117,16 @@ def record_iteration(
     met_target: bool,
     git_commit: str | None,
 ) -> None:
-    _ensure_db(knowledge_paths)
-    now = int(time.time())
-    with _connect(knowledge_paths.kb_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO iterations (
-                run_id, iter, score_source, offline_value, offline_std,
-                top1_public_score, met_target, git_commit, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_id,
-                iteration,
-                score_source,
-                offline_value,
-                offline_std,
-                top1_public_score,
-                int(met_target),
-                git_commit,
-                now,
-            ),
-        )
+    InsightRepository(knowledge_paths, ensure_db=_ensure_db, connect=_connect).record_iteration(
+        run_id=run_id,
+        iteration=iteration,
+        score_source=score_source,
+        offline_value=offline_value,
+        offline_std=offline_std,
+        top1_public_score=top1_public_score,
+        met_target=met_target,
+        git_commit=git_commit,
+    )
 
 
 def record_improvement(
@@ -1161,39 +1137,16 @@ def record_improvement(
     summary: str,
     delta_offline: float | None,
 ) -> None:
-    _ensure_db(knowledge_paths)
-    now = int(time.time())
-    with _connect(knowledge_paths.kb_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO improvements (run_id, iter, summary, delta_offline, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (run_id, iteration, summary, delta_offline, now),
-        )
+    InsightRepository(knowledge_paths, ensure_db=_ensure_db, connect=_connect).record_improvement(
+        run_id=run_id,
+        iteration=iteration,
+        summary=summary,
+        delta_offline=delta_offline,
+    )
 
 
 def knowledge_show(knowledge_paths: KnowledgePaths, slug: str) -> dict[str, object]:
-    _ensure_db(knowledge_paths)
-    with _connect(knowledge_paths.kb_path) as conn:
-        comp = conn.execute("SELECT * FROM competitions WHERE slug = ?", (slug,)).fetchone()
-        if comp is None:
-            return {"slug": slug, "found": False}
-        tags = conn.execute(
-            "SELECT tag FROM competition_tags WHERE slug = ? ORDER BY tag",
-            (slug,),
-        ).fetchall()
-        runs = conn.execute(
-            "SELECT run_id, started_at, compute, goal_metric, goal_score, direction FROM runs WHERE slug = ?",
-            (slug,),
-        ).fetchall()
-        return {
-            "slug": slug,
-            "found": True,
-            "competition": dict(comp),
-            "tags": [row["tag"] for row in tags],
-            "runs": [dict(row) for row in runs],
-        }
+    return InsightRepository(knowledge_paths, ensure_db=_ensure_db, connect=_connect).show(slug)
 
 
 def knowledge_search(
@@ -1201,24 +1154,182 @@ def knowledge_search(
     tags: Iterable[str],
     limit: int,
 ) -> list[dict[str, object]]:
+    return InsightRepository(knowledge_paths, ensure_db=_ensure_db, connect=_connect).search(tags, limit)
+
+
+def record_research_artifacts(
+    *,
+    knowledge_paths: KnowledgePaths,
+    slug: str,
+    problem_types: Iterable[str],
+    research_sources_jsonl: str,
+    research_summary_md: str,
+) -> dict[str, str]:
     _ensure_db(knowledge_paths)
-    tags_list = list(tags)
-    if not tags_list:
-        return []
+    normalized_types = _normalize_problem_types(problem_types)
+    primary_type = _primary_problem_type(normalized_types)
+    safe_slug = _safe_label(slug)
+    safe_primary = _safe_label(primary_type)
+    base_dir = knowledge_paths.knowledge_dir / "research" / safe_primary / safe_slug
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    sources_path = base_dir / "research_sources.jsonl"
+    summary_path = base_dir / "research_summary.md"
+    sources_path.write_text(research_sources_jsonl.strip() + "\n", encoding="utf-8")
+    summary_path.write_text(research_summary_md.strip() + "\n", encoding="utf-8")
+
+    now = int(time.time())
+    sources_rel = str(sources_path.relative_to(knowledge_paths.knowledge_dir))
+    summary_rel = str(summary_path.relative_to(knowledge_paths.knowledge_dir))
+    problem_types_json = json.dumps(normalized_types, ensure_ascii=True)
     with _connect(knowledge_paths.kb_path) as conn:
-        placeholders = ",".join("?" for _ in tags_list)
+        existing = conn.execute(
+            "SELECT slug FROM competition_research WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO competition_research (
+                    slug, primary_problem_type, problem_types_json,
+                    sources_path, summary_path, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    slug,
+                    primary_type,
+                    problem_types_json,
+                    sources_rel,
+                    summary_rel,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE competition_research
+                SET primary_problem_type = ?,
+                    problem_types_json = ?,
+                    sources_path = ?,
+                    summary_path = ?,
+                    updated_at = ?
+                WHERE slug = ?
+                """,
+                (
+                    primary_type,
+                    problem_types_json,
+                    sources_rel,
+                    summary_rel,
+                    now,
+                    slug,
+                ),
+            )
+        conn.execute("DELETE FROM research_problem_types WHERE slug = ?", (slug,))
+        for problem_type in normalized_types:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO research_problem_types (slug, problem_type)
+                VALUES (?, ?)
+                """,
+                (slug, problem_type),
+            )
+    return {
+        "sources_path": str(sources_path),
+        "summary_path": str(summary_path),
+        "primary_problem_type": primary_type,
+    }
+
+
+def resolve_research_artifacts(
+    *,
+    knowledge_paths: KnowledgePaths,
+    problem_types: Iterable[str],
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    _ensure_db(knowledge_paths)
+    normalized = _normalize_problem_types(problem_types)
+    if not normalized:
+        return []
+    placeholders = ",".join("?" for _ in normalized)
+    with _connect(knowledge_paths.kb_path) as conn:
         rows = conn.execute(
             f"""
-            SELECT slug, COUNT(*) as overlap
-            FROM competition_tags
-            WHERE tag IN ({placeholders})
-            GROUP BY slug
-            ORDER BY overlap DESC
+            SELECT
+                cr.slug,
+                cr.primary_problem_type,
+                cr.problem_types_json,
+                cr.sources_path,
+                cr.summary_path,
+                cr.updated_at,
+                COUNT(*) AS overlap
+            FROM competition_research AS cr
+            JOIN research_problem_types AS rpt ON rpt.slug = cr.slug
+            WHERE rpt.problem_type IN ({placeholders})
+            GROUP BY cr.slug
+            ORDER BY overlap DESC, cr.updated_at DESC
             LIMIT ?
             """,
-            [*tags_list, limit],
+            [*normalized, limit],
         ).fetchall()
-        return [dict(row) for row in rows]
+
+    results: list[dict[str, object]] = []
+    for row in rows:
+        record = dict(row)
+        sources_path = knowledge_paths.knowledge_dir / str(record.get("sources_path") or "")
+        summary_path = knowledge_paths.knowledge_dir / str(record.get("summary_path") or "")
+        problem_types_json = str(record.get("problem_types_json") or "[]")
+        try:
+            record["problem_types"] = json.loads(problem_types_json)
+        except json.JSONDecodeError:
+            record["problem_types"] = []
+        record["sources_path"] = str(sources_path)
+        record["summary_path"] = str(summary_path)
+        results.append(record)
+    return results
+
+
+def resolve_research_paths_for_slug(
+    *,
+    knowledge_paths: KnowledgePaths,
+    slug: str,
+) -> tuple[Path | None, Path | None]:
+    _ensure_db(knowledge_paths)
+    with _connect(knowledge_paths.kb_path) as conn:
+        row = conn.execute(
+            "SELECT sources_path, summary_path FROM competition_research WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+    if row is None:
+        return None, None
+    sources_rel = str(row["sources_path"])
+    summary_rel = str(row["summary_path"])
+    sources_path = knowledge_paths.knowledge_dir / sources_rel if sources_rel else None
+    summary_path = knowledge_paths.knowledge_dir / summary_rel if summary_rel else None
+    return sources_path, summary_path
+
+
+def format_research_artifacts(research_rows: list[dict[str, object]], *, limit: int = 5) -> str:
+    if not research_rows:
+        return "No cross-competition research artifacts available."
+    lines = ["Cross-competition research artifacts:", ""]
+    for row in research_rows[:limit]:
+        slug = str(row.get("slug") or "unknown")
+        primary = str(row.get("primary_problem_type") or "unknown")
+        overlap = row.get("overlap")
+        summary_path = str(row.get("summary_path") or "")
+        sources_path = str(row.get("sources_path") or "")
+        problem_types = row.get("problem_types")
+        if not isinstance(problem_types, list):
+            problem_types = []
+        overlap_text = f", overlap={overlap}" if isinstance(overlap, int) else ""
+        lines.append(f"- slug={slug}, class={primary}{overlap_text}, tags={problem_types[:6]}")
+        if summary_path:
+            lines.append(f"  summary: {summary_path}")
+        if sources_path:
+            lines.append(f"  sources: {sources_path}")
+    return "\n".join(lines)
 
 
 def _ensure_db(paths: KnowledgePaths) -> None:
@@ -1307,6 +1418,22 @@ def _ensure_db(paths: KnowledgePaths) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_error_fix_insights_problem_type
                 ON error_fix_insights(problem_type, created_at DESC);
+            CREATE TABLE IF NOT EXISTS competition_research (
+                slug TEXT PRIMARY KEY,
+                primary_problem_type TEXT NOT NULL,
+                problem_types_json TEXT NOT NULL,
+                sources_path TEXT NOT NULL,
+                summary_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS research_problem_types (
+                slug TEXT NOT NULL,
+                problem_type TEXT NOT NULL,
+                PRIMARY KEY (slug, problem_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_research_problem_types_problem_type
+                ON research_problem_types(problem_type, slug);
             """
         )
         _ensure_table_column(conn, "problem_type_insights", "outcome_bucket", "TEXT")
@@ -1314,6 +1441,32 @@ def _ensure_db(paths: KnowledgePaths) -> None:
         _ensure_table_column(conn, "error_fix_insights", "resolved", "INTEGER NOT NULL DEFAULT 0")
         _ensure_table_column(conn, "error_fix_insights", "outcome_bucket", "TEXT")
         _ensure_table_column(conn, "error_fix_insights", "submission_score", "REAL")
+
+
+def _normalize_problem_types(problem_types: Iterable[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in problem_types:
+        value = str(item).strip().lower()
+        if not value:
+            continue
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        normalized.append("unknown")
+    return normalized
+
+
+def _primary_problem_type(problem_types: list[str]) -> str:
+    for item in problem_types:
+        if item != "unknown":
+            return item
+    return "unknown"
+
+
+def _safe_label(value: str) -> str:
+    clean = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in value.strip().lower())
+    clean = clean.strip("-")
+    return clean or "unknown"
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:

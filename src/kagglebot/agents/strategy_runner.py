@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from kagglebot.exec_utils import run_command
@@ -45,10 +46,15 @@ def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) 
         _DEFAULT_MODEL,
         "-c",
         f'model_reasoning_effort="{normalized_effort}"',
-        "-a",
-        "never",
-        "--sandbox",
-        "workspace-write",
+    ]
+    supported = _supported_flags()
+    if "--full-auto" in supported:
+        args.append("--full-auto")
+    if "--sandbox" in supported or "-s" in supported:
+        args += ["--sandbox", "workspace-write"]
+    if "--search" in supported:
+        args.append("--search")
+    args += [
         "--output-last-message",
         str(last_message_path),
         "-",
@@ -90,3 +96,28 @@ def _heartbeat(stop_event: threading.Event, start_time: float, interval: float =
     while not stop_event.wait(interval):
         elapsed = int(time.monotonic() - start_time)
         print(f"gpt running... ({elapsed}s total)", flush=True)
+
+
+@lru_cache(maxsize=1)
+def _codex_help() -> str:
+    try:
+        result = run_command(["codex", "exec", "--help"])
+    except FileNotFoundError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.output
+
+
+def _supported_flags() -> set[str]:
+    text = _codex_help()
+    flags: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("-"):
+            continue
+        for token in line.split():
+            if not token.startswith("-"):
+                break
+            flags.add(token.rstrip(","))
+    return flags

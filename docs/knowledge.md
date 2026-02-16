@@ -8,7 +8,7 @@ The Knowledge Base (KB) stores cross-competition learnings to help autopilot mak
 
 The KB answers questions like:
 - **"What similar competitions have we run before?"** → Find competitions with overlapping tags
-- **"What improvements worked on tabular binary classification?"** → Surface successful strategies
+- **"What improvements worked on similar tasks/datasets?"** → Surface successful strategies
 - **"How did we perform on datasets with high missing values?"** → Learn from past challenges
 - **"What errors happened before, and how were they fixed?"** → Reuse proven fixes
 
@@ -19,6 +19,9 @@ Problem/error insights are persisted only after a submission result (online scor
 
 - **Location**: `knowledge/kb.sqlite` (SQLite database)
 - **Taxonomy**: `knowledge/taxonomy.yml` (controlled tag vocabulary)
+- **Persistent research artifacts**:
+  - `knowledge/research/<problem_type>/<slug>/research_sources.jsonl`
+  - `knowledge/research/<problem_type>/<slug>/research_summary.md`
 - **Size**: Typically <10MB for hundreds of competitions (only metadata)
 
 ## Database Schema
@@ -115,6 +118,19 @@ CREATE TABLE improvements (
 ```
 
 Agent-generated summaries of what was changed and the score delta. Most valuable for similarity search.
+
+### `competition_research`
+
+Stores one canonical research artifact location per competition:
+- `primary_problem_type` for folder classification
+- `problem_types_json` with all inferred types
+- relative paths to `research_sources.jsonl` and `research_summary.md`
+- create/update timestamps
+
+### `research_problem_types`
+
+Lookup table mapping each competition slug to one or more problem types.
+Used for cross-competition retrieval by overlapping problem type.
 
 ### `problem_type_insights`
 
@@ -270,7 +286,7 @@ After autopilot completes:
 
 ```bash
 # Bootstrap and autopilot
-uv run kagglebot autopilot house-prices
+uv run kagglebot autopilot house-prices --compute local_gpu
 ```
 
 **Behind the scenes**:
@@ -304,7 +320,7 @@ Now, future `regression` competitions with `n_rows_small` will learn that `tree_
 ### Reset KB (Clean Slate)
 
 ```bash
-rm knowledge/kagglebot.db
+rm knowledge/kb.sqlite
 ```
 
 The KB will be recreated on next bootstrap.
@@ -312,13 +328,13 @@ The KB will be recreated on next bootstrap.
 ### Export KB to JSON
 
 ```bash
-sqlite3 knowledge/kagglebot.db ".dump" > kb_backup.sql
+sqlite3 knowledge/kb.sqlite ".dump" > kb_backup.sql
 ```
 
 ### Inspect KB Directly
 
 ```bash
-sqlite3 knowledge/kagglebot.db
+sqlite3 knowledge/kb.sqlite
 
 .tables
 .schema competitions
@@ -343,7 +359,7 @@ The KB is designed to be **shareable**:
 - No model weights (only summaries)
 - No PII
 
-You could share your `kagglebot.db` with teammates to pool learnings across multiple Kaggle accounts.
+You could share your `kb.sqlite` with teammates to pool learnings across multiple Kaggle accounts.
 
 ## See Also
 

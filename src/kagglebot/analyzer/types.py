@@ -9,7 +9,7 @@ class CompetitionSchema:
     train_path: Path
     test_path: Path
     sample_submission_path: Path
-    id_column: str
+    id_column: str | None
     target_columns: list[str]
     feature_columns: list[str]
     numeric_columns: list[str]

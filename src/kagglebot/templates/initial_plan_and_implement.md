@@ -55,7 +55,7 @@ Update `{plan_path}` with the following fields:
   "holdout_frac": 0.2,
   "cv_folds": 5,
   "seed": 42,
-  "submit_policy": "on_target_only"
+  "submit_policy": "always"
 }}
 ```
 
@@ -68,16 +68,16 @@ Update `{plan_path}` with the following fields:
   - For large datasets (>100K rows): Match or slightly exceed Top1
   - Direction-aware: minimize means higher value is more lenient, maximize means lower value
 - **score_source**: Use `holdout` by default; only use `cv` if you need robust estimates (small datasets, high variance)
-- **submit_policy**: Keep as `on_target_only` (only submit when target met OR at final iteration)
+- **submit_policy**: Keep as `always` unless you are explicitly asked to throttle submissions
 
 ### Step 2: Implement Strong Initial Solution
 
 Implement a strong initial model based on overview/data/rules + web research.
 
 **Where to implement**:
-- `local_gpu`: update `kagglebot/solver/initial_model.py` (use the same best-model flow).
-- `kaggle_gpu` / `kaggle_tpu`: create `artifacts/{slug}/kernel/kernel.py` from scratch.
-- If the data is non‑tabular (images/text/FASTA/etc.), create `artifacts/{slug}/kernel/kernel.py` with a `custom_main()` entrypoint.
+- For **all compute modes** (`local_gpu`, `kaggle_gpu`, `kaggle_tpu`), implement in `artifacts/{slug}/kernel/kernel.py`.
+- `local_gpu` and `kaggle_gpu` must use the **same algorithm/pipeline**; only execution location differs.
+- If the data is non‑tabular (images/text/video/FASTA/etc.), implement a `custom_main()` entrypoint in `kernel.py`.
 
 Your implementation should:
 
@@ -123,6 +123,7 @@ Prefer GPU-accelerated supervised models when available.
 - Gradient-boosted trees with native categorical handling (CatBoost) for mixed tabular data
 - GPU-accelerated GBDT (XGBoost / LightGBM) for large/tabular datasets
 - Deep models only if the competition trend or data type supports it
+- Pretrained transfer models (vision/NLP/audio/video) when competition type and rules allow it
 
 **Classification/Regression notes**:
 - Pick loss/metric consistent with rules and sample_submission
@@ -135,13 +136,18 @@ Prefer GPU-accelerated supervised models when available.
 - Monitor utilization: GPU >80%, TPU MXU >70%
 - If utilization is low: Increase batch size, use larger models, or parallelize CV folds
 
+**Pretrained model policy**:
+- If stronger results are likely from pretrained checkpoints, implement download logic in `kernel.py`.
+- Prefer official hubs/sources (e.g., Hugging Face, official model repos) and cache under working/output dirs.
+- Respect competition rules and internet settings; when internet is off, fail gracefully with a clear fallback model.
+
 #### 2c) Offline Evaluation
 
 **Evaluate on validation set**:
 ```python
 from kagglebot.solver.metrics import compute_metric, infer_direction
 
-# For regression and binary classification
+# For regression and classification
 y_pred = model.predict(X_val)
 
 # For metrics requiring probabilities (logloss, auc)
@@ -212,7 +218,7 @@ submission.to_csv("{submission_path}", index=False)
 - ❌ NEVER automate Kaggle rules acceptance (users must accept manually in browser)
 - ❌ NEVER commit secrets (kaggle.json, API keys, tokens, passwords)
 - ❌ NEVER add interactive prompts (CLI must be non-interactive for automation)
-- ❌ NEVER hardcode competition-specific logic in solver/ (keep it generic)
+- ❌ NEVER hardcode competition-specific logic in generic src runtime modules; keep it in `kernel.py`
 - ❌ NEVER use test.csv for validation (offline eval uses train.csv splits only)
 - ❌ NEVER bypass safety guardrails (duplicate checks, rate limits, validation)
 - ✅ DO validate submission format matches sample_submission.csv exactly
@@ -227,6 +233,7 @@ submission.to_csv("{submission_path}", index=False)
 - [ ] submission.csv format matches sample_submission.csv exactly (columns, rows, types)
 - [ ] Offline evaluation produces a numeric score in metrics.json
 - [ ] GPU/TPU utilization >80% (GPU) or >70% (TPU MXU) during training
+- [ ] Implementation is in `artifacts/{slug}/kernel/kernel.py` (not src local trainer code)
 - [ ] Tests pass: `uv run pytest -q`
 - [ ] No secrets in code or logs
 

@@ -54,7 +54,7 @@ class ValidationError(KaggleBotError):
     exit_code = 6
 
 
-class SubmissionValidationError(ValidationError):
+class SubmissionValidationError(ValidationError, ValueError):
     """Submission validation failed before calling Kaggle CLI."""
 
 

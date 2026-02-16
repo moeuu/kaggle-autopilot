@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import html
 import io
 import json
+import os
+import re
 import shutil
 import time
 import urllib.error
@@ -11,7 +14,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from kagglebot.competition import rules_url_for_slug
-from kagglebot.kaggle_api import download_competition
+from kagglebot.kaggle_api import download_competition, kernels_pull, list_competition_kernels
 from kagglebot.knowledge import (
     build_improve_template,
     build_kernel_fix_template,
@@ -73,6 +76,13 @@ def bootstrap_competition(
         _write_data_markdown(paths, f"Data content not provided. See: {rules_url}\n")
     if not paths.submission_format_md_path.exists():
         _write_submission_format_markdown(paths, f"Submission format not provided. See: {rules_url}\n")
+    competition_base_url = f"https://www.kaggle.com/competitions/{slug}"
+    if not paths.code_md_path.exists():
+        _write_code_markdown(paths, f"Code content not provided. See: {competition_base_url}/code\n")
+    if not paths.models_md_path.exists():
+        _write_models_markdown(paths, f"Models content not provided. See: {competition_base_url}/models\n")
+    if not paths.discussion_md_path.exists():
+        _write_discussion_markdown(paths, f"Discussion content not provided. See: {competition_base_url}/discussions\n")
     _write_plan(paths, force=force)
 
     if download:
@@ -94,6 +104,7 @@ def bootstrap_competition(
 
     profile = _write_dataset_profile(paths)
     _cache_sample_submission(paths)
+    _mirror_sample_submission_to_data(paths)
 
     taxonomy = ensure_taxonomy(knowledge_paths)
     similar = resolve_similar_improvements(
@@ -180,6 +191,13 @@ def _capture_rules(
                         break
             if submission_section:
                 _write_submission_format_markdown(paths, submission_section)
+        community_snapshots = _fetch_competition_community_snapshots(paths=paths, slug=paths.slug)
+        if "code" in community_snapshots:
+            _write_code_markdown(paths, community_snapshots["code"])
+        if "models" in community_snapshots:
+            _write_models_markdown(paths, community_snapshots["models"])
+        if "discussion" in community_snapshots:
+            _write_discussion_markdown(paths, community_snapshots["discussion"])
         return
     if rules_source != "file":
         raise ValueError(f"Unknown rules source: {rules_source}")
@@ -258,6 +276,702 @@ def _fetch_competition_pages(*, slug: str, rules_url: str, timeout: int = 10) ->
     if not isinstance(pages, list):
         return []
     return [page for page in pages if isinstance(page, dict)]
+
+
+_TAB_URL_SUFFIXES = {
+    "code": ("code",),
+    "models": ("models", "model"),
+    "discussion": ("discussions", "discussion"),
+}
+
+_CODE_NOTEBOOK_LIMIT_ENV = "KAGGLEBOT_CODE_NOTEBOOK_LIMIT"
+_DISCUSSION_THREAD_LIMIT_ENV = "KAGGLEBOT_DISCUSSION_THREAD_LIMIT"
+_CODE_NOTEBOOK_MAX_DOWNLOAD = 10
+
+
+class _AnchorCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[dict[str, str]] = []
+        self._href: str | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if tag.lower() != "a":
+            return
+        href_value = None
+        for key, value in attrs:
+            if str(key).lower() == "href" and value:
+                href_value = str(value)
+                break
+        if href_value:
+            self._href = href_value
+            self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href and data:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a":
+            return
+        if self._href:
+            label = " ".join(" ".join(self._text_parts).split()).strip()
+            self.links.append({"href": self._href, "text": label})
+        self._href = None
+        self._text_parts = []
+
+
+def _read_int_env(name: str, *, default: int, min_value: int, max_value: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+def _fetch_competition_community_snapshots(*, paths: CompetitionPaths, slug: str, timeout: int = 10) -> dict[str, str]:
+    snapshots: dict[str, str] = {}
+    code_snapshot = _fetch_and_download_competition_code(paths=paths, slug=slug, timeout=timeout)
+    if code_snapshot:
+        snapshots["code"] = code_snapshot
+    models_snapshot = _fetch_competition_tab_snapshot(slug=slug, tab="models", timeout=timeout)
+    if models_snapshot:
+        snapshots["models"] = models_snapshot
+    discussion_snapshot = _fetch_and_download_competition_discussions(paths=paths, slug=slug, timeout=timeout)
+    if discussion_snapshot:
+        snapshots["discussion"] = discussion_snapshot
+    return snapshots
+
+
+def _fetch_competition_tab_snapshot(*, slug: str, tab: str, timeout: int = 10) -> str | None:
+    suffixes = _TAB_URL_SUFFIXES.get(tab, (tab,))
+    if not suffixes:
+        return None
+    base_url = f"https://www.kaggle.com/competitions/{slug}"
+    for suffix in suffixes:
+        url = f"{base_url}/{suffix}"
+        page_html = _fetch_text_with_retry(url, timeout=timeout)
+        if not page_html:
+            continue
+        extracted = _extract_text_snapshot_from_html(page_html, max_lines=180, max_chars=12000)
+        if not extracted:
+            continue
+        title = tab.replace("_", " ").title()
+        fetched_at = datetime.now(UTC).isoformat()
+        return (
+            f"# {title} Snapshot\n\n"
+            f"Source URL: {url}\n"
+            f"Fetched at: {fetched_at}\n\n"
+            f"## Extracted Content\n\n{extracted}\n"
+        )
+    return None
+
+
+_KAGGLE_LINK_RE = re.compile(r"^https?://(?:www\.)?kaggle\.com(?P<path>/.*)$", re.IGNORECASE)
+_CODE_HREF_RE = re.compile(r"^/code/(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)(?:/.*)?$")
+_SCORE_PATTERNS = (
+    re.compile(r"(?:public\s+score|private\s+score|leaderboard\s+score|lb|score)\s*[:=]?\s*(-?\d+(?:\.\d+)?)", re.I),
+    re.compile(r"(?:cv|oof)\s*[:=]?\s*(-?\d+(?:\.\d+)?)", re.I),
+)
+_KERNEL_ROW_SCORE_KEYS = (
+    "score",
+    "publicscore",
+    "privatescore",
+    "leaderboardscore",
+    "bestscore",
+)
+_TITLE_SCORE_HINT_RE = re.compile(
+    r"(?:public\s+lb|private\s+lb|public\s+score|private\s+score|lb|score)\s*[:=]?\s*(-?\d+(?:\.\d+)?)",
+    re.I,
+)
+
+
+def _normalize_kaggle_href(href: str) -> str:
+    match = _KAGGLE_LINK_RE.match(href.strip())
+    path = match.group("path") if match else href.strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    path = path.split("#", 1)[0]
+    path = path.split("?", 1)[0]
+    return path
+
+
+def _extract_code_candidates(*, html_text: str) -> list[dict[str, object]]:
+    parser = _AnchorCollector()
+    parser.feed(html_text)
+    parser.close()
+
+    entries: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for source_order, link in enumerate(parser.links):
+        href = _normalize_kaggle_href(link.get("href", ""))
+        match = _CODE_HREF_RE.match(href)
+        if not match:
+            continue
+        kernel_id = f"{match.group('user')}/{match.group('slug')}"
+        if kernel_id in seen:
+            continue
+        seen.add(kernel_id)
+        score = _infer_score_near_href(html_text=html_text, href=href)
+        title = (link.get("text") or "").strip() or match.group("slug").replace("-", " ")
+        entries.append(
+            {
+                "kernel_id": kernel_id,
+                "title": title,
+                "url": f"https://www.kaggle.com{href}",
+                "score": score,
+                "source_order": source_order,
+            }
+        )
+    return entries
+
+
+def _sort_code_candidates(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    def key(candidate: dict[str, object]) -> tuple[int, float, int]:
+        raw_score = candidate.get("score")
+        has_score = isinstance(raw_score, (int, float))
+        score_value = float(raw_score) if has_score else float("-inf")
+        order = int(candidate.get("source_order") or 0)
+        return (0 if has_score else 1, -score_value, order)
+
+    return sorted(candidates, key=key)
+
+
+def _parse_score_value(raw: object) -> float | None:
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_kernel_row_score(row: dict[str, str]) -> float | None:
+    lowered = {str(key).strip().lower(): value for key, value in row.items()}
+    for key in _KERNEL_ROW_SCORE_KEYS:
+        score = _parse_score_value(lowered.get(key))
+        if score is not None:
+            return score
+    title = str(lowered.get("title") or "")
+    match = _TITLE_SCORE_HINT_RE.search(title)
+    if match:
+        score = _parse_score_value(match.group(1))
+        if score is not None:
+            return score
+    return None
+
+
+def _list_competition_code_candidates_from_cli(*, slug: str) -> list[dict[str, object]]:
+    try:
+        rows = list_competition_kernels(
+            slug,
+            page=1,
+            page_size=200,
+            sort_by="scoreDescending",
+            kernel_type="notebook",
+            dry_run=False,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    entries: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        kernel_id = str(row.get("ref") or "").strip()
+        if not kernel_id or "/" not in kernel_id:
+            continue
+        if kernel_id in seen:
+            continue
+        seen.add(kernel_id)
+        entries.append(
+            {
+                "kernel_id": kernel_id,
+                "title": str(row.get("title") or kernel_id),
+                "url": f"https://www.kaggle.com/code/{kernel_id}",
+                "score": _parse_kernel_row_score(row),
+                "source_order": index,
+            }
+        )
+    return entries
+
+
+def _infer_score_near_href(*, html_text: str, href: str) -> float | None:
+    index = html_text.find(href)
+    if index < 0:
+        encoded = href.replace("/", r"\/")
+        index = html_text.find(encoded)
+    if index < 0:
+        return None
+    windows = [
+        html_text[index : min(len(html_text), index + 1800)],
+        html_text[max(0, index - 900) : min(len(html_text), index + 2500)],
+    ]
+    for window in windows:
+        window_text = _extract_text_snapshot_from_html(window, max_lines=80, max_chars=2200)
+        for pattern in _SCORE_PATTERNS:
+            match = pattern.search(window_text)
+            if not match:
+                continue
+            try:
+                value = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if abs(value) <= 1000:
+                return value
+    return None
+
+
+def _safe_kernel_dir_name(kernel_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", kernel_id.replace("/", "__")).strip("_")
+
+
+def _choose_notebook_source_file(directory: Path) -> Path | None:
+    for suffix in (".ipynb", ".py"):
+        files = sorted(directory.glob(f"*{suffix}"))
+        if files:
+            return files[0]
+    return None
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    compact = " ".join(text.split()).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars].rstrip() + "..."
+
+
+def _normalize_cell_source(source: object) -> str:
+    if isinstance(source, list):
+        return "".join(str(chunk) for chunk in source)
+    if isinstance(source, str):
+        return source
+    return ""
+
+
+def _summarize_notebook_source(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    suffix = path.suffix.lower()
+    if suffix == ".ipynb":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except json.JSONDecodeError:
+            return ""
+        cells = payload.get("cells", [])
+        if not isinstance(cells, list):
+            return ""
+        excerpts: list[str] = []
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            cell_type = str(cell.get("cell_type") or "")
+            source_text = _normalize_cell_source(cell.get("source"))
+            compact = _truncate_text(source_text, 240)
+            if not compact:
+                continue
+            lowered = compact.lower()
+            if cell_type == "markdown" or any(
+                token in lowered
+                for token in ("train", "fold", "augment", "ensemble", "pretrained", "score", "metric", "model")
+            ):
+                excerpts.append(compact)
+            if len(excerpts) >= 8:
+                break
+        if not excerpts:
+            return ""
+        return "\n".join(f"- {line}" for line in excerpts)
+
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    excerpts: list[str] = []
+    for raw_line in content.splitlines():
+        compact = raw_line.strip()
+        if not compact:
+            continue
+        lowered = compact.lower()
+        if any(token in lowered for token in ("train", "fold", "augment", "ensemble", "pretrained", "score", "metric")):
+            excerpts.append(_truncate_text(compact, 200))
+        if len(excerpts) >= 8:
+            break
+    if not excerpts:
+        return ""
+    return "\n".join(f"- {line}" for line in excerpts)
+
+
+def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, timeout: int) -> str | None:
+    code_url = f"https://www.kaggle.com/competitions/{slug}/code"
+    html_text = _fetch_text_with_retry(code_url, timeout=timeout) or ""
+    candidates = _list_competition_code_candidates_from_cli(slug=slug)
+    candidate_source = "kaggle kernels list --competition --sort-by scoreDescending"
+    if not candidates:
+        if not html_text:
+            return _fetch_competition_tab_snapshot(slug=slug, tab="code", timeout=timeout)
+        candidates = _extract_code_candidates(html_text=html_text)
+        candidate_source = "competition code page HTML"
+
+    candidates = _sort_code_candidates(candidates)
+    limit = _read_int_env(
+        _CODE_NOTEBOOK_LIMIT_ENV,
+        default=_CODE_NOTEBOOK_MAX_DOWNLOAD,
+        min_value=1,
+        max_value=_CODE_NOTEBOOK_MAX_DOWNLOAD,
+    )
+    selected = candidates[:limit]
+
+    paths.code_notebooks_dir.mkdir(parents=True, exist_ok=True)
+    entries: list[dict[str, object]] = []
+    for candidate in selected:
+        kernel_id = str(candidate.get("kernel_id") or "").strip()
+        if not kernel_id:
+            continue
+        notebook_dir = paths.code_notebooks_dir / _safe_kernel_dir_name(kernel_id)
+        notebook_dir.mkdir(parents=True, exist_ok=True)
+        pull_error = ""
+        try:
+            kernels_pull(kernel_id, notebook_dir, slug=slug, dry_run=False, metadata=True)
+        except Exception as exc:  # noqa: BLE001
+            pull_error = str(exc)
+
+        source_file = _choose_notebook_source_file(notebook_dir)
+        summary = _summarize_notebook_source(source_file)
+        if summary:
+            (notebook_dir / "summary.md").write_text(summary + "\n", encoding="utf-8")
+
+        entries.append(
+            {
+                "kernel_id": kernel_id,
+                "title": str(candidate.get("title") or kernel_id),
+                "url": str(candidate.get("url") or ""),
+                "score": candidate.get("score"),
+                "local_dir": str(notebook_dir),
+                "source_file": str(source_file) if source_file else None,
+                "summary": summary,
+                "download_error": pull_error,
+            }
+        )
+
+    index_payload = {
+        "source_url": code_url,
+        "candidate_source": candidate_source,
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "notebook_count": len(entries),
+        "notebooks": entries,
+    }
+    paths.code_notebooks_index_path.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Code Notebook Snapshot",
+        "",
+        f"Source URL: {code_url}",
+        f"Candidate source: {candidate_source}",
+        f"Fetched at: {index_payload['fetched_at']}",
+        "",
+    ]
+    if entries:
+        lines.append("## Downloaded Notebooks")
+        lines.append("")
+        for index, entry in enumerate(entries, start=1):
+            score = entry.get("score")
+            score_text = f"{float(score):.6f}" if isinstance(score, (int, float)) else "unknown"
+            lines.extend(
+                [
+                    f"### {index}. {entry['title']}",
+                    f"- kernel_id: {entry['kernel_id']}",
+                    f"- notebook_score: {score_text}",
+                    f"- url: {entry['url']}",
+                    f"- local_dir: {entry['local_dir']}",
+                ]
+            )
+            if entry.get("source_file"):
+                lines.append(f"- source_file: {entry['source_file']}")
+            if entry.get("download_error"):
+                lines.append(f"- download_error: {entry['download_error']}")
+            summary = str(entry.get("summary") or "").strip()
+            if summary:
+                lines.append("Notebook summary excerpt:")
+                lines.append(summary)
+            lines.append("")
+    else:
+        lines.append("No downloadable competition notebooks were discovered from the code tab.")
+        lines.append("")
+
+    raw_snapshot = _extract_text_snapshot_from_html(html_text, max_lines=140, max_chars=8000) if html_text else ""
+    if raw_snapshot:
+        lines.append("## Code Tab Text Snapshot")
+        lines.append("")
+        lines.append(raw_snapshot)
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _extract_discussion_candidates(*, slug: str, html_text: str) -> list[dict[str, str]]:
+    parser = _AnchorCollector()
+    parser.feed(html_text)
+    parser.close()
+    pattern = re.compile(rf"^/competitions/{re.escape(slug)}/discussion/(?P<thread_id>\d+)(?:/.*)?$", re.IGNORECASE)
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in parser.links:
+        href = _normalize_kaggle_href(link.get("href", ""))
+        match = pattern.match(href)
+        if not match:
+            continue
+        thread_id = match.group("thread_id")
+        if thread_id in seen:
+            continue
+        seen.add(thread_id)
+        title = (link.get("text") or "").strip() or f"Discussion {thread_id}"
+        entries.append(
+            {
+                "thread_id": thread_id,
+                "title": title,
+                "href": href,
+                "url": f"https://www.kaggle.com{href}",
+            }
+        )
+    return entries
+
+
+_HTML_TITLE_RE = re.compile(r"<title>(?P<title>.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_html_title(html_text: str) -> str:
+    match = _HTML_TITLE_RE.search(html_text)
+    if not match:
+        return ""
+    title = html.unescape(match.group("title"))
+    title = " ".join(title.split()).strip()
+    return re.sub(r"\s*\|\s*Kaggle\s*$", "", title, flags=re.IGNORECASE).strip()
+
+
+def _fetch_competition_topics_from_api(*, slug: str, timeout: int) -> list[dict[str, object]]:
+    competition_payload = _fetch_json_with_retry(
+        f"https://www.kaggle.com/api/i/competitions.CompetitionService/GetCompetition?competitionName={slug}",
+        timeout=timeout,
+    )
+    if not competition_payload:
+        return []
+    forum_id = competition_payload.get("forumId")
+    if not isinstance(forum_id, int):
+        return []
+    topics_payload = _fetch_json_with_retry(
+        f"https://www.kaggle.com/api/i/discussions.DiscussionsService/GetTopicListByForumId?forumId={forum_id}",
+        timeout=timeout,
+    )
+    if not topics_payload:
+        return []
+    topics = topics_payload.get("topics", [])
+    if not isinstance(topics, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        topic_id = topic.get("id")
+        if not isinstance(topic_id, int):
+            continue
+        rows.append(topic)
+    return rows
+
+
+def _fetch_and_download_competition_discussions(*, paths: CompetitionPaths, slug: str, timeout: int) -> str | None:
+    listing_url = f"https://www.kaggle.com/competitions/{slug}/discussions"
+    api_topics = _fetch_competition_topics_from_api(slug=slug, timeout=timeout)
+    html_text = _fetch_text_with_retry(listing_url, timeout=timeout) or ""
+
+    candidates: list[dict[str, str]]
+    candidate_source: str
+    if api_topics:
+        candidates = []
+        seen: set[str] = set()
+        for topic in api_topics:
+            topic_id = str(topic.get("id") or "").strip()
+            if not topic_id or topic_id in seen:
+                continue
+            seen.add(topic_id)
+            title = str(topic.get("title") or topic.get("subject") or f"Discussion {topic_id}")
+            href = f"/competitions/{slug}/discussion/{topic_id}"
+            candidates.append(
+                {
+                    "thread_id": topic_id,
+                    "title": title,
+                    "href": href,
+                    "url": f"https://www.kaggle.com{href}",
+                }
+            )
+        candidate_source = "discussions.DiscussionsService/GetTopicListByForumId"
+    else:
+        if not html_text:
+            return _fetch_competition_tab_snapshot(slug=slug, tab="discussion", timeout=timeout)
+        candidates = _extract_discussion_candidates(slug=slug, html_text=html_text)
+        candidate_source = "competition discussions page HTML"
+
+    limit = _read_int_env(_DISCUSSION_THREAD_LIMIT_ENV, default=20, min_value=1, max_value=100)
+    selected = candidates[:limit]
+
+    paths.discussion_threads_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    for candidate in selected:
+        thread_url = str(candidate.get("url") or "")
+        thread_html = _fetch_text_with_retry(thread_url, timeout=timeout)
+        if not thread_html:
+            rows.append(
+                {
+                    "thread_id": candidate.get("thread_id"),
+                    "title": candidate.get("title"),
+                    "url": thread_url,
+                    "local_path": None,
+                    "excerpt": "",
+                    "download_error": "Unable to fetch thread page.",
+                }
+            )
+            continue
+
+        thread_title = _extract_html_title(thread_html) or str(candidate.get("title") or "Discussion")
+        thread_text = _extract_text_snapshot_from_html(thread_html, max_lines=500, max_chars=30000)
+        thread_file = paths.discussion_threads_dir / f"{candidate['thread_id']}.md"
+        thread_file.write_text(
+            "\n".join(
+                [
+                    f"# {thread_title}",
+                    "",
+                    f"Source URL: {thread_url}",
+                    "",
+                    "## Extracted Content",
+                    "",
+                    thread_text or "Thread text extraction returned empty content.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        excerpt = _truncate_text(thread_text, 360) if thread_text else ""
+        rows.append(
+            {
+                "thread_id": candidate.get("thread_id"),
+                "title": thread_title,
+                "url": thread_url,
+                "local_path": str(thread_file),
+                "excerpt": excerpt,
+                "download_error": "",
+            }
+        )
+
+    index_payload = {
+        "source_url": listing_url,
+        "candidate_source": candidate_source,
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "thread_count": len(rows),
+        "threads": rows,
+    }
+    paths.discussion_threads_index_path.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Discussion Threads Snapshot",
+        "",
+        f"Source URL: {listing_url}",
+        f"Candidate source: {candidate_source}",
+        f"Fetched at: {index_payload['fetched_at']}",
+        "",
+    ]
+    if rows:
+        lines.append("## Thread Digest")
+        lines.append("")
+        for index, row in enumerate(rows, start=1):
+            lines.extend(
+                [
+                    f"### {index}. {row['title']}",
+                    f"- thread_id: {row['thread_id']}",
+                    f"- url: {row['url']}",
+                    f"- local_path: {row['local_path'] or 'unavailable'}",
+                ]
+            )
+            if row.get("download_error"):
+                lines.append(f"- download_error: {row['download_error']}")
+            excerpt = str(row.get("excerpt") or "").strip()
+            if excerpt:
+                lines.append(f"- excerpt: {excerpt}")
+            lines.append("")
+    else:
+        lines.append("No discussion threads were discovered from the discussions tab.")
+        lines.append("")
+
+    listing_snapshot = _extract_text_snapshot_from_html(html_text, max_lines=120, max_chars=6000) if html_text else ""
+    if listing_snapshot:
+        lines.append("## Discussion Tab Text Snapshot")
+        lines.append("")
+        lines.append(listing_snapshot)
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _fetch_text_with_retry(url: str, *, timeout: int, attempts: int = 3) -> str | None:
+    for attempt in range(attempts):
+        try:
+            return _fetch_text(url, timeout=timeout)
+        except (urllib.error.URLError, OSError, TimeoutError, UnicodeDecodeError):
+            if attempt < attempts - 1:
+                time.sleep(1.0)
+                continue
+            return None
+    return None
+
+
+def _fetch_text(url: str, *, timeout: int) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "kagglebot/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        encoding = resp.headers.get_content_charset() or "utf-8"
+    return raw.decode(encoding, errors="ignore")
+
+
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _extract_text_snapshot_from_html(html_text: str, *, max_lines: int, max_chars: int) -> str:
+    if not html_text.strip():
+        return ""
+    without_scripts = _SCRIPT_STYLE_RE.sub(" ", html_text)
+    without_comments = _HTML_COMMENT_RE.sub(" ", without_scripts)
+    stripped = _HTML_TAG_RE.sub("\n", without_comments)
+    plain = html.unescape(stripped)
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    total_chars = 0
+    for raw_line in plain.splitlines():
+        compact = " ".join(raw_line.split()).strip()
+        if len(compact) < 4:
+            continue
+        key = compact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        bullet = f"- {compact}"
+        lines.append(bullet)
+        total_chars += len(bullet) + 1
+        if len(lines) >= max_lines or total_chars >= max_chars:
+            break
+
+    if not lines:
+        return ""
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "\n... (truncated)"
+    return text
 
 
 def _select_page_markdown(
@@ -403,6 +1117,33 @@ def _write_submission_format_markdown(paths: CompetitionPaths, text: str) -> Non
     paths.submission_format_md_path.write_text(normalized, encoding="utf-8")
 
 
+def _write_code_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Code content unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.code_md_path.write_text(normalized, encoding="utf-8")
+
+
+def _write_models_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Models content unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.models_md_path.write_text(normalized, encoding="utf-8")
+
+
+def _write_discussion_markdown(paths: CompetitionPaths, text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        normalized = "Discussion content unavailable."
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    paths.discussion_md_path.write_text(normalized, encoding="utf-8")
+
+
 def _pages_need_refresh(paths: CompetitionPaths, rules_url: str) -> bool:
     def needs_refresh(path: Path, markers: tuple[str, ...]) -> bool:
         if not path.exists():
@@ -419,6 +1160,12 @@ def _pages_need_refresh(paths: CompetitionPaths, rules_url: str) -> bool:
     if needs_refresh(paths.data_md_path, ("Data content not provided.",)):
         return True
     if needs_refresh(paths.submission_format_md_path, ("Submission format not provided.",)):
+        return True
+    if needs_refresh(paths.code_md_path, ("Code content not provided.",)):
+        return True
+    if needs_refresh(paths.models_md_path, ("Models content not provided.",)):
+        return True
+    if needs_refresh(paths.discussion_md_path, ("Discussion content not provided.",)):
         return True
     return False
 
@@ -481,6 +1228,15 @@ def _cache_sample_submission(paths: CompetitionPaths) -> None:
                 frame.to_csv(paths.sample_submission_path, index=False)
             _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
             return
+
+
+def _mirror_sample_submission_to_data(paths: CompetitionPaths) -> None:
+    source = paths.sample_submission_path
+    destination = paths.data_dir / "sample_submission.csv"
+    if not source.exists() or destination.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
 
 
 def _find_tabular_files(root: Path) -> list[Path]:

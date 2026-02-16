@@ -1,6 +1,6 @@
 # kagglebot
 
-Safe, non-interactive automation for Kaggle competitions with top1-gated autopilot.
+Safe, non-interactive automation for Kaggle competitions with readiness-score-driven autopilot.
 
 ## Prerequisites
 
@@ -29,17 +29,25 @@ Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
-2. **Plan**: Codex (gpt-5.3-codex, extra high) summarizes context, GPT (gpt-5.2, extra high) designs strategy, Codex (gpt-5.3-codex, extra high) implements it
-3. **Initial model**: Agent implements an initial solution (local compute in `kagglebot/solver/`, kaggle_gpu/kaggle_tpu in `artifacts/<slug>/kernel.py`)
-4. **Iterate**: Train → evaluate → diagnose → improve (default 1 iteration; override with `--max-iterations`)
-5. **Submit**: Auto-submit when top1-tier (or at final iteration)
+2. **Plan**: Codex (gpt-5.3-codex, extra high) summarizes context, GPT (gpt-5.2, extra high) runs research + frozen plan, Codex (gpt-5.3-codex, extra high) implements it
+3. **Initial model**: Agent implements an initial solution in `artifacts/<slug>/kernel/kernel.py` (all compute modes)
+4. **Iterate**: Train → evaluate → diagnose → improve (default 3 iterations; override with `--max-iterations`)
+5. **Submit + Decide**: Submit each iteration, wait for Kaggle score, then decide continue/stop
 6. **Log**: Print Top1 public score and agent prompt/response to the terminal
 
+Schema/method flexibility:
+- Target/schema inference is file-name agnostic (not fixed to exact `train.csv`/`test.csv` naming only)
+- Multi-target sample submissions are supported at I/O/validation level
+- ID-based and row-order-based submission alignment are both supported
+- Metric handling supports a broader set (e.g. AUC, logloss, F1, precision/recall, AP, RMSE/MAE/MAPE/R2)
+- CV strategy auto-selection supports `TimeSeriesSplit` / `GroupKFold` / `StratifiedKFold` / `KFold`
+- Model family selection is plugin-like with optional families (XGBoost/LightGBM if installed)
+
 **Safe defaults**:
-- Default max iterations: 1 (`--max-iterations` to override)
+- Default max iterations: 3 (`--max-iterations` to override)
 - No training time limit (accuracy-first)
 - Internet ON by default (disable with `--internet off`)
-- Submit only when top1-tier or at final iteration
+- Each iteration submits and waits for Kaggle score before stop/continue decision
 
 ## Manual Commands
 
@@ -56,7 +64,7 @@ uv run kagglebot implement <competition>
 uv run kagglebot train <competition> --compute local_gpu
 
 # Submit manually
-uv run kagglebot submit <competition> -f submission.csv -m "message"
+uv run kagglebot --force submit <competition> -f submission.csv -m "message"
 ```
 
 ## Plan Configuration
@@ -73,7 +81,7 @@ Autopilot creates `artifacts/<slug>/plan.json` with agent-defined targets:
   "cv_folds": 5,
   "seed": 42,
   "internet": "on",
-  "submit_policy": "on_target_only"
+  "submit_policy": "always"
 }
 ```
 
@@ -87,9 +95,18 @@ Autopilot creates `artifacts/<slug>/plan.json` with agent-defined targets:
 
 Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 
+Optional environment knobs:
+- `KAGGLEBOT_MODEL_CANDIDATES="catboost,xgboost,lightgbm,torch,extra_trees"` to prioritize/limit model families
+- Custom metric hook: use metric string `custom:<module_or_py_path>:<function>`
+- Vision YOLO routing: if sample columns are `filename,right_place,prediction_string` and YOLO folders exist
+  (`images/train`, `images/test`, `labels/train`), Kagglebot uses a detection pipeline instead of tabular models.
+- Vision training knobs:
+  - `KAGGLEBOT_YOLO_PRETRAIN=1|0` (default `1`) toggles pretrained detector initialization.
+  - `KAGGLEBOT_YOLO_EPOCHS=<int>` overrides detector epochs (time-budget caps still apply).
+
 ## Safety Guardrails
 
-- ✅ **Top1-gated submission**: Submit only when offline score meets/exceeds top1 (direction-aware)
+- ✅ **Readiness-score-driven loop**: stop/continue uses SRS (offline metric + uncertainty), with optional submission/rank guardrails
 - ✅ **Strict local validation before submit**: Column order, row count, ID integrity, numeric prediction checks
 - ✅ **Duplicate prevention**: SHA256 hash check against `submissions/ledger.jsonl`
 - ✅ **Rate limiting**: 5-min cooldown between submissions
@@ -98,15 +115,10 @@ Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
 
-## Top1 Public Leaderboard (Heuristic Gate)
+## Top1 Public Leaderboard (Reference)
 
 The public leaderboard leader's score is fetched and stored in `context/top1_public.json`.
-Autopilot uses it as a heuristic gate:
-- Minimize metrics: submit when offline score <= top1
-- Maximize metrics: submit when offline score >= top1
-
-Offline evaluation is a pseudo-test (holdout/CV) and is **not directly comparable** to the public leaderboard; the heuristic gate is a safety check, not a guarantee.
-If top1-tier is not reached, autopilot iterates up to `max_iterations` (default 1) and submits the best offline candidate on the final iteration.
+Autopilot uses this as a reference signal (for diagnostics and rank-based major-overhaul guardrails), while primary loop control uses readiness score (SRS).
 
 ## Artifacts Layout
 
@@ -116,6 +128,9 @@ artifacts/<slug>/
   plan.json                      # Agent-defined targets (editable)
   context/
     dataset_profile.json         # Dataset statistics
+    research_sources.jsonl       # Strategy web-research log (working copy)
+    research_summary.md          # Ranked research shortlist (working copy)
+    research_storage.json        # Mapping to persisted knowledge paths
     sample_submission.csv        # Required submission format
     sample_submission_head.csv   # Head of sample submission
     top1_public.json             # Leaderboard leader snapshot
@@ -126,7 +141,13 @@ artifacts/<slug>/
     data.md                      # Data description (if available)
     submission_format.md         # Submission format (if available)
     knowledge_hints.txt          # Similar competitions + hints
-  kernel.py                      # Kaggle kernel entrypoint (for kaggle_gpu/kaggle_tpu)
+    agent/
+      brief_for_strategy.md      # Codex brief
+      strategy_plan.md           # GPT strategy section
+      codex_instructions.md      # GPT implementation instructions
+      strategy_transcript.txt    # Raw GPT stage output
+  kernel/
+    kernel.py                    # Authoritative kernel entrypoint (all compute modes)
   prompts/
     codex_plan_and_implement.md   # Initial plan + implementation prompt
     codex_improve.md             # Improvement iteration prompt
@@ -150,6 +171,8 @@ artifacts/<slug>/
 Knowledge Base lives in:
 - `knowledge/kb.sqlite`
 - `knowledge/taxonomy.yml`
+- `knowledge/research/<problem_type>/<slug>/research_sources.jsonl` (persistent)
+- `knowledge/research/<problem_type>/<slug>/research_summary.md` (persistent)
 
 ## Documentation
 
@@ -177,14 +200,20 @@ nano artifacts/titanic/plan.json
 # 3. Re-run autopilot with adjusted target
 uv run kagglebot autopilot titanic --compute kaggle_gpu
 
-# 4. Check Knowledge Base for learnings
+# 4. Resume a crashed run (same competition)
+uv run kagglebot autopilot titanic --compute kaggle_gpu --resume-run-id <run-id>
+# or resume the latest run automatically
+uv run kagglebot autopilot titanic --compute kaggle_gpu --resume-latest
+
+# 5. Check Knowledge Base for learnings
 uv run kagglebot knowledge show titanic
 
-# 5. Find similar competitions
+# 6. Find similar competitions
 uv run kagglebot knowledge search --tag tabular --tag binary --limit 5
 ```
 
 ## Notes
 
 - **Non-interactive**: No prompts for input. All decisions via CLI flags or `plan.json`.
-- **Submit resume behavior**: If a run already attempted submit once, resume will skip submit in that same run. Override only with `--force-submit` (or `KAGGLEBOT_FORCE_RESUBMIT=1`).
+- **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run.
+- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; exact same submission path is skipped unless forced.

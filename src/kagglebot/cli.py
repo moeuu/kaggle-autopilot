@@ -13,15 +13,17 @@ from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.competition import parse_competition_slug
 from kagglebot.compute import Compute
-from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError
+from kagglebot.eval import EvaluationAdvisor
+from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.exec_utils import run_command
 from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import check_rules_accepted
-from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel
+from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
-from kagglebot.solver.initial_model import train_evaluate_and_predict
+from kagglebot.solver.io import find_competition_files
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.submission.validate import validate_submission
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
@@ -190,33 +192,33 @@ def train(
         if kernel_result.submission_path:
             submission_path.write_bytes(kernel_result.submission_path.read_bytes())
     else:
-        outcome = train_evaluate_and_predict(
-            data_dir=paths.data_dir,
-            output_path=submission_path,
-            compute=compute,
-            strict_accelerator=strict_accelerator,
-            seed=resolved_seed,
+        kernel_path = paths.kernel_source_dir / "kernel.py"
+        if not kernel_path.exists():
+            raise typer.BadParameter(f"Local training now requires kernel.py, but it was not found: {kernel_path}")
+        kernel_result = run_kernel_local(
+            slug=slug,
+            run_id=run_id,
+            iteration=0,
+            base_dir=paths.base_dir.parent,
+            accelerator=resolved_accelerator,
             score_source="holdout",
             metric=metric,
-            direction="auto",
+            direction=direction,
             holdout_frac=0.2,
             cv_folds=5,
-            plan_score_source=None,
-            target_override=None,
+            seed=resolved_seed,
+            dry_run=cfg.dry_run,
+            timeout_minutes=resolved_time_budget,
+            strict_accelerator=strict_accelerator,
         )
-        metrics_path = run_dir / "metrics.json"
-        metrics_path.write_text(
-            json.dumps(
-                {
-                    "metric": outcome.evaluation.metric,
-                    "offline_value": outcome.evaluation.value,
-                    "score_source": outcome.evaluation.score_source,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        if kernel_result.submission_path:
+            submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+        if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+            metrics_path = run_dir / "metrics.json"
+            metrics_path.write_bytes(kernel_result.metrics_path.read_bytes())
 
+    _, _, sample_path = find_competition_files(paths.data_dir)
+    validate_submission(str(submission_path), str(sample_path))
     print(f"[green]submission written[/green]: {submission_path}")
 
 
@@ -288,6 +290,13 @@ def autopilot(
     verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
     message: str | None = typer.Option(None, "-m", "--message", help="Submission message override."),
     strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
+    auto_eval_spec: bool = typer.Option(
+        True,
+        "--auto-eval-spec/--no-auto-eval-spec",
+        help="Run GPT-5.2 advisor once to generate/freeze context/evaluation_spec.json (default: on).",
+    ),
+    resume_run_id: str | None = typer.Option(None, "--resume-run-id", help="Resume an existing run by run ID."),
+    resume_latest: bool = typer.Option(False, "--resume-latest", help="Resume the most recent run."),
 ) -> None:
     cfg = ctx.obj
     slug = parse_competition_slug(competition)
@@ -295,9 +304,26 @@ def autopilot(
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
 
     resolved_accelerator = _resolve_accelerator(compute.value, accelerator)
+    requested_resume_id = _resolve_resume_run_id(
+        paths=paths,
+        resume_run_id=resume_run_id,
+        resume_latest=resume_latest,
+    )
     resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
     resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
     resume_run = bool(resume_id and resume_slug == slug)
+    if requested_resume_id is not None:
+        if resume_run and resume_id != requested_resume_id:
+            raise typer.BadParameter(
+                "Autofix resume context conflicts with requested resume run ID. Retry without --resume-run-id.",
+                param_hint="--resume-run-id",
+            )
+        if not resume_run:
+            os.environ["KAGGLEBOT_RESUME_RUN_ID"] = requested_resume_id
+            os.environ["KAGGLEBOT_RESUME_SLUG"] = slug
+            resume_id = requested_resume_id
+            resume_run = True
+        print(f"[yellow]resume[/yellow]: requested run {requested_resume_id}")
 
     if resume_run and paths.context_dir.exists():
         print("[yellow]resume[/yellow]: skipping bootstrap; reusing existing context")
@@ -321,6 +347,22 @@ def autopilot(
         )
         if not cfg.dry_run:
             print(f"[green]download complete[/green]: {paths.data_dir}")
+
+    if auto_eval_spec:
+        advisor = EvaluationAdvisor(
+            paths=paths,
+            slug=slug,
+            dry_run=cfg.dry_run,
+            force=cfg.force,
+        )
+        spec, source = advisor.ensure_spec()
+        metric_name = spec.get("metric_name")
+        split_strategy = spec.get("split_strategy")
+        print(
+            "[cyan]evaluation advisor[/cyan]: "
+            f"{source} -> {advisor.spec_path} "
+            f"(metric={metric_name}, split={split_strategy})"
+        )
 
     run_id = None if resume_run else new_run_id()
     config = AutopilotConfig(
@@ -359,6 +401,9 @@ def autopilot(
     except RulesNotAcceptedError:
         _print_rules(slug)
         raise typer.Exit(code=2)
+    except SubmitAbortedError as exc:
+        print(f"[red]submit aborted[/red]: {exc}")
+        raise typer.Exit(code=exc.exit_code)
 
 
 @knowledge_app.command("show")
@@ -411,11 +456,66 @@ def _resolve_accelerator(compute: str, accelerator: str) -> str:
     return accelerator
 
 
+def _resolve_resume_run_id(
+    *,
+    paths: CompetitionPaths,
+    resume_run_id: str | None,
+    resume_latest: bool,
+) -> str | None:
+    if resume_run_id and resume_latest:
+        raise typer.BadParameter(
+            "Use either --resume-run-id or --resume-latest, not both.",
+            param_hint="--resume-run-id",
+        )
+    if resume_run_id:
+        candidate = resume_run_id.strip()
+        if not candidate:
+            raise typer.BadParameter("--resume-run-id cannot be empty.", param_hint="--resume-run-id")
+        if not paths.run_dir(candidate).exists():
+            raise typer.BadParameter(f"Run ID not found: {candidate}", param_hint="--resume-run-id")
+        return candidate
+    if not resume_latest:
+        return None
+    latest = _find_latest_run_id(paths)
+    if latest is None:
+        raise typer.BadParameter(f"No prior runs found under {paths.runs_dir}", param_hint="--resume-latest")
+    return latest
+
+
+def _find_latest_run_id(paths: CompetitionPaths) -> str | None:
+    runs_dir = paths.runs_dir
+    if not runs_dir.exists():
+        return None
+    latest_name: str | None = None
+    latest_mtime: float | None = None
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        try:
+            mtime = run_dir.stat().st_mtime
+        except OSError:
+            continue
+        if latest_mtime is None or mtime > latest_mtime:
+            latest_name = run_dir.name
+            latest_mtime = mtime
+    return latest_name
+
+
 def _print_rules(slug: str) -> None:
     print(f"[red]Rules not accepted[/red]. Visit: https://www.kaggle.com/competitions/{slug}/rules")
 
 
 def _default_metric(paths: CompetitionPaths) -> str:
+    plan_path = paths.plan_path
+    if plan_path.exists():
+        try:
+            data = json.loads(plan_path.read_text(encoding="utf-8"))
+            metric = data.get("target_metric")
+            if isinstance(metric, str) and metric.strip():
+                return metric
+        except json.JSONDecodeError:
+            pass
+
     profile_path = paths.dataset_profile_path
     if profile_path.exists():
         try:

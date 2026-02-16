@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from kagglebot.exceptions import SubmissionCliError, SubmissionValidationError
-from kagglebot.exec_utils import CommandResult
 from kagglebot.submission.guard import (
     classify_submit_error,
     compute_error_fingerprint,
@@ -27,78 +27,191 @@ def _write_sample_and_submission(tmp_path: Path) -> tuple[Path, Path]:
 def test_validate_submission_columns_mismatch(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, 2, 3], "score": [0.1, 0.2, 0.3]}).to_csv(submission, index=False)
-    with pytest.raises(SubmissionValidationError, match="columns do not match"):
-        validate_submission(submission, sample)
+    with pytest.raises(SubmissionValidationError, match="columns mismatch"):
+        validate_submission(str(submission), str(sample))
 
 
 def test_validate_submission_row_count_mismatch(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, 2], "target": [0.1, 0.2]}).to_csv(submission, index=False)
-    with pytest.raises(SubmissionValidationError, match="row count does not match"):
-        validate_submission(submission, sample)
+    with pytest.raises(SubmissionValidationError, match="row count mismatch"):
+        validate_submission(str(submission), str(sample))
 
 
 def test_validate_submission_id_nan(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, None, 3], "target": [0.1, 0.2, 0.3]}).to_csv(submission, index=False)
     with pytest.raises(SubmissionValidationError, match="id column 'id' contains NaN"):
-        validate_submission(submission, sample)
+        validate_submission(str(submission), str(sample))
 
 
 def test_validate_submission_id_duplicate(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, 1, 3], "target": [0.1, 0.2, 0.3]}).to_csv(submission, index=False)
-    with pytest.raises(SubmissionValidationError, match="contains duplicates"):
-        validate_submission(submission, sample)
+    with pytest.raises(SubmissionValidationError, match="duplicate values"):
+        validate_submission(str(submission), str(sample))
 
 
 def test_validate_submission_pred_nan_or_non_numeric(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, 2, 3], "target": [0.1, "abc", 0.3]}).to_csv(submission, index=False)
-    with pytest.raises(SubmissionValidationError, match="NaN or non-numeric"):
-        validate_submission(submission, sample)
+    with pytest.raises(SubmissionValidationError, match="NaN/non-numeric"):
+        validate_submission(str(submission), str(sample))
 
 
 def test_validate_submission_pred_inf(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, 2, 3], "target": [0.1, float("inf"), 0.3]}).to_csv(submission, index=False)
-    with pytest.raises(SubmissionValidationError, match="contains inf"):
-        validate_submission(submission, sample)
+    with pytest.raises(SubmissionValidationError, match="contains \\+/-inf"):
+        validate_submission(str(submission), str(sample))
 
 
-def test_classify_submit_error_permanent() -> None:
-    classified = classify_submit_error("", "You must accept the rules before submitting", 1)
-    assert classified.kind == "permanent"
-    assert classified.reason == "rules_not_accepted"
+def test_validate_submission_categorical_target_passes(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": [1, 2, 3], "target": ["Absence", "Presence", "Absence"]}).to_csv(sample, index=False)
+    pd.DataFrame({"id": [1, 2, 3], "target": ["Presence", "Absence", "Presence"]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
 
 
-def test_classify_submit_error_transient() -> None:
-    classified = classify_submit_error("", "ConnectionError: temporarily unavailable (503)", 1)
-    assert classified.kind == "transient"
+def test_validate_submission_categorical_target_allows_unknown_values(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": [1, 2, 3], "target": ["Absence", "Presence", "Absence"]}).to_csv(sample, index=False)
+    pd.DataFrame({"id": [1, 2, 3], "target": [0, 1, 0]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_reports_multiple_problems(tmp_path: Path) -> None:
+    sample, submission = _write_sample_and_submission(tmp_path)
+    pd.DataFrame({"id": [1, None], "target": [0.1, "bad"]}).to_csv(submission, index=False)
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submission(str(submission), str(sample))
+    message = str(exc.value)
+    assert "Submission validation failed:" in message
+    assert "- row count mismatch:" in message
+    assert "- id column 'id' contains NaN values:" in message
+    assert "- prediction column 'target' contains NaN/non-numeric values:" in message
+
+
+def test_validate_submission_uses_overview_hint_when_sample_is_header_only(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    (context_dir / "overview.md").write_text(
+        "## Submission Format\n\n```csv\nfilename,right_place,prediction_string\n```\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"filename": ["0.jpg"], "right_place": [0], "prediction_string": ["-"]}).to_csv(
+        submission, index=False
+    )
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_checks_overview_hint_not_only_sample(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    (context_dir / "overview.md").write_text(
+        "## Submission Format\n\n```csv\nfilename,right_place,prediction_string\n```\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": [1], "target": [0.5]}).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError, match="expected \\(submission_format/overview hint\\)"):
+        validate_submission(str(submission), str(sample))
+
+
+@pytest.mark.parametrize(
+    ("stderr_text", "expected_kind", "expected_reason"),
+    [
+        ("You must accept the rules before submitting", "permanent", "rules_not_accepted"),
+        ("No Kaggle API credentials found", "permanent", "authentication"),
+        ("Unauthorized (401)", "permanent", "authentication"),
+        ("Competition is not accepting submissions", "permanent", "competition_unavailable"),
+        ("Submission limit reached: maximum number of submissions", "permanent", "submission_limit"),
+        ("ConnectionError: temporarily unavailable (503)", "transient", "network_or_timeout"),
+        ("Bad Gateway (502)", "transient", "network_or_timeout"),
+        ("Gateway Timeout 504", "transient", "network_or_timeout"),
+    ],
+)
+def test_classify_submit_error_examples(stderr_text: str, expected_kind: str, expected_reason: str) -> None:
+    classified = classify_submit_error("", stderr_text, 1)
+    assert classified["kind"] == expected_kind
+    assert classified["reason"] == expected_reason
+    if expected_kind == "transient":
+        assert classified["retry_after_seconds"] == 2
+    else:
+        assert classified["retry_after_seconds"] is None
+
+
+def test_classify_submit_error_unknown() -> None:
+    classified = classify_submit_error("", "some uncategorized cli message", 3)
+    assert classified["kind"] == "unknown"
+    assert classified["reason"] == "unclassified_submit_error"
+    assert classified["retry_after_seconds"] is None
 
 
 def test_normalize_and_fingerprint_are_stable() -> None:
-    a = "Error at /home/user/repo/artifacts/demo/runs/20260101T000000Z-abcd1234: timeout 2026-02-15T12:00:00Z"
-    b = "Error at /home/other/repo/artifacts/demo/runs/20260101T000000Z-efef2222: timeout 2026-02-16T12:00:00Z"
+    a = (
+        "Error at /home/user/repo/artifacts/demo/runs/20260101T000000Z-abcd1234: "
+        "timeout 2026-02-15T12:00:00Z on 2026-02-15"
+    )
+    b = (
+        "Error at /home/other/repo/artifacts/demo/runs/20260101T000000Z-efef2222: "
+        "timeout 2026-02-16T12:00:00Z on 2026-02-16"
+    )
     na = normalize_error_text(a)
     normalize_error_text(b)
     assert "<PATH>" in na or "<ARTIFACT_PATH>" in na
+    assert "<DATETIME>" in na
+    assert "<DATE>" in na
     assert compute_error_fingerprint(a, "") == compute_error_fingerprint(b, "")
 
 
-def test_run_kaggle_submit_raises_submission_cli_error(monkeypatch) -> None:
-    def fake_run_command(*args, **kwargs):  # noqa: ARG001
-        return CommandResult(
-            args=["kaggle"],
-            returncode=2,
-            stdout="out",
-            stderr="err",
-            duration_sec=0.1,
+def test_run_kaggle_submit_captures_stdout_stderr(monkeypatch) -> None:
+    def fake_subprocess_run(*args, **kwargs):  # noqa: ARG001
+        return subprocess.CompletedProcess(
+            args=["kaggle", "competitions", "submit"],
+            returncode=0,
+            stdout="submit ok",
+            stderr="warning line",
         )
 
-    monkeypatch.setattr("kagglebot.submission.guard.run_command", fake_run_command)
+    monkeypatch.setattr("kagglebot.submission.guard.subprocess.run", fake_subprocess_run)
+    result = run_kaggle_submit(slug="demo", submission_file=Path("submission.csv"), message="m")
+    assert result.returncode == 0
+    assert result.stdout == "submit ok"
+    assert result.stderr == "warning line"
+    assert result.command[:3] == ["kaggle", "competitions", "submit"]
+    assert result.duration_sec >= 0.0
+
+
+def test_run_kaggle_submit_failure_includes_tails_and_returncode(monkeypatch) -> None:
+    long_stdout = "X" * 8000
+    long_stderr = "\n".join(f"stderr line {idx}" for idx in range(300))
+
+    def fake_subprocess_run(*args, **kwargs):  # noqa: ARG001
+        return subprocess.CompletedProcess(
+            args=["kaggle", "competitions", "submit"],
+            returncode=2,
+            stdout=long_stdout,
+            stderr=long_stderr,
+        )
+
+    monkeypatch.setattr("kagglebot.submission.guard.subprocess.run", fake_subprocess_run)
     with pytest.raises(SubmissionCliError) as exc:
         run_kaggle_submit(slug="demo", submission_file=Path("submission.csv"), message="m")
-    assert exc.value.exit_code == 2
-    assert exc.value.stdout == "out"
-    assert exc.value.stderr == "err"
+    err = exc.value
+    assert err.exit_code == 2
+    assert err.command[:3] == ["kaggle", "competitions", "submit"]
+    assert len(err.stdout) <= 6000
+    assert "stderr line 299" in err.stderr
+    assert "stderr line 0" not in err.stderr

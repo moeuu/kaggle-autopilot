@@ -4,8 +4,8 @@
 
 **Competition**: `{slug}`
 **Iteration**: {iteration} / {max_iterations}
-**Goal**: Improve offline score to meet target ({target_score} {target_direction})
-**Current Score**: {current_score} ({current_direction})
+**Goal**: Improve loop-decision score to meet target ({target_score} {target_direction})
+**Current Score Signal**: {current_score} ({current_direction})
 **Target Met**: {met_target}
 
 ## Compute Environment
@@ -27,7 +27,7 @@
 - `{run_path}` - Run settings, iteration history, and outcomes
 
 **Current Iteration Artifacts**:
-- `{current_metrics_path}` - Latest offline evaluation results (iteration {current_iteration})
+- `{current_metrics_path}` - Latest loop-decision + offline-by-source results (iteration {current_iteration})
 - `{current_diagnostics_path}` - Agent-readable performance analysis
 - `{current_submission_path}` - Current submission.csv
 - `{logs_dir}` - Training logs and error messages (if any)
@@ -42,7 +42,7 @@
 - `{rules_url_path}` - Competition rules URL
 - `{rules_html_path}` - Rules HTML (if present)
 - `{submission_format_path}` - Submission format details (if present)
-- `{kernel_main_path}` - Kernel entrypoint for kaggle_gpu/tpu
+- `{kernel_main_path}` - Kernel entrypoint for all compute modes (authoritative file)
 {kb_hints_section}
 
 ## Performance Analysis
@@ -123,6 +123,12 @@ Use the top1 gap as a guide:
 - **Far from top1** → major overhaul (model family/feature strategy)
 - **Mid gap** → moderate update (features + key hyperparameters)
 - **Near top1** → minor tuning (small hyperparameter tweaks)
+
+Implementation scope policy:
+- Always apply changes to `artifacts/<slug>/kernel/kernel.py`.
+- Keep `local_gpu` and `kaggle_gpu` algorithmically identical; only execution location differs.
+- For non-tabular competitions (image/video/audio/text), implement/iterate `custom_main()` in `kernel.py`.
+- If pretrained checkpoints are beneficial, add download + cache logic in `kernel.py` with internet-off fallback.
 
 **Recommended Strategies** (pick based on diagnosis):
 
@@ -345,7 +351,7 @@ uv run pytest -q
 - ❌ NEVER automate rules acceptance or submission bypass
 - ❌ NEVER commit secrets (kaggle.json, API keys, tokens)
 - ❌ NEVER add interactive prompts (must be non-interactive)
-- ❌ NEVER use test.csv for validation (offline eval only)
+- ❌ NEVER use test.csv for local validation split generation
 - ❌ NEVER bypass safety guardrails
 - ✅ DO keep changes incremental (1-2 focused improvements)
 - ✅ DO document what was tried and why
@@ -354,7 +360,7 @@ uv run pytest -q
 
 **Quality Checklist**:
 - [ ] Changes address root cause from diagnostics
-- [ ] Offline score improves (or provides learning for next iteration)
+- [ ] Loop-decision score improves, or offline diagnostics provide actionable learning
 - [ ] Train-val gap is reasonable (not overfitting)
 - [ ] submission.csv format still matches sample_submission.csv
 - [ ] GPU/TPU utilization >80% (GPU) or >70% (TPU MXU)
@@ -369,7 +375,7 @@ uv run pytest -q
 Your improvement will be accepted if:
 
 1. ✅ **Tests pass**: `uv run pytest -q` returns 0 exit code
-2. ✅ **Offline score valid**: metrics.json updated with new score
+2. ✅ **Decision score valid**: metrics.json has loop-decision and supporting offline metrics
 3. ✅ **Submission valid**: submission.csv still matches format
 4. ✅ **GPU/TPU utilized**: Utilization >80% (GPU) or >70% (TPU) logged
 5. ✅ **No errors**: Training completes without exceptions
@@ -383,7 +389,7 @@ If score doesn't improve, document what was tried and why it didn't work (learni
 
 **Strategy**:
 1. **Make one change at a time**: Easier to debug and understand impact
-2. **Trust offline evaluation**: Don't chase public leaderboard
+2. **Optimize loop decision**: prioritize submission score when available; use offline as fallback
 3. **Read diagnostics carefully**: They contain actionable hints
 4. **Check for data leakage**: If score is "too good", investigate
 5. **Don't over-optimize**: Diminishing returns after 3-5 iterations

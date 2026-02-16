@@ -43,7 +43,7 @@ def select_score_source(
     train: pd.DataFrame,
     test: pd.DataFrame,
     target_col: str,
-    id_col: str,
+    id_col: str | None,
 ) -> ScoreSelection:
     labeled = find_labeled_test(
         data_dir=data_dir,
@@ -75,7 +75,7 @@ def find_labeled_test(
     data_dir: Path,
     test: pd.DataFrame,
     target_col: str,
-    id_col: str,
+    id_col: str | None,
 ) -> LabeledTest | None:
     if target_col in test.columns:
         return LabeledTest(frame=test, target=test[target_col])
@@ -85,7 +85,7 @@ def find_labeled_test(
         return None
 
     labels = pd.read_csv(label_path)
-    if target_col in labels.columns and id_col in labels.columns:
+    if id_col and target_col in labels.columns and id_col in labels.columns:
         merged = test.merge(labels[[id_col, target_col]], on=id_col, how="inner")
         if merged.empty:
             return None

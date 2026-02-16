@@ -66,6 +66,34 @@ def test_leaderboard_top1_extracts_zip(monkeypatch, tmp_path) -> None:
     assert result["score"] == 0.987
 
 
+def test_leaderboard_rank_for_score_maximize(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        csv_path = tmp_path / "leaderboard" / "leaderboard.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("Rank,Score\n1,0.99\n2,0.97\n3,0.95\n4,0.94\n", encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+    result = kaggle_api.leaderboard_rank_for_score("demo", tmp_path, score=0.95, direction="maximize")
+    assert result["rank"] == 3
+    assert result["total_teams"] == 4
+    assert result["rank_percentile"] == 0.75
+
+
+def test_leaderboard_rank_for_score_minimize(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        csv_path = tmp_path / "leaderboard" / "leaderboard.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("Rank,Score\n1,0.100\n2,0.120\n3,0.125\n4,0.140\n", encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+    result = kaggle_api.leaderboard_rank_for_score("demo", tmp_path, score=0.125, direction="minimize")
+    assert result["rank"] == 3
+    assert result["total_teams"] == 4
+    assert result["rank_percentile"] == 0.75
+
+
 def test_kernel_exists_matches_url_refs(monkeypatch) -> None:
     def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
         return "ref,title\nhttps://www.kaggle.com/code/MoeUuu/sample-kernel,Sample\n"

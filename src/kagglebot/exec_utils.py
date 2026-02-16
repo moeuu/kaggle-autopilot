@@ -4,6 +4,7 @@ import logging
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def run_command(
     timeout: float | None = None,
     dry_run: bool = False,
     stream_output: bool = False,
+    line_callback: Callable[[str], None] | None = None,
 ) -> CommandResult:
     """
     Execute an external command safely (no shell).
@@ -81,6 +83,11 @@ def run_command(
                 if hasattr(sys.stdout, "write"):
                     sys.stdout.write(line)
                     sys.stdout.flush()
+                if line_callback is not None:
+                    try:
+                        line_callback(line)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("line callback failed", exc_info=True)
         returncode = proc.wait(timeout=timeout)
         stdout = "".join(stdout_chunks)
         duration = time.monotonic() - start

@@ -18,6 +18,7 @@ class SubmissionConfig:
     submission_ledger_path: Path
     dry_run: bool = False
     force_submit: bool = False
+    bypass_rate_limit: bool = False
 
 
 @dataclass(frozen=True)
@@ -34,12 +35,18 @@ class SubmissionService:
         self._config = config
 
     def submit(self, *, submission_path: Path, message: str, run_id: str | None) -> SubmissionResult:
-        sample_path = self._resolve_sample_submission()
-        validate_submission(submission_path, sample_path)
-        prepared_path = self._prepare_submission_path(sample_path, submission_path)
+        prepared_path = self.validate_and_prepare_submission(submission_path)
+        return self.submit_prepared(prepared_path=prepared_path, message=message, run_id=run_id)
 
+    def validate_and_prepare_submission(self, submission_path: Path) -> Path:
+        sample_path = self._resolve_sample_submission()
+        validate_submission(str(submission_path), str(sample_path))
+        return self._prepare_submission_path(sample_path, submission_path)
+
+    def submit_prepared(self, *, prepared_path: Path, message: str, run_id: str | None) -> SubmissionResult:
         ledger = SubmissionLedger(self._config.submission_ledger_path)
-        ensure_submission_rate_limit(ledger)
+        if not self._config.bypass_rate_limit:
+            ensure_submission_rate_limit(ledger)
         if not self._config.force_submit:
             ensure_not_duplicate_submission(
                 ledger,
@@ -71,10 +78,25 @@ class SubmissionService:
     def _resolve_sample_submission(self) -> Path:
         sample_path = self._config.sample_submission_path
         if sample_path.exists():
-            return sample_path
-        from kagglebot.solver.io import find_competition_files
+            if self._has_data_rows(sample_path):
+                return sample_path
+        synthesized = self._config.data_dir / ".kagglebot_cache" / "sample_submission_synth.csv"
+        if synthesized.exists() and self._has_data_rows(synthesized):
+            return synthesized
 
-        _, _, sample_path = find_competition_files(self._config.data_dir)
+        from kagglebot.solver.io import ensure_sample_submission, find_competition_files
+
+        discovered: Path | None = None
+        try:
+            _, _, discovered = find_competition_files(self._config.data_dir)
+        except FileNotFoundError:
+            pass
+        ensured = ensure_sample_submission(self._config.data_dir)
+        for candidate in (discovered, ensured, synthesized):
+            if candidate is None:
+                continue
+            if candidate.exists() and self._has_data_rows(candidate):
+                return candidate
         return sample_path
 
     def _prepare_submission_path(self, sample_path: Path, submission_path: Path) -> Path:
@@ -117,3 +139,18 @@ class SubmissionService:
         if counts.get(default, 0) >= counts[best]:
             return default
         return best
+
+    @staticmethod
+    def _has_data_rows(path: Path) -> bool:
+        non_empty = 0
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    non_empty += 1
+                    if non_empty >= 2:
+                        return True
+        except OSError:
+            return True
+        return False

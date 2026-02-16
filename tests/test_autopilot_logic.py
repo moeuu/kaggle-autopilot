@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import io
+import json
+from pathlib import Path
+
 import pytest
 
-from kagglebot.autopilot import _is_top1_tier, _meets_target, _update_best_score
+from kagglebot.autopilot import (
+    _infer_column_mapping,
+    _is_top1_tier,
+    _meets_target,
+    _should_force_major_overhaul_by_rank,
+    _TrainingLiveStdout,
+    _update_best_score,
+    _write_plan,
+)
+from kagglebot.paths import CompetitionPaths
+from kagglebot.types import PlanConfig
 
 
 class TestMeetsTarget:
@@ -198,3 +212,83 @@ class TestTop1Tier:
     def test_top1_maximize(self) -> None:
         assert _is_top1_tier(0.9, 0.8, "maximize") is True
         assert _is_top1_tier(0.7, 0.8, "maximize") is False
+
+
+class TestRankDrivenMajorOverhaul:
+    def test_rank_policy_forces_major_overhaul_when_percentile_is_poor(self) -> None:
+        assert (
+            _should_force_major_overhaul_by_rank(rank=1300, total_teams=2700, max_percentile=0.35, min_teams=200)
+            is True
+        )
+
+    def test_rank_policy_does_not_force_for_good_rank(self) -> None:
+        assert (
+            _should_force_major_overhaul_by_rank(rank=200, total_teams=2700, max_percentile=0.35, min_teams=200)
+            is False
+        )
+
+    def test_rank_policy_does_not_force_for_small_competition(self) -> None:
+        assert (
+            _should_force_major_overhaul_by_rank(rank=50, total_teams=120, max_percentile=0.35, min_teams=200) is False
+        )
+
+
+def test_infer_column_mapping_handles_non_string_group_tokens() -> None:
+    columns_by_file = {"train.csv": ["session_id", "target"]}
+    groups = [["session_id", None, 123], ["target", object()]]
+    mapping = _infer_column_mapping(columns_by_file, groups)
+    assert mapping["session_id"] == "session_id"
+    assert mapping["target"] == "target"
+
+
+def test_training_live_stdout_separates_live_line_and_logs() -> None:
+    buf = io.StringIO()
+    stream = _TrainingLiveStdout(buf)
+
+    stream.render_live("Training: local_gpu 10s")
+    stream.write("[local train] candidate=logreg source=holdout training\n")
+    stream.finish_live("Training: local_gpu 11s")
+
+    rendered = buf.getvalue()
+    assert "\n[local train] candidate=logreg source=holdout training\n\rTraining: local_gpu 10s" in rendered
+    assert rendered.endswith("\rTraining: local_gpu 11s\n")
+
+
+def test_training_live_stdout_keeps_regular_output_without_live_line() -> None:
+    buf = io.StringIO()
+    stream = _TrainingLiveStdout(buf)
+    stream.write("plain log line\n")
+    assert buf.getvalue() == "plain log line\n"
+
+
+def test_write_plan_preserves_extended_strategy_fields(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(
+        json.dumps(
+            {
+                "target_metric": "auc",
+                "target_direction": "maximize",
+                "target_score": 0.9,
+                "pipelines": [{"name": "p1"}],
+                "toggles": {"USE_MODEL": True},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    _write_plan(
+        paths,
+        PlanConfig(
+            target_metric="auc",
+            target_direction="maximize",
+            target_score=0.92,
+            score_source="cv",
+            max_iterations=3,
+        ),
+    )
+    payload = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+    assert payload["target_score"] == 0.92
+    assert payload["pipelines"] == [{"name": "p1"}]
+    assert payload["toggles"] == {"USE_MODEL": True}

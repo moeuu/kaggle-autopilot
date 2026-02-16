@@ -89,20 +89,31 @@ def pick_files(files: list[Path]) -> tuple[Path, Path, Path]:
     return train_path, test_path, sample_path
 
 
-def infer_target(train: pd.DataFrame, test: pd.DataFrame, sample: pd.DataFrame) -> tuple[str, str, list[str]]:
-    id_col = sample.columns[0]
-    sample_targets = list(sample.columns[1:])
-    candidates = [c for c in train.columns if c not in test.columns and c in sample.columns]
-    target_cols = candidates or sample_targets
-    if len(target_cols) != 1:
-        raise ValueError("This solver only supports single-target competitions.")
+def infer_target(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    sample: pd.DataFrame,
+) -> tuple[str | None, str, list[str], list[str]]:
+    sample_cols = list(sample.columns)
+    train_minus_test = [c for c in train.columns if c not in test.columns]
+    target_cols = [c for c in sample_cols if c in train_minus_test and c in train.columns]
+    if not target_cols:
+        target_cols = [c for c in sample_cols if c in train.columns and c not in test.columns]
+    if not target_cols:
+        target_cols = [c for c in sample_cols[1:] if c in train.columns]
+    if not target_cols and train_minus_test:
+        target_cols = train_minus_test
+    if not target_cols:
+        raise ValueError("Unable to infer target columns from train/test/sample files.")
+
+    non_targets = [c for c in sample_cols if c not in target_cols]
+    id_col = next((c for c in non_targets if c in test.columns), None)
+    if id_col is None and non_targets:
+        id_col = non_targets[0]
+
     target_col = target_cols[0]
-    if target_col not in train.columns:
-        raise ValueError(f"Target column '{target_col}' not found in training data.")
-    feature_cols = [c for c in train.columns if c not in target_cols]
-    if id_col in feature_cols:
-        feature_cols.remove(id_col)
-    return id_col, target_col, feature_cols
+    feature_cols = [c for c in train.columns if c not in target_cols and c != id_col]
+    return id_col, target_col, feature_cols, target_cols
 
 
 def infer_task(y: pd.Series) -> str:
@@ -278,15 +289,17 @@ def main() -> None:
     test = read_table(test_path)
     sample = read_table(sample_path)
 
-    id_col, target_col, feature_cols = infer_target(train, test, sample)
+    id_col, target_col, feature_cols, target_cols = infer_target(train, test, sample)
     print(f"id column: {id_col}")
     print(f"target column: {target_col}")
+    if len(target_cols) > 1:
+        print(f"multi-target detected; using primary target for baseline: {target_col} ({target_cols})")
     print(f"feature count: {len(feature_cols)}")
 
     x = train[feature_cols]
     y = train[target_col]
     task = infer_task(y)
-    prediction_kind = "probability" if sample[target_col].dtype.kind in {"f", "c"} else "class"
+    prediction_kind = "probability" if pd.api.types.is_float_dtype(sample[target_col]) else "class"
 
     label_encoder = None
     num_classes = 0
@@ -367,11 +380,16 @@ def main() -> None:
     else:
         preds = predict_sklearn(model, test[feature_cols], task, prediction_kind)
 
-    if label_encoder is not None and prediction_kind == "class":
+    if (
+        label_encoder is not None
+        and prediction_kind == "class"
+        and not pd.api.types.is_numeric_dtype(sample[target_col])
+        and not pd.api.types.is_bool_dtype(sample[target_col])
+    ):
         preds = label_encoder.inverse_transform(np.asarray(preds, dtype=int))
 
     submission = sample.copy()
-    if id_col in test.columns:
+    if id_col and id_col in test.columns and id_col in submission.columns:
         mapping = pd.Series(preds, index=test[id_col])
         submission[target_col] = submission[id_col].map(mapping)
     else:
@@ -404,7 +422,7 @@ class KaggleNotebookRunner:
         run_id = context.run_id
         paths = context.paths
 
-        run_dir = paths.artifacts / run_id
+        run_dir = paths.run_dir(run_id)
         kernel_dir = run_dir / "kernel"
         output_dir = run_dir / "output"
         logs_dir = run_dir / "logs"
@@ -479,7 +497,7 @@ class KaggleNotebookRunner:
 
         submission_path = find_submission_file(output_dir)
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)
-        local_submission = paths.submission_csv
+        local_submission = paths.submissions_dir / f"{run_id}_submission.csv"
         shutil.copy2(submission_path, local_submission)
 
         summary["submission_path"] = str(local_submission)

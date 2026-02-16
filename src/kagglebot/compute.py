@@ -20,7 +20,7 @@ class RunnerSelection:
 
 def compute_to_runner_and_accelerator(compute: Compute) -> RunnerSelection:
     if compute == Compute.local_gpu:
-        return RunnerSelection(runner="local", accelerator="gpu")
+        return RunnerSelection(runner="local_kernel", accelerator="gpu")
     if compute == Compute.kaggle_gpu:
         return RunnerSelection(runner="kaggle_notebook", accelerator="gpu")
     if compute == Compute.kaggle_tpu:

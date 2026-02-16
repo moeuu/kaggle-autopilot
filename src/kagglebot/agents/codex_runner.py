@@ -10,6 +10,9 @@ from pathlib import Path
 
 from kagglebot.exec_utils import run_command
 
+_COMMAND_LOG_FIRST_WIDTH = 100
+_COMMAND_LOG_SECOND_WIDTH = 100
+
 
 @dataclass(frozen=True)
 class CodexResult:
@@ -52,9 +55,7 @@ def run_codex(
     if normalized_effort:
         args += ["-c", f'model_reasoning_effort="{normalized_effort}"']
     supported = _supported_flags()
-    if "-a" in supported:
-        args += ["-a", "never"]
-    elif "--full-auto" in supported:
+    if "--full-auto" in supported:
         args.append("--full-auto")
     if "--sandbox" in supported or "-s" in supported:
         args += ["--sandbox", "workspace-write"]
@@ -153,11 +154,20 @@ def _emit_codex_event(line: str) -> None:
         command = item.get("command", "").strip()
         status = item.get("status", "")
         exit_code = item.get("exit_code")
+        first_line, second_line = _format_command_for_log(command)
         if status == "completed":
             suffix = f" (exit {exit_code})" if exit_code is not None else ""
-            print(f"codex: command completed: {command}{suffix}")
+            if second_line:
+                print(f"codex: command completed: {first_line}")
+                print(f"  {second_line}{suffix}")
+            else:
+                print(f"codex: command completed: {first_line}{suffix}")
         elif status:
-            print(f"codex: command {status}: {command}")
+            if second_line:
+                print(f"codex: command {status}: {first_line}")
+                print(f"  {second_line}")
+            else:
+                print(f"codex: command {status}: {first_line}")
         return
     if item_type == "file_change":
         changes = item.get("changes", [])
@@ -195,3 +205,30 @@ def _supported_flags() -> set[str]:
                 break
             flags.add(token.rstrip(","))
     return flags
+
+
+def _format_command_for_log(command: str) -> tuple[str, str]:
+    normalized = " ".join(command.split())
+    if not normalized:
+        return "", ""
+    first_line, remainder = _split_by_width(normalized, _COMMAND_LOG_FIRST_WIDTH)
+    if not remainder:
+        return first_line, ""
+    second_line, tail = _split_by_width(remainder, _COMMAND_LOG_SECOND_WIDTH)
+    if tail:
+        second_line = second_line.rstrip()
+        if len(second_line) >= _COMMAND_LOG_SECOND_WIDTH:
+            second_line = second_line[: _COMMAND_LOG_SECOND_WIDTH - 3].rstrip()
+        second_line = f"{second_line}..."
+    return first_line, second_line
+
+
+def _split_by_width(text: str, width: int) -> tuple[str, str]:
+    if len(text) <= width:
+        return text, ""
+    split_at = text.rfind(" ", 0, width + 1)
+    if split_at <= 0:
+        split_at = width
+    head = text[:split_at].strip()
+    tail = text[split_at:].strip()
+    return head, tail

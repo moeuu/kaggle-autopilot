@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+pip-wheel-metadata/
 
 # Virtual environments
 .venv/
@@ -26,16 +27,23 @@ venv/
 ENV/
 env/
 
+# Local env files
+.env
+.env.*
+*.env
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.ipynb_checkpoints/
 
 # Kaggle data and artifacts (NEVER commit these)
 data/
 artifacts/
+runs/
 data/**/*.csv
 artifacts/**/*.csv
 /submission.csv
@@ -43,18 +51,24 @@ artifacts/**/*.csv
 
 # Knowledge base
 knowledge/kb.sqlite
+knowledge/*.sqlite
+knowledge/*.sqlite-*
 
 # Kaggle API credentials (NEVER commit)
 .kaggle/
+kaggle.json
 
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 
 # Type checking
 .pytype/
 .mypy_cache/
+.ruff_cache/
+.cache/
 .dmypy.json
 dmypy.json
 

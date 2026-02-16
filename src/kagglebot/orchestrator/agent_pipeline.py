@@ -12,8 +12,12 @@ from kagglebot.knowledge import (
     derive_problem_types,
     format_error_fix_insights,
     format_problem_type_insights,
+    format_research_artifacts,
+    record_research_artifacts,
     resolve_error_fix_insights,
     resolve_problem_type_insights,
+    resolve_research_artifacts,
+    resolve_research_paths_for_slug,
 )
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -68,24 +72,33 @@ class CodexImplementationStage:
         _run_codex_kernel_implementation(self.paths, self.config, self.output_dir, instructions_path)
 
 
+@dataclass(frozen=True)
+class AgentPipeline:
+    paths: CompetitionPaths
+    config: AgentPipelineConfig
+
+    def run(self) -> None:
+        self.paths.context_agent_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_context_materials(self.paths)
+
+        brief_dir = self.paths.context_agent_dir / "brief"
+        strategy_dir = self.paths.context_agent_dir / "strategy"
+        implement_dir = self.paths.context_agent_dir / "implement"
+        brief_dir.mkdir(parents=True, exist_ok=True)
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        implement_dir.mkdir(parents=True, exist_ok=True)
+
+        brief_stage = CodexBriefStage(paths=self.paths, config=self.config, output_dir=brief_dir)
+        strategy_stage = StrategyStage(paths=self.paths, config=self.config, output_dir=strategy_dir)
+        implement_stage = CodexImplementationStage(paths=self.paths, config=self.config, output_dir=implement_dir)
+
+        brief_path = brief_stage.run()
+        instructions_path = strategy_stage.run(brief_path=brief_path)
+        implement_stage.run(instructions_path=instructions_path)
+
+
 def run_agent_pipeline(*, paths: CompetitionPaths, config: AgentPipelineConfig) -> None:
-    paths.context_agent_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_context_materials(paths)
-
-    brief_dir = paths.context_agent_dir / "brief"
-    strategy_dir = paths.context_agent_dir / "strategy"
-    implement_dir = paths.context_agent_dir / "implement"
-    brief_dir.mkdir(parents=True, exist_ok=True)
-    strategy_dir.mkdir(parents=True, exist_ok=True)
-    implement_dir.mkdir(parents=True, exist_ok=True)
-
-    brief_stage = CodexBriefStage(paths=paths, config=config, output_dir=brief_dir)
-    strategy_stage = StrategyStage(paths=paths, config=config, output_dir=strategy_dir)
-    implement_stage = CodexImplementationStage(paths=paths, config=config, output_dir=implement_dir)
-
-    brief_path = brief_stage.run()
-    instructions_path = strategy_stage.run(brief_path=brief_path)
-    implement_stage.run(instructions_path=instructions_path)
+    AgentPipeline(paths=paths, config=config).run()
 
 
 def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, output_dir: Path) -> Path:
@@ -103,6 +116,12 @@ def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, outpu
             "submission_format_path": str(paths.submission_format_md_path),
             "sample_submission_head_path": str(paths.sample_submission_head_path),
             "sample_submission_path": str(paths.sample_submission_path),
+            "code_path": str(paths.code_md_path),
+            "code_index_path": str(paths.code_notebooks_index_path),
+            "models_path": str(paths.models_md_path),
+            "discussion_path": str(paths.discussion_md_path),
+            "discussion_threads_dir": str(paths.discussion_threads_dir),
+            "discussion_index_path": str(paths.discussion_threads_index_path),
         },
     )
     prompt_text = _append_problem_type_knowledge(
@@ -200,6 +219,10 @@ def _run_strategy_plan(
     attempt = 0
     plan_payload: dict[str, object] | None = None
     plan_issue: str | None = None
+    research_sources_text: str = ""
+    research_sources_issue: str | None = None
+    research_summary_text: str = ""
+    research_summary_issue: str | None = None
     while True:
         _assert_no_secrets(prompt_text)
         prompt_path = output_dir / "prompt.md"
@@ -207,8 +230,9 @@ def _run_strategy_plan(
         _print_block("gpt strategy prompt (sent)", prompt_text)
 
         result = run_strategy(prompt_path, output_dir, dry_run=config.dry_run)
+        response_text = _select_strategy_response_text(result)
         if result.returncode != 0:
-            if "Prompt is too long" in result.stdout and not compact_mode:
+            if "Prompt is too long" in response_text and not compact_mode:
                 compact_mode = True
                 print("[yellow]note[/yellow]: GPT prompt too long; retrying with compact context.")
                 prompt_text = _build_strategy_prompt(
@@ -220,10 +244,16 @@ def _run_strategy_plan(
                 )
                 prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
                 continue
-            if _is_strategy_rate_limited(result.stdout, result.stderr):
-                error_text = (result.stderr or result.stdout).strip()
+            if _is_strategy_rate_limited(response_text, result.stderr):
+                error_text = (result.stderr or response_text).strip()
                 print("[yellow]note[/yellow]: GPT rate-limited; using fallback strategy.")
-                strategy_text, instructions_text, plan_payload = _build_fallback_strategy(
+                (
+                    strategy_text,
+                    instructions_text,
+                    plan_payload,
+                    research_sources_text,
+                    research_summary_text,
+                ) = _build_fallback_strategy(
                     paths=paths,
                     config=config,
                     brief_content=brief_content,
@@ -232,20 +262,33 @@ def _run_strategy_plan(
                 transcript = _format_fallback_transcript(error_text)
                 return _write_strategy_outputs(
                     paths=paths,
+                    knowledge_paths=KnowledgePaths(workdir=config.repo_root),
                     strategy_text=strategy_text,
                     instructions_text=instructions_text,
                     transcript_text=transcript,
                     plan_payload=plan_payload,
+                    research_sources_text=research_sources_text,
+                    research_summary_text=research_summary_text,
                 )
-            raise KaggleBotError(f"GPT strategy failed: {result.stderr or result.stdout}")
+            raise KaggleBotError(f"GPT strategy failed: {result.stderr or response_text}")
 
-        strategy_text, instructions_text = _split_strategy_output(result.stdout)
-        plan_payload, plan_issue = _extract_plan_json(result.stdout)
+        strategy_text, instructions_text = _split_strategy_output(response_text)
+        instructions_text = _ensure_kernel_instruction_reference(
+            instructions_text=instructions_text,
+            slug=config.slug,
+        )
+        research_sources_text, research_sources_issue = _extract_research_sources_jsonl(response_text)
+        research_summary_text, research_summary_issue = _extract_research_summary(response_text)
+        plan_payload, plan_issue = _extract_plan_json(response_text)
         issues = _validate_strategy_output(
             strategy_text,
             instructions_text,
             plan_payload,
             plan_issue,
+            research_sources_text,
+            research_sources_issue,
+            research_summary_text,
+            research_summary_issue,
             require_sources=config.internet != "off",
         )
         if issues:
@@ -253,6 +296,8 @@ def _run_strategy_plan(
                 issue_text = "\n".join(f"- {issue}" for issue in issues)
                 raise KaggleBotError(f"GPT strategy failed quality gate:\n{issue_text}")
             attempt += 1
+            for issue in issues:
+                print(f"[yellow]quality gate[/yellow]: {issue}")
             print("[yellow]note[/yellow]: GPT output failed quality gate; retrying with stricter instructions.")
             prompt_text = _apply_quality_gate(
                 template=template,
@@ -279,11 +324,34 @@ def _run_strategy_plan(
 
     return _write_strategy_outputs(
         paths=paths,
+        knowledge_paths=KnowledgePaths(workdir=config.repo_root),
         strategy_text=strategy_text,
         instructions_text=instructions_text,
-        transcript_text=result.stdout,
+        transcript_text=response_text,
         plan_payload=plan_payload,
+        research_sources_text=research_sources_text,
+        research_summary_text=research_summary_text,
     )
+
+
+def _select_strategy_response_text(result: object) -> str:
+    primary = str(getattr(result, "stdout", "") or "")
+    if _contains_required_strategy_sections(primary):
+        return primary
+    transcript_path = getattr(result, "transcript_path", None)
+    if isinstance(transcript_path, Path) and transcript_path.exists():
+        transcript = _read_text(transcript_path)
+        if _contains_required_strategy_sections(transcript):
+            print("[yellow]note[/yellow]: using strategy full transcript for quality parsing.")
+            return transcript
+    return primary
+
+
+def _contains_required_strategy_sections(text: str) -> bool:
+    if not text:
+        return False
+    required_markers = ("===STRATEGY===", "===PLAN_JSON===", "===CODEX_INSTRUCTIONS===")
+    return all(marker in text for marker in required_markers)
 
 
 def _run_codex_kernel_implementation(
@@ -301,6 +369,9 @@ def _run_codex_kernel_implementation(
 
     template = _load_template("codex_kernel_impl.md")
     strategy_path = paths.context_agent_dir / "strategy_plan.md"
+    knowledge_paths = KnowledgePaths(workdir=config.repo_root)
+    _, knowledge_summary_path = resolve_research_paths_for_slug(knowledge_paths=knowledge_paths, slug=paths.slug)
+    research_summary_path = knowledge_summary_path or (paths.context_dir / "research_summary.md")
     blocked_modules = _load_blocked_modules(paths.context_dir)
     blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = _render_template(
@@ -311,6 +382,8 @@ def _run_codex_kernel_implementation(
             "kernel_path": str(kernel_path),
             "instructions": _read_text(instructions_path),
             "strategy": _read_text(strategy_path),
+            "plan_path": str(paths.plan_path),
+            "research_summary_path": str(research_summary_path),
             "blocked_modules": blocked_text,
         },
     )
@@ -367,16 +440,50 @@ def _ensure_context_materials(paths: CompetitionPaths) -> None:
         paths.submission_format_md_path.write_text(
             f"Submission format not available. See {rules_url}\n", encoding="utf-8"
         )
+    competition_base_url = f"https://www.kaggle.com/competitions/{paths.slug}"
+    if not paths.code_md_path.exists():
+        paths.code_md_path.write_text(
+            f"Code tab snapshot not available. See {competition_base_url}/code\n",
+            encoding="utf-8",
+        )
+    if not paths.models_md_path.exists():
+        paths.models_md_path.write_text(
+            f"Models tab snapshot not available. See {competition_base_url}/models\n",
+            encoding="utf-8",
+        )
+    if not paths.discussion_md_path.exists():
+        paths.discussion_md_path.write_text(
+            f"Discussion tab snapshot not available. See {competition_base_url}/discussions\n",
+            encoding="utf-8",
+        )
+    paths.code_notebooks_dir.mkdir(parents=True, exist_ok=True)
+    if not paths.code_notebooks_index_path.exists():
+        paths.code_notebooks_index_path.write_text(
+            json.dumps({"source_url": f"{competition_base_url}/code", "notebook_count": 0, "notebooks": []}, indent=2),
+            encoding="utf-8",
+        )
+    paths.discussion_threads_dir.mkdir(parents=True, exist_ok=True)
+    if not paths.discussion_threads_index_path.exists():
+        paths.discussion_threads_index_path.write_text(
+            json.dumps(
+                {"source_url": f"{competition_base_url}/discussions", "thread_count": 0, "threads": []},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
-    if not paths.sample_submission_path.exists():
-        from kagglebot.solver.io import find_competition_files
+    sample_needs_refresh = (not paths.sample_submission_path.exists()) or (
+        not _has_data_rows(paths.sample_submission_path)
+    )
+    if sample_needs_refresh:
+        from kagglebot.solver.io import ensure_sample_submission
 
-        try:
-            _, _, sample_path = find_competition_files(paths.data_dir)
-            paths.sample_submission_path.write_text(sample_path.read_text(encoding="utf-8"), encoding="utf-8")
-        except FileNotFoundError:
+        resolved = ensure_sample_submission(paths.data_dir)
+        if resolved is not None and resolved.exists() and _has_data_rows(resolved):
+            paths.sample_submission_path.write_text(resolved.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
             paths.sample_submission_path.write_text("id,target\n", encoding="utf-8")
-    if not paths.sample_submission_head_path.exists():
+    if sample_needs_refresh or (not paths.sample_submission_head_path.exists()):
         head = _read_sample_submission_head(paths, max_lines=5)
         if head:
             paths.sample_submission_head_path.write_text(head + "\n", encoding="utf-8")
@@ -400,6 +507,21 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
+def _has_data_rows(path: Path) -> bool:
+    non_empty = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                non_empty += 1
+                if non_empty >= 2:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _load_blocked_modules(context_dir: Path) -> list[str]:
     path = context_dir / "blocked_modules.json"
     if not path.exists():
@@ -414,25 +536,8 @@ def _load_blocked_modules(context_dir: Path) -> list[str]:
 
 
 def _split_strategy_output(text: str) -> tuple[str, str]:
-    strategy_marker = "===STRATEGY==="
-    instructions_marker = "===CODEX_INSTRUCTIONS==="
-    strategy_lines: list[str] = []
-    instructions_lines: list[str] = []
-    current: str | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == strategy_marker:
-            current = "strategy"
-            continue
-        if stripped == instructions_marker:
-            current = "instructions"
-            continue
-        if current == "strategy":
-            strategy_lines.append(line)
-        elif current == "instructions":
-            instructions_lines.append(line)
-    strategy_text = "\n".join(strategy_lines).strip()
-    instructions_text = "\n".join(instructions_lines).strip()
+    strategy_text, _ = _extract_marked_section(text, "===STRATEGY===")
+    instructions_text, _ = _extract_marked_section(text, "===CODEX_INSTRUCTIONS===")
     if not strategy_text:
         strategy_text = text.strip()
     if not instructions_text:
@@ -440,14 +545,20 @@ def _split_strategy_output(text: str) -> tuple[str, str]:
     return strategy_text, instructions_text
 
 
-def _extract_plan_json(text: str) -> tuple[dict[str, object] | None, str | None]:
-    marker = "===PLAN_JSON==="
+def _ensure_kernel_instruction_reference(*, instructions_text: str, slug: str) -> str:
+    if "kernel.py" in instructions_text:
+        return instructions_text
+    injected = f"Primary entrypoint: `artifacts/{slug}/kernel/kernel.py`; update `kernel.py` directly.\n\n"
+    print("[yellow]note[/yellow]: Injected missing kernel.py reference into strategy instructions.")
+    return injected + instructions_text
+
+
+def _extract_marked_section(text: str, marker: str) -> tuple[str, str | None]:
     if marker not in text:
-        return None, "PLAN_JSON section missing."
-    lines = text.splitlines()
+        return "", f"{marker} section missing."
     capture: list[str] = []
     in_block = False
-    for line in lines:
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped == marker:
             in_block = True
@@ -458,17 +569,83 @@ def _extract_plan_json(text: str) -> tuple[dict[str, object] | None, str | None]
             capture.append(line)
     raw = "\n".join(capture).strip()
     if not raw:
-        return None, "PLAN_JSON section is empty."
+        return "", f"{marker} section is empty."
+    return raw, None
+
+
+def _extract_research_sources_jsonl(text: str) -> tuple[str, str | None]:
+    return _extract_marked_section(text, "===RESEARCH_SOURCES_JSONL===")
+
+
+def _extract_research_summary(text: str) -> tuple[str, str | None]:
+    return _extract_marked_section(text, "===RESEARCH_SUMMARY_MD===")
+
+
+def _extract_plan_json(text: str) -> tuple[dict[str, object] | None, str | None]:
+    raw, issue = _extract_marked_section(text, "===PLAN_JSON===")
+    if issue:
+        return None, issue.replace("===PLAN_JSON===", "PLAN_JSON")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         return None, f"PLAN_JSON is not valid JSON: {exc}"
     if not isinstance(payload, dict):
         return None, "PLAN_JSON must be a JSON object."
-    return payload, None
+    return _normalize_plan_payload(payload), None
+
+
+_STOP_POLICY_ABORT_ALIASES = (
+    "repeated_error_fingerprint_abort",
+    "error_fingerprint_policy",
+    "abort_on_repeated_error_fingerprint",
+)
+
+
+def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
+    normalized = dict(payload)
+    pipelines_raw = normalized.get("pipelines")
+    if isinstance(pipelines_raw, list):
+        pipelines: list[object] = []
+        for index, item in enumerate(pipelines_raw):
+            if not isinstance(item, dict):
+                pipelines.append(item)
+                continue
+            pipeline = dict(item)
+            name = pipeline.get("name")
+            if not isinstance(name, str) or not name.strip():
+                model_hint = ""
+                models = pipeline.get("models")
+                if isinstance(models, list) and models and isinstance(models[0], str) and models[0].strip():
+                    model_hint = re.sub(r"[^a-zA-Z0-9]+", "_", models[0]).strip("_").lower()
+                pipeline["name"] = model_hint or f"pipeline_{index + 1}"
+            pipelines.append(pipeline)
+        normalized["pipelines"] = pipelines
+
+    stop_policy_raw = normalized.get("stop_policy")
+    if not isinstance(stop_policy_raw, dict):
+        return normalized
+
+    stop_policy = dict(stop_policy_raw)
+
+    if "max_iterations" not in stop_policy:
+        top_level_max_iterations = normalized.get("max_iterations")
+        if isinstance(top_level_max_iterations, int):
+            stop_policy["max_iterations"] = top_level_max_iterations
+
+    if "error_fingerprint_abort" not in stop_policy:
+        alias_value: object | None = None
+        for alias in _STOP_POLICY_ABORT_ALIASES:
+            if alias in stop_policy:
+                alias_value = stop_policy[alias]
+                break
+        stop_policy["error_fingerprint_abort"] = alias_value if alias_value is not None else True
+
+    normalized["stop_policy"] = stop_policy
+    return normalized
 
 
 def _validate_plan_payload(payload: dict[str, object]) -> list[str]:
+    payload = _normalize_plan_payload(payload)
     issues: list[str] = []
     required = [
         "target_metric",
@@ -481,20 +658,78 @@ def _validate_plan_payload(payload: dict[str, object]) -> list[str]:
         "max_iterations",
         "patience",
         "min_improvement",
+        "pipelines",
+        "toggles",
+        "evaluation_protocol",
+        "stop_policy",
     ]
     for key in required:
         if key not in payload:
             issues.append(f"PLAN_JSON missing key: {key}.")
     if payload.get("target_direction") not in ("minimize", "maximize"):
         issues.append("PLAN_JSON target_direction must be 'minimize' or 'maximize'.")
-    if payload.get("score_source") not in ("holdout", "cv"):
-        issues.append("PLAN_JSON score_source must be 'holdout' or 'cv'.")
+    if payload.get("score_source") not in ("holdout", "cv", "test", "auto"):
+        issues.append("PLAN_JSON score_source must be one of: holdout, cv, test, auto.")
     if not isinstance(payload.get("target_score"), (int, float)):
         issues.append("PLAN_JSON target_score must be a number.")
+    pipelines = payload.get("pipelines")
+    if not isinstance(pipelines, list):
+        issues.append("PLAN_JSON pipelines must be an array.")
+    else:
+        if not 2 <= len(pipelines) <= 4:
+            issues.append("PLAN_JSON pipelines must contain 2-4 entries.")
+        for index, item in enumerate(pipelines):
+            if not isinstance(item, dict):
+                issues.append(f"PLAN_JSON pipelines[{index}] must be an object.")
+                continue
+            for key in (
+                "name",
+                "features",
+                "models",
+                "key_hyperparameters",
+                "runtime_memory",
+                "failure_modes",
+                "fallbacks",
+            ):
+                if key not in item:
+                    issues.append(f"PLAN_JSON pipelines[{index}] missing key: {key}.")
+    toggles = payload.get("toggles")
+    if not isinstance(toggles, dict):
+        issues.append("PLAN_JSON toggles must be an object.")
+    elif not toggles:
+        issues.append("PLAN_JSON toggles must not be empty.")
+    evaluation_protocol = payload.get("evaluation_protocol")
+    if not isinstance(evaluation_protocol, dict):
+        issues.append("PLAN_JSON evaluation_protocol must be an object.")
+    else:
+        for key in ("cv_type", "n_folds", "seeds", "primary_metric"):
+            if key not in evaluation_protocol:
+                issues.append(f"PLAN_JSON evaluation_protocol missing key: {key}.")
+        seeds = evaluation_protocol.get("seeds")
+        if not isinstance(seeds, list) or len(seeds) < 3:
+            issues.append("PLAN_JSON evaluation_protocol.seeds must be a list with >=3 seeds.")
+        n_folds = evaluation_protocol.get("n_folds")
+        if not isinstance(n_folds, int) or n_folds < 2:
+            issues.append("PLAN_JSON evaluation_protocol.n_folds must be an integer >= 2.")
+        cv_type = evaluation_protocol.get("cv_type")
+        if not isinstance(cv_type, str) or not cv_type.strip():
+            issues.append("PLAN_JSON evaluation_protocol.cv_type must be a non-empty string.")
+        primary_metric = evaluation_protocol.get("primary_metric")
+        if not isinstance(primary_metric, str) or not primary_metric.strip():
+            issues.append("PLAN_JSON evaluation_protocol.primary_metric must be a non-empty string.")
+    stop_policy = payload.get("stop_policy")
+    if not isinstance(stop_policy, dict):
+        issues.append("PLAN_JSON stop_policy must be an object.")
+    else:
+        if "max_iterations" not in stop_policy:
+            issues.append("PLAN_JSON stop_policy missing key: max_iterations.")
+        if "error_fingerprint_abort" not in stop_policy:
+            issues.append("PLAN_JSON stop_policy missing key: error_fingerprint_abort.")
     return issues
 
 
 def _write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> None:
+    payload = _apply_plan_guardrails(paths, payload)
     existing: dict[str, object] = {}
     if paths.plan_path.exists():
         try:
@@ -502,26 +737,186 @@ def _write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> 
         except json.JSONDecodeError:
             existing = {}
     merged = {**existing, **payload}
-    plan = PlanConfig.from_dict(merged)
-    paths.plan_path.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+    defaults = PlanConfig.from_dict(merged).to_dict()
+    persisted = {**merged, **defaults}
+    paths.plan_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+
+
+def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
+    guarded: dict[str, object] = dict(payload)
+
+    raw_toggles = guarded.get("toggles")
+    toggles: dict[str, object] | None = dict(raw_toggles) if isinstance(raw_toggles, dict) else None
+    if toggles is not None:
+        guarded["toggles"] = toggles
+
+    raw_eval_protocol = guarded.get("evaluation_protocol")
+    evaluation_protocol: dict[str, object] | None = (
+        dict(raw_eval_protocol) if isinstance(raw_eval_protocol, dict) else None
+    )
+    if evaluation_protocol is not None:
+        guarded["evaluation_protocol"] = evaluation_protocol
+
+    profile = _load_dataset_profile_payload(paths)
+    task = str(profile.get("task") or "").strip().lower()
+    modality = str(profile.get("modality") or "").strip().lower()
+    top_class_ratio = _extract_top_class_ratio(profile)
+    severe_imbalance = bool(task == "classification" and top_class_ratio is not None and top_class_ratio >= 0.98)
+
+    if severe_imbalance:
+        score_source = str(guarded.get("score_source") or "").strip().lower()
+        if score_source != "cv":
+            guarded["score_source"] = "cv"
+            print("[yellow]plan guardrail[/yellow]: detected severe class imbalance; forcing score_source=cv.")
+
+        if evaluation_protocol is not None:
+            seeds = evaluation_protocol.get("seeds")
+            normalized_seeds = [seed for seed in seeds if isinstance(seed, int)] if isinstance(seeds, list) else []
+            if len(normalized_seeds) < 3:
+                evaluation_protocol["seeds"] = [42, 2024, 777]
+                guarded["eval_seeds"] = [42, 2024, 777]
+                print(
+                    "[yellow]plan guardrail[/yellow]: "
+                    "detected severe class imbalance; forcing evaluation seeds=[42, 2024, 777]."
+                )
+
+        if isinstance(guarded.get("cv_folds"), int):
+            cv_folds = int(guarded["cv_folds"])
+            adjusted_folds = _adjust_cv_folds_for_imbalance(profile=profile, cv_folds=cv_folds)
+            if adjusted_folds < cv_folds:
+                guarded["cv_folds"] = adjusted_folds
+                if evaluation_protocol is not None:
+                    evaluation_protocol["n_folds"] = adjusted_folds
+                print(
+                    "[yellow]plan guardrail[/yellow]: "
+                    f"detected severe class imbalance; reducing cv_folds from {cv_folds} to {adjusted_folds}."
+                )
+
+        if toggles is not None:
+            classifier_keys = [
+                key for key in toggles if "CLASSIFIER" in key.upper() and key.upper() != "ALLOW_PRETRAINED_WEIGHTS"
+            ]
+            if classifier_keys and not any(bool(toggles.get(key)) for key in classifier_keys):
+                toggles[classifier_keys[0]] = True
+                print(
+                    f"[yellow]plan guardrail[/yellow]: detected severe class imbalance; enabling {classifier_keys[0]}."
+                )
+
+    if toggles is not None and modality in {"image", "video", "audio", "text"}:
+        allow_pretrained = toggles.get("ALLOW_PRETRAINED_WEIGHTS")
+        if isinstance(allow_pretrained, bool) and not allow_pretrained and not _rules_disallow_external_data(paths):
+            toggles["ALLOW_PRETRAINED_WEIGHTS"] = True
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                "modality suggests transfer learning and rules do not ban external data; "
+                "enabling ALLOW_PRETRAINED_WEIGHTS."
+            )
+
+    return guarded
+
+
+def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:
+    raw = _read_text(paths.dataset_profile_path).strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _extract_top_class_ratio(profile: dict[str, object]) -> float | None:
+    target_stats = profile.get("target_stats")
+    if not isinstance(target_stats, dict):
+        return None
+    value = target_stats.get("top_class_ratio")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _adjust_cv_folds_for_imbalance(*, profile: dict[str, object], cv_folds: int) -> int:
+    if cv_folds <= 2:
+        return cv_folds
+    train_rows = profile.get("train_rows")
+    top_class_ratio = _extract_top_class_ratio(profile)
+    if not isinstance(train_rows, int) or train_rows <= 0 or top_class_ratio is None:
+        return cv_folds
+    minority_count = int(round(float(train_rows) * max(0.0, 1.0 - top_class_ratio)))
+    if minority_count <= 0:
+        return cv_folds
+    if minority_count < cv_folds * 2:
+        if minority_count <= 3:
+            return 2
+        suggested = max(2, min(cv_folds, minority_count // 2))
+        return suggested
+    return cv_folds
+
+
+def _rules_disallow_external_data(paths: CompetitionPaths) -> bool:
+    context = "\n".join(
+        [
+            _read_text(paths.rules_md_path),
+            _read_text(paths.rules_html_path),
+            _read_text(paths.overview_md_path),
+        ]
+    ).lower()
+    if not context.strip():
+        return False
+    allow_patterns = (
+        r"external data[^.\n]{0,80}allow",
+        r"outside data[^.\n]{0,80}allow",
+    )
+    if any(re.search(pattern, context) for pattern in allow_patterns):
+        return False
+    deny_patterns = (
+        r"external data[^.\n]{0,80}prohibit",
+        r"outside data[^.\n]{0,80}prohibit",
+        r"\bno external data\b",
+        r"external data[^.\n]{0,80}forbidden",
+    )
+    return any(re.search(pattern, context) for pattern in deny_patterns)
 
 
 def _write_strategy_outputs(
     *,
     paths: CompetitionPaths,
+    knowledge_paths: KnowledgePaths,
     strategy_text: str,
     instructions_text: str,
     transcript_text: str,
     plan_payload: dict[str, object] | None,
+    research_sources_text: str,
+    research_summary_text: str,
 ) -> Path:
     if plan_payload is not None:
         _write_plan_payload(paths, plan_payload)
+
+    research_sources_path = paths.context_dir / "research_sources.jsonl"
+    research_summary_path = paths.context_dir / "research_summary.md"
+    if research_sources_text.strip():
+        research_sources_path.write_text(research_sources_text.strip() + "\n", encoding="utf-8")
+    if research_summary_text.strip():
+        research_summary_path.write_text(research_summary_text.strip() + "\n", encoding="utf-8")
+    if research_sources_text.strip() and research_summary_text.strip():
+        persisted = _persist_research_to_knowledge(
+            paths=paths,
+            knowledge_paths=knowledge_paths,
+            research_sources_text=research_sources_text,
+            research_summary_text=research_summary_text,
+        )
+        info_path = paths.context_dir / "research_storage.json"
+        info_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
 
     transcript_path = paths.context_agent_dir / "strategy_transcript.txt"
     transcript_path.write_text(transcript_text, encoding="utf-8")
 
     _print_block("gpt strategy (human-readable)", strategy_text)
     _print_block("gpt instructions for codex", instructions_text)
+    _print_block("research summary", research_summary_text)
     strategy_path = paths.context_agent_dir / "strategy_plan.md"
     instructions_path = paths.context_agent_dir / "codex_instructions.md"
     strategy_path.write_text(strategy_text + "\n", encoding="utf-8")
@@ -529,11 +924,48 @@ def _write_strategy_outputs(
     return instructions_path
 
 
+def _persist_research_to_knowledge(
+    *,
+    paths: CompetitionPaths,
+    knowledge_paths: KnowledgePaths,
+    research_sources_text: str,
+    research_summary_text: str,
+) -> dict[str, object]:
+    profile: dict[str, object] = {}
+    profile_text = _read_text(paths.dataset_profile_path)
+    if profile_text:
+        try:
+            parsed = json.loads(profile_text)
+            if isinstance(parsed, dict):
+                profile = parsed
+        except json.JSONDecodeError:
+            profile = {}
+    problem_types = derive_problem_types(profile)
+    persisted = record_research_artifacts(
+        knowledge_paths=knowledge_paths,
+        slug=paths.slug,
+        problem_types=problem_types,
+        research_sources_jsonl=research_sources_text,
+        research_summary_md=research_summary_text,
+    )
+    return {
+        "slug": paths.slug,
+        "problem_types": problem_types,
+        "primary_problem_type": persisted.get("primary_problem_type"),
+        "knowledge_sources_path": persisted.get("sources_path"),
+        "knowledge_summary_path": persisted.get("summary_path"),
+        "artifacts_sources_path": str(paths.context_dir / "research_sources.jsonl"),
+        "artifacts_summary_path": str(paths.context_dir / "research_summary.md"),
+    }
+
+
 _STRATEGY_PROMPT_MAX_CHARS = 12000
 _LOG_MAX_CHARS = 500
 _MIN_STRATEGY_CHARS = 1200
 _MIN_INSTRUCTIONS_CHARS = 200
 _MIN_SOURCES = 3
+_MIN_RESEARCH_SUMMARY_CHARS = 300
+_MIN_RESEARCH_ITEMS = 3
 _QUALITY_RETRY_LIMIT = 1
 _MAX_GUARD_FILE_BYTES = 2_000_000
 _PROTECTED_PATHS = (
@@ -546,6 +978,7 @@ _PROTECTED_PATHS = (
     "AGENTS.md",
     "STRATEGY.md",
     "SECURITY.md",
+    "knowledge/kb.sqlite",
 )
 _STRATEGY_RATE_LIMIT_MARKERS = (
     "you've hit your limit",
@@ -567,14 +1000,21 @@ def _build_strategy_prompt(
     compact: bool,
 ) -> str:
     if compact:
-        dataset_profile = _read_text(paths.dataset_profile_path)
-        submission_format = _read_text(paths.submission_format_md_path)
+        dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 2000)
+        submission_format = _truncate(_read_text(paths.submission_format_md_path), 2000)
         sample_submission_head = _truncate(_read_sample_submission_head(paths), 800)
+        code_snapshot = _truncate(_read_text(paths.code_md_path), 1200)
+        models_snapshot = _truncate(_read_text(paths.models_md_path), 1200)
+        discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 1200)
         brief_content = _truncate(brief_content, 2000)
     else:
-        dataset_profile = _read_text(paths.dataset_profile_path)
-        submission_format = _read_text(paths.submission_format_md_path)
-        sample_submission_head = _read_sample_submission_head(paths)
+        dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 6000)
+        submission_format = _truncate(_read_text(paths.submission_format_md_path), 4000)
+        sample_submission_head = _truncate(_read_sample_submission_head(paths), 1200)
+        code_snapshot = _truncate(_read_text(paths.code_md_path), 3500)
+        models_snapshot = _truncate(_read_text(paths.models_md_path), 3500)
+        discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 3500)
+        brief_content = _truncate(brief_content, 5000)
 
     prompt = _render_template(
         template,
@@ -588,6 +1028,9 @@ def _build_strategy_prompt(
             "dataset_profile": dataset_profile,
             "submission_format": submission_format,
             "sample_submission_head": sample_submission_head,
+            "code_snapshot": code_snapshot,
+            "models_snapshot": models_snapshot,
+            "discussion_snapshot": discussion_snapshot,
         },
     )
     if compact:
@@ -646,10 +1089,17 @@ def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Pat
             problem_types,
             limit=limit,
         )
+        research_rows = resolve_research_artifacts(
+            knowledge_paths=knowledge_paths,
+            problem_types=problem_types,
+            limit=limit,
+        )
         sections = [
             format_problem_type_insights(insights, limit=limit),
             "",
             format_error_fix_insights(error_insights, limit=limit),
+            "",
+            format_research_artifacts(research_rows, limit=limit),
         ]
         return "\n".join(section for section in sections if section is not None)
     except Exception:  # noqa: BLE001
@@ -677,6 +1127,10 @@ def _validate_strategy_output(
     instructions_text: str,
     plan_payload: dict[str, object] | None,
     plan_issue: str | None,
+    research_sources_text: str,
+    research_sources_issue: str | None,
+    research_summary_text: str,
+    research_summary_issue: str | None,
     *,
     require_sources: bool,
 ) -> list[str]:
@@ -708,11 +1162,59 @@ def _validate_strategy_output(
         source_count = _count_source_items(strategy_text)
         if source_count < _MIN_SOURCES:
             issues.append(f"Sources section must include at least {_MIN_SOURCES} items.")
+    if research_sources_issue:
+        issues.append(research_sources_issue)
+    elif research_sources_text.strip():
+        issues.extend(_validate_research_sources_jsonl(research_sources_text, min_items=_MIN_RESEARCH_ITEMS))
+    else:
+        issues.append("RESEARCH_SOURCES_JSONL section is required.")
+    if research_summary_issue:
+        issues.append(research_summary_issue)
+    elif len(research_summary_text.strip()) < _MIN_RESEARCH_SUMMARY_CHARS:
+        issues.append(f"RESEARCH_SUMMARY_MD is too short (<{_MIN_RESEARCH_SUMMARY_CHARS} chars).")
     if plan_payload is None:
         issues.append(plan_issue or "PLAN_JSON section missing or invalid.")
     else:
         plan_errors = _validate_plan_payload(plan_payload)
         issues.extend(plan_errors)
+    return issues
+
+
+def _validate_research_sources_jsonl(raw: str, *, min_items: int) -> list[str]:
+    issues: list[str] = []
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(lines) < min_items:
+        issues.append(f"RESEARCH_SOURCES_JSONL must contain at least {min_items} items.")
+        return issues
+    required_keys = {
+        "url",
+        "title",
+        "date",
+        "why_relevant",
+        "extracted_technique",
+        "query",
+        "top_urls",
+        "publish_dates",
+        "takeaway",
+    }
+    for index, line in enumerate(lines):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            issues.append(f"RESEARCH_SOURCES_JSONL line {index + 1} is not valid JSON: {exc}")
+            continue
+        if not isinstance(item, dict):
+            issues.append(f"RESEARCH_SOURCES_JSONL line {index + 1} must be a JSON object.")
+            continue
+        missing = sorted(required_keys - set(item.keys()))
+        if missing:
+            issues.append(f"RESEARCH_SOURCES_JSONL line {index + 1} missing keys: {', '.join(missing)}.")
+        top_urls = item.get("top_urls")
+        publish_dates = item.get("publish_dates")
+        if not isinstance(top_urls, list) or not top_urls:
+            issues.append(f"RESEARCH_SOURCES_JSONL line {index + 1} top_urls must be a non-empty list.")
+        if not isinstance(publish_dates, list) or not publish_dates:
+            issues.append(f"RESEARCH_SOURCES_JSONL line {index + 1} publish_dates must be a non-empty list.")
     return issues
 
 
@@ -723,16 +1225,15 @@ def _count_source_items(text: str) -> int:
         stripped = line.strip()
         lowered = stripped.lower()
         if lowered.startswith("## ") or lowered.startswith("### ") or lowered.startswith("#### "):
-            title = lowered.lstrip("#").strip()
-            in_sources = title.startswith("sources")
+            title = lowered.lstrip("#").strip().rstrip(":")
+            title = re.sub(r"^\d+\s*(?:[\)\.]|[-:])?\s*", "", title).strip()
+            in_sources = title.startswith("source")
             continue
         if lowered.startswith("sources"):
             in_sources = True
             continue
         if in_sources:
             if not stripped:
-                if count > 0:
-                    break
                 continue
             if stripped.startswith(("-", "*")):
                 count += 1
@@ -751,7 +1252,7 @@ def _build_fallback_strategy(
     config: AgentPipelineConfig,
     brief_content: str,
     error_text: str,
-) -> tuple[str, str, dict[str, object]]:
+) -> tuple[str, str, dict[str, object], str, str]:
     rules_url = _read_text(paths.rules_url_path).strip() or config.competition_url or "unknown"
     dataset_profile = _summarize_dataset_profile(_read_text(paths.dataset_profile_path))
     submission_format = _summarize_submission_format(_read_text(paths.submission_format_md_path))
@@ -778,9 +1279,9 @@ def _build_fallback_strategy(
         sample_submission_head or "Sample submission head unavailable.",
         "",
         "## Candidate Approaches",
-        "- Candidate 1: Strong tabular model (CatBoost/LightGBM/XGBoost) with tuned hyperparams.",
-        "- Candidate 2: Neural model (MLP/transformer) with embeddings for high-cardinality features.",
-        "- Candidate 3: Modality-specific approach (CNN for images, transformer for text, seq2seq for sequences).",
+        "- Candidate 1: Tree-ensemble family tuned for the dataset type and metric.",
+        "- Candidate 2: Neural family suitable for the modality (tabular/text/image/sequence).",
+        "- Candidate 3: Simple/high-bias baseline or linear/kernel family for calibration and fallback.",
         "",
         "## Final",
         "Pick the strongest feasible approach given file formats and time budget.",
@@ -801,10 +1302,72 @@ def _build_fallback_strategy(
         f"- Rules URL: {rules_url}",
         f"- Local dataset profile: {paths.dataset_profile_path}",
         f"- Sample submission: {paths.sample_submission_path}",
+        f"- Code snapshot: {paths.code_md_path}",
+        f"- Models snapshot: {paths.models_md_path}",
+        f"- Discussion snapshot: {paths.discussion_md_path}",
         f"- Error: {error_text or 'GPT rate limit'}",
     ]
     strategy_text = "\n".join(strategy_lines).strip()
     plan_payload = _build_fallback_plan_payload(paths)
+    research_sources = [
+        {
+            "url": rules_url,
+            "title": "Competition rules page",
+            "date": "unknown",
+            "why_relevant": "Primary source for metric and constraints when live web search is unavailable.",
+            "extracted_technique": "Constrain modeling and submission pipeline to competition rules and metric.",
+            "query": f"{config.slug} kaggle rules metric",
+            "top_urls": [rules_url, str(paths.submission_format_md_path), str(paths.dataset_profile_path)],
+            "publish_dates": ["unknown", "unknown", "unknown"],
+            "takeaway": "Fallback mode uses local context because strategy model was rate-limited.",
+        },
+        {
+            "url": str(paths.submission_format_md_path),
+            "title": "Local submission_format.md",
+            "date": "unknown",
+            "why_relevant": "Defines expected output schema for submission validation.",
+            "extracted_technique": "Validate columns/rows against sample submission before writing final file.",
+            "query": f"{config.slug} submission format csv columns",
+            "top_urls": [str(paths.sample_submission_path), str(paths.submission_format_md_path)],
+            "publish_dates": ["unknown", "unknown"],
+            "takeaway": "Submission schema is enforced in fallback implementation instructions.",
+        },
+        {
+            "url": str(paths.dataset_profile_path),
+            "title": "Local dataset_profile.json",
+            "date": "unknown",
+            "why_relevant": "Provides train/test schema hints when online sources are unavailable.",
+            "extracted_technique": "Use robust, modality-appropriate defaults with leak-safe validation.",
+            "query": f"{config.slug} tabular baseline cv auc",
+            "top_urls": [str(paths.dataset_profile_path)],
+            "publish_dates": ["unknown"],
+            "takeaway": "Fallback plan defaults to practical pipelines while keeping method choice flexible.",
+        },
+    ]
+    research_sources_text = "\n".join(json.dumps(item, ensure_ascii=True) for item in research_sources)
+    research_summary_text = "\n".join(
+        [
+            "# Research Summary (Fallback)",
+            "",
+            "1. Tree-ensemble family",
+            "- Pros: strong baseline for many structured datasets.",
+            "- Cons: can underperform on certain modalities without specialized features.",
+            "- Runtime risk: medium.",
+            "- Leakage risk: low when preprocessing is fold-safe.",
+            "",
+            "2. Neural family",
+            "- Pros: flexible representation learning for complex patterns.",
+            "- Cons: can be sensitive to training setup and data size.",
+            "- Runtime risk: low to medium.",
+            "- Leakage risk: low with strict train-fit/apply-to-val-test flow.",
+            "",
+            "3. Simple/high-bias fallback family",
+            "- Pros: fast, stable, and useful for sanity checks.",
+            "- Cons: lower ceiling on difficult tasks.",
+            "- Runtime risk: medium.",
+            "- Leakage risk: low.",
+        ]
+    )
 
     instructions_lines = [
         "# Fallback Codex Instructions",
@@ -816,8 +1379,8 @@ def _build_fallback_strategy(
         "   - Load train/test with pandas; identify target as column present in train but not test.",
         "   - Identify ID column from sample_submission (first column) if present.",
         "   - Split train into train/valid with a fixed seed.",
-        "   - Preprocess: SimpleImputer for numerics, OneHotEncoder/TargetEncoder for categoricals.",
-        "   - Model: CatBoost/LightGBM/XGBoost (GPU if available) with tuned hyperparams.",
+        "   - Preprocess with leak-safe train-fit/apply-to-val-test transforms.",
+        "   - Train at least two model families and compare offline metrics.",
         "   - Metric: use accuracy/F1/AUC for classification, RMSE/MAE for regression if unknown.",
         "3) If data is non-tabular or target is unclear:",
         "   - Use modality-appropriate models (CNN/transformer/sequence model).",
@@ -828,7 +1391,7 @@ def _build_fallback_strategy(
         "5) Keep changes confined to `kernel.py` and helper files under the kernel directory.",
     ]
     instructions_text = "\n".join(instructions_lines).replace("{slug}", config.slug).strip()
-    return strategy_text, instructions_text, plan_payload
+    return strategy_text, instructions_text, plan_payload, research_sources_text, research_summary_text
 
 
 def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
@@ -847,9 +1410,55 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
         "holdout_frac": 0.2,
         "cv_folds": 5,
         "seed": 42,
-        "max_iterations": 1,
+        "max_iterations": 3,
         "patience": 2,
         "min_improvement": 0.0,
+        "pipelines": [
+            {
+                "name": "tree_ensemble_family",
+                "features": ["basic_impute", "safe_categorical_encoding", "optional_interactions"],
+                "models": ["tree_ensemble"],
+                "key_hyperparameters": {"training_budget": "medium"},
+                "runtime_memory": "medium runtime, medium memory",
+                "failure_modes": ["overfit on noisy folds", "slow convergence"],
+                "fallbacks": ["simpler regularized model", "reduced complexity"],
+            },
+            {
+                "name": "neural_family",
+                "features": ["normalized_numeric", "encoded_categorical_or_embeddings"],
+                "models": ["neural_model"],
+                "key_hyperparameters": {"training_budget": "medium"},
+                "runtime_memory": "medium runtime, medium-high memory",
+                "failure_modes": ["unstable convergence on small data"],
+                "fallbacks": ["smaller architecture", "fallback to non-neural model"],
+            },
+            {
+                "name": "simple_fallback_family",
+                "features": ["basic_impute", "low-variance-safe-transforms"],
+                "models": ["linear_or_kernel_baseline"],
+                "key_hyperparameters": {"training_budget": "low"},
+                "runtime_memory": "low runtime, low memory",
+                "failure_modes": ["underfitting on complex datasets"],
+                "fallbacks": ["move to stronger family", "add informative features"],
+            },
+        ],
+        "toggles": {
+            "ENABLE_PIPELINE_1": True,
+            "ENABLE_PIPELINE_2": True,
+            "ENABLE_PIPELINE_3": True,
+            "ENABLE_ENSEMBLE": True,
+            "FAST_DEV": False,
+        },
+        "evaluation_protocol": {
+            "cv_type": "Auto",
+            "n_folds": 5,
+            "seeds": [42, 2024, 3407],
+            "primary_metric": metric,
+        },
+        "stop_policy": {
+            "max_iterations": 3,
+            "error_fingerprint_abort": True,
+        },
     }
 
 
@@ -1066,6 +1675,9 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
     overview_headings = _extract_headings(paths.overview_md_path)
     data_headings = _extract_headings(paths.data_md_path)
     rules_headings = _extract_headings(paths.rules_md_path)
+    code_headings = _extract_headings(paths.code_md_path)
+    models_headings = _extract_headings(paths.models_md_path)
+    discussion_headings = _extract_headings(paths.discussion_md_path)
 
     lines = [
         "# Fallback Brief (Codex output missing)",
@@ -1086,6 +1698,12 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
         f"- submission_format: {paths.submission_format_md_path}",
         f"- sample_submission_head: {paths.sample_submission_head_path}",
         f"- sample_submission: {paths.sample_submission_path}",
+        f"- code: {paths.code_md_path}",
+        f"- code_index: {paths.code_notebooks_index_path}",
+        f"- models: {paths.models_md_path}",
+        f"- discussion: {paths.discussion_md_path}",
+        f"- discussion_threads_dir: {paths.discussion_threads_dir}",
+        f"- discussion_index: {paths.discussion_threads_index_path}",
         "",
         "## Rules headings",
         _format_heading_list(rules_headings),
@@ -1095,6 +1713,15 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
         "",
         "## Data headings",
         _format_heading_list(data_headings),
+        "",
+        "## Code headings",
+        _format_heading_list(code_headings),
+        "",
+        "## Models headings",
+        _format_heading_list(models_headings),
+        "",
+        "## Discussion headings",
+        _format_heading_list(discussion_headings),
         "",
         "## Sample Submission (head)",
         sample_submission_head or "Sample submission head unavailable.",
@@ -1119,6 +1746,7 @@ _NOISE_PREFIXES = (
     ".ruff_cache/",
     ".mypy_cache/",
     ".cache/",
+    ".kagglebot_cache/",
 )
 _NOISE_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
 
@@ -1235,8 +1863,15 @@ def _is_noise_path(path: str) -> bool:
 
 def _is_protected_path(path: str) -> bool:
     if path.startswith("artifacts/"):
-        # Protect kernel artifacts so stray edits can be restored by the guard.
-        return "/kernel/" in path
+        # Protect competition-scoped control files so stray edits can be restored by the guard.
+        parts = path.split("/")
+        # artifacts/<slug>/meta.json or artifacts/<slug>/plan.json
+        if len(parts) == 3 and parts[2] in {"meta.json", "plan.json"}:
+            return True
+        # artifacts/<slug>/{kernel,prompts}/...
+        if len(parts) >= 4 and parts[2] in {"kernel", "prompts"}:
+            return True
+        return False
     for entry in _PROTECTED_PATHS:
         if entry.endswith("/"):
             if path.startswith(entry):

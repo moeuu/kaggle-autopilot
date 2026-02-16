@@ -15,14 +15,27 @@ def build_strategy(
         selected_models = [m.strip().lower() for m in models if m.strip()]
     else:
         if task == "classification":
-            selected_models = ["logreg", "hist_gb", "catboost"]
+            selected_models = [
+                "logreg",
+                "sgd_classifier",
+                "extra_trees",
+                "hist_gb",
+                "catboost",
+            ]
         else:
-            selected_models = ["ridge", "hist_gb", "catboost"]
+            selected_models = [
+                "ridge",
+                "sgd_regressor",
+                "extra_trees",
+                "hist_gb",
+                "catboost",
+            ]
 
     preprocessing = [
         "impute_median_numeric",
         "impute_mode_categorical",
         "onehot_encode_for_linear_models",
+        "ordinal_or_native_categorical_for_tree_models",
     ]
 
     return ModelingStrategy(

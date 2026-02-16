@@ -7,8 +7,12 @@ IMPORTANT:
 - Primary entrypoint: {{kernel_path}}
 - Do NOT modify any files outside the kernel directory.
 - Do NOT access secrets or Kaggle credentials.
-- Prefer strong, high-capacity models over baselines. Use GPU/TPU acceleration when available.
-- Expose training-intensity knobs (epochs/iterations/model size) near the top of kernel.py.
+- Do NOT perform open-ended web search in this phase.
+- Follow the frozen plan in `{{plan_path}}` and research summary in `{{research_summary_path}}`.
+
+This stage is Prompt 3/5 -> Prompt 4/5 -> Prompt 5/5 only.
+You must execute the shortlisted pipelines exactly as frozen in plan.json.
+If a dependency is unavailable in Kaggle runtime, use the fallback defined in plan.json.
 
 Instructions from Strategy:
 <<<
@@ -27,28 +31,53 @@ Blocked modules (do NOT import; not available on Kaggle runtime):
 If a blocked module appears in previous code, remove it and replace with Kaggle-default libraries
 (lightgbm, xgboost, catboost, torch, transformers, sklearn). If unsure, prefer these defaults.
 
-Ensure kernel.py:
-- Reads data from /kaggle/input/<competition_slug>/
-- Writes /kaggle/working/submission.csv
-- Writes /kaggle/working/metrics.json with offline split metric
-- Logs whether GPU/TPU is actually used (device + training time)
-- Fit-on-train, apply-to-test for ALL feature stats/encoders/bins:
-  - Any frequency/target/quantile/bin/median/mode encodings must be computed on train only,
-    stored (dicts/arrays), then applied to test.
-  - Never recompute these statistics on the test set.
-  - Do not leak target into features (no target-derived encodings unless explicitly CV-safe).
-- Handle train/test column mismatches safely:
-  - If a column exists in train but not test, add it to test with NA/0 (or drop it from train).
-  - If a column exists in test but not train, ignore it unless explicitly required.
-  - Never raise hard errors due to missing columns.
- - Handles categorical missing values safely:
-   - If any column is pandas Categorical, add "Unknown" before fillna:
-     `col = col.cat.add_categories(["Unknown"]).fillna("Unknown")`
-   - Or cast to string/object before fillna.
-   - Do not call `fillna("Unknown")` directly on categoricals (raises TypeError).
+Implementation contract for `kernel.py`:
+- Top-level knobs:
+  - `N_FOLDS`, `SEEDS`, `FAST_DEV`
+  - plan-driven pipeline toggles (do not hardcode a single model family)
+  - `GPU_DEVICE`
+- Unified execution contract:
+  - The exact same `kernel.py` must run on `local_gpu` and `kaggle_gpu`
+  - Only execution location/runtime differs; algorithm path must be shared
+- Robust I/O:
+  - Read from `/kaggle/input/<competition_slug>/` (or local mirror safely)
+  - Read `train`, `test`, and `sample_submission`
+- Strict target handling:
+  - Infer/match target robustly and assert target column validity
+- Feature alignment helper:
+  - Implement `align_features(train_df, test_df, feature_cols)`
+  - Add missing cols, drop extras, reorder consistently
+- Leak-safe encoders:
+  - Fit on train fold only; apply to validation/test
+  - Support only the encoders/transforms selected in plan.json
+- Per-pipeline artifacts:
+  - Save `oof_preds_<name>.npy` and `test_preds_<name>.npy`
+  - Save under `/kaggle/working` and local output dir when available
+- Evaluation:
+  - CV with deterministic seeds where feasible
+  - Print per-pipeline CV summary for the plan primary metric
+- Ensemble:
+  - Implement only ensemble methods listed in plan.json
+  - Choose final method by plan primary metric (tie-breaker: simpler/faster)
+- Submission:
+  - Write `/kaggle/working/submission.csv`
+  - Validate columns and row count against sample submission
+  - Ensure no NaN/inf in predictions; clip to safe bounds when needed
+- Modality coverage:
+  - Add dataset modality detection (tabular/image/video/text/audio/other)
+  - Keep tabular path robust by default
+  - For non-tabular tasks, provide/maintain `custom_main()` route in the same `kernel.py`
+- Pretrained assets:
+  - Provide a helper to download/cache pretrained checkpoints when useful
+  - Respect internet/rules constraints and include fallback when download is unavailable
+  - Optional manifest: `pretrained_models.json` (list of `{name,url}` objects) next to `kernel.py`
 
-Embedding/model safety:
-- If you use an encoder-decoder model (e.g. ProtT5/T5), load the encoder-only variant:
-  - Prefer `T5EncoderModel.from_pretrained(...)`, or `AutoModel(...).get_encoder()`
-  - Call with `input_ids`/`attention_mask` only (no decoder_input_ids)
-  - This avoids `ValueError: You have to specify either decoder_input_ids or decoder_inputs_embeds`
+Required safety details:
+- Fit-on-train, apply-to-test for ALL feature stats/encoders/bins.
+- Never recompute train statistics on test.
+- Handle train/test column mismatches safely.
+- Handles categorical missing values safely:
+  - If any column is pandas Categorical, add "Unknown" before fillna:
+    `col = col.cat.add_categories(["Unknown"]).fillna("Unknown")`
+  - Or cast to string/object before fillna.
+  - Do not call `fillna("Unknown")` directly on categoricals (raises TypeError).
