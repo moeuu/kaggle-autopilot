@@ -76,6 +76,8 @@ Required safety details:
 - Fit-on-train, apply-to-test for ALL feature stats/encoders/bins.
 - Never recompute train statistics on test.
 - Handle train/test column mismatches safely.
+- If plan-driven pipeline lookup is used (e.g. `get_pipeline_cfg`), missing pipeline names must NOT raise.
+  Return a safe default config and continue.
 - Handles categorical missing values safely:
   - If any column is pandas Categorical, add "Unknown" before fillna:
     `col = col.cat.add_categories(["Unknown"]).fillna("Unknown")`

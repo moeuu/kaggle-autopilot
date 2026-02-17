@@ -223,11 +223,12 @@ def run_autopilot(config: AutopilotConfig) -> None:
     if resume_id:
         os.environ.pop("KAGGLEBOT_RESUME_RUN_ID", None)
         os.environ.pop("KAGGLEBOT_RESUME_SLUG", None)
-    session = AutopilotSession(config=config, run_id=run_id, resume_run=resume_run)
+    resume_after_failure = resume_run
     attempt = 0
     submit_force_override = False
     try:
         while True:
+            session = AutopilotSession(config=config, run_id=run_id, resume_run=resume_after_failure)
             try:
                 return session.run()
             except RulesNotAcceptedError:
@@ -244,6 +245,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
                 submit_force_override = True
                 _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+                resume_after_failure = True
             except KernelCapacityError:
                 raise
             except KeyboardInterrupt:
@@ -258,6 +260,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                     raise
                 print("[yellow]autofix[/yellow]: invoking codex to repair error")
                 _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+                resume_after_failure = True
     finally:
         if submit_force_override:
             os.environ.pop("KAGGLEBOT_FORCE_RESUBMIT", None)
@@ -488,12 +491,34 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             _run_verify(config.verify_cmd, dry_run=config.dry_run)
 
             submission_path = iter_dir / "submission.csv"
+            metrics_path = iter_dir / "metrics.json"
+            evaluation_report_path = iter_dir / "evaluation_report.json"
             evaluation = None
             evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
+            submit_retry_resume = _load_submit_retry_artifacts(
+                run_dir=run_dir,
+                iter_dir=iter_dir,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                metric_direction=metric_direction,
+                target_metric=target_metric,
+                require_submit_phase=config.submit and not config.dry_run,
+            )
+            if submit_retry_resume is not None:
+                resume_submission_path, resume_metrics_path, resume_evaluation = submit_retry_resume
+                if resume_submission_path != submission_path:
+                    submission_path.write_bytes(resume_submission_path.read_bytes())
+                if resume_metrics_path != metrics_path:
+                    metrics_path.write_bytes(resume_metrics_path.read_bytes())
+                evaluation = resume_evaluation
+                print(
+                    "[yellow]resume[/yellow]: "
+                    f"iter-{iteration} has completed training artifacts; retrying submit without retraining."
+                )
 
-            if config.compute.startswith("kaggle_"):
+            if evaluation is None and config.compute.startswith("kaggle_"):
                 kaggle_user = resolve_kaggle_username(config.kaggle_username)
                 print(f"[cyan]kernel run[/cyan]: {config.compute}")
                 kernel_attempts = 0
@@ -603,7 +628,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     raise KernelFailedError(
                         "Kernel metrics missing expected score; ensure metrics.json includes a numeric metric value."
                     )
-            else:
+            elif evaluation is None:
                 kernel_path = config.paths.kernel_source_dir / "kernel.py"
                 if not kernel_path.exists():
                     raise RuntimeError(
@@ -765,6 +790,44 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 direction=metric_direction,
                 iteration=iteration,
                 max_iterations=max_iterations,
+            )
+            submit_phase_required = config.submit and not config.dry_run
+            submit_allowed_by_gate = config.submit and allow_submit
+            pre_submit_phase_state = "disabled"
+            if config.submit:
+                pre_submit_phase_state = "pending_submit" if allow_submit else "skipped_gate"
+            pre_submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate)
+            pre_submit_metrics_payload = _build_metrics_payload(
+                run_id=run_id,
+                iteration=iteration,
+                evaluation=evaluation,
+                target_score=target_score,
+                met_target=_meets_target(readiness_score, readiness_target, metric_direction),
+                top1_info=top1_info if isinstance(top1_info, dict) else {},
+                compute=config.compute,
+                accelerator=accelerator_used,
+                holdout_frac=holdout_frac,
+                cv_folds=cv_folds,
+                seed=seed,
+                evaluation_by_source=evaluation_by_source,
+                evaluation_report=report,
+                readiness_target=readiness_target,
+            )
+            pre_submit_metrics_payload["checkpoint_phase"] = "pre_submit"
+            metrics_path.write_text(json.dumps(pre_submit_metrics_payload, indent=2), encoding="utf-8")
+            _write_iteration_state_marker(
+                iter_dir=iter_dir,
+                run_id=run_id,
+                iteration=iteration,
+                submission_path=submission_path,
+                metrics_path=metrics_path,
+                evaluation_report_path=evaluation_report_path,
+                submit_phase_required=submit_phase_required,
+                submit_phase_finished=pre_submit_phase_finished,
+                submit_allowed_by_gate=submit_allowed_by_gate,
+                submit_phase_state=pre_submit_phase_state,
+                submitted=False,
+                readiness_score=readiness_score,
             )
             submission_result: dict[str, object] | None = None
             submit_phase_state = "disabled"
@@ -953,7 +1016,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "offline_readiness": top1_tier,
                 "submission_score": top1_tier_by_submission,
             }
-            metrics_path = iter_dir / "metrics.json"
             metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
 
             diff_summary = "Diff tracking disabled (git integration removed)."
@@ -972,7 +1034,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
-            submit_phase_required = config.submit and not config.dry_run
             submit_allowed_by_gate = config.submit and allow_submit
             submit_phase_finished = (
                 (not submit_phase_required) or (not submit_allowed_by_gate) or (submission_result is not None)
@@ -1705,6 +1766,39 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
     def normalize(text: str) -> str:
         return "".join(ch for ch in text.lower() if ch.isalnum())
 
+    def metric_hint() -> str | None:
+        metric_raw = payload.get("metric")
+        if isinstance(metric_raw, str) and metric_raw.strip():
+            return metric_raw.strip()
+        primary_raw = payload.get("primary_metric")
+        if isinstance(primary_raw, str) and primary_raw.strip():
+            return primary_raw.strip()
+        return target_metric.strip() if isinstance(target_metric, str) and target_metric.strip() else None
+
+    def pick_selected_metric(selected: dict[str, object]) -> tuple[str | None, float | None]:
+        hint = metric_hint()
+        hint_norm = normalize(hint) if hint else ""
+        if "map" in hint_norm and "f1" in hint_norm:
+            if is_number(selected.get("combined_score")):
+                return (hint, float(selected["combined_score"]))
+        if "map" in hint_norm:
+            if is_number(selected.get("mean_map")):
+                return (hint or "mean_map", float(selected["mean_map"]))
+        if "f1" in hint_norm:
+            if is_number(selected.get("oof_f1")):
+                return (hint or "f1", float(selected["oof_f1"]))
+        for key, name in (
+            ("offline_value", hint),
+            ("value", hint),
+            ("score", hint),
+            ("combined_score", hint or "combined_score"),
+            ("mean_map", hint or "mean_map"),
+            ("oof_f1", hint or "f1"),
+        ):
+            if is_number(selected.get(key)):
+                return (name, float(selected[key]))
+        return (None, None)
+
     def strip_prefixes(text: str) -> str:
         lowered = text.lower()
         for prefix in (
@@ -1738,12 +1832,47 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
             return None
         return min(numeric) if prefers_lower(metric_key) else max(numeric)
 
+    selected_raw = payload.get("selected")
+    if isinstance(selected_raw, dict):
+        metric, value = pick_selected_metric(selected_raw)
+        if value is not None:
+            return (metric, value)
+
     if is_number(payload.get("offline_value")):
         return (str(payload.get("metric") or target_metric or "unknown"), float(payload["offline_value"]))
     if is_number(payload.get("value")):
         return (str(payload.get("metric") or target_metric or "unknown"), float(payload["value"]))
     if is_number(payload.get("score")):
         return (str(payload.get("metric") or target_metric or "unknown"), float(payload["score"]))
+
+    pipelines_raw = payload.get("pipelines")
+    if isinstance(pipelines_raw, list):
+        selected_name = None
+        if isinstance(selected_raw, dict):
+            maybe_name = selected_raw.get("name")
+            if isinstance(maybe_name, str) and maybe_name.strip():
+                selected_name = maybe_name.strip()
+
+        best_value: float | None = None
+        best_metric: str | None = None
+        for item in pipelines_raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if selected_name and isinstance(name, str) and name.strip() != selected_name:
+                continue
+            metric, value = pick_selected_metric(item)
+            if value is None:
+                continue
+            if best_value is None:
+                best_value = value
+                best_metric = metric
+            elif best_metric and prefers_lower(best_metric):
+                best_value = min(best_value, value)
+            else:
+                best_value = max(best_value, value)
+        if best_value is not None:
+            return (best_metric, best_value)
 
     for key, value in payload.items():
         if not isinstance(value, dict):
@@ -3499,6 +3628,94 @@ def _resume_iteration_state(
         return 1, best_score, best_submission
     next_iter = max(completed_iters) + 1
     return next_iter, best_score, best_submission
+
+
+def _newest_existing_path(candidates: list[Path]) -> Path | None:
+    existing: list[tuple[float, int, Path]] = []
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            stat = candidate.stat()
+            existing.append((float(stat.st_mtime), int(stat.st_size), candidate))
+        except OSError:
+            continue
+    if not existing:
+        return None
+    existing.sort(reverse=True)
+    return existing[0][2]
+
+
+def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
+    return _newest_existing_path(
+        [
+            iter_dir / filename,
+            iter_dir / "output" / filename,
+        ]
+    )
+
+
+def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: int) -> int | None:
+    latest: int | None = None
+    for iter_dir in sorted(run_dir.glob("iter-*")):
+        if not iter_dir.is_dir():
+            continue
+        try:
+            iteration = int(iter_dir.name.split("-", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        if iteration > max_iterations:
+            continue
+        submission_path = _resolve_iteration_artifact(iter_dir, "submission.csv")
+        metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
+        if submission_path is None or metrics_path is None:
+            continue
+        if latest is None or iteration > latest:
+            latest = iteration
+    return latest
+
+
+def _load_submit_retry_artifacts(
+    *,
+    run_dir: Path,
+    iter_dir: Path,
+    iteration: int,
+    max_iterations: int,
+    metric_direction: str,
+    target_metric: str,
+    require_submit_phase: bool,
+) -> tuple[Path, Path, EvaluationResult] | None:
+    if not require_submit_phase:
+        return None
+
+    marker_payload = _load_iteration_state_marker(iter_dir / _ITERATION_STATE_FILENAME)
+    marker_pending = (
+        bool(marker_payload.get("trained"))
+        and bool(marker_payload.get("submit_allowed_by_gate"))
+        and (not bool(marker_payload.get("submit_phase_finished")))
+    )
+
+    legacy_pending = False
+    if not marker_pending:
+        latest_iter = _latest_iteration_with_training_artifacts(run_dir=run_dir, max_iterations=max_iterations)
+        run_state = _load_run_state(run_dir)
+        if bool(run_state.get("submit_attempted")) and not bool(run_state.get("submit_ok")):
+            legacy_pending = latest_iter == iteration
+        elif not marker_payload and latest_iter == iteration:
+            # Legacy runs may have submit failures without iteration_state/run_state.
+            # If the latest iteration already has both artifacts, prefer submit-only resume.
+            legacy_pending = True
+    if not (marker_pending or legacy_pending):
+        return None
+
+    submission_path = _resolve_iteration_artifact(iter_dir, "submission.csv")
+    metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
+    if submission_path is None or metrics_path is None:
+        return None
+    evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
+    if evaluation is None:
+        return None
+    return submission_path, metrics_path, evaluation
 
 
 def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:

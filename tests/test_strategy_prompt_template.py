@@ -14,6 +14,12 @@ def test_strategy_plan_prompt_requires_kernel_py_mention() -> None:
     assert "kernel.py" in template
 
 
+def test_codex_kernel_impl_prompt_requires_safe_pipeline_lookup() -> None:
+    base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts"
+    template = (base_dir / "codex_kernel_impl.md").read_text(encoding="utf-8")
+    assert "missing pipeline names must NOT raise" in template
+
+
 def test_strategy_plan_prompt_includes_quality_gate_checklist() -> None:
     base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts"
     template = (base_dir / "strategy_plan.md").read_text(encoding="utf-8")

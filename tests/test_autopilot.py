@@ -868,14 +868,12 @@ def test_autopilot_submit_validation_error_autofixes_and_resubmits(monkeypatch, 
         target_direction="minimize",
     )
 
-    train_state = {"fixed": False}
+    train_calls = {"count": 0}
 
     def fake_train(*args, **kwargs):  # noqa: ARG001
+        train_calls["count"] += 1
         output_path = kwargs["output_path"]
-        if train_state["fixed"]:
-            output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
-        else:
-            output_path.write_text("id,target\n1,0.1\n2,not_a_number\n", encoding="utf-8")
+        output_path.write_text("id,target\n1,0.1\n2,not_a_number\n", encoding="utf-8")
         evaluation = EvaluationResult(
             score_source="holdout",
             metric="rmse",
@@ -896,6 +894,7 @@ def test_autopilot_submit_validation_error_autofixes_and_resubmits(monkeypatch, 
 
     submit_calls = {"count": 0}
     autofix_calls = {"count": 0}
+    planning_calls = {"count": 0}
 
     def fake_submit(*args, **kwargs):  # noqa: ARG001
         submit_calls["count"] += 1
@@ -903,14 +902,22 @@ def test_autopilot_submit_validation_error_autofixes_and_resubmits(monkeypatch, 
 
     def fake_submit_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception):  # noqa: ARG001
         autofix_calls["count"] += 1
-        train_state["fixed"] = True
+        iter_submission = config.paths.iter_dir(run_id, 1) / "submission.csv"
+        iter_submission.parent.mkdir(parents=True, exist_ok=True)
+        iter_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        output_submission = config.paths.iter_dir(run_id, 1) / "output" / "submission.csv"
+        output_submission.parent.mkdir(parents=True, exist_ok=True)
+        output_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._run_plan_and_initial",
+        lambda *args, **kwargs: planning_calls.update(count=planning_calls["count"] + 1),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_autofix", fake_submit_autofix)
     monkeypatch.setattr(
         "kagglebot.autopilot.list_competition_submissions",
@@ -928,6 +935,8 @@ def test_autopilot_submit_validation_error_autofixes_and_resubmits(monkeypatch, 
     ]
     assert autofix_calls["count"] == 1
     assert submit_calls["count"] == 1
+    assert train_calls["count"] == 1
+    assert planning_calls["count"] == 1
     assert rows[0]["action_taken"] == "abort"
     assert rows[-1]["action_taken"] == "submit"
 
@@ -1083,6 +1092,40 @@ def test_extract_kernel_metric_from_oof_dict() -> None:
     metric, value = _extract_kernel_metric(payload, "rmse")
     assert metric == "rmse"
     assert value == 8.76
+
+
+def test_extract_kernel_metric_from_selected_combined_score_schema() -> None:
+    from kagglebot.autopilot import _extract_kernel_metric
+
+    payload = {
+        "run_id": "run_20260217_043129",
+        "primary_metric": "0.5*mAP@[0.5:0.95] + 0.5*F1",
+        "selected": {
+            "name": "yolo11m_kfold_wbf_geom_rp",
+            "mean_map": 0.6698263357562932,
+            "oof_f1": 0.6666666666666666,
+            "combined_score": 0.66824650121148,
+        },
+    }
+    metric, value = _extract_kernel_metric(payload, "0.5*mAP@[0.5:0.95] + 0.5*F1")
+    assert metric == "0.5*mAP@[0.5:0.95] + 0.5*F1"
+    assert value == 0.66824650121148
+
+
+def test_extract_kernel_metric_prefers_map_when_primary_metric_is_map() -> None:
+    from kagglebot.autopilot import _extract_kernel_metric
+
+    payload = {
+        "primary_metric": "mAP@[0.5:0.95]",
+        "selected": {
+            "mean_map": 0.669,
+            "oof_f1": 0.123,
+            "combined_score": 0.456,
+        },
+    }
+    metric, value = _extract_kernel_metric(payload, "mAP@[0.5:0.95]")
+    assert metric == "mAP@[0.5:0.95]"
+    assert value == 0.669
 
 
 def test_metric_mismatch_preserves_direction_when_metric_direction_is_unknown(monkeypatch, tmp_path: Path) -> None:
@@ -2059,6 +2102,70 @@ def test_resume_iteration_state_does_not_complete_with_submission_only(tmp_path:
     assert start == 1
     assert best_score is None
     assert best_submission is None
+
+
+def test_autopilot_resume_submit_only_from_legacy_output_artifacts(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+    )
+
+    train_calls = {"count": 0}
+    submit_calls = {"count": 0}
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        train_calls["count"] += 1
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=0.4,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="ridge",
+            model_summary={},
+            accelerator="cpu",
+        )
+
+    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
+        submit_calls["count"] += 1
+        return {
+            "message": "demo",
+            "submission_path": str(submission_path),
+            "submitted_at": "2026-02-16T00:00:00+00:00",
+            "iteration": 1,
+            "outcome": {"status": "complete", "score": 0.49},
+        }
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
+
+    config = _make_config(tmp_path, submit=True, max_iterations=1)
+    iter_output_dir = config.paths.iter_dir("run-1", 1) / "output"
+    iter_output_dir.mkdir(parents=True, exist_ok=True)
+    (iter_output_dir / "submission.csv").write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+    _write_kernel_metrics(iter_output_dir / "metrics.json", value=0.4)
+
+    run_autopilot(config)
+
+    assert train_calls["count"] == 0
+    assert submit_calls["count"] == 1
+    assert (config.paths.iter_dir("run-1", 1) / "submission.csv").exists()
+    assert (config.paths.iter_dir("run-1", 1) / "metrics.json").exists()
 
 
 def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: Path) -> None:

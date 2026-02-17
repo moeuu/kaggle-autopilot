@@ -1,24 +1,27 @@
 # research_summary.md (dal-shemagh-detection-challenge)
 
-## Ranked shortlist (practical, Kaggle-runtime oriented)
+## Ranked shortlist (candidate pipelines)
 
-### 1) Detector ensemble + WBF + geometry-derived right_place (Recommended)
-- Leak-free features/encodings: raw RGB images → detector boxes; geometry features (IoU, containment, center distance, relative y-position, area ratios, counts) computed from **OOF** detector predictions only; fit scaler/classifier on train-fold, apply to val/test.
-- Models + key hyperparameters: YOLO-style detector (from scratch) with img=640 (optionally 768), epochs=200–300, strong augmentation; ensemble 3–5 runs (seeds/sizes); WBF iou_thr≈0.55, skip_box_thr≈0.001; geometry classifier = logistic regression (C tuned) or small MLP.
-- Expected runtime/memory: local GPU ~30–60 min per detector run (varies by GPU); inference minutes for 842 images; low RAM.
-- Leakage risk: low if right_place classifier is trained only on OOF predictions and thresholds chosen per-fold.
-- Fallback if dependency unavailable: if WBF lib missing, do per-class NMS then “best-box per class” geometry; if YOLO framework unavailable, use a torchvision detector (slower) with the same post-processing.
+### 1) 2× YOLO detector ensemble + WBF + geometry right_place (Recommended)
+- Leak-free features/encodings: detector fit on train folds only; WBF is deterministic at inference; `right_place` computed from predicted boxes (best IoU pair + area ratio + confidence gating).
+- Models + key hyperparameters:
+  - Detectors: Ultralytics YOLO (e.g., `yolo11m` + `yolo11l`), `imgsz=896–1024`, `epochs=200–300`, `patience=30–50`, AMP on, strong aug.
+  - Fusion: WBF `iou_thr=0.6–0.75`, `skip_box_thr=1e-4`, per-class.
+  - right_place: rule thresholds tuned on OOF (grid over `conf_thres`, `t_iou`, `t_area`).
+- Expected runtime/memory: ~2–6 GPU-hours depending on model sizes; modest CPU overhead for WBF.
+- Leakage risk: low if thresholds are tuned only on OOF; avoid any pseudo-label training by default.
+- Fallback if dependency unavailable: if no `ensemble_boxes`, replace WBF with per-class NMS + score-weighted box averaging.
 
-### 2) Two-stage: detector → ROI crop classifier
-- Leak-free features/encodings: crop around union(top head box, top shemagh box) from detector outputs; train crop-classifier with fold-wise crops.
-- Models + key hyperparameters: detector as above; crop-classifier = small CNN (e.g., ResNet18-like from scratch), input 224–320, heavy augmentation, class-balanced sampling, focal/BCE with pos_weight; threshold tuned for F1.
-- Expected runtime/memory: extra 20–40 min per fold for classifier; modest VRAM.
-- Leakage risk: medium if crops are generated from a detector trained on all data; must generate OOF crops only.
-- Fallback: drop crop stage and use geometry classifier.
+### 2) Single strong YOLO + geometry right_place (Fast baseline with strong ceiling)
+- Leak-free features/encodings: same rule; no fusion.
+- Models + key hyperparameters: 1 YOLO model (bigger than “n”), `imgsz=896`, `epochs=250`, early stop; tune `conf_thres/t_iou/t_area` on OOF.
+- Expected runtime/memory: ~1–3 GPU-hours.
+- Leakage risk: low.
+- Fallback: if no Ultralytics, use torchvision FasterRCNN and keep geometry rule.
 
-### 3) Multi-task single model (shared backbone, 2 heads)
-- Leak-free features/encodings: raw images only.
-- Models + key hyperparameters: shared backbone; detection loss + image-level BCE/focal; loss weights tuned; longer schedule needed.
-- Expected runtime/memory: highest complexity; longer training.
-- Leakage risk: low (end-to-end), but higher overfit risk on rare positives.
-- Fallback: revert to pipeline #1.
+### 3) Ensemble + meta-classifier on geometry features (Ablation if F1 is stuck)
+- Leak-free features/encodings: build per-image geometry features from OOF predictions; fit scaler+LogReg on fold-train only; apply to fold-val/test; threshold tuned on OOF.
+- Models + key hyperparameters: `LogisticRegression(C=0.1..1.0, class_weight='balanced')`, conservative feature set (counts, max conf, best IoU, area ratios).
+- Expected runtime/memory: tiny compared to detector training.
+- Leakage risk: medium if OOF separation is mishandled; keep strict fold boundaries.
+- Fallback: disable meta-classifier and revert to rule-only.

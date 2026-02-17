@@ -125,6 +125,7 @@ class KernelPackageBuilder:
         _ensure_kernel_import_path(kernel_dir)
         _inline_kernel_modules(kernel_dir)
         _inject_data_dir_resolver(kernel_dir)
+        _inject_pipeline_cfg_fallback(kernel_dir)
         _inject_column_map_shim(kernel_dir, config.base_dir / config.slug / "context")
         _inject_column_fill_shim(kernel_dir, config.base_dir / config.slug / "context")
         _inject_object_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
@@ -329,13 +330,15 @@ def run_kernel_local(
 
     kernel_source_dir = base_dir / slug / "kernel"
     kernel_stage_dir = base_dir / slug / "kernels" / run_id / f"local-iter-{iteration}"
+    run_dir = kernel_stage_dir.parent
     context_dir = base_dir / slug / "context"
     output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
     logs_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "logs"
     output_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    kernel_stage_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     _ensure_local_sample_submission_file(base_dir=base_dir, slug=slug)
+    _stage_local_kernel_data_dir(base_dir=base_dir, slug=slug, run_dir=run_dir)
 
     ensure_solution_path_allowed(kernel_source_dir, artifacts_dir=base_dir, slug=slug)
     kernel_path = kernel_source_dir / "kernel.py"
@@ -362,6 +365,7 @@ def run_kernel_local(
     _ensure_kernel_import_path(kernel_stage_dir)
     _inline_kernel_modules(kernel_stage_dir)
     _inject_data_dir_resolver(kernel_stage_dir)
+    _inject_pipeline_cfg_fallback(kernel_stage_dir)
     _inject_column_map_shim(kernel_stage_dir, context_dir)
     _inject_column_fill_shim(kernel_stage_dir, context_dir)
     _inject_object_coerce_shim(kernel_stage_dir, context_dir)
@@ -467,6 +471,42 @@ def run_kernel_local(
         submission_path=submission_dst,
         metrics_path=metrics_dst,
     )
+
+
+def _stage_local_kernel_data_dir(*, base_dir: Path, slug: str, run_dir: Path) -> None:
+    competition_dir = base_dir / slug
+    source_dir = (competition_dir / "data").resolve()
+    if not source_dir.exists():
+        return
+
+    target_dir = run_dir / "data"
+    if target_dir.is_symlink():
+        try:
+            if target_dir.resolve() == source_dir:
+                return
+        except Exception:
+            pass
+        try:
+            target_dir.unlink()
+        except OSError:
+            pass
+    elif target_dir.exists():
+        if target_dir.is_dir():
+            shutil.rmtree(target_dir, ignore_errors=True)
+        else:
+            try:
+                target_dir.unlink()
+            except OSError:
+                return
+
+    try:
+        target_dir.symlink_to(source_dir, target_is_directory=True)
+        return
+    except Exception:
+        pass
+
+    # Fallback for filesystems where directory symlink is unavailable.
+    shutil.copytree(source_dir, target_dir, symlinks=True, dirs_exist_ok=True)
 
 
 def _ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path | None:
@@ -727,6 +767,10 @@ def _resolve_local_kernel_artifacts(
 ) -> tuple[Path | None, Path | None]:
     candidates: list[Path] = [
         output_dir,
+        # Many kernels treat the parent of the staged copy (run_dir) as the
+        # "challenge dir" and write artifacts under run_dir/outputs.
+        kernel_dir.parent / "outputs",
+        kernel_dir.parent,
         kernel_dir / "outputs",
         Path("/kaggle/working"),
         kernel_dir,
@@ -844,6 +888,7 @@ def _sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
 _KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
 _KERNEL_BOOTSTRAP_END = "del _os, _sys, _KROOT, _KWORK"
 _KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
+_KERNEL_PIPELINE_CFG_MARKER = "# kagglebot:pipeline_cfg_fallback"
 _DATA_DIR_JOIN_RE = re.compile(r"(\bdata_dir\s*/\s*)(['\"])([^'\"]+)\2")
 
 
@@ -927,6 +972,47 @@ def _inject_data_dir_resolver(kernel_dir: Path) -> None:
     lines = lines[:insert_at] + resolver_block + lines[insert_at:]
     updated = "\n".join(lines)
     updated = _DATA_DIR_JOIN_RE.sub(r"_kb_find_file(data_dir, '\3')", updated)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _inject_pipeline_cfg_fallback(kernel_dir: Path) -> None:
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_PIPELINE_CFG_MARKER in text:
+        return
+
+    lines = text.splitlines()
+    changed = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("raise KeyError("):
+            continue
+        if "Pipeline not found in plan" not in stripped:
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        replacement = [
+            f"{indent}{_KERNEL_PIPELINE_CFG_MARKER}",
+            f"{indent}return {{",
+            f'{indent}    "name": str(name),',
+            f'{indent}    "features": [],',
+            f'{indent}    "models": [str(name)],',
+            f'{indent}    "key_hyperparameters": {{}},',
+            f'{indent}    "runtime_memory": "unknown",',
+            f'{indent}    "failure_modes": ["missing_pipeline_in_plan"],',
+            f'{indent}    "fallbacks": ["use_default_pipeline_behavior"],',
+            f"{indent}}}",
+        ]
+        lines[idx : idx + 1] = replacement
+        changed = True
+        break
+    if not changed:
+        return
+
+    updated = "\n".join(lines)
     if text.endswith("\n"):
         updated += "\n"
     kernel_path.write_text(updated, encoding="utf-8")
@@ -1787,13 +1873,28 @@ def _format_log_events(events: list[dict[str, object]]) -> list[str]:
 
 
 def _find_output_file(output_dir: Path, filename: str) -> Path | None:
-    candidate = output_dir / filename
-    if candidate.exists():
-        return candidate
-    matches = list(output_dir.rglob(filename))
-    if matches:
-        return matches[0]
-    return None
+    """Find the newest matching artifact within an output tree.
+
+    Local kernels can be executed repeatedly for the same run/iteration while
+    iterating on fixes. In that scenario, stale artifacts may exist alongside
+    fresh ones (or nested under additional run directories). Prefer the most
+    recently modified match to avoid accidentally reusing stale outputs.
+    """
+
+    candidates: list[Path] = []
+    direct = output_dir / filename
+    if direct.exists():
+        candidates.append(direct)
+    try:
+        candidates.extend(path for path in output_dir.rglob(filename) if path.exists())
+    except OSError:
+        # Best-effort discovery; callers handle missing artifacts.
+        pass
+    files = [path for path in candidates if path.is_file()]
+    if not files:
+        return None
+    # Deterministic tie-breaker: path string.
+    return max(files, key=lambda path: (path.stat().st_mtime, str(path)))
 
 
 def _find_submission_by_extension(output_dir: Path) -> Path | None:
