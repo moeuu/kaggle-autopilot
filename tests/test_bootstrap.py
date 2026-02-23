@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from kagglebot.bootstrap import _mirror_sample_submission_to_data, bootstrap_competition
+from kagglebot.bootstrap import _mirror_sample_submission_to_data, _write_sample_head, bootstrap_competition
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 
@@ -263,3 +263,29 @@ def test_mirror_sample_submission_to_data(tmp_path) -> None:
     mirrored = paths.data_dir / "sample_submission.csv"
     assert mirrored.exists()
     assert mirrored.read_text(encoding="utf-8") == "id,target\n1,0.1\n"
+
+
+def test_write_sample_head_reads_limited_rows(tmp_path, monkeypatch) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    sample_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
+    head_path = tmp_path / "sample_submission_head.csv"
+
+    import pandas as pd
+
+    called: dict[str, int | None] = {"nrows": None}
+    real_read_csv = pd.read_csv
+
+    def _spy_read_csv(*args, **kwargs):  # noqa: ANN002, ANN003
+        called["nrows"] = kwargs.get("nrows")
+        return real_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", _spy_read_csv)
+
+    _write_sample_head(sample_path, head_path, rows=2)
+
+    assert called["nrows"] == 2
+    assert head_path.read_text(encoding="utf-8").strip().splitlines() == [
+        "id,target",
+        "1,0.1",
+        "2,0.2",
+    ]

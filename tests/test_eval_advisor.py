@@ -22,7 +22,7 @@ def _valid_payload() -> dict[str, object]:
                 "method": "ci_bound",
                 "k": 1.0,
                 "target_score": 0.8,
-                "submission_gate": "readiness_or_final",
+                "submission_gate": "always",
             },
             "drift_check": {"enabled": False, "drift_weight": 1.0},
             "stop_policy": {

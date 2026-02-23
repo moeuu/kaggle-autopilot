@@ -97,6 +97,18 @@ Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 
 Optional environment knobs:
 - `KAGGLEBOT_MODEL_CANDIDATES="catboost,xgboost,lightgbm,torch,extra_trees"` to prioritize/limit model families
+- Large competition download strategy (auto-enabled):
+  - Kagglebot now probes competition file sizes first.
+  - If total size is large (default threshold: `8 GiB`), downloads switch to per-file mode with retry/backoff.
+  - When per-file mode hits `429 Too Many Requests`, Kagglebot automatically falls back to a single-shot download.
+  - `KAGGLEBOT_DOWNLOAD_SPLIT_THRESHOLD_BYTES=<int>` override split threshold bytes.
+  - `KAGGLEBOT_DOWNLOAD_RETRY_ATTEMPTS=<int>` retry attempts per command (`0` = unlimited; default `8`).
+  - `KAGGLEBOT_DOWNLOAD_RETRY_BACKOFF_SEC=<float>` base retry backoff seconds (default `2.0`).
+- Training progress logging (applies even when kernel code is quiet):
+  - `KAGGLEBOT_TRAIN_PROGRESS=1|0` (default `1`) enable/disable forced periodic training logs
+  - `KAGGLEBOT_PROGRESS_INTERVAL_SEC=<float>` watchdog silence threshold before emitting "no new logs" status (default `45`)
+  - `KAGGLEBOT_MODEL_PROGRESS_INTERVAL_SEC=<float>` baseline per-model `fit()` tick interval (auto-adjusted by method/data size; default `12`)
+  - `KAGGLEBOT_BOOSTING_LOG_EVERY=<int>` boosting eval-log period in iterations (`0` = auto, default)
 - Custom metric hook: use metric string `custom:<module_or_py_path>:<function>`
 - Vision YOLO routing: if sample columns are `filename,right_place,prediction_string` and YOLO folders exist
   (`images/train`, `images/test`, `labels/train`), Kagglebot uses a detection pipeline instead of tabular models.

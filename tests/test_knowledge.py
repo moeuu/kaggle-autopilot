@@ -6,6 +6,7 @@ import sqlite3
 
 import kagglebot.knowledge as knowledge_mod
 from kagglebot.knowledge import (
+    build_dataset_profile,
     derive_problem_types,
     ensure_taxonomy,
     format_error_fix_insights,
@@ -59,6 +60,25 @@ aliases:
     data = load_taxonomy(path)
     assert "tabular" in data["tags"]
     assert data["aliases"]["bin"] == "binary"
+
+
+def test_build_dataset_profile_samples_oversized_tables(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.csv").write_text("id,feature,target\n1,10,0\n2,20,1\n3,30,0\n4,40,1\n", encoding="utf-8")
+    (data_dir / "test.csv").write_text("id,feature\n5,50\n6,60\n", encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("id,target\n5,0\n6,0\n", encoding="utf-8")
+
+    monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "1")
+    profile = build_dataset_profile(data_dir)
+
+    assert profile["status"] == "ok"
+    assert profile["train_rows"] == 4
+    sampling = profile["profile_sampling"]
+    assert sampling["enabled"] is True
+    assert sampling["train"] is True
+    assert sampling["test"] is True
+    assert sampling["sample_submission"] is True
 
 
 def test_problem_type_insight_record_and_resolve(tmp_path) -> None:

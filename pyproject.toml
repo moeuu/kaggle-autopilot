@@ -64,6 +64,7 @@ typeCheckingMode = "basic"
 exclude = ["src/kagglebot/knowledge/__init__.py"]
 
 [tool.pytest.ini_options]
+addopts = "-p no:launch_testing -p no:launch_ros"
 markers = [
     "integration: requires Kaggle CLI + credentials (opt-in)",
 ]

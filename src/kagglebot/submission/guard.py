@@ -12,6 +12,20 @@ from kagglebot.exceptions import SubmissionCliError
 
 _PERMANENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
     (
+        "notebook_only_submission_required",
+        (
+            re.compile(r"only accepts submissions from notebooks", flags=re.IGNORECASE),
+            re.compile(r"must be made through notebooks", flags=re.IGNORECASE),
+        ),
+    ),
+    (
+        "bad_request",
+        (
+            re.compile(r"\b400\s+client\s+error\b", flags=re.IGNORECASE),
+            re.compile(r"\bbad request\b", flags=re.IGNORECASE),
+        ),
+    ),
+    (
         "rules_not_accepted",
         (
             re.compile(r"accept the rules", flags=re.IGNORECASE),
@@ -115,6 +129,7 @@ def run_kaggle_submit(
         str(submission_file),
         "-m",
         message,
+        "-q",
     ]
     if dry_run:
         return SubmitResult(
@@ -151,6 +166,82 @@ def run_kaggle_submit(
         stderr_tail = _tail_text(stderr_text)
         raise SubmissionCliError(
             "Kaggle CLI submit failed.",
+            command=args,
+            exit_code=completed.returncode,
+            output=_tail_text(f"{stdout_text}\n{stderr_text}"),
+            stdout=stdout_tail,
+            stderr=stderr_tail,
+        )
+    return SubmitResult(
+        returncode=completed.returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
+        command=args,
+        duration_sec=duration,
+    )
+
+
+def run_kaggle_submit_kernel(
+    *,
+    slug: str,
+    kernel: str,
+    message: str,
+    output_file: str | None = None,
+    version: str | None = None,
+    dry_run: bool = False,
+) -> SubmitResult:
+    """Submit to a competition using a Kaggle notebook kernel reference."""
+    args = [
+        "kaggle",
+        "competitions",
+        "submit",
+        "-c",
+        slug,
+        "-k",
+        str(kernel),
+        "-m",
+        message,
+        "-q",
+    ]
+    if output_file:
+        args.extend(["-f", str(output_file)])
+    if version:
+        args.extend(["-v", str(version)])
+    if dry_run:
+        return SubmitResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            command=args,
+            duration_sec=0.0,
+        )
+
+    start = time.monotonic()
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise SubmissionCliError(
+            "Kaggle CLI notebook submit failed: kaggle executable not found on PATH.",
+            command=args,
+            exit_code=127,
+            output="",
+            stdout="",
+            stderr=str(exc),
+        ) from exc
+    duration = time.monotonic() - start
+
+    stdout_text = completed.stdout or ""
+    stderr_text = completed.stderr or ""
+    if completed.returncode != 0:
+        stdout_tail = _tail_text(stdout_text)
+        stderr_tail = _tail_text(stderr_text)
+        raise SubmissionCliError(
+            "Kaggle CLI notebook submit failed.",
             command=args,
             exit_code=completed.returncode,
             output=_tail_text(f"{stdout_text}\n{stderr_text}"),

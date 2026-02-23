@@ -88,7 +88,8 @@ CV strategy selection:
 - otherwise uses `StratifiedKFold` for classification or `KFold` for other tasks
 
 Submission behavior:
-- submit according to readiness gate policy (`submission_gate`, default `always`)
+- default submit every iteration
+- activate `submission_gate` only when rules indicate submission-count limits
 - wait for submission outcome when submission is attempted
 - use readiness score (SRS) as primary loop-decision signal; submission score/rank are secondary guardrails
 

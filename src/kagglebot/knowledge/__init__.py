@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -13,6 +14,9 @@ import pandas as pd
 from kagglebot.knowledge.repositories import InsightRepository, TaxonomyRepository
 from kagglebot.paths import KnowledgePaths
 from kagglebot.solver.io import find_competition_files, infer_prediction_kind, infer_submission_layout, infer_task
+
+_PROFILE_MAX_TABLE_BYTES_DEFAULT = 256 * 1024 * 1024
+_PROFILE_SAMPLE_ROWS = 200_000
 
 
 @dataclass(frozen=True)
@@ -491,10 +495,11 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         profile["tags"] = []
         return profile
 
+    max_table_bytes = _profile_max_table_bytes()
     try:
-        train = _read_table(train_path)
-        test = _read_table(test_path)
-        sample = _read_table(sample_path)
+        train, train_row_count, train_sampled = _read_table_for_profile(train_path, max_table_bytes=max_table_bytes)
+        test, test_row_count, test_sampled = _read_table_for_profile(test_path, max_table_bytes=max_table_bytes)
+        sample, _, sample_sampled = _read_table_for_profile(sample_path, max_table_bytes=max_table_bytes)
     except Exception as exc:  # noqa: BLE001
         profile["status"] = "unreadable_tabular"
         profile["error"] = str(exc)
@@ -513,7 +518,7 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     prediction_kind_by_target = {
         col: infer_prediction_kind(sample[col]) if col in sample.columns else "continuous" for col in target_cols
     }
-    n_rows = len(train)
+    n_rows = train_row_count if train_row_count is not None else len(train)
     n_cols = len(train.columns)
     missingness = float(train.isna().mean().mean())
     missingness_by_column = {col: float(val) for col, val in train.isna().mean().items()}
@@ -550,7 +555,7 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             "sample_submission_file": sample_path.name,
             "train_rows": n_rows,
             "train_cols": n_cols,
-            "test_rows": len(test),
+            "test_rows": test_row_count if test_row_count is not None else len(test),
             "test_cols": len(test.columns),
             "id_column": id_col,
             "target_column": target_col,
@@ -570,9 +575,66 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             "target_stats": target_stats,
             "train_only_columns": train_only,
             "test_only_columns": test_only,
+            "profile_sampling": {
+                "enabled": bool(train_sampled or test_sampled or sample_sampled),
+                "max_table_bytes": max_table_bytes,
+                "max_rows": _PROFILE_SAMPLE_ROWS,
+                "train": train_sampled,
+                "test": test_sampled,
+                "sample_submission": sample_sampled,
+            },
         }
     )
     return profile
+
+
+def _profile_max_table_bytes() -> int:
+    raw = str(os.getenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", _PROFILE_MAX_TABLE_BYTES_DEFAULT)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _PROFILE_MAX_TABLE_BYTES_DEFAULT
+    if value <= 0:
+        return _PROFILE_MAX_TABLE_BYTES_DEFAULT
+    return value
+
+
+def _read_table_for_profile(path: Path, *, max_table_bytes: int) -> tuple[pd.DataFrame, int | None, bool]:
+    size_bytes = _safe_file_size(path)
+    suffix = path.suffix.lower()
+    oversized = size_bytes is not None and size_bytes > max_table_bytes
+    if oversized and suffix in {".csv", ".tsv", ".txt", ".jsonl"}:
+        if suffix == ".jsonl":
+            frame = pd.read_json(path, lines=True, nrows=_PROFILE_SAMPLE_ROWS)
+            row_count = _count_text_rows(path, has_header=False)
+            return frame, row_count, True
+        sep = "\t" if suffix in {".tsv", ".txt"} else ","
+        frame = pd.read_csv(path, sep=sep, nrows=_PROFILE_SAMPLE_ROWS)
+        row_count = _count_text_rows(path, has_header=True)
+        return frame, row_count, True
+    frame = _read_table(path)
+    return frame, len(frame), False
+
+
+def _safe_file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _count_text_rows(path: Path, *, has_header: bool) -> int | None:
+    rows = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if line.strip():
+                    rows += 1
+    except OSError:
+        return None
+    if has_header and rows > 0:
+        rows -= 1
+    return rows
 
 
 def _find_tabular_files(root: Path) -> list[Path]:
@@ -900,6 +962,11 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 - Avoid weak starter implementations.
 - Avoid generic metric heuristics; derive metric choices from the rules.
 - Use web search each iteration to validate model/feature choices; prefer official docs or top Kaggle discussions.
+- Use one consistent evaluation path for training-time selection and final offline scoring.
+  If you print `val_*` during training, it must be computed under the same split/rollout/aggregation
+  assumptions as the final reported metric.
+- Evaluate at least one simple baseline (mean/majority/persistence as appropriate) with the same
+  validation protocol, and do not select/submit a learned pipeline that underperforms that baseline.
 
 **Mode guidance**:
 - `major_overhaul`: switch model family or core feature strategy; remove dead code paths.
@@ -1524,6 +1591,7 @@ def build_kernel_fix_template() -> str:
 1) Identify the root cause of the kernel failure from logs and traceback.
 2) Fix the issue with minimal, targeted changes.
    - Edit **only** the authoritative `kernel.py` (`Kernel Main` above) for competition-specific fixes.
+   - Do **NOT** edit anything under `artifacts/<slug>/kernels/` (generated staging directory).
    - Do **NOT** edit the generated `Kernel Script` copy (it will be overwritten).
    - If the failure is in the **runner/validators/CLI plumbing** (e.g., kernel packaging,
      path injection, validation, or Kaggle CLI status/output handling), you may edit **src/**

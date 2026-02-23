@@ -14,7 +14,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from kagglebot.competition import rules_url_for_slug
-from kagglebot.kaggle_api import download_competition, kernels_pull, list_competition_kernels
+from kagglebot.kaggle_api import DownloadProgressCallback, download_competition, kernels_pull, list_competition_kernels
 from kagglebot.knowledge import (
     build_improve_template,
     build_kernel_fix_template,
@@ -24,7 +24,7 @@ from kagglebot.knowledge import (
     resolve_similar_improvements,
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
-from kagglebot.submission_format import extract_submission_section, load_submission_format_hint
+from kagglebot.submission_format import extract_submission_section, load_submission_format_hint, parse_submission_format
 from kagglebot.types import BootstrapMeta, PlanConfig, RulesInfo
 from kagglebot.validators import safe_extract_zip
 
@@ -41,6 +41,7 @@ def bootstrap_competition(
     quiet: bool = True,
     force: bool = False,
     dry_run: bool = False,
+    download_progress_callback: DownloadProgressCallback | None = None,
 ) -> Path:
     """
     Prepare local workspace directories and write meta + plan files.
@@ -91,7 +92,13 @@ def bootstrap_competition(
                 "DRY RUN: download skipped.\n", encoding="utf-8"
             )
         else:
-            download_competition(slug, paths.data_dir, force=True, quiet=quiet)
+            download_competition(
+                slug,
+                paths.data_dir,
+                force=True,
+                quiet=quiet,
+                progress_callback=download_progress_callback,
+            )
             _unzip_downloads(paths.data_dir)
             if rules_source == "url":
                 _capture_rules(
@@ -177,15 +184,15 @@ def _capture_rules(
 
             submission_section = None
             if normalized_data:
-                submission_section = extract_submission_section(normalized_data)
+                submission_section = _extract_usable_submission_section(normalized_data)
             if not submission_section and normalized_overview:
-                submission_section = extract_submission_section(normalized_overview)
+                submission_section = _extract_usable_submission_section(normalized_overview)
             if not submission_section:
                 for page in pages:
                     content = page.get("content")
                     if not isinstance(content, str) or not content.strip():
                         continue
-                    section = extract_submission_section(_normalize_page_markdown(content))
+                    section = _extract_usable_submission_section(_normalize_page_markdown(content))
                     if section:
                         submission_section = section
                         break
@@ -240,6 +247,16 @@ class _RulesHtmlToMarkdown(HTMLParser):
     def to_markdown(self) -> str:
         self._flush()
         return "\n".join(self._lines).strip()
+
+
+def _extract_usable_submission_section(markdown: str) -> str | None:
+    section = extract_submission_section(markdown)
+    if not section:
+        return None
+    hint = parse_submission_format(section)
+    if hint.columns:
+        return section
+    return None
 
 
 def _write_rules_from_file(paths: CompetitionPaths, rules_file: Path, *, rules_url: str) -> None:
@@ -1349,7 +1366,7 @@ def _write_sample_head(sample_path: Path, head_path: Path, rows: int = 5) -> Non
     except Exception:  # pragma: no cover - optional dependency in tests
         return
     try:
-        sample = pd.read_csv(sample_path)
+        sample = pd.read_csv(sample_path, nrows=rows)
     except Exception:
         return
     head_path.write_text(sample.head(rows).to_csv(index=False), encoding="utf-8")

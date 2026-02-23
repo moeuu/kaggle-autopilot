@@ -9,9 +9,11 @@ import os
 import random
 import re
 import shlex
+import shutil
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,7 +53,12 @@ from kagglebot.kaggle_api import (
     leaderboard_top1,
     list_competition_submissions,
 )
-from kagglebot.kernel_runner import _collect_log_tail, resolve_kaggle_username, run_kernel, run_kernel_local
+from kagglebot.kernel_runner import (
+    _collect_log_tail,
+    resolve_kaggle_username,
+    run_kernel,
+    run_kernel_local,
+)
 from kagglebot.knowledge import (
     derive_problem_types,
     ensure_taxonomy,
@@ -80,8 +87,9 @@ from kagglebot.submission.guard import (
     classify_submit_error,
     compute_error_fingerprint,
     normalize_error_text,
+    run_kaggle_submit_kernel,
 )
-from kagglebot.submission.outcome_service import SubmissionOutcomeService
+from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.types import PlanConfig
 
@@ -132,7 +140,7 @@ class AutopilotConfig:
     dry_run: bool
 
 
-MAX_KERNEL_FIX_ATTEMPTS: int | None = None
+MAX_KERNEL_FIX_ATTEMPTS: int | None = 8
 MAX_SAME_KERNEL_ERROR_REPEATS = 2
 MAX_KERNEL_CAPACITY_RETRIES = 3
 KERNEL_CAPACITY_RETRY_SLEEP = 30.0
@@ -149,10 +157,22 @@ _ERROR_STRATEGY_MODEL = "gpt-5.2"
 _ERROR_STRATEGY_REASONING_EFFORT = "extra_high"
 _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
+_SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
+_FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
 _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
+_KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
+_NOTEBOOK_FALLBACK_HINTS = (
+    "submit-notebook",
+    "notebook",
+    "/api/v1/competitions/submissions/submit/",
+    "submission not allowed",
+    "only accepts submissions from notebooks",
+    "code competition submissions require both the output file name and the version label",
+    "kernel must be specified as <owner>/<notebook>",
+)
 _ITERATION_STATE_FILENAME = "iteration_state.json"
 _LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS = frozenset({"submit"})
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
@@ -160,6 +180,37 @@ _DEFAULT_EVAL_REPEATS = 2
 _EVAL_REPEAT_SEED_OFFSET = 1009
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
+_DEFAULT_LIMITED_SUBMISSION_GATE = "readiness_or_final"
+_KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
+_QUALITY_GUARD_BASELINE_REL_MARGIN = 0.01
+_QUALITY_GUARD_BASELINE_ABS_MARGIN = 1e-6
+_QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE = 2.0
+_QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE = 0.30
+_QUALITY_GUARD_MISMATCH_ABS_MARGIN = 0.05
+_QUALITY_GUARD_STEP_BUCKET_RATIO = 2.5
+_NUMBER_WORD_TO_INT = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+@dataclass(frozen=True)
+class _CompetitionRuleConstraints:
+    notebook_submissions_only: bool = False
+    internet_must_be_off: bool = False
+    submission_limit_detected: bool = False
+    submission_limit_per_day: int | None = None
+    cpu_runtime_limit_min: int | None = None
+    gpu_runtime_limit_min: int | None = None
 
 
 class _TrainingLiveStdout:
@@ -242,8 +293,10 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 if attempt > MAX_AUTOFIX_ATTEMPTS:
                     raise
                 print("[yellow]autofix[/yellow]: submit stage failed; invoking codex to repair and retry submit")
-                os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
-                submit_force_override = True
+                run_dir = config.paths.run_dir(run_id)
+                if (not _has_successful_submit_attempt(run_dir)) or _should_force_resubmit_after_submit_abort(run_dir):
+                    os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
+                    submit_force_override = True
                 _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
                 resume_after_failure = True
             except KernelCapacityError:
@@ -357,7 +410,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         _write_plan(config.paths, plan)
 
     print(f"[cyan]fetching leaderboard[/cyan]: {config.slug}")
-    top1_info = leaderboard_top1(config.slug, config.paths.context_dir, dry_run=config.dry_run)
+    metric_hint = config.target_metric or plan.target_metric
+    top1_info = leaderboard_top1(
+        config.slug,
+        config.paths.context_dir,
+        dry_run=config.dry_run,
+        metric_hint=metric_hint,
+    )
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
     _print_top1_info(top1_info)
     knowledge_phase.refresh()
@@ -418,9 +477,17 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     score_source = str(resolved["score_source"] or "auto")
     max_total_min_raw = resolved.get("max_total_min")
     max_total_min = float(max_total_min_raw) if isinstance(max_total_min_raw, (int, float)) else None
+    time_budget_min_raw = resolved.get("time_budget_min")
+    time_budget_min = int(time_budget_min_raw) if isinstance(time_budget_min_raw, (int, float)) else None
     kernel_name = resolved["kernel_name"]
     enable_internet = str(resolved["internet"]) == "on"
     submission_gate = str(resolved.get("submission_gate") or "always")
+    submission_limit_per_day_raw = resolved.get("submission_limit_per_day")
+    submission_limit_per_day = (
+        int(submission_limit_per_day_raw)
+        if isinstance(submission_limit_per_day_raw, (int, float)) and int(submission_limit_per_day_raw) > 0
+        else None
+    )
     readiness_target = float(resolved.get("readiness_target_score") or target_score)
     readiness_method = str(resolved.get("readiness_method") or "ci_bound")
     readiness_k = float(resolved.get("readiness_k") or 1.0)
@@ -494,6 +561,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             metrics_path = iter_dir / "metrics.json"
             evaluation_report_path = iter_dir / "evaluation_report.json"
             evaluation = None
+            kernel_metrics_payload: dict[str, object] | None = None
             evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
@@ -509,10 +577,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if submit_retry_resume is not None:
                 resume_submission_path, resume_metrics_path, resume_evaluation = submit_retry_resume
                 if resume_submission_path != submission_path:
-                    submission_path.write_bytes(resume_submission_path.read_bytes())
+                    submission_path = _copy_submission_artifact_to_iteration_dir(
+                        source=resume_submission_path,
+                        iter_dir=iter_dir,
+                    )
                 if resume_metrics_path != metrics_path:
                     metrics_path.write_bytes(resume_metrics_path.read_bytes())
                 evaluation = resume_evaluation
+                kernel_metrics_payload = _load_json_object(resume_metrics_path)
                 print(
                     "[yellow]resume[/yellow]: "
                     f"iter-{iteration} has completed training artifacts; retrying submit without retraining."
@@ -541,8 +613,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             cv_folds=cv_folds,
                             seed=seed,
                             dry_run=config.dry_run,
-                            timeout_minutes=None,
+                            timeout_minutes=time_budget_min,
                         )
+                        if kernel_result.submission_path:
+                            submission_path = _copy_submission_artifact_to_iteration_dir(
+                                source=kernel_result.submission_path,
+                                iter_dir=iter_dir,
+                            )
+                        if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+                            kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
+                            evaluation = _load_kernel_metrics(
+                                kernel_result.metrics_path,
+                                metric_direction,
+                                target_metric,
+                            )
+                        if evaluation is None:
+                            raise KernelFailedError(
+                                "Kernel metrics missing expected score; "
+                                "ensure metrics.json includes a numeric metric value."
+                            )
                         break
                     except RulesNotAcceptedError:
                         raise
@@ -599,13 +688,26 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             continue
                         kernel_attempts += 1
                         error_text = _format_kernel_error(exc)
-                        _record_kernel_error(
-                            logs_dir=logs_dir,
-                            attempt=kernel_attempts,
-                            error_text=error_text,
-                            error_fingerprints=error_fingerprints,
-                            output_dir=output_dir,
-                        )
+                        try:
+                            _record_kernel_error(
+                                logs_dir=logs_dir,
+                                attempt=kernel_attempts,
+                                error_text=error_text,
+                                error_fingerprints=error_fingerprints,
+                                output_dir=output_dir,
+                            )
+                        except KernelFailedError:
+                            if _maybe_regenerate_kernel_sources_once(
+                                config=config,
+                                run_id=run_id,
+                                iteration=iteration,
+                                iter_dir=iter_dir,
+                                attempt=kernel_attempts,
+                                trigger_reason="repeated_error_fingerprint",
+                            ):
+                                error_fingerprints.clear()
+                                continue
+                            raise
                         if config.dry_run:
                             raise
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
@@ -620,14 +722,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             attempt=kernel_attempts,
                             pending_error_fixes=pending_error_fixes,
                         )
-                if kernel_result.submission_path:
-                    submission_path.write_bytes(kernel_result.submission_path.read_bytes())
-                if kernel_result.metrics_path and kernel_result.metrics_path.exists():
-                    evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction, target_metric)
-                if evaluation is None:
-                    raise KernelFailedError(
-                        "Kernel metrics missing expected score; ensure metrics.json includes a numeric metric value."
-                    )
             elif evaluation is None:
                 kernel_path = config.paths.kernel_source_dir / "kernel.py"
                 if not kernel_path.exists():
@@ -653,20 +747,50 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             cv_folds=cv_folds,
                             seed=seed,
                             dry_run=config.dry_run,
-                            timeout_minutes=config.time_budget_min,
+                            timeout_minutes=time_budget_min,
                             strict_accelerator=config.strict_accelerator,
                         )
+                        if kernel_result.submission_path:
+                            submission_path = _copy_submission_artifact_to_iteration_dir(
+                                source=kernel_result.submission_path,
+                                iter_dir=iter_dir,
+                            )
+                        if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+                            kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
+                            evaluation = _load_kernel_metrics(
+                                kernel_result.metrics_path,
+                                metric_direction,
+                                target_metric,
+                            )
+                        if evaluation is None:
+                            raise KernelFailedError(
+                                "Local kernel metrics missing expected score; "
+                                "ensure metrics.json includes a numeric metric value."
+                            )
                         break
                     except Exception as exc:  # noqa: BLE001
                         kernel_attempts += 1
                         error_text = _format_kernel_error(exc)
-                        _record_kernel_error(
-                            logs_dir=logs_dir,
-                            attempt=kernel_attempts,
-                            error_text=error_text,
-                            error_fingerprints=error_fingerprints,
-                            output_dir=output_dir,
-                        )
+                        try:
+                            _record_kernel_error(
+                                logs_dir=logs_dir,
+                                attempt=kernel_attempts,
+                                error_text=error_text,
+                                error_fingerprints=error_fingerprints,
+                                output_dir=output_dir,
+                            )
+                        except KernelFailedError:
+                            if _maybe_regenerate_kernel_sources_once(
+                                config=config,
+                                run_id=run_id,
+                                iteration=iteration,
+                                iter_dir=iter_dir,
+                                attempt=kernel_attempts,
+                                trigger_reason="repeated_error_fingerprint",
+                            ):
+                                error_fingerprints.clear()
+                                continue
+                            raise
                         if config.dry_run:
                             raise
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
@@ -683,16 +807,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             attempt=kernel_attempts,
                             pending_error_fixes=pending_error_fixes,
                         )
-
-                if kernel_result.submission_path:
-                    submission_path.write_bytes(kernel_result.submission_path.read_bytes())
-                if kernel_result.metrics_path and kernel_result.metrics_path.exists():
-                    evaluation = _load_kernel_metrics(kernel_result.metrics_path, metric_direction, target_metric)
-                if evaluation is None:
-                    raise KernelFailedError(
-                        "Local kernel metrics missing expected score; "
-                        "ensure metrics.json includes a numeric metric value."
-                    )
 
             if evaluation is None:
                 raise RuntimeError("No evaluation metrics produced.")
@@ -783,6 +897,30 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
 
+            quality_guard = _build_kernel_quality_guard(
+                evaluation=evaluation,
+                kernel_metrics_payload=kernel_metrics_payload,
+                logs_dir=logs_dir,
+                direction=metric_direction,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                force_submit=config.force_submit,
+            )
+            quality_allows_submit = bool(quality_guard.get("allow_submit", True))
+            quality_reasons_raw = quality_guard.get("reasons")
+            quality_reasons = (
+                [str(item) for item in quality_reasons_raw if isinstance(item, str)]
+                if isinstance(quality_reasons_raw, list)
+                else []
+            )
+            if config.submit and (not quality_allows_submit) and (not config.force_submit):
+                reason_text = ", ".join(quality_reasons) if quality_reasons else "quality_guard_blocked_submit"
+                print(
+                    "[yellow]submit blocked[/yellow]: kernel quality guard detected unstable evaluation "
+                    f"({reason_text}); submission is deferred to a later iteration."
+                )
+
+            successful_submit_count = _count_successful_submit_attempts(run_dir)
             allow_submit = _should_attempt_submit_for_readiness(
                 gate=submission_gate,
                 readiness_score=readiness_score,
@@ -790,12 +928,30 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 direction=metric_direction,
                 iteration=iteration,
                 max_iterations=max_iterations,
+                submission_limit_per_day=submission_limit_per_day,
+                successful_submissions=successful_submit_count,
+                top1_score=top1_score if isinstance(top1_score, (int, float)) else None,
             )
+            if (not quality_allows_submit) and (not config.force_submit):
+                allow_submit = False
+            submit_limited_holdback = False
+            if config.submit and submission_limit_per_day is not None and quality_allows_submit:
+                reserve_start = max(0, submission_limit_per_day - 1)
+                if successful_submit_count >= reserve_start and not allow_submit:
+                    submit_limited_holdback = True
+                    print(
+                        "[yellow]submit deferred[/yellow]: reserved final submission slot "
+                        "until offline score reaches top1-tier or final iteration."
+                    )
             submit_phase_required = config.submit and not config.dry_run
             submit_allowed_by_gate = config.submit and allow_submit
             pre_submit_phase_state = "disabled"
             if config.submit:
-                pre_submit_phase_state = "pending_submit" if allow_submit else "skipped_gate"
+                pre_submit_phase_state = "pending_submit"
+            if config.submit and (not quality_allows_submit) and (not config.force_submit):
+                pre_submit_phase_state = "blocked_quality_guard"
+            if submit_limited_holdback:
+                pre_submit_phase_state = "deferred_for_final_slot"
             pre_submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate)
             pre_submit_metrics_payload = _build_metrics_payload(
                 run_id=run_id,
@@ -814,6 +970,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 readiness_target=readiness_target,
             )
             pre_submit_metrics_payload["checkpoint_phase"] = "pre_submit"
+            pre_submit_metrics_payload["quality_guard"] = quality_guard
             metrics_path.write_text(json.dumps(pre_submit_metrics_payload, indent=2), encoding="utf-8")
             _write_iteration_state_marker(
                 iter_dir=iter_dir,
@@ -830,7 +987,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 readiness_score=readiness_score,
             )
             submission_result: dict[str, object] | None = None
-            submit_phase_state = "disabled"
+            submit_phase_state = "deferred_for_final_slot" if submit_limited_holdback else "disabled"
             if config.submit and allow_submit:
                 try:
                     submission_result = submission_phase.attempt(
@@ -939,13 +1096,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 )
                 else:
                     submit_phase_state = "dry_run" if config.dry_run else "attempted_no_result"
-            elif config.submit:
-                submit_phase_state = "skipped_gate"
-                print(
-                    "[yellow]submit gate[/yellow]: "
-                    f"gate={submission_gate} readiness={readiness_score:.6f} target={readiness_target:.6f} -> skipped"
-                )
-
             met_target = _meets_target(readiness_score, readiness_target, metric_direction)
             top1_tier = _is_top1_tier(readiness_score, top1_score, metric_direction)
             delta_srs_vs_prev: float | None = None
@@ -1016,6 +1166,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "offline_readiness": top1_tier,
                 "submission_score": top1_tier_by_submission,
             }
+            metrics_payload["quality_guard"] = quality_guard
             metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
 
             diff_summary = "Diff tracking disabled (git integration removed)."
@@ -1031,6 +1182,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 evaluation_by_source=evaluation_by_source,
                 loop_decision_score=decision_score,
                 loop_decision_source=decision_source,
+                quality_guard=quality_guard,
             )
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
@@ -1157,15 +1309,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         print("[yellow]run interrupted[/yellow]")
         return
 
-    allow_final_submit = _should_attempt_submit_for_readiness(
-        gate=submission_gate,
-        readiness_score=best_score,
-        readiness_target=readiness_target,
-        direction=metric_direction,
-        iteration=max_iterations,
-        max_iterations=max_iterations,
-    )
-    if config.submit and not submitted and best_submission is not None and allow_final_submit:
+    if config.submit and not submitted and best_submission is not None:
         try:
             fallback_result = submission_phase.attempt(
                 submission_path=best_submission,
@@ -1178,12 +1322,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         if fallback_result:
             submitted = True
             last_submission_result = fallback_result
-    elif config.submit and not submitted and best_submission is not None and not allow_final_submit:
-        print(
-            "[yellow]submit gate[/yellow]: "
-            f"final submit skipped by gate={submission_gate} "
-            f"(best_readiness={best_score if best_score is not None else 'n/a'}, target={readiness_target:.6f})"
-        )
 
     if submitted and last_submission_result:
         top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
@@ -1265,6 +1403,96 @@ def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
     return kernel_path.exists()
 
 
+def _extract_submission_limit_per_day(lowered_rules_text: str) -> int | None:
+    """Extract an explicit `N submissions per day` value from rules text."""
+    candidates: list[int] = []
+
+    for match in re.finditer(r"\((\d+)\)\s+submissions?\s+per\s+day", lowered_rules_text):
+        candidates.append(int(match.group(1)))
+
+    for match in re.finditer(r"\b(\d+)\s+submissions?\s+per\s+day\b", lowered_rules_text):
+        candidates.append(int(match.group(1)))
+
+    for match in re.finditer(r"\b([a-z]+)\s+submissions?\s+per\s+day\b", lowered_rules_text):
+        number_word = match.group(1)
+        if number_word in _NUMBER_WORD_TO_INT:
+            candidates.append(_NUMBER_WORD_TO_INT[number_word])
+
+    positive = [value for value in candidates if value > 0]
+    if not positive:
+        return None
+    return min(positive)
+
+
+def _load_competition_rule_constraints(paths: CompetitionPaths) -> _CompetitionRuleConstraints:
+    text_parts: list[str] = []
+    for path in (paths.rules_md_path, paths.rules_html_path):
+        if not path.exists():
+            continue
+        try:
+            text_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    if not text_parts:
+        return _CompetitionRuleConstraints()
+    text = "\n".join(text_parts)
+    lowered = text.lower()
+
+    notebook_submissions_only = bool(
+        re.search(r"submissions?\s+to\s+this\s+competition\s+must\s+be\s+made\s+through\s+notebooks?", lowered)
+        or re.search(r"submissions?\s+must\s+be\s+made\s+through\s+notebooks?", lowered)
+        or re.search(r"only\s+accepts?\s+submissions?\s+from\s+notebooks?", lowered)
+    )
+    internet_must_be_off = bool(
+        re.search(r"internet\s+access\s+disabled", lowered)
+        or re.search(r"enable[_\s-]?internet\s*[:=]\s*false", lowered)
+    )
+    submission_limit_per_day = _extract_submission_limit_per_day(lowered)
+    submission_limit_detected = bool(
+        re.search(r"maximum\s+number\s+of\s+submissions", lowered)
+        or re.search(r"submission\s+limit", lowered)
+        or re.search(r"\bmax(?:imum)?\s+submissions?\b", lowered)
+        or re.search(r"\b\d+\s+submissions?\s+per\s+day\b", lowered)
+        or re.search(r"\bdaily\s+submissions?\b", lowered)
+        or submission_limit_per_day is not None
+    )
+
+    cpu_runtime_limit_min: int | None = None
+    gpu_runtime_limit_min: int | None = None
+    for match in re.finditer(
+        r"\b(cpu|gpu)\s+notebook\s*<=?\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b",
+        lowered,
+    ):
+        device = match.group(1)
+        hours = float(match.group(2))
+        minutes = max(1, int(round(hours * 60)))
+        if device == "cpu":
+            cpu_runtime_limit_min = minutes if cpu_runtime_limit_min is None else min(cpu_runtime_limit_min, minutes)
+        else:
+            gpu_runtime_limit_min = minutes if gpu_runtime_limit_min is None else min(gpu_runtime_limit_min, minutes)
+
+    return _CompetitionRuleConstraints(
+        notebook_submissions_only=notebook_submissions_only,
+        internet_must_be_off=internet_must_be_off,
+        submission_limit_detected=submission_limit_detected,
+        submission_limit_per_day=submission_limit_per_day,
+        cpu_runtime_limit_min=cpu_runtime_limit_min,
+        gpu_runtime_limit_min=gpu_runtime_limit_min,
+    )
+
+
+def _runtime_limit_for_compute(*, constraints: _CompetitionRuleConstraints, compute: str) -> int | None:
+    normalized = str(compute or "").strip().lower()
+    if normalized == "kaggle_gpu":
+        return constraints.gpu_runtime_limit_min or constraints.cpu_runtime_limit_min
+    if normalized == "kaggle_tpu":
+        limits = [value for value in (constraints.gpu_runtime_limit_min, constraints.cpu_runtime_limit_min) if value]
+        if limits:
+            return min(limits)
+        return None
+    return None
+
+
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
     def choose(value, fallback, default):
         if value is not None:
@@ -1337,11 +1565,29 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             f"upgrading to default {_DEFAULT_EVAL_REPEATS} to reduce noise."
         )
         eval_repeats = _DEFAULT_EVAL_REPEATS
+    constraints = _load_competition_rule_constraints(config.paths)
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
     internet = choose(config.internet, plan.internet, "on")
     if internet in (None, "auto"):
         internet = "on"
+    if constraints.notebook_submissions_only and not str(config.compute).startswith("kaggle_"):
+        print(
+            "[yellow]note[/yellow]: competition requires notebook-based submissions; "
+            "autopilot will auto-switch submit mode to notebook submit."
+        )
+    if constraints.internet_must_be_off and str(internet).strip().lower() != "off":
+        print("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.")
+        internet = "off"
+    runtime_limit_min = _runtime_limit_for_compute(constraints=constraints, compute=config.compute)
+    if runtime_limit_min is not None:
+        current_limit = int(time_budget_min) if isinstance(time_budget_min, (int, float)) else None
+        if current_limit is None or current_limit > runtime_limit_min:
+            print(
+                "[yellow]note[/yellow]: rules impose notebook runtime cap; "
+                f"forcing time_budget_min={runtime_limit_min}."
+            )
+            time_budget_min = runtime_limit_min
     default_max_iterations = 3
     if config.max_iterations is None:
         max_iterations = default_max_iterations
@@ -1356,9 +1602,41 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     max_total_min = choose(config.max_total_min, plan.max_total_min, None)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
-    submit_policy = str(choose(None, plan.submit_policy, "always") or "always")
-    policy_submission_gate = _submission_gate_for_policy(submit_policy)
-    submission_gate = choose(None, plan.submission_gate, spec_submission_gate or policy_submission_gate)
+    requested_submit_policy = str(choose(None, plan.submit_policy, "always") or "always")
+    requested_submission_gate_raw = choose(None, plan.submission_gate, spec_submission_gate)
+    requested_submission_gate = str(requested_submission_gate_raw or "").strip().lower() or None
+    if constraints.submission_limit_detected:
+        submit_policy = _normalized_submit_policy(requested_submit_policy)
+        default_gate = _submission_gate_for_policy(submit_policy)
+        if requested_submission_gate is not None:
+            submission_gate = _normalized_submission_gate(requested_submission_gate, default=default_gate)
+        else:
+            submission_gate = default_gate
+        if submission_gate == "always" and requested_submission_gate is None and submit_policy == "always":
+            submission_gate = _DEFAULT_LIMITED_SUBMISSION_GATE
+            submit_policy = "readiness_or_final"
+            print(
+                "[yellow]note[/yellow]: submission limit detected in rules; "
+                f"defaulting submission_gate={submission_gate}."
+            )
+    else:
+        submit_policy = "always"
+        submission_gate = "always"
+        if _normalized_submit_policy(requested_submit_policy) != "always":
+            print(
+                "[yellow]note[/yellow]: no submission limit detected; "
+                f"ignoring submit_policy='{requested_submit_policy}'."
+            )
+        normalized_requested_gate = (
+            _normalized_submission_gate(requested_submission_gate, default="always")
+            if requested_submission_gate
+            else "always"
+        )
+        if requested_submission_gate and normalized_requested_gate != "always":
+            print(
+                "[yellow]note[/yellow]: no submission limit detected; "
+                f"ignoring submission_gate='{requested_submission_gate}'."
+            )
     readiness_target_score = choose(
         None,
         plan.readiness_target_score,
@@ -1420,6 +1698,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "min_improvement": min_improvement,
         "submit_policy": submit_policy,
         "submission_gate": submission_gate,
+        "submission_limit_per_day": constraints.submission_limit_per_day,
         "readiness_target_score": readiness_target_score,
         "readiness_method": readiness_method,
         "readiness_k": readiness_k,
@@ -1513,6 +1792,7 @@ def _build_run_payload(
             "eval_repeats": resolved.get("eval_repeats"),
             "submit_policy": resolved.get("submit_policy"),
             "submission_gate": resolved.get("submission_gate"),
+            "submission_limit_per_day": resolved.get("submission_limit_per_day"),
             "readiness_target_score": resolved.get("readiness_target_score"),
             "readiness_method": resolved.get("readiness_method"),
             "readiness_k": resolved.get("readiness_k"),
@@ -1664,7 +1944,23 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
     if dry_run:
         return
     args = shlex.split(verify_cmd)
-    result = run_command(args)
+
+    def _is_pytest_invocation(cmd_args: list[str]) -> bool:
+        for idx, item in enumerate(cmd_args):
+            if item == "pytest" or item.endswith("/pytest"):
+                return True
+            if item == "-m" and idx + 1 < len(cmd_args) and cmd_args[idx + 1] == "pytest":
+                return True
+        return False
+
+    env = None
+    if _is_pytest_invocation(args):
+        # Avoid crashes from unrelated third-party pytest plugins present in the environment
+        # (e.g. system/site packages) by disabling auto-loading during verification.
+        env = os.environ.copy()
+        env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+
+    result = run_command(args, env=env)
     if result.returncode != 0:
         raise RuntimeError(f"Verification failed: {result.output}")
 
@@ -1713,14 +2009,30 @@ def _print_agent_response(response_path: Path, response_text: str) -> None:
     builtins.print("")
 
 
-def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str | None) -> EvaluationResult | None:
-    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+def _load_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _evaluation_from_kernel_metrics_payload(
+    payload: dict[str, object],
+    *,
+    direction: str,
+    target_metric: str | None,
+) -> EvaluationResult | None:
     from kagglebot.solver.evaluate import EvaluationResult
 
     metric_name, value = _extract_kernel_metric(payload, target_metric)
     if value is None:
         return None
     payload_direction_raw = payload.get("direction")
+    if payload_direction_raw is None:
+        payload_direction_raw = payload.get("target_direction")
     payload_direction = str(payload_direction_raw).strip().lower() if payload_direction_raw is not None else ""
     resolved_direction = direction
     if payload_direction in {"minimize", "maximize"}:
@@ -1729,6 +2041,8 @@ def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str 
     std = payload.get("offline_std")
     if std is None:
         std = payload.get("std")
+    if std is None:
+        std = payload.get("selected_cv_std")
     std_value = float(std) if isinstance(std, (int, float)) else None
 
     fold_scores_raw = payload.get("fold_scores")
@@ -1759,9 +2073,24 @@ def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str 
     )
 
 
+def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str | None) -> EvaluationResult | None:
+    payload = _load_json_object(metrics_path)
+    if payload is None:
+        return None
+    return _evaluation_from_kernel_metrics_payload(
+        payload,
+        direction=direction,
+        target_metric=target_metric,
+    )
+
+
 def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:
-    def is_number(value: object) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    def as_number(value: object) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return _to_float(value)
 
     def normalize(text: str) -> str:
         return "".join(ch for ch in text.lower() if ch.isalnum())
@@ -1779,24 +2108,29 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
         hint = metric_hint()
         hint_norm = normalize(hint) if hint else ""
         if "map" in hint_norm and "f1" in hint_norm:
-            if is_number(selected.get("combined_score")):
-                return (hint, float(selected["combined_score"]))
+            value = as_number(selected.get("combined_score"))
+            if value is not None:
+                return (hint, value)
         if "map" in hint_norm:
-            if is_number(selected.get("mean_map")):
-                return (hint or "mean_map", float(selected["mean_map"]))
+            value = as_number(selected.get("mean_map"))
+            if value is not None:
+                return (hint or "mean_map", value)
         if "f1" in hint_norm:
-            if is_number(selected.get("oof_f1")):
-                return (hint or "f1", float(selected["oof_f1"]))
+            value = as_number(selected.get("oof_f1"))
+            if value is not None:
+                return (hint or "f1", value)
         for key, name in (
             ("offline_value", hint),
             ("value", hint),
             ("score", hint),
+            ("cv_mean", hint),
             ("combined_score", hint or "combined_score"),
             ("mean_map", hint or "mean_map"),
             ("oof_f1", hint or "f1"),
         ):
-            if is_number(selected.get(key)):
-                return (name, float(selected[key]))
+            value = as_number(selected.get(key))
+            if value is not None:
+                return (name, value)
         return (None, None)
 
     def strip_prefixes(text: str) -> str:
@@ -1822,12 +2156,15 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
 
     def pick_from_dict(metric_key: str, values: dict[str, object]) -> float | None:
         selection = payload.get("selection")
-        if isinstance(selection, str) and selection in values and is_number(values[selection]):
-            return float(values[selection])
+        if isinstance(selection, str) and selection in values:
+            selected_value = as_number(values.get(selection))
+            if selected_value is not None:
+                return selected_value
         for key in ("selected", "average", "stacked", "best", "val", "oof", "score"):
-            if key in values and is_number(values[key]):
-                return float(values[key])
-        numeric = [float(v) for v in values.values() if is_number(v)]
+            value = as_number(values.get(key))
+            if value is not None:
+                return value
+        numeric = [parsed for raw in values.values() if (parsed := as_number(raw)) is not None]
         if not numeric:
             return None
         return min(numeric) if prefers_lower(metric_key) else max(numeric)
@@ -1838,12 +2175,44 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
         if value is not None:
             return (metric, value)
 
-    if is_number(payload.get("offline_value")):
-        return (str(payload.get("metric") or target_metric or "unknown"), float(payload["offline_value"]))
-    if is_number(payload.get("value")):
-        return (str(payload.get("metric") or target_metric or "unknown"), float(payload["value"]))
-    if is_number(payload.get("score")):
-        return (str(payload.get("metric") or target_metric or "unknown"), float(payload["score"]))
+    selected_cv_mean = as_number(payload.get("selected_cv_mean"))
+    if selected_cv_mean is not None:
+        return (metric_hint(), selected_cv_mean)
+
+    offline_value = as_number(payload.get("offline_value"))
+    if offline_value is not None:
+        return (str(payload.get("metric") or target_metric or "unknown"), offline_value)
+    payload_value = as_number(payload.get("value"))
+    if payload_value is not None:
+        return (str(payload.get("metric") or target_metric or "unknown"), payload_value)
+    score_value = as_number(payload.get("score"))
+    if score_value is not None:
+        return (str(payload.get("metric") or target_metric or "unknown"), score_value)
+
+    leaderboard_raw = payload.get("leaderboard")
+    if isinstance(leaderboard_raw, list):
+        selected_pipeline = payload.get("selected_pipeline")
+        selected_name = selected_pipeline.strip() if isinstance(selected_pipeline, str) else ""
+        best_value: float | None = None
+        best_metric = metric_hint()
+        for item in leaderboard_raw:
+            if not isinstance(item, dict):
+                continue
+            if selected_name:
+                pipeline = item.get("pipeline")
+                if isinstance(pipeline, str) and pipeline.strip() != selected_name:
+                    continue
+            cv_mean = as_number(item.get("cv_mean"))
+            if cv_mean is None:
+                continue
+            if best_value is None:
+                best_value = cv_mean
+            elif best_metric and prefers_lower(best_metric):
+                best_value = min(best_value, cv_mean)
+            else:
+                best_value = max(best_value, cv_mean)
+        if best_value is not None:
+            return (best_metric, best_value)
 
     pipelines_raw = payload.get("pipelines")
     if isinstance(pipelines_raw, list):
@@ -1913,15 +2282,17 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
                 break
         if wanted:
             for key, val in payload.items():
-                if not is_number(val):
+                parsed = as_number(val)
+                if parsed is None:
                     continue
                 normalized_key = normalize(str(key))
                 normalized_base = normalize(strip_prefixes(str(key)))
                 if normalized_key in wanted or normalized_base in wanted:
-                    return (str(target_metric), float(val))
+                    return (str(target_metric), parsed)
 
     for key, val in payload.items():
-        if not is_number(val):
+        parsed = as_number(val)
+        if parsed is None:
             continue
         normalized_key = normalize(str(key))
         normalized_base = normalize(strip_prefixes(str(key)))
@@ -1929,9 +2300,259 @@ def _extract_kernel_metric(payload: dict[str, object], target_metric: str | None
             normalized_aliases = {normalize(v) for v in values}
             normalized_aliases.add(normalize(metric_name))
             if normalized_key in normalized_aliases or normalized_base in normalized_aliases:
-                return (metric_name, float(val))
+                return (metric_name, parsed)
 
     return (str(target_metric) if target_metric else None, None)
+
+
+def _metric_value_from_payload_item(item: dict[str, object]) -> float | None:
+    for key in (
+        "offline_value",
+        "selected_cv_mean",
+        "cv_mean",
+        "score",
+        "value",
+        "combined_score",
+        "mean_map",
+        "oof_f1",
+    ):
+        value = _to_float(item.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_baseline_candidates_from_metrics_payload(payload: dict[str, object]) -> list[tuple[str, float]]:
+    candidates: list[tuple[str, float]] = []
+
+    pipelines_raw = payload.get("pipelines")
+    if isinstance(pipelines_raw, list):
+        for item in pipelines_raw:
+            if not isinstance(item, dict):
+                continue
+            name_raw = item.get("name") or item.get("pipeline")
+            name = str(name_raw).strip() if isinstance(name_raw, str) else ""
+            lowered = name.lower()
+            if "baseline" not in lowered and "persistence" not in lowered:
+                continue
+            score = _metric_value_from_payload_item(item)
+            if score is not None:
+                candidates.append((f"pipelines:{name or 'unnamed'}", float(score)))
+
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            continue
+        lowered = key.lower()
+        if "baseline" not in lowered and "persistence" not in lowered:
+            continue
+        if isinstance(value, dict):
+            score = _metric_value_from_payload_item(value)
+            if score is not None:
+                candidates.append((f"metrics:{key}", float(score)))
+                continue
+            for nested_key, nested_value in value.items():
+                nested_score = _to_float(nested_value)
+                if nested_score is None:
+                    continue
+                candidates.append((f"metrics:{key}.{nested_key}", float(nested_score)))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, dict):
+                    score = _metric_value_from_payload_item(item)
+                    if score is not None:
+                        candidates.append((f"metrics:{key}[{index}]", float(score)))
+                        continue
+                parsed = _to_float(item)
+                if parsed is not None:
+                    candidates.append((f"metrics:{key}[{index}]", float(parsed)))
+        else:
+            parsed = _to_float(value)
+            if parsed is not None:
+                candidates.append((f"metrics:{key}", float(parsed)))
+
+    return candidates
+
+
+def _collect_kernel_log_text(logs_dir: Path | None) -> str:
+    if logs_dir is None or not logs_dir.exists():
+        return ""
+    texts: list[str] = []
+    for path in sorted(logs_dir.glob("*.log")):
+        name = path.name.lower()
+        if "stdout" not in name and "kernel" not in name:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if not text:
+            continue
+        texts.append(text[-250_000:])
+    if not texts:
+        return ""
+    return "\n".join(texts)
+
+
+def _extract_validation_scores_from_log_text(log_text: str, metric_name: str | None) -> list[float]:
+    if not log_text:
+        return []
+    pattern = re.compile(
+        r"val_([^=\n]{1,80})\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        flags=re.IGNORECASE,
+    )
+    target_norm = _normalize_metric_name(metric_name)
+    scores: list[float] = []
+    for match in pattern.finditer(log_text):
+        metric_label = match.group(1).strip()
+        parsed = _to_float(match.group(2))
+        if parsed is None:
+            continue
+        if target_norm:
+            label_norm = _normalize_metric_name(metric_label)
+            if label_norm and (target_norm not in label_norm and label_norm not in target_norm):
+                continue
+        scores.append(float(parsed))
+    return scores
+
+
+def _extract_baseline_scores_from_log_text(log_text: str) -> list[float]:
+    if not log_text:
+        return []
+    pattern = re.compile(
+        r"baseline[^=\n]{0,120}=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        flags=re.IGNORECASE,
+    )
+    scores: list[float] = []
+    for match in pattern.finditer(log_text):
+        parsed = _to_float(match.group(1))
+        if parsed is not None:
+            scores.append(float(parsed))
+    return scores
+
+
+def _is_significantly_worse(
+    *,
+    current: float,
+    reference: float,
+    direction: str,
+    rel_margin: float,
+    abs_margin: float,
+) -> bool:
+    margin = max(abs(reference) * max(rel_margin, 0.0), max(abs_margin, 0.0))
+    if direction == "minimize":
+        return (current - reference) > margin
+    return (reference - current) > margin
+
+
+def _build_kernel_quality_guard(
+    *,
+    evaluation: EvaluationResult,
+    kernel_metrics_payload: dict[str, object] | None,
+    logs_dir: Path | None,
+    direction: str,
+    iteration: int,
+    max_iterations: int,
+    force_submit: bool,
+) -> dict[str, object]:
+    reasons: list[str] = []
+    warnings: list[str] = []
+    block_submit = False
+    is_final_iteration = iteration >= max_iterations
+    payload = kernel_metrics_payload or {}
+
+    baseline_candidates = _extract_baseline_candidates_from_metrics_payload(payload)
+    log_text = _collect_kernel_log_text(logs_dir)
+    baseline_from_logs = _extract_baseline_scores_from_log_text(log_text)
+    for index, score in enumerate(baseline_from_logs):
+        baseline_candidates.append((f"logs:baseline[{index}]", float(score)))
+
+    best_baseline_source: str | None = None
+    best_baseline_score: float | None = None
+    if baseline_candidates:
+        if direction == "minimize":
+            best_baseline_source, best_baseline_score = min(baseline_candidates, key=lambda item: item[1])
+        else:
+            best_baseline_source, best_baseline_score = max(baseline_candidates, key=lambda item: item[1])
+
+    baseline_worse_than_reference = False
+    if best_baseline_score is not None:
+        baseline_worse_than_reference = _is_significantly_worse(
+            current=float(evaluation.value),
+            reference=float(best_baseline_score),
+            direction=direction,
+            rel_margin=_QUALITY_GUARD_BASELINE_REL_MARGIN,
+            abs_margin=_QUALITY_GUARD_BASELINE_ABS_MARGIN,
+        )
+        if baseline_worse_than_reference:
+            reasons.append("selected_worse_than_detected_baseline")
+            if not is_final_iteration and not force_submit:
+                block_submit = True
+
+    validation_scores = _extract_validation_scores_from_log_text(log_text, evaluation.metric)
+    best_validation: float | None = None
+    severe_validation_mismatch = False
+    if validation_scores:
+        best_validation = min(validation_scores) if direction == "minimize" else max(validation_scores)
+        mismatch_rel = (
+            _QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE
+            if direction == "minimize"
+            else _QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE
+        )
+        severe_validation_mismatch = _is_significantly_worse(
+            current=float(evaluation.value),
+            reference=float(best_validation),
+            direction=direction,
+            rel_margin=mismatch_rel,
+            abs_margin=_QUALITY_GUARD_MISMATCH_ABS_MARGIN,
+        )
+        if severe_validation_mismatch:
+            reasons.append("validation_metric_mismatch_vs_final_metric")
+            if not is_final_iteration and not force_submit:
+                block_submit = True
+
+    step_bucket_payload = payload.get("cv_step_buckets")
+    step_bucket_scores: list[float] = []
+    if isinstance(step_bucket_payload, dict):
+        for value in step_bucket_payload.values():
+            parsed = _to_float(value)
+            if parsed is not None:
+                step_bucket_scores.append(float(parsed))
+    step_bucket_collapse = False
+    if len(step_bucket_scores) >= 4:
+        median_bucket = float(np.median(step_bucket_scores))
+        worst_bucket = float(max(step_bucket_scores))
+        collapse_threshold = max(median_bucket * _QUALITY_GUARD_STEP_BUCKET_RATIO, median_bucket + 0.5)
+        step_bucket_collapse = worst_bucket > collapse_threshold
+        if step_bucket_collapse:
+            warnings.append("cv_step_bucket_collapse_detected")
+            if severe_validation_mismatch:
+                reasons.append("severe_step_bucket_instability")
+                if not is_final_iteration and not force_submit:
+                    block_submit = True
+
+    allow_submit = not block_submit
+    return {
+        "allow_submit": allow_submit,
+        "block_submit": block_submit,
+        "is_final_iteration": is_final_iteration,
+        "reasons": reasons,
+        "warnings": warnings,
+        "baseline": {
+            "best_source": best_baseline_source,
+            "best_score": best_baseline_score,
+            "candidate_count": len(baseline_candidates),
+            "selected_worse_than_baseline": baseline_worse_than_reference,
+        },
+        "metric_alignment": {
+            "best_validation_score": best_validation,
+            "validation_score_count": len(validation_scores),
+            "severe_mismatch": severe_validation_mismatch,
+        },
+        "step_bucket": {
+            "count": len(step_bucket_scores),
+            "collapse_detected": step_bucket_collapse,
+        },
+    }
 
 
 def _build_metrics_payload(
@@ -2138,8 +2759,22 @@ def _ensure_eval_data_cache(
     except Exception:  # noqa: BLE001
         split = SplitStrategyFactory.create(y=[0, 1, 0, 1], strategy="kfold", n_splits=2, seed=seed)
         fingerprints = []
-    drift_train_x = data.train[data.feature_columns].copy() if data.feature_columns else None
-    drift_test_x = data.test[data.feature_columns].copy() if data.feature_columns else None
+    drift_cols_raw = list(data.feature_columns or [])
+    drift_cols: list[str] = []
+    seen_drift_cols: set[str] = set()
+    for col in drift_cols_raw:
+        if col in seen_drift_cols:
+            continue
+        seen_drift_cols.add(col)
+        drift_cols.append(col)
+    try:
+        common_cols = set(data.train.columns).intersection(set(data.test.columns))
+        drift_cols = [col for col in drift_cols if col in common_cols]
+        drift_train_x = data.train.reindex(columns=drift_cols).copy() if drift_cols else None
+        drift_test_x = data.test.reindex(columns=drift_cols).copy() if drift_cols else None
+    except Exception:  # noqa: BLE001
+        drift_train_x = None
+        drift_test_x = None
     return {
         "split_strategy": split.name,
         "n_splits": split.n_splits,
@@ -2290,8 +2925,19 @@ def _should_attempt_submit_for_readiness(
     direction: str,
     iteration: int,
     max_iterations: int,
+    submission_limit_per_day: int | None = None,
+    successful_submissions: int = 0,
+    top1_score: float | None = None,
 ) -> bool:
-    normalized = str(gate or "always").strip().lower()
+    if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
+        reserve_start = max(0, submission_limit_per_day - 1)
+        if successful_submissions < reserve_start:
+            return True
+        is_final_iteration = iteration >= max_iterations
+        top1_tier = readiness_score is not None and _is_top1_tier(readiness_score, top1_score, direction)
+        return top1_tier or is_final_iteration
+
+    normalized = _normalized_submission_gate(gate, default="always")
     if normalized in {"always", "each_iteration"}:
         return True
     if normalized in {"final_only", "at_final"}:
@@ -2307,16 +2953,42 @@ def _should_attempt_submit_for_readiness(
 
 
 def _submission_gate_for_policy(policy: str | None) -> str:
+    normalized = _normalized_submit_policy(policy)
+    if normalized in {"always", "each_iteration"}:
+        return "always"
+    if normalized in {"final_only", "at_final"}:
+        return "final_only"
+    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
+        return "readiness_only"
+    if normalized in {"readiness_or_final", "target_or_final"}:
+        return "readiness_or_final"
+    return "always"
+
+
+def _normalized_submit_policy(policy: str | None) -> str:
     normalized = str(policy or "").strip().lower()
     if normalized in {"always", "each_iteration"}:
         return "always"
     if normalized in {"final_only", "at_final"}:
         return "final_only"
-    if normalized in {"readiness_only", "readiness_target"}:
+    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
         return "readiness_only"
-    if normalized in {"on_target_only", "target_or_final", "readiness_or_final"}:
+    if normalized in {"readiness_or_final", "target_or_final"}:
         return "readiness_or_final"
     return "always"
+
+
+def _normalized_submission_gate(gate: str | None, *, default: str) -> str:
+    normalized = str(gate or "").strip().lower()
+    if normalized in {"always", "each_iteration"}:
+        return "always"
+    if normalized in {"final_only", "at_final"}:
+        return "final_only"
+    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
+        return "readiness_only"
+    if normalized in {"readiness_or_final", "target_or_final"}:
+        return "readiness_or_final"
+    return default
 
 
 def _pipeline_config_hash(*, model_summary: dict[str, object], metric: str, accelerator: str) -> str:
@@ -2367,6 +3039,7 @@ def _build_diagnostics(
     evaluation_by_source: dict[str, EvaluationResult] | None = None,
     loop_decision_score: float | None = None,
     loop_decision_source: str = "offline",
+    quality_guard: dict[str, object] | None = None,
 ) -> str:
     direction = evaluation.direction
     decision_score = evaluation.value if loop_decision_score is None else loop_decision_score
@@ -2415,6 +3088,24 @@ def _build_diagnostics(
         lines.append(f"Train/val gap: {gap:.6f}")
     if evaluation.std is not None:
         lines.append(f"CV std: {evaluation.std:.6f}")
+    if quality_guard:
+        reasons = quality_guard.get("reasons")
+        warning_values = quality_guard.get("warnings")
+        reason_text = (
+            ", ".join(str(item) for item in reasons if isinstance(item, str))
+            if isinstance(reasons, list) and reasons
+            else "none"
+        )
+        warning_text = (
+            ", ".join(str(item) for item in warning_values if isinstance(item, str))
+            if isinstance(warning_values, list) and warning_values
+            else "none"
+        )
+        lines.append(
+            "Kernel quality guard: "
+            f"allow_submit={bool(quality_guard.get('allow_submit', True))}, "
+            f"reasons={reason_text}, warnings={warning_text}"
+        )
     lines += [
         "",
         "Dataset summary:",
@@ -2604,7 +3295,20 @@ def _run_improvement(
     _print_agent_prompt(prompt_path, prompt_text)
 
     print("[cyan]improve[/cyan]: running codex implementer")
-    allowed_prefixes = [config.paths.kernel_source_dir]
+    # Codex runner always writes execution logs (codex_exec.jsonl / codex_last_message.txt)
+    # under the provided output_dir (agent_dir). Include it in the allowlist so the guard
+    # does not fail on its own transcripts.
+    #
+    # During improvement iterations we also update competition context (e.g. leaderboard snapshots,
+    # eval advisor status) and run-scoped metadata (run.json, evaluation_report.json). Those are
+    # side effects of Kagglebot itself rather than agent edits, so they must be allowlisted here
+    # to avoid spurious write-guard failures.
+    allowed_prefixes = [
+        config.paths.kernel_source_dir,
+        config.paths.context_dir,
+        config.paths.run_dir(run_id),
+        agent_dir,
+    ]
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.paths.repo_root)
     result = run_codex(
@@ -2736,9 +3440,28 @@ def _run_kernel_fix(
     attempt: int,
     pending_error_fixes: list[dict[str, object]] | None = None,
 ) -> None:
-    prompt_template = config.paths.codex_kernel_fix_template.read_text(encoding="utf-8")
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
+    lightweight_note_path = agent_dir / f"kernel_fix_note-{attempt:02d}.txt"
+    lightweight_fix = _maybe_apply_lightweight_runtime_fix(
+        config=config,
+        error_text=error_message,
+        note_path=lightweight_note_path,
+        stage_label="kernel fix",
+    )
+    if lightweight_fix:
+        if pending_error_fixes is not None:
+            pending_error_fixes.append(
+                {
+                    "iteration": iteration,
+                    "error_message": error_message,
+                    "fix_summary": f"Applied lightweight runtime autofix: {lightweight_fix}",
+                    "resolved": True,
+                }
+            )
+        return
+
+    prompt_template = config.paths.codex_kernel_fix_template.read_text(encoding="utf-8")
     prompt_path = agent_dir / "kernel_fix_prompt.md"
     missing_module = _extract_missing_module(error_message)
     blocked_modules = _load_blocked_modules(config.paths.context_dir)
@@ -2808,6 +3531,9 @@ def _run_kernel_fix(
         config.paths.context_dir,
         config.paths.runs_dir,
         config.paths.prompts_dir,
+        config.paths.submissions_dir,
+        config.paths.kernels_dir,
+        config.paths.base_dir / "outputs",
     ]
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.paths.repo_root)
@@ -2823,6 +3549,26 @@ def _run_kernel_fix(
     )
     after = _snapshot_tree(config.paths.repo_root)
     changed = _diff_snapshots(before, after)
+    if not changed:
+        if _maybe_regenerate_kernel_sources_once(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=iter_dir,
+            attempt=attempt,
+            trigger_reason="codex_no_changes",
+        ):
+            if pending_error_fixes is not None:
+                pending_error_fixes.append(
+                    {
+                        "iteration": iteration,
+                        "error_message": error_message,
+                        "fix_summary": "Codex kernel-fix made no changes; regenerated kernel sources once.",
+                        "resolved": True,
+                    }
+                )
+            return
+        raise KernelFailedError("Kernel fix agent produced no file changes and regeneration fallback was already used.")
     _enforce_allowlist_changes(
         root=config.paths.repo_root,
         before=before,
@@ -2876,45 +3622,15 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     error_path.write_text(header + error_text + "\n", encoding="utf-8")
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
-    if not submit_autofix and _maybe_write_column_fill(config, error_text):
-        note_path = autofix_dir / "note.txt"
-        note = (
-            "autofix_note: column_fill.json created for missing column error.\n"
-            "autofix will retry without modifying kernel sources.\n"
+    if not submit_autofix:
+        lightweight_fix = _maybe_apply_lightweight_runtime_fix(
+            config=config,
+            error_text=error_text,
+            note_path=autofix_dir / "note.txt",
+            stage_label="autofix",
         )
-        note_path.write_text(note, encoding="utf-8")
-        print("[yellow]autofix[/yellow]: wrote column_fill.json; retrying without kernel edits")
-        return
-
-    if not submit_autofix and _maybe_write_object_coerce(config, error_text):
-        note_path = autofix_dir / "note.txt"
-        note = (
-            "autofix_note: object_coerce.json created for numpy.object_ conversion error.\n"
-            "autofix will retry without modifying kernel sources.\n"
-        )
-        note_path.write_text(note, encoding="utf-8")
-        print("[yellow]autofix[/yellow]: wrote object_coerce.json; retrying without kernel edits")
-        return
-
-    if not submit_autofix and _maybe_write_device_coerce(config, error_text):
-        note_path = autofix_dir / "note.txt"
-        note = (
-            "autofix_note: device_coerce.json created for torch device mismatch error.\n"
-            "autofix will retry without modifying kernel sources.\n"
-        )
-        note_path.write_text(note, encoding="utf-8")
-        print("[yellow]autofix[/yellow]: wrote device_coerce.json; retrying without kernel edits")
-        return
-
-    if not submit_autofix and _maybe_write_column_map(config, error_text):
-        note_path = autofix_dir / "note.txt"
-        note = (
-            "autofix_note: column_map.json created for missing column error.\n"
-            "autofix will retry without modifying kernel sources.\n"
-        )
-        note_path.write_text(note, encoding="utf-8")
-        print("[yellow]autofix[/yellow]: wrote column_map.json; retrying without kernel edits")
-        return
+        if lightweight_fix:
+            return
 
     allowed_prefixes = _autofix_allowed_prefixes(config)
     prompt_text = _build_autofix_prompt(
@@ -2957,7 +3673,6 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
 
-    guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.paths.repo_root)
     result = run_codex(
         prompt_path,
@@ -2969,15 +3684,8 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     )
     after = _snapshot_tree(config.paths.repo_root)
     changed = _diff_snapshots(before, after)
-    _enforce_allowlist_changes(
-        root=config.paths.repo_root,
-        before=before,
-        after=after,
-        allowed_prefixes=allowed_prefixes,
-        stage=f"autofix_attempt_{attempt}",
-        guard_snapshot=guard_snapshot,
-        auto_repair=True,
-    )
+    # Autofix often needs to regenerate staged outputs under artifacts/*/kernels and
+    # run-level state files; do not apply write-guard restrictions in this stage.
     _maybe_restart_for_src_changes(
         config=config,
         run_id=run_id,
@@ -3161,6 +3869,10 @@ _DEVICE_COERCE_FILENAME = "device_coerce.json"
 _BLOCKED_MODULES_FILENAME = "blocked_modules.json"
 _MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]")
 _MISSING_COLUMNS_RE = re.compile(r"missing columns?:\s*\[([^\]]+)\]", re.IGNORECASE)
+_MISSING_COLUMNS_KEYERROR_RE = re.compile(
+    r"KeyError:\s*[\"']?\[([^\]]+)\]\s*not in index[\"']?",
+    re.IGNORECASE,
+)
 _MISSING_COLUMNS_FILE_RE = re.compile(
     r"([A-Za-z0-9_.-]+\.(?:csv|tsv|txt|parquet|json|jsonl))\s+missing columns",
     re.IGNORECASE,
@@ -3174,28 +3886,112 @@ _COLUMN_ERROR_PATTERNS = (
     "could not resolve column",
     "unable to locate session",
     "missing columns",
+    "not in index",
+    "are in the [columns]",
 )
 
 
 def _maybe_write_column_fill(config: AutopilotConfig, error_text: str) -> bool:
-    match = _MISSING_COLUMNS_RE.search(error_text or "")
-    if not match:
-        return False
-    missing_columns = _parse_missing_columns(match.group(1))
+    raw_error = error_text or ""
+    file_name: str | None = None
+    match = _MISSING_COLUMNS_RE.search(raw_error)
+    if match:
+        missing_columns = _parse_missing_columns(match.group(1))
+        file_match = _MISSING_COLUMNS_FILE_RE.search(raw_error)
+        file_name = file_match.group(1) if file_match else None
+    else:
+        keyerror_match = _MISSING_COLUMNS_KEYERROR_RE.search(raw_error)
+        if not keyerror_match:
+            return False
+        missing_columns = _parse_missing_columns(keyerror_match.group(1))
     if not missing_columns:
         return False
+
+    deduped_missing: list[str] = []
+    seen_missing: set[str] = set()
+    for column in missing_columns:
+        normalized = str(column).strip()
+        if not normalized or normalized in seen_missing:
+            continue
+        seen_missing.add(normalized)
+        deduped_missing.append(normalized)
+    if not deduped_missing:
+        return False
+
     context_dir = config.paths.context_dir
     fill_path = context_dir / _COLUMN_FILL_FILENAME
+    payload: dict[str, object] = {}
     if fill_path.exists():
+        try:
+            loaded = json.loads(fill_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
+    changed = not fill_path.exists()
+    files_payload = payload.get("files")
+    files: dict[str, list[str]]
+    if isinstance(files_payload, dict):
+        files = {}
+        for key, value in files_payload.items():
+            if not isinstance(key, str) or not isinstance(value, list):
+                continue
+            cleaned: list[str] = []
+            seen_cols: set[str] = set()
+            for col in value:
+                col_name = str(col).strip()
+                if not col_name or col_name in seen_cols:
+                    continue
+                seen_cols.add(col_name)
+                cleaned.append(col_name)
+            files[key] = cleaned
+    else:
+        files = {}
+        if files_payload is not None:
+            changed = True
+
+    if file_name:
+        existing = files.get(file_name, [])
+        merged = list(existing)
+        for col in deduped_missing:
+            if col not in merged:
+                merged.append(col)
+        if merged != existing:
+            files[file_name] = merged
+            changed = True
+    else:
+        missing_payload = payload.get("missing_columns")
+        if isinstance(missing_payload, list):
+            existing_missing: list[str] = []
+            seen_cols: set[str] = set()
+            for col in missing_payload:
+                col_name = str(col).strip()
+                if not col_name or col_name in seen_cols:
+                    continue
+                seen_cols.add(col_name)
+                existing_missing.append(col_name)
+        else:
+            existing_missing = []
+            if missing_payload is not None:
+                changed = True
+        merged_missing = list(existing_missing)
+        for col in deduped_missing:
+            if col not in merged_missing:
+                merged_missing.append(col)
+        if merged_missing != existing_missing:
+            payload["missing_columns"] = merged_missing
+            changed = True
+
+    if not changed:
         return False
-    file_match = _MISSING_COLUMNS_FILE_RE.search(error_text or "")
-    file_name = file_match.group(1) if file_match else None
-    payload = {
-        "source": "autofix",
-        "created_at": datetime.now(UTC).isoformat(),
-        "files": {file_name: missing_columns} if file_name else {},
-        "missing_columns": [] if file_name else missing_columns,
-    }
+
+    payload["files"] = files
+    payload.setdefault("source", "autofix")
+    payload.setdefault("created_at", datetime.now(UTC).isoformat())
+    payload["updated_at"] = datetime.now(UTC).isoformat()
+    if "missing_columns" not in payload:
+        payload["missing_columns"] = []
     context_dir.mkdir(parents=True, exist_ok=True)
     fill_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return True
@@ -3420,6 +4216,100 @@ def _extract_missing_module(error_text: str) -> str | None:
     return match.group(1)
 
 
+def _maybe_regenerate_kernel_sources_once(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    iter_dir: Path,
+    attempt: int,
+    trigger_reason: str,
+) -> bool:
+    """Regenerate authoritative kernel sources once when fix loops are stuck."""
+    if config.dry_run:
+        return False
+    agent_dir = iter_dir / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = agent_dir / _KERNEL_REGENERATE_MARKER_FILENAME
+    if marker_path.exists():
+        return False
+
+    marker_payload = {
+        "created_at": datetime.now(UTC).isoformat(),
+        "trigger_reason": trigger_reason,
+        "attempt": int(attempt),
+        "iteration": int(iteration),
+        "run_id": run_id,
+    }
+    marker_path.write_text(json.dumps(marker_payload, indent=2), encoding="utf-8")
+    print(
+        "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
+        "regenerating kernel sources once before retry."
+    )
+    try:
+        _run_plan_and_initial(config, run_id)
+    except Exception as exc:  # noqa: BLE001
+        note_path = agent_dir / f"kernel_regen_note-{attempt:02d}.txt"
+        note_path.write_text(
+            (f"kernel_regen_failed: regeneration fallback failed.\ntrigger_reason: {trigger_reason}\nerror: {exc}\n"),
+            encoding="utf-8",
+        )
+        return False
+    note_path = agent_dir / f"kernel_regen_note-{attempt:02d}.txt"
+    note_path.write_text(
+        (f"kernel_regen_applied: regeneration fallback succeeded.\ntrigger_reason: {trigger_reason}\n"),
+        encoding="utf-8",
+    )
+    return True
+
+
+def _maybe_apply_lightweight_runtime_fix(
+    *,
+    config: AutopilotConfig,
+    error_text: str,
+    note_path: Path,
+    stage_label: str,
+) -> str | None:
+    actions: tuple[tuple[str, str, Callable[[AutopilotConfig, str], bool]], ...] = (
+        (
+            "column_fill.json",
+            "missing column error",
+            _maybe_write_column_fill,
+        ),
+        (
+            "object_coerce.json",
+            "numpy.object_ conversion error",
+            _maybe_write_object_coerce,
+        ),
+        (
+            "device_coerce.json",
+            "torch device mismatch error",
+            _maybe_write_device_coerce,
+        ),
+        (
+            "column_map.json",
+            "column alias mismatch",
+            _maybe_write_column_map,
+        ),
+    )
+    for artifact_name, reason, action in actions:
+        try:
+            changed = bool(action(config, error_text))
+        except Exception:
+            changed = False
+        if not changed:
+            continue
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note = (
+            f"autofix_note: {artifact_name} created for {reason}.\n"
+            "autofix will retry without modifying kernel sources.\n"
+        )
+        note_path.write_text(note, encoding="utf-8")
+        print(f"[yellow]{stage_label}[/yellow]: wrote {artifact_name}; retrying without codex edits")
+        return artifact_name
+    return None
+
+
 def _load_blocked_modules(context_dir: Path) -> list[str]:
     path = context_dir / _BLOCKED_MODULES_FILENAME
     if not path.exists():
@@ -3565,20 +4455,20 @@ def _resume_iteration_state(
             continue
         if iteration > max_iterations:
             continue
-        submission_path = iter_dir / "submission.csv"
+        submission_path = _resolve_iteration_submission_artifact(iter_dir)
         metrics_path = iter_dir / "metrics.json"
-        if not submission_path.exists() and not metrics_path.exists():
+        if submission_path is None and not metrics_path.exists():
             continue
-        if submission_path.exists() and not metrics_path.exists():
+        if submission_path is not None and not metrics_path.exists():
             print(
                 "[yellow]resume[/yellow]: "
-                f"iter-{iteration} has submission.csv but no metrics.json; treating as incomplete."
+                f"iter-{iteration} has submission artifact but no metrics.json; treating as incomplete."
             )
             continue
-        if metrics_path.exists() and not submission_path.exists():
+        if metrics_path.exists() and submission_path is None:
             print(
                 "[yellow]resume[/yellow]: "
-                f"iter-{iteration} has metrics.json but no submission.csv; treating as incomplete."
+                f"iter-{iteration} has metrics.json but no submission artifact; treating as incomplete."
             )
             continue
 
@@ -3616,6 +4506,8 @@ def _resume_iteration_state(
             continue
 
         completed_iters.append(iteration)
+        if submission_path is None:
+            continue
         if best_submission is None:
             best_submission = submission_path
         if best_score is None:
@@ -3655,6 +4547,32 @@ def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
     )
 
 
+def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
+    candidates: list[Path] = [iter_dir / "submission.csv", iter_dir / "output" / "submission.csv"]
+    for root in (iter_dir, iter_dir / "output"):
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob("submission.*"):
+                if path.is_file():
+                    candidates.append(path)
+        except OSError:
+            continue
+    return _newest_existing_path(candidates)
+
+
+def _copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
+    destination = iter_dir / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if source.resolve() == destination.resolve():
+            return destination
+    except OSError:
+        pass
+    shutil.copy2(source, destination)
+    return destination
+
+
 def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: int) -> int | None:
     latest: int | None = None
     for iter_dir in sorted(run_dir.glob("iter-*")):
@@ -3666,7 +4584,7 @@ def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: 
             continue
         if iteration > max_iterations:
             continue
-        submission_path = _resolve_iteration_artifact(iter_dir, "submission.csv")
+        submission_path = _resolve_iteration_submission_artifact(iter_dir)
         metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
         if submission_path is None or metrics_path is None:
             continue
@@ -3708,7 +4626,7 @@ def _load_submit_retry_artifacts(
     if not (marker_pending or legacy_pending):
         return None
 
-    submission_path = _resolve_iteration_artifact(iter_dir, "submission.csv")
+    submission_path = _resolve_iteration_submission_artifact(iter_dir)
     metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
     if submission_path is None or metrics_path is None:
         return None
@@ -3758,28 +4676,8 @@ def _attempt_submit(
         return None
     run_dir = config.paths.run_dir(run_id)
     run_state = _load_run_state(run_dir)
+    submit_code_fingerprint = _compute_submit_code_fingerprint(config)
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
-    last_submission_path = str(run_state.get("last_submission_path") or "").strip()
-    if last_submission_path and Path(last_submission_path) == submission_path and not allow_force:
-        print("[yellow]submit skipped[/yellow]: same submission file already attempted in this run")
-        known_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "")
-        _append_submit_attempt(
-            run_dir=run_dir,
-            payload={
-                "run_id": run_id,
-                "sub_path": str(submission_path),
-                "sub_sha256": _sha256_or_none(submission_path),
-                "exit_code": None,
-                "ok": False,
-                "fingerprint": known_fingerprint,
-                "error_kind": "unknown",
-                "action_taken": "skip",
-                "reason": "same_submission_path_reused_in_run",
-                "stdout_tail": "",
-                "stderr_tail": "",
-            },
-        )
-        return None
 
     message = _submission_message(config, run_id, best_score, submission_path=submission_path)
     submission_service = SubmissionService(
@@ -3804,7 +4702,8 @@ def _attempt_submit(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
-            submission_path=submission_path,
+            submission_ref=submission_path,
+            code_fingerprint=submit_code_fingerprint,
             fingerprint=fingerprint,
             error_kind="validation",
             reason="local_submission_validation_failed",
@@ -3822,7 +4721,8 @@ def _attempt_submit(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
-                submission_path=prepared_submission_path,
+                submission_ref=prepared_submission_path,
+                code_fingerprint=submit_code_fingerprint,
                 fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
                 error_kind="permanent",
                 reason="kaggle_credentials_missing",
@@ -3837,7 +4737,8 @@ def _attempt_submit(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
-            submission_path=prepared_submission_path,
+            submission_ref=prepared_submission_path,
+            code_fingerprint=submit_code_fingerprint,
             fingerprint=compute_error_fingerprint("", "rules_not_accepted"),
             error_kind="permanent",
             reason="rules_not_accepted",
@@ -3847,37 +4748,132 @@ def _attempt_submit(
             exit_code=RulesNotAcceptedError.exit_code,
         )
 
+    constraints = _load_competition_rule_constraints(config.paths)
+    notebook_submit_required = bool(constraints.notebook_submissions_only)
+    notebook_fallback_activated = notebook_submit_required
+    if notebook_submit_required:
+        print("[yellow]submit mode[/yellow]: notebook-only competition detected; using notebook submit")
+
+    if not notebook_submit_required:
+        last_submission_path = str(run_state.get("last_submission_path") or "").strip()
+        last_reason = str(run_state.get("last_reason") or "").strip().lower()
+        allow_same_path_retry_reasons = {
+            "bad_request",
+            "notebook_only_submission_required",
+            "unclassified_submit_error",
+        }
+        if last_submission_path and Path(last_submission_path) == prepared_submission_path and not allow_force:
+            if last_reason in allow_same_path_retry_reasons:
+                print(
+                    "[yellow]submit retry[/yellow]: previous submit failed with "
+                    f"reason={last_reason}; retrying same artifact to allow notebook fallback."
+                )
+            else:
+                print("[yellow]submit skipped[/yellow]: same submission file already attempted in this run")
+                known_fingerprint = str(
+                    run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or ""
+                )
+                _append_submit_attempt(
+                    run_dir=run_dir,
+                    payload={
+                        "run_id": run_id,
+                        "sub_path": str(prepared_submission_path),
+                        "sub_sha256": _sha256_or_none(prepared_submission_path),
+                        "exit_code": None,
+                        "ok": False,
+                        "fingerprint": known_fingerprint,
+                        "error_kind": "unknown",
+                        "action_taken": "skip",
+                        "reason": "same_submission_path_reused_in_run",
+                        "stdout_tail": "",
+                        "stderr_tail": "",
+                    },
+                )
+                return None
+
     seen_fingerprints = set(_load_submit_fingerprints(run_dir))
     state_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "").strip()
     if state_fingerprint:
         seen_fingerprints.add(state_fingerprint)
     max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)
+    submission_result = None
+    submission_reference = str(prepared_submission_path)
+    submission_artifact_path: Path | None = prepared_submission_path
     for attempt in range(1, max_attempts + 1):
         try:
-            submission_result = submission_service.submit_prepared(
-                prepared_path=prepared_submission_path,
-                message=message,
-                run_id=run_id,
-            )
-        except SubmissionCliError as exc:
-            classification = classify_submit_error(exc.stdout, exc.stderr, exc.exit_code)
-            classification_kind = str(classification.get("kind") or "unknown")
-            classification_reason = str(classification.get("reason") or "unclassified_submit_error")
-            fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
-            if fingerprint in seen_fingerprints:
-                return _abort_submit_for_run(
+            if notebook_submit_required:
+                notebook_result, notebook_ref, notebook_artifact_path = _submit_with_notebook_kernel(
                     config=config,
                     run_id=run_id,
-                    problem_types=problem_types,
                     submission_path=prepared_submission_path,
-                    fingerprint=fingerprint,
-                    error_kind=classification_kind,
-                    reason="same_error_fingerprint_recurred",
-                    message="Same submit error fingerprint recurred; aborting this run to prevent infinite loop.",
-                    stdout_tail=exc.stdout,
-                    stderr_tail=exc.stderr,
-                    exit_code=exc.exit_code,
+                    message=message,
                 )
+                submission_result = notebook_result
+                submission_reference = notebook_ref
+                submission_artifact_path = notebook_artifact_path
+            else:
+                submission_result = submission_service.submit_prepared(
+                    prepared_path=prepared_submission_path,
+                    message=message,
+                    run_id=run_id,
+                )
+                submission_reference = str(submission_result.submission_path)
+                submission_artifact_path = submission_result.submission_path
+        except SubmissionCliError as exc:
+            classification_stderr = exc.stderr or ""
+            classification = classify_submit_error(exc.stdout, classification_stderr, exc.exit_code)
+            if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and (
+                exc.output
+            ):
+                fallback_stderr = "\n".join(part for part in [classification_stderr, exc.output] if part)
+                classification = classify_submit_error(exc.stdout, fallback_stderr, exc.exit_code)
+                classification_stderr = fallback_stderr
+            classification_kind = str(classification.get("kind") or "unknown")
+            classification_reason = str(classification.get("reason") or "unclassified_submit_error")
+            if (
+                (not notebook_submit_required)
+                and (not notebook_fallback_activated)
+                and _should_use_notebook_submit_fallback(
+                    reason=classification_reason,
+                    stdout=exc.stdout,
+                    stderr=exc.stderr,
+                )
+            ):
+                notebook_submit_required = True
+                notebook_fallback_activated = True
+                print(
+                    "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
+                    "retrying via notebook submit automatically."
+                )
+                continue
+            fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
+            if fingerprint in seen_fingerprints:
+                if _consume_same_submit_fingerprint_retry_allowance(
+                    run_dir=run_dir,
+                    run_state=run_state,
+                    fingerprint=fingerprint,
+                    code_fingerprint=submit_code_fingerprint,
+                ):
+                    print(
+                        "[yellow]submit retry[/yellow]: same fingerprint matched previous failures, "
+                        "but code changed since last submit error; allowing one retry."
+                    )
+                else:
+                    return _abort_submit_for_run(
+                        config=config,
+                        run_id=run_id,
+                        problem_types=problem_types,
+                        submission_ref=submission_reference,
+                        submission_artifact_path=submission_artifact_path,
+                        code_fingerprint=submit_code_fingerprint,
+                        fingerprint=fingerprint,
+                        error_kind=classification_kind,
+                        reason="same_error_fingerprint_recurred",
+                        message="Same submit error fingerprint recurred; aborting this run to prevent infinite loop.",
+                        stdout_tail=exc.stdout,
+                        stderr_tail=classification_stderr,
+                        exit_code=exc.exit_code,
+                    )
             seen_fingerprints.add(fingerprint)
             retry_after = classification.get("retry_after_seconds")
             retry_after_value = float(retry_after) if isinstance(retry_after, (int, float)) else 0.0
@@ -3891,8 +4887,8 @@ def _attempt_submit(
                     run_dir=run_dir,
                     payload={
                         "run_id": run_id,
-                        "sub_path": str(prepared_submission_path),
-                        "sub_sha256": _sha256_or_none(prepared_submission_path),
+                        "sub_path": submission_reference,
+                        "sub_sha256": _sha256_or_none(submission_artifact_path),
                         "exit_code": exc.exit_code,
                         "ok": False,
                         "fingerprint": fingerprint,
@@ -3900,14 +4896,14 @@ def _attempt_submit(
                         "action_taken": "retry",
                         "reason": classification_reason,
                         "stdout_tail": exc.stdout[-_SUBMIT_STDOUT_TAIL_CHARS:],
-                        "stderr_tail": exc.stderr[-_SUBMIT_STDERR_TAIL_CHARS:],
+                        "stderr_tail": classification_stderr[-_SUBMIT_STDERR_TAIL_CHARS:],
                     },
                 )
                 _record_submit_reason_knowledge(
                     config=config,
                     run_id=run_id,
                     problem_types=problem_types,
-                    submission_path=prepared_submission_path,
+                    submission_path=submission_artifact_path or prepared_submission_path,
                     error_kind="transient",
                     reason=classification_reason,
                     action_taken="retry",
@@ -3924,7 +4920,9 @@ def _attempt_submit(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
-                submission_path=prepared_submission_path,
+                submission_ref=submission_reference,
+                submission_artifact_path=submission_artifact_path,
+                code_fingerprint=submit_code_fingerprint,
                 fingerprint=fingerprint,
                 error_kind=classification_kind,
                 reason=classification_reason,
@@ -3934,7 +4932,7 @@ def _attempt_submit(
                     else "Transient submit error exceeded retry budget; aborting this run."
                 ),
                 stdout_tail=exc.stdout,
-                stderr_tail=exc.stderr,
+                stderr_tail=classification_stderr,
                 exit_code=exc.exit_code,
             )
         except (DuplicateSubmissionError, SubmissionRateLimitError) as exc:
@@ -3943,7 +4941,9 @@ def _attempt_submit(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
-                submission_path=prepared_submission_path,
+                submission_ref=submission_reference,
+                submission_artifact_path=submission_artifact_path,
+                code_fingerprint=submit_code_fingerprint,
                 fingerprint=fingerprint,
                 error_kind="permanent",
                 reason="local_submission_guardrail",
@@ -3958,7 +4958,9 @@ def _attempt_submit(
                     config=config,
                     run_id=run_id,
                     problem_types=problem_types,
-                    submission_path=prepared_submission_path,
+                    submission_ref=submission_reference,
+                    submission_artifact_path=submission_artifact_path,
+                    code_fingerprint=submit_code_fingerprint,
                     fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
                     error_kind="permanent",
                     reason="kaggle_credentials_missing",
@@ -3972,7 +4974,11 @@ def _attempt_submit(
             raise
         break
 
-    submission_for_submit = submission_result.submission_path
+    if submission_result is None:
+        raise SubmitAbortedError("Submit failed before producing a submission result.")
+    submission_ref = submission_reference
+    submission_for_submit_path = submission_artifact_path
+    submit_exit_code = getattr(submission_result, "exit_code", getattr(submission_result, "returncode", None))
     stdout_tail = submission_result.stdout[-_SUBMIT_STDOUT_TAIL_CHARS:]
     stderr_tail = submission_result.stderr[-_SUBMIT_STDERR_TAIL_CHARS:]
     fingerprint = compute_error_fingerprint(submission_result.stdout, submission_result.stderr)
@@ -3980,9 +4986,9 @@ def _attempt_submit(
         run_dir=run_dir,
         payload={
             "run_id": run_id,
-            "sub_path": str(submission_for_submit),
-            "sub_sha256": _sha256_or_none(submission_for_submit),
-            "exit_code": submission_result.exit_code,
+            "sub_path": submission_ref,
+            "sub_sha256": _sha256_or_none(submission_for_submit_path),
+            "exit_code": submit_exit_code,
             "ok": True,
             "fingerprint": fingerprint,
             "error_kind": "none",
@@ -3999,20 +5005,68 @@ def _attempt_submit(
             "submit_ok": True,
             "last_submit_fingerprint": fingerprint,
             "last_fingerprint": fingerprint,
+            "last_submit_code_fingerprint": submit_code_fingerprint,
             "last_error_kind": "none",
             "last_action": "submit",
             "last_reason": "submitted",
-            "last_submission_path": str(submission_for_submit),
+            "last_submission_path": submission_ref,
             "submit_attempts_count": int(_load_run_state(run_dir).get("submit_attempts_count", 0)) + 1,
         },
     )
     print("[green]submission recorded[/green]")
-    outcome = _wait_for_submission_outcome(
-        slug=config.slug,
-        message=message,
-        submitted_at=submitted_at,
-    )
-    if outcome and outcome.get("score") is not None:
+    try:
+        outcome = _wait_for_submission_outcome(
+            slug=config.slug,
+            message=message,
+            submitted_at=submitted_at,
+        )
+    except SubmissionOutcomePollingError as exc:
+        detail = normalize_error_text(exc.detail or str(exc), max_chars=1200)
+        return _abort_submit_for_run(
+            config=config,
+            run_id=run_id,
+            problem_types=problem_types,
+            submission_ref=submission_ref,
+            submission_artifact_path=submission_for_submit_path,
+            code_fingerprint=submit_code_fingerprint,
+            fingerprint=compute_error_fingerprint("", detail or str(exc)),
+            error_kind="transient",
+            reason="submission_polling_error",
+            message="Submission outcome polling failed; aborting submit stage for this run.",
+            stdout_tail="",
+            stderr_tail=detail or str(exc),
+            exit_code=None,
+        )
+
+    if isinstance(outcome, dict):
+        outcome_status = _normalize_submission_outcome_status(outcome.get("status"))
+        outcome["status"] = outcome_status
+        if outcome_status in _FAILED_SUBMISSION_OUTCOME_STATUSES:
+            raw_payload = outcome.get("raw")
+            if isinstance(raw_payload, dict):
+                raw_detail = normalize_error_text(json.dumps(raw_payload, ensure_ascii=True), max_chars=1200)
+            else:
+                raw_detail = normalize_error_text(str(raw_payload or outcome_status), max_chars=1200)
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_ref=submission_ref,
+                submission_artifact_path=submission_for_submit_path,
+                code_fingerprint=submit_code_fingerprint,
+                fingerprint=compute_error_fingerprint("", raw_detail or outcome_status),
+                error_kind="validation",
+                reason=f"submission_poll_status_{outcome_status}",
+                message=(
+                    f"Submission finished with error status '{outcome_status}' during polling; "
+                    "aborting submit stage for this run."
+                ),
+                stdout_tail="",
+                stderr_tail=raw_detail or outcome_status,
+                exit_code=None,
+            )
+
+    if isinstance(outcome, dict) and outcome.get("score") is not None:
         print(
             "[cyan]submission result[/cyan]: "
             f"status={outcome.get('status') or 'unknown'} score={float(outcome['score']):.6f}"
@@ -4021,11 +5075,105 @@ def _attempt_submit(
         print("[yellow]submission result[/yellow]: score not available yet; knowledge update skipped")
     return {
         "message": message,
-        "submission_path": str(submission_for_submit),
+        "submission_path": submission_ref,
         "submitted_at": submitted_at.isoformat(),
         "iteration": _infer_iteration_from_submission_path(submission_path),
         "outcome": outcome,
     }
+
+
+def _submit_with_notebook_kernel(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    submission_path: Path,
+    message: str,
+):
+    """Execute a Kaggle notebook kernel and submit via kernel reference."""
+    iteration = _infer_iteration_from_submission_path(submission_path) or 1
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    kaggle_user = resolve_kaggle_username(config.kaggle_username)
+    enable_internet = str(config.internet or "on").strip().lower() == "on"
+    try:
+        kernel_result = run_kernel(
+            slug=config.slug,
+            run_id=run_id,
+            iteration=iteration,
+            base_dir=config.paths.base_dir.parent,
+            kaggle_username=kaggle_user,
+            kernel_name=config.kernel_name,
+            accelerator=config.accelerator,
+            enable_internet=enable_internet,
+            score_source="auto",
+            metric="unknown",
+            direction="maximize",
+            holdout_frac=0.2,
+            cv_folds=5,
+            seed=42,
+            dry_run=config.dry_run,
+            timeout_minutes=config.time_budget_min,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SubmissionCliError(
+            "Notebook submission fallback failed while running Kaggle kernel.",
+            command=[],
+            output=str(exc),
+            stdout="",
+            stderr=str(exc),
+        ) from exc
+
+    submission_artifact_path: Path | None = None
+    if kernel_result.submission_path:
+        submission_artifact_path = _copy_submission_artifact_to_iteration_dir(
+            source=kernel_result.submission_path,
+            iter_dir=iter_dir,
+        )
+    kernel_ref = kernel_result.kernel_id
+    output_file = (
+        (submission_artifact_path or kernel_result.submission_path).name
+        if (submission_artifact_path or kernel_result.submission_path)
+        else "submission.csv"
+    )
+    version = _infer_kernel_submit_version_label(iter_dir / "logs") or "1"
+    print(f"[cyan]submit notebook[/cyan]: {kernel_ref}")
+    submit_result = run_kaggle_submit_kernel(
+        slug=config.slug,
+        kernel=kernel_ref,
+        message=message,
+        output_file=output_file,
+        version=version,
+        dry_run=config.dry_run,
+    )
+    return submit_result, f"kernel:{kernel_ref}", submission_artifact_path
+
+
+def _should_use_notebook_submit_fallback(*, reason: str, stdout: str, stderr: str) -> bool:
+    """Return True only when submit errors clearly indicate notebook-only submission."""
+    normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason == "notebook_only_submission_required":
+        return True
+    if normalized_reason not in {"bad_request", "unclassified_submit_error", "unknown"}:
+        return False
+    detail = f"{stdout}\n{stderr}".lower()
+    return any(hint in detail for hint in _NOTEBOOK_FALLBACK_HINTS)
+
+
+def _infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:
+    """Read pushed kernel version from kernel push logs for notebook submit."""
+    if logs_dir is None or not logs_dir.exists():
+        return None
+    candidates = sorted(logs_dir.glob("kernel_push-*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        match = _KERNEL_PUSH_VERSION_RE.search(text)
+        if match:
+            version = str(match.group("version") or "").strip()
+            if version:
+                return version
+    return None
 
 
 def _abort_submit_for_run(
@@ -4033,7 +5181,9 @@ def _abort_submit_for_run(
     config: AutopilotConfig,
     run_id: str,
     problem_types: list[str],
-    submission_path: Path,
+    submission_ref: str | Path,
+    submission_artifact_path: Path | None = None,
+    code_fingerprint: str | None = None,
     fingerprint: str,
     error_kind: str,
     reason: str,
@@ -4043,15 +5193,24 @@ def _abort_submit_for_run(
     exit_code: int | None,
 ) -> None:
     run_dir = config.paths.run_dir(run_id)
+    submission_ref_text = str(submission_ref)
+    artifact_path: Path | None
+    if submission_artifact_path is not None:
+        artifact_path = submission_artifact_path
+    elif isinstance(submission_ref, Path):
+        artifact_path = submission_ref
+    else:
+        artifact_path = None
     _append_submit_attempt(
         run_dir=run_dir,
         payload={
             "run_id": run_id,
-            "sub_path": str(submission_path),
-            "sub_sha256": _sha256_or_none(submission_path),
+            "sub_path": submission_ref_text,
+            "sub_sha256": _sha256_or_none(artifact_path),
             "exit_code": exit_code,
             "ok": False,
             "fingerprint": fingerprint,
+            "code_fingerprint": code_fingerprint or "",
             "error_kind": error_kind,
             "action_taken": "abort",
             "reason": reason,
@@ -4060,25 +5219,28 @@ def _abort_submit_for_run(
         },
     )
     prior = _load_run_state(run_dir)
+    prior_ok = bool(prior.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
     _save_run_state(
         run_dir,
         {
             "submit_attempted": True,
-            "submit_ok": False,
+            "submit_ok": prior_ok,
             "last_submit_fingerprint": fingerprint,
             "last_fingerprint": fingerprint,
+            "last_submit_code_fingerprint": code_fingerprint or "",
             "last_error_kind": error_kind,
             "last_action": "abort",
             "last_reason": reason,
-            "last_submission_path": str(submission_path),
+            "last_submission_path": submission_ref_text,
             "submit_attempts_count": int(prior.get("submit_attempts_count", 0)) + 1,
         },
     )
+    knowledge_submission_path = artifact_path or Path(submission_ref_text)
     _record_submit_reason_knowledge(
         config=config,
         run_id=run_id,
         problem_types=problem_types,
-        submission_path=submission_path,
+        submission_path=knowledge_submission_path,
         error_kind=error_kind,
         reason=reason,
         action_taken="abort",
@@ -4117,12 +5279,17 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
         payload["last_submit_fingerprint"] = payload.get("last_fingerprint")
     if "last_fingerprint" not in payload and payload.get("last_submit_fingerprint"):
         payload["last_fingerprint"] = payload.get("last_submit_fingerprint")
+    if bool(payload.get("submit_attempted")) and not bool(payload.get("submit_ok")):
+        if _has_successful_submit_attempt(run_dir):
+            payload["submit_ok"] = True
     return payload
 
 
 def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
     state = _load_run_state(run_dir)
     state.update(updates)
+    state["submit_attempted"] = bool(state.get("submit_attempted")) or _has_submit_attempt_records(run_dir)
+    state["submit_ok"] = bool(state.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
     state["updated_at"] = datetime.now(UTC).isoformat()
     state_path = run_dir / "run_state.json"
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -4139,6 +5306,54 @@ def _has_submit_attempt_records(run_dir: Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def _has_successful_submit_attempt(run_dir: Path) -> bool:
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return False
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and bool(payload.get("ok")):
+            return True
+    return False
+
+
+def _count_successful_submit_attempts(run_dir: Path) -> int:
+    """Count successful Kaggle submit actions recorded for this run."""
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return 0
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    count = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if not bool(payload.get("ok")):
+            continue
+        action_taken = str(payload.get("action_taken") or "").strip().lower()
+        if action_taken and action_taken != "submit":
+            continue
+        count += 1
+    return count
 
 
 def _load_submit_fingerprints(run_dir: Path) -> list[str]:
@@ -4230,13 +5445,95 @@ def _build_submit_autofix_context(run_dir: Path) -> str:
     return "\n".join(lines).strip()
 
 
-def _sha256_or_none(path: Path) -> str | None:
+def _sha256_or_none(path: Path | None) -> str | None:
+    """Return SHA256 for an existing file path, otherwise None."""
+    if path is None:
+        return None
     if not path.exists():
         return None
     try:
         return sha256_file(str(path))
     except OSError:
         return None
+
+
+def _compute_submit_code_fingerprint(config: AutopilotConfig) -> str:
+    """Compute a stable fingerprint of submit-relevant local code."""
+    hasher = hashlib.sha256()
+    root_specs = (
+        ("src", Path(__file__).resolve().parent),
+        ("kernel", config.paths.kernel_source_dir),
+    )
+    for label, root in root_specs:
+        if not root.exists() or not root.is_dir():
+            hasher.update(f"{label}:<missing>\n".encode())
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            if path.suffix.lower() in {".pyc", ".pyo"}:
+                continue
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                rel = path.name
+            hasher.update(f"{label}:{rel}\n".encode())
+            hasher.update((_sha256_or_none(path) or "missing").encode())
+            hasher.update(b"\n")
+    return hasher.hexdigest()
+
+
+def _consume_same_submit_fingerprint_retry_allowance(
+    *,
+    run_dir: Path,
+    run_state: dict[str, object],
+    fingerprint: str,
+    code_fingerprint: str,
+) -> bool:
+    """Allow one repeated-fingerprint retry after code changes since last submit error."""
+    last_code_fingerprint = str(run_state.get("last_submit_code_fingerprint") or "").strip()
+    prior_error_fingerprint = str(
+        run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or ""
+    ).strip()
+    if not code_fingerprint:
+        return False
+
+    consumed_code_fingerprint = str(run_state.get("same_fp_allowance_code_fingerprint") or "").strip()
+    consumed_error_fingerprint = str(run_state.get("same_fp_allowance_error_fingerprint") or "").strip()
+    if consumed_code_fingerprint == code_fingerprint and consumed_error_fingerprint == fingerprint:
+        return False
+
+    # Backward compatibility for runs recorded before code_fingerprint tracking existed.
+    # In that case we cannot compare "before vs after" code reliably, so allow exactly once.
+    if not last_code_fingerprint:
+        if not prior_error_fingerprint or prior_error_fingerprint != fingerprint:
+            return False
+        run_state["same_fp_allowance_code_fingerprint"] = code_fingerprint
+        run_state["same_fp_allowance_error_fingerprint"] = fingerprint
+        _save_run_state(
+            run_dir,
+            {
+                "same_fp_allowance_code_fingerprint": code_fingerprint,
+                "same_fp_allowance_error_fingerprint": fingerprint,
+            },
+        )
+        return True
+
+    if code_fingerprint == last_code_fingerprint:
+        return False
+
+    run_state["same_fp_allowance_code_fingerprint"] = code_fingerprint
+    run_state["same_fp_allowance_error_fingerprint"] = fingerprint
+    _save_run_state(
+        run_dir,
+        {
+            "same_fp_allowance_code_fingerprint": code_fingerprint,
+            "same_fp_allowance_error_fingerprint": fingerprint,
+        },
+    )
+    return True
 
 
 def _compute_submit_backoff(attempt: int) -> float:
@@ -4248,6 +5545,16 @@ def _compute_submit_backoff(attempt: int) -> float:
 def _env_truthy(name: str) -> bool:
     value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
+    state = _load_run_state(run_dir)
+    reason = str(state.get("last_reason") or "").strip().lower()
+    if not reason:
+        return False
+    if reason in {"submission_polling_error", "submission_polling_timeout", "submission_polling_invalid_payload"}:
+        return True
+    return reason.startswith("submission_poll_status_")
 
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
@@ -4332,6 +5639,7 @@ def _wait_for_submission_outcome(
         fetch_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
         max_attempts=max_attempts,
         poll_interval_sec=poll_interval_sec,
+        max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
     )
     return service.wait_for_outcome(
         slug=slug,
@@ -4350,6 +5658,17 @@ def _to_float(value: object) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def _normalize_submission_outcome_status(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "unknown"
+    if "." in raw:
+        prefix, _, suffix = raw.rpartition(".")
+        if suffix and "status" in prefix:
+            return suffix.strip()
+    return raw
 
 
 def _to_int(value: object) -> int | None:
@@ -4576,10 +5895,10 @@ def _submission_message(
     if config.message:
         return config.message
     iteration = _infer_iteration_from_submission_path(submission_path) if submission_path is not None else None
-    iteration_suffix = f" iter={iteration}" if isinstance(iteration, int) else ""
+    iteration_suffix = f" i={iteration}" if isinstance(iteration, int) else ""
     if best_score is None:
-        return f"kagglebot {config.slug} {run_id}{iteration_suffix}"
-    return f"kagglebot {config.slug} {run_id}{iteration_suffix} best_offline={best_score:.6f}"
+        return f"kb {run_id}{iteration_suffix}"
+    return f"kb {run_id}{iteration_suffix} offline={best_score:.4f}"
 
 
 def _normalize_metric_name(name: str | None) -> str:

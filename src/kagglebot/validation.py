@@ -344,7 +344,7 @@ def ensure_submission_rate_limit(
     ledger: SubmissionLedger,
     *,
     max_submissions_per_day: int = 5,
-    min_hours_between: float = 1.0,
+    min_hours_between: float = 5.0 / 60.0,
 ) -> None:
     now = datetime.now(UTC)
     last_ts = ledger.last_submission_time()

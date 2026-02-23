@@ -170,7 +170,7 @@ class EvaluationAdvisor:
             "Task:\n"
             "1) Determine official metric and direction from competition material and web research.\n"
             "2) Choose split strategy and evaluation parameters compatible with the supported options.\n"
-            "3) Propose gating thresholds and stop policy to avoid iteration loops.\n"
+            "3) Set submission_gate policy; use non-always gates only when rules mention submission-count limits.\n"
             "4) Include search queries used and concise source summary.\n\n"
             f"Output schema:\n{schema_text}\n"
         )
@@ -193,7 +193,7 @@ class EvaluationAdvisor:
             "method": "ci_bound",
             "k": 1.0,
             "target_score": top1_score,
-            "submission_gate": "readiness_or_final",
+            "submission_gate": "always",
         }
         spec = {
             "metric_name": metric,

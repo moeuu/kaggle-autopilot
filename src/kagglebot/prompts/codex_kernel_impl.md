@@ -30,6 +30,7 @@ Blocked modules (do NOT import; not available on Kaggle runtime):
 >>>
 If a blocked module appears in previous code, remove it and replace with Kaggle-default libraries
 (lightgbm, xgboost, catboost, torch, transformers, sklearn). If unsure, prefer these defaults.
+If `KAGGLEBOT_DISABLE_XGBOOST=1`, force-disable XGBoost paths even if code previously enabled them.
 
 Implementation contract for `kernel.py`:
 - Top-level knobs:
@@ -42,6 +43,8 @@ Implementation contract for `kernel.py`:
 - Robust I/O:
   - Read from `/kaggle/input/<competition_slug>/` (or local mirror safely)
   - Read `train`, `test`, and `sample_submission`
+  - Resolve output dirs dynamically; write to `/kaggle/working` only when writable
+  - Never print noisy permission warnings for expected unwritable paths during local runs
 - Strict target handling:
   - Infer/match target robustly and assert target column validity
 - Feature alignment helper:
@@ -52,17 +55,26 @@ Implementation contract for `kernel.py`:
   - Support only the encoders/transforms selected in plan.json
 - Per-pipeline artifacts:
   - Save `oof_preds_<name>.npy` and `test_preds_<name>.npy`
-  - Save under `/kaggle/working` and local output dir when available
+  - Save under local output dir always, and mirror to `/kaggle/working` only when writable
 - Evaluation:
   - CV with deterministic seeds where feasible
   - Print per-pipeline CV summary for the plan primary metric
+  - Use the same metric implementation/path for epoch model-selection and final offline scoring
+    (do not optimize on a proxy metric that differs from final reported score)
 - Ensemble:
   - Implement only ensemble methods listed in plan.json
   - Choose final method by plan primary metric (tie-breaker: simpler/faster)
+  - Include at least one simple baseline evaluated on the same folds/windows; never choose a final
+    pipeline that is worse than the baseline on the primary offline metric
 - Submission:
-  - Write `/kaggle/working/submission.csv`
+  - Write `submission.csv` into a writable output dir
+  - Mirror to `/kaggle/working/submission.csv` only when writable
   - Validate columns and row count against sample submission
   - Ensure no NaN/inf in predictions; clip to safe bounds when needed
+  - If `KAGGLEBOT_LOCAL_KERNEL=1`, avoid hard-failing on `/kaggle/working` writes
+- Optional model backends:
+  - Use XGBoost/CatBoost only if import succeeds and runtime toggles allow it
+  - If `KAGGLEBOT_DISABLE_LGBM_GPU=1`, force LightGBM to CPU (no GPU retry loops)
 - Modality coverage:
   - Add dataset modality detection (tabular/image/video/text/audio/other)
   - Keep tabular path robust by default

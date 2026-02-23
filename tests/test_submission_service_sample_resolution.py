@@ -84,3 +84,50 @@ def test_submission_service_synthesizes_sample_for_non_tabular_competitions(tmp_
     assert resolved_sample.name == "sample_submission_synth.csv"
     prepared = service.validate_and_prepare_submission(submission_path)
     assert prepared.exists()
+
+
+def test_submission_service_prefers_real_data_sample_when_placeholders_exist(tmp_path: Path) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    placeholder_context_sample = context_dir / "sample_submission.csv"
+    placeholder_context_sample.write_text("id,prediction\n", encoding="utf-8")
+
+    placeholder_data_sample = data_dir / "sample_submission.csv"
+    placeholder_data_sample.write_text("id,prediction\n", encoding="utf-8")
+
+    real_sample = data_dir / "SampleSubmission.csv"
+    pd.DataFrame(
+        {
+            "ID": [1, 2],
+            "LabelA": [0, 0],
+            "LabelB": [0, 0],
+        }
+    ).to_csv(real_sample, index=False)
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "ID": [1, 2],
+            "LabelA": [1, 0],
+            "LabelB": [0, 1],
+        }
+    ).to_csv(submission_path, index=False)
+
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=placeholder_context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+    resolved_sample = service._resolve_sample_submission()
+    assert resolved_sample == real_sample
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared == submission_path

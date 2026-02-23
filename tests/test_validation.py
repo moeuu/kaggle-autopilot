@@ -207,3 +207,24 @@ def test_submission_rate_limit(tmp_path):
 
     with pytest.raises(SubmissionRateLimitError, match="cooldown"):
         ensure_submission_rate_limit(ledger, max_submissions_per_day=5, min_hours_between=1.0)
+
+
+def test_submission_rate_limit_default_cooldown_is_five_minutes(tmp_path):
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
+    now = datetime.now(UTC)
+    entries = [
+        {
+            "ts": (now - timedelta(minutes=4)).isoformat(),
+            "sha256": "a",
+            "fingerprint": "f1",
+            "slug": "demo",
+            "submission_path": "sub.csv",
+            "message": "m1",
+            "run_id": "r1",
+        }
+    ]
+    ledger.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.ledger_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    with pytest.raises(SubmissionRateLimitError, match="cooldown"):
+        ensure_submission_rate_limit(ledger)

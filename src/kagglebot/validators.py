@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import py_compile
 import re
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -45,7 +46,8 @@ def safe_extract_zip(zip_path: Path, dest_dir: Path) -> list[Path]:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member, "r") as src, target.open("wb") as dst:
-                dst.write(src.read())
+                # Stream extraction to avoid loading large archive members fully into memory.
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
             extracted.append(target)
     return extracted
 
@@ -108,8 +110,8 @@ def validate_kernel_sources(kernel_dir: Path, *, require_kaggle_input: bool = Tr
             issues.append(f"Syntax error in {path.name}: {exc.msg}")
 
     content = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in py_files if path.is_file())
-    if require_kaggle_input and "/kaggle/input/" not in content:
-        issues.append("Kernel sources do not reference /kaggle/input/ for data loading.")
+    if require_kaggle_input and "/kaggle/input" not in content:
+        issues.append("Kernel sources do not reference /kaggle/input for data loading.")
     if "submission.csv" not in content:
         issues.append("Kernel sources do not reference submission.csv output.")
     if "metrics.json" not in content:

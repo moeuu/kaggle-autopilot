@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import base64
+import gzip
 import json
 import os
 import re
@@ -44,13 +46,124 @@ _OBJECT_COERCE_FILENAME = "object_coerce.json"
 _OBJECT_COERCE_SHIM_MARKER = "# kagglebot: object-coerce-shim"
 _DEVICE_COERCE_FILENAME = "device_coerce.json"
 _DEVICE_COERCE_SHIM_MARKER = "# kagglebot: device-coerce-shim"
+_KAGGLE_WORKING_REDIRECT_SHIM_MARKER = "# kagglebot: kaggle-working-redirect-shim"
+_LGBM_GPU_GUARD_SHIM_MARKER = "# kagglebot: lgbm-gpu-guard-shim"
+_TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
+_TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER = "# kagglebot: transformers-eval-strategy-shim"
+_KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
+_LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 
 _PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_seed(?P<seed>\d+)_fold(?P<fold>\d+)")
 _PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
     r"\b(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*seed=(?P<seed>\d+)\s+fold=(?P<fold>\d+)\b"
 )
+_PIPELINE_START_RE = re.compile(r"\bRunning pipeline:\s*(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)")
+_PIPELINE_DONE_RE = re.compile(r"\bPipeline\s+(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:")
+
+
+def _env_truthy(raw: str | None) -> bool:
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
+
+
+def _local_lightgbm_gpu_probe_usable() -> bool:
+    global _LOCAL_LGBM_GPU_PROBE_OK
+    if _LOCAL_LGBM_GPU_PROBE_OK is not None:
+        return _LOCAL_LGBM_GPU_PROBE_OK
+    if _env_truthy(os.environ.get("KAGGLEBOT_SKIP_LGBM_GPU_PROBE")):
+        _LOCAL_LGBM_GPU_PROBE_OK = False
+        return False
+    try:
+        import lightgbm as lgb
+        import numpy as np
+    except Exception:
+        _LOCAL_LGBM_GPU_PROBE_OK = False
+        return False
+
+    rng = np.random.default_rng(42)
+    x = rng.normal(size=(128, 4)).astype(np.float32)
+    y = (0.4 * x[:, 0] - 0.3 * x[:, 1] + 0.2 * x[:, 2]).astype(np.float32)
+    try:
+        model = lgb.LGBMRegressor(
+            n_estimators=16,
+            learning_rate=0.1,
+            num_leaves=15,
+            max_depth=5,
+            min_data_in_leaf=1,
+            min_data_in_bin=1,
+            device_type="gpu",
+            verbosity=-1,
+        )
+        model.fit(x, y)
+    except Exception:
+        _LOCAL_LGBM_GPU_PROBE_OK = False
+        return False
+    _LOCAL_LGBM_GPU_PROBE_OK = True
+    return True
+
+
+def _apply_local_runtime_env_defaults(
+    *,
+    env: dict[str, str],
+    accelerator: str,
+    local_working_dir: Path,
+) -> list[str]:
+    """Apply local execution defaults and force training to stay enabled."""
+    notes: list[str] = []
+    env.setdefault("KAGGLEBOT_LOCAL_WORKING_DIR", str(local_working_dir))
+    env.setdefault("KAGGLEBOT_DISABLE_KAGGLE_WORKING_WRITES", "1")
+    env["KAGGLEBOT_DO_TRAIN"] = "1"
+    env["KAGGLEBOT_FORCE_TRAIN"] = "1"
+    notes.append("forcing KAGGLEBOT_DO_TRAIN=1 and KAGGLEBOT_FORCE_TRAIN=1")
+
+    if not _module_available("xgboost"):
+        env.setdefault("USE_XGB", "0")
+        env.setdefault("KAGGLEBOT_DISABLE_XGBOOST", "1")
+        notes.append("xgboost unavailable; forcing USE_XGB=0")
+
+    force_lgbm_gpu = _env_truthy(os.environ.get("KAGGLEBOT_FORCE_LGBM_GPU"))
+    if accelerator == "gpu" and not force_lgbm_gpu and not _local_lightgbm_gpu_probe_usable():
+        env.setdefault("USE_LGBM_GPU", "0")
+        env.setdefault("KAGGLEBOT_DISABLE_LGBM_GPU", "1")
+        notes.append("LightGBM GPU probe failed; forcing CPU LightGBM")
+    return notes
+
+
+def _detect_cuda_oom(text: str) -> bool:
+    lowered = text.lower()
+    if "out of memory" not in lowered:
+        return False
+    if "cuda" in lowered:
+        return True
+    if "cublas_status_alloc_failed" in lowered:
+        return True
+    if "hiperroroutofmemory" in lowered:
+        return True
+    if "mps" in lowered and "out of memory" in lowered:
+        return True
+    return False
+
+
+def _apply_local_kernel_oom_fallback_env(env: dict[str, str]) -> list[str]:
+    notes: list[str] = []
+    env["ENABLE_LLM"] = "0"
+    env["PIPELINE_NAME"] = "retrieval_only_baseline"
+    env["ENABLE_SELF_CONSIST"] = "0"
+    env["SAVE_INTERMEDIATE"] = "0"
+    notes.append("CUDA OOM detected; retrying with ENABLE_LLM=0 and retrieval_only_baseline")
+    return notes
 
 
 @dataclass(frozen=True)
@@ -90,6 +203,89 @@ class KernelBuildConfig:
 
 
 @dataclass(frozen=True)
+class KernelSubmitBuildConfig:
+    slug: str
+    run_id: str
+    iteration: int
+    base_dir: Path
+    kaggle_username: str
+    kernel_name: str | None
+    accelerator: str
+    enable_internet: bool
+    submission_path: Path
+    dry_run: bool
+
+
+def _resolve_submit_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
+    if kernel_name:
+        candidate = f"{sanitize_kernel_slug(kernel_name)}-submit"
+        return sanitize_kernel_slug(candidate)
+    suffix = f"{run_id[-6:]}-i{iteration}"
+    prefix = f"kagglebot-{slug}-submit"
+    max_len = 50
+    allowed_prefix_len = max_len - len(suffix) - 1
+    if allowed_prefix_len < 1:
+        prefix = "kagglebot-submit"
+    else:
+        prefix = prefix[:allowed_prefix_len].rstrip("-")
+    base = f"{prefix}-{suffix}"
+    return sanitize_kernel_slug(base)
+
+
+_SUBMISSION_KERNEL_TEMPLATE = """\
+from __future__ import annotations
+
+import base64
+import gzip
+import json
+import os
+from pathlib import Path
+
+# This kernel exists to satisfy notebook-only competitions: it emits a prepared
+# `submission.csv` artifact that is already validated locally by Kagglebot.
+#
+# NOTE: We still reference `/kaggle/input` to satisfy source validators and to
+# make debugging easier in the Kaggle runtime.
+KAGGLE_INPUT_ROOT = "/kaggle/input"
+SUBMISSION_GZIP_B64 = "__SUBMISSION_GZIP_B64__"
+
+
+def _resolve_kernel_dir() -> Path:
+    try:
+        return Path(__file__).resolve().parent
+    except NameError:
+        return Path(os.getcwd()).resolve()
+
+
+def main() -> None:
+    dst = Path("/kaggle/working/submission.csv")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = gzip.decompress(base64.b64decode(SUBMISSION_GZIP_B64.encode("ascii")))
+    except Exception as exc:
+        raise RuntimeError("Failed to decode embedded submission payload.") from exc
+    dst.write_bytes(payload)
+    metrics_path = Path("/kaggle/working/metrics.json")
+    metrics_payload = {\"schema_version\": 1, \"kind\": \"submit_only\"}
+    metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding=\"utf-8\")
+    print(f\"Wrote {dst} (bytes={dst.stat().st_size})\")
+    print(f\"Wrote {metrics_path}\")
+
+
+if __name__ == \"__main__\":
+    main()
+"""
+
+
+def _render_submission_kernel_script(submission_path: Path) -> str:
+    """Render a self-contained submit-only kernel script with embedded submission bytes."""
+    submission_bytes = submission_path.read_bytes()
+    compressed = gzip.compress(submission_bytes, compresslevel=9)
+    payload_b64 = base64.b64encode(compressed).decode("ascii")
+    return _SUBMISSION_KERNEL_TEMPLATE.replace("__SUBMISSION_GZIP_B64__", payload_b64)
+
+
+@dataclass(frozen=True)
 class KernelPackageBuilder:
     def prepare(self, config: KernelBuildConfig) -> KernelPreparation:
         kernel_dir = config.base_dir / config.slug / "kernels" / config.run_id
@@ -123,6 +319,7 @@ class KernelPackageBuilder:
             targets=[kernel_dir / "plan.json"],
         )
         _ensure_kernel_import_path(kernel_dir)
+        _inject_competition_slug_env(kernel_dir, config.slug)
         _inline_kernel_modules(kernel_dir)
         _inject_data_dir_resolver(kernel_dir)
         _inject_pipeline_cfg_fallback(kernel_dir)
@@ -130,12 +327,73 @@ class KernelPackageBuilder:
         _inject_column_fill_shim(kernel_dir, config.base_dir / config.slug / "context")
         _inject_object_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
         _inject_device_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
+        _inject_training_progress_shim(kernel_dir)
+        _inject_transformers_eval_strategy_shim(kernel_dir)
+        _inject_competition_slug_env(kernel_dir, config.slug)
+        _inject_force_train_env(kernel_dir)
+        _ensure_training_progress_shim(kernel_dir)
         ensure_kernel_sources_valid(kernel_dir)
         _write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
             title=kernel_slug,
             code_file="kernel.py",
+            kernel_type="script",
+            accelerator=config.accelerator,
+            enable_internet=config.enable_internet,
+            competition_slug=config.slug,
+        )
+        validate_kernel_package(kernel_dir)
+        return KernelPreparation(
+            kernel_dir=kernel_dir,
+            output_dir=output_dir,
+            logs_dir=logs_dir,
+            kernel_slug=kernel_slug,
+            kernel_id=kernel_id,
+        )
+
+
+@dataclass(frozen=True)
+class KernelSubmitPackageBuilder:
+    def prepare(self, config: KernelSubmitBuildConfig) -> KernelPreparation:
+        kernel_dir = config.base_dir / config.slug / "kernels" / config.run_id / f"submit-iter-{config.iteration}"
+        output_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "output"
+        logs_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "logs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        if kernel_dir.exists():
+            shutil.rmtree(kernel_dir)
+        kernel_dir.mkdir(parents=True, exist_ok=True)
+
+        if not config.dry_run and not check_rules_accepted(config.slug, dry_run=False):
+            raise RulesNotAcceptedError("Competition rules not accepted.")
+
+        if not config.submission_path.exists() or not config.submission_path.is_file():
+            raise KernelFailedError(f"Submission artifact not found: {config.submission_path}")
+
+        if not config.dry_run:
+            print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
+            kernels_init(kernel_dir, dry_run=False)
+
+        kernel_slug = _resolve_submit_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
+        kernel_id = f"{config.kaggle_username}/{kernel_slug}"
+
+        (kernel_dir / "kernel.py").write_text(
+            _render_submission_kernel_script(config.submission_path),
+            encoding="utf-8",
+        )
+
+        _ensure_kernel_import_path(kernel_dir)
+        _inject_competition_slug_env(kernel_dir, config.slug)
+        _inject_force_train_env(kernel_dir)
+        ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
+        _write_kernel_metadata(
+            kernel_dir=kernel_dir,
+            kernel_id=kernel_id,
+            title=kernel_slug,
+            code_file="kernel.py",
+            kernel_type="script",
             accelerator=config.accelerator,
             enable_internet=config.enable_internet,
             competition_slug=config.slug,
@@ -159,6 +417,9 @@ class KernelJobMonitor:
         slug: str,
         timeout_minutes: int | None,
     ) -> str:
+        _ensure_kernel_competition_slug_env(preparation.kernel_dir, slug)
+        _ensure_kernel_force_train_env(preparation.kernel_dir)
+        _clear_stale_kernel_output(preparation.output_dir)
         print(f"[cyan]kernel push[/cyan]: {preparation.kernel_dir}")
         push_attempt = 1
         kernel_id = preparation.kernel_id
@@ -240,12 +501,42 @@ def resolve_kaggle_username(explicit: str | None) -> str:
     env_user = os.getenv("KAGGLE_USERNAME")
     if env_user:
         return env_user
-    kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
-    if kaggle_json.exists():
-        data = json.loads(kaggle_json.read_text(encoding="utf-8"))
-        if "username" in data:
-            return str(data["username"])
-    raise ValueError("Kaggle username not found. Provide --kaggle-username or set KAGGLE_USERNAME.")
+
+    config_dir_env = os.getenv("KAGGLE_CONFIG_DIR")
+    candidates: list[Path] = []
+    if config_dir_env:
+        config_path = Path(config_dir_env).expanduser()
+        # Support KAGGLE_CONFIG_DIR pointing to either a directory or kaggle.json file.
+        if config_path.suffix.lower() == ".json":
+            candidates.append(config_path)
+        else:
+            candidates.extend([config_path / "kaggle.json", config_path / "kaggle" / "kaggle.json"])
+    else:
+        candidates.append(Path("~/.kaggle/kaggle.json").expanduser())
+
+    candidates.extend(
+        [
+            Path.home() / ".kaggle" / "kaggle.json",
+            Path.home() / ".config" / "kaggle" / "kaggle.json",
+        ]
+    )
+    candidates = list(dict.fromkeys(candidates))
+
+    for kaggle_json in candidates:
+        if not kaggle_json.exists() or not kaggle_json.is_file():
+            continue
+        try:
+            data = json.loads(kaggle_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        username = data.get("username")
+        if username:
+            return str(username)
+    raise ValueError(
+        "Kaggle username is required for kaggle_* compute modes. "
+        "Set --kaggle-username, KAGGLE_USERNAME, or point KAGGLE_CONFIG_DIR "
+        "to a directory (or kaggle.json file) containing a username."
+    )
 
 
 def run_kernel(
@@ -309,6 +600,56 @@ def run_kernel(
     )
 
 
+def run_submit_kernel(
+    *,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    base_dir: Path,
+    kaggle_username: str,
+    kernel_name: str | None,
+    accelerator: str,
+    enable_internet: bool,
+    submission_path: Path,
+    dry_run: bool,
+    timeout_minutes: int | None,
+) -> KernelRunResult:
+    build_config = KernelSubmitBuildConfig(
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        base_dir=base_dir,
+        kaggle_username=kaggle_username,
+        kernel_name=kernel_name,
+        accelerator=accelerator,
+        enable_internet=enable_internet,
+        submission_path=submission_path,
+        dry_run=dry_run,
+    )
+    preparation = KernelSubmitPackageBuilder().prepare(build_config)
+    if dry_run:
+        return KernelRunResult(
+            kernel_id=preparation.kernel_id,
+            output_dir=preparation.output_dir,
+            submission_path=None,
+            metrics_path=None,
+        )
+
+    kernel_id = KernelJobMonitor().push_and_wait(
+        preparation=preparation,
+        slug=slug,
+        timeout_minutes=timeout_minutes,
+    )
+    resolved_submission_path = find_submission_file(preparation.output_dir)
+    metrics_path = _find_output_file(preparation.output_dir, "metrics.json")
+    return KernelRunResult(
+        kernel_id=kernel_id,
+        output_dir=preparation.output_dir,
+        submission_path=resolved_submission_path,
+        metrics_path=metrics_path,
+    )
+
+
 def run_kernel_local(
     *,
     slug: str,
@@ -363,6 +704,7 @@ def run_kernel_local(
 
     # Mirror packaging shims so local and kaggle kernel behavior are aligned.
     _ensure_kernel_import_path(kernel_stage_dir)
+    _inject_competition_slug_env(kernel_stage_dir, slug)
     _inline_kernel_modules(kernel_stage_dir)
     _inject_data_dir_resolver(kernel_stage_dir)
     _inject_pipeline_cfg_fallback(kernel_stage_dir)
@@ -370,6 +712,13 @@ def run_kernel_local(
     _inject_column_fill_shim(kernel_stage_dir, context_dir)
     _inject_object_coerce_shim(kernel_stage_dir, context_dir)
     _inject_device_coerce_shim(kernel_stage_dir, context_dir)
+    _inject_kaggle_working_redirect_shim(kernel_stage_dir)
+    _inject_lgbm_gpu_guard_shim(kernel_stage_dir)
+    _inject_training_progress_shim(kernel_stage_dir)
+    _inject_transformers_eval_strategy_shim(kernel_stage_dir)
+    _inject_competition_slug_env(kernel_stage_dir, slug)
+    _inject_force_train_env(kernel_stage_dir)
+    _ensure_training_progress_shim(kernel_stage_dir)
     ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
 
     if dry_run:
@@ -388,15 +737,24 @@ def run_kernel_local(
         timeout_sec=timeout_sec,
         eta_total_sec=eta_total_sec,
         eta_samples=eta_samples,
+        progress_tracker=progress_tracker,
     )
     started_at = time.time()
     monotonic_start = time.monotonic()
     env = os.environ.copy()
     env.setdefault("KAGGLEBOT_LOCAL_KERNEL", "1")
     env.setdefault("KAGGLEBOT_SLUG", slug)
+    env.setdefault("KAGGLEBOT_COMPETITION_SLUG", slug)
     env.setdefault("KAGGLEBOT_RUN_ID", run_id)
     env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
     env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
+    env_notes = _apply_local_runtime_env_defaults(
+        env=env,
+        accelerator=accelerator,
+        local_working_dir=kernel_stage_dir / "outputs" / "kaggle_working",
+    )
+    for note in env_notes:
+        print(f"[yellow]kernel local[/yellow]: {note}")
 
     heartbeat_stop = threading.Event()
     heartbeat = threading.Thread(
@@ -407,20 +765,25 @@ def run_kernel_local(
             "timeout_sec": timeout_sec,
             "eta_total_sec": eta_total_sec,
             "eta_samples": eta_samples,
+            "progress_tracker": progress_tracker,
             "interval_sec": _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC,
         },
         daemon=True,
     )
     heartbeat.start()
     try:
-        result = run_command(
-            [sys.executable, str(kernel_path)],
-            cwd=kernel_stage_dir,
-            env=env,
-            timeout=timeout_sec,
-            stream_output=True,
-            line_callback=progress_tracker.observe_line,
-        )
+
+        def run_once(*, current_env: dict[str, str]):
+            return run_command(
+                [sys.executable, str(kernel_path)],
+                cwd=kernel_stage_dir,
+                env=current_env,
+                timeout=timeout_sec,
+                stream_output=True,
+                line_callback=progress_tracker.observe_line,
+            )
+
+        result = run_once(current_env=env)
     except subprocess.TimeoutExpired as exc:
         raise KernelTimeoutError(f"Local kernel timed out after {timeout_sec}s.") from exc
     finally:
@@ -431,12 +794,48 @@ def run_kernel_local(
     (logs_dir / "local_kernel_stderr.log").write_text(result.stderr, encoding="utf-8")
 
     if result.returncode != 0:
-        stdout_tail = truncate_lines(result.stdout[-4000:], max_lines=80)
-        stderr_tail = truncate_lines(result.stderr[-4000:], max_lines=80)
-        detail = "\n".join(part for part in [stdout_tail, stderr_tail] if part).strip()
-        if detail:
-            detail = f"\n{detail}"
-        raise KernelFailedError(f"Local kernel execution failed with exit code {result.returncode}.{detail}")
+        combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
+        enable_llm_env = env.get("ENABLE_LLM")
+        llm_disabled_by_env = enable_llm_env is not None and not _env_truthy(enable_llm_env)
+        if accelerator == "gpu" and not strict_accelerator and not llm_disabled_by_env and _detect_cuda_oom(combined):
+            retry_env = env.copy()
+            retry_notes = _apply_local_kernel_oom_fallback_env(retry_env)
+            for note in retry_notes:
+                print(f"[yellow]kernel local[/yellow]: {note}")
+            try:
+                shutil.rmtree(run_dir / "outputs", ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                shutil.rmtree(kernel_stage_dir / "outputs", ignore_errors=True)
+            except Exception:
+                pass
+            time.sleep(2.0)
+
+            retry_result = run_once(current_env=retry_env)
+            (logs_dir / "local_kernel_stdout_oom_retry.log").write_text(retry_result.stdout, encoding="utf-8")
+            (logs_dir / "local_kernel_stderr_oom_retry.log").write_text(retry_result.stderr, encoding="utf-8")
+            if retry_result.returncode == 0:
+                result = retry_result
+                (logs_dir / "local_kernel_stdout.log").write_text(result.stdout, encoding="utf-8")
+                (logs_dir / "local_kernel_stderr.log").write_text(result.stderr, encoding="utf-8")
+            else:
+                stdout_tail = truncate_lines(retry_result.stdout[-4000:], max_lines=80)
+                stderr_tail = truncate_lines(retry_result.stderr[-4000:], max_lines=80)
+                detail = "\n".join(part for part in [stdout_tail, stderr_tail] if part).strip()
+                if detail:
+                    detail = f"\n{detail}"
+                raise KernelFailedError(
+                    f"Local kernel execution failed with CUDA OOM, then failed again after disabling LLM.{detail}"
+                )
+
+        if result.returncode != 0:
+            stdout_tail = truncate_lines(result.stdout[-4000:], max_lines=80)
+            stderr_tail = truncate_lines(result.stderr[-4000:], max_lines=80)
+            detail = "\n".join(part for part in [stdout_tail, stderr_tail] if part).strip()
+            if detail:
+                detail = f"\n{detail}"
+            raise KernelFailedError(f"Local kernel execution failed with exit code {result.returncode}.{detail}")
     _append_local_kernel_duration_history(
         base_dir=base_dir,
         slug=slug,
@@ -551,8 +950,28 @@ class _LocalKernelProgressTracker:
     started_at_monotonic: float = field(default_factory=time.monotonic)
     zero_based_folds: bool = False
     seen_triplets: set[tuple[str, int, int]] = field(default_factory=set)
+    lines_seen: int = 0
+    last_output_monotonic: float | None = None
+    current_pipeline: str | None = None
+    completed_pipelines: set[str] = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def observe_line(self, line: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self.lines_seen += 1
+            self.last_output_monotonic = now
+
+        started_pipeline = _extract_pipeline_start_from_line(line)
+        if started_pipeline is not None:
+            with self._lock:
+                self.current_pipeline = started_pipeline
+
+        completed_pipeline = _extract_pipeline_done_from_line(line)
+        if completed_pipeline is not None:
+            with self._lock:
+                self.completed_pipelines.add(completed_pipeline)
+
         parsed = _extract_training_stage_from_line(line)
         if parsed is None:
             return
@@ -597,6 +1016,21 @@ class _LocalKernelProgressTracker:
             f"(elapsed={elapsed_min:.1f}m)"
         )
 
+    def snapshot(self, now_monotonic: float | None = None) -> dict[str, object]:
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        with self._lock:
+            lines_seen = self.lines_seen
+            last_output = self.last_output_monotonic
+            current_pipeline = self.current_pipeline
+            completed_count = len(self.completed_pipelines)
+        last_log_age_sec = None if last_output is None else max(0.0, now - last_output)
+        return {
+            "lines_seen": lines_seen,
+            "last_log_age_sec": last_log_age_sec,
+            "current_pipeline": current_pipeline,
+            "completed_pipeline_count": completed_count,
+        }
+
 
 def _build_local_kernel_progress_tracker(*, base_dir: Path, slug: str) -> _LocalKernelProgressTracker:
     expected_folds: int | None = None
@@ -640,6 +1074,22 @@ def _match_to_stage_tuple(match: re.Match[str]) -> tuple[str, int, int] | None:
     if not pipeline:
         return None
     return pipeline, seed, fold
+
+
+def _extract_pipeline_start_from_line(line: str) -> str | None:
+    match = _PIPELINE_START_RE.search(line)
+    if not match:
+        return None
+    pipeline = str(match.group("pipeline")).strip()
+    return pipeline or None
+
+
+def _extract_pipeline_done_from_line(line: str) -> str | None:
+    match = _PIPELINE_DONE_RE.search(line)
+    if not match:
+        return None
+    pipeline = str(match.group("pipeline")).strip()
+    return pipeline or None
 
 
 def _resolve_seed_current(*, seed: int, expected_seeds: list[int]) -> int | None:
@@ -725,6 +1175,7 @@ def _local_kernel_heartbeat(
     timeout_sec: int | None,
     eta_total_sec: float | None,
     eta_samples: int,
+    progress_tracker: _LocalKernelProgressTracker,
     interval_sec: float,
 ) -> None:
     while not stop_event.wait(interval_sec):
@@ -734,6 +1185,7 @@ def _local_kernel_heartbeat(
             timeout_sec=timeout_sec,
             eta_total_sec=eta_total_sec,
             eta_samples=eta_samples,
+            progress_tracker=progress_tracker,
         )
 
 
@@ -743,20 +1195,44 @@ def _print_local_kernel_progress(
     timeout_sec: int | None,
     eta_total_sec: float | None,
     eta_samples: int,
+    progress_tracker: _LocalKernelProgressTracker | None,
 ) -> None:
+    activity_suffix = _format_local_kernel_activity_suffix(progress_tracker)
     elapsed = max(0, int(elapsed_sec))
     if eta_total_sec is not None and eta_total_sec > 0:
         remaining = max(0, int(eta_total_sec - elapsed_sec))
         print(
             "[cyan]kernel local running[/cyan]: "
             f"elapsed={elapsed}s eta~{remaining}s (expected~{int(eta_total_sec)}s from {eta_samples} runs)"
+            f"{activity_suffix}"
         )
         return
     if timeout_sec is not None:
         timeout_remaining = max(0, int(timeout_sec - elapsed_sec))
-        print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s)")
+        print(
+            f"[cyan]kernel local running[/cyan]: "
+            f"elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s){activity_suffix}"
+        )
         return
-    print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown")
+    print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown{activity_suffix}")
+
+
+def _format_local_kernel_activity_suffix(progress_tracker: _LocalKernelProgressTracker | None) -> str:
+    if progress_tracker is None:
+        return ""
+    snapshot = progress_tracker.snapshot()
+    lines_seen = int(snapshot.get("lines_seen", 0))
+    last_log_age_sec = snapshot.get("last_log_age_sec")
+    current_pipeline = snapshot.get("current_pipeline")
+    completed_pipeline_count = int(snapshot.get("completed_pipeline_count", 0))
+    last_log_text = "none"
+    if isinstance(last_log_age_sec, (int, float)):
+        last_log_text = f"{int(last_log_age_sec)}s ago"
+    pipeline_text = str(current_pipeline) if current_pipeline else "unknown"
+    return (
+        f" (logs={lines_seen}, last_log={last_log_text}, "
+        f"pipeline={pipeline_text}, pipelines_done={completed_pipeline_count})"
+    )
 
 
 def _resolve_local_kernel_artifacts(
@@ -833,6 +1309,7 @@ def _write_kernel_metadata(
     kernel_id: str,
     title: str,
     code_file: str,
+    kernel_type: str,
     accelerator: str,
     enable_internet: bool,
     competition_slug: str,
@@ -848,7 +1325,7 @@ def _write_kernel_metadata(
             "title": title,
             "code_file": code_file,
             "language": "python",
-            "kernel_type": "script",
+            "kernel_type": kernel_type,
             "is_private": True,
             "enable_gpu": accelerator == "gpu",
             "enable_tpu": accelerator == "tpu",
@@ -889,7 +1366,14 @@ _KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
 _KERNEL_BOOTSTRAP_END = "del _os, _sys, _KROOT, _KWORK"
 _KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
 _KERNEL_PIPELINE_CFG_MARKER = "# kagglebot:pipeline_cfg_fallback"
+_KERNEL_COMPETITION_SLUG_MARKER = "# kagglebot:competition_slug"
 _DATA_DIR_JOIN_RE = re.compile(r"(\bdata_dir\s*/\s*)(['\"])([^'\"]+)\2")
+_DATA_DIR_REQUIRED_RE = re.compile(r"all\(\(cand\s*/\s*name\)\.exists\(\)\s*for\s*name\s*in\s*required\)")
+_DATA_DIR_LOCATE_FALLBACK_MARKER = "# kagglebot:data-dir-fallback-scan"
+_DATA_DIR_RAISE_RE = re.compile(
+    r"^\s*raise FileNotFoundError\(f\"Could not find required csv files for slug='\{slug\}'\"\)\s*$",
+    re.MULTILINE,
+)
 
 
 def _strip_kernel_bootstrap(lines: list[str]) -> list[str]:
@@ -944,25 +1428,70 @@ def _inject_data_dir_resolver(kernel_dir: Path) -> None:
     if not kernel_path.exists():
         return
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_DATA_RESOLVER_MARKER in text:
-        return
     if not _DATA_DIR_JOIN_RE.search(text):
         return
+    lines = text.splitlines()
+    if _KERNEL_DATA_RESOLVER_MARKER not in text:
+        resolver_block = [
+            _KERNEL_DATA_RESOLVER_MARKER,
+            "from pathlib import Path as _KBPath",
+            "",
+            "def _kb_find_file(base: _KBPath, name: str) -> _KBPath:",
+            "    candidate = base / name",
+            "    if candidate.exists():",
+            "        return candidate",
+            "    try:",
+            "        matches = list(base.rglob(name))",
+            "    except Exception:",
+            "        matches = []",
+            "    if matches:",
+            "        return matches[0]",
+            "    return candidate",
+            "",
+        ]
+        insert_at = _find_bootstrap_block_end(lines)
+        if insert_at is None:
+            insert_at = _find_bootstrap_insertion_index(lines)
+        lines = lines[:insert_at] + resolver_block + lines[insert_at:]
+    updated = "\n".join(lines)
+    updated = _DATA_DIR_JOIN_RE.sub(r"_kb_find_file(data_dir, '\3')", updated)
+    updated = _DATA_DIR_REQUIRED_RE.sub(
+        "all(_kb_find_file(cand, name).exists() for name in required)",
+        updated,
+    )
+    if _DATA_DIR_LOCATE_FALLBACK_MARKER not in updated:
+        fallback_block = (
+            "    input_root = _KBPath('/kaggle/input')\n"
+            "    if input_root.exists() and input_root.is_dir():\n"
+            f"        {_DATA_DIR_LOCATE_FALLBACK_MARKER}\n"
+            "        for cand in sorted(input_root.iterdir(), key=lambda p: p.name):\n"
+            "            if not cand.is_dir():\n"
+            "                continue\n"
+            "            if all(_kb_find_file(cand, name).exists() for name in required):\n"
+            "                return cand\n"
+            "    raise FileNotFoundError(f\"Could not find required csv files for slug='{slug}'\")"
+        )
+        updated = _DATA_DIR_RAISE_RE.sub(fallback_block, updated, count=1)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _inject_competition_slug_env(kernel_dir: Path, competition_slug: str) -> None:
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_COMPETITION_SLUG_MARKER in text:
+        return
+
+    slug_literal = json.dumps(str(competition_slug))
     resolver_block = [
-        _KERNEL_DATA_RESOLVER_MARKER,
-        "from pathlib import Path as _KBPath",
-        "",
-        "def _kb_find_file(base: _KBPath, name: str) -> _KBPath:",
-        "    candidate = base / name",
-        "    if candidate.exists():",
-        "        return candidate",
-        "    try:",
-        "        matches = list(base.rglob(name))",
-        "    except Exception:",
-        "        matches = []",
-        "    if matches:",
-        "        return matches[0]",
-        "    return candidate",
+        _KERNEL_COMPETITION_SLUG_MARKER,
+        "import os as _kb_os",
+        f"_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = {slug_literal}",
+        f"_kb_os.environ['KAGGLEBOT_SLUG'] = {slug_literal}",
+        "del _kb_os",
         "",
     ]
     lines = text.splitlines()
@@ -971,10 +1500,137 @@ def _inject_data_dir_resolver(kernel_dir: Path) -> None:
         insert_at = _find_bootstrap_insertion_index(lines)
     lines = lines[:insert_at] + resolver_block + lines[insert_at:]
     updated = "\n".join(lines)
-    updated = _DATA_DIR_JOIN_RE.sub(r"_kb_find_file(data_dir, '\3')", updated)
     if text.endswith("\n"):
         updated += "\n"
     kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _inject_force_train_env(kernel_dir: Path) -> None:
+    """Inject environment bootstrap that keeps training enabled in staged kernels."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_FORCE_TRAIN_MARKER in text:
+        return
+
+    resolver_block = [
+        _KERNEL_FORCE_TRAIN_MARKER,
+        "import os as _kb_os",
+        "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '1'",
+        "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '1'",
+        "del _kb_os",
+        "",
+    ]
+    lines = text.splitlines()
+    insert_at = _find_bootstrap_block_end(lines)
+    if insert_at is None:
+        insert_at = _find_bootstrap_insertion_index(lines)
+    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
+    updated = "\n".join(lines)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _strip_competition_slug_bootstrap(lines: list[str]) -> list[str]:
+    stripped = lines
+    while _KERNEL_COMPETITION_SLUG_MARKER in stripped:
+        start = stripped.index(_KERNEL_COMPETITION_SLUG_MARKER)
+        end = None
+        search_end = min(start + 12, len(stripped))
+        for idx in range(start + 1, search_end):
+            if stripped[idx].strip() == "del _kb_os":
+                end = idx + 1
+                if end < len(stripped) and stripped[end].strip() == "":
+                    end += 1
+                break
+        if end is None:
+            stripped = stripped[:start] + stripped[start + 1 :]
+        else:
+            stripped = stripped[:start] + stripped[end:]
+    return stripped
+
+
+def _strip_force_train_bootstrap(lines: list[str]) -> list[str]:
+    """Remove injected force-train bootstrap blocks from kernel text lines."""
+    stripped = lines
+    while _KERNEL_FORCE_TRAIN_MARKER in stripped:
+        start = stripped.index(_KERNEL_FORCE_TRAIN_MARKER)
+        end = None
+        search_end = min(start + 12, len(stripped))
+        for idx in range(start + 1, search_end):
+            if stripped[idx].strip() == "del _kb_os":
+                end = idx + 1
+                if end < len(stripped) and stripped[end].strip() == "":
+                    end += 1
+                break
+        if end is None:
+            stripped = stripped[:start] + stripped[start + 1 :]
+        else:
+            stripped = stripped[:start] + stripped[end:]
+    return stripped
+
+
+def _ensure_kernel_competition_slug_env(kernel_dir: Path, competition_slug: str) -> None:
+    """Ensure the kernel runtime can resolve the competition slug on Kaggle.
+
+    Kaggle script kernels run from `/kaggle/working`, so naive filesystem-based defaults
+    (e.g. using parent directory names) often resolve to "kaggle" instead of the
+    competition slug. Inject a tiny env bootstrap into kernel.py so the runtime uses
+    the correct slug regardless of working directory layout.
+    """
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    slug_literal = json.dumps(str(competition_slug))
+    expected_slug_line = f"_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = {slug_literal}"
+    expected_alias_line = f"_kb_os.environ['KAGGLEBOT_SLUG'] = {slug_literal}"
+    if _KERNEL_COMPETITION_SLUG_MARKER in text and expected_slug_line in text and expected_alias_line in text:
+        return
+    if _KERNEL_COMPETITION_SLUG_MARKER in text:
+        stripped_lines = _strip_competition_slug_bootstrap(text.splitlines())
+        stripped_text = "\n".join(stripped_lines)
+        if text.endswith("\n"):
+            stripped_text += "\n"
+        kernel_path.write_text(stripped_text, encoding="utf-8")
+    _inject_competition_slug_env(kernel_dir, competition_slug)
+    updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if (
+        _KERNEL_COMPETITION_SLUG_MARKER not in updated
+        or expected_slug_line not in updated
+        or expected_alias_line not in updated
+    ):
+        raise KernelFailedError(
+            "Failed to inject competition slug bootstrap into kernel.py. "
+            "Refusing to push a kernel that may mis-resolve /kaggle/input paths."
+        )
+
+
+def _ensure_kernel_force_train_env(kernel_dir: Path) -> None:
+    """Ensure staged kernel runtime has force-train env injection."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    expected_train_line = "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '1'"
+    expected_force_line = "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '1'"
+    if _KERNEL_FORCE_TRAIN_MARKER in text and expected_train_line in text and expected_force_line in text:
+        return
+    if _KERNEL_FORCE_TRAIN_MARKER in text:
+        stripped_lines = _strip_force_train_bootstrap(text.splitlines())
+        stripped_text = "\n".join(stripped_lines)
+        if text.endswith("\n"):
+            stripped_text += "\n"
+        kernel_path.write_text(stripped_text, encoding="utf-8")
+    _inject_force_train_env(kernel_dir)
+    updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_FORCE_TRAIN_MARKER not in updated or expected_train_line not in updated or expected_force_line not in updated:
+        raise KernelFailedError(
+            "Failed to inject force-train bootstrap into kernel.py. "
+            "Refusing to push a kernel that may auto-disable training."
+        )
 
 
 def _inject_pipeline_cfg_fallback(kernel_dir: Path) -> None:
@@ -1085,6 +1741,7 @@ def _inject_column_fill_shim(kernel_dir: Path, context_dir: Path) -> None:
     shim = [
         _COLUMN_FILL_SHIM_MARKER,
         "import json",
+        "import re",
         "from pathlib import Path",
         "",
         "def _kb_load_fill() -> dict:",
@@ -1120,24 +1777,92 @@ def _inject_column_fill_shim(kernel_dir: Path, context_dir: Path) -> None:
         "        return [str(c) for c in cols if str(c).strip()]",
         "    return []",
         "",
+        "def _kb_global_missing_columns() -> set[str]:",
+        "    payload = _kb_load_fill()",
+        "    if not payload:",
+        "        return set()",
+        "    allowed: set[str] = set()",
+        "    cols = payload.get('missing_columns') if isinstance(payload, dict) else None",
+        "    if isinstance(cols, list):",
+        "        for col in cols:",
+        "            name = str(col).strip()",
+        "            if name:",
+        "                allowed.add(name)",
+        "    file_map = payload.get('files') if isinstance(payload, dict) else None",
+        "    if isinstance(file_map, dict):",
+        "        for value in file_map.values():",
+        "            if not isinstance(value, list):",
+        "                continue",
+        "            for col in value:",
+        "                name = str(col).strip()",
+        "                if name:",
+        "                    allowed.add(name)",
+        "    return allowed",
+        "",
+        "def _kb_add_missing_columns(df, columns: list[str]) -> bool:",
+        "    added = False",
+        "    for col in columns:",
+        "        if col in df.columns:",
+        "            continue",
+        "        try:",
+        "            df[col] = float('nan')",
+        "            added = True",
+        "        except Exception:",
+        "            continue",
+        "    return added",
+        "",
+        "def _kb_parse_missing_from_keyerror(exc: Exception) -> list[str]:",
+        "    text = str(exc)",
+        '    match = re.search(r"\\[([^\\]]+)\\]\\s*not in index", text, flags=re.IGNORECASE)',
+        "    if not match:",
+        "        return []",
+        "    raw = match.group(1).strip()",
+        "    if not raw:",
+        "        return []",
+        "    values = []",
+        "    for token in raw.split(','):",
+        '        name = token.strip().strip("\'\\"")',
+        "        if name:",
+        "            values.append(name)",
+        "    return values",
+        "",
         "def _kb_patch_pandas_fill() -> None:",
         "    try:",
         "        import pandas as _pd",
         "    except Exception:",
         "        return",
         "    _orig = _pd.read_csv",
+        "    _orig_getitem = _pd.DataFrame.__getitem__",
         "    def _patched(*args, **kwargs):",
         "        df = _orig(*args, **kwargs)",
         "        try:",
         "            path_value = args[0] if args else kwargs.get('filepath_or_buffer')",
         "            missing_cols = _kb_missing_columns_for(path_value)",
-        "            for col in missing_cols:",
-        "                if col not in df.columns:",
-        "                    df[col] = _pd.NA",
+        "            _kb_add_missing_columns(df, missing_cols)",
         "        except Exception:",
         "            return df",
         "        return df",
+        "    def _patched_getitem(df, key):",
+        "        try:",
+        "            return _orig_getitem(df, key)",
+        "        except KeyError as exc:",
+        "            if not isinstance(key, (list, tuple)):",
+        "                raise",
+        "            requested = [str(item) for item in key if isinstance(item, str)]",
+        "            if not requested:",
+        "                raise",
+        "            allowed = _kb_global_missing_columns()",
+        "            missing = [col for col in requested if col not in df.columns and (not allowed or col in allowed)]",
+        "            if not missing:",
+        "                parsed = _kb_parse_missing_from_keyerror(exc)",
+        "                missing = [col for col in parsed if col in requested and (not allowed or col in allowed)]",
+        "            if not missing:",
+        "                raise",
+        "            if not _kb_add_missing_columns(df, missing):",
+        "                raise",
+        "            return _orig_getitem(df, key)",
         "    _pd.read_csv = _patched",
+        "    _pd.DataFrame.__getitem__ = _patched_getitem",
         "",
         "_kb_patch_pandas_fill()",
         "",
@@ -1334,6 +2059,470 @@ def _inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
         site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
         return
     site_path.write_text("\\n".join(shim), encoding="utf-8")
+
+
+def _inject_kaggle_working_redirect_shim(kernel_dir: Path) -> None:
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _KAGGLE_WORKING_REDIRECT_SHIM_MARKER,
+        "import builtins",
+        "import io",
+        "import os",
+        "from pathlib import Path",
+        "",
+        "def _kb_local_kernel_mode() -> bool:",
+        "    value = str(os.environ.get('KAGGLEBOT_LOCAL_KERNEL', '0')).strip().lower()",
+        "    return value in {'1', 'true', 'yes', 'on'}",
+        "",
+        "def _kb_redirect_root() -> Path | None:",
+        "    root = str(os.environ.get('KAGGLEBOT_LOCAL_WORKING_DIR', '')).strip()",
+        "    if not root:",
+        "        return None",
+        "    return Path(root)",
+        "",
+        "def _kb_remap_path(path_value):",
+        "    try:",
+        "        raw = os.fspath(path_value)",
+        "    except Exception:",
+        "        return path_value",
+        "    if not isinstance(raw, str):",
+        "        return path_value",
+        "    if raw == '/kaggle/working':",
+        "        root = _kb_redirect_root()",
+        "        return str(root) if root is not None else path_value",
+        "    if raw.startswith('/kaggle/working/'):",
+        "        root = _kb_redirect_root()",
+        "        if root is None:",
+        "            return path_value",
+        "        suffix = raw[len('/kaggle/working/'):].lstrip('/')",
+        "        return str(root / suffix)",
+        "    return path_value",
+        "",
+        "def _kb_prepare_parent(path_value, mode: str) -> None:",
+        "    if not any(flag in mode for flag in ('w', 'a', 'x', '+')):",
+        "        return",
+        "    try:",
+        "        parent = Path(os.fspath(path_value)).parent",
+        "        parent.mkdir(parents=True, exist_ok=True)",
+        "    except Exception:",
+        "        return",
+        "",
+        "def _kb_patch_open_redirect() -> None:",
+        "    if not _kb_local_kernel_mode():",
+        "        return",
+        "    _orig_builtin_open = builtins.open",
+        "    _orig_io_open = io.open",
+        "",
+        "    def _open_builtin(file, mode='r', *args, **kwargs):",
+        "        mapped = _kb_remap_path(file)",
+        "        _kb_prepare_parent(mapped, mode)",
+        "        return _orig_builtin_open(mapped, mode, *args, **kwargs)",
+        "",
+        "    def _open_io(file, mode='r', *args, **kwargs):",
+        "        mapped = _kb_remap_path(file)",
+        "        _kb_prepare_parent(mapped, mode)",
+        "        return _orig_io_open(mapped, mode, *args, **kwargs)",
+        "",
+        "    builtins.open = _open_builtin",
+        "    io.open = _open_io",
+        "",
+        "_kb_patch_open_redirect()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _KAGGLE_WORKING_REDIRECT_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\\n".join(shim), encoding="utf-8")
+
+
+def _inject_lgbm_gpu_guard_shim(kernel_dir: Path) -> None:
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _LGBM_GPU_GUARD_SHIM_MARKER,
+        "import os",
+        "",
+        "def _kb_disable_lgbm_gpu_enabled() -> bool:",
+        "    value = str(os.environ.get('KAGGLEBOT_DISABLE_LGBM_GPU', '0')).strip().lower()",
+        "    return value in {'1', 'true', 'yes', 'on'}",
+        "",
+        "def _kb_patch_lgbm_gpu_guard() -> None:",
+        "    if not _kb_disable_lgbm_gpu_enabled():",
+        "        return",
+        "    try:",
+        "        import lightgbm as _lgb",
+        "    except Exception:",
+        "        return",
+        "",
+        "    def _force_cpu(estimator) -> None:",
+        "        for key in ('device', 'device_type'):",
+        "            try:",
+        "                estimator.set_params(**{key: 'cpu'})",
+        "            except Exception:",
+        "                continue",
+        "",
+        "    targets = ('LGBMModel', 'LGBMRegressor', 'LGBMClassifier', 'LGBMRanker')",
+        "    for cls_name in targets:",
+        "        cls = getattr(_lgb, cls_name, None)",
+        "        if cls is None:",
+        "            continue",
+        "        fit = getattr(cls, 'fit', None)",
+        "        if fit is None or not callable(fit) or getattr(fit, '__kb_lgbm_cpu_wrapped__', False):",
+        "            continue",
+        "        def _wrapped(self, *args, _fit=fit, **kwargs):",
+        "            _force_cpu(self)",
+        "            return _fit(self, *args, **kwargs)",
+        "        _wrapped.__kb_lgbm_cpu_wrapped__ = True",
+        "        setattr(cls, 'fit', _wrapped)",
+        "",
+        "    train_fn = getattr(_lgb, 'train', None)",
+        "    if callable(train_fn) and not getattr(train_fn, '__kb_lgbm_cpu_wrapped__', False):",
+        "        def _train(params, *args, _train=train_fn, **kwargs):",
+        "            if isinstance(params, dict):",
+        "                updated = dict(params)",
+        "                updated['device'] = 'cpu'",
+        "                updated['device_type'] = 'cpu'",
+        "                params = updated",
+        "            return _train(params, *args, **kwargs)",
+        "        _train.__kb_lgbm_cpu_wrapped__ = True",
+        "        _lgb.train = _train",
+        "",
+        "_kb_patch_lgbm_gpu_guard()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _LGBM_GPU_GUARD_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\\n".join(shim), encoding="utf-8")
+
+
+def _inject_training_progress_shim(kernel_dir: Path) -> None:
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = (
+        (
+            f"""
+{_TRAIN_PROGRESS_SHIM_MARKER}
+import importlib
+import os
+import threading
+import time
+
+_KB_PROGRESS = {{
+    "started_at": time.monotonic(),
+    "last_event_at": time.monotonic(),
+    "watchdog_started": False,
+}}
+
+def _kb_progress_enabled() -> bool:
+    value = str(os.environ.get("KAGGLEBOT_TRAIN_PROGRESS", "1")).strip().lower()
+    return value not in {{"0", "false", "off", "no"}}
+
+def _kb_int_env(name: str, default: int, minimum: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+def _kb_float_env(name: str, default: float, minimum: float) -> float:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+def _kb_emit(msg: str) -> None:
+    _KB_PROGRESS["last_event_at"] = time.monotonic()
+    print(f"[kernel] {{msg}}", flush=True)
+
+def _kb_get_shape(args):
+    if not args:
+        return None, None
+    x = args[0]
+    rows = None
+    cols = None
+    try:
+        rows = int(len(x))
+    except Exception:
+        rows = None
+    try:
+        shape = getattr(x, "shape", None)
+        if shape is not None and len(shape) >= 2:
+            cols = int(shape[1])
+    except Exception:
+        cols = None
+    return rows, cols
+
+def _kb_estimator_iter_budget(estimator) -> int | None:
+    params = {{}}
+    try:
+        params = estimator.get_params(deep=False)
+    except Exception:
+        params = {{}}
+    for key in ("iterations", "n_estimators", "max_iter", "num_iterations"):
+        value = params.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+def _kb_resolve_boosting_log_every(estimator) -> int:
+    forced = _kb_int_env("KAGGLEBOT_BOOSTING_LOG_EVERY", 0, 0)
+    if forced > 0:
+        return forced
+    budget = _kb_estimator_iter_budget(estimator)
+    if budget is None:
+        return 100
+    # Target around 20-30 evaluation points across a full fit.
+    period = max(1, budget // 25)
+    return min(max(period, 10), 200)
+
+def _kb_choose_fit_tick_interval(label: str, rows: int | None) -> float:
+    base = _kb_float_env("KAGGLEBOT_MODEL_PROGRESS_INTERVAL_SEC", 12.0, 5.0)
+    if label in {{"catboost", "lightgbm", "xgboost"}}:
+        # Boosting models also emit iteration logs; keep timer sparse.
+        return max(base, 30.0)
+    if rows is None:
+        return base
+    if rows >= 200000:
+        return max(base, 30.0)
+    if rows >= 50000:
+        return max(base, 20.0)
+    if rows >= 10000:
+        return max(base, 12.0)
+    return base
+
+def _kb_start_watchdog_thread() -> None:
+    if not _kb_progress_enabled():
+        return
+    if bool(_KB_PROGRESS.get("watchdog_started", False)):
+        return
+    _KB_PROGRESS["watchdog_started"] = True
+    silence_sec = _kb_float_env("KAGGLEBOT_PROGRESS_INTERVAL_SEC", 45.0, 10.0)
+    poll_sec = max(1.0, min(5.0, silence_sec / 6.0))
+    def _run():
+        while True:
+            time.sleep(poll_sec)
+            now = time.monotonic()
+            last = float(_KB_PROGRESS.get("last_event_at", now))
+            if now - last < silence_sec:
+                continue
+            elapsed = int(max(0.0, now - float(_KB_PROGRESS.get("started_at", now))))
+            quiet = int(max(0.0, now - last))
+            _kb_emit(f"train watchdog: elapsed={{elapsed}}s no_new_logs_for={{quiet}}s")
+    t = threading.Thread(target=_run, daemon=True, name="kb-train-watchdog")
+    t.start()
+
+def _kb_wrap_splitter(module_name: str, class_name: str) -> None:
+    if not _kb_progress_enabled():
+        return
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return
+    cls = getattr(mod, class_name, None)
+    if cls is None:
+        return
+    split = getattr(cls, "split", None)
+    if split is None or not callable(split):
+        return
+    if getattr(split, "__kb_progress_wrapped__", False):
+        return
+    def _wrapped(self, *args, **kwargs):
+        iterator = split(self, *args, **kwargs)
+        total = getattr(self, "n_splits", None)
+        idx = 0
+        for item in iterator:
+            idx += 1
+            train_n = "?"
+            valid_n = "?"
+            if isinstance(item, tuple) and len(item) >= 2:
+                try:
+                    train_n = str(len(item[0]))
+                except Exception:
+                    pass
+                try:
+                    valid_n = str(len(item[1]))
+                except Exception:
+                    pass
+            fold_part = f"{{idx}}/{{total}}" if isinstance(total, int) and total > 0 else str(idx)
+            _kb_emit(
+                f"cv fold start: splitter={{class_name}} fold={{fold_part}} train={{train_n}} valid={{valid_n}}"
+            )
+            yield item
+        if idx > 0:
+            _kb_emit(f"cv split done: splitter={{class_name}} folds={{idx}}")
+    _wrapped.__kb_progress_wrapped__ = True
+    setattr(cls, "split", _wrapped)
+
+def _kb_wrap_fit(module_name: str, class_name: str, label: str) -> None:
+    if not _kb_progress_enabled():
+        return
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return
+    cls = getattr(mod, class_name, None)
+    if cls is None:
+        return
+    fit = getattr(cls, "fit", None)
+    if fit is None or not callable(fit):
+        return
+    if getattr(fit, "__kb_progress_wrapped__", False):
+        return
+    def _wrapped(self, *args, **kwargs):
+        model_name = self.__class__.__name__
+        rows, cols = _kb_get_shape(args)
+        iter_budget = _kb_estimator_iter_budget(self)
+        log_every = None
+        if label in {{"catboost", "lightgbm", "xgboost"}}:
+            log_every = _kb_resolve_boosting_log_every(self)
+        summary = [f"train start: model={{label}}.{{model_name}}"]
+        if rows is not None:
+            summary.append(f"rows={{rows}}")
+        if cols is not None:
+            summary.append(f"cols={{cols}}")
+        if iter_budget is not None:
+            summary.append(f"iter_budget={{iter_budget}}")
+        if log_every is not None:
+            summary.append(f"log_every={{log_every}}")
+        _kb_emit(" ".join(summary))
+        try:
+            if label == "lightgbm":
+                import lightgbm as _lgb
+                callbacks = list(kwargs.get("callbacks") or [])
+                callbacks.append(_lgb.log_evaluation(period=log_every))
+                kwargs["callbacks"] = callbacks
+            elif label == "xgboost":
+                if kwargs.get("eval_set"):
+                    kwargs["verbose"] = log_every
+            elif label == "catboost":
+                try:
+                    self.set_params(verbose=log_every)
+                except Exception:
+                    pass
+                kwargs.setdefault("verbose", log_every)
+        except Exception:
+            pass
+        started = time.monotonic()
+        interval = _kb_choose_fit_tick_interval(label, rows)
+        stop = threading.Event()
+        def _ticker():
+            while not stop.wait(interval):
+                elapsed = int(max(0.0, time.monotonic() - started))
+                _kb_emit(f"train running: model={{label}}.{{model_name}} elapsed={{elapsed}}s")
+        thread = threading.Thread(target=_ticker, daemon=True, name=f"kb-fit-{{label}}")
+        thread.start()
+        try:
+            return fit(self, *args, **kwargs)
+        finally:
+            stop.set()
+            thread.join(timeout=0.2)
+            elapsed = int(max(0.0, time.monotonic() - started))
+            _kb_emit(f"train done: model={{label}}.{{model_name}} elapsed={{elapsed}}s")
+    _wrapped.__kb_progress_wrapped__ = True
+    setattr(cls, "fit", _wrapped)
+
+def _kb_patch_training_progress() -> None:
+    if not _kb_progress_enabled():
+        return
+    _kb_start_watchdog_thread()
+    splitters = [
+        ("sklearn.model_selection", "KFold"),
+        ("sklearn.model_selection", "StratifiedKFold"),
+        ("sklearn.model_selection", "GroupKFold"),
+        ("sklearn.model_selection", "TimeSeriesSplit"),
+    ]
+    for module_name, class_name in splitters:
+        _kb_wrap_splitter(module_name, class_name)
+    targets = [
+        ("catboost", "CatBoostRegressor", "catboost"),
+        ("lightgbm", "LGBMRegressor", "lightgbm"),
+        ("xgboost", "XGBRegressor", "xgboost"),
+        ("sklearn.ensemble", "HistGradientBoostingRegressor", "sklearn"),
+        ("sklearn.linear_model", "ElasticNet", "sklearn"),
+        ("sklearn.linear_model", "Ridge", "sklearn"),
+        ("sklearn.linear_model", "SGDRegressor", "sklearn"),
+        ("sklearn.kernel_ridge", "KernelRidge", "sklearn"),
+    ]
+    for module_name, class_name, label in targets:
+        _kb_wrap_fit(module_name, class_name, label)
+
+_kb_patch_training_progress()
+"""
+        )
+        .strip("\n")
+        .splitlines()
+    )
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _TRAIN_PROGRESS_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\\n".join(shim), encoding="utf-8")
+
+
+def _inject_transformers_eval_strategy_shim(kernel_dir: Path) -> None:
+    """Patch transformers API drift for Seq2SeqTrainingArguments eval strategy naming."""
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER,
+        "import inspect",
+        "",
+        "def _kb_patch_transformers_eval_strategy_alias() -> None:",
+        "    try:",
+        "        import transformers as _tf",
+        "    except Exception:",
+        "        return",
+        "    args_cls = getattr(_tf, 'Seq2SeqTrainingArguments', None)",
+        "    if args_cls is None:",
+        "        return",
+        "    try:",
+        "        params = inspect.signature(args_cls.__init__).parameters",
+        "    except Exception:",
+        "        return",
+        "    if 'evaluation_strategy' in params:",
+        "        return",
+        "    if 'eval_strategy' not in params:",
+        "        return",
+        "    _orig_init = args_cls.__init__",
+        "    def _patched_init(self, *args, **kwargs):",
+        "        if 'evaluation_strategy' in kwargs and 'eval_strategy' not in kwargs:",
+        "            kwargs['eval_strategy'] = kwargs.pop('evaluation_strategy')",
+        "        return _orig_init(self, *args, **kwargs)",
+        "    args_cls.__init__ = _patched_init",
+        "",
+        "_kb_patch_transformers_eval_strategy_alias()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\\n".join(shim), encoding="utf-8")
+
+
+def _ensure_training_progress_shim(kernel_dir: Path) -> None:
+    site_path = kernel_dir / "sitecustomize.py"
+    if not site_path.exists():
+        raise KernelFailedError(
+            f"Training progress shim missing: {site_path}. Refusing to run a kernel without mandatory progress logging."
+        )
+    text = site_path.read_text(encoding="utf-8", errors="ignore")
+    if _TRAIN_PROGRESS_SHIM_MARKER not in text:
+        raise KernelFailedError(
+            f"Training progress shim marker not found in {site_path}. "
+            "Refusing to run a kernel without mandatory progress logging."
+        )
 
 
 def _find_bootstrap_block_end(lines: list[str]) -> int | None:
@@ -1691,6 +2880,20 @@ def _write_push_log(logs_dir: Path, attempt: int, output: str) -> None:
     path.write_text(output.strip() + "\n", encoding="utf-8")
 
 
+def _clear_stale_kernel_output(output_dir: Path) -> None:
+    """Remove stale files from prior kernel runs in the same output directory."""
+    if not output_dir.exists():
+        return
+    for path in output_dir.iterdir():
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+                continue
+            path.unlink()
+        except OSError:
+            continue
+
+
 def _parse_kernel_status(output: str) -> str:
     match = re.search(r"status\\s+\\\"?([A-Za-z0-9_.-]+)\\\"?", output)
     if match:
@@ -1898,14 +3101,18 @@ def _find_output_file(output_dir: Path, filename: str) -> Path | None:
 
 
 def _find_submission_by_extension(output_dir: Path) -> Path | None:
-    suffixes = [".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"]
-    for suffix in suffixes:
+    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".zip"}
+    candidates: list[Path] = []
+    for suffix in sorted(suffixes):
         candidate = output_dir / f"submission{suffix}"
-        if candidate.exists():
-            return candidate
+        if candidate.is_file():
+            candidates.append(candidate)
     for path in output_dir.rglob("submission.*"):
         if not path.is_file():
             continue
-        if path.suffix.lower() in suffixes:
-            return path
-    return None
+        if path.suffix.lower() not in suffixes:
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: (path.stat().st_mtime, str(path)))

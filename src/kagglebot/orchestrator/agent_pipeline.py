@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 from dataclasses import dataclass
@@ -372,7 +373,7 @@ def _run_codex_kernel_implementation(
     knowledge_paths = KnowledgePaths(workdir=config.repo_root)
     _, knowledge_summary_path = resolve_research_paths_for_slug(knowledge_paths=knowledge_paths, slug=paths.slug)
     research_summary_path = knowledge_summary_path or (paths.context_dir / "research_summary.md")
-    blocked_modules = _load_blocked_modules(paths.context_dir)
+    blocked_modules = _resolve_blocked_modules_for_runtime(paths.context_dir, compute=config.compute)
     blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = _render_template(
         template,
@@ -482,7 +483,7 @@ def _ensure_context_materials(paths: CompetitionPaths) -> None:
         if resolved is not None and resolved.exists() and _has_data_rows(resolved):
             paths.sample_submission_path.write_text(resolved.read_text(encoding="utf-8"), encoding="utf-8")
         else:
-            paths.sample_submission_path.write_text("id,target\n", encoding="utf-8")
+            paths.sample_submission_path.write_text("id,prediction\n", encoding="utf-8")
     if sample_needs_refresh or (not paths.sample_submission_head_path.exists()):
         head = _read_sample_submission_head(paths, max_lines=5)
         if head:
@@ -533,6 +534,15 @@ def _load_blocked_modules(context_dir: Path) -> list[str]:
     if isinstance(payload, list):
         return [str(item) for item in payload if item]
     return []
+
+
+def _resolve_blocked_modules_for_runtime(context_dir: Path, *, compute: str) -> list[str]:
+    blocked = set(_load_blocked_modules(context_dir))
+    if compute.startswith("local"):
+        for module_name in ("xgboost",):
+            if importlib.util.find_spec(module_name) is None:
+                blocked.add(module_name)
+    return sorted(blocked)
 
 
 def _split_strategy_output(text: str) -> tuple[str, str]:
@@ -1386,8 +1396,8 @@ def _build_fallback_strategy(
         "   - Use modality-appropriate models (CNN/transformer/sequence model).",
         "   - Only fall back to sample_submission if no valid training path exists.",
         "4) Always write:",
-        "   - `/kaggle/working/submission.csv` matching sample_submission columns and row count.",
-        "   - `/kaggle/working/metrics.json` with `offline_value` (numeric) and `metric` name.",
+        "   - `submission.csv` and `metrics.json` under a writable output directory.",
+        "   - If `/kaggle/working` is writable, mirror artifacts there; if not, skip silently.",
         "5) Keep changes confined to `kernel.py` and helper files under the kernel directory.",
     ]
     instructions_text = "\n".join(instructions_lines).replace("{slug}", config.slug).strip()
@@ -1848,6 +1858,8 @@ def _allowed_prefixes(root: Path, allowed_prefixes: list[Path]) -> list[str]:
 
 
 def _is_noise_path(path: str) -> bool:
+    if path.startswith("artifacts/") and "/kernels/" in path:
+        return True
     for prefix in _NOISE_PREFIXES:
         if path.startswith(prefix):
             return True

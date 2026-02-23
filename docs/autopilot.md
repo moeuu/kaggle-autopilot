@@ -7,7 +7,7 @@ It always follows this high-level path:
 2. Plan and implement initial kernel via `codex -> gpt -> codex`
 3. Train/evaluate per iteration
 4. Improve if needed
-5. Submit based on gate policy and use submission outcomes as secondary guardrails
+5. Submit and use submission outcomes as secondary guardrails
 
 ## Quick Start
 
@@ -47,7 +47,8 @@ Per iteration, autopilot does:
 4. If not top1-tier and iterations remain, run improvement
 
 Submission behavior:
-- Submit according to `submission_gate` policy (default `always`)
+- Default: submit every iteration
+- `submission_gate` is activated only when rules indicate submission-count limits
 - Loop decision uses readiness score (SRS); submission score/rank are secondary guardrails
 - Repeated submit-error fingerprints are aborted safely
 

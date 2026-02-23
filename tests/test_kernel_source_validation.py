@@ -40,6 +40,24 @@ def test_kernel_source_validation_passes_basic(tmp_path: Path) -> None:
     ensure_kernel_sources_valid(kernel_dir)
 
 
+def test_kernel_source_validation_accepts_kaggle_input_without_trailing_slash(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "\n".join(
+            [
+                "DATA_ROOT = '/kaggle/input'",
+                "DATA = DATA_ROOT + '/demo/train.csv'",
+                "OUT1 = '/kaggle/working/submission.csv'",
+                "OUT2 = '/kaggle/working/metrics.json'",
+            ]
+        )
+        + "\n",
+    )
+    ensure_kernel_sources_valid(kernel_dir)
+
+
 def test_kernel_source_validation_flags_prott5_automodel(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)

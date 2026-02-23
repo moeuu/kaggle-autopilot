@@ -5,12 +5,13 @@ This document explains the current submission policy in autopilot.
 ## Policy
 
 Autopilot uses readiness score (SRS) as the primary loop decision.
-Submission is controlled by `submission_gate` (default: `always`).
+By default it submits every iteration.
+`submission_gate` is only used when rules indicate submission-count limits.
 
 Decision rule:
 1. Iterate training/evaluation up to `max_iterations`
 2. Compute SRS from metric mean/std/CI (+ optional drift penalty)
-3. Submit only when gate allows
+3. Submit after each iteration (unless a submission-limit gate is active)
 4. Use submission score/rank as secondary guardrails (e.g. top1-tier stop, rank-based major-overhaul trigger)
 
 ## Why This Exists

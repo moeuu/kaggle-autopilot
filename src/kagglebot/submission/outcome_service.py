@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 _RANK_PAIR_RE = re.compile(r"(?P<rank>\d+)\s*/\s*(?P<total>\d+)")
+_TERMINAL_SUBMISSION_STATUSES = {"complete", "completed", "error", "failed", "cancelled", "canceled"}
+
+
+class SubmissionOutcomePollingError(RuntimeError):
+    def __init__(self, message: str, *, attempt: int, consecutive_errors: int, detail: str) -> None:
+        super().__init__(message)
+        self.attempt = attempt
+        self.consecutive_errors = consecutive_errors
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -15,6 +24,7 @@ class SubmissionOutcomeService:
     fetch_rows: Callable[[str], list[dict[str, str]]]
     max_attempts: int | None = None
     poll_interval_sec: float = 30.0
+    max_fetch_errors: int = 3
 
     def wait_for_outcome(
         self,
@@ -24,12 +34,30 @@ class SubmissionOutcomeService:
         submitted_at: datetime,
     ) -> dict[str, object] | None:
         attempt = 0
+        consecutive_fetch_errors = 0
         while True:
             attempt += 1
             try:
                 rows = self.fetch_rows(slug)
-            except Exception:  # noqa: BLE001
-                rows = []
+                consecutive_fetch_errors = 0
+            except Exception as exc:  # noqa: BLE001
+                consecutive_fetch_errors += 1
+                builtins.print(f"submission poll: attempt={attempt} status=fetch_error waiting", flush=True)
+                if self.max_fetch_errors > 0 and consecutive_fetch_errors >= self.max_fetch_errors:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    raise SubmissionOutcomePollingError(
+                        (
+                            "Submission polling failed after consecutive fetch errors "
+                            f"(attempt={attempt}, consecutive_errors={consecutive_fetch_errors}): {detail}"
+                        ),
+                        attempt=attempt,
+                        consecutive_errors=consecutive_fetch_errors,
+                        detail=detail,
+                    ) from exc
+                if self.max_attempts is not None and self.max_attempts > 0 and attempt >= self.max_attempts:
+                    return None
+                time.sleep(self.poll_interval_sec)
+                continue
             match = self._select_submission_row(rows=rows, message=message, submitted_at=submitted_at)
             if match is not None:
                 status = self._extract_submission_status(match)
@@ -45,7 +73,7 @@ class SubmissionOutcomeService:
                     }
                     payload.update(rank_payload)
                     return payload
-                if status in {"complete", "completed", "error", "failed", "cancelled"}:
+                if status in _TERMINAL_SUBMISSION_STATUSES:
                     payload = {
                         "status": status,
                         "score": None,
@@ -116,8 +144,19 @@ class SubmissionOutcomeService:
         for key in ("status", "state"):
             value = SubmissionOutcomeService._get_row_value_ci(row, key)
             if value:
-                return value.strip().lower()
+                return SubmissionOutcomeService._normalize_submission_status(value)
         return "unknown"
+
+    @staticmethod
+    def _normalize_submission_status(value: object) -> str:
+        raw = str(value).strip().lower()
+        if not raw:
+            return "unknown"
+        if "." in raw:
+            prefix, _, suffix = raw.rpartition(".")
+            if suffix and "status" in prefix:
+                return suffix.strip()
+        return raw
 
     @staticmethod
     def _extract_submission_score(row: dict[str, str]) -> float | None:

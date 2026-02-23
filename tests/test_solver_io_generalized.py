@@ -25,6 +25,24 @@ def test_infer_submission_layout_supports_multi_target() -> None:
     assert feature_cols == ["f1"]
 
 
+def test_infer_submission_layout_excludes_train_only_columns() -> None:
+    train = pd.DataFrame(
+        {
+            "oare_id": ["x1", "x2", "x3"],
+            "transliteration": ["a", "b", "c"],
+            "translation": ["A", "B", "C"],
+        }
+    )
+    test = pd.DataFrame({"id": [10, 11], "transliteration": ["d", "e"]})
+    sample = pd.DataFrame({"id": [10, 11], "translation": ["", ""]})
+
+    id_col, target_cols, feature_cols = infer_submission_layout(train=train, test=test, sample=sample)
+
+    assert id_col == "id"
+    assert target_cols == ["translation"]
+    assert feature_cols == ["transliteration"]
+
+
 def test_write_submission_multitarget_aligns_by_id(tmp_path) -> None:
     sample = pd.DataFrame({"id": [11, 12], "target_a": [0, 0], "target_b": [0.0, 0.0]})
     test = pd.DataFrame({"id": [12, 11], "f": [1, 2]})

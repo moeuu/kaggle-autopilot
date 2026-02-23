@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,9 +22,7 @@ from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
-from kagglebot.solver.io import find_competition_files
 from kagglebot.solver.metrics import infer_direction
-from kagglebot.submission.validate import validate_submission
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
@@ -90,6 +89,7 @@ def bootstrap(
         quiet=quiet,
         force=cfg.force,
         dry_run=cfg.dry_run,
+        download_progress_callback=_print_download_progress,
     )
     print(f"[green]bootstrap complete[/green]: {meta_path}")
 
@@ -161,7 +161,7 @@ def train(
     run_id = new_run_id()
     run_dir = paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-    submission_path = paths.submissions_dir / f"{run_id}_submission.csv"
+    submission_path: Path | None = None
 
     if compute.value.startswith("kaggle_"):
         if not cfg.force and not cfg.dry_run:
@@ -190,7 +190,11 @@ def train(
             _print_rules(slug)
             raise typer.Exit(code=2)
         if kernel_result.submission_path:
-            submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+            submission_path = _store_submission_artifact(
+                source=kernel_result.submission_path,
+                destination_dir=paths.submissions_dir,
+                run_id=run_id,
+            )
     else:
         kernel_path = paths.kernel_source_dir / "kernel.py"
         if not kernel_path.exists():
@@ -212,13 +216,29 @@ def train(
             strict_accelerator=strict_accelerator,
         )
         if kernel_result.submission_path:
-            submission_path.write_bytes(kernel_result.submission_path.read_bytes())
+            submission_path = _store_submission_artifact(
+                source=kernel_result.submission_path,
+                destination_dir=paths.submissions_dir,
+                run_id=run_id,
+            )
         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
             metrics_path = run_dir / "metrics.json"
             metrics_path.write_bytes(kernel_result.metrics_path.read_bytes())
 
-    _, _, sample_path = find_competition_files(paths.data_dir)
-    validate_submission(str(submission_path), str(sample_path))
+    if submission_path is None:
+        raise typer.BadParameter("Training completed but no submission artifact was produced.")
+    validation_service = SubmissionService(
+        SubmissionConfig(
+            slug=slug,
+            data_dir=paths.data_dir,
+            sample_submission_path=paths.sample_submission_path,
+            submission_ledger_path=paths.submission_ledger_path,
+            dry_run=cfg.dry_run,
+            force_submit=True,
+            bypass_rate_limit=True,
+        )
+    )
+    submission_path = validation_service.validate_and_prepare_submission(submission_path)
     print(f"[green]submission written[/green]: {submission_path}")
 
 
@@ -226,7 +246,7 @@ def train(
 def submit(
     ctx: typer.Context,
     competition: str = typer.Argument(..., help="Competition URL or slug."),
-    file: Path = typer.Option(..., "-f", "--file", help="Submission CSV path."),
+    file: Path = typer.Option(..., "-f", "--file", help="Submission file path."),
     message: str = typer.Option(..., "-m", "--message", help="Submission message."),
     force_submit: bool = typer.Option(False, "--force-submit", help="Allow duplicate submissions."),
 ) -> None:
@@ -344,6 +364,7 @@ def autopilot(
             download=not cfg.dry_run,
             force=False,
             dry_run=cfg.dry_run,
+            download_progress_callback=_print_download_progress,
         )
         if not cfg.dry_run:
             print(f"[green]download complete[/green]: {paths.data_dir}")
@@ -429,6 +450,14 @@ def knowledge_search_cmd(
     print(json.dumps(results, indent=2))
 
 
+def _print_download_progress(done_files: int, total_files: int, file_name: str | None) -> None:
+    if total_files <= 0:
+        return
+    percent = (done_files / total_files) * 100.0
+    detail = f" - {Path(file_name).name}" if file_name else ""
+    print(f"[cyan]download progress[/cyan]: {done_files}/{total_files} ({percent:.1f}%){detail}")
+
+
 def _run_verify(cmd: str, dry_run: bool) -> None:
     if dry_run:
         return
@@ -471,9 +500,25 @@ def _resolve_resume_run_id(
         candidate = resume_run_id.strip()
         if not candidate:
             raise typer.BadParameter("--resume-run-id cannot be empty.", param_hint="--resume-run-id")
-        if not paths.run_dir(candidate).exists():
-            raise typer.BadParameter(f"Run ID not found: {candidate}", param_hint="--resume-run-id")
-        return candidate
+        if paths.run_dir(candidate).exists():
+            return candidate
+        run_ids = sorted(_list_run_ids(paths))
+        prefix_matches = [run_id for run_id in run_ids if run_id.startswith(candidate)]
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+        if len(prefix_matches) > 1:
+            options = ", ".join(prefix_matches[:5])
+            raise typer.BadParameter(
+                f"Run ID prefix is ambiguous: {candidate} ({options})",
+                param_hint="--resume-run-id",
+            )
+        if run_ids:
+            hints = ", ".join(run_ids[-3:])
+            raise typer.BadParameter(
+                f"Run ID not found: {candidate}. Recent run IDs: {hints}",
+                param_hint="--resume-run-id",
+            )
+        raise typer.BadParameter(f"Run ID not found: {candidate}", param_hint="--resume-run-id")
     if not resume_latest:
         return None
     latest = _find_latest_run_id(paths)
@@ -501,8 +546,27 @@ def _find_latest_run_id(paths: CompetitionPaths) -> str | None:
     return latest_name
 
 
+def _list_run_ids(paths: CompetitionPaths) -> list[str]:
+    runs_dir = paths.runs_dir
+    if not runs_dir.exists():
+        return []
+    run_ids: list[str] = []
+    for run_dir in runs_dir.iterdir():
+        if run_dir.is_dir():
+            run_ids.append(run_dir.name)
+    return run_ids
+
+
 def _print_rules(slug: str) -> None:
     print(f"[red]Rules not accepted[/red]. Visit: https://www.kaggle.com/competitions/{slug}/rules")
+
+
+def _store_submission_artifact(*, source: Path, destination_dir: Path, run_id: str) -> Path:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix
+    destination = destination_dir / f"{run_id}_submission{suffix}"
+    shutil.copy2(source, destination)
+    return destination
 
 
 def _default_metric(paths: CompetitionPaths) -> str:

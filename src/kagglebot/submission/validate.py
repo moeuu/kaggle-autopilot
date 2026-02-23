@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 
 from kagglebot.exceptions import SubmissionValidationError
-from kagglebot.submission_format import extract_submission_section, load_submission_format_hint, parse_submission_format
+from kagglebot.submission_format import (
+    columns_look_plausible,
+    extract_submission_section,
+    load_submission_format_hint,
+    parse_submission_format,
+)
 
 
 def validate_submission(sub_path: str, sample_path: str) -> None:
@@ -23,14 +28,21 @@ def validate_submission(sub_path: str, sample_path: str) -> None:
     if problems:
         raise SubmissionValidationError(_format_validation_message(problems))
 
-    sample = pd.read_csv(sample_csv)
-    submission = pd.read_csv(submission_csv)
+    sample_delim = _sniff_delimiter(sample_csv, default=_default_delimiter_for_path(sample_csv))
+    submission_delim = _sniff_delimiter(submission_csv, default=sample_delim)
+
+    sample = pd.read_csv(sample_csv, sep=sample_delim)
+    submission = pd.read_csv(submission_csv, sep=submission_delim)
 
     sample_has_data_rows = _has_data_rows(sample_csv)
     expected_columns = list(sample.columns)
     expected_source = "sample_submission.csv"
     hint_columns = _resolve_expected_columns_from_context(sample_csv)
-    if hint_columns and (not expected_columns or sample.empty or not sample_has_data_rows):
+    if hint_columns and _should_prefer_hint_columns(
+        sample_has_data_rows=sample_has_data_rows,
+        sample_columns=expected_columns,
+        hint_columns=hint_columns,
+    ):
         expected_columns = hint_columns
         expected_source = "submission_format/overview hint"
 
@@ -41,6 +53,11 @@ def validate_submission(sub_path: str, sample_path: str) -> None:
             f"  expected ({expected_source}): {expected_columns}\n"
             f"  actual:                     {actual_columns}"
         )
+        if len(expected_columns) == len(actual_columns) and not (set(expected_columns) & set(actual_columns)):
+            problems.append(
+                "submission header does not resemble the expected columns "
+                "(the file may be missing a header row or using an unexpected delimiter)"
+            )
 
     if sample_has_data_rows and len(sample) != len(submission):
         problems.append(f"row count mismatch:\n  expected: {len(sample)}\n  actual:   {len(submission)}")
@@ -50,7 +67,13 @@ def validate_submission(sub_path: str, sample_path: str) -> None:
     else:
         id_col = expected_columns[0]
         if id_col not in submission.columns:
-            problems.append(f"id column missing in submission: '{id_col}'")
+            if len(expected_columns) == len(actual_columns):
+                # Most commonly: headerless submissions where the first data row becomes the header.
+                problems.append(
+                    f"expected id column '{id_col}' is missing (submission appears to be missing a header row)"
+                )
+            else:
+                problems.append(f"id column missing in submission: '{id_col}'")
         else:
             id_values = submission[id_col]
             if id_values.isna().any():
@@ -109,6 +132,34 @@ def _sample_column_is_numeric(sample_col: pd.Series) -> bool:
     return coerced.notna().all()
 
 
+def _should_prefer_hint_columns(
+    *,
+    sample_has_data_rows: bool,
+    sample_columns: list[str],
+    hint_columns: list[str],
+) -> bool:
+    if not hint_columns:
+        return False
+    if sample_has_data_rows:
+        return False
+    if not sample_columns:
+        return True
+    if list(sample_columns) == list(hint_columns):
+        return False
+    if not columns_look_plausible(sample_columns):
+        return True
+    return _sample_header_looks_placeholder(sample_columns)
+
+
+def _sample_header_looks_placeholder(columns: list[str]) -> bool:
+    normalized = [str(col).strip().lower() for col in columns if str(col).strip()]
+    if len(normalized) != 2:
+        return False
+    id_like = normalized[0] in {"id", "row_id", "identifier"}
+    target_like = normalized[1] in {"target", "label", "y", "value"}
+    return bool(id_like and target_like)
+
+
 def _has_data_rows(path: Path) -> bool:
     non_empty = 0
     try:
@@ -124,6 +175,42 @@ def _has_data_rows(path: Path) -> bool:
     return False
 
 
+def _default_delimiter_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".tsv", ".txt"}:
+        return "\t"
+    return ","
+
+
+def _sniff_delimiter(path: Path, *, default: str = ",", max_lines: int = 100) -> str:
+    candidates: list[str] = []
+    for sep in (default, "\t", ","):
+        if sep and sep not in candidates:
+            candidates.append(sep)
+    counts = {sep: 0 for sep in candidates}
+    lines_seen = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                lines_seen += 1
+                for sep in candidates:
+                    counts[sep] += line.count(sep)
+                if lines_seen >= max_lines:
+                    break
+    except OSError:
+        return default
+    if lines_seen == 0:
+        return default
+    best = max(candidates, key=lambda sep: counts[sep])
+    if counts[best] == 0:
+        return default
+    if counts.get(default, 0) >= counts[best]:
+        return default
+    return best
+
+
 def _resolve_expected_columns_from_context(sample_csv: Path) -> list[str] | None:
     for context_dir in _candidate_context_dirs(sample_csv):
         format_hint = load_submission_format_hint(context_dir / "submission_format.md")
@@ -137,7 +224,7 @@ def _resolve_expected_columns_from_context(sample_csv: Path) -> list[str] | None
         if not section.strip():
             continue
         overview_hint = parse_submission_format(section)
-        if overview_hint.columns:
+        if overview_hint.columns and columns_look_plausible(list(overview_hint.columns)):
             return list(overview_hint.columns)
     return None
 

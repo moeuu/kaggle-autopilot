@@ -89,11 +89,17 @@ def infer_submission_layout(
     target_cols = _infer_target_columns(train=train, test=test, sample=sample, train_minus_test=train_minus_test)
     id_col = _pick_id_column(sample_cols=sample_cols, target_cols=target_cols, test_cols=test_cols)
 
-    feature_cols = [col for col in train_cols if col not in target_cols]
+    # Feature columns must be present in BOTH train and test; otherwise they cannot be
+    # used for inference and will break downstream schema/validation logic.
+    common_non_target = [col for col in train_cols if col in test_cols and col not in target_cols]
+    feature_cols = list(common_non_target)
+
     if id_col and id_col in feature_cols:
         feature_cols.remove(id_col)
     if not feature_cols:
-        feature_cols = [col for col in train_cols if col not in target_cols]
+        # If removing the id column would leave no features, keep the common columns
+        # (including id) as a last-ditch fallback.
+        feature_cols = list(common_non_target)
 
     return id_col, target_cols, feature_cols
 
