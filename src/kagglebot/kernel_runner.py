@@ -126,7 +126,9 @@ def _apply_local_runtime_env_defaults(
     env.setdefault("KAGGLEBOT_DISABLE_KAGGLE_WORKING_WRITES", "1")
     env["KAGGLEBOT_DO_TRAIN"] = "1"
     env["KAGGLEBOT_FORCE_TRAIN"] = "1"
+    env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] = "1"
     notes.append("forcing KAGGLEBOT_DO_TRAIN=1 and KAGGLEBOT_FORCE_TRAIN=1")
+    notes.append("forcing KAGGLEBOT_ALLOW_MODEL_DOWNLOAD=1")
 
     if not _module_available("xgboost"):
         env.setdefault("USE_XGB", "0")
@@ -731,13 +733,18 @@ def run_kernel_local(
 
     timeout_sec = None if timeout_minutes is None else max(60, int(timeout_minutes * 60))
     eta_total_sec, eta_samples = _estimate_local_kernel_duration_seconds(base_dir=base_dir, slug=slug)
-    progress_tracker = _build_local_kernel_progress_tracker(base_dir=base_dir, slug=slug)
+    progress_tracker = _build_local_kernel_progress_tracker(
+        base_dir=base_dir,
+        slug=slug,
+        watch_dirs=[output_dir, kernel_stage_dir / "outputs"],
+    )
     _print_local_kernel_progress(
         elapsed_sec=0.0,
         timeout_sec=timeout_sec,
         eta_total_sec=eta_total_sec,
         eta_samples=eta_samples,
         progress_tracker=progress_tracker,
+        accelerator=accelerator,
     )
     started_at = time.time()
     monotonic_start = time.monotonic()
@@ -766,6 +773,7 @@ def run_kernel_local(
             "eta_total_sec": eta_total_sec,
             "eta_samples": eta_samples,
             "progress_tracker": progress_tracker,
+            "accelerator": accelerator,
             "interval_sec": _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC,
         },
         daemon=True,
@@ -863,6 +871,23 @@ def run_kernel_local(
             source=metrics_src,
             destination=output_dir / "metrics.json",
         )
+    for filename in (
+        "oof_predictions.csv",
+        "split_diagnostics.json",
+        "feature_suspects.csv",
+    ):
+        optional_src = _resolve_local_kernel_artifact_file(
+            kernel_dir=kernel_stage_dir,
+            output_dir=output_dir,
+            started_at=started_at,
+            filename=filename,
+        )
+        if optional_src is None:
+            continue
+        _copy_artifact_if_needed(
+            source=optional_src,
+            destination=output_dir / filename,
+        )
 
     return KernelRunResult(
         kernel_id=f"local/{slug}",
@@ -873,12 +898,25 @@ def run_kernel_local(
 
 
 def _stage_local_kernel_data_dir(*, base_dir: Path, slug: str, run_dir: Path) -> None:
+    """Stage canonical and compatibility local data directories for generated kernels."""
     competition_dir = base_dir / slug
     source_dir = (competition_dir / "data").resolve()
     if not source_dir.exists():
         return
 
-    target_dir = run_dir / "data"
+    _stage_local_data_alias(source_dir=source_dir, target_dir=run_dir / "data")
+    # Some generated kernels incorrectly resolve local data as
+    # <competition_dir>/artifacts/<slug>/data. Keep a compatibility alias
+    # to prevent unnecessary runtime autofix loops.
+    _stage_local_data_alias(
+        source_dir=source_dir,
+        target_dir=competition_dir / "artifacts" / slug / "data",
+    )
+
+
+def _stage_local_data_alias(*, source_dir: Path, target_dir: Path) -> None:
+    """Create a symlink/copy alias from target_dir to source_dir."""
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
     if target_dir.is_symlink():
         try:
             if target_dir.resolve() == source_dir:
@@ -909,10 +947,12 @@ def _stage_local_kernel_data_dir(*, base_dir: Path, slug: str, run_dir: Path) ->
 
 
 def _ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path | None:
+    """Ensure data/sample_submission.csv exists and expand tiny placeholder templates."""
     competition_dir = base_dir / slug
     data_dir = competition_dir / "data"
     canonical_path = data_dir / "sample_submission.csv"
     if canonical_path.exists():
+        _expand_placeholder_sample_submission(canonical_path=canonical_path, data_dir=data_dir)
         return canonical_path
     source_path = _resolve_sample_submission_source(
         context_dir=competition_dir / "context",
@@ -922,6 +962,7 @@ def _ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path |
         return None
     data_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, canonical_path)
+    _expand_placeholder_sample_submission(canonical_path=canonical_path, data_dir=data_dir)
     return canonical_path
 
 
@@ -943,10 +984,105 @@ def _resolve_sample_submission_source(*, context_dir: Path, data_dir: Path) -> P
     return None
 
 
+def _expand_placeholder_sample_submission(*, canonical_path: Path, data_dir: Path) -> None:
+    """Expand tiny sample_submission templates to full test ids when confidently detected."""
+    try:
+        import pandas as pd
+    except Exception:
+        return
+
+    test_path = data_dir / "test.csv"
+    if not canonical_path.exists() or not test_path.exists():
+        return
+    try:
+        sample = pd.read_csv(canonical_path)
+    except Exception:
+        return
+    if sample.empty or len(sample.columns) < 2:
+        return
+
+    id_col = str(sample.columns[0])
+    pred_cols = [str(col) for col in sample.columns if str(col) != id_col]
+    if not pred_cols:
+        return
+    if len(sample) > 10 or sample[id_col].duplicated().any():
+        return
+
+    try:
+        test = pd.read_csv(test_path, usecols=[id_col], dtype={id_col: str})
+    except Exception:
+        return
+    if id_col not in test.columns:
+        return
+
+    test_ids = test[id_col].astype(str).tolist()
+    sample_ids = sample[id_col].astype(str).tolist()
+    if len(test_ids) <= max(len(sample_ids) * 3, len(sample_ids) + 10):
+        return
+    if sample_ids and test_ids[: len(sample_ids)] != sample_ids:
+        return
+
+    defaults = _placeholder_prediction_defaults(
+        sample=sample,
+        data_dir=data_dir,
+        id_col=id_col,
+        prediction_columns=pred_cols,
+    )
+    expanded = pd.DataFrame({id_col: test_ids})
+    for col in pred_cols:
+        expanded[col] = defaults.get(col, 0.0)
+    canonical_columns = [str(col) for col in sample.columns]
+    for col in canonical_columns:
+        if col not in expanded.columns:
+            expanded[col] = ""
+    expanded = expanded[canonical_columns]
+    expanded.to_csv(canonical_path, index=False)
+
+
+def _placeholder_prediction_defaults(
+    *,
+    sample,
+    data_dir: Path,
+    id_col: str,
+    prediction_columns: list[str],
+) -> dict[str, float]:
+    """Estimate stable default values for expanded placeholder prediction columns."""
+    try:
+        import pandas as pd
+    except Exception:
+        return {col: 0.0 for col in prediction_columns}
+
+    defaults: dict[str, float] = {}
+    for col in prediction_columns:
+        sample_series = pd.to_numeric(sample[col], errors="coerce").dropna()
+        defaults[col] = float(sample_series.mean()) if not sample_series.empty else 0.0
+
+    train_path = data_dir / "train.csv"
+    if not train_path.exists():
+        return defaults
+    train_cols = [col for col in prediction_columns if col != id_col]
+    if not train_cols:
+        return defaults
+    try:
+        train = pd.read_csv(train_path, usecols=train_cols)
+    except Exception:
+        return defaults
+    for col in train_cols:
+        if col not in train.columns:
+            continue
+        train_series = pd.to_numeric(train[col], errors="coerce").dropna()
+        if not train_series.empty:
+            defaults[col] = float(train_series.mean())
+    return defaults
+
+
 @dataclass
 class _LocalKernelProgressTracker:
+    """Track local-kernel textual and artifact-level progress signals."""
+
     expected_folds: int | None
     expected_seeds: list[int]
+    watch_dirs: tuple[Path, ...] = field(default_factory=tuple)
     started_at_monotonic: float = field(default_factory=time.monotonic)
     zero_based_folds: bool = False
     seen_triplets: set[tuple[str, int, int]] = field(default_factory=set)
@@ -1017,22 +1153,62 @@ class _LocalKernelProgressTracker:
         )
 
     def snapshot(self, now_monotonic: float | None = None) -> dict[str, object]:
+        """Return a point-in-time progress snapshot for heartbeat rendering."""
         now = time.monotonic() if now_monotonic is None else now_monotonic
+        now_wall = time.time()
         with self._lock:
             lines_seen = self.lines_seen
             last_output = self.last_output_monotonic
             current_pipeline = self.current_pipeline
             completed_count = len(self.completed_pipelines)
         last_log_age_sec = None if last_output is None else max(0.0, now - last_output)
+        artifact_count, last_artifact_age_sec = _scan_watch_dirs_activity(
+            watch_dirs=self.watch_dirs,
+            now_wall=now_wall,
+        )
         return {
             "lines_seen": lines_seen,
             "last_log_age_sec": last_log_age_sec,
             "current_pipeline": current_pipeline,
             "completed_pipeline_count": completed_count,
+            "artifact_count": artifact_count,
+            "last_artifact_age_sec": last_artifact_age_sec,
         }
 
 
-def _build_local_kernel_progress_tracker(*, base_dir: Path, slug: str) -> _LocalKernelProgressTracker:
+def _scan_watch_dirs_activity(*, watch_dirs: tuple[Path, ...], now_wall: float) -> tuple[int, float | None]:
+    """Scan watched directories and return (artifact_count, age_of_latest_artifact_sec)."""
+    artifact_count = 0
+    latest_mtime: float | None = None
+    for root in watch_dirs:
+        if not root.exists():
+            continue
+        try:
+            paths = root.rglob("*")
+        except OSError:
+            continue
+        for path in paths:
+            if not path.is_file():
+                continue
+            artifact_count += 1
+            try:
+                mtime = float(path.stat().st_mtime)
+            except OSError:
+                continue
+            if latest_mtime is None or mtime > latest_mtime:
+                latest_mtime = mtime
+    if latest_mtime is None:
+        return artifact_count, None
+    return artifact_count, max(0.0, now_wall - latest_mtime)
+
+
+def _build_local_kernel_progress_tracker(
+    *,
+    base_dir: Path,
+    slug: str,
+    watch_dirs: list[Path] | None = None,
+) -> _LocalKernelProgressTracker:
+    """Build a local-kernel progress tracker from plan metadata and watch dirs."""
     expected_folds: int | None = None
     expected_seeds: list[int] = []
     plan_path = base_dir / slug / "plan.json"
@@ -1051,7 +1227,12 @@ def _build_local_kernel_progress_tracker(*, base_dir: Path, slug: str) -> _Local
             raw_seed = payload.get("seed")
             if isinstance(raw_seed, int):
                 expected_seeds = [raw_seed]
-    return _LocalKernelProgressTracker(expected_folds=expected_folds, expected_seeds=expected_seeds)
+    watch_dir_tuple = tuple(watch_dirs or [])
+    return _LocalKernelProgressTracker(
+        expected_folds=expected_folds,
+        expected_seeds=expected_seeds,
+        watch_dirs=watch_dir_tuple,
+    )
 
 
 def _extract_training_stage_from_line(line: str) -> tuple[str, int, int] | None:
@@ -1176,8 +1357,10 @@ def _local_kernel_heartbeat(
     eta_total_sec: float | None,
     eta_samples: int,
     progress_tracker: _LocalKernelProgressTracker,
+    accelerator: str,
     interval_sec: float,
 ) -> None:
+    """Emit periodic local-kernel progress heartbeats while execution is running."""
     while not stop_event.wait(interval_sec):
         elapsed = max(0.0, time.monotonic() - start_monotonic)
         _print_local_kernel_progress(
@@ -1186,6 +1369,7 @@ def _local_kernel_heartbeat(
             eta_total_sec=eta_total_sec,
             eta_samples=eta_samples,
             progress_tracker=progress_tracker,
+            accelerator=accelerator,
         )
 
 
@@ -1196,28 +1380,32 @@ def _print_local_kernel_progress(
     eta_total_sec: float | None,
     eta_samples: int,
     progress_tracker: _LocalKernelProgressTracker | None,
+    accelerator: str,
 ) -> None:
+    """Render a single local-kernel heartbeat line."""
     activity_suffix = _format_local_kernel_activity_suffix(progress_tracker)
+    gpu_suffix = _format_local_gpu_activity_suffix(accelerator=accelerator)
     elapsed = max(0, int(elapsed_sec))
     if eta_total_sec is not None and eta_total_sec > 0:
         remaining = max(0, int(eta_total_sec - elapsed_sec))
         print(
             "[cyan]kernel local running[/cyan]: "
             f"elapsed={elapsed}s eta~{remaining}s (expected~{int(eta_total_sec)}s from {eta_samples} runs)"
-            f"{activity_suffix}"
+            f"{activity_suffix}{gpu_suffix}"
         )
         return
     if timeout_sec is not None:
         timeout_remaining = max(0, int(timeout_sec - elapsed_sec))
         print(
             f"[cyan]kernel local running[/cyan]: "
-            f"elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s){activity_suffix}"
+            f"elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s){activity_suffix}{gpu_suffix}"
         )
         return
-    print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown{activity_suffix}")
+    print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown{activity_suffix}{gpu_suffix}")
 
 
 def _format_local_kernel_activity_suffix(progress_tracker: _LocalKernelProgressTracker | None) -> str:
+    """Format tracker activity details for local-kernel heartbeat lines."""
     if progress_tracker is None:
         return ""
     snapshot = progress_tracker.snapshot()
@@ -1225,14 +1413,57 @@ def _format_local_kernel_activity_suffix(progress_tracker: _LocalKernelProgressT
     last_log_age_sec = snapshot.get("last_log_age_sec")
     current_pipeline = snapshot.get("current_pipeline")
     completed_pipeline_count = int(snapshot.get("completed_pipeline_count", 0))
+    artifact_count = int(snapshot.get("artifact_count", 0))
+    last_artifact_age_sec = snapshot.get("last_artifact_age_sec")
     last_log_text = "none"
     if isinstance(last_log_age_sec, (int, float)):
         last_log_text = f"{int(last_log_age_sec)}s ago"
+    last_artifact_text = "none"
+    if isinstance(last_artifact_age_sec, (int, float)):
+        last_artifact_text = f"{int(last_artifact_age_sec)}s ago"
     pipeline_text = str(current_pipeline) if current_pipeline else "unknown"
     return (
         f" (logs={lines_seen}, last_log={last_log_text}, "
-        f"pipeline={pipeline_text}, pipelines_done={completed_pipeline_count})"
+        f"pipeline={pipeline_text}, pipelines_done={completed_pipeline_count}, "
+        f"artifacts={artifact_count}, last_artifact={last_artifact_text})"
     )
+
+
+def _format_local_gpu_activity_suffix(*, accelerator: str) -> str:
+    """Return a short GPU utilization suffix for heartbeat lines when available."""
+    if accelerator != "gpu":
+        return ""
+    if shutil.which("nvidia-smi") is None:
+        return ""
+    try:
+        probe = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if probe.returncode != 0:
+        return ""
+    first_line = ""
+    for raw in probe.stdout.splitlines():
+        stripped = raw.strip()
+        if stripped:
+            first_line = stripped
+            break
+    if not first_line:
+        return ""
+    parts = [part.strip() for part in first_line.split(",")]
+    if len(parts) < 3:
+        return ""
+    util, mem_used, mem_total = parts[0], parts[1], parts[2]
+    return f" (gpu={util}%, mem={mem_used}/{mem_total}MiB)"
 
 
 def _resolve_local_kernel_artifacts(
@@ -1267,6 +1498,34 @@ def _resolve_local_kernel_artifacts(
     submission_path = _pick_latest_artifact(submission_candidates, min_mtime=min_mtime)
     metrics_path = _pick_latest_artifact(metrics_candidates, min_mtime=min_mtime)
     return submission_path, metrics_path
+
+
+def _resolve_local_kernel_artifact_file(
+    *,
+    kernel_dir: Path,
+    output_dir: Path,
+    started_at: float,
+    filename: str,
+) -> Path | None:
+    candidates: list[Path] = [
+        output_dir,
+        # Many kernels treat the parent of the staged copy (run_dir) as the
+        # "challenge dir" and write artifacts under run_dir/outputs.
+        kernel_dir.parent / "outputs",
+        kernel_dir.parent,
+        kernel_dir / "outputs",
+        Path("/kaggle/working"),
+        kernel_dir,
+    ]
+    file_candidates: list[Path] = []
+    for root in candidates:
+        if not root.exists():
+            continue
+        match = _find_output_file(root, filename)
+        if match is not None and match.exists():
+            file_candidates.append(match)
+    min_mtime = started_at - 1.0
+    return _pick_latest_artifact(file_candidates, min_mtime=min_mtime)
 
 
 def _pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
@@ -1626,7 +1885,11 @@ def _ensure_kernel_force_train_env(kernel_dir: Path) -> None:
         kernel_path.write_text(stripped_text, encoding="utf-8")
     _inject_force_train_env(kernel_dir)
     updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_FORCE_TRAIN_MARKER not in updated or expected_train_line not in updated or expected_force_line not in updated:
+    if (
+        _KERNEL_FORCE_TRAIN_MARKER not in updated
+        or expected_train_line not in updated
+        or expected_force_line not in updated
+    ):
         raise KernelFailedError(
             "Failed to inject force-train bootstrap into kernel.py. "
             "Refusing to push a kernel that may auto-disable training."

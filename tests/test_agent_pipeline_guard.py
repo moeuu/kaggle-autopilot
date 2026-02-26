@@ -124,6 +124,47 @@ def test_guard_restores_competition_control_files(tmp_path: Path) -> None:
     assert kb_path.read_bytes() == kb_original
 
 
+def test_guard_restores_knowledge_research_artifacts(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    research_dir = repo_root / "knowledge" / "research" / "unknown" / "demo"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    sources_path = research_dir / "research_sources.jsonl"
+    summary_path = research_dir / "research_summary.md"
+
+    sources_original = '{"url":"https://example.com","title":"Example"}\n'
+    summary_original = "# Research\n\nOriginal summary.\n"
+    sources_path.write_text(sources_original, encoding="utf-8")
+    summary_path.write_text(summary_original, encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    sources_path.write_text('{"url":"https://bad.example","title":"Changed"}\n', encoding="utf-8")
+    summary_path.write_text("# Research\n\nChanged summary.\n", encoding="utf-8")
+
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert sources_path.read_text(encoding="utf-8") == sources_original
+    assert summary_path.read_text(encoding="utf-8") == summary_original
+
+
 def test_guard_ignores_generated_kernel_staging_tree(tmp_path: Path) -> None:
     repo_root = tmp_path
     artifacts_dir = repo_root / "artifacts"

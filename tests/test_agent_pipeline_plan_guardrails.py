@@ -87,3 +87,56 @@ def test_write_plan_payload_enables_pretrained_when_rules_allow(tmp_path: Path) 
     _write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
     assert persisted["toggles"]["ALLOW_PRETRAINED_WEIGHTS"] is True
+
+
+def test_write_plan_payload_disables_fast_dev_toggle(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps(
+            {
+                "task": "classification",
+                "modality": "tabular",
+                "train_rows": 5000,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+
+    payload = _base_payload()
+    payload["toggles"]["FAST_DEV"] = True
+    _write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+    assert persisted["toggles"]["FAST_DEV"] is False
+    assert persisted["score_source"] == "cv"
+    assert persisted["max_iterations"] == 12
+    assert persisted["patience"] == 4
+    assert persisted["eval_seeds"] == [42, 2024, 777]
+    assert persisted["evaluation_protocol"]["seeds"] == [42, 2024, 777]
+    assert persisted["stop_policy"]["max_iterations"] == 12
+
+
+def test_write_plan_payload_forces_cv_for_non_generalizable_score_source(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps(
+            {
+                "task": "classification",
+                "modality": "tabular",
+                "train_rows": 5000,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+
+    payload = _base_payload()
+    payload["score_source"] = "auto"
+    _write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["score_source"] == "cv"

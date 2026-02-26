@@ -21,6 +21,7 @@ from kagglebot.kernel_runner import (
     _extract_pipeline_start_from_line,
     _extract_training_stage_from_line,
     _find_output_file,
+    _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
     _resolve_fold_current,
     _resolve_seed_current,
@@ -162,7 +163,7 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     assert "SUBMISSION_GZIP_B64 = " in kernel_text
     assert not (kernel_dir / "submission_source.csv").exists()
 
-    payload_match = re.search(r'SUBMISSION_GZIP_B64 = \"([A-Za-z0-9+/=]+)\"', kernel_text)
+    payload_match = re.search(r"SUBMISSION_GZIP_B64 = \"([A-Za-z0-9+/=]+)\"", kernel_text)
     assert payload_match is not None
     encoded = payload_match.group(1)
     decoded = gzip.decompress(base64.b64decode(encoded.encode("ascii"))).decode("utf-8")
@@ -592,12 +593,14 @@ def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
     assert env["KAGGLEBOT_LOCAL_WORKING_DIR"] == str(tmp_path / "local-working")
     assert env["KAGGLEBOT_DO_TRAIN"] == "1"
     assert env["KAGGLEBOT_FORCE_TRAIN"] == "1"
+    assert env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] == "1"
     assert env["USE_XGB"] == "0"
     assert env["KAGGLEBOT_DISABLE_XGBOOST"] == "1"
     assert env["USE_LGBM_GPU"] == "0"
     assert env["KAGGLEBOT_DISABLE_LGBM_GPU"] == "1"
     assert any("xgboost unavailable" in note for note in notes)
     assert any("LightGBM GPU probe failed" in note for note in notes)
+    assert any("KAGGLEBOT_ALLOW_MODEL_DOWNLOAD=1" in note for note in notes)
 
 
 def test_inject_pipeline_cfg_fallback_replaces_keyerror(tmp_path: Path) -> None:
@@ -782,6 +785,58 @@ def test_run_kernel_local_executes_staged_copy(tmp_path: Path) -> None:
     assert json.loads(staged_plan_parent.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
 
 
+def test_run_kernel_local_copies_optional_oof_artifacts(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "out = Path('outputs')",
+                "out.mkdir(parents=True, exist_ok=True)",
+                "out.joinpath('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                "out.joinpath('metrics.json').write_text(",
+                '    \'{"metric":"accuracy","offline_value":0.5}\',',
+                "    encoding='utf-8',",
+                ")",
+                "out.joinpath('oof_predictions.csv').write_text(",
+                "    'row_id,y,oof_pred,oof_proba,fold\\n0,0,0,0.1,1\\n1,1,1,0.9,1\\n',",
+                "    encoding='utf-8',",
+                ")",
+                "out.joinpath('split_diagnostics.json').write_text('{\"ok\": true}', encoding='utf-8')",
+                "out.joinpath('feature_suspects.csv').write_text('col,score\\na,0.1\\n', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-oof",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert (result.output_dir / "oof_predictions.csv").exists()
+    assert (result.output_dir / "split_diagnostics.json").exists()
+    assert (result.output_dir / "feature_suspects.csv").exists()
+
+
 def test_run_kernel_local_retries_cuda_oom_by_disabling_llm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ENABLE_LLM", raising=False)
     monkeypatch.delenv("PIPELINE_NAME", raising=False)
@@ -926,6 +981,28 @@ def test_run_kernel_local_mirrors_context_sample_submission(tmp_path: Path) -> N
     assert result.metrics_path is not None and result.metrics_path.exists()
 
 
+def test_ensure_local_sample_submission_file_expands_placeholder_template(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.csv").write_text("id,target\n1,0\n2,1\n3,0\n", encoding="utf-8")
+    (data_dir / "test.csv").write_text(
+        "id,feature\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n9,90\n10,100\n11,110\n12,120\n13,130\n14,140\n",
+        encoding="utf-8",
+    )
+    (data_dir / "sample_submission.csv").write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+
+    resolved = kernel_runner._ensure_local_sample_submission_file(base_dir=tmp_path, slug="demo")
+
+    assert resolved == data_dir / "sample_submission.csv"
+    lines = (data_dir / "sample_submission.csv").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 15  # header + 14 test ids
+    assert lines[0] == "id,target"
+    assert lines[1].startswith("1,")
+    assert lines[14].startswith("14,")
+
+
 def test_run_kernel_local_stages_competition_data_dir(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -995,6 +1072,59 @@ def test_stage_local_kernel_data_dir_replaces_stale_file_target(tmp_path: Path) 
     assert stale_target.is_dir() or stale_target.is_symlink()
     assert (stale_target / "sample_submission.csv").exists()
     assert (stale_target / "images" / "a.jpg").exists()
+    compat_target = tmp_path / "demo" / "artifacts" / "demo" / "data"
+    assert compat_target.exists()
+    assert compat_target.is_dir() or compat_target.is_symlink()
+    assert (compat_target / "sample_submission.csv").exists()
+    assert (compat_target / "images" / "a.jpg").exists()
+
+
+def test_run_kernel_local_supports_legacy_artifacts_data_dir_layout(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "this_file = Path(__file__).resolve()",
+                "slug = os.getenv('KAGGLEBOT_COMPETITION_SLUG', 'demo')",
+                "repo_root = this_file.parents[3]",
+                "legacy_data_dir = repo_root / 'artifacts' / slug / 'data'",
+                "if not legacy_data_dir.exists():",
+                "    raise FileNotFoundError(f'Data directory not found: {legacy_data_dir}')",
+                "Path('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-legacy-path",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.submission_path is not None and result.submission_path.exists()
+    assert result.metrics_path is not None and result.metrics_path.exists()
 
 
 def test_run_kernel_local_stages_non_tabular_data_tree(tmp_path: Path) -> None:
@@ -1156,11 +1286,36 @@ def test_progress_tracker_reports_generic_activity(tmp_path: Path) -> None:
     assert snapshot["current_pipeline"] == "tri_blend_stack"
     assert snapshot["completed_pipeline_count"] == 1
     assert isinstance(snapshot["last_log_age_sec"], (int, float))
+    assert "artifact_count" in snapshot
+    assert "last_artifact_age_sec" in snapshot
 
     suffix = _format_local_kernel_activity_suffix(tracker)
     assert "logs=2" in suffix
     assert "pipeline=tri_blend_stack" in suffix
     assert "pipelines_done=1" in suffix
+    assert "artifacts=" in suffix
+    assert "last_artifact=" in suffix
+
+
+def test_progress_tracker_reports_artifact_activity(tmp_path: Path) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir(parents=True, exist_ok=True)
+    artifact = watch_dir / "metrics.json"
+    artifact.write_text('{"ok":true}\n', encoding="utf-8")
+    tracker = _build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo", watch_dirs=[watch_dir])
+
+    snapshot = tracker.snapshot()
+    assert int(snapshot["artifact_count"]) >= 1
+    assert isinstance(snapshot["last_artifact_age_sec"], (int, float))
+
+    suffix = _format_local_kernel_activity_suffix(tracker)
+    assert "artifacts=" in suffix
+    assert "last_artifact=" in suffix
+
+
+def test_format_local_gpu_activity_suffix_handles_missing_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("kagglebot.kernel_runner.shutil.which", lambda name: None)
+    assert _format_local_gpu_activity_suffix(accelerator="gpu") == ""
 
 
 def test_ensure_training_progress_shim_requires_marker(tmp_path: Path) -> None:

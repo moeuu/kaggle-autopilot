@@ -67,18 +67,22 @@ class EvaluationAdvisor:
         self.paths.context_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
+        errors: list[str] = []
         if self.spec_path.exists() and not self.force:
             frozen = _load_json(self.spec_path)
             if isinstance(frozen, dict):
-                self._write_status(source="frozen", attempts=0, errors=[], notes="existing frozen spec reused")
-                return frozen, "frozen"
+                stale_reason = _stale_frozen_spec_reason(frozen=frozen, paths=self.paths)
+                if stale_reason is None:
+                    self._write_status(source="frozen", attempts=0, errors=[], notes="existing frozen spec reused")
+                    return frozen, "frozen"
+                errors.append(f"stale frozen spec detected: {stale_reason}")
 
         if self.dry_run or not self._search_capability_check():
             fallback = self._fallback_spec(reason="advisor_unavailable")
-            self._persist_final_spec(fallback, source="fallback", attempts=0, errors=["advisor unavailable"])
+            fallback_errors = [*errors, "advisor unavailable"]
+            self._persist_final_spec(fallback, source="fallback", attempts=0, errors=fallback_errors)
             return fallback, "fallback"
 
-        errors: list[str] = []
         total_attempts = self.max_retries + 1
         for attempt in range(1, total_attempts + 1):
             prompt_text = self._build_prompt(previous_errors=errors)
@@ -588,6 +592,10 @@ def _load_top1_score(paths: CompetitionPaths) -> float | None:
 
 
 def _infer_metric_from_context(*, profile: dict[str, object], context_text: str) -> str:
+    context_candidates = _extract_metric_candidates_from_text(context_text)
+    if context_candidates:
+        return context_candidates[0]
+
     profile_metric = profile.get("metric")
     if isinstance(profile_metric, str):
         metric_name = profile_metric.strip().lower()
@@ -596,6 +604,29 @@ def _infer_metric_from_context(*, profile: dict[str, object], context_text: str)
         except ValueError:
             pass
 
+    task = str(profile.get("task", "")).strip().lower()
+    if task == "regression":
+        return "rmse"
+    if task in {"classification", "binary", "multiclass"}:
+        return "logloss"
+    return "rmse"
+
+
+def _infer_split_strategy(*, profile: dict[str, object], context_text: str) -> str:
+    task = str(profile.get("task", "")).strip().lower()
+    if re.search(r"\btime[-\s]?series\b|\bforecast\b|\bchronolog", context_text):
+        return "timeseries_split"
+    modality = str(profile.get("modality", "")).strip().lower()
+    if modality == "timeseries" and _profile_has_temporal_signal(profile):
+        return "timeseries_split"
+    if re.search(r"\bgroupkfold\b|\bgroup fold\b|\bgroup leakage\b", context_text):
+        return "group_kfold"
+    if task in {"classification", "binary", "multiclass"}:
+        return "stratified_kfold"
+    return "kfold"
+
+
+def _extract_metric_candidates_from_text(context_text: str) -> list[str]:
     patterns = [
         (r"\bauc\b|\broc[-\s_]?auc\b", "auc"),
         (r"\blog\s*loss\b|\bcross[-\s_]?entropy\b", "logloss"),
@@ -609,25 +640,51 @@ def _infer_metric_from_context(*, profile: dict[str, object], context_text: str)
         (r"\bpearson\b", "pearson"),
         (r"\bspearman\b", "spearman"),
     ]
+    hits: list[str] = []
     for pattern, metric in patterns:
-        if re.search(pattern, context_text, flags=re.IGNORECASE):
-            return metric
-
-    task = str(profile.get("task", "")).strip().lower()
-    if task == "regression":
-        return "rmse"
-    if task in {"classification", "binary", "multiclass"}:
-        return "logloss"
-    return "rmse"
+        if re.search(pattern, context_text, flags=re.IGNORECASE) and metric not in hits:
+            hits.append(metric)
+    return hits
 
 
-def _infer_split_strategy(*, profile: dict[str, object], context_text: str) -> str:
-    modality = str(profile.get("modality", "")).strip().lower()
-    task = str(profile.get("task", "")).strip().lower()
-    if modality == "timeseries" or re.search(r"\btime[-\s]?series\b|\bforecast\b|\bchronolog", context_text):
-        return "timeseries_split"
-    if re.search(r"\bgroupkfold\b|\bgroup fold\b|\bgroup leakage\b", context_text):
-        return "group_kfold"
-    if task in {"classification", "binary", "multiclass"}:
-        return "stratified_kfold"
-    return "kfold"
+def _profile_has_temporal_signal(profile: dict[str, object]) -> bool:
+    dtype_map_raw = profile.get("dtype_by_column")
+    if not isinstance(dtype_map_raw, dict):
+        return False
+    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
+    for name, dtype in dtype_map_raw.items():
+        column_name = str(name)
+        dtype_name = str(dtype).lower()
+        if "datetime" in dtype_name or "timedelta" in dtype_name:
+            return True
+        if temporal_name.search(column_name):
+            return True
+    return False
+
+
+def _normalize_metric_name(name: str) -> str:
+    try:
+        return MetricRegistry.definition(name).canonical_name
+    except ValueError:
+        return name.strip().lower()
+
+
+def _stale_frozen_spec_reason(*, frozen: dict[str, object], paths: CompetitionPaths) -> str | None:
+    metric_name = frozen.get("metric_name")
+    if not isinstance(metric_name, str) or not metric_name.strip():
+        return None
+
+    context_text = "\n".join(
+        [
+            _read_trimmed(paths.rules_md_path, limit_chars=4000),
+            _read_trimmed(paths.overview_md_path, limit_chars=4000),
+            _read_trimmed(paths.submission_format_md_path, limit_chars=4000),
+        ]
+    )
+    candidates = _extract_metric_candidates_from_text(context_text)
+    if len(candidates) != 1:
+        return None
+    inferred = candidates[0]
+    if _normalize_metric_name(metric_name) != _normalize_metric_name(inferred):
+        return f"metric mismatch frozen={metric_name} context={inferred}"
+    return None

@@ -13,8 +13,10 @@ from kagglebot.submission_format import (
     parse_submission_format,
 )
 
+_PLACEHOLDER_SAMPLE_MAX_ROWS = 10
 
-def validate_submission(sub_path: str, sample_path: str) -> None:
+
+def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path | None = None) -> None:
     """Strict local validation for Kaggle submissions."""
     sample_csv = Path(sample_path)
     submission_csv = Path(sub_path)
@@ -31,11 +33,15 @@ def validate_submission(sub_path: str, sample_path: str) -> None:
     sample_delim = _sniff_delimiter(sample_csv, default=_default_delimiter_for_path(sample_csv))
     submission_delim = _sniff_delimiter(submission_csv, default=sample_delim)
 
-    sample = pd.read_csv(sample_csv, sep=sample_delim)
-    submission = pd.read_csv(submission_csv, sep=submission_delim)
+    # Read sample header first so we can preserve id-column formatting (e.g., leading zeros).
+    try:
+        sample_header = pd.read_csv(sample_csv, sep=sample_delim, nrows=0)
+        sample_columns = list(sample_header.columns)
+    except Exception as exc:  # noqa: BLE001
+        raise SubmissionValidationError(f"unable to read sample submission header: {sample_csv}") from exc
 
     sample_has_data_rows = _has_data_rows(sample_csv)
-    expected_columns = list(sample.columns)
+    expected_columns = sample_columns
     expected_source = "sample_submission.csv"
     hint_columns = _resolve_expected_columns_from_context(sample_csv)
     if hint_columns and _should_prefer_hint_columns(
@@ -45,6 +51,20 @@ def validate_submission(sub_path: str, sample_path: str) -> None:
     ):
         expected_columns = hint_columns
         expected_source = "submission_format/overview hint"
+
+    if not expected_columns:
+        raise SubmissionValidationError(_format_validation_message(["sample_submission has no columns"]))
+
+    id_col = expected_columns[0]
+    # Read frames with id_col forced to string to avoid losing leading zeros.
+    try:
+        sample = pd.read_csv(sample_csv, sep=sample_delim, dtype={id_col: str})
+    except Exception:  # noqa: BLE001
+        sample = pd.read_csv(sample_csv, sep=sample_delim)
+    try:
+        submission = pd.read_csv(submission_csv, sep=submission_delim, dtype={id_col: str})
+    except Exception:  # noqa: BLE001
+        submission = pd.read_csv(submission_csv, sep=submission_delim)
 
     actual_columns = list(submission.columns)
     if expected_columns != actual_columns:
@@ -59,63 +79,120 @@ def validate_submission(sub_path: str, sample_path: str) -> None:
                 "(the file may be missing a header row or using an unexpected delimiter)"
             )
 
-    if sample_has_data_rows and len(sample) != len(submission):
-        problems.append(f"row count mismatch:\n  expected: {len(sample)}\n  actual:   {len(submission)}")
+    expected_row_count = len(sample) if sample_has_data_rows else None
+    expected_id_values: set[str] | None = None
+    placeholder_sample = False
 
-    if not expected_columns:
-        problems.append("sample_submission has no columns")
-    else:
-        id_col = expected_columns[0]
-        if id_col not in submission.columns:
-            if len(expected_columns) == len(actual_columns):
-                # Most commonly: headerless submissions where the first data row becomes the header.
-                problems.append(
-                    f"expected id column '{id_col}' is missing (submission appears to be missing a header row)"
-                )
-            else:
-                problems.append(f"id column missing in submission: '{id_col}'")
+    if (
+        data_dir is not None
+        and sample_has_data_rows
+        and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
+        and (id_col in sample.columns)
+        and (not sample[id_col].duplicated().any())
+    ):
+        test_ids = _maybe_load_test_ids(Path(data_dir), id_col=id_col)
+        if test_ids is not None:
+            sample_ids = sample[id_col].astype(str).tolist()
+            if len(test_ids) >= max(len(sample_ids) * 3, len(sample_ids) + 10) and (
+                _is_prefix(sample_ids, test_ids) or set(sample_ids).issubset(set(test_ids))
+            ):
+                placeholder_sample = True
+                expected_row_count = len(test_ids)
+                expected_id_values = set(test_ids)
+
+    if expected_row_count is not None and len(submission) != expected_row_count:
+        problems.append(f"row count mismatch:\n  expected: {expected_row_count}\n  actual:   {len(submission)}")
+
+    if id_col not in submission.columns:
+        if len(expected_columns) == len(actual_columns):
+            # Most commonly: headerless submissions where the first data row becomes the header.
+            problems.append(f"expected id column '{id_col}' is missing (submission appears to be missing a header row)")
         else:
-            id_values = submission[id_col]
-            if id_values.isna().any():
-                nan_count = int(id_values.isna().sum())
-                problems.append(f"id column '{id_col}' contains NaN values: {nan_count}")
-            enforce_unique_id = True
-            if not sample_has_data_rows:
-                enforce_unique_id = False
-            elif id_col in sample.columns and sample[id_col].duplicated().any():
-                # Long-format submissions can legitimately repeat ids (e.g., one row per label).
-                enforce_unique_id = False
-            if enforce_unique_id:
-                dup_count = int(id_values.duplicated().sum())
-                if dup_count > 0:
-                    problems.append(f"id column '{id_col}' contains duplicate values: {dup_count}")
+            problems.append(f"id column missing in submission: '{id_col}'")
+    else:
+        id_values = submission[id_col]
+        if id_values.isna().any():
+            nan_count = int(id_values.isna().sum())
+            problems.append(f"id column '{id_col}' contains NaN values: {nan_count}")
+        enforce_unique_id = True
+        if not sample_has_data_rows:
+            enforce_unique_id = False
+        elif id_col in sample.columns and sample[id_col].duplicated().any():
+            # Long-format submissions can legitimately repeat ids (e.g., one row per label).
+            enforce_unique_id = False
+        if enforce_unique_id:
+            dup_count = int(id_values.duplicated().sum())
+            if dup_count > 0:
+                problems.append(f"id column '{id_col}' contains duplicate values: {dup_count}")
 
-        prediction_columns = [col for col in expected_columns if col != id_col]
-        for col in prediction_columns:
-            if col not in submission.columns:
-                continue
+        if placeholder_sample and expected_id_values is not None:
+            sub_ids = [str(value) for value in id_values.tolist()]
+            if set(sub_ids) != expected_id_values:
+                missing = sorted(expected_id_values - set(sub_ids))[:5]
+                extra = sorted(set(sub_ids) - expected_id_values)[:5]
+                problems.append(
+                    "id values mismatch (placeholder sample detected; validated against test ids):\n"
+                    f"  missing (first 5): {missing}\n"
+                    f"  extra (first 5):   {extra}"
+                )
 
-            sample_col = sample[col] if (col in sample.columns and sample_has_data_rows) else pd.Series(dtype=object)
-            submission_col = submission[col]
-            if _sample_column_is_numeric(sample_col):
-                numeric = pd.to_numeric(submission_col, errors="coerce")
-                nan_count = int(numeric.isna().sum())
-                if nan_count > 0:
-                    problems.append(f"prediction column '{col}' contains NaN/non-numeric values: {nan_count}")
-                    continue
-                values = numeric.to_numpy(dtype=float, copy=False)
-                inf_count = int(np.isinf(values).sum())
-                if inf_count > 0:
-                    problems.append(f"prediction column '{col}' contains +/-inf values: {inf_count}")
-                continue
+    prediction_columns = [col for col in expected_columns if col != id_col]
+    for col in prediction_columns:
+        if col not in submission.columns:
+            continue
 
-            nan_count = int(submission_col.isna().sum())
+        sample_col = sample[col] if (col in sample.columns and sample_has_data_rows) else pd.Series(dtype=object)
+        submission_col = submission[col]
+        if _sample_column_is_numeric(sample_col):
+            numeric = pd.to_numeric(submission_col, errors="coerce")
+            nan_count = int(numeric.isna().sum())
             if nan_count > 0:
-                problems.append(f"prediction column '{col}' contains NaN values: {nan_count}")
+                problems.append(f"prediction column '{col}' contains NaN/non-numeric values: {nan_count}")
                 continue
+            values = numeric.to_numpy(dtype=float, copy=False)
+            inf_count = int(np.isinf(values).sum())
+            if inf_count > 0:
+                problems.append(f"prediction column '{col}' contains +/-inf values: {inf_count}")
+            continue
+
+        nan_count = int(submission_col.isna().sum())
+        if nan_count > 0:
+            problems.append(f"prediction column '{col}' contains NaN values: {nan_count}")
+            continue
 
     if problems:
         raise SubmissionValidationError(_format_validation_message(problems))
+
+
+def _is_prefix(prefix: list[str], values: list[str]) -> bool:
+    if not prefix:
+        return False
+    if len(prefix) > len(values):
+        return False
+    return all(a == b for a, b in zip(prefix, values, strict=False))
+
+
+def _maybe_load_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
+    if not data_dir.exists():
+        return None
+    try:
+        from kagglebot.solver.io import find_competition_files
+    except Exception:
+        return None
+    try:
+        _, test_path, _ = find_competition_files(data_dir)
+    except Exception:  # noqa: BLE001
+        return None
+    if not test_path.exists():
+        return None
+    try:
+        delim = _sniff_delimiter(test_path, default=_default_delimiter_for_path(test_path))
+        test = pd.read_csv(test_path, sep=delim, usecols=[id_col], dtype={id_col: str})
+    except Exception:  # noqa: BLE001
+        return None
+    if id_col not in test.columns:
+        return None
+    return [str(value) for value in test[id_col].tolist()]
 
 
 def _format_validation_message(problems: list[str]) -> str:

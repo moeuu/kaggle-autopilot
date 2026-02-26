@@ -131,3 +131,148 @@ def test_submission_service_prefers_real_data_sample_when_placeholders_exist(tmp
 
     prepared = service.validate_and_prepare_submission(submission_path)
     assert prepared == submission_path
+
+
+def test_submission_service_prefers_stage1_sample_over_stage2_by_default(tmp_path: Path) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    placeholder_context_sample = context_dir / "sample_submission.csv"
+    placeholder_context_sample.write_text("id,prediction\n", encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("id,prediction\n", encoding="utf-8")
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.51, 0.49]}).to_csv(submission_path, index=False)
+
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=placeholder_context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+    resolved_sample = service._resolve_sample_submission()
+    assert resolved_sample == stage1
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared.exists()
+    assert prepared.name.endswith(".autofixed.csv")
+
+
+def test_submission_service_does_not_switch_to_staged_sample_when_context_sample_has_rows(tmp_path: Path) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    # Context provides a real sample submission with rows, but the filename is the canonical
+    # `sample_submission.csv` (no explicit stage marker). The service should treat it as
+    # canonical and avoid implicitly switching to staged templates.
+    context_sample = context_dir / "sample_submission.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(
+        context_sample, index=False
+    )
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.51, 0.49]}).to_csv(submission_path, index=False)
+
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared.exists()
+    assert prepared.name.endswith(".autofixed.csv")
+    prepared_df = pd.read_csv(prepared)
+    assert list(prepared_df.columns) == ["ID", "Pred"]
+    assert len(prepared_df) == 3
+
+
+def test_submission_service_allows_stage_override_via_env(tmp_path: Path, monkeypatch) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    placeholder_context_sample = context_dir / "sample_submission.csv"
+    placeholder_context_sample.write_text("id,prediction\n", encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("id,prediction\n", encoding="utf-8")
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.51, 0.49]}).to_csv(submission_path, index=False)
+
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_STAGE", "2")
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=placeholder_context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+    resolved_sample = service._resolve_sample_submission()
+    assert resolved_sample == stage2
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared == submission_path
+
+
+def test_submission_service_uses_alternate_sample_when_primary_would_force_bad_autofix(tmp_path: Path) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.51, 0.49, 0.52]}).to_csv(
+        submission_path, index=False
+    )
+
+    # Primary sample points to a mismatched stage. Service should still avoid autofixing
+    # into that wrong shape when another in-data sample already validates the submission.
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=stage2,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared == submission_path

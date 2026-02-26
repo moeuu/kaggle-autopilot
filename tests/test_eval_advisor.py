@@ -80,6 +80,54 @@ def test_evaluation_advisor_fallback_writes_spec_when_unavailable(tmp_path: Path
     assert (paths.context_dir / "eval_advisor" / "sources_summary.md").exists()
 
 
+def test_evaluation_advisor_fallback_prefers_context_metric_over_profile_metric(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "accuracy", "task": "classification", "modality": "tabular"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Model submissions are ranked by the official metric.\n", encoding="utf-8")
+    paths.overview_md_path.write_text("Evaluation metric: ROC-AUC.\n", encoding="utf-8")
+    paths.submission_format_md_path.write_text("id,target\n", encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+    assert source == "fallback"
+    assert spec["metric_name"] == "auc"
+
+
+def test_evaluation_advisor_refreshes_stale_frozen_spec(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "accuracy", "task": "classification", "modality": "tabular"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Competition ranking uses AUC.\n", encoding="utf-8")
+    paths.overview_md_path.write_text("Evaluation: AUC.\n", encoding="utf-8")
+    paths.submission_format_md_path.write_text("id,target\n", encoding="utf-8")
+    stale = _valid_payload()["evaluation_spec"] | {"metric_name": "accuracy", "direction": "maximize"}
+    paths.context_dir.joinpath("evaluation_spec.json").write_text(json.dumps(stale, indent=2), encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+    assert source == "fallback"
+    assert spec["metric_name"] == "auc"
+
+
 def test_evaluation_advisor_preserves_frozen_spec_without_force(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

@@ -18,6 +18,29 @@ SECRET_PATTERNS = [
     r"\b(?:access|refresh|auth|bearer)?_?token\b\s*[:=]\s*['\"][^'\"]{8,}",
 ]
 
+FORBIDDEN_EVALUATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\bKAGGLEBOT_ORACLE_MODE\b", re.IGNORECASE),
+        "Kernel sources reference KAGGLEBOT_ORACLE_MODE, which is forbidden for offline metric integrity.",
+    ),
+    (
+        re.compile(r"\bbuild_oracle_game_map\b", re.IGNORECASE),
+        "Kernel sources include oracle label-map construction, which is forbidden for offline metric integrity.",
+    ),
+    (
+        re.compile(r"\bapply_oracle_override\b", re.IGNORECASE),
+        "Kernel sources include oracle prediction overrides, which is forbidden for offline metric integrity.",
+    ),
+    (
+        re.compile(r"\bscore_source\b[^\n]{0,80}\boracle\b", re.IGNORECASE),
+        "Kernel sources emit score_source=oracle, which is forbidden for model selection.",
+    ),
+    (
+        re.compile(r"\bscore_source\b[^\n]{0,80}\blb_proxy\b", re.IGNORECASE),
+        "Kernel sources emit score_source=lb_proxy, which is forbidden for model selection.",
+    ),
+]
+
 
 def validate_slug(slug: str) -> str:
     cleaned = slug.strip()
@@ -90,6 +113,7 @@ def validate_kernel_package(package_dir: Path) -> None:
 
 
 def validate_kernel_sources(kernel_dir: Path, *, require_kaggle_input: bool = True) -> list[str]:
+    """Validate kernel source quality and reject non-generalizable evaluation shortcuts."""
     issues: list[str] = []
     if not kernel_dir.exists():
         return [f"Kernel directory not found: {kernel_dir}"]
@@ -124,6 +148,9 @@ def validate_kernel_sources(kernel_dir: Path, *, require_kaggle_input: bool = Tr
                 "Detected T5/ProtT5 with AutoModel; use T5EncoderModel or "
                 "model.get_encoder() to avoid decoder_input_ids errors."
             )
+    for pattern, message in FORBIDDEN_EVALUATION_PATTERNS:
+        if pattern.search(content):
+            issues.append(message)
     return issues
 
 

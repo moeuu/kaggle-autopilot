@@ -29,6 +29,10 @@ from kagglebot.validators import scan_text_for_secrets
 
 _PLANNING_CODEX_MODEL = "gpt-5.3-codex"
 _PLANNING_REASONING_EFFORT = "extra_high"
+_ACCURACY_FIRST_MIN_MAX_ITERATIONS = 12
+_ACCURACY_FIRST_MIN_PATIENCE = 4
+_ACCURACY_FIRST_MIN_CV_FOLDS = 5
+_ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
 
 
 @dataclass(frozen=True)
@@ -678,8 +682,8 @@ def _validate_plan_payload(payload: dict[str, object]) -> list[str]:
             issues.append(f"PLAN_JSON missing key: {key}.")
     if payload.get("target_direction") not in ("minimize", "maximize"):
         issues.append("PLAN_JSON target_direction must be 'minimize' or 'maximize'.")
-    if payload.get("score_source") not in ("holdout", "cv", "test", "auto"):
-        issues.append("PLAN_JSON score_source must be one of: holdout, cv, test, auto.")
+    if payload.get("score_source") not in ("holdout", "cv"):
+        issues.append("PLAN_JSON score_source must be one of: holdout, cv.")
     if not isinstance(payload.get("target_score"), (int, float)):
         issues.append("PLAN_JSON target_score must be a number.")
     pipelines = payload.get("pipelines")
@@ -759,6 +763,9 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
     toggles: dict[str, object] | None = dict(raw_toggles) if isinstance(raw_toggles, dict) else None
     if toggles is not None:
         guarded["toggles"] = toggles
+        if isinstance(toggles.get("FAST_DEV"), bool) and bool(toggles.get("FAST_DEV")):
+            toggles["FAST_DEV"] = False
+            print("[yellow]plan guardrail[/yellow]: forcing FAST_DEV=False for production-quality evaluation.")
 
     raw_eval_protocol = guarded.get("evaluation_protocol")
     evaluation_protocol: dict[str, object] | None = (
@@ -772,6 +779,66 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
     modality = str(profile.get("modality") or "").strip().lower()
     top_class_ratio = _extract_top_class_ratio(profile)
     severe_imbalance = bool(task == "classification" and top_class_ratio is not None and top_class_ratio >= 0.98)
+
+    score_source = str(guarded.get("score_source") or "").strip().lower()
+    if score_source not in {"cv", "holdout"}:
+        guarded["score_source"] = "cv"
+        print(
+            "[yellow]plan guardrail[/yellow]: non-generalizable score_source is not allowed; forcing score_source=cv."
+        )
+
+    if _should_force_accuracy_first_cv(modality=modality):
+        score_source = str(guarded.get("score_source") or "").strip().lower()
+        if score_source != "cv":
+            guarded["score_source"] = "cv"
+            print("[yellow]plan guardrail[/yellow]: accuracy-first mode enabled; forcing score_source=cv.")
+
+        cv_folds = _as_positive_int(guarded.get("cv_folds"))
+        if cv_folds is None or cv_folds < _ACCURACY_FIRST_MIN_CV_FOLDS:
+            guarded["cv_folds"] = _ACCURACY_FIRST_MIN_CV_FOLDS
+            if evaluation_protocol is not None:
+                evaluation_protocol["n_folds"] = _ACCURACY_FIRST_MIN_CV_FOLDS
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                f"accuracy-first mode enabled; forcing cv_folds>={_ACCURACY_FIRST_MIN_CV_FOLDS}."
+            )
+        elif evaluation_protocol is not None:
+            protocol_folds = _as_positive_int(evaluation_protocol.get("n_folds"))
+            if protocol_folds is None or protocol_folds < cv_folds:
+                evaluation_protocol["n_folds"] = cv_folds
+
+    eval_seeds = _normalize_seed_list(guarded.get("eval_seeds"))
+    protocol_seeds = _normalize_seed_list(evaluation_protocol.get("seeds")) if evaluation_protocol is not None else []
+    if len(eval_seeds) < 3 or len(protocol_seeds) < 3:
+        guarded["eval_seeds"] = list(_ACCURACY_FIRST_EVAL_SEEDS)
+        if evaluation_protocol is not None:
+            evaluation_protocol["seeds"] = list(_ACCURACY_FIRST_EVAL_SEEDS)
+        print(
+            "[yellow]plan guardrail[/yellow]: "
+            f"forcing evaluation seeds={_ACCURACY_FIRST_EVAL_SEEDS} for lower-variance model ranking."
+        )
+
+    max_iterations = _as_positive_int(guarded.get("max_iterations"))
+    if max_iterations is None or max_iterations < _ACCURACY_FIRST_MIN_MAX_ITERATIONS:
+        guarded["max_iterations"] = _ACCURACY_FIRST_MIN_MAX_ITERATIONS
+        max_iterations = _ACCURACY_FIRST_MIN_MAX_ITERATIONS
+        print(
+            "[yellow]plan guardrail[/yellow]: "
+            f"forcing max_iterations>={_ACCURACY_FIRST_MIN_MAX_ITERATIONS} for deeper search."
+        )
+
+    patience = _as_positive_int(guarded.get("patience"))
+    if patience is None or patience < _ACCURACY_FIRST_MIN_PATIENCE:
+        guarded["patience"] = _ACCURACY_FIRST_MIN_PATIENCE
+        print(f"[yellow]plan guardrail[/yellow]: forcing patience>={_ACCURACY_FIRST_MIN_PATIENCE} for stability.")
+
+    raw_stop_policy = guarded.get("stop_policy")
+    stop_policy = dict(raw_stop_policy) if isinstance(raw_stop_policy, dict) else {}
+    guarded["stop_policy"] = stop_policy
+    stop_max_iterations = _as_positive_int(stop_policy.get("max_iterations"))
+    if stop_max_iterations is None or stop_max_iterations < max_iterations:
+        stop_policy["max_iterations"] = max_iterations
+        print("[yellow]plan guardrail[/yellow]: aligning stop_policy.max_iterations with top-level max_iterations.")
 
     if severe_imbalance:
         score_source = str(guarded.get("score_source") or "").strip().lower()
@@ -823,6 +890,45 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
             )
 
     return guarded
+
+
+def _as_positive_int(value: object) -> int | None:
+    """Parse a positive integer from mixed input values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = int(float(text))
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _normalize_seed_list(value: object) -> list[int]:
+    """Normalize seed payloads into a deduplicated integer list."""
+    if not isinstance(value, list):
+        return []
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, int) and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+def _should_force_accuracy_first_cv(*, modality: str) -> bool:
+    """Return whether score_source should default to CV for this modality."""
+    return modality not in {"image", "video", "audio", "text"}
 
 
 def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:
@@ -969,7 +1075,7 @@ def _persist_research_to_knowledge(
     }
 
 
-_STRATEGY_PROMPT_MAX_CHARS = 12000
+_STRATEGY_PROMPT_MAX_CHARS = 18000
 _LOG_MAX_CHARS = 500
 _MIN_STRATEGY_CHARS = 1200
 _MIN_INSTRUCTIONS_CHARS = 200
@@ -988,6 +1094,7 @@ _PROTECTED_PATHS = (
     "AGENTS.md",
     "STRATEGY.md",
     "SECURITY.md",
+    "knowledge/research/",
     "knowledge/kb.sqlite",
 )
 _STRATEGY_RATE_LIMIT_MARKERS = (
@@ -1013,7 +1120,7 @@ def _build_strategy_prompt(
         dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 2000)
         submission_format = _truncate(_read_text(paths.submission_format_md_path), 2000)
         sample_submission_head = _truncate(_read_sample_submission_head(paths), 800)
-        code_snapshot = _truncate(_read_text(paths.code_md_path), 1200)
+        code_snapshot = _truncate(_read_text(paths.code_md_path), 2500)
         models_snapshot = _truncate(_read_text(paths.models_md_path), 1200)
         discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 1200)
         brief_content = _truncate(brief_content, 2000)
@@ -1021,7 +1128,7 @@ def _build_strategy_prompt(
         dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 6000)
         submission_format = _truncate(_read_text(paths.submission_format_md_path), 4000)
         sample_submission_head = _truncate(_read_sample_submission_head(paths), 1200)
-        code_snapshot = _truncate(_read_text(paths.code_md_path), 3500)
+        code_snapshot = _truncate(_read_text(paths.code_md_path), 9000)
         models_snapshot = _truncate(_read_text(paths.models_md_path), 3500)
         discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 3500)
         brief_content = _truncate(brief_content, 5000)
@@ -1416,12 +1523,12 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
         "target_metric": metric,
         "target_direction": direction,
         "target_score": target_score,
-        "score_source": "holdout",
+        "score_source": "cv",
         "holdout_frac": 0.2,
-        "cv_folds": 5,
+        "cv_folds": 7,
         "seed": 42,
-        "max_iterations": 3,
-        "patience": 2,
+        "max_iterations": 12,
+        "patience": 6,
         "min_improvement": 0.0,
         "pipelines": [
             {
@@ -1461,12 +1568,12 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
         },
         "evaluation_protocol": {
             "cv_type": "Auto",
-            "n_folds": 5,
-            "seeds": [42, 2024, 3407],
+            "n_folds": 7,
+            "seeds": [42, 2024, 777],
             "primary_metric": metric,
         },
         "stop_policy": {
-            "max_iterations": 3,
+            "max_iterations": 12,
             "error_fingerprint_abort": True,
         },
     }

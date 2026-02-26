@@ -97,6 +97,9 @@ Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 
 Optional environment knobs:
 - `KAGGLEBOT_MODEL_CANDIDATES="catboost,xgboost,lightgbm,torch,extra_trees"` to prioritize/limit model families
+- Submission sample stage selection (for competitions that publish Stage 1/2 sample files):
+  - Default preference is earlier stage samples (`Stage1` before `Stage2`) when multiple staged files exist.
+  - `KAGGLEBOT_SUBMISSION_STAGE=<int>` or `KAGGLEBOT_SAMPLE_SUBMISSION_STAGE=<int>` forces preferred stage.
 - Large competition download strategy (auto-enabled):
   - Kagglebot now probes competition file sizes first.
   - If total size is large (default threshold: `8 GiB`), downloads switch to per-file mode with retry/backoff.

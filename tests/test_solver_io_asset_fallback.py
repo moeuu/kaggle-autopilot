@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from kagglebot.solver.io import find_competition_files
+from kagglebot.solver.io import ensure_sample_submission, find_competition_files
 
 
 def test_find_competition_files_synthesizes_from_assets(tmp_path: Path) -> None:
@@ -111,3 +111,69 @@ def test_find_competition_files_uses_ancestor_context_for_nested_data_dir(tmp_pa
     assert sample_path.name == "sample_submission_synth.csv"
     assert train_path.name == "train_synth.csv"
     assert test_path.name == "test_synth.csv"
+
+
+def test_find_competition_files_prefers_stage1_sample_over_stage2_by_default(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    (data_dir / "train.csv").write_text("ID,Target\n1,0\n2,1\n", encoding="utf-8")
+    (data_dir / "test.csv").write_text("ID\n3\n4\n", encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("id,prediction\n", encoding="utf-8")
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    _, _, sample_path = find_competition_files(data_dir)
+    assert sample_path == stage1
+
+
+def test_find_competition_files_honors_stage_override(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    (data_dir / "train.csv").write_text("ID,Target\n1,0\n2,1\n", encoding="utf-8")
+    (data_dir / "test.csv").write_text("ID\n3\n4\n", encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("id,prediction\n", encoding="utf-8")
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_STAGE", "2")
+    _, _, sample_path = find_competition_files(data_dir)
+    assert sample_path == stage2
+
+
+def test_ensure_sample_submission_prefers_stage1_sample_over_stage2_by_default(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    (data_dir / "sample_submission.csv").write_text("id,prediction\n", encoding="utf-8")
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    sample_path = ensure_sample_submission(data_dir)
+    assert sample_path == stage1
+
+
+def test_ensure_sample_submission_honors_stage_override(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    (data_dir / "sample_submission.csv").write_text("id,prediction\n", encoding="utf-8")
+
+    stage1 = data_dir / "SampleSubmissionStage1.csv"
+    pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(stage1, index=False)
+    stage2 = data_dir / "SampleSubmissionStage2.csv"
+    pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
+
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_STAGE", "2")
+    sample_path = ensure_sample_submission(data_dir)
+    assert sample_path == stage2

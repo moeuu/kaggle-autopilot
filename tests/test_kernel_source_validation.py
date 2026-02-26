@@ -72,3 +72,46 @@ def test_kernel_source_validation_flags_prott5_automodel(tmp_path: Path) -> None
     )
     issues = validate_kernel_sources(kernel_dir)
     assert any("T5/ProtT5" in issue for issue in issues)
+
+
+def test_kernel_source_validation_flags_oracle_override_patterns(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "\n".join(
+            [
+                "DATA = '/kaggle/input/demo/train.csv'",
+                "OUT1 = '/kaggle/working/submission.csv'",
+                "OUT2 = '/kaggle/working/metrics.json'",
+                "MODE = 'auto'",
+                "def build_oracle_game_map():",
+                "    return {}",
+                "def apply_oracle_override(submission):",
+                "    return submission",
+                "ORACLE_MODE = 'KAGGLEBOT_ORACLE_MODE'",
+            ]
+        )
+        + "\n",
+    )
+    issues = validate_kernel_sources(kernel_dir)
+    assert any("oracle" in issue.lower() for issue in issues)
+
+
+def test_kernel_source_validation_flags_lb_proxy_score_source(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "\n".join(
+            [
+                "DATA = '/kaggle/input/demo/train.csv'",
+                "OUT1 = '/kaggle/working/submission.csv'",
+                "OUT2 = '/kaggle/working/metrics.json'",
+                "metrics_payload = {'score_source': 'lb_proxy'}",
+            ]
+        )
+        + "\n",
+    )
+    issues = validate_kernel_sources(kernel_dir)
+    assert any("lb_proxy" in issue for issue in issues)

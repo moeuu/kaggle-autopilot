@@ -286,7 +286,7 @@ def autopilot(
     target_metric: str | None = typer.Option(None, "--target-metric", help="Target metric override."),
     target_score: float | None = typer.Option(None, "--target-score", help="Target score override."),
     target_direction: str | None = typer.Option(None, "--target-direction", help="minimize|maximize|auto"),
-    score_source: str | None = typer.Option(None, "--score-source", help="auto|holdout|cv|test"),
+    score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
     holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
     cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
     max_iterations: int | None = typer.Option(
@@ -384,6 +384,15 @@ def autopilot(
             f"{source} -> {advisor.spec_path} "
             f"(metric={metric_name}, split={split_strategy})"
         )
+
+    if score_source is not None:
+        normalized_score_source = score_source.strip().lower()
+        if normalized_score_source not in {"holdout", "cv"}:
+            raise typer.BadParameter(
+                "Invalid --score-source. Allowed values: holdout, cv.",
+                param_hint="--score-source",
+            )
+        score_source = normalized_score_source
 
     run_id = None if resume_run else new_run_id()
     config = AutopilotConfig(

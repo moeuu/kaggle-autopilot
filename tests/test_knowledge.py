@@ -81,6 +81,22 @@ def test_build_dataset_profile_samples_oversized_tables(tmp_path, monkeypatch) -
     assert sampling["sample_submission"] is True
 
 
+def test_build_dataset_profile_does_not_treat_times_suffix_as_timeseries(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.csv").write_text(
+        "id,Total asset turnover rate (Times),target\n1,0.1,0\n2,0.2,1\n3,0.3,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "test.csv").write_text("id,Total asset turnover rate (Times)\n4,0.4\n5,0.5\n", encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("id,target\n4,0\n5,0\n", encoding="utf-8")
+
+    profile = build_dataset_profile(data_dir)
+
+    assert profile["status"] == "ok"
+    assert profile["modality"] == "tabular"
+
+
 def test_problem_type_insight_record_and_resolve(tmp_path) -> None:
     knowledge_paths = KnowledgePaths(workdir=tmp_path)
     profile = {"modality": "tabular", "task": "regression", "tags": ["tabular", "regression"]}

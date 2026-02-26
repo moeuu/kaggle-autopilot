@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+_SAMPLE_STAGE_PATTERN = re.compile(r"(?:stage|phase|round)[_-]?(\d+)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -29,18 +33,7 @@ def find_competition_files(data_dir: Path) -> tuple[Path, Path, Path]:
     if not files:
         raise FileNotFoundError(f"No tabular files found under {data_dir}.")
 
-    def score_sample(path: Path) -> int:
-        name = path.name.lower()
-        if "sample_submission" in name:
-            return 3
-        if "sample" in name and "submission" in name:
-            return 2
-        if "submission" in name:
-            return 1
-        return 0
-
-    sample_candidates = sorted(files, key=score_sample, reverse=True)
-    sample_path = sample_candidates[0] if score_sample(sample_candidates[0]) > 0 else None
+    sample_path = _select_sample_submission_path(files)
 
     train_path = None
     test_path = None
@@ -66,14 +59,107 @@ def find_competition_files(data_dir: Path) -> tuple[Path, Path, Path]:
     return train_path, test_path, sample_path
 
 
+def _select_sample_submission_path(files: Sequence[Path]) -> Path | None:
+    """Pick the most plausible sample-submission file from discovered tabular files."""
+    candidates = [path for path in files if _sample_name_score(path) > 0]
+    if not candidates:
+        return None
+    usable = [path for path in candidates if _tabular_file_has_data_rows(path)]
+    ranked = usable or candidates
+    return max(ranked, key=_sample_candidate_key)
+
+
+def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, str]:
+    """Return ranking key for sample-submission candidates."""
+    name_score = _sample_name_score(path)
+    stage_score = _sample_stage_score(path)
+    desired_stage = _resolve_desired_submission_stage()
+    stage_match = 1 if (desired_stage is not None and stage_score == desired_stage) else 0
+    # Prefer earlier stages by default (stage1 over stage2), since Kaggle often only accepts
+    # the current stage format. Unstaged samples (stage_score=0) remain preferred when they
+    # have data rows, as they're typically the canonical file.
+    stage_preference = 0 if stage_score == 0 else -stage_score
+    # When an explicit desired stage is provided, prefer the closest stage number as a fallback.
+    desired_distance = 0
+    if desired_stage is not None:
+        desired_distance = -abs(stage_score - desired_stage) if stage_score else -10_000
+    return (name_score, stage_match, desired_distance, stage_preference, path.name.lower())
+
+
+def _sample_name_score(path: Path) -> int:
+    """Score how clearly a filename indicates a sample-submission file."""
+    name = path.name.lower()
+    compact = name.replace("_", "")
+    if "sample_submission" in name or "samplesubmission" in compact:
+        return 3
+    if "sample" in name and "submission" in name:
+        return 2
+    if "submission" in name:
+        return 1
+    return 0
+
+
+def _sample_stage_score(path: Path) -> int:
+    """Extract stage/phase/round number from filename for ranking."""
+    matches = _SAMPLE_STAGE_PATTERN.findall(path.name.lower())
+    if not matches:
+        return 0
+    return max(int(value) for value in matches)
+
+
+def _resolve_desired_submission_stage() -> int | None:
+    raw = (
+        os.environ.get("KAGGLEBOT_SUBMISSION_STAGE") or os.environ.get("KAGGLEBOT_SAMPLE_SUBMISSION_STAGE") or ""
+    ).strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _tabular_file_has_data_rows(path: Path) -> bool:
+    """Return whether a delimited tabular file includes at least one data row."""
+    if path.suffix.lower() not in {".csv", ".tsv", ".txt"}:
+        return True
+    non_empty = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                non_empty += 1
+                if non_empty >= 2:
+                    return True
+    except OSError:
+        return True
+    return False
+
+
 def ensure_sample_submission(data_dir: Path) -> Path | None:
     """
     Ensure a usable sample submission exists for this competition.
 
-    This is a lightweight helper intended for non-tabular competitions where a valid
-    sample submission may need to be synthesized from `context/submission_format.md`
-    plus discovered test IDs (e.g., filenames under `images/test`).
+    Preference order:
+    1) Use an existing sample-submission file shipped with the competition data
+       (including multi-stage files like `SampleSubmissionStage1.csv`).
+    2) If no usable sample file exists, try to synthesize one from
+       `context/submission_format.md` plus discovered test IDs (e.g., filenames under
+       `images/test`).
     """
+    if not data_dir.exists():
+        return None
+    try:
+        files = _find_tabular_files(data_dir)
+    except OSError:
+        files = []
+    candidate = _select_sample_submission_path(files)
+    if candidate is not None and _tabular_file_has_data_rows(candidate):
+        return candidate
     return _maybe_synthesize_sample_submission(data_dir)
 
 

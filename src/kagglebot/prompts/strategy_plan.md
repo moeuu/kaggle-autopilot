@@ -51,6 +51,8 @@ Competition discussion tab snapshot (trimmed):
 >>>
 
 Use the code snapshot's notebook scores as ranking evidence when selecting candidate pipelines.
+Treat the notebook listed under `Required Reference Notebook (Execution baseline)` in the code snapshot as a mandatory reference baseline (or kernel base).
+If the raw top-ranked notebook is marked as leak-like/placeholder, use it only as a warning signal and do not copy leak logic.
 Use discussion thread insights for failure modes, leakage warnings, and strong baselines.
 
 Return output with exact delimiters. Do NOT include chain-of-thought; provide concise, actionable steps only.
@@ -59,6 +61,7 @@ If accelerator is GPU/TPU, prefer accelerator-optimized training and longer sche
 If the gap to top1 is large, recommend a major model upgrade (architecture or feature strategy).
 If near top1, recommend targeted tuning/ablations.
 Always require a train-fit -> test-apply pipeline for all feature statistics/encoders/bins.
+Never use oracle-style overrides, known-label rewrites, or leaderboard-proxy scoring.
 Handle train/test column mismatches safely:
 - If a feature exists in train but not test, drop it or add it to test with NA/0; never raise.
 - If a column exists in test but not train, ignore it unless explicitly required for inference.
@@ -86,6 +89,7 @@ Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings a
 - Candidate approaches (2-4) with pros/cons
 - Final approach + rationale
 - Training & evaluation plan (competition-appropriate CV/holdout + seeds + primary metric)
+- Forbidden shortcuts: explicitly state that `score_source` must be `cv` or `holdout` (never `oracle`, `lb_proxy`, or test-label proxy)
 - Compute/GPU plan + time budget (include how to scale training time/epochs/iterations)
 - Feature engineering protocol: explicitly state how train statistics are fit and then applied to test
 - Modality plan: explain how kernel.py handles tabular + non-tabular tasks (image/video/text/audio) via routing/custom_main
@@ -124,12 +128,12 @@ Provide a JSON object with these keys (do not wrap in markdown):
 - target_metric (string, from rules)
 - target_direction ("minimize" or "maximize")
 - target_score (number; use top1 public score as a realistic target)
-- score_source ("holdout" or "cv")
+- score_source ("cv" preferred for accuracy-first search; use holdout only when CV is infeasible)
 - holdout_frac (number, e.g. 0.2)
-- cv_folds (int, e.g. 5)
+- cv_folds (int, prefer 5-10 for robust ranking)
 - seed (int)
-- max_iterations (int)
-- patience (int)
+- max_iterations (int, prefer >=12 for hard competitions)
+- patience (int, prefer >=4 so promising runs are not cut early)
 - min_improvement (number)
 - pipelines (array, length 2-4; each pipeline object MUST include: name, features, models, key_hyperparameters, runtime_memory, failure_modes, fallbacks)
 - toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default)
@@ -151,6 +155,7 @@ Require the implementation to include:
 - Per-model OOF/test predictions saved as `.npy` under both `/kaggle/working` and local output dir
 - Ensemble selection only if shortlisted in plan (e.g., stacking/blending/rank-mean)
 - Final method chosen by plan primary metric (tie-breaker: simpler/faster)
+- Never include oracle overrides (`build_oracle_game_map`, `apply_oracle_override`, `KAGGLEBOT_ORACLE_MODE`) or leaderboard-proxy score reporting
 - Submission validation (columns, rows, no NaN/inf, clipped if needed)
 Call out robust categorical missing-value handling:
 - If using pandas Categorical dtype, add "Unknown" to categories before fillna, or cast to string/object.

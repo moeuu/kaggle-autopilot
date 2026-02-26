@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ _KAGGLE_SUBMISSION_MESSAGE_MAX_CHARS = 100
 _KAGGLE_SUBMISSION_COMPACT_FLOAT_FORMAT = "%.10g"
 _TABULAR_SUBMISSION_SUFFIXES = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
 _ZIP_SUBMISSION_SUFFIX = ".zip"
+_SAMPLE_STAGE_PATTERN = re.compile(r"(?:stage|phase|round)[_-]?(\d+)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -82,13 +85,13 @@ class SubmissionService:
                 format_hint=format_hint,
             )
 
-        sample_path = self._resolve_sample_submission()
+        sample_path = self._resolve_sample_submission_for_submission(submission_path=submission_path)
         try:
-            validate_submission(str(submission_path), str(sample_path))
+            validate_submission(str(submission_path), str(sample_path), data_dir=self._config.data_dir)
             prepared = self._prepare_submission_path(sample_path, submission_path)
             compacted = self._maybe_compact_submission_csv(sample_path, prepared)
             if compacted != prepared:
-                validate_submission(str(compacted), str(sample_path))
+                validate_submission(str(compacted), str(sample_path), data_dir=self._config.data_dir)
             return self._finalize_prepared_tabular_submission(
                 sample_path=sample_path,
                 submission_path=compacted,
@@ -113,7 +116,7 @@ class SubmissionService:
             if autofixed == submission_path:
                 raise
             try:
-                validate_submission(str(autofixed), str(sample_path))
+                validate_submission(str(autofixed), str(sample_path), data_dir=self._config.data_dir)
             except SubmissionValidationError as exc2:
                 raise SubmissionValidationError(
                     f"{original}\n\nAutofix wrote: {autofixed}\nBut validation still failed:\n{exc2}"
@@ -121,12 +124,48 @@ class SubmissionService:
             prepared = self._prepare_submission_path(sample_path, autofixed)
             compacted = self._maybe_compact_submission_csv(sample_path, prepared)
             if compacted != prepared:
-                validate_submission(str(compacted), str(sample_path))
+                validate_submission(str(compacted), str(sample_path), data_dir=self._config.data_dir)
             return self._finalize_prepared_tabular_submission(
                 sample_path=sample_path,
                 submission_path=compacted,
                 format_hint=format_hint,
             )
+
+    def _resolve_sample_submission_for_submission(self, *, submission_path: Path) -> Path:
+        """Resolve a sample file, preferring one that already validates the current submission."""
+        primary_sample = self._resolve_sample_submission()
+        candidates = [primary_sample, *self._find_all_usable_sample_submissions_in_data_dir()]
+        deduped: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            deduped.append(candidate)
+        desired_stage = self._resolve_desired_submission_stage()
+        primary_stage = self._sample_stage_score(primary_sample)
+        primary_has_rows = primary_sample.exists() and self._has_data_rows(primary_sample)
+        for candidate in deduped:
+            candidate_stage = self._sample_stage_score(candidate)
+            if desired_stage is None and primary_has_rows and primary_stage == 0 and candidate_stage > 0:
+                # If the configured sample submission has data rows but lacks an explicit stage
+                # marker in its filename, treat it as the canonical template and avoid switching
+                # to staged samples implicitly. Multi-stage competitions often ship both stage
+                # templates, but Kaggle will only accept one at a time.
+                continue
+            if desired_stage is None and primary_stage > 0 and candidate_stage > 0 and candidate_stage > primary_stage:
+                # Avoid jumping to a later stage when no explicit override is set.
+                continue
+            try:
+                validate_submission(str(submission_path), str(candidate), data_dir=self._config.data_dir)
+            except SubmissionValidationError:
+                continue
+            return candidate
+        return primary_sample
 
     @staticmethod
     def _validate_submission_file_exists(path: Path) -> None:
@@ -178,7 +217,7 @@ class SubmissionService:
             self._validate_zip_submission(finalized)
             return finalized
         if self._is_tabular_submission(finalized):
-            validate_submission(str(finalized), str(sample_path))
+            validate_submission(str(finalized), str(sample_path), data_dir=self._config.data_dir)
             return finalized
         self._validate_non_tabular_submission_file(finalized)
         return finalized
@@ -564,10 +603,16 @@ class SubmissionService:
         if not sums:
             return submission_path
 
-        prepared = expected.copy() if sample_has_data_rows else expected.iloc[0:0].copy()
         if not sample_has_data_rows:
             # Never synthesize a header-only autofixed file for submit.
             return submission_path
+        prepared = self._expand_autofix_template_if_placeholder(
+            sample=expected,
+            key_cols=key_cols,
+            pred_cols=pred_cols,
+        )
+        if prepared is None:
+            prepared = expected.copy()
 
         # Fill prediction columns by matching keys against the sample template.
         key_df = prepared[key_cols].astype(str)
@@ -590,6 +635,84 @@ class SubmissionService:
         )
         prepared.to_csv(prepared_path, index=False, sep=sample_delim)
         return prepared_path
+
+    def _expand_autofix_template_if_placeholder(
+        self,
+        *,
+        sample,
+        key_cols: list[str],
+        pred_cols: list[str],
+    ):
+        """Return a test-sized template when sample_submission rows look truncated.
+
+        Some competitions ship a tiny example `sample_submission.csv` while Kaggle expects
+        one row per test id. If we can confidently detect that pattern, expand the template
+        to all test ids and use safe numeric defaults for missing predictions.
+        """
+        try:
+            import pandas as pd
+        except Exception:
+            return None
+
+        if len(key_cols) != 1:
+            return None
+        id_col = key_cols[0]
+        if id_col not in getattr(sample, "columns", ()):
+            return None
+        if len(sample) > 10:
+            return None
+        if sample[id_col].duplicated().any():
+            return None
+
+        try:
+            from kagglebot.solver.io import find_competition_files
+        except Exception:
+            return None
+        try:
+            train_path, test_path, _ = find_competition_files(self._config.data_dir)
+        except Exception:  # noqa: BLE001
+            return None
+        if not test_path.exists():
+            return None
+
+        try:
+            test_delim = self._sniff_delimiter(test_path)
+            test = pd.read_csv(test_path, sep=test_delim, usecols=[id_col], dtype={id_col: str})
+        except Exception:  # noqa: BLE001
+            return None
+        if id_col not in test.columns:
+            return None
+
+        test_ids = test[id_col].astype(str).tolist()
+        sample_ids = sample[id_col].astype(str).tolist()
+        if len(test_ids) <= max(len(sample_ids) * 3, len(sample_ids) + 10):
+            return None
+        if sample_ids and test_ids[: len(sample_ids)] != sample_ids:
+            return None
+
+        defaults: dict[str, float] = {col: 0.0 for col in pred_cols}
+        if train_path.exists() and pred_cols:
+            try:
+                train_delim = self._sniff_delimiter(train_path)
+                train = pd.read_csv(train_path, sep=train_delim, usecols=[c for c in pred_cols if c != id_col])
+            except Exception:  # noqa: BLE001
+                train = None
+            if train is not None:
+                for col in pred_cols:
+                    if col not in train.columns:
+                        continue
+                    series = pd.to_numeric(train[col], errors="coerce").dropna()
+                    if not series.empty:
+                        defaults[col] = float(series.mean())
+
+        template = pd.DataFrame({id_col: test_ids})
+        for col in pred_cols:
+            template[col] = defaults.get(col, 0.0)
+        # Match sample column order (and preserve any additional key columns if present).
+        for col in list(sample.columns):
+            if col not in template.columns:
+                template[col] = ""
+        return template[list(sample.columns)]
 
     @staticmethod
     def _sniff_header_and_column_index(
@@ -670,10 +793,17 @@ class SubmissionService:
         return False
 
     def _find_usable_sample_submission_in_data_dir(self) -> Path | None:
+        candidates = self._find_all_usable_sample_submissions_in_data_dir()
+        if not candidates:
+            return None
+        return candidates[0]
+
+    def _find_all_usable_sample_submissions_in_data_dir(self) -> list[Path]:
+        """List usable sample-submission CSV candidates in ranked preference order."""
         data_dir = self._config.data_dir
         if not data_dir.exists():
-            return None
-        candidates: list[tuple[int, str, Path]] = []
+            return []
+        candidates: list[Path] = []
         for path in data_dir.rglob("*.csv"):
             if not path.is_file():
                 continue
@@ -684,12 +814,57 @@ class SubmissionService:
                 continue
             if not self._csv_has_two_or_more_columns(path):
                 continue
-            score = 2 if "sample_submission" in name else 1
-            candidates.append((score, str(path), path))
-        if not candidates:
+            candidates.append(path)
+        return sorted(candidates, key=self._sample_candidate_key, reverse=True)
+
+    @staticmethod
+    def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, str]:
+        """Return ranking key for sample-submission CSV candidates."""
+        name_score = SubmissionService._sample_name_score(path)
+        stage_score = SubmissionService._sample_stage_score(path)
+        desired_stage = SubmissionService._resolve_desired_submission_stage()
+        stage_match = 1 if (desired_stage is not None and stage_score == desired_stage) else 0
+        stage_preference = 0 if stage_score == 0 else -stage_score
+        desired_distance = 0
+        if desired_stage is not None:
+            desired_distance = -abs(stage_score - desired_stage) if stage_score else -10_000
+        return (name_score, stage_match, desired_distance, stage_preference, path.name.lower())
+
+    @staticmethod
+    def _sample_name_score(path: Path) -> int:
+        """Score how clearly a filename indicates a sample-submission CSV."""
+        name = path.name.lower()
+        compact = name.replace("_", "")
+        if "sample_submission" in name or "samplesubmission" in compact:
+            return 3
+        if "sample" in name and "submission" in name:
+            return 2
+        if "submission" in name:
+            return 1
+        return 0
+
+    @staticmethod
+    def _sample_stage_score(path: Path) -> int:
+        """Extract stage/phase/round number from filename for ranking."""
+        matches = _SAMPLE_STAGE_PATTERN.findall(path.name.lower())
+        if not matches:
+            return 0
+        return max(int(value) for value in matches)
+
+    @staticmethod
+    def _resolve_desired_submission_stage() -> int | None:
+        raw = (
+            os.environ.get("KAGGLEBOT_SUBMISSION_STAGE") or os.environ.get("KAGGLEBOT_SAMPLE_SUBMISSION_STAGE") or ""
+        ).strip()
+        if not raw:
             return None
-        candidates.sort(key=lambda item: (-item[0], item[1]))
-        return candidates[0][2]
+        try:
+            value = int(raw)
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+        return value
 
     @staticmethod
     def _csv_has_two_or_more_columns(path: Path) -> bool:

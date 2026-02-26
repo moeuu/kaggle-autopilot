@@ -12,12 +12,15 @@ import pandas as pd
 import pytest
 
 from kagglebot.autopilot import (
+    _DEFAULT_MAX_ITERATIONS,
     AutopilotConfig,
     _attempt_submit,
     _build_kernel_quality_guard,
     _build_submit_autofix_context,
+    _error_strategy_skip_reason,
     _infer_kernel_submit_version_label,
     _load_run_state,
+    _maybe_restart_for_src_changes,
     _resolve_plan,
     _resolve_submission_rank_payload,
     _resume_iteration_state,
@@ -81,7 +84,10 @@ def _make_config(tmp_path: Path, **overrides) -> AutopilotConfig:
     paths.codex_kernel_fix_template.write_text("fix {slug} {iteration}\n", encoding="utf-8")
     paths.codex_plan_and_implement_prompt.write_text("plan+implement\n", encoding="utf-8")
     paths.kernel_source_dir.mkdir(parents=True, exist_ok=True)
-    (paths.kernel_source_dir / "kernel.py").write_text("print('kernel stub')\n", encoding="utf-8")
+    (paths.kernel_source_dir / "kernel.py").write_text(
+        "print('kernel stub')\n# submission.csv\n# metrics.json\n",
+        encoding="utf-8",
+    )
     base = AutopilotConfig(
         run_id="run-1",
         slug="demo",
@@ -309,6 +315,33 @@ def test_resolve_plan_preserves_requested_score_source(tmp_path: Path) -> None:
     resolved = _resolve_plan(plan, config)
 
     assert resolved["score_source"] == "cv"
+
+
+def test_resolve_plan_overrides_auto_score_source_to_cv(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, score_source="auto")
+    plan = PlanConfig(score_source="auto")
+
+    resolved = _resolve_plan(plan, config)
+
+    assert resolved["score_source"] == "cv"
+
+
+def test_resolve_plan_uses_plan_max_iterations_when_cli_unspecified(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, max_iterations=None)
+    plan = PlanConfig(max_iterations=9)
+
+    resolved = _resolve_plan(plan, config)
+
+    assert resolved["max_iterations"] == 9
+
+
+def test_resolve_plan_falls_back_to_default_max_iterations_when_plan_invalid(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, max_iterations=None)
+    plan = PlanConfig(max_iterations=0)
+
+    resolved = _resolve_plan(plan, config)
+
+    assert resolved["max_iterations"] == _DEFAULT_MAX_ITERATIONS
 
 
 def test_resolve_plan_applies_evaluation_spec_when_plan_uses_defaults(tmp_path: Path) -> None:
@@ -545,7 +578,7 @@ def test_autopilot_submit_when_top1_tier_single_iteration(monkeypatch, tmp_path:
     assert len(submission_calls) == 1
 
 
-def test_autopilot_writes_evaluation_report_and_uses_readiness_loop_decision(monkeypatch, tmp_path: Path) -> None:
+def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monkeypatch, tmp_path: Path) -> None:
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="auc",
@@ -589,10 +622,9 @@ def test_autopilot_writes_evaluation_report_and_uses_readiness_loop_decision(mon
     assert iter1_report_path.exists()
     assert iter2_report_path.exists()
 
-    iter1_report = json.loads(iter1_report_path.read_text(encoding="utf-8"))
     iter1_metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
-    assert iter1_metrics["loop_decision"]["source"] == "readiness"
-    assert iter1_metrics["loop_decision"]["value"] == pytest.approx(iter1_report["readiness_score"])
+    assert iter1_metrics["loop_decision"]["source"] == "holdout"
+    assert iter1_metrics["loop_decision"]["value"] == pytest.approx(0.86)
 
     run_report = json.loads((config.paths.run_dir("run-1") / "evaluation_report.json").read_text(encoding="utf-8"))
     assert run_report["latest_iteration"] == 2
@@ -1658,6 +1690,65 @@ def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch,
     assert result["submission_path"] == "kernel:user/demo-kernel"
 
 
+def test_attempt_submit_retries_same_path_after_code_change(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path, submit=True, max_iterations=1, force_submit=False)
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    (run_dir / "run_state.json").write_text(
+        json.dumps(
+            {
+                "submit_attempted": True,
+                "submit_ok": False,
+                "last_submission_path": str(submission_path),
+                "last_reason": "submission_poll_status_error",
+                "last_submit_fingerprint": "prev",
+                "last_submit_code_fingerprint": "old-code-fingerprint",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
+        lambda self, path: path,  # noqa: ARG005
+    )
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._load_competition_rule_constraints",
+        lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
+    )
+    monkeypatch.setattr(
+        "kagglebot.submission_service.run_kaggle_submit",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+    )
+    monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
+
+    result = _attempt_submit(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        best_score=0.4,
+        problem_types=[],
+    )
+
+    assert result is not None
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "submit_attempts.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows
+    assert rows[-1]["action_taken"] == "submit"
+    assert rows[-1]["sub_path"] == str(submission_path)
+
+
 def test_attempt_submit_allows_new_submission_after_prior_success(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path, submit=True, max_iterations=1, force_submit=False)
     run_id = config.run_id or "run-1"
@@ -1826,11 +1917,12 @@ def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: 
         train_calls["count"] += 1
         output_path = kwargs["output_path"]
         output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        value = 0.4 - 0.01 * float(train_calls["count"] - 1)
         evaluation = EvaluationResult(
             score_source="holdout",
             metric="rmse",
             direction="minimize",
-            value=0.4,
+            value=value,
             std=None,
             train_score=None,
             val_score=None,
@@ -1872,6 +1964,66 @@ def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: 
     assert iter2_state["submit_phase_state"] == "submitted"
 
 
+def test_autopilot_allows_non_improving_submit_on_final_iteration(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+    )
+
+    train_calls = {"count": 0}
+    submit_calls = {"count": 0}
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        train_calls["count"] += 1
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        value = 0.4 if train_calls["count"] == 1 else 0.45
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=value,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="ridge",
+            model_summary={},
+            accelerator="cpu",
+        )
+
+    def fake_submit(*args, **kwargs):  # noqa: ARG001
+        submit_calls["count"] += 1
+        return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.35})
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
+    monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
+
+    config = _make_config(tmp_path, submit=True, max_iterations=2, force_submit=False)
+    run_autopilot(config)
+
+    assert train_calls["count"] == 2
+    assert submit_calls["count"] == 2
+
+    iter2_state = json.loads(
+        (config.paths.iter_dir(config.run_id or "run-1", 2) / "iteration_state.json").read_text(encoding="utf-8")
+    )
+    assert iter2_state["submit_phase_state"] == "submitted"
+
+
 def test_load_run_state_infers_submit_ok_from_submit_attempts(tmp_path: Path) -> None:
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_dir = config.paths.run_dir(config.run_id or "run-1")
@@ -1895,6 +2047,71 @@ def test_load_run_state_infers_submit_ok_from_submit_attempts(tmp_path: Path) ->
     state = _load_run_state(run_dir)
     assert state["submit_attempted"] is True
     assert state["submit_ok"] is True
+
+
+def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_restart(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    state_path = run_dir / "autofix_restart.json"
+    state_path.write_text(
+        json.dumps({"count": 1, "last_stage": "kernel_fix_attempt_1"}, indent=2),
+        encoding="utf-8",
+    )
+
+    execv_calls: list[tuple[str, list[str]]] = []
+
+    def fake_execv(executable: str, argv: list[str]) -> None:
+        execv_calls.append((executable, argv))
+
+    monkeypatch.setattr("kagglebot.autopilot.os.execv", fake_execv)
+
+    _maybe_restart_for_src_changes(
+        config=config,
+        run_id=run_id,
+        changed=["src/kagglebot/solver/io.py"],
+        stage="autofix_attempt_1",
+    )
+
+    assert len(execv_calls) == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_stage"] == "autofix_attempt_1"
+    assert state["last_stage_family"] == "autofix"
+    assert state["counts_by_stage"]["kernel_fix"] == 1
+    assert state["counts_by_stage"]["autofix"] == 1
+
+
+def test_maybe_restart_for_src_changes_blocks_second_restart_in_same_stage_family(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    state_path = run_dir / "autofix_restart.json"
+    state_path.write_text(
+        json.dumps({"counts_by_stage": {"autofix": 1}, "count": 1, "last_stage": "autofix_attempt_1"}, indent=2),
+        encoding="utf-8",
+    )
+
+    execv_calls: list[tuple[str, list[str]]] = []
+
+    def fake_execv(executable: str, argv: list[str]) -> None:
+        execv_calls.append((executable, argv))
+
+    monkeypatch.setattr("kagglebot.autopilot.os.execv", fake_execv)
+
+    _maybe_restart_for_src_changes(
+        config=config,
+        run_id=run_id,
+        changed=["src/kagglebot/autopilot.py"],
+        stage="autofix_attempt_2",
+    )
+
+    assert execv_calls == []
 
 
 def test_build_submit_autofix_context_includes_latest_attempt(tmp_path: Path) -> None:
@@ -1972,7 +2189,7 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
                 "action_taken": "abort",
                 "fingerprint": "abc123",
                 "sub_path": "/tmp/submission.csv",
-                "stderr_tail": "missing columns: ['target']",
+                "stderr_tail": "submission payload mismatch",
             }
         )
         + "\n",
@@ -2032,6 +2249,89 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
         encoding="utf-8"
     )
     assert "Stage: submit_autofix" in strategy_prompt
+
+
+def test_error_strategy_skip_reason_detects_deterministic_failures() -> None:
+    reason = _error_strategy_skip_reason(
+        stage="kernel_fix",
+        error_text=(
+            "ValueError: Kernel source validation failed:\n- Kernel sources do not reference metrics.json output."
+        ),
+    )
+    assert reason is not None
+    assert "deterministic" in reason
+    reason_data = _error_strategy_skip_reason(
+        stage="kernel_fix",
+        error_text=("FileNotFoundError: Data directory not found: /tmp/artifacts/demo/artifacts/demo/data"),
+    )
+    assert reason_data is not None
+    assert "path resolution" in reason_data
+    reason_metric = _error_strategy_skip_reason(
+        stage="autofix",
+        error_text=(
+            "RuntimeError: Competition metric mismatch persisted after metric-only repairs "
+            "(attempts=2, target=auc/maximize, kernel=accuracy/maximize)."
+        ),
+    )
+    assert reason_metric is not None
+    assert "metric mismatch" in reason_metric
+
+
+def test_run_autofix_submit_error_skips_strategy_for_internet_policy(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run_state.json").write_text(
+        json.dumps(
+            {
+                "submit_attempted": True,
+                "submit_ok": False,
+                "last_error_kind": "unknown",
+                "last_reason": "bad_request",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    calls = {"strategy": 0, "codex": 0}
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool):  # noqa: ARG001
+        calls["strategy"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / "strategy_last_message.txt"
+        last_msg.write_text("strategy\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        calls["codex"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / "codex_last_message.txt"
+        last_msg.write_text("submit fix applied\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_strategy", fake_run_strategy)
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
+    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+
+    _run_autofix(
+        config=config,
+        run_id=run_id,
+        attempt=1,
+        error=SubmitAbortedError("Cannot submit: Your Notebook cannot use internet access in this competition."),
+    )
+
+    assert calls["strategy"] == 0
+    assert calls["codex"] == 1
 
 
 def test_extract_kernel_metric_from_oof_dict() -> None:
@@ -2123,6 +2423,19 @@ def test_extract_kernel_metric_supports_pipelines_cv_mean_schema() -> None:
     assert value == 0.11
 
 
+def test_extract_kernel_metric_from_direct_brier_score_key() -> None:
+    from kagglebot.autopilot import _extract_kernel_metric
+
+    payload = {
+        "metric": "brier_score",
+        "brier_score": 0.18,
+        "direction": "minimize",
+    }
+    metric, value = _extract_kernel_metric(payload, "brier_score")
+    assert metric == "brier_score"
+    assert value == 0.18
+
+
 def test_load_kernel_metrics_supports_selected_cv_mean_schema(tmp_path: Path) -> None:
     from kagglebot.autopilot import _load_kernel_metrics
 
@@ -2152,6 +2465,28 @@ def test_load_kernel_metrics_supports_selected_cv_mean_schema(tmp_path: Path) ->
     assert evaluation.direction == "minimize"
     assert evaluation.value == 0.11915219856213632
     assert evaluation.std == 0.016552210168151973
+
+
+def test_load_kernel_metrics_falls_back_to_cv_for_untrusted_score_source(tmp_path: Path) -> None:
+    from kagglebot.autopilot import _load_kernel_metrics
+
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "metric": "brier_score",
+                "direction": "minimize",
+                "score_source": "oracle",
+                "brier_score": 0.0,
+                "cv_brier": 0.17321,
+            }
+        ),
+        encoding="utf-8",
+    )
+    evaluation = _load_kernel_metrics(metrics_path, direction="minimize", target_metric="brier_score")
+    assert evaluation is not None
+    assert evaluation.score_source == "cv"
+    assert evaluation.value == pytest.approx(0.17321)
 
 
 def test_kernel_quality_guard_blocks_when_selected_worse_than_baseline() -> None:
@@ -2230,6 +2565,33 @@ def test_kernel_quality_guard_blocks_on_severe_validation_mismatch(tmp_path: Pat
     assert final_guard["allow_submit"] is True
 
 
+def test_kernel_quality_guard_blocks_oracle_or_untrusted_score_source() -> None:
+    evaluation = EvaluationResult(
+        score_source="oracle",
+        metric="rmse",
+        direction="minimize",
+        value=0.1,
+        std=0.01,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.1, 0.1],
+    )
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload={"oracle": {"mode_setting": "auto", "applied": True}},
+        logs_dir=None,
+        direction="minimize",
+        iteration=3,
+        max_iterations=3,
+        force_submit=False,
+    )
+    assert guard["allow_submit"] is False
+    reasons = guard.get("reasons")
+    assert isinstance(reasons, list)
+    assert "untrusted_score_source" in reasons
+    assert "oracle_override_detected" in reasons
+
+
 def test_autopilot_missing_kernel_metric_triggers_kernel_fix(monkeypatch, tmp_path: Path) -> None:
     from kagglebot.autopilot import AutopilotSession
 
@@ -2278,7 +2640,133 @@ def test_autopilot_missing_kernel_metric_triggers_kernel_fix(monkeypatch, tmp_pa
     assert calls["kernel_fix"] == 1
 
 
-def test_metric_mismatch_preserves_direction_when_metric_direction_is_unknown(monkeypatch, tmp_path: Path) -> None:
+def test_metric_mismatch_keeps_competition_metric_in_strict_mode(monkeypatch, tmp_path: Path) -> None:
+    target_metric = "0.5 * mAP@[0.5:0.95] + 0.5 * F1-score"
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric=target_metric,
+        target_score=0.9,
+        target_direction="maximize",
+    )
+    calls = {"metric_fix": 0, "metric_recheck": 0}
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="composite",
+            direction="maximize",
+            value=0.62,
+            std=0.01,
+            train_score=None,
+            val_score=0.62,
+            fold_scores=[0.61, 0.63],
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="vision",
+            model_summary={},
+            accelerator="cuda",
+        )
+
+    def fake_metric_only_fix(**kwargs):  # noqa: ANN003
+        calls["metric_fix"] += 1
+
+    def fake_metric_recheck(**kwargs):  # noqa: ANN003
+        calls["metric_recheck"] += 1
+        submission_path = kwargs["submission_path"]
+        evaluation = EvaluationResult(
+            score_source="cv",
+            metric=target_metric,
+            direction="maximize",
+            value=0.62,
+            std=0.01,
+            train_score=None,
+            val_score=0.62,
+            fold_scores=[0.61, 0.63],
+        )
+        payload = {
+            "score_source": "cv",
+            "metric": target_metric,
+            "direction": "maximize",
+            "offline_value": 0.62,
+            "offline_std": 0.01,
+            "val_score": 0.62,
+            "fold_scores": [0.61, 0.63],
+        }
+        return evaluation, payload, submission_path
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
+    monkeypatch.setattr("kagglebot.autopilot._rerun_kernel_for_metric_recheck", fake_metric_recheck)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1)
+    run_autopilot(config)
+
+    persisted_plan = json.loads(config.paths.plan_path.read_text(encoding="utf-8"))
+    assert persisted_plan["target_metric"] == target_metric
+    assert persisted_plan["target_direction"] == "maximize"
+    assert calls["metric_recheck"] == 1
+    assert calls["metric_fix"] == 0
+
+    iter_metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
+    assert iter_metrics["metric"] == target_metric
+    guard = iter_metrics.get("quality_guard", {})
+    reasons = guard.get("reasons", []) if isinstance(guard, dict) else []
+    assert "competition_metric_mismatch" not in reasons
+
+
+def test_metric_alias_equivalence_does_not_trigger_mismatch(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="brier_score",
+        target_score=0.2,
+        target_direction="minimize",
+    )
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="brier",
+            direction="minimize",
+            value=0.19,
+            std=0.01,
+            train_score=None,
+            val_score=0.19,
+            fold_scores=[0.18, 0.2],
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="vision",
+            model_summary={},
+            accelerator="cuda",
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1)
+    run_autopilot(config)
+
+    iter_metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
+    guard = iter_metrics.get("quality_guard", {})
+    reasons = guard.get("reasons", []) if isinstance(guard, dict) else []
+    assert "competition_metric_mismatch" not in reasons
+
+
+def test_metric_mismatch_can_follow_kernel_metric_when_strict_mode_disabled(monkeypatch, tmp_path: Path) -> None:
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="0.5 * mAP@[0.5:0.95] + 0.5 * F1-score",
@@ -2307,6 +2795,7 @@ def test_metric_mismatch_preserves_direction_when_metric_direction_is_unknown(mo
             accelerator="cuda",
         )
 
+    monkeypatch.setenv("KAGGLEBOT_STRICT_COMPETITION_METRIC", "0")
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
@@ -2319,6 +2808,421 @@ def test_metric_mismatch_preserves_direction_when_metric_direction_is_unknown(mo
     persisted_plan = json.loads(config.paths.plan_path.read_text(encoding="utf-8"))
     assert persisted_plan["target_metric"] == "composite"
     assert persisted_plan["target_direction"] == "maximize"
+
+
+def test_metric_only_fix_reruns_local_kernel_to_materialize_metric_outputs(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="auc",
+        target_score=0.9,
+        target_direction="maximize",
+    )
+    monkeypatch.setenv("KAGGLEBOT_STRICT_COMPETITION_METRIC", "1")
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._needs_planning", lambda *args, **kwargs: False)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+
+    calls = {"kernel_runs": 0, "metric_fix": 0}
+
+    def fake_metric_only_fix(**kwargs):  # noqa: ANN003
+        calls["metric_fix"] += 1
+
+    def fake_run_kernel_local(**kwargs):  # noqa: ANN003
+        calls["kernel_runs"] += 1
+        slug = kwargs["slug"]
+        run_id = kwargs["run_id"]
+        iteration = kwargs["iteration"]
+        base_dir = Path(kwargs["base_dir"])
+        output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        submission_path = output_dir / "submission.csv"
+        metrics_path = output_dir / "metrics.json"
+        submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        metric = "accuracy" if calls["kernel_runs"] == 1 else "auc"
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": metric,
+                    "direction": "maximize",
+                    "offline_value": 0.9 if metric == "accuracy" else 0.91,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return KernelRunResult(
+            kernel_id=f"local/{slug}",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1)
+    run_autopilot(config)
+
+    assert calls["metric_fix"] == 1
+    assert calls["kernel_runs"] == 2
+    iter_metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
+    assert iter_metrics["metric"] == "auc"
+
+
+def test_metric_recheck_uses_existing_artifacts_without_retraining(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+
+    config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = output_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+    metrics_path = output_dir / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "score_source": "cv",
+                "metric": "rmse",
+                "direction": "minimize",
+                "offline_value": 0.321,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel must not be called")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel_local",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
+    )
+
+    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
+        config=config,
+        run_id="run-1",
+        iteration=1,
+        submission_path=submission_path,
+        iter_dir=iter_dir,
+        metrics_artifact_path=metrics_path,
+        kernel_name=None,
+        enable_internet=False,
+        score_source="cv",
+        target_metric="rmse",
+        metric_direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        time_budget_min=10,
+    )
+
+    assert evaluation.metric == "rmse"
+    assert evaluation.value == pytest.approx(0.321)
+    assert isinstance(payload, dict)
+    assert payload.get("metric") == "rmse"
+    assert resolved_submission.exists()
+
+
+def test_metric_recheck_prefers_output_metrics_over_stale_iteration_metrics(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+
+    config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = output_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    stale_iter_metrics_path = iter_dir / "metrics.json"
+    stale_iter_metrics_path.write_text(
+        json.dumps(
+            {
+                "score_source": "cv",
+                "metric": "accuracy",
+                "direction": "maximize",
+                "offline_value": 0.5,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    output_metrics_path = output_dir / "metrics.json"
+    output_metrics_path.write_text(
+        json.dumps(
+            {
+                "score_source": "cv",
+                "metric": "auc",
+                "direction": "maximize",
+                "offline_value": 0.92,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel must not be called")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel_local",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
+    )
+
+    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
+        config=config,
+        run_id="run-1",
+        iteration=1,
+        submission_path=submission_path,
+        iter_dir=iter_dir,
+        metrics_artifact_path=stale_iter_metrics_path,
+        kernel_name=None,
+        enable_internet=False,
+        score_source="cv",
+        target_metric="auc",
+        metric_direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        time_budget_min=10,
+    )
+
+    assert evaluation.metric == "auc"
+    assert evaluation.value == pytest.approx(0.92)
+    assert isinstance(payload, dict)
+    assert payload.get("metric") == "auc"
+    assert resolved_submission.exists()
+
+
+def test_metric_recheck_recomputes_target_metric_from_oof_without_retraining(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+
+    config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = output_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+    metrics_path = output_dir / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "score_source": "cv",
+                "metric": "accuracy",
+                "direction": "maximize",
+                "offline_value": 0.5,
+                "offline_std": 0.01,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    oof_path = output_dir / "oof_predictions.csv"
+    oof_path.write_text(
+        "\n".join(
+            [
+                "row_id,y,oof_pred,oof_proba,fold",
+                "0,0,0,0.01,1",
+                "1,0,0,0.10,1",
+                "2,1,1,0.90,2",
+                "3,1,1,0.99,2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel must not be called")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel_local",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
+    )
+
+    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
+        config=config,
+        run_id="run-1",
+        iteration=1,
+        submission_path=submission_path,
+        iter_dir=iter_dir,
+        metrics_artifact_path=metrics_path,
+        kernel_name=None,
+        enable_internet=False,
+        score_source="cv",
+        target_metric="auc",
+        metric_direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        time_budget_min=10,
+    )
+
+    assert evaluation.metric == "auc"
+    assert evaluation.value == pytest.approx(1.0)
+    assert isinstance(payload, dict)
+    assert payload.get("metric") == "auc"
+    assert payload.get("metric_recheck_without_retrain") is True
+    persisted = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert persisted["metric"] == "auc"
+    assert persisted["offline_value"] == pytest.approx(1.0)
+    assert resolved_submission.exists()
+
+
+def test_metric_recheck_resolves_oof_from_staged_local_kernel_outputs(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+
+    config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = output_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+    metrics_path = output_dir / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "score_source": "cv",
+                "metric": "accuracy",
+                "direction": "maximize",
+                "offline_value": 0.5,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    staged_oof_path = tmp_path / "artifacts" / "demo" / "kernels" / "run-1" / "local-iter-1" / "outputs"
+    staged_oof_path.mkdir(parents=True, exist_ok=True)
+    (staged_oof_path / "oof_predictions.csv").write_text(
+        "\n".join(
+            [
+                "row_id,y,oof_pred,oof_proba,fold",
+                "0,0,0,0.01,1",
+                "1,0,0,0.10,1",
+                "2,1,1,0.90,2",
+                "3,1,1,0.99,2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel must not be called")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel_local",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
+    )
+
+    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
+        config=config,
+        run_id="run-1",
+        iteration=1,
+        submission_path=submission_path,
+        iter_dir=iter_dir,
+        metrics_artifact_path=metrics_path,
+        kernel_name=None,
+        enable_internet=False,
+        score_source="cv",
+        target_metric="auc",
+        metric_direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        time_budget_min=10,
+    )
+
+    assert evaluation.metric == "auc"
+    assert evaluation.value == pytest.approx(1.0)
+    assert isinstance(payload, dict)
+    assert payload.get("metric") == "auc"
+    assert payload.get("metric_recheck_without_retrain") is True
+    assert resolved_submission.exists()
+
+
+def test_local_kernel_oof_artifact_is_synced_for_metric_recheck(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="auc",
+        target_score=0.6,
+        target_direction="maximize",
+    )
+    calls = {"metric_fix": 0}
+
+    def fake_run_kernel_local(**kwargs):  # noqa: ANN003
+        slug = kwargs["slug"]
+        run_id = kwargs["run_id"]
+        iteration = kwargs["iteration"]
+        base_dir = Path(kwargs["base_dir"])
+        output_dir = base_dir / slug / "kernels" / run_id / f"local-iter-{iteration}" / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        submission_path = output_dir / "submission.csv"
+        submission_path.write_text("id,target\n1,0.1\n2,0.9\n", encoding="utf-8")
+        metrics_path = output_dir / "metrics.json"
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": "accuracy",
+                    "direction": "maximize",
+                    "offline_value": 0.5,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "oof_predictions.csv").write_text(
+            "\n".join(
+                [
+                    "row_id,y,oof_pred,oof_proba,fold",
+                    "0,0,0,0.01,1",
+                    "1,0,0,0.10,1",
+                    "2,1,1,0.90,2",
+                    "3,1,1,0.99,2",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return KernelRunResult(
+            kernel_id=f"local/{slug}",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    def fake_metric_only_fix(**kwargs):  # noqa: ANN003
+        calls["metric_fix"] += 1
+
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
+    monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_autopilot(config)
+
+    iter_output_dir = config.paths.iter_dir("run-1", 1) / "output"
+    assert (iter_output_dir / "oof_predictions.csv").exists()
+    iter_metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
+    assert iter_metrics["metric"] == "auc"
+    assert calls["metric_fix"] == 0
 
 
 def test_autopilot_submit_when_top1_tier(monkeypatch, tmp_path: Path) -> None:
@@ -2821,6 +3725,69 @@ def test_autopilot_retries_kernel_failure(monkeypatch, tmp_path: Path) -> None:
     assert calls["kernel_fix"] == 1
 
 
+def test_autopilot_preflight_fixes_kernel_sources_before_local_run(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+        score_source="cv",
+        cv_folds=3,
+        seed=42,
+    )
+    config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu", max_iterations=1, submit=False)
+    kernel_path = config.paths.kernel_source_dir / "kernel.py"
+    kernel_path.write_text("print('missing contract')\n", encoding="utf-8")
+
+    calls = {"kernel_fix": 0, "run_kernel_local": 0}
+
+    def fake_run_kernel_fix(**kwargs):  # noqa: ANN003
+        calls["kernel_fix"] += 1
+        kernel_path.write_text(
+            "print('fixed')\n# submission.csv\n# metrics.json\n",
+            encoding="utf-8",
+        )
+
+    def fake_run_kernel_local(**kwargs):  # noqa: ANN003
+        calls["run_kernel_local"] += 1
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        submission_path = output_dir / "submission.csv"
+        metrics_path = output_dir / "metrics.json"
+        submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": "rmse",
+                    "direction": "minimize",
+                    "offline_value": 0.4,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return KernelRunResult(
+            kernel_id=f"local/{kwargs['slug']}",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", fake_run_kernel_fix)
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
+
+    run_autopilot(config)
+
+    assert calls["kernel_fix"] == 1
+    assert calls["run_kernel_local"] == 1
+
+
 def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
     calls = {"train": 0}
 
@@ -2877,6 +3844,7 @@ def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
 def test_autopilot_top1_stop_requires_submission_score(monkeypatch, tmp_path: Path) -> None:
     calls = {"submit": 0}
     submission_scores = [0.6, 0.4]
+    train_calls = {"count": 0}
 
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
@@ -2886,10 +3854,14 @@ def test_autopilot_top1_stop_requires_submission_score(monkeypatch, tmp_path: Pa
     )
 
     def fake_train(*args, **kwargs):  # noqa: ARG001
+        train_calls["count"] += 1
         output_path = kwargs["output_path"]
         output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
         source = str(kwargs.get("score_source") or "holdout")
-        value = 0.4 if source == "holdout" else 0.41
+        if source == "holdout":
+            value = 0.4 - 0.01 * float(train_calls["count"] - 1)
+        else:
+            value = 0.41 - 0.01 * float(train_calls["count"] - 1)
         evaluation = EvaluationResult(
             score_source=source,
             metric="rmse",

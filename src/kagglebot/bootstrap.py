@@ -302,8 +302,10 @@ _TAB_URL_SUFFIXES = {
 }
 
 _CODE_NOTEBOOK_LIMIT_ENV = "KAGGLEBOT_CODE_NOTEBOOK_LIMIT"
+_CODE_SCORE_DIRECTION_ENV = "KAGGLEBOT_CODE_SCORE_DIRECTION"
 _DISCUSSION_THREAD_LIMIT_ENV = "KAGGLEBOT_DISCUSSION_THREAD_LIMIT"
-_CODE_NOTEBOOK_MAX_DOWNLOAD = 10
+_CODE_NOTEBOOK_DEFAULT_DOWNLOAD = 50
+_CODE_NOTEBOOK_MAX_DOWNLOAD = 50
 
 
 class _AnchorCollector(HTMLParser):
@@ -405,6 +407,21 @@ _TITLE_SCORE_HINT_RE = re.compile(
     r"(?:public\s+lb|private\s+lb|public\s+score|private\s+score|lb|score)\s*[:=]?\s*(-?\d+(?:\.\d+)?)",
     re.I,
 )
+_SCORE_DIRECTION_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bbrier\b", re.IGNORECASE), "minimize"),
+    (re.compile(r"\blog\s*loss\b|\blogloss\b|\bcross[-\s]?entropy\b", re.IGNORECASE), "minimize"),
+    (re.compile(r"\brmse\b|\brmsle\b|\bmae\b|\bmape\b|\bmse\b", re.IGNORECASE), "minimize"),
+    (re.compile(r"\bauc\b|\broc[-\s]?auc\b", re.IGNORECASE), "maximize"),
+    (re.compile(r"\baccuracy\b|\bf1\b|\bprecision\b|\brecall\b|\br2\b", re.IGNORECASE), "maximize"),
+)
+_LEAKY_NOTEBOOK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bleak\b", re.IGNORECASE),
+    re.compile(r"\bperfect\s+score\b", re.IGNORECASE),
+    re.compile(r"\bguaranteed\b", re.IGNORECASE),
+    re.compile(r"\bpublic\s*lb\b", re.IGNORECASE),
+    re.compile(r"\bstage\s*1\b", re.IGNORECASE),
+    re.compile(r"\b0(?:\.0+)?\s*(?:lb|score)\b", re.IGNORECASE),
+)
 
 
 def _normalize_kaggle_href(href: str) -> str:
@@ -441,21 +458,95 @@ def _extract_code_candidates(*, html_text: str) -> list[dict[str, object]]:
                 "title": title,
                 "url": f"https://www.kaggle.com{href}",
                 "score": score,
+                "total_votes": 0,
+                "last_run_time": None,
                 "source_order": source_order,
             }
         )
     return entries
 
 
-def _sort_code_candidates(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
-    def key(candidate: dict[str, object]) -> tuple[int, float, int]:
+def _sort_code_candidates(candidates: list[dict[str, object]], *, score_direction: str) -> list[dict[str, object]]:
+    """Sort notebook candidates by score, with votes/recency fallbacks."""
+
+    minimize_score = score_direction == "minimize"
+
+    def key(candidate: dict[str, object]) -> tuple[int, float, int, float, int]:
         raw_score = candidate.get("score")
         has_score = isinstance(raw_score, (int, float))
-        score_value = float(raw_score) if has_score else float("-inf")
+        score_value = float(raw_score) if has_score else 0.0
+        if has_score:
+            score_key = score_value if minimize_score else -score_value
+        else:
+            score_key = 0.0
+        vote_key = -_parse_vote_count(candidate.get("total_votes"))
+        recency_key = -_parse_last_run_epoch(candidate.get("last_run_time"))
         order = int(candidate.get("source_order") or 0)
-        return (0 if has_score else 1, -score_value, order)
+        return (0 if has_score else 1, score_key, vote_key, recency_key, order)
 
     return sorted(candidates, key=key)
+
+
+def _is_likely_leak_or_placeholder_notebook(candidate: dict[str, object]) -> bool:
+    """Heuristic filter for leak-style or placeholder leaderboard notebooks."""
+    text_parts = [
+        str(candidate.get("kernel_id") or ""),
+        str(candidate.get("title") or ""),
+        str(candidate.get("summary") or ""),
+    ]
+    text = " ".join(text_parts)
+    if any(pattern.search(text) for pattern in _LEAKY_NOTEBOOK_PATTERNS):
+        return True
+    raw_score = candidate.get("score")
+    if isinstance(raw_score, (int, float)) and abs(float(raw_score)) <= 1e-12:
+        lowered = text.lower()
+        if "lb" in lowered or "score" in lowered:
+            return True
+    return False
+
+
+def _select_required_reference_notebook(entries: list[dict[str, object]]) -> dict[str, object] | None:
+    """Pick a mandatory reference notebook, preferring non-leak candidates."""
+    if not entries:
+        return None
+    for entry in entries:
+        if not _is_likely_leak_or_placeholder_notebook(entry):
+            return entry
+    return entries[0]
+
+
+def _parse_vote_count(raw: object) -> int:
+    """Parse notebook vote count with resilient fallback."""
+    if isinstance(raw, int):
+        return max(raw, 0)
+    if isinstance(raw, float):
+        return max(int(raw), 0)
+    if not isinstance(raw, str):
+        return 0
+    text = raw.strip().replace(",", "")
+    if not text:
+        return 0
+    try:
+        return max(int(text), 0)
+    except ValueError:
+        return 0
+
+
+def _parse_last_run_epoch(raw: object) -> float:
+    """Convert last-run timestamps to epoch seconds for stable sorting."""
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, str) and raw.strip():
+        text = raw.strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return 0.0
+    else:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
 
 
 def _parse_score_value(raw: object) -> float | None:
@@ -515,10 +606,82 @@ def _list_competition_code_candidates_from_cli(*, slug: str) -> list[dict[str, o
                 "title": str(row.get("title") or kernel_id),
                 "url": f"https://www.kaggle.com/code/{kernel_id}",
                 "score": _parse_kernel_row_score(row),
+                "total_votes": _parse_vote_count(row.get("totalVotes")),
+                "last_run_time": str(row.get("lastRunTime") or ""),
                 "source_order": index,
             }
         )
     return entries
+
+
+def _resolve_code_score_direction(*, paths: CompetitionPaths) -> str:
+    """Resolve notebook score direction: minimize or maximize."""
+    explicit = os.getenv(_CODE_SCORE_DIRECTION_ENV, "").strip().lower()
+    if explicit in {"minimize", "maximize"}:
+        return explicit
+
+    spec_direction = _read_direction_from_json(paths.context_dir / "evaluation_spec.json", ("direction",))
+    if spec_direction is not None:
+        return spec_direction
+
+    plan_direction = _read_direction_from_json(paths.plan_path, ("target_direction", "direction"))
+    if plan_direction is not None:
+        return plan_direction
+
+    inferred = _infer_direction_from_context_files(paths)
+    if inferred is not None:
+        return inferred
+    return "maximize"
+
+
+def _read_direction_from_json(path: Path, keys: tuple[str, ...]) -> str | None:
+    """Read direction from a JSON file if present and valid."""
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        raw = str(payload.get(key) or "").strip().lower()
+        if raw in {"minimize", "maximize"}:
+            return raw
+    return None
+
+
+def _infer_direction_from_context_files(paths: CompetitionPaths) -> str | None:
+    """Infer score direction from competition context text."""
+    text = "\n".join(
+        [
+            paths.rules_md_path.read_text(encoding="utf-8", errors="ignore") if paths.rules_md_path.exists() else "",
+            paths.overview_md_path.read_text(encoding="utf-8", errors="ignore")
+            if paths.overview_md_path.exists()
+            else "",
+            paths.data_md_path.read_text(encoding="utf-8", errors="ignore") if paths.data_md_path.exists() else "",
+        ]
+    ).strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+    if re.search(r"\blower\b[^.\n]*\bbetter\b|\bminimi[sz]e\b", lowered):
+        return "minimize"
+    if re.search(r"\bhigher\b[^.\n]*\bbetter\b|\bmaximi[sz]e\b", lowered):
+        return "maximize"
+
+    earliest: tuple[int, str] | None = None
+    for pattern, direction in _SCORE_DIRECTION_HINTS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        found = (match.start(), direction)
+        if earliest is None or found[0] < earliest[0]:
+            earliest = found
+    if earliest is not None:
+        return earliest[1]
+    return None
 
 
 def _infer_score_near_href(*, html_text: str, href: str) -> float | None:
@@ -637,10 +800,11 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
         candidates = _extract_code_candidates(html_text=html_text)
         candidate_source = "competition code page HTML"
 
-    candidates = _sort_code_candidates(candidates)
+    score_direction = _resolve_code_score_direction(paths=paths)
+    candidates = _sort_code_candidates(candidates, score_direction=score_direction)
     limit = _read_int_env(
         _CODE_NOTEBOOK_LIMIT_ENV,
-        default=_CODE_NOTEBOOK_MAX_DOWNLOAD,
+        default=_CODE_NOTEBOOK_DEFAULT_DOWNLOAD,
         min_value=1,
         max_value=_CODE_NOTEBOOK_MAX_DOWNLOAD,
     )
@@ -671,6 +835,8 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
                 "title": str(candidate.get("title") or kernel_id),
                 "url": str(candidate.get("url") or ""),
                 "score": candidate.get("score"),
+                "total_votes": _parse_vote_count(candidate.get("total_votes")),
+                "last_run_time": str(candidate.get("last_run_time") or ""),
                 "local_dir": str(notebook_dir),
                 "source_file": str(source_file) if source_file else None,
                 "summary": summary,
@@ -681,8 +847,13 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
     index_payload = {
         "source_url": code_url,
         "candidate_source": candidate_source,
+        "score_direction": score_direction,
         "fetched_at": datetime.now(UTC).isoformat(),
         "notebook_count": len(entries),
+        "top_kernel_id": str(entries[0]["kernel_id"]) if entries else "",
+        "required_reference_kernel_id": str(_select_required_reference_notebook(entries).get("kernel_id") or "")
+        if entries
+        else "",
         "notebooks": entries,
     }
     paths.code_notebooks_index_path.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
@@ -692,10 +863,49 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
         "",
         f"Source URL: {code_url}",
         f"Candidate source: {candidate_source}",
+        f"Score direction: {score_direction}",
         f"Fetched at: {index_payload['fetched_at']}",
         "",
     ]
     if entries:
+        top_entry = entries[0]
+        top_score = top_entry.get("score")
+        top_score_text = f"{float(top_score):.6f}" if isinstance(top_score, (int, float)) else "unknown"
+        required_entry = _select_required_reference_notebook(entries)
+        required_is_top = bool(required_entry) and required_entry == top_entry
+        required_score = required_entry.get("score") if required_entry else None
+        required_score_text = f"{float(required_score):.6f}" if isinstance(required_score, (int, float)) else "unknown"
+        lines.extend(
+            [
+                "## Top-ranked Notebook (Raw ranking)",
+                f"- kernel_id: {top_entry['kernel_id']}",
+                f"- title: {top_entry['title']}",
+                f"- notebook_score: {top_score_text}",
+                f"- total_votes: {int(top_entry.get('total_votes') or 0)}",
+                "",
+            ]
+        )
+        if required_entry:
+            lines.extend(
+                [
+                    "## Required Reference Notebook (Execution baseline)",
+                    f"- kernel_id: {required_entry['kernel_id']}",
+                    f"- title: {required_entry['title']}",
+                    f"- notebook_score: {required_score_text}",
+                    f"- total_votes: {int(required_entry.get('total_votes') or 0)}",
+                    (
+                        "- selection_reason: Top-ranked notebook is usable."
+                        if required_is_top
+                        else (
+                            "- selection_reason: Top-ranked notebook appears leak-like/placeholder; "
+                            "using the highest-ranked non-leak notebook."
+                        )
+                    ),
+                    "- instruction: Treat this notebook as a mandatory baseline reference before adding improvements.",
+                    "",
+                ]
+            )
+
         lines.append("## Downloaded Notebooks")
         lines.append("")
         for index, entry in enumerate(entries, start=1):
@@ -706,6 +916,7 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
                     f"### {index}. {entry['title']}",
                     f"- kernel_id: {entry['kernel_id']}",
                     f"- notebook_score: {score_text}",
+                    f"- total_votes: {int(entry.get('total_votes') or 0)}",
                     f"- url: {entry['url']}",
                     f"- local_dir: {entry['local_dir']}",
                 ]

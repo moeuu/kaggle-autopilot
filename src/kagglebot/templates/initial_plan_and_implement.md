@@ -67,7 +67,7 @@ Update `{plan_path}` with the following fields:
   - For medium datasets (5K-100K rows): Add 5-10% margin
   - For large datasets (>100K rows): Match or slightly exceed Top1
   - Direction-aware: minimize means higher value is more lenient, maximize means lower value
-- **score_source**: Use `holdout` by default; only use `cv` if you need robust estimates (small datasets, high variance)
+- **score_source**: Use `cv` by default for robust model ranking; use `holdout` only when CV is infeasible
 - **submit_policy**: Keep as `always` unless rules clearly limit submission counts
 
 ### Step 2: Implement Strong Initial Solution

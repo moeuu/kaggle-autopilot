@@ -30,7 +30,7 @@ class PlanConfig:
     target_metric: str | None = None
     target_direction: str = "auto"
     target_score: float | None = None
-    score_source: str = "auto"
+    score_source: str = "cv"
     holdout_frac: float | None = None
     cv_folds: int | None = None
     split_strategy: str | None = None
@@ -68,7 +68,7 @@ class PlanConfig:
             target_metric=payload.get("target_metric"),
             target_direction=payload.get("target_direction") or "auto",
             target_score=payload.get("target_score"),
-            score_source=payload.get("score_source") or "auto",
+            score_source=payload.get("score_source") or "cv",
             holdout_frac=payload.get("holdout_frac"),
             cv_folds=payload.get("cv_folds"),
             split_strategy=payload.get("split_strategy"),

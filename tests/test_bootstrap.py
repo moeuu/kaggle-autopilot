@@ -184,7 +184,7 @@ def test_bootstrap_downloads_code_notebooks_and_discussions(tmp_path, monkeypatc
     assert "Fast CV tips" in discussion_md
 
 
-def test_bootstrap_code_uses_top_score_order_and_caps_at_10(tmp_path, monkeypatch) -> None:
+def test_bootstrap_code_uses_top_score_order_and_caps_at_50(tmp_path, monkeypatch) -> None:
     def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
         return [
             {"name": "rules", "content": "Rules text"},
@@ -216,7 +216,7 @@ def test_bootstrap_code_uses_top_score_order_and_caps_at_10(tmp_path, monkeypatc
     monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
 
     candidates = []
-    for idx in range(12):
+    for idx in range(80):
         nb_slug = f"nb-{idx:02d}"
         candidates.append(
             {
@@ -224,6 +224,8 @@ def test_bootstrap_code_uses_top_score_order_and_caps_at_10(tmp_path, monkeypatc
                 "title": f"Notebook {idx}",
                 "url": f"https://www.kaggle.com/code/user/{nb_slug}",
                 "score": 0.900 + (idx * 0.001),
+                "total_votes": idx,
+                "last_run_time": f"2026-02-24 10:{idx:02d}:00",
                 "source_order": idx,
             }
         )
@@ -242,14 +244,253 @@ def test_bootstrap_code_uses_top_score_order_and_caps_at_10(tmp_path, monkeypatc
     )
 
     code_index = json.loads(paths.code_notebooks_index_path.read_text(encoding="utf-8"))
-    assert code_index["notebook_count"] == 10
+    assert code_index["notebook_count"] == 50
+    assert code_index["score_direction"] == "maximize"
+    assert code_index["top_kernel_id"] == "user/nb-79"
+    assert code_index["required_reference_kernel_id"] == "user/nb-79"
     assert code_index["candidate_source"] == "kaggle kernels list --competition --sort-by scoreDescending"
-    assert len(pulled) == 10
-    assert pulled[0] == "user/nb-11"
-    assert pulled[-1] == "user/nb-02"
-    assert code_index["notebooks"][0]["kernel_id"] == "user/nb-11"
-    assert code_index["notebooks"][0]["score"] == 0.911
-    assert code_index["notebooks"][-1]["kernel_id"] == "user/nb-02"
+    assert len(pulled) == 50
+    assert pulled[0] == "user/nb-79"
+    assert pulled[-1] == "user/nb-30"
+    assert code_index["notebooks"][0]["kernel_id"] == "user/nb-79"
+    assert round(float(code_index["notebooks"][0]["score"]), 6) == 0.979
+    assert code_index["notebooks"][-1]["kernel_id"] == "user/nb-30"
+    code_text = paths.code_md_path.read_text(encoding="utf-8")
+    assert "Top-ranked Notebook (Raw ranking)" in code_text
+    assert "Required Reference Notebook (Execution baseline)" in code_text
+    assert "instruction: Treat this notebook as a mandatory baseline reference" in code_text
+
+
+def test_bootstrap_code_prefers_votes_when_scores_missing(tmp_path, monkeypatch) -> None:
+    def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
+        return [
+            {"name": "rules", "content": "Rules text"},
+            {"name": "description", "content": "Overview text"},
+            {"name": "data-description", "content": "Data text"},
+        ]
+
+    def fake_fetch_text(*args, **kwargs):  # noqa: ANN002, ANN003
+        url = args[0]
+        if url.endswith("/code"):
+            return "<html><body><h1>Code</h1></body></html>"
+        if url.endswith("/models"):
+            return "<html><body><h1>Models</h1></body></html>"
+        if url.endswith("/discussions"):
+            return "<html><body></body></html>"
+        return ""
+
+    pulled: list[str] = []
+
+    def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
+        pulled.append(str(kernel_id))
+        notebook = output_dir / "notebook.ipynb"
+        notebook.write_text(json.dumps({"cells": []}), encoding="utf-8")
+        return "ok"
+
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_pages", fake_pages)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_text_with_retry", fake_fetch_text)
+    monkeypatch.setattr("kagglebot.bootstrap.kernels_pull", fake_kernels_pull)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
+
+    candidates = [
+        {
+            "kernel_id": "user/score-missing-a",
+            "title": "A",
+            "url": "https://www.kaggle.com/code/user/score-missing-a",
+            "score": None,
+            "total_votes": 12,
+            "last_run_time": "2026-02-24 10:00:00",
+            "source_order": 0,
+        },
+        {
+            "kernel_id": "user/score-missing-b",
+            "title": "B",
+            "url": "https://www.kaggle.com/code/user/score-missing-b",
+            "score": None,
+            "total_votes": 44,
+            "last_run_time": "2026-02-24 09:00:00",
+            "source_order": 1,
+        },
+        {
+            "kernel_id": "user/score-missing-c",
+            "title": "C",
+            "url": "https://www.kaggle.com/code/user/score-missing-c",
+            "score": None,
+            "total_votes": 7,
+            "last_run_time": "2026-02-24 11:00:00",
+            "source_order": 2,
+        },
+    ]
+    monkeypatch.setattr("kagglebot.bootstrap._list_competition_code_candidates_from_cli", lambda *, slug: candidates)
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    bootstrap_competition(
+        slug="demo",
+        competition_url="https://www.kaggle.com/competitions/demo",
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        rules_source="url",
+        download=False,
+        dry_run=False,
+    )
+
+    assert pulled[:3] == [
+        "user/score-missing-b",
+        "user/score-missing-a",
+        "user/score-missing-c",
+    ]
+
+
+def test_bootstrap_code_respects_minimize_score_direction(tmp_path, monkeypatch) -> None:
+    def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
+        return [
+            {"name": "rules", "content": "Metric: Brier score (lower is better)."},
+            {"name": "description", "content": "Overview text"},
+            {"name": "data-description", "content": "Data text"},
+        ]
+
+    def fake_fetch_text(*args, **kwargs):  # noqa: ANN002, ANN003
+        url = args[0]
+        if url.endswith("/code"):
+            return "<html><body><h1>Code</h1></body></html>"
+        if url.endswith("/models"):
+            return "<html><body><h1>Models</h1></body></html>"
+        if url.endswith("/discussions"):
+            return "<html><body></body></html>"
+        return ""
+
+    pulled: list[str] = []
+
+    def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
+        pulled.append(str(kernel_id))
+        notebook = output_dir / "notebook.ipynb"
+        notebook.write_text(json.dumps({"cells": []}), encoding="utf-8")
+        return "ok"
+
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_pages", fake_pages)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_text_with_retry", fake_fetch_text)
+    monkeypatch.setattr("kagglebot.bootstrap.kernels_pull", fake_kernels_pull)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
+
+    candidates = [
+        {
+            "kernel_id": "user/high-score",
+            "title": "High score",
+            "url": "https://www.kaggle.com/code/user/high-score",
+            "score": 0.2000,
+            "total_votes": 10,
+            "last_run_time": "2026-02-24 10:00:00",
+            "source_order": 0,
+        },
+        {
+            "kernel_id": "user/best-score",
+            "title": "Best score",
+            "url": "https://www.kaggle.com/code/user/best-score",
+            "score": 0.0400,
+            "total_votes": 8,
+            "last_run_time": "2026-02-24 10:00:00",
+            "source_order": 1,
+        },
+        {
+            "kernel_id": "user/mid-score",
+            "title": "Mid score",
+            "url": "https://www.kaggle.com/code/user/mid-score",
+            "score": 0.1000,
+            "total_votes": 9,
+            "last_run_time": "2026-02-24 10:00:00",
+            "source_order": 2,
+        },
+    ]
+    monkeypatch.setattr("kagglebot.bootstrap._list_competition_code_candidates_from_cli", lambda *, slug: candidates)
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    bootstrap_competition(
+        slug="demo",
+        competition_url="https://www.kaggle.com/competitions/demo",
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        rules_source="url",
+        download=False,
+        dry_run=False,
+    )
+
+    assert pulled[:3] == [
+        "user/best-score",
+        "user/mid-score",
+        "user/high-score",
+    ]
+
+
+def test_bootstrap_code_uses_non_leak_required_reference_when_top_ranked_looks_leaky(tmp_path, monkeypatch) -> None:
+    def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
+        return [
+            {"name": "rules", "content": "Metric: Brier score (lower is better)."},
+            {"name": "description", "content": "Overview text"},
+            {"name": "data-description", "content": "Data text"},
+        ]
+
+    def fake_fetch_text(*args, **kwargs):  # noqa: ANN002, ANN003
+        url = args[0]
+        if url.endswith("/code"):
+            return "<html><body><h1>Code</h1></body></html>"
+        if url.endswith("/models"):
+            return "<html><body><h1>Models</h1></body></html>"
+        if url.endswith("/discussions"):
+            return "<html><body></body></html>"
+        return ""
+
+    def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
+        notebook = output_dir / "notebook.ipynb"
+        notebook.write_text(json.dumps({"cells": []}), encoding="utf-8")
+        return f"ok:{kernel_id}"
+
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_pages", fake_pages)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_text_with_retry", fake_fetch_text)
+    monkeypatch.setattr("kagglebot.bootstrap.kernels_pull", fake_kernels_pull)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
+
+    candidates = [
+        {
+            "kernel_id": "user/lb-0-0-leak-submit",
+            "title": "[LB 0.0] Leak Submit",
+            "url": "https://www.kaggle.com/code/user/lb-0-0-leak-submit",
+            "score": 0.0000,
+            "total_votes": 40,
+            "last_run_time": "2026-02-24 10:00:00",
+            "source_order": 0,
+        },
+        {
+            "kernel_id": "user/histgb-xgb-catboost",
+            "title": "HistGB + XGB + CatBoost",
+            "url": "https://www.kaggle.com/code/user/histgb-xgb-catboost",
+            "score": 0.0734,
+            "total_votes": 20,
+            "last_run_time": "2026-02-24 11:00:00",
+            "source_order": 1,
+        },
+    ]
+    monkeypatch.setattr("kagglebot.bootstrap._list_competition_code_candidates_from_cli", lambda *, slug: candidates)
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    bootstrap_competition(
+        slug="demo",
+        competition_url="https://www.kaggle.com/competitions/demo",
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        rules_source="url",
+        download=False,
+        dry_run=False,
+    )
+
+    code_index = json.loads(paths.code_notebooks_index_path.read_text(encoding="utf-8"))
+    assert code_index["top_kernel_id"] == "user/lb-0-0-leak-submit"
+    assert code_index["required_reference_kernel_id"] == "user/histgb-xgb-catboost"
+
+    code_text = paths.code_md_path.read_text(encoding="utf-8")
+    assert "selection_reason: Top-ranked notebook appears leak-like/placeholder" in code_text
 
 
 def test_mirror_sample_submission_to_data(tmp_path) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -712,9 +713,33 @@ def _infer_modality(data_dir: Path, train: pd.DataFrame) -> str:
             avg_len = sample.apply(lambda col: col.map(len)).mean().mean()
         if avg_len >= 30:
             return "text"
-    if any("date" in c.lower() or "time" in c.lower() for c in train.columns):
+    if _has_temporal_datetime_signal(train):
         return "timeseries"
     return "tabular"
+
+
+def _has_temporal_datetime_signal(train: pd.DataFrame) -> bool:
+    """Return True when the table contains a plausible datetime-like feature column."""
+    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
+    for col in train.columns:
+        series = train[col]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return True
+        if not temporal_name.search(str(col)):
+            continue
+        if not (
+            pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+            or pd.api.types.is_numeric_dtype(series)
+        ):
+            continue
+        sample = series.dropna().astype(str).head(200)
+        if sample.empty:
+            continue
+        parsed = pd.to_datetime(sample, errors="coerce", utc=True, format="mixed")
+        if float(parsed.notna().mean()) >= 0.8:
+            return True
+    return False
 
 
 def _task_tag(task: str, target: pd.Series) -> str:
@@ -813,12 +838,12 @@ def build_plan_and_initial_prompt(
         '  "target_metric": "<derive_from_rules>",',
         '  "target_score": 0.0,',
         '  "target_direction": "<minimize|maximize>",',
-        '  "score_source": "holdout",',
+        '  "score_source": "cv",',
         '  "holdout_frac": 0.2,',
         '  "cv_folds": 5,',
         '  "seed": 42,',
         '  "internet": "on",',
-        '  "max_iterations": 3,',
+        '  "max_iterations": 12,',
         '  "submit_policy": "always"',
         "}",
         "```",
@@ -831,7 +856,7 @@ def build_plan_and_initial_prompt(
         "  to identify data format.",
         "- Use web search to choose the strongest initial approach; prefer official docs and competition discussions.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
-        "- Prefer CV for small datasets or high variance; otherwise holdout.",
+        "- Prefer CV by default for stronger model ranking; use holdout only when CV is infeasible.",
         "- Do NOT change submit_policy; autopilot controls submission behavior.",
         "",
         "### 2) Implement the strongest initial model",
@@ -868,7 +893,7 @@ def build_plan_and_initial_prompt(
         "uv run pytest -q",
         "```",
         "",
-        "The autopilot will iterate up to max_iterations (default 3),",
+        "The autopilot will iterate up to max_iterations (default 12),",
         "submit according to submission gate policy, and use readiness score as the primary loop decision signal.",
     ]
     return "\n".join(lines) + "\n"
@@ -888,7 +913,7 @@ def build_improve_template() -> str:
 **Competition**: `{slug}`
 **Iteration**: {iteration}
 **Goal**: Improve loop-decision score (readiness primary; submission/rank as guardrails) toward top1-tier
-or best possible within the max_iterations budget (default 3)
+or best possible within the max_iterations budget (default 12)
 **Compute**: {compute} ({accelerator})
 **Top1 gap**: {top1_gap}
 **Delta vs previous best**: {delta_offline}

@@ -144,3 +144,57 @@ def test_validate_and_prepare_does_not_emit_header_only_autofix_file(tmp_path: P
     with pytest.raises(SubmissionValidationError):
         service.validate_and_prepare_submission(submission_path)
     assert not submission_path.with_name("submission.autofixed.csv").exists()
+
+
+def test_validate_and_prepare_expands_placeholder_sample_to_test_ids(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    sample_path = context_dir / "sample_submission.csv"
+    pd.DataFrame(
+        {
+            "Stock code": ["X00001", "X00002", "X00003"],
+            "IsDefault": [0, 0, 0],
+        }
+    ).to_csv(sample_path, index=False)
+
+    train_path = data_dir / "train.csv"
+    pd.DataFrame(
+        {
+            "Stock code": [f"T{i:05d}" for i in range(20)],
+            "IsDefault": [0, 1] * 10,
+        }
+    ).to_csv(train_path, index=False)
+
+    test_ids = ["X00001", "X00002", "X00003", *[f"X{i:05d}" for i in range(4, 21)]]
+    test_path = data_dir / "test.csv"
+    pd.DataFrame({"Stock code": test_ids, "f1": list(range(len(test_ids)))}).to_csv(test_path, index=False)
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "Stock code": ["X00001", "X00002", "X00003"],
+            "IsDefault": [0.1, 0.2, 0.3],
+        }
+    ).to_csv(submission_path, index=False)
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=data_dir,
+            sample_submission_path=sample_path,
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared.name.endswith(".autofixed.csv")
+
+    prepared_df = pd.read_csv(prepared)
+    assert len(prepared_df) == len(test_ids)
+    assert prepared_df["Stock code"].tolist() == test_ids
+    validate_submission(str(prepared), str(sample_path), data_dir=data_dir)
