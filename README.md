@@ -103,10 +103,13 @@ Optional environment knobs:
 - Large competition download strategy (auto-enabled):
   - Kagglebot now probes competition file sizes first.
   - If total size is large (default threshold: `8 GiB`), downloads switch to per-file mode with retry/backoff.
-  - When per-file mode hits `429 Too Many Requests`, Kagglebot automatically falls back to a single-shot download.
+  - When per-file mode hits `429 Too Many Requests`, Kagglebot retries per-file mode (no single-shot fallback).
   - `KAGGLEBOT_DOWNLOAD_SPLIT_THRESHOLD_BYTES=<int>` override split threshold bytes.
   - `KAGGLEBOT_DOWNLOAD_RETRY_ATTEMPTS=<int>` retry attempts per command (`0` = unlimited; default `8`).
+  - `KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS=<int>` retry attempts for `429` in per-file mode (`0` = unlimited; default `8`).
   - `KAGGLEBOT_DOWNLOAD_RETRY_BACKOFF_SEC=<float>` base retry backoff seconds (default `2.0`).
+  - `KAGGLEBOT_DOWNLOAD_RETRY_MAX_BACKOFF_SEC=<float>` max retry backoff seconds (default `120.0`).
+  - `KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC=<float>` minimum delay between split-download API requests (default `0.0`).
 - Training progress logging (applies even when kernel code is quiet):
   - `KAGGLEBOT_TRAIN_PROGRESS=1|0` (default `1`) enable/disable forced periodic training logs
   - `KAGGLEBOT_PROGRESS_INTERVAL_SEC=<float>` watchdog silence threshold before emitting "no new logs" status (default `45`)

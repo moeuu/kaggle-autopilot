@@ -123,12 +123,79 @@ def test_validate_and_prepare_compacts_large_csv_when_over_soft_limit(tmp_path: 
     validate_submission(str(prepared), str(sample_path))
 
 
-def test_validate_and_prepare_does_not_emit_header_only_autofix_file(tmp_path: Path) -> None:
+def test_validate_and_prepare_autofixes_header_only_sample_by_renaming_columns(tmp_path: Path) -> None:
     sample_path = tmp_path / "sample_submission.csv"
     sample_path.write_text("id,prediction\n", encoding="utf-8")
 
     submission_path = tmp_path / "submission.csv"
-    pd.DataFrame({"ID": [1, 2], "target": [0.2, 0.8]}).to_csv(submission_path, index=False)
+    pd.DataFrame({"ID": [1, 2], "Category": ["A", "B"]}).to_csv(submission_path, index=False)
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=tmp_path / "data",
+            sample_submission_path=sample_path,
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    validate_submission(str(prepared), str(sample_path))
+    df = pd.read_csv(prepared)
+    assert list(df.columns) == ["id", "prediction"]
+    assert df["id"].tolist() == [1, 2]
+    assert df["prediction"].tolist() == ["A", "B"]
+
+
+def test_validate_and_prepare_autofixes_missing_required_id_suffix(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "Kaggle_Prepared" / "val" / "MS").mkdir(parents=True, exist_ok=True)
+    for stem in ("val_0001", "val_0002"):
+        (data_dir / "Kaggle_Prepared" / "val" / "MS" / f"{stem}.tif").write_bytes(b"TIFF")
+
+    sample_path = context_dir / "sample_submission.csv"
+    sample_path.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "data.md").write_text(
+        "## Submission Format\n\n"
+        "A CSV file with the following columns:\n"
+        "* `Id`: The filename (e.g., `val_a1b2c3d4.tif`)\n"
+        "* `Category`: The predicted class\n",
+        encoding="utf-8",
+    )
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame({"Id": ["val_0001", "val_0002"], "Category": ["Health", "Rust"]}).to_csv(submission_path, index=False)
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=data_dir,
+            sample_submission_path=sample_path,
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared.name.endswith(".autofixed.csv")
+    validate_submission(str(prepared), str(sample_path), data_dir=data_dir)
+
+    df = pd.read_csv(prepared)
+    assert list(df.columns) == ["Id", "Category"]
+    assert df["Id"].tolist() == ["val_0001.tif", "val_0002.tif"]
+
+
+def test_validate_and_prepare_does_not_autofix_header_only_sample_when_mapping_is_ambiguous(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    sample_path.write_text("id,prediction\n", encoding="utf-8")
+
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame({"foo": [1, 2], "bar": ["A", "B"]}).to_csv(submission_path, index=False)
 
     service = SubmissionService(
         SubmissionConfig(

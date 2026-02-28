@@ -46,6 +46,8 @@ _OBJECT_COERCE_FILENAME = "object_coerce.json"
 _OBJECT_COERCE_SHIM_MARKER = "# kagglebot: object-coerce-shim"
 _DEVICE_COERCE_FILENAME = "device_coerce.json"
 _DEVICE_COERCE_SHIM_MARKER = "# kagglebot: device-coerce-shim"
+_ZERO_OVERLAP_DRIFT_GUARD_FILENAME = "zero_overlap_drift_guard.json"
+_ZERO_OVERLAP_DRIFT_SHIM_MARKER = "# kagglebot: zero-overlap-drift-shim"
 _KAGGLE_WORKING_REDIRECT_SHIM_MARKER = "# kagglebot: kaggle-working-redirect-shim"
 _LGBM_GPU_GUARD_SHIM_MARKER = "# kagglebot: lgbm-gpu-guard-shim"
 _TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
@@ -54,6 +56,17 @@ _KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
+_ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
+_ZERO_OVERLAP_DRIFT_MIN_ABS_CORR = 0.08
+_ZERO_OVERLAP_DRIFT_MIN_ZERO_OVERLAP_RATIO = 0.50
+_ZERO_OVERLAP_DRIFT_MAX_CAT_UNIQUE_RATIO = 0.98
+_BVS_KERNEL_CONTRACT_SLUG_PREFIX = "beyond-visible-spectrum-ai-for-agriculture-2026"
+_BVS_TIMM_FAILURE_MARKERS = (
+    "timm is unavailable",
+    "timm.create_model is missing",
+    "skipping tri_branch_timm_gated because timm is unavailable",
+    "falling back to smallspectralencoder for rgb",
+)
 
 _PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_seed(?P<seed>\d+)_fold(?P<fold>\d+)")
 _PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
@@ -61,6 +74,99 @@ _PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
 )
 _PIPELINE_START_RE = re.compile(r"\bRunning pipeline:\s*(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)")
 _PIPELINE_DONE_RE = re.compile(r"\bPipeline\s+(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:")
+
+
+def _requires_bvs_kernel_contract(slug: str) -> bool:
+    return slug.strip().lower().startswith(_BVS_KERNEL_CONTRACT_SLUG_PREFIX)
+
+
+def _collect_local_kernel_log_text(logs_dir: Path) -> str:
+    chunks: list[str] = []
+    for name in (
+        "local_kernel_stdout.log",
+        "local_kernel_stderr.log",
+        "local_kernel_stdout_oom_retry.log",
+        "local_kernel_stderr_oom_retry.log",
+    ):
+        path = logs_dir / name
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks)
+
+
+def _extract_kernel_size_markers(log_text: str) -> list[int]:
+    pattern = re.compile(r"\b(?:load_size|img_size)\s*=\s*(\d+)\b")
+    values: list[int] = []
+    for match in pattern.finditer(log_text):
+        try:
+            values.append(int(match.group(1)))
+        except ValueError:
+            continue
+    return values
+
+
+def _enforce_competition_kernel_contract(
+    *,
+    slug: str,
+    logs_dir: Path,
+    metrics_path: Path | None,
+) -> None:
+    """Enforce competition-specific quality contracts to prevent silent regressions."""
+    if not _requires_bvs_kernel_contract(slug):
+        return
+
+    errors: list[str] = []
+    payload: dict[str, object] = {}
+    if metrics_path is None or not metrics_path.exists():
+        errors.append("metrics.json is missing; cannot validate BVS kernel contract.")
+    else:
+        try:
+            parsed = json.loads(metrics_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                payload = parsed
+            else:
+                errors.append("metrics.json payload must be a JSON object.")
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"metrics.json is unreadable: {exc}")
+
+    log_text = _collect_local_kernel_log_text(logs_dir)
+    lowered_log = log_text.lower()
+    for marker in _BVS_TIMM_FAILURE_MARKERS:
+        if marker in lowered_log:
+            errors.append(f"timm/ConvNeXt fallback marker detected in logs: {marker}")
+
+    size_markers = _extract_kernel_size_markers(log_text)
+    if not size_markers:
+        errors.append("No img_size/load_size markers found in local kernel logs.")
+    else:
+        undersized = sorted({value for value in size_markers if value < 128})
+        if undersized:
+            errors.append(f"Detected img_size/load_size below 128 in logs: {undersized}")
+
+    if payload:
+        model_name = str(payload.get("model_name") or "").strip().lower()
+        if model_name in {"resnet50", "small_rgb_encoder", "none"}:
+            errors.append(f"Weak fallback backbone detected in metrics model_name={model_name!r}.")
+
+        pipelines = payload.get("pipelines")
+        if not isinstance(pipelines, list) or len(pipelines) < 2:
+            errors.append("metrics.json must report at least two pipeline candidates for ensemble selection.")
+
+        chosen_pipeline = str(payload.get("chosen_pipeline") or "").strip().lower()
+        if not chosen_pipeline:
+            errors.append("metrics.json must include chosen_pipeline.")
+        elif "ensemble" not in chosen_pipeline:
+            errors.append(f"chosen_pipeline must be ensemble-based, got: {chosen_pipeline!r}.")
+
+    if errors:
+        issue_text = "\n".join(f"- {message}" for message in errors)
+        raise KernelFailedError(f"BVS kernel contract failed (timm/size/ensemble guard):\n{issue_text}")
 
 
 def _env_truthy(raw: str | None) -> bool:
@@ -293,6 +399,7 @@ class KernelPackageBuilder:
         kernel_dir = config.base_dir / config.slug / "kernels" / config.run_id
         output_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "output"
         logs_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "logs"
+        context_dir = config.base_dir / config.slug / "context"
         kernel_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -325,12 +432,14 @@ class KernelPackageBuilder:
         _inline_kernel_modules(kernel_dir)
         _inject_data_dir_resolver(kernel_dir)
         _inject_pipeline_cfg_fallback(kernel_dir)
-        _inject_column_map_shim(kernel_dir, config.base_dir / config.slug / "context")
-        _inject_column_fill_shim(kernel_dir, config.base_dir / config.slug / "context")
-        _inject_object_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
-        _inject_device_coerce_shim(kernel_dir, config.base_dir / config.slug / "context")
+        _inject_column_map_shim(kernel_dir, context_dir)
+        _inject_column_fill_shim(kernel_dir, context_dir)
+        _inject_object_coerce_shim(kernel_dir, context_dir)
+        _inject_device_coerce_shim(kernel_dir, context_dir)
         _inject_training_progress_shim(kernel_dir)
         _inject_transformers_eval_strategy_shim(kernel_dir)
+        _prepare_zero_overlap_drift_guard(base_dir=config.base_dir, slug=config.slug, context_dir=context_dir)
+        _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
         _inject_competition_slug_env(kernel_dir, config.slug)
         _inject_force_train_env(kernel_dir)
         _ensure_training_progress_shim(kernel_dir)
@@ -682,6 +791,7 @@ def run_kernel_local(
     run_dir.mkdir(parents=True, exist_ok=True)
     _ensure_local_sample_submission_file(base_dir=base_dir, slug=slug)
     _stage_local_kernel_data_dir(base_dir=base_dir, slug=slug, run_dir=run_dir)
+    _stage_local_kernel_context_profile(base_dir=base_dir, slug=slug, run_dir=run_dir)
 
     ensure_solution_path_allowed(kernel_source_dir, artifacts_dir=base_dir, slug=slug)
     kernel_path = kernel_source_dir / "kernel.py"
@@ -718,6 +828,8 @@ def run_kernel_local(
     _inject_lgbm_gpu_guard_shim(kernel_stage_dir)
     _inject_training_progress_shim(kernel_stage_dir)
     _inject_transformers_eval_strategy_shim(kernel_stage_dir)
+    _prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
+    _inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
     _inject_competition_slug_env(kernel_stage_dir, slug)
     _inject_force_train_env(kernel_stage_dir)
     _ensure_training_progress_shim(kernel_stage_dir)
@@ -871,6 +983,11 @@ def run_kernel_local(
             source=metrics_src,
             destination=output_dir / "metrics.json",
         )
+    _enforce_competition_kernel_contract(
+        slug=slug,
+        logs_dir=logs_dir,
+        metrics_path=metrics_dst,
+    )
     for filename in (
         "oof_predictions.csv",
         "split_diagnostics.json",
@@ -912,6 +1029,29 @@ def _stage_local_kernel_data_dir(*, base_dir: Path, slug: str, run_dir: Path) ->
         source_dir=source_dir,
         target_dir=competition_dir / "artifacts" / slug / "data",
     )
+
+
+def _stage_local_kernel_context_profile(*, base_dir: Path, slug: str, run_dir: Path) -> None:
+    """Stage dataset profile metadata for kernels that resolve context relative to run_dir."""
+    source_path = base_dir / slug / "context" / "dataset_profile.json"
+    if not source_path.exists():
+        return
+
+    context_dir = run_dir / "context"
+    if context_dir.exists() and not context_dir.is_dir():
+        if context_dir.is_symlink() or context_dir.is_file():
+            context_dir.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(context_dir, ignore_errors=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    target_path = context_dir / "dataset_profile.json"
+    if target_path.exists() or target_path.is_symlink():
+        if target_path.is_dir() and not target_path.is_symlink():
+            shutil.rmtree(target_path, ignore_errors=True)
+        else:
+            target_path.unlink(missing_ok=True)
+    shutil.copy2(source_path, target_path)
 
 
 def _stage_local_data_alias(*, source_dir: Path, target_dir: Path) -> None:
@@ -1621,6 +1761,215 @@ def _sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
         shutil.copy2(plan_path, target)
 
 
+def _load_dataset_profile_identity(*, context_dir: Path) -> tuple[str | None, str | None]:
+    profile_path = context_dir / "dataset_profile.json"
+    if not profile_path.exists():
+        return None, None
+    try:
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    target_raw = payload.get("target_column")
+    id_raw = payload.get("id_column")
+    target_col = str(target_raw).strip() if isinstance(target_raw, str) and str(target_raw).strip() else None
+    id_col = str(id_raw).strip() if isinstance(id_raw, str) and str(id_raw).strip() else None
+    return target_col, id_col
+
+
+def _infer_target_column_from_frames(*, train_columns: list[str], test_columns: list[str]) -> str | None:
+    test_set = set(test_columns)
+    candidates = [col for col in train_columns if col not in test_set]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        return candidates[-1]
+    for name in ("target", "label", "y"):
+        if name in train_columns and name not in test_set:
+            return name
+    return None
+
+
+def _is_categorical_like_series(*, series, n_rows: int) -> bool:
+    dtype_name = str(getattr(series, "dtype", "")).lower()
+    if any(token in dtype_name for token in ("object", "category", "string", "bool")):
+        return True
+    try:
+        nunique = int(series.nunique(dropna=True))
+    except Exception:
+        return False
+    if nunique <= 0:
+        return False
+    unique_ratio = nunique / max(1, n_rows)
+    return unique_ratio <= _ZERO_OVERLAP_DRIFT_MAX_CAT_UNIQUE_RATIO
+
+
+def _categorical_tvd(*, train_series, test_series) -> float:
+    train_values = train_series.fillna("__nan__").astype(str).value_counts(normalize=True)
+    test_values = test_series.fillna("__nan__").astype(str).value_counts(normalize=True)
+    keys = set(train_values.index) | set(test_values.index)
+    if not keys:
+        return 0.0
+    total_variation = 0.0
+    for key in keys:
+        total_variation += abs(float(train_values.get(key, 0.0)) - float(test_values.get(key, 0.0)))
+    return 0.5 * total_variation
+
+
+def _abs_corr_with_target(*, feature_series, target_series) -> float:
+    try:
+        target_numeric = target_series.astype(float)
+    except Exception:
+        return 0.0
+    if target_numeric.nunique(dropna=True) <= 1:
+        return 0.0
+    dtype_name = str(getattr(feature_series, "dtype", "")).lower()
+    try:
+        if any(token in dtype_name for token in ("object", "string", "category", "bool")):
+            encoded = feature_series.fillna("__nan__").astype(str).factorize()[0]
+            encoded_series = target_numeric.__class__(encoded, index=target_numeric.index)
+            corr = target_numeric.corr(encoded_series)
+        else:
+            corr = target_numeric.corr(feature_series.astype(float))
+    except Exception:
+        return 0.0
+    if corr is None:
+        return 0.0
+    try:
+        value = abs(float(corr))
+    except Exception:
+        return 0.0
+    if value != value:
+        return 0.0
+    return value
+
+
+def _build_zero_overlap_drift_guard_payload(
+    *,
+    train_df,
+    test_df,
+    target_col: str | None,
+    id_col: str | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "enabled": False,
+        "drop_columns": [],
+        "reason": "guard_not_triggered",
+        "thresholds": {
+            "min_tvd": _ZERO_OVERLAP_DRIFT_MIN_TVD,
+            "min_abs_corr": _ZERO_OVERLAP_DRIFT_MIN_ABS_CORR,
+            "min_zero_overlap_ratio": _ZERO_OVERLAP_DRIFT_MIN_ZERO_OVERLAP_RATIO,
+        },
+        "suspects": [],
+    }
+    if target_col is None or target_col not in train_df.columns:
+        payload["reason"] = "missing_target_column"
+        return payload
+
+    feature_cols = [col for col in train_df.columns if col != target_col and col in test_df.columns]
+    if not feature_cols:
+        payload["reason"] = "no_common_feature_columns"
+        return payload
+
+    n_rows = int(len(train_df))
+    categorical_checked = 0
+    zero_overlap_checked = 0
+    suspects: list[dict[str, object]] = []
+    drop_columns: list[str] = []
+    target_series = train_df[target_col]
+    for column in feature_cols:
+        if id_col is not None and column == id_col:
+            continue
+        train_series = train_df[column]
+        test_series = test_df[column]
+        if not _is_categorical_like_series(series=train_series, n_rows=n_rows):
+            continue
+        categorical_checked += 1
+        train_keys = set(train_series.dropna().astype(str).unique().tolist())
+        test_keys = set(test_series.dropna().astype(str).unique().tolist())
+        if not train_keys or not test_keys:
+            continue
+        overlap = len(train_keys & test_keys)
+        if overlap != 0:
+            continue
+        zero_overlap_checked += 1
+        drift = _categorical_tvd(train_series=train_series, test_series=test_series)
+        corr = _abs_corr_with_target(feature_series=train_series, target_series=target_series)
+        candidate = {
+            "column": column,
+            "overlap_unique_count": overlap,
+            "train_unique": len(train_keys),
+            "test_unique": len(test_keys),
+            "drift_tvd": drift,
+            "abs_corr_target": corr,
+        }
+        suspects.append(candidate)
+        if drift >= _ZERO_OVERLAP_DRIFT_MIN_TVD and corr >= _ZERO_OVERLAP_DRIFT_MIN_ABS_CORR:
+            drop_columns.append(column)
+
+    zero_overlap_ratio = zero_overlap_checked / categorical_checked if categorical_checked > 0 else 0.0
+    payload["suspects"] = sorted(
+        suspects,
+        key=lambda item: float(item.get("drift_tvd", 0.0)) * float(item.get("abs_corr_target", 0.0)),
+        reverse=True,
+    )
+    payload["stats"] = {
+        "categorical_checked": categorical_checked,
+        "zero_overlap_checked": zero_overlap_checked,
+        "zero_overlap_ratio": zero_overlap_ratio,
+    }
+    payload["drop_columns"] = sorted(set(drop_columns))
+    if payload["drop_columns"] and zero_overlap_ratio >= _ZERO_OVERLAP_DRIFT_MIN_ZERO_OVERLAP_RATIO:
+        payload["enabled"] = True
+        payload["reason"] = "zero_overlap_high_drift_detected"
+    return payload
+
+
+def _prepare_zero_overlap_drift_guard(*, base_dir: Path, slug: str, context_dir: Path) -> Path | None:
+    enabled_env = os.getenv("KAGGLEBOT_ENABLE_ZERO_OVERLAP_DRIFT_GUARD")
+    if enabled_env is not None and not _env_truthy(enabled_env):
+        return None
+    try:
+        import pandas as pd  # noqa: PLC0415
+    except Exception:
+        return None
+
+    data_dir = base_dir / slug / "data"
+    train_path = data_dir / "train.csv"
+    test_path = data_dir / "test.csv"
+    if not train_path.exists() or not test_path.exists():
+        return None
+    try:
+        train_df = pd.read_csv(train_path)
+        test_df = pd.read_csv(test_path)
+    except Exception:
+        return None
+    if train_df.empty or test_df.empty:
+        return None
+
+    target_col, id_col = _load_dataset_profile_identity(context_dir=context_dir)
+    if target_col is None:
+        target_col = _infer_target_column_from_frames(
+            train_columns=[str(col) for col in train_df.columns],
+            test_columns=[str(col) for col in test_df.columns],
+        )
+    payload = _build_zero_overlap_drift_guard_payload(
+        train_df=train_df,
+        test_df=test_df,
+        target_col=target_col,
+        id_col=id_col,
+    )
+    payload["target_column"] = target_col
+    payload["id_column"] = id_col
+    payload["generated_at_epoch"] = int(time.time())
+
+    guard_path = context_dir / _ZERO_OVERLAP_DRIFT_GUARD_FILENAME
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+    guard_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return guard_path
+
+
 _KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
 _KERNEL_BOOTSTRAP_END = "del _os, _sys, _KROOT, _KWORK"
 _KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
@@ -1640,7 +1989,7 @@ def _strip_kernel_bootstrap(lines: list[str]) -> list[str]:
     while _KERNEL_BOOTSTRAP_MARKER in stripped:
         start = stripped.index(_KERNEL_BOOTSTRAP_MARKER)
         end = None
-        search_end = min(start + 20, len(stripped))
+        search_end = min(start + 60, len(stripped))
         for idx in range(start + 1, search_end):
             if stripped[idx].strip() == _KERNEL_BOOTSTRAP_END:
                 end = idx + 1
@@ -1670,6 +2019,16 @@ def _ensure_kernel_import_path(kernel_dir: Path) -> None:
         "_KWORK = '/kaggle/working'\n"
         "if _KWORK not in _sys.path:\n"
         "    _sys.path.insert(0, _KWORK)\n"
+        "try:\n"
+        "    _KSC = _os.path.join(_KROOT, 'sitecustomize.py')\n"
+        "    if _os.path.exists(_KSC):\n"
+        "        with open(_KSC, 'rb') as _kb_f:\n"
+        "            exec(\n"
+        "                compile(_kb_f.read(), _KSC, 'exec'),\n"
+        "                {'__file__': _KSC, '__name__': 'kagglebot_sitecustomize'},\n"
+        "            )\n"
+        "except Exception:\n"
+        "    pass\n"
         "del _os, _sys, _KROOT, _KWORK\n"
     )
     lines = _strip_kernel_bootstrap(text.splitlines())
@@ -1988,6 +2347,87 @@ def _inject_column_map_shim(kernel_dir: Path, context_dir: Path) -> None:
     if site_path.exists():
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _COLUMN_MAP_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\n".join(shim), encoding="utf-8")
+
+
+def _inject_zero_overlap_drift_shim(kernel_dir: Path, context_dir: Path) -> None:
+    guard_path = context_dir / _ZERO_OVERLAP_DRIFT_GUARD_FILENAME
+    if not guard_path.exists():
+        return
+    kernel_guard_path = kernel_dir / _ZERO_OVERLAP_DRIFT_GUARD_FILENAME
+    shutil.copy2(guard_path, kernel_guard_path)
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _ZERO_OVERLAP_DRIFT_SHIM_MARKER,
+        "import json",
+        "from pathlib import Path",
+        "",
+        "def _kb_load_zero_overlap_drift_guard() -> dict:",
+        "    candidates = [",
+        f"        Path(__file__).with_name('{_ZERO_OVERLAP_DRIFT_GUARD_FILENAME}'),",
+        f"        Path('/kaggle/working/{_ZERO_OVERLAP_DRIFT_GUARD_FILENAME}'),",
+        "    ]",
+        "    for path in candidates:",
+        "        if not path.exists():",
+        "            continue",
+        "        try:",
+        "            payload = json.loads(path.read_text(encoding='utf-8'))",
+        "        except Exception:",
+        "            continue",
+        "        if isinstance(payload, dict):",
+        "            return payload",
+        "    return {}",
+        "",
+        "def _kb_is_train_or_test_csv(path_value: object) -> bool:",
+        "    try:",
+        "        name = Path(str(path_value)).name.lower()",
+        "    except Exception:",
+        "        return False",
+        "    return name in {'train.csv', 'test.csv'}",
+        "",
+        "def _kb_patch_zero_overlap_drift_drop() -> None:",
+        "    try:",
+        "        import pandas as _pd",
+        "    except Exception:",
+        "        return",
+        "    guard = _kb_load_zero_overlap_drift_guard()",
+        "    if not guard or not bool(guard.get('enabled')):",
+        "        return",
+        "    raw_cols = guard.get('drop_columns')",
+        "    if not isinstance(raw_cols, list):",
+        "        return",
+        "    drop_columns = [str(col) for col in raw_cols if str(col).strip()]",
+        "    if not drop_columns:",
+        "        return",
+        "    _orig = _pd.read_csv",
+        "",
+        "    def _patched(*args, **kwargs):",
+        "        df = _orig(*args, **kwargs)",
+        "        path_value = args[0] if args else kwargs.get('filepath_or_buffer')",
+        "        if not _kb_is_train_or_test_csv(path_value):",
+        "            return df",
+        "        try:",
+        "            cols = [col for col in drop_columns if col in df.columns]",
+        "        except Exception:",
+        "            cols = []",
+        "        if not cols:",
+        "            return df",
+        "        try:",
+        "            return df.drop(columns=cols)",
+        "        except Exception:",
+        "            return df",
+        "",
+        "    _pd.read_csv = _patched",
+        "",
+        "_kb_patch_zero_overlap_drift_drop()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _ZERO_OVERLAP_DRIFT_SHIM_MARKER in text:
             return
         site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
@@ -2319,9 +2759,9 @@ def _inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _DEVICE_COERCE_SHIM_MARKER in text:
             return
-        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
-    site_path.write_text("\\n".join(shim), encoding="utf-8")
+    site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
 def _inject_kaggle_working_redirect_shim(kernel_dir: Path) -> None:
@@ -2396,9 +2836,9 @@ def _inject_kaggle_working_redirect_shim(kernel_dir: Path) -> None:
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _KAGGLE_WORKING_REDIRECT_SHIM_MARKER in text:
             return
-        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
-    site_path.write_text("\\n".join(shim), encoding="utf-8")
+    site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
 def _inject_lgbm_gpu_guard_shim(kernel_dir: Path) -> None:
@@ -2459,9 +2899,9 @@ def _inject_lgbm_gpu_guard_shim(kernel_dir: Path) -> None:
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _LGBM_GPU_GUARD_SHIM_MARKER in text:
             return
-        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
-    site_path.write_text("\\n".join(shim), encoding="utf-8")
+    site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
 def _inject_training_progress_shim(kernel_dir: Path) -> None:
@@ -2727,9 +3167,9 @@ _kb_patch_training_progress()
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _TRAIN_PROGRESS_SHIM_MARKER in text:
             return
-        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
-    site_path.write_text("\\n".join(shim), encoding="utf-8")
+    site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
 def _inject_transformers_eval_strategy_shim(kernel_dir: Path) -> None:
@@ -2769,9 +3209,9 @@ def _inject_transformers_eval_strategy_shim(kernel_dir: Path) -> None:
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER in text:
             return
-        site_path.write_text(text.rstrip("\\n") + "\\n\\n" + "\\n".join(shim), encoding="utf-8")
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
-    site_path.write_text("\\n".join(shim), encoding="utf-8")
+    site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
 def _ensure_training_progress_shim(kernel_dir: Path) -> None:

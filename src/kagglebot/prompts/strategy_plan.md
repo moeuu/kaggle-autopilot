@@ -96,7 +96,10 @@ Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings a
 - Pretrained assets plan: when transfer learning is recommended, specify how to download/cache checkpoints safely
 - Error analysis + ablation plan
 - Risks, constraints, and rule compliance
-- Dependency sanity: prefer Kaggle-default libraries; if you suggest niche libs, give a fallback.
+- Dependency sanity: prefer Kaggle-default libraries and actively use already-available repo dependencies
+  first (torch/timm/torchvision/opencv, xgboost/lightgbm/catboost, transformers/tabicl, sklearn);
+  if you suggest niche libs, give a fallback.
+  If a missing package is essential, call out `uv add <package>` and mention updating `pyproject.toml` + `uv.lock`.
 - Search notes (queries & key findings)
 - Sources (>=3). Provide title + domain; URLs are acceptable.
 
@@ -122,6 +125,7 @@ For each pipeline include:
 - leakage risk
 - fallback if dependency unavailable
 Keep it practical for Kaggle runtime (avoid heavy installs; prefer widely available libs).
+When similar choices exist, prefer solutions that leverage already-installed dependencies over weaker fallbacks.
 
 ===PLAN_JSON===
 Provide a JSON object with these keys (do not wrap in markdown):

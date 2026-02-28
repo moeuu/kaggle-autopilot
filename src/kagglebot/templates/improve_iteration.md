@@ -39,6 +39,8 @@
 - `{dataset_profile_path}` - Dataset statistics
 - `{sample_submission_path}` - Required submission format
 - `{top1_public_path}` - Top1 leaderboard score (context only)
+- `artifacts/<slug>/context/code.md` - Competition code snapshot with Required Reference Notebook baseline
+- `artifacts/<slug>/context/code_notebooks_index.json` - Structured notebook metadata (kernel_id/title/score/source_file)
 - `{rules_url_path}` - Competition rules URL
 - `{rules_html_path}` - Rules HTML (if present)
 - `{submission_format_path}` - Submission format details (if present)
@@ -118,6 +120,10 @@ Read diagnostics and metrics to identify why the current score doesn't meet targ
 ### Step 2: Implement Targeted Improvements
 
 Make **1-2 focused changes** per iteration. Avoid changing too many things at once.
+
+If current loop score is below the code reference notebook score, treat the
+`Required Reference Notebook (Execution baseline)` in `context/code.md` as mandatory:
+reuse its strongest leak-free baseline elements first, then iterate.
 
 Use the top1 gap as a guide:
 - **Far from top1** → major overhaul (model family/feature strategy)

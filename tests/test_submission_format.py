@@ -47,3 +47,14 @@ def test_parse_submission_format_prefers_zip_when_rules_require_zip_file() -> No
     assert hint.expected_suffixes is not None
     assert hint.expected_suffixes[0] == ".zip"
     assert ".csv" in hint.expected_suffixes
+
+
+def test_parse_submission_format_reads_bullet_column_definitions() -> None:
+    markdown = (
+        "## Submission Format\n\n"
+        "A CSV file with the following columns:\n"
+        "* `Id`: The filename\n"
+        "* `Category`: The predicted class\n"
+    )
+    hint = parse_submission_format(markdown)
+    assert hint.columns == ["Id", "Category"]

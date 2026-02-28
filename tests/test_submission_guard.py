@@ -114,6 +114,73 @@ def test_validate_submission_uses_overview_hint_when_sample_is_header_only(tmp_p
     validate_submission(str(submission), str(sample))
 
 
+def test_validate_submission_uses_data_md_hint_when_sample_is_header_only(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "data.md").write_text(
+        "## Submission Format\n\n"
+        "A CSV file with the following columns:\n"
+        "* `Id`: The filename\n"
+        "* `Category`: The predicted class\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"Id": ["x"], "Category": ["Health"]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_rejects_missing_required_id_suffix_when_inferred(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    (data_dir / "Kaggle_Prepared" / "val" / "MS").mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "data.md").write_text(
+        "## Submission Format\n\n"
+        "A CSV file with the following columns:\n"
+        "* `Id`: The filename (e.g., `val_a1b2c3d4.tif`)\n"
+        "* `Category`: The predicted class\n",
+        encoding="utf-8",
+    )
+    for stem in ("val_0001", "val_0002"):
+        (data_dir / "Kaggle_Prepared" / "val" / "MS" / f"{stem}.tif").write_bytes(b"TIFF")
+
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"Id": ["val_0001", "val_0002"], "Category": ["Health", "Rust"]}).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError, match="require '\\.tif' suffix"):
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_accepts_inferred_required_id_suffix_when_present(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    (data_dir / "Kaggle_Prepared" / "val" / "MS").mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "data.md").write_text(
+        "## Submission Format\n\n"
+        "A CSV file with the following columns:\n"
+        "* `Id`: The filename (e.g., `val_a1b2c3d4.tif`)\n"
+        "* `Category`: The predicted class\n",
+        encoding="utf-8",
+    )
+    for stem in ("val_0001", "val_0002"):
+        (data_dir / "Kaggle_Prepared" / "val" / "MS" / f"{stem}.tif").write_bytes(b"TIFF")
+
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"Id": ["val_0001.tif", "val_0002.tif"], "Category": ["Health", "Rust"]}).to_csv(
+        submission, index=False
+    )
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
 def test_validate_submission_checks_overview_hint_not_only_sample(tmp_path: Path) -> None:
     context_dir = tmp_path / "context"
     context_dir.mkdir(parents=True, exist_ok=True)

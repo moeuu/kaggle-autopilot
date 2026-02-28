@@ -27,7 +27,10 @@ _NEXT_PAGE_TOKEN_PREFIX = "next page token ="
 _FILES_PAGE_SIZE = 200
 _DEFAULT_SPLIT_THRESHOLD_BYTES = 8 * 1024**3
 _DEFAULT_DOWNLOAD_ATTEMPTS = 8
+_DEFAULT_RATE_LIMIT_DOWNLOAD_ATTEMPTS = _DEFAULT_DOWNLOAD_ATTEMPTS
 _DEFAULT_RETRY_BACKOFF_SEC = 2.0
+_DEFAULT_RETRY_MAX_BACKOFF_SEC = 120.0
+_DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC = 0.0
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,17 @@ def download_competition(
     threshold = _split_download_threshold_bytes()
     total_files = len(files)
     completed_files = _count_downloaded_competition_files(dest_dir, files)
+
+    # Avoid heavy re-downloads when the expected competition files are already present.
+    if total_files > 0 and completed_files >= total_files:
+        _emit_download_progress(
+            progress_callback,
+            completed_files=completed_files,
+            total_files=total_files,
+            file_name=None,
+        )
+        return ""
+
     if files and total_size >= threshold:
         return _download_competition_by_file(
             slug,
@@ -213,6 +227,16 @@ def _download_attempts() -> int | None:
     return value
 
 
+def _download_rate_limit_attempts() -> int | None:
+    value = _read_int_env(
+        "KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS",
+        _DEFAULT_RATE_LIMIT_DOWNLOAD_ATTEMPTS,
+    )
+    if value <= 0:
+        return None
+    return value
+
+
 def _download_retry_backoff_sec() -> float:
     raw = os.getenv("KAGGLEBOT_DOWNLOAD_RETRY_BACKOFF_SEC")
     if raw is None:
@@ -224,6 +248,49 @@ def _download_retry_backoff_sec() -> float:
     if value < 0:
         return _DEFAULT_RETRY_BACKOFF_SEC
     return value
+
+
+def _download_retry_max_backoff_sec() -> float:
+    raw = os.getenv("KAGGLEBOT_DOWNLOAD_RETRY_MAX_BACKOFF_SEC")
+    if raw is None:
+        return _DEFAULT_RETRY_MAX_BACKOFF_SEC
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return _DEFAULT_RETRY_MAX_BACKOFF_SEC
+    if value < 0:
+        return _DEFAULT_RETRY_MAX_BACKOFF_SEC
+    return value
+
+
+def _download_min_interval_sec() -> float:
+    raw = os.getenv("KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC")
+    if raw is None:
+        return _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC
+    if value < 0:
+        return _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC
+    return value
+
+
+def _compute_retry_sleep_sec(*, attempt: int, base_backoff: float) -> float:
+    sleep_sec = base_backoff * (2 ** (attempt - 1))
+    max_backoff = _download_retry_max_backoff_sec()
+    return min(sleep_sec, max_backoff)
+
+
+def _apply_download_pacing(*, min_interval_sec: float, last_request_started_at: float | None) -> float:
+    now = time.monotonic()
+    if min_interval_sec > 0 and last_request_started_at is not None:
+        elapsed = now - last_request_started_at
+        remaining = min_interval_sec - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+            now = time.monotonic()
+    return now
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -244,12 +311,28 @@ def _build_basename_counts(files: list[_CompetitionFile]) -> dict[str, int]:
     return basename_counts
 
 
+def _build_basename_size_counts(files: list[_CompetitionFile]) -> dict[tuple[str, int], int]:
+    basename_size_counts: dict[tuple[str, int], int] = {}
+    for item in files:
+        key = (Path(item.name).name, item.size_bytes)
+        basename_size_counts[key] = basename_size_counts.get(key, 0) + 1
+    return basename_size_counts
+
+
 def _count_downloaded_competition_files(dest_dir: Path, files: list[_CompetitionFile]) -> int:
     if not files:
         return 0
     basename_counts = _build_basename_counts(files)
+    basename_size_counts = _build_basename_size_counts(files)
     return sum(
-        1 for item in files if _is_competition_file_already_downloaded(dest_dir, item, basename_counts=basename_counts)
+        1
+        for item in files
+        if _is_competition_file_already_downloaded(
+            dest_dir,
+            item,
+            basename_counts=basename_counts,
+            basename_size_counts=basename_size_counts,
+        )
     )
 
 
@@ -304,8 +387,12 @@ def _download_competition_by_file(
 ) -> str:
     outputs: list[str] = []
     max_attempts = _download_attempts()
+    rate_limit_attempts = _download_rate_limit_attempts()
     base_backoff = _download_retry_backoff_sec()
+    min_interval_sec = _download_min_interval_sec()
+    last_request_started_at: float | None = None
     basename_counts = _build_basename_counts(files)
+    basename_size_counts = _build_basename_size_counts(files)
     total_files = len(files)
     if completed_files is None:
         completed_files = _count_downloaded_competition_files(dest_dir, files)
@@ -317,7 +404,12 @@ def _download_competition_by_file(
     )
 
     for file in sorted(files, key=lambda item: item.name):
-        if _is_competition_file_already_downloaded(dest_dir, file, basename_counts=basename_counts):
+        if _is_competition_file_already_downloaded(
+            dest_dir,
+            file,
+            basename_counts=basename_counts,
+            basename_size_counts=basename_size_counts,
+        ):
             continue
 
         args = _competition_download_args(slug=slug, dest_dir=dest_dir, force=force, quiet=quiet, file_name=file.name)
@@ -325,6 +417,10 @@ def _download_competition_by_file(
         attempt = 1
         while True:
             try:
+                last_request_started_at = _apply_download_pacing(
+                    min_interval_sec=min_interval_sec,
+                    last_request_started_at=last_request_started_at,
+                )
                 output = _run_kaggle(args, slug=slug, dry_run=dry_run)
                 if output:
                     outputs.append(output)
@@ -337,36 +433,16 @@ def _download_competition_by_file(
                 )
                 break
             except KaggleCliError as exc:
-                if _is_rate_limited_download_error(exc):
-                    logger.warning(
-                        "rate limited while downloading %s in split mode; "
-                        "falling back to single-shot competition download",
-                        file.name,
-                    )
-                    fallback_output = _run_kaggle_with_retry(
-                        _competition_download_args(
-                            slug=slug,
-                            dest_dir=dest_dir,
-                            force=force,
-                            quiet=quiet,
-                            file_name=None,
-                        ),
-                        slug=slug,
-                        dry_run=dry_run,
-                    )
-                    if fallback_output:
-                        outputs.append(fallback_output)
-                    _emit_download_progress(
-                        progress_callback,
-                        completed_files=total_files,
-                        total_files=total_files,
-                        file_name=None,
-                    )
-                    return "\n".join(outputs).strip()
-                if _should_stop_retrying(attempt=attempt, max_attempts=max_attempts, error=exc):
+                effective_max_attempts = rate_limit_attempts if _is_rate_limited_download_error(exc) else max_attempts
+                if _should_stop_retrying(attempt=attempt, max_attempts=effective_max_attempts, error=exc):
                     raise
-                sleep_sec = base_backoff * (2 ** (attempt - 1))
-                _log_download_retry(exc=exc, attempt=attempt, max_attempts=max_attempts, sleep_sec=sleep_sec)
+                sleep_sec = _compute_retry_sleep_sec(attempt=attempt, base_backoff=base_backoff)
+                _log_download_retry(
+                    exc=exc,
+                    attempt=attempt,
+                    max_attempts=effective_max_attempts,
+                    sleep_sec=sleep_sec,
+                )
                 if sleep_sec > 0:
                     time.sleep(sleep_sec)
                 attempt += 1
@@ -431,7 +507,7 @@ def _run_kaggle_with_retry(args: list[str], *, slug: str, dry_run: bool) -> str:
         except KaggleCliError as exc:
             if _should_stop_retrying(attempt=attempt, max_attempts=max_attempts, error=exc):
                 raise
-            sleep_sec = base_backoff * (2 ** (attempt - 1))
+            sleep_sec = _compute_retry_sleep_sec(attempt=attempt, base_backoff=base_backoff)
             _log_download_retry(exc=exc, attempt=attempt, max_attempts=max_attempts, sleep_sec=sleep_sec)
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
@@ -451,16 +527,23 @@ def _is_competition_file_already_downloaded(
     file: _CompetitionFile,
     *,
     basename_counts: dict[str, int],
+    basename_size_counts: dict[tuple[str, int], int],
 ) -> bool:
     direct_path = dest_dir / file.name
     if _path_looks_downloaded(direct_path, file_size=file.size_bytes):
         return True
 
     basename = Path(file.name).name
-    if basename_counts.get(basename, 0) != 1:
-        return False
     basename_path = dest_dir / basename
-    return _path_looks_downloaded(basename_path, file_size=file.size_bytes)
+    if not _path_looks_downloaded(basename_path, file_size=file.size_bytes):
+        return False
+
+    # If basename is unique across competition files, the flat path is unambiguous.
+    if basename_counts.get(basename, 0) == 1:
+        return True
+
+    # For duplicated basenames, allow flat-path match only when size disambiguates the entry.
+    return basename_size_counts.get((basename, file.size_bytes), 0) == 1
 
 
 def _path_looks_downloaded(path: Path, *, file_size: int) -> bool:

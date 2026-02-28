@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import kagglebot.eval.advisor as advisor_module
 from kagglebot.eval import EvaluationAdvisor, validate_advisor_payload
+from kagglebot.exec_utils import CommandResult
 from kagglebot.paths import CompetitionPaths
 
 
@@ -152,3 +154,26 @@ def test_evaluation_advisor_preserves_frozen_spec_without_force(tmp_path: Path) 
     assert source == "frozen"
     assert called["runner"] == 0
     assert spec["metric_name"] == "auc"
+
+
+def test_supports_live_search_allows_modern_codex_without_search_flag(monkeypatch) -> None:
+    def _fake_run_command(args: list[str], **kwargs: object) -> CommandResult:  # noqa: ARG001
+        assert args == ["codex", "exec", "--help"]
+        return CommandResult(
+            args=args,
+            returncode=0,
+            stdout="Usage: codex exec [OPTIONS]\n      --enable <FEATURE>\n",
+            stderr="",
+            duration_sec=0.01,
+        )
+
+    monkeypatch.setattr(advisor_module, "run_command", _fake_run_command)
+    assert advisor_module._supports_live_search() is True
+
+
+def test_supports_live_search_returns_false_when_codex_missing(monkeypatch) -> None:
+    def _raise_file_not_found(args: list[str], **kwargs: object) -> CommandResult:  # noqa: ARG001
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr(advisor_module, "run_command", _raise_file_not_found)
+    assert advisor_module._supports_live_search() is False

@@ -857,6 +857,11 @@ def build_plan_and_initial_prompt(
         "- Use web search to choose the strongest initial approach; prefer official docs and competition discussions.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV by default for stronger model ranking; use holdout only when CV is infeasible.",
+        "- Actively use preinstalled dependencies before introducing new ones:",
+        "  torch/timm/torchvision/opencv, xgboost/lightgbm/catboost, transformers/tabicl, sklearn.",
+        "- If one backend import fails, disable only that path and keep other high-capacity backends active.",
+        "- When a required package is truly missing, add it with `uv add <package>` so",
+        "  `pyproject.toml` and `uv.lock` stay consistent.",
         "- Do NOT change submit_policy; autopilot controls submission behavior.",
         "",
         "### 2) Implement the strongest initial model",
@@ -879,6 +884,8 @@ def build_plan_and_initial_prompt(
         "- If data is non-tabular or requires custom parsing, implement custom_main() in kernel.py.",
         "- If pretrained checkpoints are likely beneficial, implement download + cache logic in kernel.py",
         "  and provide a fallback path when internet is unavailable.",
+        "- For vision/multimodal tasks, prefer strong prepared backbones (e.g., timm/ConvNeXt)",
+        "  and avoid silent downgrade to weak fallback models when imports succeed.",
         "- If GPU runs finish in under ~1 minute, increase model iterations/trees or use CV to better utilize GPU.",
         "- Do NOT implement competition-specific logic in src local trainers.",
         "",
@@ -904,6 +911,8 @@ def build_improve_template() -> str:
 
     This template has placeholders that get filled with .format() at runtime:
     - {slug}, {iteration}, {plan_path}, {run_path}, {metrics_path}, {diagnostics_path}, {logs_dir}
+    - {code_md}, {code_index}, {code_reference_score}, {code_reference_source},
+      {code_reference_delta}, {code_reference_status}
     """
     return """\
 # Kagglebot Codex: Improvement Iteration
@@ -943,6 +952,10 @@ or best possible within the max_iterations budget (default 12)
 - **Submission Format**: `{submission_format}` (read this if present)
 - **Dataset Profile**: `{dataset_profile}`
 - **Sample Submission**: `{sample_submission}`
+- **Code Snapshot**: `{code_md}` (read this; includes Required Reference Notebook baseline)
+- **Code Notebook Index**: `{code_index}` (use this for structured notebook metadata)
+- **Code Reference Score**: `{code_reference_score}`
+  (source: {code_reference_source}, delta_vs_current: {code_reference_delta}, status: {code_reference_status})
 - **Kernel Main**: `{kernel_main}` (edit this for all compute modes)
 
 ## Your Task
@@ -987,11 +1000,19 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 - Avoid weak starter implementations.
 - Avoid generic metric heuristics; derive metric choices from the rules.
 - Use web search each iteration to validate model/feature choices; prefer official docs or top Kaggle discussions.
+- Prefer already-available dependencies before adding new ones:
+  torch/timm/torchvision/opencv, xgboost/lightgbm/catboost, transformers/tabicl, sklearn.
+- Do not silently downgrade model capacity when prepared libraries import successfully.
+- If one dependency is missing, isolate that path only and keep other strong pipelines enabled.
+- If a dependency is genuinely required and missing, you may add it via `uv add <package>`;
+  keep `pyproject.toml` and `uv.lock` in sync.
 - Use one consistent evaluation path for training-time selection and final offline scoring.
   If you print `val_*` during training, it must be computed under the same split/rollout/aggregation
   assumptions as the final reported metric.
 - Evaluate at least one simple baseline (mean/majority/persistence as appropriate) with the same
   validation protocol, and do not select/submit a learned pipeline that underperforms that baseline.
+- If `code_reference_status` is `underperforming_code_reference`, you MUST inspect `{code_md}` and `{code_index}`
+  and treat `Required Reference Notebook (Execution baseline)` as mandatory context before proposing new variants.
 
 **Mode guidance**:
 - `major_overhaul`: switch model family or core feature strategy; remove dead code paths.
@@ -1587,9 +1608,12 @@ def build_kernel_fix_template() -> str:
 **Iteration**: {iteration}
 **Compute**: {compute} ({accelerator})
 
-## Blocked Modules (do NOT import)
+## Known Missing Modules (avoid import unless installed)
 
 {blocked_modules}
+
+If one of these modules is required for a strong solution, you may install it with
+`uv add <package>` and keep `pyproject.toml` + `uv.lock` updated.
 
 ## Error Summary
 
@@ -1618,6 +1642,12 @@ def build_kernel_fix_template() -> str:
    - Edit **only** the authoritative `kernel.py` (`Kernel Main` above) for competition-specific fixes.
    - Do **NOT** edit anything under `artifacts/<slug>/kernels/` (generated staging directory).
    - Do **NOT** edit the generated `Kernel Script` copy (it will be overwritten).
+   - Prefer already-installed dependencies first (torch/timm/torchvision/opencv,
+     xgboost/lightgbm/catboost, transformers/tabicl, ultralytics, sklearn).
+   - If a required dependency is missing, add it via `uv add <package>` and keep
+     `pyproject.toml` and `uv.lock` updated together.
+   - If one dependency is missing, guard/disable only that path; do not globally downgrade
+     all pipelines to a weak fallback.
    - If the failure is in the **runner/validators/CLI plumbing** (e.g., kernel packaging,
      path injection, validation, or Kaggle CLI status/output handling), you may edit **src/**
      to fix the root cause.

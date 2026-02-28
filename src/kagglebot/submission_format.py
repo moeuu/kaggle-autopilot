@@ -20,6 +20,12 @@ _DISALLOWED_SUBMISSION_HEADING_TERMS = (
     "foundational rules",
     "general competition rules",
 )
+_BULLET_COLUMN_RE = re.compile(
+    r"^\s*(?:[-*]|\d+[.)])\s*`(?P<name>[^`]+)`\s*(?::|-|–|—)\s*",
+)
+_BOLD_BULLET_COLUMN_RE = re.compile(
+    r"^\s*(?:[-*]|\d+[.)])\s*\\*\\*(?P<name>[^*]+)\\*\\*\s*(?::|-|–|—)\s*",
+)
 _KNOWN_SUBMISSION_SUFFIXES = (".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".zip")
 _SUBMISSION_EXTENSION_RE = re.compile(r"(?<![A-Za-z0-9_])\.(csv|tsv|txt|parquet|jsonl|json|zip)\b", re.I)
 _SUBMISSION_CODE_FENCE_LANG_RE = re.compile(r"^\s*```(?P<lang>[A-Za-z0-9_+-]+)\s*$")
@@ -122,6 +128,9 @@ def _parse_columns_from_markdown(markdown: str) -> tuple[list[str] | None, str |
     table_header = _parse_markdown_table_header(lines)
     if table_header:
         return table_header, None
+    bullet_columns = _parse_bullet_column_definitions(lines)
+    if bullet_columns:
+        return bullet_columns, None
     for line in lines:
         cols, delim = _parse_columns_from_line(line)
         if cols:
@@ -152,6 +161,32 @@ def _parse_markdown_table_header(lines: list[str]) -> list[str] | None:
         header = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(header) >= 2 and all(header):
             return header
+    return None
+
+
+def _parse_bullet_column_definitions(lines: list[str]) -> list[str] | None:
+    """Parse column lists expressed as bullet definitions.
+
+    Common in competition "Submission Format" blocks:
+    - `Id`: ...
+    - `Category`: ...
+    """
+    columns: list[str] = []
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        match = _BULLET_COLUMN_RE.match(line)
+        if match is None:
+            match = _BOLD_BULLET_COLUMN_RE.match(line)
+        if match is None:
+            continue
+        name = match.group("name").strip()
+        if not name or name in columns:
+            continue
+        columns.append(name)
+    if len(columns) >= 2 and columns_look_plausible(columns):
+        return columns
     return None
 
 

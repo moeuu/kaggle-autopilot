@@ -3,9 +3,11 @@
 You are Codex. Implement the kernel for this competition.
 
 IMPORTANT:
-- Modify ONLY files under: {{kernel_dir}}
+- Default edit scope: {{kernel_dir}}
+- Dependency exception: you may also edit repo-root `pyproject.toml` and `uv.lock` only when
+  a required package is missing and must be added via `uv add <package>`.
 - Primary entrypoint: {{kernel_path}}
-- Do NOT modify any files outside the kernel directory.
+- Do NOT modify any other files outside the allowed scope above.
 - Do NOT access secrets or Kaggle credentials.
 - Do NOT perform open-ended web search in this phase.
 - Follow the frozen plan in `{{plan_path}}` and research summary in `{{research_summary_path}}`.
@@ -29,7 +31,11 @@ Blocked modules (do NOT import; not available on Kaggle runtime):
 {{blocked_modules}}
 >>>
 If a blocked module appears in previous code, remove it and replace with Kaggle-default libraries
-(lightgbm, xgboost, catboost, torch, transformers, sklearn). If unsure, prefer these defaults.
+(lightgbm, xgboost, catboost, torch, timm, torchvision, opencv, transformers, ultralytics,
+tabicl, sklearn). Prefer the strongest available backend and avoid silent fallback to weak baselines
+when these imports succeed.
+If a required package is genuinely missing, add it with `uv add <package>` instead of deleting the
+entire model path.
 If `KAGGLEBOT_DISABLE_XGBOOST=1`, force-disable XGBoost paths even if code previously enabled them.
 
 Implementation contract for `kernel.py`:
@@ -74,6 +80,8 @@ Implementation contract for `kernel.py`:
   - If `KAGGLEBOT_LOCAL_KERNEL=1`, avoid hard-failing on `/kaggle/working` writes
 - Optional model backends:
   - Use XGBoost/CatBoost only if import succeeds and runtime toggles allow it
+  - If torch/timm/torchvision are importable, keep deep vision backbones enabled unless the plan
+    explicitly disables them
   - If `KAGGLEBOT_DISABLE_LGBM_GPU=1`, force LightGBM to CPU (no GPU retry loops)
 - Modality coverage:
   - Add dataset modality detection (tabular/image/video/text/audio/other)

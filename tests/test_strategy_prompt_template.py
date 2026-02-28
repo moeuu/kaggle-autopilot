@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import kagglebot.orchestrator.agent_pipeline as agent_pipeline
-from kagglebot.knowledge import build_improve_template
+from kagglebot.knowledge import build_improve_template, build_kernel_fix_template
 from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig
 from kagglebot.paths import CompetitionPaths
 
@@ -18,6 +18,7 @@ def test_codex_kernel_impl_prompt_requires_safe_pipeline_lookup() -> None:
     base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts"
     template = (base_dir / "codex_kernel_impl.md").read_text(encoding="utf-8")
     assert "missing pipeline names must NOT raise" in template
+    assert "uv add <package>" in template
 
 
 def test_strategy_plan_prompt_includes_quality_gate_checklist() -> None:
@@ -46,6 +47,16 @@ def test_improve_template_uses_loop_decision_language() -> None:
     template = build_improve_template()
     assert "{current_score_source}" in template
     assert "loop-decision" in template
+    assert "{code_md}" in template
+    assert "{code_index}" in template
+    assert "{code_reference_status}" in template
+
+
+def test_kernel_fix_template_mentions_dependency_add_path() -> None:
+    template = build_kernel_fix_template()
+    assert "uv add <package>" in template
+    assert "pyproject.toml" in template
+    assert "uv.lock" in template
 
 
 def test_strategy_prompt_includes_code_models_discussion_context(tmp_path: Path) -> None:

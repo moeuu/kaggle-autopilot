@@ -396,7 +396,13 @@ def _run_codex_kernel_implementation(
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
-    allowed_prefixes = [paths.kernel_source_dir, paths.runs_dir, paths.context_dir]
+    allowed_prefixes = [
+        paths.kernel_source_dir,
+        paths.runs_dir,
+        paths.context_dir,
+        config.repo_root / "pyproject.toml",
+        config.repo_root / "uv.lock",
+    ]
     guard_snapshot = _backup_guarded_files(config.repo_root, allowed_prefixes)
     before = _snapshot_tree(config.repo_root)
     result = run_codex(
@@ -1090,6 +1096,7 @@ _PROTECTED_PATHS = (
     "docs/",
     "README.md",
     "pyproject.toml",
+    "uv.lock",
     ".gitignore",
     "AGENTS.md",
     "STRATEGY.md",
@@ -1864,6 +1871,7 @@ _NOISE_PREFIXES = (
     ".mypy_cache/",
     ".cache/",
     ".kagglebot_cache/",
+    ".venv/",
 )
 _NOISE_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
 
@@ -1960,7 +1968,20 @@ def _allowed_prefixes(root: Path, allowed_prefixes: list[Path]) -> list[str]:
             rel = prefix.relative_to(root).as_posix()
         except ValueError:
             continue
-        allowed.append(rel.rstrip("/") + "/")
+        rel_clean = rel.rstrip("/")
+        if not rel_clean:
+            continue
+        if prefix.exists():
+            if prefix.is_dir():
+                allowed.append(rel_clean + "/")
+            else:
+                allowed.append(rel_clean)
+            continue
+        # Heuristic for not-yet-existing paths: treat dotted names as files.
+        if Path(rel_clean).suffix:
+            allowed.append(rel_clean)
+        else:
+            allowed.append(rel_clean + "/")
     return allowed
 
 
@@ -1987,6 +2008,12 @@ def _is_protected_path(path: str) -> bool:
         # artifacts/<slug>/meta.json or artifacts/<slug>/plan.json
         if len(parts) == 3 and parts[2] in {"meta.json", "plan.json"}:
             return True
+        # artifacts/<slug>/data/sample_submission.csv
+        if _is_artifact_data_sample_submission(path):
+            return True
+        # artifacts/<slug>/submissions/ledger.jsonl
+        if len(parts) == 4 and parts[2] == "submissions" and parts[3] == "ledger.jsonl":
+            return True
         # artifacts/<slug>/{kernel,prompts}/...
         if len(parts) >= 4 and parts[2] in {"kernel", "prompts"}:
             return True
@@ -2011,6 +2038,8 @@ def _filter_restored_paths(root: Path, unauthorized: list[str], guard_snapshot: 
             continue
         original = guard_snapshot.backup.get(rel)
         if original is None:
+            if _matches_artifact_data_sample_submission_context(root, rel):
+                continue
             filtered.append(rel)
             continue
         try:
@@ -2021,6 +2050,41 @@ def _filter_restored_paths(root: Path, unauthorized: list[str], guard_snapshot: 
             continue
         filtered.append(rel)
     return filtered
+
+
+def _is_artifact_data_sample_submission(path: str) -> bool:
+    parts = path.split("/")
+    return len(parts) == 4 and parts[0] == "artifacts" and parts[2] == "data" and parts[3] == "sample_submission.csv"
+
+
+def _restore_artifact_data_sample_submission(root: Path, rel: str) -> bool:
+    if not _is_artifact_data_sample_submission(rel):
+        return False
+    parts = rel.split("/")
+    source = root / "artifacts" / parts[1] / "context" / "sample_submission.csv"
+    if not source.is_file():
+        return False
+    target = root / rel
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    except OSError:
+        return False
+    return True
+
+
+def _matches_artifact_data_sample_submission_context(root: Path, rel: str) -> bool:
+    if not _is_artifact_data_sample_submission(rel):
+        return False
+    parts = rel.split("/")
+    source = root / "artifacts" / parts[1] / "context" / "sample_submission.csv"
+    target = root / rel
+    if not source.is_file() or not target.is_file():
+        return False
+    try:
+        return target.read_bytes() == source.read_bytes()
+    except OSError:
+        return False
 
 
 def _repair_unauthorized_changes(
@@ -2035,6 +2099,8 @@ def _repair_unauthorized_changes(
             _remove_path(root / rel)
             continue
         if rel in guard_snapshot.oversized:
+            if _restore_artifact_data_sample_submission(root, rel):
+                continue
             errors.append(f"Cannot restore oversized file: {rel}")
             continue
         if rel in guard_snapshot.backup:
@@ -2049,6 +2115,8 @@ def _repair_unauthorized_changes(
             _remove_path(root / rel)
             continue
         if _is_protected_path(rel):
+            if _restore_artifact_data_sample_submission(root, rel):
+                continue
             errors.append(f"Cannot restore protected file: {rel}")
             continue
         errors.append(f"Cannot auto-repair changed file: {rel}")
@@ -2067,7 +2135,11 @@ def _remove_path(path: Path) -> None:
 
 def _is_allowed(path: str, allowed_prefixes: list[str]) -> bool:
     for prefix in allowed_prefixes:
-        if path.startswith(prefix):
+        if prefix.endswith("/"):
+            if path.startswith(prefix):
+                return True
+            continue
+        if path == prefix:
             return True
     return False
 

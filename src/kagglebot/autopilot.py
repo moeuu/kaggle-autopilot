@@ -150,15 +150,18 @@ MAX_KERNEL_REGISTRATION_RETRIES = 2
 KERNEL_REGISTRATION_RETRY_SLEEP = 15.0
 MAX_AUTOFIX_ATTEMPTS = 2
 MAX_AUTOFIX_RESTARTS = 1
+MAX_AUTOFIX_CODEX_PASSES = 3
+MAX_KERNEL_FIX_CODEX_PASSES = 3
 MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
 _ERROR_FIX_CODEX_MODEL = "gpt-5.3-codex"
 _ERROR_FIX_REASONING_EFFORT = "extra_high"
 _ERROR_STRATEGY_MODEL = "gpt-5.2"
 _ERROR_STRATEGY_REASONING_EFFORT = "extra_high"
-_METRIC_FIX_CODEX_MODEL = "gpt-5.2-codex"
+_METRIC_FIX_CODEX_MODEL = "gpt-5.3-codex"
 _METRIC_FIX_REASONING_EFFORT = "extra_high"
-_MAX_METRIC_FIX_ATTEMPTS = 2
+_MAX_METRIC_FIX_ATTEMPTS = 3
+_MAX_METRIC_FIX_CODEX_PASSES = 4
 _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
@@ -168,6 +171,7 @@ _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
+_CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
 _NOTEBOOK_FALLBACK_HINTS = (
     "submit-notebook",
     "notebook",
@@ -196,8 +200,17 @@ _QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE = 2.0
 _QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE = 0.30
 _QUALITY_GUARD_MISMATCH_ABS_MARGIN = 0.05
 _QUALITY_GUARD_STEP_BUCKET_RATIO = 2.5
+_QUALITY_GUARD_CODE_REF_REL_MARGIN = 0.0
+_QUALITY_GUARD_CODE_REF_ABS_MARGIN = 0.02
+_BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = 0.02
+_BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = 0.01
+_REGRESSION_GUARD_ABS_DROP_PROB = 0.03
+_REGRESSION_GUARD_ABS_DROP_DEFAULT = 0.10
+_CONSERVATIVE_COLLAPSE_MAX_FEATURES = 5
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 _TRUSTED_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
+_BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
+_CODE_REFERENCE_IMPL_MARKER_PREFIX = "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED:"
 _NUMBER_WORD_TO_INT = {
     "zero": 0,
     "one": 1,
@@ -221,6 +234,15 @@ class _CompetitionRuleConstraints:
     submission_limit_per_day: int | None = None
     cpu_runtime_limit_min: int | None = None
     gpu_runtime_limit_min: int | None = None
+
+
+@dataclass(frozen=True)
+class _CodeReferenceNotebook:
+    kernel_id: str
+    title: str
+    source_file: str | None = None
+    local_dir: str | None = None
+    summary: str = ""
 
 
 class _TrainingLiveStdout:
@@ -468,6 +490,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         status="running",
     )
     (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+    _ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
     record_run(
         knowledge_paths=config.knowledge_paths,
@@ -483,6 +506,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     submission_phase = SubmissionPhase(config=config, run_id=run_id, problem_types=problem_types)
     best_score = None
     best_submission: Path | None = None
+    best_submittable_score: float | None = None
+    best_submittable_submission: Path | None = None
     submitted = False
     pending_problem_insights: list[dict[str, object]] = []
     pending_error_fixes: list[dict[str, object]] = []
@@ -558,6 +583,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     if resumed_best_readiness is not None and best_score is None:
         best_score = resumed_best_readiness
+    best_submittable_score = best_score
+    best_submittable_submission = best_submission
     if start_iteration > 1:
         print(f"[yellow]resume[/yellow]: found completed iterations; resuming at {start_iteration}/{max_iterations}")
     loop_started_at = time.monotonic()
@@ -1064,6 +1091,22 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
             decision_score = float(evaluation.value)
             decision_source = str(evaluation.score_source or "offline")
+            top1_score_value = float(top1_score) if isinstance(top1_score, (int, float)) else None
+            effective_best_score, best_score_guard = _effective_best_score_for_progress(
+                prev_best=best_score,
+                current_score=decision_score,
+                top1_score=top1_score_value,
+                direction=metric_direction,
+            )
+            if best_score_guard is not None and effective_best_score is not None:
+                print(
+                    "[yellow]best-score guard[/yellow]: "
+                    f"clipped previous best from {float(best_score_guard['prev_best']):.6f} "
+                    f"to {float(best_score_guard['effective_best']):.6f} "
+                    f"(top1={float(best_score_guard['top1_score']):.6f}, "
+                    f"margin={float(best_score_guard['margin']):.6f})."
+                )
+                best_score = effective_best_score
             top1_tier_by_submission = False
             submission_rank: int | None = None
             submission_total_teams: int | None = None
@@ -1075,6 +1118,28 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submission_rank_estimate_source: str | None = None
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
+            code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
+            code_reference_delta_vs_current = (
+                _score_delta_vs_reference(decision_score, code_reference_score, metric_direction)
+                if code_reference_score is not None
+                else None
+            )
+            first_iteration_below_code_reference = bool(
+                iteration == 1 and code_reference_delta_vs_current is not None and code_reference_delta_vs_current < 0.0
+            )
+            score_drop_vs_best = _score_drop_vs_best(
+                best_score=best_score,
+                current_score=decision_score,
+                direction=metric_direction,
+            )
+            severe_regression_detected = _is_severe_regression_vs_best(
+                metric=evaluation.metric,
+                direction=metric_direction,
+                best_score=best_score,
+                current_score=decision_score,
+            )
+            conservative_feature_collapse = _is_conservative_feature_collapse(kernel_metrics_payload)
+            conservative_regression_detected = bool(severe_regression_detected and conservative_feature_collapse)
 
             quality_guard = _build_kernel_quality_guard(
                 evaluation=evaluation,
@@ -1084,6 +1149,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 iteration=iteration,
                 max_iterations=max_iterations,
                 force_submit=config.force_submit,
+                code_reference_score=code_reference_score,
+                code_reference_source=code_reference_source,
                 metric_mismatch_detected=metric_mismatch_detected,
                 metric_mismatch_reason=metric_mismatch_reason,
             )
@@ -1097,12 +1164,30 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             non_generalizable_eval_detected = any(
                 reason in {"untrusted_score_source", "oracle_override_detected"} for reason in quality_reasons
             )
+            quality_forced_major_overhaul = "below_code_reference_baseline" in quality_reasons
+            quality_force_reason: str | None = None
+            if quality_forced_major_overhaul:
+                if code_reference_score is not None:
+                    code_delta = _score_delta_vs_reference(decision_score, code_reference_score, metric_direction)
+                    quality_force_reason = (
+                        "Offline score is materially below code reference baseline: "
+                        f"current={decision_score:.6f}, code_ref={code_reference_score:.6f}, "
+                        f"delta={code_delta:+.6f}, source={code_reference_source or 'unknown'}."
+                    )
+                else:
+                    quality_force_reason = (
+                        "Offline score is materially below code reference baseline detected by quality guard."
+                    )
             if config.submit and (not quality_allows_submit) and (not config.force_submit):
                 reason_text = ", ".join(quality_reasons) if quality_reasons else "quality_guard_blocked_submit"
                 print(
                     "[yellow]submit blocked[/yellow]: kernel quality guard detected unstable evaluation "
                     f"({reason_text}); submission is deferred to a later iteration."
                 )
+            if quality_allows_submit or config.force_submit:
+                if _update_best_score(best_submittable_score, decision_score, metric_direction, 0.0):
+                    best_submittable_score = decision_score
+                    best_submittable_submission = submission_path
 
             is_final_iteration = iteration >= max_iterations
             successful_submit_count = _count_successful_submit_attempts(run_dir)
@@ -1152,12 +1237,21 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 and submit_improvement_allowed
             ):
                 reserve_start = max(0, submission_limit_per_day - 1)
-                if successful_submit_count >= reserve_start and not allow_submit:
+                strict_limit_mode = max_iterations > submission_limit_per_day
+                if (successful_submit_count >= reserve_start and not allow_submit) or (
+                    strict_limit_mode and (not allow_submit)
+                ):
                     submit_limited_holdback = True
-                    print(
-                        "[yellow]submit deferred[/yellow]: reserved final submission slot "
-                        "until offline score reaches top1-tier or final iteration."
-                    )
+                    if successful_submit_count >= reserve_start:
+                        print(
+                            "[yellow]submit deferred[/yellow]: reserved final submission slot "
+                            "until offline score reaches top1-tier, readiness target, or final iteration."
+                        )
+                    else:
+                        print(
+                            "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
+                            "is active because daily limit is lower than max iterations."
+                        )
             submit_phase_required = config.submit and not config.dry_run
             submit_allowed_by_gate = config.submit and allow_submit
             pre_submit_phase_state = "disabled"
@@ -1333,7 +1427,32 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     noise_limited_streak = 0
             previous_readiness_score = readiness_score
             noise_forced_major_overhaul = noise_limited_streak >= 2
-            force_major_overhaul_next = noise_forced_major_overhaul or rank_forced_major_overhaul
+            code_reference_forced_reproduction = bool(
+                first_iteration_below_code_reference or conservative_regression_detected
+            )
+            code_reference_force_reason: str | None = None
+            if first_iteration_below_code_reference and code_reference_score is not None:
+                code_reference_force_reason = (
+                    "First iteration is below /code reference baseline; "
+                    f"current={decision_score:.6f}, code_ref={code_reference_score:.6f}, "
+                    f"delta={float(code_reference_delta_vs_current):+.6f}. "
+                    "Next iteration must implement the required reference notebook path."
+                )
+            elif conservative_regression_detected:
+                drop_text = (
+                    f"{float(score_drop_vs_best):.6f}" if isinstance(score_drop_vs_best, (int, float)) else "unknown"
+                )
+                code_reference_force_reason = (
+                    "Detected severe regression with conservative feature collapse "
+                    f"(drop_vs_best={drop_text}, max_features={_CONSERVATIVE_COLLAPSE_MAX_FEATURES}). "
+                    "Next iteration must recover from code reference baseline instead of keeping the collapsed path."
+                )
+            force_major_overhaul_next = (
+                noise_forced_major_overhaul
+                or rank_forced_major_overhaul
+                or quality_forced_major_overhaul
+                or code_reference_forced_reproduction
+            )
             forced_major_overhaul_reasons: list[str] = []
             if noise_forced_major_overhaul:
                 forced_major_overhaul_reasons.append(
@@ -1343,6 +1462,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if rank_forced_major_overhaul:
                 forced_major_overhaul_reasons.append(
                     rank_force_reason or "Leaderboard rank indicates major improvement is still required."
+                )
+            if quality_forced_major_overhaul:
+                forced_major_overhaul_reasons.append(
+                    quality_force_reason
+                    or "Quality guard requires major overhaul due to code-reference underperformance."
+                )
+            if code_reference_forced_reproduction:
+                forced_major_overhaul_reasons.append(
+                    code_reference_force_reason
+                    or "Mandatory code-reference implementation is required in the next iteration."
                 )
             forced_major_overhaul_reason = (
                 " ".join(forced_major_overhaul_reasons) if forced_major_overhaul_reasons else None
@@ -1392,7 +1521,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "offline_readiness": top1_tier_by_readiness,
                 "submission_score": top1_tier_by_submission,
             }
+            if best_score_guard is not None:
+                metrics_payload["best_score_guard"] = best_score_guard
             metrics_payload["quality_guard"] = quality_guard
+            metrics_payload["regression_guard"] = {
+                "best_score_before_iteration": best_score,
+                "score_drop_vs_best": score_drop_vs_best,
+                "severe_regression_detected": severe_regression_detected,
+                "conservative_feature_collapse": conservative_feature_collapse,
+                "conservative_regression_detected": conservative_regression_detected,
+                "first_iteration_below_code_reference": first_iteration_below_code_reference,
+                "code_reference_score": code_reference_score,
+                "code_reference_delta_vs_current": code_reference_delta_vs_current,
+                "code_reference_forced_reproduction": code_reference_forced_reproduction,
+            }
             metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
 
             diff_summary = "Diff tracking disabled (git integration removed)."
@@ -1470,22 +1612,37 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 best_score = decision_score
                 best_submission = submission_path
                 no_improve_streak = 0
+                _capture_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
             else:
                 no_improve_streak += 1
+                if conservative_regression_detected:
+                    restored = _restore_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
+                    if restored:
+                        print(
+                            "[yellow]kernel regression guard[/yellow]: "
+                            "restored best-known kernel source after severe conservative regression."
+                        )
 
             if force_major_on_no_improve and (not improved):
-                force_major_overhaul_next = True
-                regression_reason = (
-                    f"Offline {evaluation.metric} did not improve "
-                    f"(current={decision_score:.6f}, best={float(prev_best):.6f})."
-                    if prev_best is not None
-                    else f"Offline {evaluation.metric} did not improve."
-                )
-                forced_major_overhaul_reason = (
-                    f"{forced_major_overhaul_reason} {regression_reason}".strip()
-                    if forced_major_overhaul_reason
-                    else regression_reason
-                )
+                if best_score_guard is not None:
+                    print(
+                        "[yellow]improve guard[/yellow]: "
+                        "skipping no-improve major-overhaul override because previous best "
+                        "was clipped as an outlier."
+                    )
+                else:
+                    force_major_overhaul_next = True
+                    regression_reason = (
+                        f"Offline {evaluation.metric} did not improve "
+                        f"(current={decision_score:.6f}, best={float(prev_best):.6f})."
+                        if prev_best is not None
+                        else f"Offline {evaluation.metric} did not improve."
+                    )
+                    forced_major_overhaul_reason = (
+                        f"{forced_major_overhaul_reason} {regression_reason}".strip()
+                        if forced_major_overhaul_reason
+                        else regression_reason
+                    )
 
             current_config_hash = _pipeline_config_hash(
                 model_summary=model_summary,
@@ -1546,6 +1703,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 current_score_source=decision_source,
                 forced_improvement_mode="major_overhaul" if force_major_overhaul_next else None,
                 forced_improvement_reason=forced_major_overhaul_reason,
+                enforce_code_reference_implementation=code_reference_forced_reproduction,
+                code_reference_enforcement_reason=code_reference_force_reason,
+                best_score_so_far=best_score,
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
@@ -1553,18 +1713,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         print("[yellow]run interrupted[/yellow]")
         return
 
-    if config.submit and not submitted and best_submission is not None:
+    if config.submit and not submitted and best_submittable_submission is not None:
         final_iteration_reached = last_completed_iteration >= max_iterations
         allow_fallback_submit = True
         if (
             require_submit_improvement
             and not config.force_submit
-            and best_score is not None
+            and best_submittable_score is not None
             and best_submitted_score is not None
         ):
             allow_fallback_submit = _update_best_score(
                 best_submitted_score,
-                best_score,
+                best_submittable_score,
                 metric_direction,
                 stop_min_delta,
             )
@@ -1577,8 +1737,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         if allow_fallback_submit:
             try:
                 fallback_result = submission_phase.attempt(
-                    submission_path=best_submission,
-                    best_score=best_score,
+                    submission_path=best_submittable_submission,
+                    best_score=best_submittable_score,
                 )
             except SubmitAbortedError:
                 run_payload["status"] = "submit_failed"
@@ -1587,18 +1747,23 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if fallback_result:
                 submitted = True
                 last_submission_result = fallback_result
-                if best_score is not None and _update_best_score(
+                if best_submittable_score is not None and _update_best_score(
                     best_submitted_score,
-                    best_score,
+                    best_submittable_score,
                     metric_direction,
                     0.0,
                 ):
-                    best_submitted_score = best_score
+                    best_submitted_score = best_submittable_score
         else:
             print(
                 "[yellow]submit skipped[/yellow]: fallback artifact is not better "
                 "than previously submitted offline score."
             )
+    elif config.submit and not submitted and best_submission is not None and best_submittable_submission is None:
+        print(
+            "[yellow]submit skipped[/yellow]: no quality-eligible fallback artifact "
+            "(all candidates were blocked by quality guard)."
+        )
 
     if submitted and last_submission_result:
         top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
@@ -2315,6 +2480,34 @@ def _print_agent_response(response_path: Path, response_text: str) -> None:
     builtins.print("")
 
 
+def _tail_for_prompt(text: str, *, max_chars: int = 6000) -> str:
+    normalized = (text or "").replace("\r", "\n").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[-max_chars:]
+
+
+def _append_fix_retry_feedback(
+    *,
+    base_prompt: str,
+    stage_label: str,
+    codex_pass: int,
+    failure_text: str,
+) -> str:
+    clipped = _tail_for_prompt(failure_text, max_chars=6000)
+    if not clipped:
+        return base_prompt
+    return (
+        f"{base_prompt}\n\n"
+        f"## Retry Feedback (pass {codex_pass})\n\n"
+        f"The previous {stage_label} pass did not fully resolve the issue.\n"
+        "Apply additional minimal edits focused on the remaining failure below.\n\n"
+        "```\n"
+        f"{clipped}\n"
+        "```\n"
+    )
+
+
 def _load_json_object(path: Path) -> dict[str, object] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2824,6 +3017,8 @@ def _build_kernel_quality_guard(
     iteration: int,
     max_iterations: int,
     force_submit: bool,
+    code_reference_score: float | None = None,
+    code_reference_source: str | None = None,
     metric_mismatch_detected: bool = False,
     metric_mismatch_reason: str | None = None,
 ) -> dict[str, object]:
@@ -2928,6 +3123,27 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
+    below_code_reference = False
+    code_delta: float | None = None
+    if code_reference_score is not None:
+        code_delta = _score_delta_vs_reference(float(evaluation.value), float(code_reference_score), direction)
+        below_code_reference = _is_significantly_worse(
+            current=float(evaluation.value),
+            reference=float(code_reference_score),
+            direction=direction,
+            rel_margin=_QUALITY_GUARD_CODE_REF_REL_MARGIN,
+            abs_margin=_QUALITY_GUARD_CODE_REF_ABS_MARGIN,
+        )
+        if below_code_reference:
+            reasons.append("below_code_reference_baseline")
+            warnings.append(
+                "code_reference_score="
+                f"{float(code_reference_score):.6f},current={float(evaluation.value):.6f},"
+                f"delta={code_delta:+.6f},source={code_reference_source or 'unknown'}"
+            )
+            if not force_submit:
+                block_submit = True
+
     allow_submit = not block_submit
     return {
         "allow_submit": allow_submit,
@@ -2949,6 +3165,14 @@ def _build_kernel_quality_guard(
         "step_bucket": {
             "count": len(step_bucket_scores),
             "collapse_detected": step_bucket_collapse,
+        },
+        "code_reference": {
+            "score": code_reference_score,
+            "source": code_reference_source,
+            "delta_vs_current": code_delta,
+            "below_reference": below_code_reference,
+            "abs_margin": _QUALITY_GUARD_CODE_REF_ABS_MARGIN,
+            "rel_margin": _QUALITY_GUARD_CODE_REF_REL_MARGIN,
         },
     }
 
@@ -3315,6 +3539,29 @@ def _resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[fl
     return prev_score, streak
 
 
+def _non_final_submission_checkpoints(*, max_iterations: int, non_final_slots: int) -> set[int]:
+    """Spread non-final submit slots across the loop to avoid early budget burn."""
+    if max_iterations <= 1 or non_final_slots <= 0:
+        return set()
+    last_non_final = max_iterations - 1
+    if non_final_slots >= last_non_final:
+        return set(range(1, max_iterations))
+
+    checkpoints: set[int] = set()
+    for idx in range(1, non_final_slots + 1):
+        # Integer spacing over [1, max_iterations-1], leaving room for final slot.
+        candidate = (idx * max_iterations) // (non_final_slots + 1)
+        candidate = max(1, min(last_non_final, candidate))
+        checkpoints.add(candidate)
+
+    if len(checkpoints) < non_final_slots:
+        for candidate in range(last_non_final, 0, -1):
+            checkpoints.add(candidate)
+            if len(checkpoints) >= non_final_slots:
+                break
+    return checkpoints
+
+
 def _should_attempt_submit_for_readiness(
     *,
     gate: str,
@@ -3327,27 +3574,43 @@ def _should_attempt_submit_for_readiness(
     successful_submissions: int = 0,
     top1_score: float | None = None,
 ) -> bool:
-    if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
-        reserve_start = max(0, submission_limit_per_day - 1)
-        if successful_submissions < reserve_start:
-            return True
-        is_final_iteration = iteration >= max_iterations
-        top1_tier = readiness_score is not None and _is_top1_tier(readiness_score, top1_score, direction)
-        return top1_tier or is_final_iteration
-
     normalized = _normalized_submission_gate(gate, default="always")
-    if normalized in {"always", "each_iteration"}:
-        return True
+    is_final_iteration = iteration >= max_iterations
+    met_target = readiness_score is not None and _meets_target(readiness_score, readiness_target, direction)
+    top1_tier = readiness_score is not None and _is_top1_tier(readiness_score, top1_score, direction)
+
     if normalized in {"final_only", "at_final"}:
-        return iteration >= max_iterations
-    if readiness_score is None:
-        return iteration >= max_iterations
-    met_target = _meets_target(readiness_score, readiness_target, direction)
+        return is_final_iteration
     if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
         return met_target
+
+    if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
+        if is_final_iteration:
+            return True
+
+        non_final_slots = max(0, submission_limit_per_day - 1)
+        if non_final_slots <= 0:
+            return False
+
+        if successful_submissions >= non_final_slots:
+            return top1_tier or met_target
+
+        if max_iterations > submission_limit_per_day:
+            checkpoints = _non_final_submission_checkpoints(
+                max_iterations=max_iterations,
+                non_final_slots=non_final_slots,
+            )
+            return (iteration in checkpoints) or top1_tier or met_target
+
+        return True
+
+    if normalized in {"always", "each_iteration"}:
+        return True
     if normalized in {"readiness_or_final", "target_or_final"}:
-        return met_target or iteration >= max_iterations
-    return met_target or iteration >= max_iterations
+        return met_target or is_final_iteration
+    if readiness_score is None:
+        return is_final_iteration
+    return met_target or is_final_iteration
 
 
 def _submission_gate_for_policy(policy: str | None) -> str:
@@ -3653,6 +3916,9 @@ def _run_improvement(
     current_score_source: str = "offline",
     forced_improvement_mode: str | None = None,
     forced_improvement_reason: str | None = None,
+    enforce_code_reference_implementation: bool = False,
+    code_reference_enforcement_reason: str | None = None,
+    best_score_so_far: float | None = None,
 ) -> None:
     prompt_template = config.paths.codex_improve_template.read_text(encoding="utf-8")
     agent_dir = iter_dir / "agent"
@@ -3672,6 +3938,22 @@ def _run_improvement(
         )
         improvement_mode = forced_improvement_mode
     kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
+    code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
+    code_reference_delta = (
+        _score_delta_vs_reference(effective_current_score, code_reference_score, evaluation.direction)
+        if code_reference_score is not None
+        else None
+    )
+    code_reference_underperforming = bool(
+        code_reference_score is not None and code_reference_delta is not None and code_reference_delta < 0
+    )
+    if code_reference_score is None:
+        code_reference_status = "code_reference_unavailable"
+    elif code_reference_underperforming:
+        code_reference_status = "underperforming_code_reference"
+    else:
+        code_reference_status = "at_or_above_code_reference"
+    required_reference_notebook = _load_required_reference_notebook(config.paths)
     base_prompt_text = prompt_template.format(
         slug=config.slug,
         iteration=iteration,
@@ -3702,6 +3984,12 @@ def _run_improvement(
         submission_format=str(config.paths.submission_format_md_path),
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
+        code_md=str(config.paths.code_md_path),
+        code_index=str(config.paths.code_notebooks_index_path),
+        code_reference_score=("unavailable" if code_reference_score is None else f"{code_reference_score:.6f}"),
+        code_reference_source=code_reference_source,
+        code_reference_delta=("unavailable" if code_reference_delta is None else f"{code_reference_delta:+.6f}"),
+        code_reference_status=code_reference_status,
         kernel_main=str(kernel_main_path),
     )
     if forced_improvement_reason:
@@ -3710,6 +3998,79 @@ def _run_improvement(
             f"Reason: {forced_improvement_reason}\n"
             "Do not propose minor_tuning; make a major_overhaul plan.\n"
         )
+    if best_score_so_far is not None:
+        base_prompt_text += (
+            "\n\nRegression Guard Policy:\n"
+            f"- Best known offline score so far: {float(best_score_so_far):.6f}\n"
+            "- Do NOT introduce conservative fallback paths that intentionally reduce model capacity "
+            "or collapse features (e.g., tiny robust subsets) when they materially degrade offline quality.\n"
+            "- If suspiciously high CV is detected, keep leak fixes but preserve competitive model strength "
+            "instead of defaulting to a weak baseline.\n"
+        )
+    code_reference_gate_lines = [
+        "## Code Reference Gate",
+        f"- Code snapshot: {config.paths.code_md_path}",
+        f"- Code notebook index: {config.paths.code_notebooks_index_path}",
+        (
+            "- Code reference score: unavailable"
+            if code_reference_score is None
+            else (
+                f"- Code reference score: {code_reference_score:.6f} "
+                f"(source: {code_reference_source}, delta_vs_current={code_reference_delta:+.6f})"
+            )
+        ),
+        f"- Code reference status: {code_reference_status}",
+    ]
+    code_reference_mandatory = bool(code_reference_underperforming or enforce_code_reference_implementation)
+    if code_reference_mandatory:
+        code_reference_gate_lines.extend(
+            [
+                "",
+                (
+                    "Current score is below the code reference baseline."
+                    if code_reference_underperforming
+                    else "Code reference implementation is policy-mandatory for the next iteration."
+                ),
+                (
+                    f"Enforcement reason: {code_reference_enforcement_reason}"
+                    if code_reference_enforcement_reason
+                    else "Enforcement reason: code-reference policy"
+                ),
+                "You MUST inspect code.md and code_notebooks_index.json and treat",
+                "`Required Reference Notebook (Execution baseline)` as mandatory baseline context.",
+            ]
+        )
+        if required_reference_notebook is not None:
+            code_reference_gate_lines.extend(
+                [
+                    f"- required_kernel_id: {required_reference_notebook.kernel_id}",
+                    f"- required_title: {required_reference_notebook.title}",
+                    (
+                        f"- required_source_file: {required_reference_notebook.source_file}"
+                        if required_reference_notebook.source_file
+                        else "- required_source_file: unavailable"
+                    ),
+                    (
+                        f"- required_local_dir: {required_reference_notebook.local_dir}"
+                        if required_reference_notebook.local_dir
+                        else "- required_local_dir: unavailable"
+                    ),
+                    f"- required_marker: {_code_reference_marker(required_reference_notebook)}",
+                    (
+                        "- required_model_family: tabicl"
+                        if _reference_requires_tabicl(required_reference_notebook)
+                        else "- required_model_family: follow required notebook strategy"
+                    ),
+                ]
+            )
+        code_reference_gate_lines.extend(
+            [
+                "Either reproduce that baseline path first or justify concrete blockers and implement",
+                "the closest leak-free fallback in kernel.py.",
+                "When implementing the required notebook path, add the exact marker comment shown above.",
+            ]
+        )
+    base_prompt_text += "\n\n" + "\n".join(code_reference_gate_lines) + "\n"
     problem_type_knowledge = _load_problem_type_knowledge_text(config)
     strategy_prompt = _build_improvement_strategy_prompt(
         slug=config.slug,
@@ -3763,30 +4124,72 @@ def _run_improvement(
         config.paths.context_dir,
         config.paths.run_dir(run_id),
         agent_dir,
+        config.paths.repo_root / "pyproject.toml",
+        config.paths.repo_root / "uv.lock",
     ]
-    guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
-    before = _snapshot_tree(config.paths.repo_root)
-    result = run_codex(
-        prompt_path,
-        agent_dir,
-        dry_run=config.dry_run,
-        model=_ERROR_FIX_CODEX_MODEL,
-        reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
-    )
-    after = _snapshot_tree(config.paths.repo_root)
-    _enforce_allowlist_changes(
-        root=config.paths.repo_root,
-        before=before,
-        after=after,
-        allowed_prefixes=allowed_prefixes,
-        stage=f"improve_iteration_{iteration}",
-        guard_snapshot=guard_snapshot,
-        auto_repair=True,
-    )
-    response_text = _read_agent_response(result.last_message_path)
-    _print_agent_response(result.last_message_path, response_text)
-    if result.returncode != 0:
-        raise RuntimeError("Codex improvement failed.")
+
+    def _run_improve_codex_pass(*, current_prompt_path: Path, stage_suffix: str) -> tuple[str, Path]:
+        guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
+        before = _snapshot_tree(config.paths.repo_root)
+        result = run_codex(
+            current_prompt_path,
+            agent_dir,
+            dry_run=config.dry_run,
+            model=_ERROR_FIX_CODEX_MODEL,
+            reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+        )
+        after = _snapshot_tree(config.paths.repo_root)
+        _enforce_allowlist_changes(
+            root=config.paths.repo_root,
+            before=before,
+            after=after,
+            allowed_prefixes=allowed_prefixes,
+            stage=f"improve_iteration_{iteration}{stage_suffix}",
+            guard_snapshot=guard_snapshot,
+            auto_repair=True,
+        )
+        response = _read_agent_response(result.last_message_path)
+        _print_agent_response(result.last_message_path, response)
+        if result.returncode != 0:
+            raise RuntimeError("Codex improvement failed.")
+        return response, result.last_message_path
+
+    response_text, _ = _run_improve_codex_pass(current_prompt_path=prompt_path, stage_suffix="")
+
+    if code_reference_mandatory and required_reference_notebook is not None and not config.dry_run:
+        kernel_path = config.paths.kernel_source_dir / "kernel.py"
+        implementation_issues = _validate_code_reference_implementation(
+            kernel_path=kernel_path,
+            reference=required_reference_notebook,
+        )
+        if implementation_issues:
+            print(
+                "[yellow]code reference guard[/yellow]: "
+                "required reference implementation missing; rerunning codex with strict repair prompt."
+            )
+            repair_prompt_path = agent_dir / f"code_reference_repair_prompt-{iteration:02d}.md"
+            repair_prompt_text = _build_code_reference_repair_prompt(
+                base_prompt_text=base_prompt_text,
+                reference=required_reference_notebook,
+                issues=implementation_issues,
+                kernel_path=kernel_path,
+            )
+            repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
+            _print_agent_prompt(repair_prompt_path, repair_prompt_text)
+            repair_response, _ = _run_improve_codex_pass(
+                current_prompt_path=repair_prompt_path,
+                stage_suffix="_code_reference_repair",
+            )
+            implementation_issues = _validate_code_reference_implementation(
+                kernel_path=kernel_path,
+                reference=required_reference_notebook,
+            )
+            if implementation_issues:
+                issues_text = ", ".join(implementation_issues)
+                raise RuntimeError(
+                    f"Code reference implementation requirement not satisfied after repair pass (issues={issues_text})."
+                )
+            response_text = f"{response_text}\n\n{repair_response}".strip()
 
     _run_verify(config.verify_cmd, dry_run=config.dry_run)
     summary = response_text
@@ -3892,6 +4295,16 @@ def _error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
     if not lowered:
         return None
 
+    cross_stage_patterns = (
+        (
+            "competition metric mismatch",
+            "strict competition metric mismatch escalation is deterministic",
+        ),
+    )
+    for needle, reason in cross_stage_patterns:
+        if needle in lowered:
+            return reason
+
     common_patterns = (
         (
             "kernel source validation failed",
@@ -3933,10 +4346,6 @@ def _error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
             "unable to resolve competition data root",
             "deterministic competition data path resolution failure",
         ),
-        (
-            "competition metric mismatch persisted after metric-only repairs",
-            "strict competition metric mismatch escalation is deterministic",
-        ),
     )
     if normalized_stage != "submit_autofix":
         for needle, reason in common_patterns:
@@ -3977,6 +4386,7 @@ def _run_kernel_fix(
     codex_model: str | None = None,
     codex_reasoning_effort: str | None = None,
     prompt_prefix: str = "",
+    max_codex_passes: int | None = None,
 ) -> None:
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -4004,7 +4414,9 @@ def _run_kernel_fix(
     missing_module = _extract_missing_module(error_message)
     blocked_modules = _load_blocked_modules(config.paths.context_dir)
     if missing_module:
-        blocked_modules = _record_blocked_module(config.paths.context_dir, missing_module)
+        # Keep dependency recovery paths open: do not auto-block newly missing modules.
+        blocked_modules = [name for name in blocked_modules if name != missing_module]
+        _save_blocked_modules(config.paths.context_dir, blocked_modules)
     blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = prompt_template.format(
         slug=config.slug,
@@ -4028,7 +4440,11 @@ def _run_kernel_fix(
     if missing_module:
         prompt_text = (
             f"Missing dependency detected: {missing_module}\n"
-            "Avoid this package or guard it with a fallback; prefer Kaggle-default libraries.\n\n" + prompt_text
+            "Guard/disable only this missing package path. Keep actively using other available "
+            "repo dependencies (torch/timm/torchvision/opencv/xgboost/lightgbm/catboost/"
+            "transformers/tabicl/ultralytics/sklearn) and avoid silent capacity downgrades. "
+            "If this package is required, add it via `uv add <package>` and update `pyproject.toml` "
+            "+ `uv.lock`.\n\n" + prompt_text
         )
     if prompt_prefix.strip():
         prompt_text = f"{prompt_prefix.strip()}\n\n{prompt_text}"
@@ -4069,16 +4485,18 @@ def _run_kernel_fix(
             f"{strategy_text}\n"
         )
 
-    prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
-    prompt_path.write_text(prompt_text, encoding="utf-8")
+    base_prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
+    prompt_path.write_text(base_prompt_text, encoding="utf-8")
     attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
-    attempt_path.write_text(prompt_text, encoding="utf-8")
-    _print_agent_prompt(prompt_path, prompt_text)
+    attempt_path.write_text(base_prompt_text, encoding="utf-8")
+    _print_agent_prompt(prompt_path, base_prompt_text)
 
     allowed_prefixes = [
         config.paths.repo_root / "src",
         config.paths.repo_root / "docs",
         config.paths.repo_root / "tests",
+        config.paths.repo_root / "pyproject.toml",
+        config.paths.repo_root / "uv.lock",
         config.paths.kernel_source_dir,
         config.paths.context_dir,
         config.paths.runs_dir,
@@ -4088,68 +4506,126 @@ def _run_kernel_fix(
         config.paths.base_dir / "outputs",
     ]
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
-    before = _snapshot_tree(config.paths.repo_root)
+    codex_pass_limit = max(1, int(max_codex_passes or MAX_KERNEL_FIX_CODEX_PASSES))
+    retry_feedback = ""
+    last_response_text = ""
+    for codex_pass in range(1, codex_pass_limit + 1):
+        pass_prompt_text = (
+            base_prompt_text
+            if not retry_feedback
+            else _append_fix_retry_feedback(
+                base_prompt=base_prompt_text,
+                stage_label="kernel_fix",
+                codex_pass=codex_pass - 1,
+                failure_text=retry_feedback,
+            )
+        )
+        pass_prompt_path = (
+            prompt_path if codex_pass == 1 else agent_dir / f"kernel_fix_prompt-{attempt:02d}-pass-{codex_pass:02d}.md"
+        )
+        pass_prompt_path.write_text(pass_prompt_text, encoding="utf-8")
+        if codex_pass > 1:
+            print(
+                "[yellow]kernel fix[/yellow]: "
+                f"retrying codex pass {codex_pass}/{codex_pass_limit} with previous failure context."
+            )
+        before = _snapshot_tree(config.paths.repo_root)
+        pass_output_dir = (
+            agent_dir if codex_pass == 1 else agent_dir / f"kernel_fix_pass-{attempt:02d}-{codex_pass:02d}"
+        )
+        print("[cyan]kernel fix[/cyan]: running codex fixer")
+        result = run_codex(
+            pass_prompt_path,
+            pass_output_dir,
+            dry_run=config.dry_run,
+            heartbeat_label="fixing error",
+            model=codex_model or _ERROR_FIX_CODEX_MODEL,
+            reasoning_effort=codex_reasoning_effort or _ERROR_FIX_REASONING_EFFORT,
+        )
+        after = _snapshot_tree(config.paths.repo_root)
+        changed = _diff_snapshots(before, after)
+        if changed:
+            _enforce_allowlist_changes(
+                root=config.paths.repo_root,
+                before=before,
+                after=after,
+                allowed_prefixes=allowed_prefixes,
+                stage=f"kernel_fix_attempt_{attempt}",
+                guard_snapshot=guard_snapshot,
+                auto_repair=True,
+            )
+            _maybe_restart_for_src_changes(
+                config=config,
+                run_id=run_id,
+                changed=changed,
+                stage=f"kernel_fix_attempt_{attempt}",
+            )
+        response_text = _read_agent_response(result.last_message_path)
+        _print_agent_response(result.last_message_path, response_text)
+        last_response_text = response_text
+        if result.returncode != 0:
+            retry_feedback = (
+                "Codex kernel-fix step failed with non-zero exit status.\n"
+                f"returncode={result.returncode}\n"
+                f"pass={codex_pass}/{codex_pass_limit}\n"
+                f"response={response_text}"
+            )
+            if codex_pass < codex_pass_limit:
+                continue
+            raise RuntimeError("Codex kernel-fix step failed.")
 
-    print("[cyan]kernel fix[/cyan]: running codex fixer")
-    result = run_codex(
-        prompt_path,
-        agent_dir,
-        dry_run=config.dry_run,
-        heartbeat_label="fixing error",
-        model=codex_model or _ERROR_FIX_CODEX_MODEL,
-        reasoning_effort=codex_reasoning_effort or _ERROR_FIX_REASONING_EFFORT,
-    )
-    after = _snapshot_tree(config.paths.repo_root)
-    changed = _diff_snapshots(before, after)
-    if not changed:
-        if _maybe_regenerate_kernel_sources_once(
-            config=config,
-            run_id=run_id,
-            iteration=iteration,
-            iter_dir=iter_dir,
-            attempt=attempt,
-            trigger_reason="codex_no_changes",
-        ):
+        if not changed:
+            regenerated = _maybe_regenerate_kernel_sources_once(
+                config=config,
+                run_id=run_id,
+                iteration=iteration,
+                iter_dir=iter_dir,
+                attempt=attempt,
+                trigger_reason="codex_no_changes",
+            )
+            if not regenerated:
+                raise KernelFailedError(
+                    "Kernel fix agent produced no file changes and regeneration fallback was already used."
+                )
+            try:
+                _run_verify(config.verify_cmd, dry_run=config.dry_run)
+            except Exception as exc:  # noqa: BLE001
+                retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+                if codex_pass < codex_pass_limit:
+                    continue
+                raise
             if pending_error_fixes is not None:
                 pending_error_fixes.append(
                     {
                         "iteration": iteration,
                         "error_message": error_message,
-                        "fix_summary": "Codex kernel-fix made no changes; regenerated kernel sources once.",
+                        "fix_summary": (
+                            "Codex kernel-fix made no edits; regenerated kernel sources once and verification passed."
+                        ),
                         "resolved": True,
                     }
                 )
             return
-        raise KernelFailedError("Kernel fix agent produced no file changes and regeneration fallback was already used.")
-    _enforce_allowlist_changes(
-        root=config.paths.repo_root,
-        before=before,
-        after=after,
-        allowed_prefixes=allowed_prefixes,
-        stage=f"kernel_fix_attempt_{attempt}",
-        guard_snapshot=guard_snapshot,
-        auto_repair=True,
-    )
-    _maybe_restart_for_src_changes(
-        config=config,
-        run_id=run_id,
-        changed=changed,
-        stage=f"kernel_fix_attempt_{attempt}",
-    )
-    response_text = _read_agent_response(result.last_message_path)
-    _print_agent_response(result.last_message_path, response_text)
-    if result.returncode != 0:
-        raise RuntimeError("Codex kernel-fix step failed.")
-    _run_verify(config.verify_cmd, dry_run=config.dry_run)
-    if pending_error_fixes is not None:
-        pending_error_fixes.append(
-            {
-                "iteration": iteration,
-                "error_message": error_message,
-                "fix_summary": strategy_text or response_text,
-                "resolved": True,
-            }
-        )
+
+        try:
+            _run_verify(config.verify_cmd, dry_run=config.dry_run)
+        except Exception as exc:  # noqa: BLE001
+            retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            if codex_pass < codex_pass_limit:
+                continue
+            raise
+        if pending_error_fixes is not None:
+            pending_error_fixes.append(
+                {
+                    "iteration": iteration,
+                    "error_message": error_message,
+                    "fix_summary": strategy_text or last_response_text,
+                    "resolved": True,
+                }
+            )
+        return
+
+    raise RuntimeError("Kernel fix exhausted codex retry passes without resolving the error.")
 
 
 def _run_metric_only_competition_metric_fix(
@@ -4187,6 +4663,7 @@ def _run_metric_only_competition_metric_fix(
         codex_model=_METRIC_FIX_CODEX_MODEL,
         codex_reasoning_effort=_METRIC_FIX_REASONING_EFFORT,
         prompt_prefix=policy_prefix,
+        max_codex_passes=_MAX_METRIC_FIX_CODEX_PASSES,
     )
 
 
@@ -4433,16 +4910,6 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     error_path.write_text(header + error_text + "\n", encoding="utf-8")
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
-    if not submit_autofix:
-        lightweight_fix = _maybe_apply_lightweight_runtime_fix(
-            config=config,
-            error_text=error_text,
-            note_path=autofix_dir / "note.txt",
-            stage_label="autofix",
-        )
-        if lightweight_fix:
-            return
-
     allowed_prefixes = _autofix_allowed_prefixes(config)
     prompt_text = _build_autofix_prompt(
         config=config,
@@ -4455,69 +4922,102 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     )
     strategy_stage = "submit_autofix" if submit_autofix else "autofix"
     strategy_label = "submit autofix" if submit_autofix else "autofix"
-    strategy_text = ""
-    strategy_skip_reason = _error_strategy_skip_reason(stage=strategy_stage, error_text=error_text)
-    if strategy_skip_reason:
-        print(
-            f"[yellow]{strategy_label}[/yellow]: "
-            f"skipping gpt strategy ({strategy_skip_reason}); invoking codex fixer directly."
+    print(
+        f"[cyan]{strategy_label}[/cyan]: strategy={_ERROR_STRATEGY_MODEL}({_ERROR_STRATEGY_REASONING_EFFORT}) "
+        f"-> fixer={_ERROR_FIX_CODEX_MODEL}({_ERROR_FIX_REASONING_EFFORT})"
+    )
+    strategy_prompt = _build_error_strategy_prompt(
+        stage=strategy_stage,
+        slug=config.slug,
+        run_id=run_id,
+        attempt=attempt,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        error_text=error_text,
+        codex_prompt=prompt_text,
+    )
+    strategy_text = _run_error_strategy(
+        prompt_text=strategy_prompt,
+        output_dir=autofix_dir / "gpt_strategy",
+        dry_run=config.dry_run,
+        stage_label=strategy_label,
+    )
+    if not strategy_text.strip():
+        raise RuntimeError(
+            "Autofix strategy generation failed: strict autofix path requires GPT strategy output before Codex edits."
         )
-    else:
-        if submit_autofix:
-            print(
-                f"[cyan]submit autofix[/cyan]: strategy={_ERROR_STRATEGY_MODEL}({_ERROR_STRATEGY_REASONING_EFFORT}) "
-                f"-> fixer={_ERROR_FIX_CODEX_MODEL}({_ERROR_FIX_REASONING_EFFORT})"
-            )
-        strategy_prompt = _build_error_strategy_prompt(
-            stage=strategy_stage,
-            slug=config.slug,
-            run_id=run_id,
-            attempt=attempt,
-            compute=config.compute,
-            accelerator=config.accelerator,
-            error_text=error_text,
-            codex_prompt=prompt_text,
-        )
-        strategy_text = _run_error_strategy(
-            prompt_text=strategy_prompt,
-            output_dir=autofix_dir / "gpt_strategy",
-            dry_run=config.dry_run,
-            stage_label=strategy_label,
-        )
-    if strategy_text:
-        prompt_text += (
-            "\n\n## GPT 5.2 Extra-High Error-Fix Strategy\n"
-            "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
-            f"{strategy_text}\n"
-        )
+    prompt_text += (
+        "\n\n## GPT 5.2 Extra-High Error-Fix Strategy\n"
+        "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
+        f"{strategy_text}\n"
+    )
     prompt_path = autofix_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
 
-    before = _snapshot_tree(config.paths.repo_root)
-    result = run_codex(
-        prompt_path,
-        autofix_dir,
-        dry_run=config.dry_run,
-        heartbeat_label="fixing error",
-        model=_ERROR_FIX_CODEX_MODEL,
-        reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
-    )
-    after = _snapshot_tree(config.paths.repo_root)
-    changed = _diff_snapshots(before, after)
-    # Autofix often needs to regenerate staged outputs under artifacts/*/kernels and
-    # run-level state files; do not apply write-guard restrictions in this stage.
-    _maybe_restart_for_src_changes(
-        config=config,
-        run_id=run_id,
-        changed=changed,
-        stage=f"autofix_attempt_{attempt}",
-    )
-    response_text = _read_agent_response(result.last_message_path)
-    _print_agent_response(result.last_message_path, response_text)
-    if result.returncode != 0:
-        raise RuntimeError("Codex autofix step failed.")
-    _run_verify(config.verify_cmd, dry_run=config.dry_run)
+    retry_feedback = ""
+    for codex_pass in range(1, MAX_AUTOFIX_CODEX_PASSES + 1):
+        pass_prompt_text = (
+            prompt_text
+            if not retry_feedback
+            else _append_fix_retry_feedback(
+                base_prompt=prompt_text,
+                stage_label="autofix",
+                codex_pass=codex_pass - 1,
+                failure_text=retry_feedback,
+            )
+        )
+        pass_prompt_path = prompt_path if codex_pass == 1 else autofix_dir / f"prompt-pass-{codex_pass:02d}.md"
+        pass_prompt_path.write_text(pass_prompt_text, encoding="utf-8")
+        if codex_pass > 1:
+            print(
+                "[yellow]autofix[/yellow]: "
+                f"retrying codex pass {codex_pass}/{MAX_AUTOFIX_CODEX_PASSES} with previous failure context."
+            )
+
+        before = _snapshot_tree(config.paths.repo_root)
+        pass_output_dir = autofix_dir if codex_pass == 1 else autofix_dir / f"pass-{codex_pass:02d}"
+        result = run_codex(
+            pass_prompt_path,
+            pass_output_dir,
+            dry_run=config.dry_run,
+            heartbeat_label="fixing error",
+            model=_ERROR_FIX_CODEX_MODEL,
+            reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+        )
+        after = _snapshot_tree(config.paths.repo_root)
+        changed = _diff_snapshots(before, after)
+        # Autofix often needs to regenerate staged outputs under artifacts/*/kernels and
+        # run-level state files; do not apply write-guard restrictions in this stage.
+        _maybe_restart_for_src_changes(
+            config=config,
+            run_id=run_id,
+            changed=changed,
+            stage=f"autofix_attempt_{attempt}",
+        )
+        response_text = _read_agent_response(result.last_message_path)
+        _print_agent_response(result.last_message_path, response_text)
+        if result.returncode != 0:
+            retry_feedback = (
+                "Codex autofix step failed with non-zero exit status.\n"
+                f"returncode={result.returncode}\n"
+                f"pass={codex_pass}/{MAX_AUTOFIX_CODEX_PASSES}\n"
+                f"response={response_text}"
+            )
+            if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
+                continue
+            raise RuntimeError("Codex autofix step failed.")
+
+        try:
+            _run_verify(config.verify_cmd, dry_run=config.dry_run)
+        except Exception as exc:  # noqa: BLE001
+            retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
+                continue
+            raise
+        return
+
+    raise RuntimeError("Autofix exhausted codex retry passes without resolving the error.")
 
 
 def _autofix_allowed_prefixes(config: AutopilotConfig) -> list[Path]:
@@ -4528,6 +5028,8 @@ def _autofix_allowed_prefixes(config: AutopilotConfig) -> list[Path]:
         config.paths.repo_root / "src",
         config.paths.repo_root / "docs",
         config.paths.repo_root / "tests",
+        config.paths.repo_root / "pyproject.toml",
+        config.paths.repo_root / "uv.lock",
         # Allow competition-scoped prompt/context/submission artifacts and authoritative kernel.
         config.paths.kernel_source_dir,
         config.paths.context_dir,
@@ -4607,7 +5109,9 @@ Error log file: {error_path}
 
 1) Identify root cause of the failure.
 2) Apply minimal, targeted fixes so autopilot can continue.
-3) Do not touch datasets or credentials. Do not add new dependencies without justification.
+3) Do not touch datasets or credentials.
+   Prefer already-installed dependencies; add new dependencies only with clear justification.
+   If a dependency must be added, use `uv add <package>` and keep `pyproject.toml` + `uv.lock` consistent.
 4) Explain what you changed in your response.
 """
 
@@ -5144,13 +5648,22 @@ def _load_blocked_modules(context_dir: Path) -> list[str]:
     return []
 
 
+def _save_blocked_modules(context_dir: Path, modules: list[str]) -> None:
+    context_dir.mkdir(parents=True, exist_ok=True)
+    path = context_dir / _BLOCKED_MODULES_FILENAME
+    if modules:
+        path.write_text(json.dumps(modules, indent=2), encoding="utf-8")
+        return
+    if path.exists():
+        path.unlink()
+
+
 def _record_blocked_module(context_dir: Path, module: str) -> list[str]:
     context_dir.mkdir(parents=True, exist_ok=True)
     existing = _load_blocked_modules(context_dir)
     if module not in existing:
         existing.append(module)
-        path = context_dir / _BLOCKED_MODULES_FILENAME
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        _save_blocked_modules(context_dir, existing)
     return existing
 
 
@@ -6931,6 +7444,337 @@ def _classify_improvement_mode(value: float, top1_score: float | None, direction
     if gap >= MODERATE_TOP1_GAP:
         return "moderate_update", gap
     return "minor_tuning", gap
+
+
+def _score_delta_vs_reference(current: float, reference: float, direction: str) -> float:
+    """Return signed delta where positive means current is better than reference."""
+    if direction == "minimize":
+        return reference - current
+    return current - reference
+
+
+def _score_drop_vs_best(*, best_score: float | None, current_score: float, direction: str) -> float | None:
+    if best_score is None:
+        return None
+    if direction == "maximize":
+        return float(best_score) - float(current_score)
+    return float(current_score) - float(best_score)
+
+
+def _regression_drop_threshold(*, metric: str, direction: str) -> float:
+    if direction == "maximize":
+        metric_name = canonical_metric(metric)
+        if metric_name in {"auc", "accuracy", "f1", "precision", "recall", "average_precision", "r2", "r_squared"}:
+            return _REGRESSION_GUARD_ABS_DROP_PROB
+    return _REGRESSION_GUARD_ABS_DROP_DEFAULT
+
+
+def _is_severe_regression_vs_best(
+    *, metric: str, direction: str, best_score: float | None, current_score: float
+) -> bool:
+    drop = _score_drop_vs_best(best_score=best_score, current_score=current_score, direction=direction)
+    if drop is None:
+        return False
+    threshold = _regression_drop_threshold(metric=metric, direction=direction)
+    return drop > threshold
+
+
+def _is_conservative_feature_collapse(payload: dict[str, object] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    robust_subset_payload = payload.get("robust_subset_report")
+    if not isinstance(robust_subset_payload, dict):
+        return False
+    selected_feature_count_raw = payload.get("selected_feature_count")
+    selected_feature_count = (
+        int(selected_feature_count_raw) if isinstance(selected_feature_count_raw, (int, float)) else None
+    )
+    selected_features = robust_subset_payload.get("selected_features")
+    selected_subset_size = len(selected_features) if isinstance(selected_features, list) else None
+    if selected_feature_count is not None and selected_feature_count <= _CONSERVATIVE_COLLAPSE_MAX_FEATURES:
+        return True
+    if selected_subset_size is not None and selected_subset_size <= _CONSERVATIVE_COLLAPSE_MAX_FEATURES:
+        return True
+    return False
+
+
+def _best_kernel_snapshot_path(run_dir: Path) -> Path:
+    return run_dir / _BEST_KERNEL_SNAPSHOT_FILENAME
+
+
+def _capture_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> bool:
+    kernel_path = paths.kernel_source_dir / "kernel.py"
+    if not kernel_path.exists():
+        return False
+    snapshot_path = _best_kernel_snapshot_path(run_dir)
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(kernel_path, snapshot_path)
+    except OSError:
+        return False
+    return True
+
+
+def _ensure_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> None:
+    snapshot_path = _best_kernel_snapshot_path(run_dir)
+    if snapshot_path.exists():
+        return
+    _capture_best_kernel_snapshot(paths=paths, run_dir=run_dir)
+
+
+def _restore_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> bool:
+    snapshot_path = _best_kernel_snapshot_path(run_dir)
+    kernel_path = paths.kernel_source_dir / "kernel.py"
+    if not snapshot_path.exists():
+        return False
+    try:
+        shutil.copy2(snapshot_path, kernel_path)
+    except OSError:
+        return False
+    return True
+
+
+def _effective_best_score_for_progress(
+    *,
+    prev_best: float | None,
+    current_score: float,
+    top1_score: float | None,
+    direction: str,
+) -> tuple[float | None, dict[str, object] | None]:
+    """
+    Clamp an implausible previous best into a top1-proximate band before no-improve checks.
+
+    This avoids driving improvement-mode escalation from a stale outlier best score.
+    """
+    if prev_best is None or top1_score is None:
+        return prev_best, None
+
+    margin = _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN + (
+        _BEST_SCORE_OUTLIER_TOP1_REL_MARGIN * max(abs(float(top1_score)), 1.0)
+    )
+    if direction == "maximize":
+        cap = float(top1_score) + margin
+        if float(prev_best) > cap and float(current_score) <= cap:
+            return cap, {
+                "applied": True,
+                "reason": "clip_prev_best_above_top1_band",
+                "prev_best": float(prev_best),
+                "effective_best": cap,
+                "top1_score": float(top1_score),
+                "margin": float(margin),
+            }
+        return prev_best, None
+
+    floor = float(top1_score) - margin
+    if float(prev_best) < floor and float(current_score) >= floor:
+        return floor, {
+            "applied": True,
+            "reason": "clip_prev_best_below_top1_band",
+            "prev_best": float(prev_best),
+            "effective_best": floor,
+            "top1_score": float(top1_score),
+            "margin": float(margin),
+        }
+    return prev_best, None
+
+
+def _extract_score_from_text(text: str) -> float | None:
+    for match in _CODE_SCORE_RE.finditer(text):
+        value = _to_float(match.group(1))
+        if value is None:
+            continue
+        if 0.0 <= value <= 1.0:
+            return value
+    return None
+
+
+def _extract_code_reference_score_from_index(path: Path) -> tuple[float | None, str]:
+    if not path.exists():
+        return None, "missing_code_index"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, "invalid_code_index"
+    if not isinstance(payload, dict):
+        return None, "invalid_code_index"
+    notebooks = payload.get("notebooks")
+    if not isinstance(notebooks, list) or not notebooks:
+        return None, "empty_code_index"
+    required_id_raw = payload.get("required_reference_kernel_id")
+    required_id = str(required_id_raw).strip() if isinstance(required_id_raw, str) else ""
+    selected: dict[str, object] | None = None
+    if required_id:
+        for row in notebooks:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("kernel_id") or "").strip() == required_id:
+                selected = row
+                break
+    if selected is None:
+        for row in notebooks:
+            if isinstance(row, dict):
+                selected = row
+                break
+    if selected is None:
+        return None, "empty_code_index"
+
+    kernel_id = str(selected.get("kernel_id") or "top_entry").strip() or "top_entry"
+    score = _to_float(selected.get("score"))
+    if score is not None:
+        return score, f"code_index:{kernel_id}"
+
+    title_score = _extract_score_from_text(str(selected.get("title") or ""))
+    if title_score is not None:
+        return title_score, f"code_title:{kernel_id}"
+    return None, "code_index_without_numeric_score"
+
+
+def _extract_code_reference_score_from_markdown(path: Path) -> tuple[float | None, str]:
+    if not path.exists():
+        return None, "missing_code_md"
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None, "missing_code_md"
+    if not text.strip():
+        return None, "empty_code_md"
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "notebook_score:" not in line.lower():
+            continue
+        score = _extract_score_from_text(line)
+        if score is not None:
+            return score, "code_md:notebook_score"
+
+    lowered = text.lower()
+    required_start = lowered.find("required reference notebook")
+    if required_start >= 0:
+        required_section = text[required_start : required_start + 2200]
+        score = _extract_score_from_text(required_section)
+        if score is not None:
+            return score, "code_md:required_reference_section"
+
+    top_snapshot = text[:3000]
+    score = _extract_score_from_text(top_snapshot)
+    if score is not None:
+        return score, "code_md:top_snapshot"
+    return None, "code_md_without_numeric_score"
+
+
+def _extract_code_reference_score(paths: CompetitionPaths) -> tuple[float | None, str]:
+    score, source = _extract_code_reference_score_from_index(paths.code_notebooks_index_path)
+    if score is not None:
+        return score, source
+    score, source = _extract_code_reference_score_from_markdown(paths.code_md_path)
+    if score is not None:
+        return score, source
+    if source and source != "code_md_without_numeric_score":
+        return None, source
+    return None, "unavailable"
+
+
+def _load_required_reference_notebook(paths: CompetitionPaths) -> _CodeReferenceNotebook | None:
+    index_path = paths.code_notebooks_index_path
+    if not index_path.exists():
+        return None
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    notebooks = payload.get("notebooks")
+    if not isinstance(notebooks, list) or not notebooks:
+        return None
+    required_id_raw = payload.get("required_reference_kernel_id")
+    required_id = str(required_id_raw).strip() if isinstance(required_id_raw, str) else ""
+    selected: dict[str, object] | None = None
+    if required_id:
+        for row in notebooks:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("kernel_id") or "").strip() == required_id:
+                selected = row
+                break
+    if selected is None:
+        for row in notebooks:
+            if isinstance(row, dict):
+                selected = row
+                break
+    if selected is None:
+        return None
+    kernel_id = str(selected.get("kernel_id") or "").strip()
+    if not kernel_id:
+        return None
+    title = str(selected.get("title") or kernel_id).strip() or kernel_id
+    source_file_raw = selected.get("source_file")
+    source_file = str(source_file_raw).strip() if isinstance(source_file_raw, str) and source_file_raw else None
+    local_dir_raw = selected.get("local_dir")
+    local_dir = str(local_dir_raw).strip() if isinstance(local_dir_raw, str) and local_dir_raw else None
+    summary_raw = selected.get("summary")
+    summary = str(summary_raw).strip() if isinstance(summary_raw, str) and summary_raw else ""
+    return _CodeReferenceNotebook(
+        kernel_id=kernel_id,
+        title=title,
+        source_file=source_file,
+        local_dir=local_dir,
+        summary=summary,
+    )
+
+
+def _reference_requires_tabicl(reference: _CodeReferenceNotebook) -> bool:
+    text = " ".join([reference.kernel_id, reference.title, reference.summary]).lower()
+    return "tabicl" in text
+
+
+def _code_reference_marker(reference: _CodeReferenceNotebook) -> str:
+    return f"{_CODE_REFERENCE_IMPL_MARKER_PREFIX} {reference.kernel_id}"
+
+
+def _validate_code_reference_implementation(*, kernel_path: Path, reference: _CodeReferenceNotebook) -> list[str]:
+    if not kernel_path.exists():
+        return ["kernel_source_missing"]
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    lowered = text.lower()
+    marker = _code_reference_marker(reference).lower()
+    issues: list[str] = []
+    if marker not in lowered:
+        issues.append("missing_code_reference_marker")
+    if _reference_requires_tabicl(reference) and "tabicl" not in lowered:
+        issues.append("missing_tabicl_implementation_path")
+    return issues
+
+
+def _build_code_reference_repair_prompt(
+    *,
+    base_prompt_text: str,
+    reference: _CodeReferenceNotebook,
+    issues: list[str],
+    kernel_path: Path,
+) -> str:
+    issues_text = ", ".join(issues) if issues else "unknown"
+    tabicl_required = _reference_requires_tabicl(reference)
+    tabicl_line = (
+        "- This reference appears to be TabICL-based. You MUST include a real TabICL path in kernel.py."
+        if tabicl_required
+        else "- TabICL path is optional for this reference notebook."
+    )
+    return (
+        "# Codex Improvement Repair: Mandatory Code Reference Implementation\n\n"
+        "The previous change did not satisfy mandatory code-reference implementation requirements.\n\n"
+        f"- Failed checks: {issues_text}\n"
+        f"- Required notebook: {reference.kernel_id} ({reference.title})\n"
+        f"- Kernel path: {kernel_path}\n"
+        f"- Required marker: `{_code_reference_marker(reference)}`\n"
+        f"{tabicl_line}\n\n"
+        "Make minimal edits to kernel.py so all checks pass.\n"
+        "Do not weaken the model by collapsing to tiny conservative feature subsets that reduce offline score.\n\n"
+        "## Original Improvement Context\n\n"
+        f"{base_prompt_text}\n"
+    )
 
 
 def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:

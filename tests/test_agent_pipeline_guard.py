@@ -38,6 +38,119 @@ def test_guard_restores_other_competition_kernel(tmp_path: Path) -> None:
     assert other_kernel_path.read_text(encoding="utf-8") == original
 
 
+def test_guard_restores_other_competition_submission_ledger(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    other_submissions = artifacts_dir / "other" / "submissions"
+    other_submissions.mkdir(parents=True, exist_ok=True)
+    ledger_path = other_submissions / "ledger.jsonl"
+    original = '{"run_id":"r1","hash":"abc"}\n'
+    ledger_path.write_text(original, encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    ledger_path.write_text('{"run_id":"r2","hash":"def"}\n', encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert ledger_path.read_text(encoding="utf-8") == original
+
+
+def test_guard_restores_other_competition_data_sample_submission(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    other_data = artifacts_dir / "other" / "data"
+    other_data.mkdir(parents=True, exist_ok=True)
+    sample_path = other_data / "sample_submission.csv"
+    original = "Id,Category\nval_1.tif,Health\n"
+    sample_path.write_text(original, encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    sample_path.write_text("Id,Category\nval_1.tif,Rust\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert sample_path.read_text(encoding="utf-8") == original
+
+
+def test_guard_restores_oversized_data_sample_submission_from_context(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    slug = "beyond-visible-spectrum-ai-for-agriculture-2026"
+    context_sample = artifacts_dir / slug / "context" / "sample_submission.csv"
+    data_sample = artifacts_dir / slug / "data" / "sample_submission.csv"
+    context_sample.parent.mkdir(parents=True, exist_ok=True)
+    data_sample.parent.mkdir(parents=True, exist_ok=True)
+
+    context_content = "Id,Category\nval_1.tif,Healthy\n"
+    context_sample.write_text(context_content, encoding="utf-8")
+
+    row = "val_1.tif,Healthy\n"
+    repeat = (agent_pipeline._MAX_GUARD_FILE_BYTES // len(row)) + 1_000
+    oversized_content = "Id,Category\n" + (row * repeat)
+    data_sample.write_text(oversized_content, encoding="utf-8")
+    assert data_sample.stat().st_size > agent_pipeline._MAX_GUARD_FILE_BYTES
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    sample_rel = data_sample.relative_to(repo_root).as_posix()
+    assert sample_rel in guard_snapshot.oversized
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    data_sample.write_text("Id,Category\nval_1.tif,Rust\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert data_sample.read_text(encoding="utf-8") == context_content
+
+
 def test_guard_ignores_kagglebot_cache_churn(tmp_path: Path) -> None:
     repo_root = tmp_path
     artifacts_dir = repo_root / "artifacts"
@@ -195,3 +308,76 @@ def test_guard_ignores_generated_kernel_staging_tree(tmp_path: Path) -> None:
     )
 
     assert staged_kernel.read_text(encoding="utf-8") == "print('changed')\n"
+
+
+def test_guard_ignores_venv_churn_and_restores_uv_lock(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    uv_lock = repo_root / "uv.lock"
+    uv_lock_original = "lock-version = 1\n"
+    uv_lock.write_text(uv_lock_original, encoding="utf-8")
+
+    venv_entrypoint = repo_root / ".venv" / "bin" / "kagglebot"
+    venv_entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    venv_entrypoint.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    uv_lock.write_text("lock-version = 999\n", encoding="utf-8")
+    venv_entrypoint.write_text("# changed\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert uv_lock.read_text(encoding="utf-8") == uv_lock_original
+    assert venv_entrypoint.read_text(encoding="utf-8") == "# changed\n"
+
+
+def test_guard_allows_explicit_dependency_file_edits(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    pyproject_path = repo_root / "pyproject.toml"
+    uv_lock_path = repo_root / "uv.lock"
+    pyproject_path.write_text("[project]\nname='demo'\n", encoding="utf-8")
+    uv_lock_path.write_text("lock-version = 1\n", encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel, pyproject_path, uv_lock_path]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    pyproject_path.write_text("[project]\nname='demo'\ndependencies=['albumentations']\n", encoding="utf-8")
+    uv_lock_path.write_text("lock-version = 2\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert "albumentations" in pyproject_path.read_text(encoding="utf-8")
+    assert uv_lock_path.read_text(encoding="utf-8") == "lock-version = 2\n"

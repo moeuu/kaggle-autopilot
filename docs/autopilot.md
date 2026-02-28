@@ -57,6 +57,7 @@ Submission behavior:
 - `--max-iterations`: default runtime behavior is 3 unless overridden by CLI
 - `--internet`: default `on` for autopilot
 - Submission in autopilot is enabled by default
+- Data bootstrap checks existing competition files and skips re-download when local file count/size already matches
 - `--agent` and `--submit` are not part of autopilot CLI
 - Submission schema handling is flexible:
   - supports ID-based alignment when an ID column exists

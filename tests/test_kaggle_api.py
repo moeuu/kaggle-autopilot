@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kagglebot import kaggle_api
 from kagglebot.exceptions import KaggleCliError, RulesNotAcceptedError
 
@@ -175,6 +177,33 @@ def test_list_competition_files_with_sizes_retries_retryable_errors(monkeypatch)
     assert counter["n"] == 3
 
 
+def test_download_min_interval_sec_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC", "1.5")
+    assert kaggle_api._download_min_interval_sec() == 1.5
+
+
+def test_download_rate_limit_attempts_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS", "3")
+    assert kaggle_api._download_rate_limit_attempts() == 3
+
+
+def test_apply_download_pacing_sleeps_until_interval(monkeypatch) -> None:
+    ticks = iter([10.2, 10.5])
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(kaggle_api.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(kaggle_api.time, "sleep", lambda sec: sleeps.append(sec))
+
+    started_at = kaggle_api._apply_download_pacing(
+        min_interval_sec=0.5,
+        last_request_started_at=10.0,
+    )
+
+    assert len(sleeps) == 1
+    assert abs(sleeps[0] - 0.3) < 1e-6
+    assert started_at == 10.5
+
+
 def test_download_competition_uses_single_shot_for_small_data(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         kaggle_api,
@@ -196,6 +225,39 @@ def test_download_competition_uses_single_shot_for_small_data(monkeypatch, tmp_p
     assert len(captured) == 1
     assert "-f" not in captured[0]
     assert captured[0][:3] == ["kaggle", "competitions", "download"]
+
+
+def test_download_competition_skips_when_all_files_already_present(monkeypatch, tmp_path) -> None:
+    files = [
+        kaggle_api._CompetitionFile(name="a.csv", size_bytes=3),
+        kaggle_api._CompetitionFile(name="b.csv", size_bytes=4),
+    ]
+    monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", lambda slug, dry_run: files)  # noqa: ARG005
+    monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 10_000)
+
+    (tmp_path / "a.csv").write_bytes(b"abc")
+    (tmp_path / "b.csv").write_bytes(b"defg")
+
+    seen: list[list[str]] = []
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        seen.append(args)
+        return "should-not-run"
+
+    progress: list[tuple[int, int, str | None]] = []
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    output = kaggle_api.download_competition(
+        "demo",
+        tmp_path,
+        force=True,
+        quiet=True,
+        progress_callback=lambda done, total, file_name: progress.append((done, total, file_name)),
+    )
+
+    assert output == ""
+    assert seen == []
+    assert progress == [(2, 2, None)]
 
 
 def test_download_competition_splits_and_retries_large_data(monkeypatch, tmp_path) -> None:
@@ -321,6 +383,18 @@ def test_download_competition_split_skips_existing_basename_match(monkeypatch, t
     assert seen == []
 
 
+def test_count_downloaded_files_uses_size_to_disambiguate_duplicate_basenames(tmp_path) -> None:
+    files = [
+        kaggle_api._CompetitionFile(name="deprecated_train_images/1407735.tif", size_bytes=26641798),
+        kaggle_api._CompetitionFile(name="train_images/1407735.tif", size_bytes=1059109),
+    ]
+    (tmp_path / "1407735.tif").write_bytes(b"x" * 26641798)
+
+    completed = kaggle_api._count_downloaded_competition_files(tmp_path, files)
+
+    assert completed == 1
+
+
 def test_download_competition_split_unbounded_retry(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         kaggle_api,
@@ -346,7 +420,7 @@ def test_download_competition_split_unbounded_retry(monkeypatch, tmp_path) -> No
     assert counter["n"] == 4
 
 
-def test_download_competition_split_falls_back_to_single_shot_on_rate_limit(monkeypatch, tmp_path) -> None:
+def test_download_competition_split_retries_rate_limit_without_single_shot_fallback(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -357,22 +431,50 @@ def test_download_competition_split_falls_back_to_single_shot_on_rate_limit(monk
     )
     monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 1)
     monkeypatch.setattr(kaggle_api, "_download_attempts", lambda: 2)
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_attempts", lambda: None)
     monkeypatch.setattr(kaggle_api, "_download_retry_backoff_sec", lambda: 0.0)
 
     seen: list[list[str]] = []
+    attempts = {"a": 0}
 
     def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
         seen.append(args)
-        if "-f" in args:
-            raise KaggleCliError("transient", args, exit_code=1, output="429 Too Many Requests")
-        return "single-shot-ok"
+        assert "-f" in args
+        file_name = args[args.index("-f") + 1]
+        if file_name == "a.csv":
+            attempts["a"] += 1
+            if attempts["a"] < 3:
+                raise KaggleCliError("transient", args, exit_code=1, output="429 Too Many Requests")
+        return f"ok-{file_name}"
 
     monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
     output = kaggle_api.download_competition("demo", tmp_path, force=True, quiet=True)
 
-    assert output == "single-shot-ok"
-    assert len(seen) == 2
-    assert seen[0][:3] == ["kaggle", "competitions", "download"]
-    assert "-f" in seen[0]
-    assert seen[1][:3] == ["kaggle", "competitions", "download"]
-    assert "-f" not in seen[1]
+    assert "ok-a.csv" in output
+    assert "ok-b.csv" in output
+    assert len(seen) == 4
+    assert all("-f" in args for args in seen)
+
+
+def test_download_competition_split_stops_after_rate_limit_retry_budget(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        kaggle_api,
+        "_list_competition_files_with_sizes",
+        lambda slug, dry_run: [kaggle_api._CompetitionFile(name="a.csv", size_bytes=70)],  # noqa: ARG005
+    )
+    monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 1)
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_attempts", lambda: 2)
+    monkeypatch.setattr(kaggle_api, "_download_retry_backoff_sec", lambda: 0.0)
+
+    counter = {"n": 0}
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        counter["n"] += 1
+        raise KaggleCliError("transient", args, exit_code=1, output="429 Too Many Requests")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    with pytest.raises(KaggleCliError):
+        kaggle_api.download_competition("demo", tmp_path, force=True, quiet=True)
+
+    assert counter["n"] == 2

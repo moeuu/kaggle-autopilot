@@ -492,6 +492,82 @@ def test_inject_column_fill_shim(tmp_path: Path) -> None:
     assert (kernel_dir / "column_fill.json").exists()
 
 
+def test_prepare_zero_overlap_drift_guard_detects_high_risk_zero_overlap_feature(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.csv").write_text(
+        "\n".join(
+            [
+                "id,risk_cat,safe_cat,target",
+                "A,x,same,1",
+                "B,x,same,1",
+                "C,x,same,1",
+                "D,y,same,0",
+                "E,y,same,0",
+                "F,y,same,0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "test.csv").write_text(
+        "\n".join(
+            [
+                "id,risk_cat,safe_cat",
+                "T1,u,same",
+                "T2,u,same",
+                "T3,v,same",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "dataset_profile.json").write_text(
+        json.dumps({"target_column": "target", "id_column": "id"}, indent=2),
+        encoding="utf-8",
+    )
+
+    guard_path = kernel_runner._prepare_zero_overlap_drift_guard(
+        base_dir=tmp_path,
+        slug="demo",
+        context_dir=context_dir,
+    )
+
+    assert guard_path is not None and guard_path.exists()
+    payload = json.loads(guard_path.read_text(encoding="utf-8"))
+    assert payload["enabled"] is True
+    assert "risk_cat" in payload["drop_columns"]
+    assert "id" not in payload["drop_columns"]
+    assert payload["reason"] == "zero_overlap_high_drift_detected"
+
+
+def test_inject_zero_overlap_drift_shim(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"enabled": True, "drop_columns": ["risk_cat"]}
+    (context_dir / "zero_overlap_drift_guard.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    kernel_runner._inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+    kernel_runner._inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+
+    site_path = kernel_dir / "sitecustomize.py"
+    assert site_path.exists()
+    text = site_path.read_text(encoding="utf-8")
+    assert "zero-overlap-drift-shim" in text
+    assert text.count("zero-overlap-drift-shim") == 1
+    assert "zero_overlap_drift_guard.json" in text
+    assert (kernel_dir / "zero_overlap_drift_guard.json").exists()
+
+
 def test_inject_object_coerce_shim(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
@@ -785,6 +861,195 @@ def test_run_kernel_local_executes_staged_copy(tmp_path: Path) -> None:
     assert json.loads(staged_plan_parent.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
 
 
+def test_run_kernel_local_enforces_bvs_contract_rejects_regressed_kernel(tmp_path: Path) -> None:
+    slug = "beyond-visible-spectrum-ai-for-agriculture-2026p2"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "from pathlib import Path",
+                "",
+                "print('tri_branch_convnext_spectral cfg: load_size=64 crop_size=64')",
+                "Path('submission.csv').write_text('Id,Category\\nval_1.tif,Health\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text(",
+                "    json.dumps({",
+                "        'model_name': 'resnet50',",
+                "        'chosen_pipeline': 'tri_branch_convnext_spectral',",
+                "        'pipelines': [",
+                "            {'name': 'tri_branch_convnext_spectral', 'score': 0.68},",
+                "        ],",
+                "    }),",
+                "    encoding='utf-8',",
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KernelFailedError, match="BVS kernel contract failed"):
+        run_kernel_local(
+            slug=slug,
+            run_id="run-bvs-reject",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="cv",
+            metric="accuracy",
+            direction="maximize",
+            holdout_frac=0.2,
+            cv_folds=5,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+
+def test_run_kernel_local_enforces_bvs_contract_allows_ensemble_kernel(tmp_path: Path) -> None:
+    slug = "beyond-visible-spectrum-ai-for-agriculture-2026p2"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "from pathlib import Path",
+                "",
+                "print('tri_branch_timm_gated cfg: load_size=224 crop_size=64')",
+                "Path('submission.csv').write_text('Id,Category\\nval_1.tif,Health\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text(",
+                "    json.dumps({",
+                "        'model_name': 'convnext_tiny',",
+                "        'chosen_pipeline': 'ensemble_tri_branch__tabular',",
+                "        'pipelines': [",
+                "            {'name': 'tri_branch_timm_gated', 'score': 0.70},",
+                "            {'name': 'tabular_fallback', 'score': 0.66},",
+                "            {'name': 'ensemble_tri_branch__tabular', 'score': 0.72},",
+                "        ],",
+                "    }),",
+                "    encoding='utf-8',",
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_kernel_local(
+        slug=slug,
+        run_id="run-bvs-allow",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="cv",
+        metric="accuracy",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.submission_path is not None and result.submission_path.exists()
+    assert result.metrics_path is not None and result.metrics_path.exists()
+
+
+def test_run_kernel_local_applies_zero_overlap_drift_drop_shim(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "from pathlib import Path",
+                "import pandas as pd",
+                "",
+                "data_root = Path(__file__).resolve().parents[3] / 'data'",
+                "train_df = pd.read_csv(data_root / 'train.csv')",
+                "test_df = pd.read_csv(data_root / 'test.csv')",
+                "dropped = float('risk_cat' not in train_df.columns and 'risk_cat' not in test_df.columns)",
+                "Path('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text(",
+                "    json.dumps({'metric': 'auc', 'offline_value': dropped}),",
+                "    encoding='utf-8',",
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.csv").write_text(
+        "\n".join(
+            [
+                "id,risk_cat,target",
+                "A,x,1",
+                "B,x,1",
+                "C,x,1",
+                "D,y,0",
+                "E,y,0",
+                "F,y,0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "test.csv").write_text(
+        "\n".join(
+            [
+                "id,risk_cat",
+                "T1,u",
+                "T2,u",
+                "T3,v",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "sample_submission.csv").write_text("id,target\n1,0.0\n2,0.0\n3,0.0\n", encoding="utf-8")
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "dataset_profile.json").write_text(
+        json.dumps({"target_column": "target", "id_column": "id"}, indent=2),
+        encoding="utf-8",
+    )
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-zod",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.metrics_path is not None
+    metrics_payload = json.loads(result.metrics_path.read_text(encoding="utf-8"))
+    assert metrics_payload.get("offline_value") == 1.0
+    staged_sitecustomize = tmp_path / "demo" / "kernels" / "run-zod" / "local-iter-1" / "sitecustomize.py"
+    assert staged_sitecustomize.exists()
+    assert "zero-overlap-drift-shim" in staged_sitecustomize.read_text(encoding="utf-8")
+
+
 def test_run_kernel_local_copies_optional_oof_artifacts(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -977,6 +1242,52 @@ def test_run_kernel_local_mirrors_context_sample_submission(tmp_path: Path) -> N
     mirrored = tmp_path / "demo" / "data" / "sample_submission.csv"
     assert mirrored.exists()
     assert mirrored.read_text(encoding="utf-8") == "id,target\n1,0.0\n"
+    assert result.submission_path is not None and result.submission_path.exists()
+    assert result.metrics_path is not None and result.metrics_path.exists()
+
+
+def test_run_kernel_local_mirrors_context_dataset_profile(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "Path('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "sample_submission.csv").write_text("id,target\n1,0.0\n", encoding="utf-8")
+    profile_payload = {"modality": "tabular", "task": "regression", "target_column": "target"}
+    (context_dir / "dataset_profile.json").write_text(json.dumps(profile_payload), encoding="utf-8")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-6-profile",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    staged_profile = tmp_path / "demo" / "kernels" / "run-6-profile" / "context" / "dataset_profile.json"
+    assert staged_profile.exists()
+    assert json.loads(staged_profile.read_text(encoding="utf-8")) == profile_payload
     assert result.submission_path is not None and result.submission_path.exists()
     assert result.metrics_path is not None and result.metrics_path.exists()
 

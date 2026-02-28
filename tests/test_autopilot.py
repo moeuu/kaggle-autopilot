@@ -25,6 +25,7 @@ from kagglebot.autopilot import (
     _resolve_submission_rank_payload,
     _resume_iteration_state,
     _run_autofix,
+    _run_kernel_fix,
     _should_attempt_submit_for_readiness,
     _should_skip_planning,
     _submission_message,
@@ -518,6 +519,80 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
             max_iterations=3,
             submission_limit_per_day=3,
             successful_submissions=2,
+            top1_score=0.80,
+        )
+        is True
+    )
+
+
+def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions() -> None:
+    # Daily cap 5 with 10 iterations -> reserve 1 slot for final, spread 4 non-final checkpoints.
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="always",
+            readiness_score=0.20,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=1,
+            max_iterations=10,
+            submission_limit_per_day=5,
+            successful_submissions=0,
+            top1_score=0.80,
+        )
+        is False
+    )
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="always",
+            readiness_score=0.20,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=2,
+            max_iterations=10,
+            submission_limit_per_day=5,
+            successful_submissions=0,
+            top1_score=0.80,
+        )
+        is True
+    )
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="always",
+            readiness_score=0.20,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=3,
+            max_iterations=10,
+            submission_limit_per_day=5,
+            successful_submissions=1,
+            top1_score=0.80,
+        )
+        is False
+    )
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="always",
+            readiness_score=0.20,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=4,
+            max_iterations=10,
+            submission_limit_per_day=5,
+            successful_submissions=1,
+            top1_score=0.80,
+        )
+        is True
+    )
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="always",
+            readiness_score=0.20,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=10,
+            max_iterations=10,
+            submission_limit_per_day=5,
+            successful_submissions=4,
             top1_score=0.80,
         )
         is True
@@ -2277,7 +2352,19 @@ def test_error_strategy_skip_reason_detects_deterministic_failures() -> None:
     assert "metric mismatch" in reason_metric
 
 
-def test_run_autofix_submit_error_skips_strategy_for_internet_policy(monkeypatch, tmp_path: Path) -> None:
+def test_error_strategy_skip_reason_detects_metric_mismatch_for_submit_autofix() -> None:
+    reason = _error_strategy_skip_reason(
+        stage="submit_autofix",
+        error_text=(
+            "RuntimeError: Competition metric mismatch persisted after metric-only repairs "
+            "(attempts=3, target=auc/maximize, kernel=accuracy/maximize)."
+        ),
+    )
+    assert reason is not None
+    assert "metric mismatch" in reason
+
+
+def test_run_autofix_submit_error_still_runs_strategy_for_internet_policy(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     run_id = config.run_id or "run-1"
     run_dir = config.paths.run_dir(run_id)
@@ -2330,8 +2417,103 @@ def test_run_autofix_submit_error_skips_strategy_for_internet_policy(monkeypatch
         error=SubmitAbortedError("Cannot submit: Your Notebook cannot use internet access in this competition."),
     )
 
-    assert calls["strategy"] == 0
+    assert calls["strategy"] == 1
     assert calls["codex"] == 1
+
+
+def test_run_autofix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    calls = {"codex": 0, "verify": 0}
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        calls["codex"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / f"codex_last_message-{calls['codex']}.txt"
+        last_msg.write_text(f"autofix pass {calls['codex']}\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    def flaky_verify(*args, **kwargs):  # noqa: ANN002, ARG001
+        calls["verify"] += 1
+        if calls["verify"] == 1:
+            raise RuntimeError("Verification failed: first pass")
+
+    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "1) fix root cause\n")
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", flaky_verify)
+    monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
+    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+
+    _run_autofix(
+        config=config,
+        run_id=run_id,
+        attempt=1,
+        error=RuntimeError("train crashed"),
+    )
+
+    assert calls["codex"] == 2
+    assert calls["verify"] == 2
+    retry_prompt = run_dir / "autofix" / "attempt-1" / "prompt-pass-02.md"
+    assert retry_prompt.exists()
+    assert "Retry Feedback (pass 1)" in retry_prompt.read_text(encoding="utf-8")
+
+
+def test_run_kernel_fix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    iter_dir = config.paths.iter_dir(run_id, 1)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    calls = {"codex": 0, "verify": 0}
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        calls["codex"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / f"kernel_fix_last_message-{calls['codex']}.txt"
+        last_msg.write_text(f"kernel fix pass {calls['codex']}\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    def flaky_verify(*args, **kwargs):  # noqa: ANN002, ARG001
+        calls["verify"] += 1
+        if calls["verify"] == 1:
+            raise RuntimeError("Verification failed: first kernel-fix pass")
+
+    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", flaky_verify)
+    monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: ["src/kagglebot/autopilot.py"])
+    monkeypatch.setattr("kagglebot.autopilot._enforce_allowlist_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+
+    _run_kernel_fix(
+        config=config,
+        run_id=run_id,
+        iteration=1,
+        iter_dir=iter_dir,
+        error_message="RuntimeError: kernel failed",
+        attempt=1,
+        pending_error_fixes=[],
+    )
+
+    assert calls["codex"] == 2
+    assert calls["verify"] == 2
+    retry_prompt = iter_dir / "agent" / "kernel_fix_prompt-01-pass-02.md"
+    assert retry_prompt.exists()
+    assert "Retry Feedback (pass 1)" in retry_prompt.read_text(encoding="utf-8")
 
 
 def test_extract_kernel_metric_from_oof_dict() -> None:
@@ -2590,6 +2772,37 @@ def test_kernel_quality_guard_blocks_oracle_or_untrusted_score_source() -> None:
     assert isinstance(reasons, list)
     assert "untrusted_score_source" in reasons
     assert "oracle_override_detected" in reasons
+
+
+def test_kernel_quality_guard_blocks_when_below_code_reference_baseline() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.62,
+        std=0.01,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.60, 0.64],
+    )
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload={},
+        logs_dir=None,
+        direction="maximize",
+        iteration=3,
+        max_iterations=3,
+        force_submit=False,
+        code_reference_score=0.741,
+        code_reference_source="code_index:alice/ref-kernel",
+    )
+    assert guard["allow_submit"] is False
+    reasons = guard.get("reasons")
+    assert isinstance(reasons, list)
+    assert "below_code_reference_baseline" in reasons
+    code_ref = guard.get("code_reference")
+    assert isinstance(code_ref, dict)
+    assert code_ref.get("below_reference") is True
 
 
 def test_autopilot_missing_kernel_metric_triggers_kernel_fix(monkeypatch, tmp_path: Path) -> None:
@@ -3629,6 +3842,211 @@ def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path:
     assert len(pending_problem_insights) == 1
 
 
+def test_extract_code_reference_score_prefers_required_index_entry(tmp_path: Path) -> None:
+    from kagglebot.autopilot import _extract_code_reference_score
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [
+                    {"kernel_id": "alice/other-kernel", "score": 0.701},
+                    {"kernel_id": "alice/ref-kernel", "score": 0.741},
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.code_md_path.write_text("fallback should not be used\n", encoding="utf-8")
+
+    score, source = _extract_code_reference_score(paths)
+    assert score == pytest.approx(0.741)
+    assert source == "code_index:alice/ref-kernel"
+
+
+def test_run_improvement_appends_code_reference_gate_when_underperforming(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _run_improvement
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    config = _make_config(tmp_path, max_iterations=2)
+    run_id = config.run_id or "run-1"
+    iteration = 1
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    kernel_path = config.paths.kernel_source_dir / "kernel.py"
+
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.code_md_path.write_text(
+        (
+            "# Code Notebook Snapshot\n\n"
+            "## Required Reference Notebook (Execution baseline)\n"
+            "- title: [Stock Pledge 2026] 0.741 FE + TabICL KFold\n"
+        ),
+        encoding="utf-8",
+    )
+    config.paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [
+                    {"kernel_id": "alice/ref-kernel", "score": 0.741, "title": "ref"},
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        kernel_path.write_text(
+            "\n".join(
+                [
+                    "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED: alice/ref-kernel",
+                    "import tabicl",
+                    "print('ok')",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        last_msg = output_dir / "codex_last_message.txt"
+        last_msg.write_text("improved features\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
+
+    pending_problem_insights: list[dict[str, object]] = []
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.62,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+    _run_improvement(
+        config=config,
+        run_id=run_id,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        evaluation=evaluation,
+        top1_info={"score": 0.78, "source": "leaderboard"},
+        target_score=0.78,
+        delta_offline=-0.02,
+        pending_problem_insights=pending_problem_insights,
+    )
+
+    prompt_text = (iter_dir / "agent" / "prompt.md").read_text(encoding="utf-8")
+    assert "## Code Reference Gate" in prompt_text
+    assert str(config.paths.code_md_path) in prompt_text
+    assert str(config.paths.code_notebooks_index_path) in prompt_text
+    assert "underperforming_code_reference" in prompt_text
+    assert "Required Reference Notebook (Execution baseline)" in prompt_text
+
+
+def test_run_improvement_retries_when_code_reference_impl_is_missing(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _run_improvement
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    config = _make_config(tmp_path, max_iterations=2)
+    run_id = config.run_id or "run-1"
+    iteration = 1
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    kernel_path = config.paths.kernel_source_dir / "kernel.py"
+
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [
+                    {
+                        "kernel_id": "alice/ref-kernel",
+                        "title": "TabICL reference",
+                        "summary": "TabICL baseline notebook",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    codex_calls = {"count": 0}
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        codex_calls["count"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if codex_calls["count"] == 2:
+            kernel_path.write_text(
+                "\n".join(
+                    [
+                        "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED: alice/ref-kernel",
+                        "import tabicl",
+                        "print('reference path implemented')",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        last_msg = output_dir / f"codex_last_message_{codex_calls['count']}.txt"
+        last_msg.write_text("improved\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
+
+    pending_problem_insights: list[dict[str, object]] = []
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.70,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+    _run_improvement(
+        config=config,
+        run_id=run_id,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        evaluation=evaluation,
+        top1_info={"score": 0.78, "source": "leaderboard"},
+        target_score=0.78,
+        delta_offline=-0.01,
+        pending_problem_insights=pending_problem_insights,
+        enforce_code_reference_implementation=True,
+        code_reference_enforcement_reason="initial run under /code baseline",
+    )
+
+    assert codex_calls["count"] == 2
+    kernel_text = kernel_path.read_text(encoding="utf-8")
+    assert "KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED: alice/ref-kernel" in kernel_text
+    assert "tabicl" in kernel_text.lower()
+
+
 def test_autopilot_runs_agent_pipeline(monkeypatch, tmp_path: Path) -> None:
     called = {"run": False}
 
@@ -4123,6 +4541,147 @@ def test_autopilot_forces_major_overhaul_after_noise_limited_streak(monkeypatch,
     assert forced_modes[2][2] and "noise-limited" in forced_modes[2][2]
 
 
+def test_autopilot_skips_no_improve_major_override_when_best_is_outlier(monkeypatch, tmp_path: Path) -> None:
+    forced_modes: list[tuple[int, str | None, str | None]] = []
+
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="AUC-ROC",
+        target_score=0.78,
+        target_direction="maximize",
+        score_source="cv",
+    )
+
+    def _iter_from_output(path: Path) -> int:
+        for parent in [path.parent, *path.parents]:
+            name = parent.name
+            if name.startswith("iter-"):
+                return int(name.split("-", 1)[1])
+        return 1
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.90\n2,0.10\n", encoding="utf-8")
+        iteration = _iter_from_output(output_path)
+        value = 0.799651 if iteration == 1 else 0.799700
+        evaluation = EvaluationResult(
+            score_source="cv",
+            metric="AUC-ROC",
+            direction="maximize",
+            value=value,
+            std=0.0020,
+            train_score=None,
+            val_score=value,
+            fold_scores=[value - 0.0010, value, value + 0.0010],
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="catboost",
+            model_summary={},
+            accelerator="cuda",
+        )
+
+    def fake_improvement(**kwargs):
+        forced_modes.append(
+            (
+                int(kwargs["iteration"]),
+                kwargs.get("forced_improvement_mode"),
+                kwargs.get("forced_improvement_reason"),
+            )
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
+    monkeypatch.setattr(
+        "kagglebot.autopilot._resume_iteration_state",
+        lambda **kwargs: (1, 0.999511, None),  # stale outlier best
+    )
+
+    config = _make_config(tmp_path, submit=False, max_iterations=2)
+    run_autopilot(config)
+
+    assert len(forced_modes) == 1
+    assert forced_modes[0][1] is None
+
+    metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["best_score_guard"]["applied"] is True
+    assert metrics["best_score_guard"]["prev_best"] == pytest.approx(0.999511)
+
+
+def test_autopilot_forces_major_overhaul_when_below_code_reference(monkeypatch, tmp_path: Path) -> None:
+    forced_modes: list[tuple[int, str | None, str | None, bool]] = []
+
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="AUC-ROC",
+        target_score=0.78,
+        target_direction="maximize",
+        score_source="cv",
+    )
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [{"kernel_id": "alice/ref-kernel", "score": 0.741}],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.9\n2,0.1\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="cv",
+            metric="AUC-ROC",
+            direction="maximize",
+            value=0.62,
+            std=0.002,
+            train_score=None,
+            val_score=0.62,
+            fold_scores=[0.61, 0.63],
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="catboost",
+            model_summary={},
+            accelerator="cuda",
+        )
+
+    def fake_improvement(**kwargs):
+        forced_modes.append(
+            (
+                int(kwargs["iteration"]),
+                kwargs.get("forced_improvement_mode"),
+                kwargs.get("forced_improvement_reason"),
+                bool(kwargs.get("enforce_code_reference_implementation")),
+            )
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
+
+    config = _make_config(tmp_path, submit=False, max_iterations=2)
+    run_autopilot(config)
+
+    assert len(forced_modes) == 1
+    assert forced_modes[0][1] == "major_overhaul"
+    assert forced_modes[0][2] and "code reference baseline" in forced_modes[0][2]
+    assert forced_modes[0][3] is True
+
+
 def test_autopilot_forces_major_overhaul_when_submission_rank_is_poor(monkeypatch, tmp_path: Path) -> None:
     forced_modes: list[tuple[int, str | None, str | None]] = []
 
@@ -4205,6 +4764,66 @@ def test_autopilot_forces_major_overhaul_when_submission_rank_is_poor(monkeypatc
     assert len(forced_modes) == 1
     assert forced_modes[0][1] == "major_overhaul"
     assert forced_modes[0][2] and "1300/2700" in forced_modes[0][2]
+
+
+def test_autopilot_skips_no_improve_major_override_when_best_anchor_is_outlier(monkeypatch, tmp_path: Path) -> None:
+    forced_modes: list[tuple[int, str | None, str | None]] = []
+
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="auc",
+        target_score=0.78,
+        target_direction="maximize",
+        score_source="cv",
+    )
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.9\n2,0.1\n", encoding="utf-8")
+        evaluation = EvaluationResult(
+            score_source="cv",
+            metric="auc",
+            direction="maximize",
+            value=0.799651,
+            std=0.0015,
+            train_score=None,
+            val_score=0.799651,
+            fold_scores=[0.7981, 0.7991, 0.7997, 0.8002, 0.8011],
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="catboost",
+            model_summary={},
+            accelerator="cuda",
+        )
+
+    def fake_improvement(**kwargs):
+        forced_modes.append(
+            (
+                int(kwargs["iteration"]),
+                kwargs.get("forced_improvement_mode"),
+                kwargs.get("forced_improvement_reason"),
+            )
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
+    monkeypatch.setattr(
+        "kagglebot.autopilot._resume_iteration_state",
+        lambda **kwargs: (1, 0.999511, None),  # noqa: ARG005
+    )
+
+    config = _make_config(tmp_path, submit=False, max_iterations=2)
+    run_autopilot(config)
+
+    assert len(forced_modes) == 1
+    assert forced_modes[0][1] is None
+    metrics = json.loads((config.paths.iter_dir("run-1", 1) / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["best_score_guard"]["applied"] is True
 
 
 def test_autopilot_evaluation_report_uses_multiseed_defaults(monkeypatch, tmp_path: Path) -> None:
@@ -4699,6 +5318,8 @@ def test_autofix_allows_src_edits(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     allowed_prefixes = _autofix_allowed_prefixes(config)
     assert config.paths.repo_root / "src" in allowed_prefixes
+    assert config.paths.repo_root / "pyproject.toml" in allowed_prefixes
+    assert config.paths.repo_root / "uv.lock" in allowed_prefixes
     module_src_root = Path(autopilot_mod.__file__).resolve().parents[1]
     if module_src_root.name == "src":
         assert module_src_root in allowed_prefixes

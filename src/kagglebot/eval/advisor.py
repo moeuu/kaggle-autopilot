@@ -484,7 +484,10 @@ def _supports_live_search() -> bool:
         return False
     if result.returncode != 0:
         return False
-    return "--search" in result.output
+    # Older codex CLIs exposed explicit "--search"; newer CLIs can still perform
+    # web-backed runs without that flag. If codex exec is available, allow the
+    # advisor path and let runtime execution decide exact capabilities.
+    return True
 
 
 def _parse_json_response(text: str) -> dict[str, object] | None:

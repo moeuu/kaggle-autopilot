@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,8 @@ from kagglebot.submission_format import (
 )
 
 _PLACEHOLDER_SAMPLE_MAX_ROWS = 10
+_BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
+_FILENAME_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?P<ext>[A-Za-z0-9]{2,8})\b")
 
 
 def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path | None = None) -> None:
@@ -83,14 +86,16 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
     expected_id_values: set[str] | None = None
     placeholder_sample = False
 
+    data_dir_path = Path(data_dir) if data_dir is not None else None
+
     if (
-        data_dir is not None
+        data_dir_path is not None
         and sample_has_data_rows
         and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
         and (id_col in sample.columns)
         and (not sample[id_col].duplicated().any())
     ):
-        test_ids = _maybe_load_test_ids(Path(data_dir), id_col=id_col)
+        test_ids = _maybe_load_test_ids(data_dir_path, id_col=id_col)
         if test_ids is not None:
             sample_ids = sample[id_col].astype(str).tolist()
             if len(test_ids) >= max(len(sample_ids) * 3, len(sample_ids) + 10) and (
@@ -111,6 +116,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
             problems.append(f"id column missing in submission: '{id_col}'")
     else:
         id_values = submission[id_col]
+        sub_ids = [str(value).strip() for value in id_values.tolist()]
         if id_values.isna().any():
             nan_count = int(id_values.isna().sum())
             problems.append(f"id column '{id_col}' contains NaN values: {nan_count}")
@@ -126,7 +132,6 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                 problems.append(f"id column '{id_col}' contains duplicate values: {dup_count}")
 
         if placeholder_sample and expected_id_values is not None:
-            sub_ids = [str(value) for value in id_values.tolist()]
             if set(sub_ids) != expected_id_values:
                 missing = sorted(expected_id_values - set(sub_ids))[:5]
                 extra = sorted(set(sub_ids) - expected_id_values)[:5]
@@ -134,6 +139,19 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                     "id values mismatch (placeholder sample detected; validated against test ids):\n"
                     f"  missing (first 5): {missing}\n"
                     f"  extra (first 5):   {extra}"
+                )
+        required_id_suffix = infer_required_id_suffix(
+            sample_csv=sample_csv,
+            data_dir=data_dir_path,
+            submission_ids=sub_ids,
+        )
+        if required_id_suffix:
+            suffix_mismatches = [sid for sid in sub_ids if sid and Path(sid).suffix.lower() != required_id_suffix]
+            if suffix_mismatches:
+                preview = suffix_mismatches[:5]
+                problems.append(
+                    f"id values appear to require '{required_id_suffix}' suffix based on context/data files "
+                    f"(first 5 mismatches: {preview})"
                 )
 
     prediction_columns = [col for col in expected_columns if col != id_col]
@@ -195,6 +213,83 @@ def _maybe_load_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
     return [str(value) for value in test[id_col].tolist()]
 
 
+def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submission_ids: list[str]) -> str | None:
+    """Infer a required id-file suffix (e.g., '.tif') when evidence is strong."""
+    if data_dir is None or not data_dir.exists():
+        return None
+    ids_without_suffix = {
+        value for value in (str(raw).strip() for raw in submission_ids) if value and not Path(value).suffix
+    }
+    if not ids_without_suffix:
+        return None
+
+    suffix_counts: dict[str, int] = {}
+    for path in data_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        stem = path.stem
+        if stem not in ids_without_suffix:
+            continue
+        suffix = path.suffix.lower()
+        if not suffix:
+            continue
+        suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
+
+    if not suffix_counts:
+        return None
+
+    required_matches = len(ids_without_suffix)
+    full_coverage = sorted(suffix for suffix, count in suffix_counts.items() if count >= required_matches)
+    if not full_coverage:
+        return None
+
+    preferred = _preferred_id_suffix_from_context(sample_csv)
+    if preferred and preferred in full_coverage:
+        return preferred
+    if len(full_coverage) == 1:
+        return full_coverage[0]
+    return None
+
+
+def _preferred_id_suffix_from_context(sample_csv: Path) -> str | None:
+    counts: dict[str, int] = {}
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "overview.md", "data.md", "rules.md", "discussion.md"):
+            path = context_dir / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            section = extract_submission_section(text) or ""
+            if not section.strip():
+                continue
+            for suffix in _extract_suffix_tokens(section):
+                counts[suffix] = counts.get(suffix, 0) + 1
+    if not counts:
+        return None
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ranked[0][0]
+
+
+def _extract_suffix_tokens(section: str) -> list[str]:
+    suffixes: list[str] = []
+    for token in _BACKTICK_TOKEN_RE.findall(section):
+        suffix = Path(token.strip()).suffix.lower()
+        if _suffix_looks_plausible(suffix):
+            suffixes.append(suffix)
+    for match in _FILENAME_TOKEN_RE.finditer(section):
+        suffix = f".{match.group('ext').lower()}"
+        if _suffix_looks_plausible(suffix):
+            suffixes.append(suffix)
+    return suffixes
+
+
+def _suffix_looks_plausible(suffix: str) -> bool:
+    if not suffix.startswith("."):
+        return False
+    ext = suffix[1:]
+    return 2 <= len(ext) <= 8 and ext.isalnum()
+
+
 def _format_validation_message(problems: list[str]) -> str:
     lines = ["Submission validation failed:", *[f"- {problem}" for problem in problems]]
     return "\n".join(lines)
@@ -233,7 +328,17 @@ def _sample_header_looks_placeholder(columns: list[str]) -> bool:
     if len(normalized) != 2:
         return False
     id_like = normalized[0] in {"id", "row_id", "identifier"}
-    target_like = normalized[1] in {"target", "label", "y", "value"}
+    target_like = normalized[1] in {
+        "target",
+        "label",
+        "y",
+        "value",
+        "prediction",
+        "pred",
+        "category",
+        "class",
+        "classes",
+    }
     return bool(id_like and target_like)
 
 
@@ -293,16 +398,17 @@ def _resolve_expected_columns_from_context(sample_csv: Path) -> list[str] | None
         format_hint = load_submission_format_hint(context_dir / "submission_format.md")
         if format_hint is not None and format_hint.columns:
             return list(format_hint.columns)
-        overview_path = context_dir / "overview.md"
-        if not overview_path.exists():
-            continue
-        text = overview_path.read_text(encoding="utf-8", errors="ignore")
-        section = extract_submission_section(text) or ""
-        if not section.strip():
-            continue
-        overview_hint = parse_submission_format(section)
-        if overview_hint.columns and columns_look_plausible(list(overview_hint.columns)):
-            return list(overview_hint.columns)
+        for name in ("overview.md", "data.md", "rules.md", "discussion.md"):
+            path = context_dir / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            section = extract_submission_section(text) or ""
+            if not section.strip():
+                continue
+            hint = parse_submission_format(section)
+            if hint.columns and columns_look_plausible(list(hint.columns)):
+                return list(hint.columns)
     return None
 
 

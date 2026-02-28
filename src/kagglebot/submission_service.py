@@ -11,7 +11,7 @@ from pathlib import Path
 from kagglebot.exceptions import SubmissionValidationError
 from kagglebot.history import SubmissionLedger
 from kagglebot.submission.guard import run_kaggle_submit
-from kagglebot.submission.validate import validate_submission
+from kagglebot.submission.validate import infer_required_id_suffix, validate_submission
 from kagglebot.submission_format import (
     SubmissionFormatHint,
     extract_submission_section,
@@ -26,6 +26,19 @@ _KAGGLE_SUBMISSION_COMPACT_FLOAT_FORMAT = "%.10g"
 _TABULAR_SUBMISSION_SUFFIXES = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
 _ZIP_SUBMISSION_SUFFIX = ".zip"
 _SAMPLE_STAGE_PATTERN = re.compile(r"(?:stage|phase|round)[_-]?(\d+)", re.IGNORECASE)
+_ID_LIKE_COLUMN_NAMES = {"id", "rowid", "row_id", "identifier"}
+_PREDICTION_LIKE_COLUMN_NAMES = {
+    "prediction",
+    "pred",
+    "target",
+    "label",
+    "category",
+    "class",
+    "value",
+    "y",
+    "result",
+    "output",
+}
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,7 @@ class SubmissionService:
                     "columns mismatch",
                     "row count mismatch",
                     "id column missing",
+                    "id values appear to require",
                     "missing a header row",
                     "header does not resemble",
                 )
@@ -228,16 +242,17 @@ class SubmissionService:
             format_hint = load_submission_format_hint(context_dir / "submission_format.md")
             if format_hint is not None and self._hint_has_any_signal(format_hint):
                 return format_hint
-            overview_path = context_dir / "overview.md"
-            if not overview_path.exists():
-                continue
-            overview_text = overview_path.read_text(encoding="utf-8", errors="ignore")
-            section = extract_submission_section(overview_text) or ""
-            if not section.strip():
-                continue
-            overview_hint = parse_submission_format(section)
-            if self._hint_has_any_signal(overview_hint):
-                return overview_hint
+            for name in ("overview.md", "data.md", "rules.md", "discussion.md"):
+                path = context_dir / name
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                section = extract_submission_section(text) or ""
+                if not section.strip():
+                    continue
+                hint = parse_submission_format(section)
+                if self._hint_has_any_signal(hint):
+                    return hint
         return None
 
     @staticmethod
@@ -541,6 +556,41 @@ class SubmissionService:
 
         expected_columns = list(expected.columns)
         sample_has_data_rows = self._has_data_rows(sample_path)
+        if not sample_has_data_rows:
+            format_hint = self._resolve_submission_format_hint()
+            if (
+                format_hint is not None
+                and format_hint.columns
+                and list(format_hint.columns) != expected_columns
+                and self._sample_columns_look_placeholder(expected_columns)
+            ):
+                expected_columns = list(format_hint.columns)
+
+        source_submission_path = submission_path
+        submission_delim = self._sniff_delimiter(source_submission_path, default=sample_delim)
+        columns_only_autofix = self._attempt_autofix_submission_columns_only(
+            expected_columns=expected_columns,
+            sample_delim=sample_delim,
+            submission_path=source_submission_path,
+            submission_delim=submission_delim,
+        )
+        if columns_only_autofix is not None:
+            source_submission_path = columns_only_autofix
+            submission_delim = sample_delim
+
+        id_suffix_autofix = self._attempt_autofix_submission_id_suffix(
+            sample_path=sample_path,
+            expected_columns=expected_columns,
+            sample_delim=sample_delim,
+            submission_path=source_submission_path,
+            submission_delim=submission_delim,
+        )
+        if id_suffix_autofix is not None:
+            source_submission_path = id_suffix_autofix
+            submission_delim = sample_delim
+
+        if not sample_has_data_rows:
+            return source_submission_path
 
         pred_cols = []
         for col in expected_columns[1:]:
@@ -550,9 +600,8 @@ class SubmissionService:
             pred_cols = expected_columns[1:]
         key_cols = [c for c in expected_columns if c not in pred_cols] or [expected_columns[0]]
 
-        submission_delim = self._sniff_delimiter(submission_path, default=sample_delim)
         header, col_index = self._sniff_header_and_column_index(
-            submission_path=submission_path, delim=submission_delim, expected_columns=expected_columns
+            submission_path=source_submission_path, delim=submission_delim, expected_columns=expected_columns
         )
         if col_index is None:
             return submission_path
@@ -566,7 +615,7 @@ class SubmissionService:
         sums: dict[tuple[str, ...], list[float]] = {}
         counts: dict[tuple[str, ...], int] = {}
         try:
-            with submission_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            with source_submission_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
                 reader = csv.reader(handle, delimiter=submission_delim)
                 first = True
                 for row in reader:
@@ -604,7 +653,6 @@ class SubmissionService:
             return submission_path
 
         if not sample_has_data_rows:
-            # Never synthesize a header-only autofixed file for submit.
             return submission_path
         prepared = self._expand_autofix_template_if_placeholder(
             sample=expected,
@@ -635,6 +683,195 @@ class SubmissionService:
         )
         prepared.to_csv(prepared_path, index=False, sep=sample_delim)
         return prepared_path
+
+    @classmethod
+    def _sample_columns_look_placeholder(cls, columns: list[str]) -> bool:
+        if len(columns) != 2:
+            return False
+        normalized = [cls._normalize_column_name(c) for c in columns]
+        id_like = normalized[0] in {cls._normalize_column_name(v) for v in _ID_LIKE_COLUMN_NAMES}
+        prediction_like = normalized[1] in {cls._normalize_column_name(v) for v in _PREDICTION_LIKE_COLUMN_NAMES} | {
+            "target",
+            "label",
+            "value",
+            "y",
+        }
+        return bool(id_like and prediction_like)
+
+    def _attempt_autofix_submission_columns_only(
+        self,
+        *,
+        expected_columns: list[str],
+        sample_delim: str,
+        submission_path: Path,
+        submission_delim: str,
+    ) -> Path | None:
+        """Try to rewrite the submission with expected columns/ordering.
+
+        This handles common failures where the submission is structurally correct but uses
+        different column names/casing (e.g., `Id,Category` vs `id,prediction`), including
+        header-only sample submissions.
+        """
+        if not expected_columns:
+            return None
+
+        try:
+            import pandas as pd
+        except Exception:
+            return None
+
+        try:
+            frame = pd.read_csv(submission_path, sep=submission_delim)
+        except Exception:
+            return None
+
+        actual_columns = list(frame.columns)
+        if len(actual_columns) != len(expected_columns):
+            return None
+
+        mapping = self._resolve_column_mapping(expected_columns=expected_columns, actual_columns=actual_columns)
+        if mapping is None:
+            return None
+
+        if expected_columns == actual_columns and all(mapping.get(col) == col for col in actual_columns):
+            return None
+
+        renamed = frame.rename(columns=mapping, errors="raise")
+        try:
+            renamed = renamed[expected_columns]
+        except Exception:
+            return None
+
+        prepared_path = submission_path.with_name(
+            f"{submission_path.stem}.autofixed{'.tsv' if sample_delim == chr(9) else '.csv'}"
+        )
+        try:
+            renamed.to_csv(prepared_path, index=False, sep=sample_delim)
+        except Exception:
+            return None
+        return prepared_path
+
+    def _attempt_autofix_submission_id_suffix(
+        self,
+        *,
+        sample_path: Path,
+        expected_columns: list[str],
+        sample_delim: str,
+        submission_path: Path,
+        submission_delim: str,
+    ) -> Path | None:
+        """Append a required filename suffix to id values when inferred confidently."""
+        if not expected_columns:
+            return None
+
+        try:
+            import pandas as pd
+        except Exception:
+            return None
+
+        try:
+            frame = pd.read_csv(submission_path, sep=submission_delim)
+        except Exception:
+            return None
+        if frame.empty:
+            return None
+
+        id_col = expected_columns[0]
+        if id_col not in frame.columns:
+            return None
+
+        raw_ids = [str(value).strip() for value in frame[id_col].tolist()]
+        required_suffix = infer_required_id_suffix(
+            sample_csv=sample_path,
+            data_dir=self._config.data_dir,
+            submission_ids=raw_ids,
+        )
+        if not required_suffix:
+            return None
+
+        rewritten = (
+            frame[id_col]
+            .astype(str)
+            .map(
+                lambda raw: (
+                    raw.strip() if (not raw.strip()) or Path(raw.strip()).suffix else f"{raw.strip()}{required_suffix}"
+                )
+            )
+        )
+        current = frame[id_col].astype(str).map(str.strip)
+        if rewritten.equals(current):
+            return None
+
+        frame[id_col] = rewritten
+        if all(col in frame.columns for col in expected_columns):
+            frame = frame[expected_columns]
+
+        prepared_path = submission_path.with_name(
+            f"{submission_path.stem}.autofixed{'.tsv' if sample_delim == chr(9) else '.csv'}"
+        )
+        try:
+            frame.to_csv(prepared_path, index=False, sep=sample_delim)
+        except Exception:
+            return None
+        return prepared_path
+
+    @staticmethod
+    def _normalize_column_name(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+    @classmethod
+    def _semantic_group_for_column(cls, normalized: str) -> str:
+        if normalized in {cls._normalize_column_name(v) for v in _ID_LIKE_COLUMN_NAMES}:
+            return "id"
+        if normalized in {cls._normalize_column_name(v) for v in _PREDICTION_LIKE_COLUMN_NAMES}:
+            return "prediction"
+        return normalized
+
+    @classmethod
+    def _resolve_column_mapping(
+        cls, *, expected_columns: list[str], actual_columns: list[str]
+    ) -> dict[str, str] | None:
+        expected_norm = [cls._normalize_column_name(c) for c in expected_columns]
+        actual_norm = [cls._normalize_column_name(c) for c in actual_columns]
+
+        # Fast-paths: exact or case/format-only differences.
+        if expected_columns == actual_columns:
+            return {c: c for c in actual_columns}
+        if expected_norm == actual_norm:
+            return {actual: expected for actual, expected in zip(actual_columns, expected_columns, strict=False)}
+
+        expected_groups = [cls._semantic_group_for_column(n) for n in expected_norm]
+        actual_groups = [cls._semantic_group_for_column(n) for n in actual_norm]
+
+        if len(expected_groups) != len(actual_groups):
+            return None
+
+        remaining_actual = set(range(len(actual_columns)))
+        mapping: dict[str, str] = {}
+
+        # 1) Prefer exact normalized matches.
+        for exp_idx, exp_norm in enumerate(expected_norm):
+            matches = [i for i in remaining_actual if actual_norm[i] == exp_norm]
+            if len(matches) == 1:
+                act_idx = matches[0]
+                remaining_actual.remove(act_idx)
+                mapping[actual_columns[act_idx]] = expected_columns[exp_idx]
+
+        # 2) Then match by semantic group (id/prediction), but only when unambiguous.
+        for exp_idx, exp_group in enumerate(expected_groups):
+            expected_name = expected_columns[exp_idx]
+            if expected_name in mapping.values():
+                continue
+            matches = [i for i in remaining_actual if actual_groups[i] == exp_group]
+            if len(matches) != 1:
+                return None
+            act_idx = matches[0]
+            remaining_actual.remove(act_idx)
+            mapping[actual_columns[act_idx]] = expected_name
+
+        if len(mapping) != len(expected_columns):
+            return None
+        return mapping
 
     def _expand_autofix_template_if_placeholder(
         self,

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from kagglebot.autopilot import (
+    _effective_best_score_for_progress,
     _infer_column_mapping,
     _is_top1_tier,
     _meets_target,
@@ -231,6 +232,30 @@ class TestRankDrivenMajorOverhaul:
         assert (
             _should_force_major_overhaul_by_rank(rank=50, total_teams=120, max_percentile=0.35, min_teams=200) is False
         )
+
+
+class TestBestScoreOutlierGuard:
+    def test_clips_implausible_previous_best_for_maximize_metric(self) -> None:
+        effective_best, guard = _effective_best_score_for_progress(
+            prev_best=0.999511,
+            current_score=0.799651,
+            top1_score=0.78,
+            direction="maximize",
+        )
+        assert effective_best is not None
+        assert effective_best < 0.999511
+        assert guard is not None
+        assert guard["reason"] == "clip_prev_best_above_top1_band"
+
+    def test_does_not_clip_when_current_score_is_still_in_outlier_band(self) -> None:
+        effective_best, guard = _effective_best_score_for_progress(
+            prev_best=0.999511,
+            current_score=0.98,
+            top1_score=0.78,
+            direction="maximize",
+        )
+        assert effective_best == 0.999511
+        assert guard is None
 
 
 def test_infer_column_mapping_handles_non_string_group_tokens() -> None:
