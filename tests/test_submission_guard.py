@@ -98,9 +98,12 @@ def test_validate_submission_reports_multiple_problems(tmp_path: Path) -> None:
 
 
 def test_validate_submission_uses_overview_hint_when_sample_is_header_only(tmp_path: Path) -> None:
-    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir = data_dir / "context"
+    cache_dir = data_dir / ".kagglebot_cache"
     context_dir.mkdir(parents=True, exist_ok=True)
-    sample = context_dir / "sample_submission.csv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sample = cache_dir / "sample_submission_synth.csv"
     sample.write_text("id,target\n", encoding="utf-8")
     (context_dir / "overview.md").write_text(
         "## Submission Format\n\n```csv\nfilename,right_place,prediction_string\n```\n",
@@ -115,9 +118,12 @@ def test_validate_submission_uses_overview_hint_when_sample_is_header_only(tmp_p
 
 
 def test_validate_submission_uses_data_md_hint_when_sample_is_header_only(tmp_path: Path) -> None:
-    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir = data_dir / "context"
+    cache_dir = data_dir / ".kagglebot_cache"
     context_dir.mkdir(parents=True, exist_ok=True)
-    sample = context_dir / "sample_submission.csv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sample = cache_dir / "sample_submission_synth.csv"
     sample.write_text("id,prediction\n", encoding="utf-8")
     (context_dir / "data.md").write_text(
         "## Submission Format\n\n"
@@ -130,6 +136,42 @@ def test_validate_submission_uses_data_md_hint_when_sample_is_header_only(tmp_pa
     pd.DataFrame({"Id": ["x"], "Category": ["Health"]}).to_csv(submission, index=False)
 
     validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_header_only_sample_validates_against_icpr_evaluation_ids(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    eval_root = data_dir / "ICPR02" / "kaggle" / "evaluation"
+    for sample_id in ("a0", "b1", "c2"):
+        sample_dir = eval_root / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        (sample_dir / "B2.tif").write_bytes(b"TIFF")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["a0", "b1"], "prediction": [0.1, 0.2]}).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
+    message = str(exc.value)
+    assert "row count mismatch" in message
+    assert "id values mismatch (header-only sample detected; validated against evaluation directory ids)" in message
+
+
+def test_validate_submission_header_only_sample_accepts_icpr_evaluation_id_set(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    eval_root = data_dir / "ICPR02" / "kaggle" / "evaluation"
+    for sample_id in ("a0", "b1", "c2"):
+        sample_dir = eval_root / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        (sample_dir / "B2.tif").write_bytes(b"TIFF")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["c2", "a0", "b1"], "prediction": [0.3, 0.1, 0.2]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
 
 
 def test_validate_submission_rejects_missing_required_id_suffix_when_inferred(tmp_path: Path) -> None:
@@ -150,7 +192,7 @@ def test_validate_submission_rejects_missing_required_id_suffix_when_inferred(tm
         (data_dir / "Kaggle_Prepared" / "val" / "MS" / f"{stem}.tif").write_bytes(b"TIFF")
 
     submission = tmp_path / "submission.csv"
-    pd.DataFrame({"Id": ["val_0001", "val_0002"], "Category": ["Health", "Rust"]}).to_csv(submission, index=False)
+    pd.DataFrame({"id": ["val_0001", "val_0002"], "prediction": ["Health", "Rust"]}).to_csv(submission, index=False)
 
     with pytest.raises(SubmissionValidationError, match="require '\\.tif' suffix"):
         validate_submission(str(submission), str(sample), data_dir=data_dir)
@@ -174,7 +216,7 @@ def test_validate_submission_accepts_inferred_required_id_suffix_when_present(tm
         (data_dir / "Kaggle_Prepared" / "val" / "MS" / f"{stem}.tif").write_bytes(b"TIFF")
 
     submission = tmp_path / "submission.csv"
-    pd.DataFrame({"Id": ["val_0001.tif", "val_0002.tif"], "Category": ["Health", "Rust"]}).to_csv(
+    pd.DataFrame({"id": ["val_0001.tif", "val_0002.tif"], "prediction": ["Health", "Rust"]}).to_csv(
         submission, index=False
     )
 
@@ -182,9 +224,12 @@ def test_validate_submission_accepts_inferred_required_id_suffix_when_present(tm
 
 
 def test_validate_submission_checks_overview_hint_not_only_sample(tmp_path: Path) -> None:
-    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir = data_dir / "context"
+    cache_dir = data_dir / ".kagglebot_cache"
     context_dir.mkdir(parents=True, exist_ok=True)
-    sample = context_dir / "sample_submission.csv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sample = cache_dir / "sample_submission_synth.csv"
     sample.write_text("id,target\n", encoding="utf-8")
     (context_dir / "overview.md").write_text(
         "## Submission Format\n\n```csv\nfilename,right_place,prediction_string\n```\n",
@@ -233,9 +278,12 @@ def test_validate_submission_ignores_submission_format_rules_text_with_commas(tm
 
 
 def test_validate_submission_prefers_real_submission_section_over_rules_heading(tmp_path: Path) -> None:
-    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir = data_dir / "context"
+    cache_dir = data_dir / ".kagglebot_cache"
     context_dir.mkdir(parents=True, exist_ok=True)
-    sample = context_dir / "sample_submission.csv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sample = cache_dir / "sample_submission_synth.csv"
     sample.write_text("id,target\n", encoding="utf-8")
     (context_dir / "overview.md").write_text(
         "#### 6. SUBMISSION CODE REQUIREMENTS\n"

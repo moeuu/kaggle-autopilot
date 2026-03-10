@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from kagglebot.agents.identity import IMPLEMENTATION_AGENT, render_prompt_identity
 from kagglebot.exec_utils import run_command
 
 _COMMAND_LOG_FIRST_WIDTH = 100
 _COMMAND_LOG_SECOND_WIDTH = 100
+_RUNNER_LABEL = IMPLEMENTATION_AGENT.log_alias
 
 
 @dataclass(frozen=True)
@@ -33,13 +35,13 @@ def run_codex(
     reasoning_effort: str | None = None,
 ) -> CodexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
-    prompt_text = prompt_path.read_text(encoding="utf-8")
+    prompt_text = render_prompt_identity(prompt_path.read_text(encoding="utf-8"))
     transcript_path = output_dir / "codex_exec.jsonl"
     last_message_path = output_dir / "codex_last_message.txt"
 
     if dry_run:
         transcript_path.write_text("", encoding="utf-8")
-        last_message_path.write_text("DRY RUN: codex not executed.\n", encoding="utf-8")
+        last_message_path.write_text(f"DRY RUN: {_RUNNER_LABEL} not executed.\n", encoding="utf-8")
         return CodexResult(
             transcript_path=transcript_path,
             last_message_path=last_message_path,
@@ -48,7 +50,7 @@ def run_codex(
             stderr="",
         )
 
-    args = ["codex", "exec"]
+    args = [IMPLEMENTATION_AGENT.cli_command, "exec"]
     if model:
         args += ["-m", model]
     normalized_effort = _normalize_reasoning_effort(reasoning_effort)
@@ -69,7 +71,7 @@ def run_codex(
     start_time = time.monotonic()
     label = heartbeat_label.strip() if heartbeat_label else None
     label_suffix = f" [{label}]" if label else ""
-    print(f"codex running... (0s total){label_suffix}", flush=True)
+    print(f"{_RUNNER_LABEL} running... (0s total){label_suffix}", flush=True)
     heartbeat = threading.Thread(
         target=_heartbeat,
         args=(stop_event, start_time, label),
@@ -101,7 +103,7 @@ def run_codex(
         stop_event.set()
         heartbeat.join(timeout=1.0)
     total_elapsed = int(time.monotonic() - start_time)
-    print(f"codex done... ({total_elapsed}s total, exit={returncode}){label_suffix}", flush=True)
+    print(f"{_RUNNER_LABEL} done... ({total_elapsed}s total, exit={returncode}){label_suffix}", flush=True)
     stdout_text = "".join(stdout_chunks)
     transcript_path.write_text(stdout_text, encoding="utf-8")
     if not last_message_path.exists():
@@ -121,7 +123,7 @@ def _normalize_reasoning_effort(effort: str | None) -> str | None:
     normalized = effort.strip().lower().replace("-", "_").replace(" ", "_")
     if not normalized:
         return None
-    # Codex CLI accepts low/medium/high; map user-facing "extra high" to high.
+    # The CLI accepts low/medium/high; map user-facing "extra high" to high.
     if normalized == "extra_high":
         return "high"
     return normalized
@@ -136,7 +138,7 @@ def _heartbeat(
     while not stop_event.wait(interval):
         elapsed = int(time.monotonic() - start_time)
         label_suffix = f" [{label}]" if label else ""
-        print(f"codex running... ({elapsed}s total){label_suffix}", flush=True)
+        print(f"{_RUNNER_LABEL} running... ({elapsed}s total){label_suffix}", flush=True)
 
 
 def _emit_codex_event(line: str) -> None:
@@ -158,16 +160,16 @@ def _emit_codex_event(line: str) -> None:
         if status == "completed":
             suffix = f" (exit {exit_code})" if exit_code is not None else ""
             if second_line:
-                print(f"codex: command completed: {first_line}")
+                print(f"{_RUNNER_LABEL}: command completed: {first_line}")
                 print(f"  {second_line}{suffix}")
             else:
-                print(f"codex: command completed: {first_line}{suffix}")
+                print(f"{_RUNNER_LABEL}: command completed: {first_line}{suffix}")
         elif status:
             if second_line:
-                print(f"codex: command {status}: {first_line}")
+                print(f"{_RUNNER_LABEL}: command {status}: {first_line}")
                 print(f"  {second_line}")
             else:
-                print(f"codex: command {status}: {first_line}")
+                print(f"{_RUNNER_LABEL}: command {status}: {first_line}")
         return
     if item_type == "file_change":
         changes = item.get("changes", [])
@@ -178,14 +180,14 @@ def _emit_codex_event(line: str) -> None:
                 path = change.get("path")
                 kind = change.get("kind")
                 if path and kind:
-                    print(f"codex: {kind} {path}")
+                    print(f"{_RUNNER_LABEL}: {kind} {path}")
         return
 
 
 @lru_cache(maxsize=1)
 def _codex_help() -> str:
     try:
-        result = run_command(["codex", "exec", "--help"])
+        result = run_command([IMPLEMENTATION_AGENT.cli_command, "exec", "--help"])
     except FileNotFoundError:
         return ""
     if result.returncode != 0:

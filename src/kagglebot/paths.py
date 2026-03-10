@@ -111,6 +111,14 @@ class CompetitionPaths:
         return self.context_dir / "discussion_threads_index.json"
 
     @property
+    def reference_inputs_dir(self) -> Path:
+        return self.context_dir / "reference_inputs"
+
+    @property
+    def reference_inputs_manifest_path(self) -> Path:
+        return self.context_dir / "reference_inputs_manifest.json"
+
+    @property
     def knowledge_hints_path(self) -> Path:
         return self.context_dir / "knowledge_hints.txt"
 

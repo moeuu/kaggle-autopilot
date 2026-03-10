@@ -15,7 +15,7 @@ Execution rule:
 - Use a single authoritative implementation in `artifacts/<slug>/kernel/kernel.py`.
 - `local_gpu` and `kaggle_gpu` must share the same algorithm/pipeline; only execution location differs.
 
-Codex interpretation (summary of overview/data/rules + dataset profile):
+{{implementation_agent_name}} interpretation (summary of overview/data/rules + dataset profile):
 <<<
 {{interpretation}}
 >>>
@@ -57,9 +57,16 @@ Use discussion thread insights for failure modes, leakage warnings, and strong b
 
 Return output with exact delimiters. Do NOT include chain-of-thought; provide concise, actionable steps only.
 Avoid baseline-only solutions. Propose a high-capacity, competition-appropriate approach.
+Prioritize maximum achievable accuracy over submitability.
+Prefer a stronger candidate that is not yet submission-ready over a weaker submit-ready fallback.
+Do not simplify the strategy merely to guarantee a submission.
 If accelerator is GPU/TPU, prefer accelerator-optimized training and longer schedules.
 If the gap to top1 is large, recommend a major model upgrade (architecture or feature strategy).
 If near top1, recommend targeted tuning/ablations.
+If the dataset is tabular binary with large row count and meaningful categorical structure, do NOT collapse into single-family tuning:
+- set `target_medal` to at least `bronze` and `target_rank_percentile` to `0.10` unless a stronger objective is justified
+- shortlist CatBoost raw categorical, XGBoost with leak-safe target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant
+- include at least one OOF blend candidate (weighted/rank/logit blend)
 Always require a train-fit -> test-apply pipeline for all feature statistics/encoders/bins.
 Never use oracle-style overrides, known-label rewrites, or leaderboard-proxy scoring.
 Handle train/test column mismatches safely:
@@ -131,6 +138,8 @@ When similar choices exist, prefer solutions that leverage already-installed dep
 Provide a JSON object with these keys (do not wrap in markdown):
 - target_metric (string, from rules)
 - target_direction ("minimize" or "maximize")
+- target_medal (string|null; prefer bronze/silver/gold for leaderboard competitions)
+- target_rank_percentile (number|null; e.g. bronze=0.10)
 - target_score (number; use top1 public score as a realistic target)
 - score_source ("cv" preferred for accuracy-first search; use holdout only when CV is infeasible)
 - holdout_frac (number, e.g. 0.2)
@@ -140,13 +149,15 @@ Provide a JSON object with these keys (do not wrap in markdown):
 - patience (int, prefer >=4 so promising runs are not cut early)
 - min_improvement (number)
 - pipelines (array, length 2-4; each pipeline object MUST include: name, features, models, key_hyperparameters, runtime_memory, failure_modes, fallbacks)
+  - `key_hyperparameters` must be the chosen runtime configuration for that shortlisted pipeline.
+  - Do not put unresolved search grids or arrays in `key_hyperparameters`; each value must be a concrete scalar or nested object of concrete scalar values.
 - toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default)
 - evaluation_protocol (object; include `cv_type`, `n_folds`, `seeds` (>=3), and `primary_metric` based on the competition)
 - stop_policy (object; include exact keys `max_iterations` and `error_fingerprint_abort`; `error_fingerprint_abort` may be bool or object)
 
 ===CODEX_INSTRUCTIONS===
 Prompt 3/5, Prompt 4/5, Prompt 5/5 scope.
-Give Codex step-by-step implementation instructions to update only `artifacts/<slug>/kernel/`.
+Give {{implementation_agent_name}} step-by-step implementation instructions to update only `artifacts/<slug>/kernel/`.
 You MUST mention `kernel.py` explicitly (include the literal string `kernel.py`) and treat
 `artifacts/<slug>/kernel/kernel.py` as the primary entrypoint file to edit.
 This stage must not do open-ended web searching. It must execute the frozen shortlist from plan.json.

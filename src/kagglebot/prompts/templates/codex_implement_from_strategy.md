@@ -1,6 +1,6 @@
-# Codex Implementation (from Strategy)
+# {{implementation_agent_name}} Implementation (from Strategy)
 
-You are Codex. Follow the instructions from Strategy below to implement changes.
+You are {{implementation_agent_name}}. Follow the instructions from Strategy below to implement changes.
 
 IMPORTANT:
 - Keep CLI non-interactive.

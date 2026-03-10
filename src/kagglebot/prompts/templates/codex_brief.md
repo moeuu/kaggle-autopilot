@@ -1,6 +1,6 @@
-# Codex Brief for Strategy
+# {{brief_agent_name}} Brief for Strategy
 
-You are Codex. Read the context files and write a concise brief for Strategy.
+You are {{brief_agent_name}}. Read the context files and write a concise brief for Strategy.
 
 Files to read:
 - {{overview_md}}

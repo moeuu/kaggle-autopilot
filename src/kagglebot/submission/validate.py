@@ -51,6 +51,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
         sample_has_data_rows=sample_has_data_rows,
         sample_columns=expected_columns,
         hint_columns=hint_columns,
+        sample_csv=sample_csv,
     ):
         expected_columns = hint_columns
         expected_source = "submission_format/overview hint"
@@ -84,9 +85,16 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
     expected_row_count = len(sample) if sample_has_data_rows else None
     expected_id_values: set[str] | None = None
+    expected_ids_source: str | None = None
     placeholder_sample = False
 
     data_dir_path = Path(data_dir) if data_dir is not None else None
+    if data_dir_path is not None and not sample_has_data_rows:
+        eval_ids = _maybe_load_evaluation_ids(data_dir_path)
+        if eval_ids is not None:
+            expected_row_count = len(eval_ids)
+            expected_id_values = set(eval_ids)
+            expected_ids_source = "evaluation directory ids"
 
     if (
         data_dir_path is not None
@@ -131,14 +139,18 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
             if dup_count > 0:
                 problems.append(f"id column '{id_col}' contains duplicate values: {dup_count}")
 
-        if placeholder_sample and expected_id_values is not None:
+        if expected_id_values is not None:
             if set(sub_ids) != expected_id_values:
                 missing = sorted(expected_id_values - set(sub_ids))[:5]
                 extra = sorted(set(sub_ids) - expected_id_values)[:5]
+                if placeholder_sample:
+                    source_msg = "placeholder sample detected; validated against test ids"
+                elif expected_ids_source:
+                    source_msg = f"header-only sample detected; validated against {expected_ids_source}"
+                else:
+                    source_msg = "validated against expected test ids"
                 problems.append(
-                    "id values mismatch (placeholder sample detected; validated against test ids):\n"
-                    f"  missing (first 5): {missing}\n"
-                    f"  extra (first 5):   {extra}"
+                    f"id values mismatch ({source_msg}):\n  missing (first 5): {missing}\n  extra (first 5):   {extra}"
                 )
         required_id_suffix = infer_required_id_suffix(
             sample_csv=sample_csv,
@@ -211,6 +223,26 @@ def _maybe_load_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
     if id_col not in test.columns:
         return None
     return [str(value) for value in test[id_col].tolist()]
+
+
+def _maybe_load_evaluation_ids(data_dir: Path) -> list[str] | None:
+    eval_root = data_dir / "ICPR02" / "kaggle" / "evaluation"
+    if not eval_root.exists() or not eval_root.is_dir():
+        return None
+
+    sample_ids: list[str] = []
+    for entry in sorted(eval_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if any(entry.glob("B*.tif")):
+            sample_ids.append(entry.name)
+            continue
+        nested = [d for d in entry.iterdir() if d.is_dir() and any(d.glob("B*.tif"))]
+        if nested:
+            sample_ids.append(entry.name)
+    if not sample_ids:
+        return None
+    return sample_ids
 
 
 def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submission_ids: list[str]) -> str | None:
@@ -309,6 +341,7 @@ def _should_prefer_hint_columns(
     sample_has_data_rows: bool,
     sample_columns: list[str],
     hint_columns: list[str],
+    sample_csv: Path,
 ) -> bool:
     if not hint_columns:
         return False
@@ -320,7 +353,21 @@ def _should_prefer_hint_columns(
         return False
     if not columns_look_plausible(sample_columns):
         return True
+    # Be conservative: Kaggle's evaluation is anchored to the actual sample_submission header,
+    # even when the file is header-only. Only override with context hints when we believe the
+    # sample was synthesized by kagglebot (and therefore potentially wrong/incomplete).
+    if not _is_synthesized_sample_submission(sample_csv):
+        return False
     return _sample_header_looks_placeholder(sample_columns)
+
+
+def _is_synthesized_sample_submission(path: Path) -> bool:
+    name = path.name.lower()
+    if "sample_submission_synth" in name:
+        return True
+    if ".kagglebot_cache" in {part.lower() for part in path.parts}:
+        return True
+    return False
 
 
 def _sample_header_looks_placeholder(columns: list[str]) -> bool:

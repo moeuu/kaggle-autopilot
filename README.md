@@ -65,7 +65,19 @@ uv run kagglebot train <competition> --compute local_gpu
 
 # Submit manually
 uv run kagglebot --force submit <competition> -f submission.csv -m "message"
+
+# Crawl Kaggle competition submission formats
+uv run kagglebot crawl-submission-formats --output-dir artifacts/competition-submission-formats
 ```
+
+`crawl-submission-formats` discovers competition slugs from Kaggle list pages plus Kaggle API search sweeps,
+then scrapes each competition's Kaggle overview/rules pages with headless Chrome and writes:
+
+- `raw_submission_formats.jsonl`
+- `normalized_submission_formats.csv`
+- `summary.json`
+
+Use `--max-prefix-depth` and `--max-pages-per-search` to broaden historical discovery coverage.
 
 ## Plan Configuration
 
@@ -132,6 +144,12 @@ Optional environment knobs:
 - ✅ **Controlled retries**: Transient submit errors retry up to 3 times with backoff; permanent errors abort immediately
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
+- ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, legacy `csv` aliases remain accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission
+- ✅ **Explicit submit mode**: `submit_mode` is tracked separately as `file|notebook`, so notebook-only leaderboard competitions no longer get conflated with writeup competitions
+- ✅ **Medal-aware iteration policy**: leaderboard runs default to a bronze target (`target_medal=bronze`, `target_rank_percentile=0.10`) so `minor_tuning` is suppressed until the run reaches the target rank band
+- ✅ **High-accuracy tabular planning guardrails**: large tabular binary problems with meaningful categoricals must keep multi-family search active (CatBoost + XGBoost + LightGBM/second variant + OOF blend candidate)
+- ✅ **Reference input recovery**: required reference notebooks now emit `context/reference_inputs_manifest.json`, and `--download` stages referenced datasets/competitions into `context/reference_inputs/` for kernels that depend on external/original data
+- ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration is forced away from same-family-only tuning toward broader model-family diversification and blending
 
 ## Top1 Public Leaderboard (Reference)
 
@@ -178,7 +196,8 @@ artifacts/<slug>/
     iter-<k>/
       metrics.json               # Offline evaluation results
       diagnostics.md             # Agent-readable performance analysis
-      submission.csv             # Predictions for this iteration
+      submission.csv             # Tabular predictions for this iteration
+      submission_manifest.json   # Canonical submission artifact manifest for non-tabular/bundle outputs
       agent/
         prompt.md                # Codex input
         codex_last_message.txt   # Codex output summary
@@ -196,6 +215,8 @@ Knowledge Base lives in:
 
 For detailed guides, see:
 - [docs/autopilot.md](docs/autopilot.md) - Autopilot usage, configuration, troubleshooting
+
+Submission artifacts are no longer assumed to be `submission.csv` only. For non-tabular competitions, autopilot can now carry a `submission_manifest.json` that points to a single-file artifact, a bundle, or a multi-file zip staging directory.
 - [docs/knowledge.md](docs/knowledge.md) - Knowledge Base system for cross-competition learning
 - [docs/taxonomy.md](docs/taxonomy.md) - Tag taxonomy for competition similarity
 - [docs/architecture.md](docs/architecture.md) - Control flow and safety gates (developer-focused)

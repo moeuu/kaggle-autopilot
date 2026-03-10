@@ -47,6 +47,7 @@ def test_parse_submission_format_prefers_zip_when_rules_require_zip_file() -> No
     assert hint.expected_suffixes is not None
     assert hint.expected_suffixes[0] == ".zip"
     assert ".csv" in hint.expected_suffixes
+    assert hint.artifact_class == "multi_file_zip"
 
 
 def test_parse_submission_format_reads_bullet_column_definitions() -> None:
@@ -58,3 +59,25 @@ def test_parse_submission_format_reads_bullet_column_definitions() -> None:
     )
     hint = parse_submission_format(markdown)
     assert hint.columns == ["Id", "Category"]
+    assert hint.artifact_class == "tabular"
+
+
+def test_parse_submission_format_treats_weights_and_inference_script_as_bundle() -> None:
+    markdown = (
+        "## Submission Format\n\n"
+        "Submit a ZIP archive containing model weights (.pt or .pth) and the inference script.\n"
+    )
+    hint = parse_submission_format(markdown)
+    assert hint.expected_suffixes == [".zip"]
+    assert hint.artifact_class == "bundle"
+
+
+def test_parse_submission_format_ignores_topology_json_noise() -> None:
+    markdown = (
+        "## Submission Format\n\n"
+        "Include the topology JSON description in your documentation.\n"
+        "Submit predictions through the official submission channel.\n"
+    )
+    hint = parse_submission_format(markdown)
+    assert hint.expected_suffixes is None
+    assert hint.artifact_class == "unknown"

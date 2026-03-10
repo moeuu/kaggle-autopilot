@@ -3,8 +3,10 @@ from __future__ import annotations
 import ast
 import builtins
 import csv
+import functools
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -23,7 +25,52 @@ import numpy as np
 from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
+from kagglebot.agents.identity import (
+    IMPLEMENTATION_AGENT,
+    STRATEGY_AGENT,
+    planning_flow_summary,
+    prompt_identity_format_args,
+    render_prompt_identity,
+)
 from kagglebot.agents.strategy_runner import run_strategy
+from kagglebot.autopilot_helpers import (
+    _build_medal_target_reason,
+    _detect_online_mismatch_signal,
+    _extract_orig_proba_signal,
+    _extract_pseudo_label_failure_signal,
+    _meets_rank_percentile_target,
+    _requires_tabular_multi_family_policy,
+    _resume_best_online_submission_score,
+    _should_force_major_overhaul_by_rank,
+    _to_float,
+    _to_int,
+    _update_best_score,
+)
+from kagglebot.autopilot_state import (
+    _copy_kernel_support_artifacts_to_iteration_dir,
+    _copy_submission_artifact_to_iteration_dir,
+    _count_successful_submit_attempts,
+    _has_successful_submit_attempt,
+    _load_latest_submit_attempt,
+    _load_run_state,
+    _load_submit_fingerprints,
+    _resolve_iteration_artifact,
+    _resolve_iteration_submission_artifact,
+    _save_run_state,
+    _write_iteration_state_marker,
+)
+from kagglebot.autopilot_state import (
+    _load_submit_retry_artifacts as _state_load_submit_retry_artifacts,
+)
+from kagglebot.autopilot_state import (
+    _resume_best_submittable_iteration_state as _state_resume_best_submittable_iteration_state,
+)
+from kagglebot.autopilot_state import (
+    _resume_best_submitted_offline_score as _state_resume_best_submitted_offline_score,
+)
+from kagglebot.autopilot_state import (
+    _resume_iteration_state as _state_resume_iteration_state,
+)
 from kagglebot.eval import (
     DriftChecker,
     EvaluationReport,
@@ -93,6 +140,13 @@ from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, 
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.types import PlanConfig
 from kagglebot.validators import ensure_kernel_sources_valid
+from kagglebot.writeup import (
+    build_writeup_bundle,
+    infer_deliverable_mode_from_paths,
+    infer_submit_mode_from_paths,
+    normalize_deliverable_mode,
+    normalize_submit_mode,
+)
 
 
 # Backward-compatible symbol for tests/extensions.
@@ -154,12 +208,12 @@ MAX_AUTOFIX_CODEX_PASSES = 3
 MAX_KERNEL_FIX_CODEX_PASSES = 3
 MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
-_ERROR_FIX_CODEX_MODEL = "gpt-5.3-codex"
-_ERROR_FIX_REASONING_EFFORT = "extra_high"
-_ERROR_STRATEGY_MODEL = "gpt-5.2"
-_ERROR_STRATEGY_REASONING_EFFORT = "extra_high"
-_METRIC_FIX_CODEX_MODEL = "gpt-5.3-codex"
-_METRIC_FIX_REASONING_EFFORT = "extra_high"
+_ERROR_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
+_ERROR_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
+_ERROR_STRATEGY_MODEL = STRATEGY_AGENT.model
+_ERROR_STRATEGY_REASONING_EFFORT = STRATEGY_AGENT.reasoning_effort
+_METRIC_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
+_METRIC_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
 _MAX_METRIC_FIX_ATTEMPTS = 3
 _MAX_METRIC_FIX_CODEX_PASSES = 4
 _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
@@ -170,6 +224,21 @@ _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
+_SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
+_SUBMIT_FILE_ERROR_MARKERS = (
+    "submission file",
+    "submission.csv",
+    "columns mismatch",
+    "row count mismatch",
+    "id column missing",
+    "missing a header row",
+    "header does not resemble",
+    "id values appear to require",
+    "submission payload mismatch",
+    "prediction column contains nan",
+    "file format mismatch",
+    "file must be named",
+)
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 _CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
 _NOTEBOOK_FALLBACK_HINTS = (
@@ -181,14 +250,18 @@ _NOTEBOOK_FALLBACK_HINTS = (
     "code competition submissions require both the output file name and the version label",
     "kernel must be specified as <owner>/<notebook>",
 )
-_ITERATION_STATE_FILENAME = "iteration_state.json"
-_LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS = frozenset({"submit"})
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
 _DEFAULT_EVAL_REPEATS = 2
 _DEFAULT_MAX_ITERATIONS = 12
 _EVAL_REPEAT_SEED_OFFSET = 1009
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
+_DEFAULT_TARGET_MEDAL = "bronze"
+_MEDAL_TARGET_PERCENTILES = {
+    "bronze": 0.10,
+    "silver": 0.05,
+    "gold": 0.01,
+}
 _DEFAULT_LIMITED_SUBMISSION_GATE = "readiness_or_final"
 _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
@@ -209,8 +282,49 @@ _REGRESSION_GUARD_ABS_DROP_DEFAULT = 0.10
 _CONSERVATIVE_COLLAPSE_MAX_FEATURES = 5
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 _TRUSTED_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
+_DEFAULT_ACCEPTED_SCORE_SOURCES = ("cv", "holdout")
+_COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
+    "sample",
+    "smoke",
+    "surrogate",
+    "oracle",
+    "proxy",
+)
+_FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
+_CAPACITY_TIER_PRIORITY = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "extreme": 3,
+}
+_LOW_CAPACITY_MARKERS = ("naive", "mean", "persistence", "baseline", "ridge", "linear")
+_MEDIUM_CAPACITY_MARKERS = ("lightgbm", "xgboost", "catboost", "randomforest", "tabnet", "tabm", "mlp")
+_HIGH_CAPACITY_MARKERS = (
+    "graph",
+    "gnn",
+    "transformer",
+    "seq2seq",
+    "hybrid",
+    "multihorizon",
+    "autoregressive",
+    "ensemble",
+    "blend",
+    "stack",
+)
+_EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
+_SPLIT_STRATEGY_PRIORITY = {
+    "kfold": 0,
+    "stratified_kfold": 1,
+    "group_kfold": 2,
+    "timeseries_split": 3,
+}
 _BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
 _CODE_REFERENCE_IMPL_MARKER_PREFIX = "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED:"
+_SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT = "submission_artifact"
+_SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = "submit_mode_or_kernel"
+_SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = "platform_or_polling"
+_SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = "manual_intervention"
+_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN = "unknown"
 _NUMBER_WORD_TO_INT = {
     "zero": 0,
     "one": 1,
@@ -324,7 +438,10 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 attempt += 1
                 if attempt > MAX_AUTOFIX_ATTEMPTS:
                     raise
-                print("[yellow]autofix[/yellow]: submit stage failed; invoking codex to repair and retry submit")
+                print(
+                    f"[yellow]autofix[/yellow]: submit stage failed; invoking "
+                    f"{IMPLEMENTATION_AGENT.log_alias} to repair and retry submit"
+                )
                 run_dir = config.paths.run_dir(run_id)
                 if (not _has_successful_submit_attempt(run_dir)) or _should_force_resubmit_after_submit_abort(run_dir):
                     os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
@@ -343,7 +460,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 attempt += 1
                 if attempt > MAX_AUTOFIX_ATTEMPTS:
                     raise
-                print("[yellow]autofix[/yellow]: invoking codex to repair error")
+                print(f"[yellow]autofix[/yellow]: invoking {IMPLEMENTATION_AGENT.log_alias} to repair error")
                 _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
                 resume_after_failure = True
     finally:
@@ -402,15 +519,89 @@ class SubmissionPhase:
     config: AutopilotConfig
     run_id: str
     problem_types: list[str]
+    submit_mode: str
 
     def attempt(self, *, submission_path: Path, best_score: float | None) -> dict[str, object] | None:
-        return _attempt_submit(
-            config=self.config,
-            run_id=self.run_id,
-            submission_path=submission_path,
-            best_score=best_score,
-            problem_types=self.problem_types,
-        )
+        kwargs: dict[str, object] = {
+            "config": self.config,
+            "run_id": self.run_id,
+            "submission_path": submission_path,
+            "best_score": best_score,
+            "problem_types": self.problem_types,
+            "submit_mode": self.submit_mode,
+        }
+        if _callable_accepts_keyword_argument(_attempt_submit, "submit_mode") is False:
+            kwargs.pop("submit_mode", None)
+        try:
+            return _attempt_submit(
+                **kwargs,
+            )
+        except TypeError as exc:
+            if "submit_mode" not in kwargs or not _is_unexpected_keyword_type_error(exc, "submit_mode"):
+                raise
+            kwargs.pop("submit_mode", None)
+            return _attempt_submit(
+                **kwargs,
+            )
+
+
+def _resume_iteration_state_compat(**kwargs) -> tuple[int, float | None, Path | None]:
+    if _callable_accepts_keyword_argument(_resume_iteration_state, "load_kernel_metrics") is False:
+        kwargs.pop("load_kernel_metrics", None)
+    if _callable_accepts_keyword_argument(_resume_iteration_state, "infer_iteration_from_submission_path") is False:
+        kwargs.pop("infer_iteration_from_submission_path", None)
+    try:
+        return _resume_iteration_state(**kwargs)
+    except TypeError as exc:
+        if "load_kernel_metrics" in kwargs and _is_unexpected_keyword_type_error(exc, "load_kernel_metrics"):
+            kwargs.pop("load_kernel_metrics", None)
+            return _resume_iteration_state(**kwargs)
+        if "infer_iteration_from_submission_path" in kwargs and _is_unexpected_keyword_type_error(
+            exc, "infer_iteration_from_submission_path"
+        ):
+            kwargs.pop("infer_iteration_from_submission_path", None)
+            return _resume_iteration_state(**kwargs)
+        raise
+
+
+def _callable_accepts_keyword_argument(func: object, keyword: str) -> bool | None:
+    target = _unwrap_callable_code_target(func)
+    code = getattr(target, "__code__", None)
+    if code is None and hasattr(target, "__call__"):
+        target = _unwrap_callable_code_target(getattr(target, "__call__"))
+        code = getattr(target, "__code__", None)
+    if code is None:
+        return None
+    if code.co_flags & 0x08:
+        return True
+    total_args = getattr(code, "co_posonlyargcount", 0) + code.co_argcount + code.co_kwonlyargcount
+    return keyword in code.co_varnames[:total_args]
+
+
+def _unwrap_callable_code_target(func: object) -> object:
+    target = func
+    seen: set[int] = set()
+    while id(target) not in seen:
+        seen.add(id(target))
+        if isinstance(target, functools.partial):
+            target = target.func
+            continue
+        wrapped = getattr(target, "__wrapped__", None)
+        if wrapped is None:
+            break
+        target = wrapped
+    return target
+
+
+def _is_unexpected_keyword_type_error(exc: TypeError, keyword: str) -> bool:
+    message = str(exc).lower()
+    normalized_keyword = keyword.lower()
+    keyword_mismatch_markers = (
+        "unexpected keyword argument",
+        "unexpected keyword arguments",
+        "positional-only arguments passed as keyword arguments",
+    )
+    return normalized_keyword in message and any(marker in message for marker in keyword_mismatch_markers)
 
 
 @dataclass(frozen=True)
@@ -469,6 +660,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
     metric_direction = infer_direction(target_metric, resolved["target_direction"])
     resolved["target_direction"] = metric_direction
+    deliverable_mode = normalize_deliverable_mode(resolved.get("deliverable_mode"), default="leaderboard")
+    resolved["deliverable_mode"] = deliverable_mode
+    submit_mode = normalize_submit_mode(resolved.get("submit_mode"), default="file")
+    resolved["submit_mode"] = submit_mode
+    writeup_mode = deliverable_mode == "writeup"
+    submit_enabled = bool(config.submit and not writeup_mode)
     strict_competition_metric = _env_flag(
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
         default=_DEFAULT_STRICT_COMPETITION_METRIC,
@@ -503,15 +700,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     dataset_profile = knowledge_phase.load_dataset_profile()
     problem_types = knowledge_phase.derive_problem_types()
-    submission_phase = SubmissionPhase(config=config, run_id=run_id, problem_types=problem_types)
+    submission_phase = (
+        SubmissionPhase(config=config, run_id=run_id, problem_types=problem_types, submit_mode=submit_mode)
+        if submit_enabled
+        else None
+    )
     best_score = None
     best_submission: Path | None = None
     best_submittable_score: float | None = None
     best_submittable_submission: Path | None = None
+    best_high_potential_score: float | None = None
+    best_high_potential_submission: Path | None = None
+    best_high_potential_iteration: int | None = None
+    best_high_potential_meta: dict[str, object] | None = None
     submitted = False
     pending_problem_insights: list[dict[str, object]] = []
     pending_error_fixes: list[dict[str, object]] = []
     last_submission_result: dict[str, object] | None = None
+    fallback_submit_blocked_reason: str | None = None
+    writeup_bundle_meta: dict[str, object] | None = None
 
     max_iterations = max(1, int(resolved["max_iterations"]))
     iteration_phase = IterationPhase(metric_direction=metric_direction)
@@ -535,11 +742,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         if isinstance(submission_limit_per_day_raw, (int, float)) and int(submission_limit_per_day_raw) > 0
         else None
     )
+    evaluation_contract = (
+        resolved.get("evaluation_contract") if isinstance(resolved.get("evaluation_contract"), dict) else None
+    )
     readiness_target = float(resolved.get("readiness_target_score") or target_score)
     readiness_method = str(resolved.get("readiness_method") or "ci_bound")
     readiness_k = float(resolved.get("readiness_k") or 1.0)
     ci_method = str(resolved.get("ci_method") or "normal")
     ci_alpha = float(resolved.get("ci_alpha") or 0.05)
+    target_medal = _normalize_target_medal(resolved.get("target_medal"), default=None)
+    target_rank_percentile = _normalize_target_rank_percentile(
+        resolved.get("target_rank_percentile"),
+        medal=target_medal,
+        fallback=None,
+    )
     drift_check_enabled = bool(resolved.get("drift_check", False))
     drift_weight = float(resolved.get("drift_weight") or 1.0)
     stop_min_delta = float(resolved.get("stop_min_delta") or 0.0)
@@ -554,6 +770,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
     no_improve_streak = 0
+    frontier_no_improve_streak = 0
     same_config_streak = 0
     last_config_hash: str | None = None
     eval_data_cache: dict[str, object] | None = None
@@ -561,19 +778,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         run_dir=config.paths.run_dir(run_id),
         max_iterations=max_iterations,
     )
-    start_iteration, best_score, best_submission = _resume_iteration_state(
+    start_iteration, best_score, best_submission = _resume_iteration_state_compat(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
-        require_submit_phase=config.submit and not config.dry_run,
+        require_submit_phase=submit_enabled and not config.dry_run,
     )
     best_submitted_score = _resume_best_submitted_offline_score(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
         target_metric=target_metric,
+        max_iterations=max_iterations,
+    )
+    best_online_submission_score = _resume_best_online_submission_score(
+        paths=config.paths,
+        run_id=run_id,
+        direction=metric_direction,
         max_iterations=max_iterations,
     )
     resumed_best_readiness = _resume_best_readiness_score(
@@ -583,8 +806,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     if resumed_best_readiness is not None and best_score is None:
         best_score = resumed_best_readiness
-    best_submittable_score = best_score
-    best_submittable_submission = best_submission
+    best_submittable_score, best_submittable_submission = _resume_best_submittable_iteration_state(
+        paths=config.paths,
+        run_id=run_id,
+        metric_direction=metric_direction,
+        target_metric=target_metric,
+        max_iterations=max_iterations,
+    )
     if start_iteration > 1:
         print(f"[yellow]resume[/yellow]: found completed iterations; resuming at {start_iteration}/{max_iterations}")
     loop_started_at = time.monotonic()
@@ -631,7 +859,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 max_iterations=max_iterations,
                 metric_direction=metric_direction,
                 target_metric=target_metric,
-                require_submit_phase=config.submit and not config.dry_run,
+                require_submit_phase=submit_enabled and not config.dry_run,
             )
             if submit_retry_resume is not None:
                 resume_submission_path, resume_metrics_path, resume_evaluation = submit_retry_resume
@@ -786,7 +1014,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             raise
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
                             raise
-                        print(f"[yellow]kernel failed[/yellow]: invoking codex to fix (attempt {kernel_attempts})")
+                        print(
+                            f"[yellow]kernel failed[/yellow]: invoking "
+                            f"{IMPLEMENTATION_AGENT.log_alias} to fix (attempt {kernel_attempts})"
+                        )
                         _run_kernel_fix(
                             config=config,
                             run_id=run_id,
@@ -875,7 +1106,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
                             raise
                         print(
-                            f"[yellow]local kernel failed[/yellow]: invoking codex to fix (attempt {kernel_attempts})"
+                            f"[yellow]local kernel failed[/yellow]: invoking "
+                            f"{IMPLEMENTATION_AGENT.log_alias} to fix (attempt {kernel_attempts})"
                         )
                         _run_kernel_fix(
                             config=config,
@@ -914,7 +1146,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             f"{metric_mismatch_reason} "
                             f"(direction_confidence={confidence_text}). "
                             "Strict competition metric mode is enabled; attempting same-iteration metric recheck "
-                            "before invoking Codex."
+                            f"before invoking {IMPLEMENTATION_AGENT.display_name}."
                         )
                         evaluation, kernel_metrics_payload, submission_path = _rerun_kernel_for_metric_recheck(
                             config=config,
@@ -945,7 +1177,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "[yellow]metric mismatch[/yellow]: "
                         f"{metric_mismatch_reason} "
                         f"(direction_confidence={confidence_text}). "
-                        "Strict competition metric mode is enabled; applying metric-only Codex fix "
+                        "Strict competition metric mode is enabled; applying "
+                        f"metric-only {IMPLEMENTATION_AGENT.display_name} fix "
                         f"(attempt {metric_fix_attempts}/{_MAX_METRIC_FIX_ATTEMPTS}) and re-running evaluation."
                     )
                     _run_metric_only_competition_metric_fix(
@@ -1116,6 +1349,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submission_total_teams_estimate: int | None = None
             submission_rank_percentile_estimate: float | None = None
             submission_rank_estimate_source: str | None = None
+            medal_target_met = False
+            medal_minimum_improvement_mode: str | None = None
+            medal_policy_reason: str | None = None
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
             code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
@@ -1144,6 +1380,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             quality_guard = _build_kernel_quality_guard(
                 evaluation=evaluation,
                 kernel_metrics_payload=kernel_metrics_payload,
+                evaluation_report=report,
+                evaluation_contract=evaluation_contract,
                 logs_dir=logs_dir,
                 direction=metric_direction,
                 iteration=iteration,
@@ -1161,8 +1399,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 if isinstance(quality_reasons_raw, list)
                 else []
             )
+            accuracy_potential = _build_accuracy_potential(
+                evaluation=evaluation,
+                kernel_metrics_payload=kernel_metrics_payload,
+                model_summary=model_summary,
+                quality_guard=quality_guard,
+                evaluation_contract=evaluation_contract,
+            )
             non_generalizable_eval_detected = any(
-                reason in {"untrusted_score_source", "oracle_override_detected"} for reason in quality_reasons
+                reason
+                in {
+                    "untrusted_score_source",
+                    "oracle_override_detected",
+                    "competition_metric_mismatch",
+                    "competition_split_mismatch",
+                    "competition_score_source_mismatch",
+                    "competition_evaluation_unfaithful",
+                    "missing_competitive_data",
+                }
+                for reason in quality_reasons
             )
             quality_forced_major_overhaul = "below_code_reference_baseline" in quality_reasons
             quality_force_reason: str | None = None
@@ -1178,13 +1433,30 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     quality_force_reason = (
                         "Offline score is materially below code reference baseline detected by quality guard."
                     )
-            if config.submit and (not quality_allows_submit) and (not config.force_submit):
+            if submit_enabled and (not quality_allows_submit) and (not config.force_submit):
                 reason_text = ", ".join(quality_reasons) if quality_reasons else "quality_guard_blocked_submit"
                 print(
                     "[yellow]submit blocked[/yellow]: kernel quality guard detected unstable evaluation "
                     f"({reason_text}); submission is deferred to a later iteration."
                 )
-            if quality_allows_submit or config.force_submit:
+            high_potential_improved = False
+            if accuracy_potential.get("eligible"):
+                if _should_update_best_accuracy_candidate(
+                    current_potential=accuracy_potential,
+                    best_potential=best_high_potential_meta,
+                    current_score=decision_score,
+                    best_score=best_high_potential_score,
+                    direction=metric_direction,
+                ):
+                    best_high_potential_score = decision_score
+                    best_high_potential_submission = submission_path
+                    best_high_potential_iteration = iteration
+                    best_high_potential_meta = dict(accuracy_potential)
+                    frontier_no_improve_streak = 0
+                    high_potential_improved = True
+                else:
+                    frontier_no_improve_streak += 1
+            if submit_enabled and (quality_allows_submit or config.force_submit):
                 if _update_best_score(best_submittable_score, decision_score, metric_direction, 0.0):
                     best_submittable_score = decision_score
                     best_submittable_submission = submission_path
@@ -1193,6 +1465,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             successful_submit_count = _count_successful_submit_attempts(run_dir)
             submit_improvement_allowed = True
             submit_non_improving = False
+            defer_submit_for_accuracy_frontier = False
             if require_submit_improvement and not config.force_submit and best_submitted_score is not None:
                 submit_improvement_allowed = _update_best_score(
                     best_submitted_score,
@@ -1204,15 +1477,32 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     if is_final_iteration:
                         print(
                             "[yellow]submit override[/yellow]: final iteration reached; "
-                            "allowing submit even though offline metric did not improve."
+                            "allowing submit even though score did not improve over submitted checkpoints."
                         )
                         submit_improvement_allowed = True
                     else:
                         submit_non_improving = True
                         print(
                             "[yellow]submit deferred[/yellow]: "
-                            "offline metric did not improve over previous submitted checkpoint."
+                            "score did not improve over previous submitted checkpoint."
                         )
+            if submit_enabled and isinstance(best_high_potential_meta, dict):
+                current_priority = _to_int(accuracy_potential.get("frontier_priority")) or 0
+                best_priority = _to_int(best_high_potential_meta.get("frontier_priority")) or 0
+                if (
+                    best_high_potential_submission is not None
+                    and best_high_potential_submission != submission_path
+                    and best_priority > current_priority
+                    and (
+                        not bool(best_high_potential_meta.get("faithful", False))
+                        or not bool(best_high_potential_meta.get("trusted", False))
+                    )
+                ):
+                    defer_submit_for_accuracy_frontier = True
+                    print(
+                        "[yellow]submit deferred[/yellow]: preserving a higher-potential unsubmitted candidate "
+                        "instead of auto-submitting a weaker artifact."
+                    )
             allow_submit = _should_attempt_submit_for_readiness(
                 gate=submission_gate,
                 readiness_score=decision_score,
@@ -1226,12 +1516,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             if not submit_improvement_allowed:
                 allow_submit = False
+            if defer_submit_for_accuracy_frontier:
+                allow_submit = False
             if (not quality_allows_submit) and (not config.force_submit):
                 allow_submit = False
-            submit_non_improving = config.submit and submit_non_improving
+            submit_non_improving = submit_enabled and submit_non_improving
             submit_limited_holdback = False
             if (
-                config.submit
+                submit_enabled
                 and submission_limit_per_day is not None
                 and quality_allows_submit
                 and submit_improvement_allowed
@@ -1252,18 +1544,31 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
                             "is active because daily limit is lower than max iterations."
                         )
-            submit_phase_required = config.submit and not config.dry_run
-            submit_allowed_by_gate = config.submit and allow_submit
+            submit_phase_required = submit_enabled and not config.dry_run
+            submit_allowed_by_gate = submit_enabled and allow_submit
             pre_submit_phase_state = "disabled"
-            if config.submit:
+            if submit_enabled:
                 pre_submit_phase_state = "pending_submit"
-            if config.submit and (not quality_allows_submit) and (not config.force_submit):
+            if submit_enabled and (not quality_allows_submit) and (not config.force_submit):
                 pre_submit_phase_state = "blocked_quality_guard"
             if submit_non_improving:
                 pre_submit_phase_state = "deferred_non_improving"
+            if defer_submit_for_accuracy_frontier:
+                pre_submit_phase_state = "deferred_accuracy_frontier"
             if submit_limited_holdback:
                 pre_submit_phase_state = "deferred_for_final_slot"
             pre_submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate)
+            _print_iteration_submit_status(
+                iteration=iteration,
+                max_iterations=max_iterations,
+                submit_enabled=submit_enabled,
+                submit_allowed_by_gate=submit_allowed_by_gate,
+                submit_phase_state=pre_submit_phase_state,
+                quality_reasons=quality_reasons,
+                competition_faithfulness=quality_guard.get("competition_faithfulness")
+                if isinstance(quality_guard.get("competition_faithfulness"), dict)
+                else None,
+            )
             pre_submit_metrics_payload = _build_metrics_payload(
                 run_id=run_id,
                 iteration=iteration,
@@ -1279,6 +1584,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 evaluation_by_source=evaluation_by_source,
                 evaluation_report=report,
                 readiness_target=readiness_target,
+                evaluation_contract=evaluation_contract,
+                competition_faithfulness=quality_guard.get("competition_faithfulness")
+                if isinstance(quality_guard.get("competition_faithfulness"), dict)
+                else None,
+                accuracy_potential=accuracy_potential,
             )
             pre_submit_metrics_payload["checkpoint_phase"] = "pre_submit"
             pre_submit_metrics_payload["quality_guard"] = quality_guard
@@ -1298,13 +1608,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 readiness_score=readiness_score,
             )
             submission_result: dict[str, object] | None = None
+            online_score: float | None = None
             if submit_non_improving:
                 submit_phase_state = "deferred_non_improving"
+            elif defer_submit_for_accuracy_frontier:
+                submit_phase_state = "deferred_accuracy_frontier"
             elif submit_limited_holdback:
                 submit_phase_state = "deferred_for_final_slot"
             else:
                 submit_phase_state = "disabled"
-            if config.submit and allow_submit:
+            if submit_enabled and allow_submit and submission_phase is not None:
                 try:
                     submission_result = submission_phase.attempt(
                         submission_path=submission_path,
@@ -1318,8 +1631,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     submit_phase_state = "submitted"
                     submitted = True
                     last_submission_result = submission_result
-                    if _update_best_score(best_submitted_score, decision_score, metric_direction, 0.0):
-                        best_submitted_score = decision_score
                     outcome_payload = submission_result.get("outcome")
                     if isinstance(outcome_payload, dict):
                         online_score = _to_float(outcome_payload.get("score"))
@@ -1412,8 +1723,35 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                     f"{submission_rank_estimate}/{submission_total_teams_estimate} "
                                     f"(percentile={percentile_text}){source_text}"
                                 )
+                    submitted_tracking_score, submitted_tracking_source = _submission_score_for_tracking(
+                        offline_score=decision_score,
+                        online_score=online_score,
+                    )
+                    if _update_best_score(best_submitted_score, submitted_tracking_score, metric_direction, 0.0):
+                        best_submitted_score = submitted_tracking_score
+                        if submitted_tracking_source != "offline":
+                            print(
+                                "[cyan]submit tracking[/cyan]: "
+                                f"updated best submitted score from {submitted_tracking_source}."
+                            )
                 else:
                     submit_phase_state = "dry_run" if config.dry_run else "attempted_no_result"
+            if target_rank_percentile is not None and deliverable_mode == "leaderboard":
+                medal_target_met = _meets_rank_percentile_target(
+                    rank_percentile=submission_rank_percentile,
+                    estimated_rank_percentile=submission_rank_percentile_estimate,
+                    target_rank_percentile=target_rank_percentile,
+                )
+                if not medal_target_met:
+                    medal_minimum_improvement_mode = "moderate_update"
+                    medal_policy_reason = _build_medal_target_reason(
+                        target_medal=target_medal,
+                        target_rank_percentile=target_rank_percentile,
+                        rank_percentile=submission_rank_percentile,
+                        estimated_rank_percentile=submission_rank_percentile_estimate,
+                    )
+                    if medal_policy_reason:
+                        print(f"[yellow]medal policy[/yellow]: {medal_policy_reason}")
             met_target = _meets_target(decision_score, target_score, metric_direction)
             top1_tier = _is_top1_tier(decision_score, top1_score, metric_direction)
             top1_tier_by_readiness = _is_top1_tier(readiness_score, top1_score, metric_direction)
@@ -1453,6 +1791,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 or quality_forced_major_overhaul
                 or code_reference_forced_reproduction
             )
+            fallback_submit_blocked_reason = None
+            for blocked_reason in (
+                "untrusted_score_source",
+                "competition_metric_mismatch",
+                "competition_split_mismatch",
+                "competition_score_source_mismatch",
+                "competition_evaluation_unfaithful",
+                "missing_competitive_data",
+            ):
+                if blocked_reason in quality_reasons:
+                    fallback_submit_blocked_reason = f"latest_iteration_{blocked_reason}"
+                    break
             forced_major_overhaul_reasons: list[str] = []
             if noise_forced_major_overhaul:
                 forced_major_overhaul_reasons.append(
@@ -1492,6 +1842,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 evaluation_by_source=evaluation_by_source,
                 evaluation_report=report,
                 readiness_target=readiness_target,
+                evaluation_contract=evaluation_contract,
+                competition_faithfulness=quality_guard.get("competition_faithfulness")
+                if isinstance(quality_guard.get("competition_faithfulness"), dict)
+                else None,
+                accuracy_potential=accuracy_potential,
             )
             metrics_payload["loop_decision"] = {
                 "source": decision_source,
@@ -1504,6 +1859,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "force_major_overhaul_next": force_major_overhaul_next,
             }
             metrics_payload["rank_guard"] = {
+                "target_medal": target_medal,
+                "target_rank_percentile": target_rank_percentile,
+                "target_rank_met": medal_target_met,
+                "minimum_improvement_mode": medal_minimum_improvement_mode,
                 "rank": submission_rank,
                 "total_teams": submission_total_teams,
                 "rank_percentile": submission_rank_percentile,
@@ -1521,6 +1880,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "offline_readiness": top1_tier_by_readiness,
                 "submission_score": top1_tier_by_submission,
             }
+            if isinstance(online_score, (int, float)):
+                metrics_payload["submission_score"] = float(online_score)
             if best_score_guard is not None:
                 metrics_payload["best_score_guard"] = best_score_guard
             metrics_payload["quality_guard"] = quality_guard
@@ -1551,10 +1912,163 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 loop_decision_score=decision_score,
                 loop_decision_source=decision_source,
                 quality_guard=quality_guard,
+                accuracy_potential=accuracy_potential,
             )
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
-            submit_allowed_by_gate = config.submit and allow_submit
+            orig_proba_signal = _extract_orig_proba_signal(kernel_metrics_payload)
+            pseudo_label_signal = _extract_pseudo_label_failure_signal(
+                kernel_metrics_payload=kernel_metrics_payload,
+                diagnostics_text=diagnostics,
+            )
+            online_mismatch_signal = _detect_online_mismatch_signal(
+                previous_best_offline=best_score,
+                current_offline=decision_score,
+                previous_best_online=best_online_submission_score,
+                current_online=online_score,
+                direction=metric_direction,
+            )
+            if isinstance(online_score, (int, float)) and _update_best_score(
+                best_online_submission_score,
+                float(online_score),
+                metric_direction,
+                0.0,
+            ):
+                best_online_submission_score = float(online_score)
+
+            extra_policy_notes: list[str] = []
+            minimum_improvement_mode_next = medal_minimum_improvement_mode
+            minimum_improvement_reason_next = medal_policy_reason
+            loop_signal_errors: list[dict[str, object]] = []
+            loop_signal_problems: list[dict[str, object]] = []
+            if orig_proba_signal is not None:
+                extra_policy_notes.append(str(orig_proba_signal["note"]))
+                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                    minimum_improvement_mode_next or "minor_tuning",
+                    "moderate_update",
+                )
+                minimum_improvement_reason_next = (
+                    f"{minimum_improvement_reason_next} {orig_proba_signal['note']}".strip()
+                    if minimum_improvement_reason_next
+                    else str(orig_proba_signal["note"])
+                )
+                loop_signal_errors.append(
+                    {
+                        "iteration": iteration,
+                        "error_message": (
+                            "ORIG_proba external signal fell back to constants because original data was unavailable."
+                        ),
+                        "fix_summary": str(orig_proba_signal["note"]),
+                        "resolved": False,
+                        "outcome_bucket": "unknown",
+                    }
+                )
+            if pseudo_label_signal is not None:
+                extra_policy_notes.append(str(pseudo_label_signal["note"]))
+                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                    minimum_improvement_mode_next or "minor_tuning",
+                    "moderate_update",
+                )
+                minimum_improvement_reason_next = (
+                    f"{minimum_improvement_reason_next} {pseudo_label_signal['note']}".strip()
+                    if minimum_improvement_reason_next
+                    else str(pseudo_label_signal["note"])
+                )
+                loop_signal_errors.append(
+                    {
+                        "iteration": iteration,
+                        "error_message": (
+                            f"Pseudo-labeling yielded {int(pseudo_label_signal['accepted'])}/"
+                            f"{int(pseudo_label_signal['total'])} accepted folds or candidates."
+                        ),
+                        "fix_summary": str(pseudo_label_signal["note"]),
+                        "resolved": False,
+                        "outcome_bucket": "unknown",
+                    }
+                )
+            if online_mismatch_signal is not None:
+                extra_policy_notes.append(str(online_mismatch_signal["note"]))
+                force_major_overhaul_next = True
+                forced_major_overhaul_reason = (
+                    f"{forced_major_overhaul_reason} {online_mismatch_signal['note']}".strip()
+                    if forced_major_overhaul_reason
+                    else str(online_mismatch_signal["note"])
+                )
+                loop_signal_problems.append(
+                    {
+                        "iteration": iteration,
+                        "why_poor": str(online_mismatch_signal["note"]),
+                        "how_improved": (
+                            "Ban same-family-only tuning after an online mismatch and require model-family "
+                            "diversification plus OOF blending."
+                        ),
+                        "delta_offline": None,
+                        "outcome_bucket": "low",
+                    }
+                )
+            if extra_policy_notes:
+                metrics_payload["repair_signals"] = {
+                    "orig_proba_constant_fallback": orig_proba_signal,
+                    "pseudo_label_failure": pseudo_label_signal,
+                    "online_mismatch": online_mismatch_signal,
+                }
+            metrics_payload["next_iteration_policy"] = {
+                "minimum_improvement_mode": minimum_improvement_mode_next,
+                "minimum_improvement_reason": minimum_improvement_reason_next,
+                "forced_improvement_mode": "major_overhaul" if force_major_overhaul_next else None,
+                "forced_improvement_reason": forced_major_overhaul_reason,
+                "extra_policy_notes": extra_policy_notes,
+            }
+            metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+
+            for issue in loop_signal_errors:
+                try:
+                    record_error_fix_insight(
+                        knowledge_paths=config.knowledge_paths,
+                        slug=config.slug,
+                        run_id=run_id,
+                        iteration=int(issue.get("iteration") or iteration),
+                        problem_types=problem_types,
+                        error_message=str(issue.get("error_message") or ""),
+                        fix_summary=str(issue.get("fix_summary") or ""),
+                        resolved=bool(issue.get("resolved")),
+                        outcome_bucket=str(issue.get("outcome_bucket") or "unknown"),
+                        submission_score=online_score,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            for issue in loop_signal_problems:
+                try:
+                    record_problem_type_insight(
+                        knowledge_paths=config.knowledge_paths,
+                        slug=config.slug,
+                        run_id=run_id,
+                        iteration=int(issue.get("iteration") or iteration),
+                        problem_types=problem_types,
+                        why_poor=str(issue.get("why_poor") or ""),
+                        how_improved=str(issue.get("how_improved") or ""),
+                        delta_offline=None,
+                        outcome_bucket=str(issue.get("outcome_bucket") or "unknown"),
+                        submission_score=online_score,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if writeup_mode:
+                writeup_bundle_meta = build_writeup_bundle(
+                    paths=config.paths,
+                    run_id=run_id,
+                    iteration=iteration,
+                    resolved=resolved,
+                    evaluation=evaluation,
+                    metrics_payload=metrics_payload,
+                    top1_info=top1_info if isinstance(top1_info, dict) else None,
+                )
+                metrics_payload["deliverable_mode"] = "writeup"
+                metrics_payload["writeup_bundle"] = writeup_bundle_meta
+                metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+
+            submit_allowed_by_gate = submit_enabled and allow_submit
             submit_phase_finished = (
                 (not submit_phase_required) or (not submit_allowed_by_gate) or (submission_result is not None)
             )
@@ -1623,7 +2137,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "restored best-known kernel source after severe conservative regression."
                         )
 
-            if force_major_on_no_improve and (not improved):
+            if force_major_on_no_improve and (not improved) and (not high_potential_improved):
                 if best_score_guard is not None:
                     print(
                         "[yellow]improve guard[/yellow]: "
@@ -1655,16 +2169,24 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 same_config_streak = 0
             last_config_hash = current_config_hash
 
-            if (not config.submit) and stop_no_improve_patience > 0 and no_improve_streak >= stop_no_improve_patience:
+            effective_no_improve_streak = (
+                frontier_no_improve_streak if best_high_potential_score is not None else no_improve_streak
+            )
+            effective_track_label = "accuracy frontier" if best_high_potential_score is not None else "offline metric"
+            if (
+                (not submit_enabled)
+                and stop_no_improve_patience > 0
+                and effective_no_improve_streak >= stop_no_improve_patience
+            ):
                 run_payload["status"] = "stopped"
                 run_payload["stop_reason"] = (
-                    f"offline metric did not improve by >= {stop_min_delta:.6f} "
-                    f"for {no_improve_streak} consecutive iterations"
+                    f"{effective_track_label} did not improve by >= {stop_min_delta:.6f} "
+                    f"for {effective_no_improve_streak} consecutive iterations"
                 )
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
             if (
-                (not config.submit)
+                (not submit_enabled)
                 and stop_same_config_patience > 0
                 and same_config_streak >= stop_same_config_patience
             ):
@@ -1701,8 +2223,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 pending_problem_insights=pending_problem_insights,
                 current_score=decision_score,
                 current_score_source=decision_source,
+                minimum_improvement_mode=minimum_improvement_mode_next,
+                minimum_improvement_reason=minimum_improvement_reason_next,
+                target_medal=target_medal,
+                target_rank_percentile=target_rank_percentile,
                 forced_improvement_mode="major_overhaul" if force_major_overhaul_next else None,
                 forced_improvement_reason=forced_major_overhaul_reason,
+                extra_policy_notes=extra_policy_notes,
                 enforce_code_reference_implementation=code_reference_forced_reproduction,
                 code_reference_enforcement_reason=code_reference_force_reason,
                 best_score_so_far=best_score,
@@ -1713,7 +2240,24 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         print("[yellow]run interrupted[/yellow]")
         return
 
-    if config.submit and not submitted and best_submittable_submission is not None:
+    if (
+        fallback_submit_blocked_reason is None
+        and isinstance(best_high_potential_meta, dict)
+        and best_high_potential_submission is not None
+        and best_high_potential_submission != best_submittable_submission
+        and (
+            not bool(best_high_potential_meta.get("faithful", False))
+            or not bool(best_high_potential_meta.get("trusted", False))
+        )
+    ):
+        fallback_submit_blocked_reason = "higher_potential_unsubmitted_candidate_exists"
+
+    if (
+        submit_enabled
+        and not submitted
+        and best_submittable_submission is not None
+        and fallback_submit_blocked_reason is None
+    ):
         final_iteration_reached = last_completed_iteration >= max_iterations
         allow_fallback_submit = True
         if (
@@ -1735,6 +2279,17 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
                 allow_fallback_submit = True
         if allow_fallback_submit:
+            fallback_iteration = _infer_iteration_from_submission_path(best_submittable_submission)
+            score_text = (
+                f" score={best_submittable_score:.6f}" if isinstance(best_submittable_score, (int, float)) else ""
+            )
+            if fallback_iteration is not None:
+                fallback_label = (
+                    f"best competition-faithful artifact from iter {fallback_iteration}/{max_iterations}{score_text}"
+                )
+                print(f"[cyan]submit[/cyan]: using {fallback_label}.")
+            else:
+                print(f"[cyan]submit[/cyan]: using best competition-faithful artifact{score_text}.")
             try:
                 fallback_result = submission_phase.attempt(
                     submission_path=best_submittable_submission,
@@ -1747,21 +2302,35 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if fallback_result:
                 submitted = True
                 last_submission_result = fallback_result
-                if best_submittable_score is not None and _update_best_score(
-                    best_submitted_score,
-                    best_submittable_score,
-                    metric_direction,
-                    0.0,
-                ):
-                    best_submitted_score = best_submittable_score
+                fallback_online_score: float | None = None
+                outcome_payload = fallback_result.get("outcome")
+                if isinstance(outcome_payload, dict):
+                    fallback_online_score = _to_float(outcome_payload.get("score"))
+                if best_submittable_score is not None:
+                    submitted_tracking_score, _submitted_tracking_source = _submission_score_for_tracking(
+                        offline_score=best_submittable_score,
+                        online_score=fallback_online_score,
+                    )
+                    if _update_best_score(
+                        best_submitted_score,
+                        submitted_tracking_score,
+                        metric_direction,
+                        0.0,
+                    ):
+                        best_submitted_score = submitted_tracking_score
         else:
             print(
                 "[yellow]submit skipped[/yellow]: fallback artifact is not better "
-                "than previously submitted offline score."
+                "than previously submitted checkpoint score."
             )
-    elif config.submit and not submitted and best_submission is not None and best_submittable_submission is None:
+    elif submit_enabled and not submitted and fallback_submit_blocked_reason is not None:
         print(
-            "[yellow]submit skipped[/yellow]: no quality-eligible fallback artifact "
+            "[yellow]submit skipped[/yellow]: latest iteration was not competition-faithful "
+            f"({fallback_submit_blocked_reason}); refusing fallback submit from an older artifact."
+        )
+    elif submit_enabled and not submitted and best_submission is not None and best_submittable_submission is None:
+        print(
+            "[yellow]submit skipped[/yellow]: no competition-faithful fallback artifact "
             "(all candidates were blocked by quality guard)."
         )
 
@@ -1779,8 +2348,27 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             top1_score=top1_score if isinstance(top1_score, (int, float)) else None,
         )
         run_payload["status"] = "submitted"
+    elif writeup_mode and writeup_bundle_meta:
+        run_payload["status"] = "manual_finalization_required"
+        run_payload["writeup_bundle"] = writeup_bundle_meta
     elif run_payload.get("status") not in {"interrupted", "submit_failed"}:
         run_payload["status"] = "completed"
+
+    run_payload["summary"] = {
+        "best_trusted_score": best_score,
+        "best_trusted_submission": str(best_submission) if best_submission is not None else None,
+        "best_competition_faithful_score": best_submittable_score,
+        "best_competition_faithful_submission": (
+            str(best_submittable_submission) if best_submittable_submission is not None else None
+        ),
+        "best_high_potential_score": best_high_potential_score,
+        "best_high_potential_submission": (
+            str(best_high_potential_submission) if best_high_potential_submission is not None else None
+        ),
+        "best_high_potential_iteration": best_high_potential_iteration,
+        "best_high_potential_meta": best_high_potential_meta,
+        "fallback_submit_blocked_reason": fallback_submit_blocked_reason,
+    }
 
     (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
 
@@ -1810,6 +2398,142 @@ def _load_plan(paths: CompetitionPaths) -> PlanConfig:
     except json.JSONDecodeError:
         return PlanConfig()
     return PlanConfig.from_dict(payload)
+
+
+def _normalize_split_strategy_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    aliases = {
+        "k": "kfold",
+        "kfold": "kfold",
+        "stratified": "stratified_kfold",
+        "stratifiedkfold": "stratified_kfold",
+        "stratified_kfold": "stratified_kfold",
+        "group": "group_kfold",
+        "groupkfold": "group_kfold",
+        "group_kfold": "group_kfold",
+        "time": "timeseries_split",
+        "timeseries": "timeseries_split",
+        "timeseriessplit": "timeseries_split",
+        "timeseries_split": "timeseries_split",
+    }
+    return aliases.get(normalized)
+
+
+def _infer_split_strategy_from_hint_text(text: str) -> str | None:
+    lowered = text.strip().lower()
+    if not lowered:
+        return None
+    direct = _normalize_split_strategy_name(lowered)
+    if direct is not None:
+        return direct
+    if re.search(r"\btime[-_\s]?series\b|\bchronolog\b|\bforecast\b", lowered):
+        return "timeseries_split"
+    if re.search(r"\bgroupkfold\b|\bgroup[_\s-]?kfold\b|\bgroup[_\s-]?fold\b|\bgroup[_\s-]?cv\b", lowered):
+        return "group_kfold"
+    if re.search(r"\bstratifiedkfold\b|\bstratified[_\s-]?kfold\b|\bstratified[_\s-]?cv\b", lowered):
+        return "stratified_kfold"
+    if re.search(r"\bk[-_\s]?fold\b", lowered):
+        return "kfold"
+    return None
+
+
+def _extract_plan_split_strategy_hints(plan_payload: dict[str, object]) -> list[str]:
+    hints: list[str] = []
+
+    evaluation_protocol = plan_payload.get("evaluation_protocol")
+    if isinstance(evaluation_protocol, dict):
+        for key in ("cv_type", "split_strategy"):
+            raw = evaluation_protocol.get(key)
+            if isinstance(raw, str) and raw.strip():
+                hints.append(raw)
+
+    toggles = plan_payload.get("toggles")
+    if isinstance(toggles, dict):
+        for key in ("CV_TYPE", "cv_type", "split_strategy", "SPLIT_STRATEGY"):
+            raw = toggles.get(key)
+            if isinstance(raw, str) and raw.strip():
+                hints.append(raw)
+
+    for key in ("cv_type", "split_strategy"):
+        raw = plan_payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            hints.append(raw)
+
+    return hints
+
+
+def _profile_has_temporal_signal(profile: dict[str, object]) -> bool:
+    dtype_map_raw = profile.get("dtype_by_column")
+    if not isinstance(dtype_map_raw, dict):
+        return False
+    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
+    for name, dtype in dtype_map_raw.items():
+        column_name = str(name)
+        dtype_name = str(dtype).lower()
+        if "datetime" in dtype_name or "timedelta" in dtype_name:
+            return True
+        if temporal_name.search(column_name):
+            return True
+    return False
+
+
+def _resolve_split_strategy_from_hints(
+    *,
+    paths: CompetitionPaths,
+    split_strategy: object,
+) -> tuple[str | None, str | None]:
+    raw_current = str(split_strategy).strip() if isinstance(split_strategy, str) else ""
+    normalized_current = _normalize_split_strategy_name(raw_current)
+    if raw_current and normalized_current is None:
+        return raw_current, None
+    if normalized_current not in {None, "kfold"}:
+        return normalized_current, None
+
+    plan_payload = _load_json_object(paths.plan_path) or {}
+    hints = _extract_plan_split_strategy_hints(plan_payload)
+    hinted_strategy: str | None = None
+    for hint in hints:
+        candidate = _infer_split_strategy_from_hint_text(hint)
+        if candidate is None:
+            continue
+        if hinted_strategy is None or (_SPLIT_STRATEGY_PRIORITY[candidate] > _SPLIT_STRATEGY_PRIORITY[hinted_strategy]):
+            hinted_strategy = candidate
+
+    if (
+        hinted_strategy in {"timeseries_split", "group_kfold", "stratified_kfold"}
+        and hinted_strategy != normalized_current
+    ):
+        return (
+            hinted_strategy,
+            f"split_strategy '{normalized_current or 'auto'}' -> '{hinted_strategy}' "
+            "using plan evaluation hints for better local/public alignment.",
+        )
+
+    profile = _load_json_object(paths.dataset_profile_path) or {}
+    if (
+        str(profile.get("modality", "")).strip().lower() == "timeseries"
+        and _profile_has_temporal_signal(profile)
+        and normalized_current != "timeseries_split"
+    ):
+        return (
+            "timeseries_split",
+            f"split_strategy '{normalized_current or 'auto'}' -> 'timeseries_split' "
+            "using dataset_profile temporal signal.",
+        )
+
+    task = str(profile.get("task", "")).strip().lower()
+    if task in {"classification", "binary", "multiclass"} and normalized_current in {None, "kfold"}:
+        return (
+            "stratified_kfold",
+            f"split_strategy '{normalized_current or 'auto'}' -> 'stratified_kfold' "
+            "using dataset_profile classification task.",
+        )
+
+    return normalized_current, None
 
 
 def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
@@ -1989,6 +2713,42 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
         default=_DEFAULT_STRICT_COMPETITION_METRIC,
     )
+    plan_deliverable_mode = normalize_deliverable_mode(getattr(plan, "deliverable_mode", None), default="")
+    spec_deliverable_mode = normalize_deliverable_mode(eval_spec.get("deliverable_mode"), default="")
+    inferred_deliverable_mode = infer_deliverable_mode_from_paths(config.paths, default="")
+    if spec_deliverable_mode:
+        deliverable_mode = spec_deliverable_mode
+    elif inferred_deliverable_mode:
+        deliverable_mode = inferred_deliverable_mode
+    elif plan_deliverable_mode:
+        deliverable_mode = plan_deliverable_mode
+    else:
+        deliverable_mode = "leaderboard"
+    plan_submit_mode = normalize_submit_mode(getattr(plan, "submit_mode", None), default="")
+    spec_submit_mode = normalize_submit_mode(eval_spec.get("submit_mode"), default="")
+    inferred_submit_mode = infer_submit_mode_from_paths(config.paths, default="")
+    if spec_submit_mode:
+        submit_mode = spec_submit_mode
+    elif inferred_submit_mode:
+        submit_mode = inferred_submit_mode
+    elif plan_submit_mode:
+        submit_mode = plan_submit_mode
+    else:
+        submit_mode = "file"
+    plan_target_medal = _normalize_target_medal(getattr(plan, "target_medal", None), default=None)
+    spec_target_medal = _normalize_target_medal(eval_spec.get("target_medal"), default=None)
+    default_target_medal = _DEFAULT_TARGET_MEDAL if deliverable_mode == "leaderboard" else None
+    target_medal = spec_target_medal or plan_target_medal or default_target_medal
+    target_rank_percentile = _normalize_target_rank_percentile(
+        getattr(plan, "target_rank_percentile", None),
+        medal=target_medal,
+        fallback=None,
+    )
+    target_rank_percentile = _normalize_target_rank_percentile(
+        eval_spec.get("target_rank_percentile"),
+        medal=spec_target_medal or target_medal,
+        fallback=target_rank_percentile,
+    )
     target_metric = choose(config.target_metric, plan.target_metric, spec_metric)
     target_score = choose(config.target_score, plan.target_score, spec_readiness_target)
     target_direction = choose(config.target_direction, plan.target_direction, spec_direction or "auto")
@@ -2019,6 +2779,12 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
     cv_folds = choose(config.cv_folds, plan.cv_folds, spec_folds if spec_folds is not None else 5)
     split_strategy = choose(None, plan.split_strategy, spec_split)
+    split_strategy, split_strategy_note = _resolve_split_strategy_from_hints(
+        paths=config.paths,
+        split_strategy=split_strategy,
+    )
+    if split_strategy_note:
+        print(f"[yellow]note[/yellow]: {split_strategy_note}")
     seed = choose(config.seed, plan.seed, spec_seed if spec_seed is not None else 42)
     eval_seeds = _normalize_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
     if len(eval_seeds) < 2:
@@ -2035,14 +2801,17 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         )
         eval_repeats = _DEFAULT_EVAL_REPEATS
     constraints = _load_competition_rule_constraints(config.paths)
+    if constraints.notebook_submissions_only and submit_mode != "notebook":
+        print("[yellow]note[/yellow]: competition requires notebook-based submissions; forcing submit_mode=notebook.")
+        submit_mode = "notebook"
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
     internet = choose(config.internet, plan.internet, "on")
     if internet in (None, "auto"):
         internet = "on"
-    if constraints.notebook_submissions_only and not str(config.compute).startswith("kaggle_"):
+    if submit_mode == "notebook" and not str(config.compute).startswith("kaggle_"):
         print(
-            "[yellow]note[/yellow]: competition requires notebook-based submissions; "
+            "[yellow]note[/yellow]: notebook-based submission is selected; "
             "autopilot will auto-switch submit mode to notebook submit."
         )
     if constraints.internet_must_be_off and str(internet).strip().lower() != "off":
@@ -2144,12 +2913,25 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         plan.rank_force_major_max_percentile,
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
     )
+    if target_rank_percentile is not None:
+        rank_force_major_max_percentile = min(rank_force_major_max_percentile, float(target_rank_percentile))
     rank_force_major_min_teams = _normalize_rank_force_min_teams(
         plan.rank_force_major_min_teams,
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
+    evaluation_contract = _build_evaluation_contract(
+        paths=config.paths,
+        eval_spec=eval_spec,
+        target_metric=str(target_metric) if isinstance(target_metric, str) else None,
+        target_direction=str(target_direction) if isinstance(target_direction, str) else None,
+        split_strategy=str(split_strategy) if isinstance(split_strategy, str) else None,
+    )
 
     return {
+        "deliverable_mode": deliverable_mode,
+        "submit_mode": submit_mode,
+        "target_medal": target_medal,
+        "target_rank_percentile": target_rank_percentile,
         "target_metric": target_metric,
         "target_score": target_score,
         "target_direction": target_direction,
@@ -2182,11 +2964,20 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "stop_same_config_patience": stop_same_config_patience,
         "rank_force_major_max_percentile": rank_force_major_max_percentile,
         "rank_force_major_min_teams": rank_force_major_min_teams,
+        "evaluation_contract": evaluation_contract,
     }
 
 
 def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
     return PlanConfig(
+        deliverable_mode=str(resolved.get("deliverable_mode") or "leaderboard"),
+        submit_mode=str(resolved.get("submit_mode") or "file"),
+        target_medal=_normalize_target_medal(resolved.get("target_medal"), default=None),
+        target_rank_percentile=_normalize_target_rank_percentile(
+            resolved.get("target_rank_percentile"),
+            medal=_normalize_target_medal(resolved.get("target_medal"), default=None),
+            fallback=None,
+        ),
         target_metric=resolved.get("target_metric"),  # type: ignore[arg-type]
         target_direction=str(resolved.get("target_direction") or "auto"),
         target_score=resolved.get("target_score"),  # type: ignore[arg-type]
@@ -2243,6 +3034,10 @@ def _build_run_payload(
             "agent": config.agent,
             "compute": config.compute,
             "accelerator": config.accelerator,
+            "deliverable_mode": resolved.get("deliverable_mode"),
+            "submit_mode": resolved.get("submit_mode"),
+            "target_medal": resolved.get("target_medal"),
+            "target_rank_percentile": resolved.get("target_rank_percentile"),
             "kaggle_username": config.kaggle_username,
             "kernel_name": resolved.get("kernel_name"),
             "internet": resolved.get("internet"),
@@ -2276,6 +3071,7 @@ def _build_run_payload(
             "stop_same_config_patience": resolved.get("stop_same_config_patience"),
             "rank_force_major_max_percentile": resolved.get("rank_force_major_max_percentile"),
             "rank_force_major_min_teams": resolved.get("rank_force_major_min_teams"),
+            "evaluation_contract": resolved.get("evaluation_contract"),
             "submit": config.submit,
             "message": config.message,
         },
@@ -2349,6 +3145,53 @@ def _normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
     if isinstance(value, float):
         return max(1, int(value))
     return max(1, int(fallback))
+
+
+def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _MEDAL_TARGET_PERCENTILES:
+            return normalized
+    return default
+
+
+def _normalize_target_rank_percentile(
+    value: object,
+    *,
+    medal: str | None = None,
+    fallback: float | None = None,
+) -> float | None:
+    parsed: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        parsed = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                parsed = None
+    if parsed is not None and 0.0 < parsed <= 1.0:
+        return parsed
+    if medal is not None:
+        medal_target = _MEDAL_TARGET_PERCENTILES.get(medal)
+        if medal_target is not None:
+            return medal_target
+    if fallback is not None and 0.0 < float(fallback) <= 1.0:
+        return float(fallback)
+    return None
+
+
+def _improvement_mode_rank(mode: str) -> int:
+    return {"minor_tuning": 0, "moderate_update": 1, "major_overhaul": 2}.get(mode, 0)
+
+
+def _upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> str:
+    if not minimum_mode:
+        return current_mode
+    if _improvement_mode_rank(minimum_mode) > _improvement_mode_rank(current_mode):
+        return minimum_mode
+    return current_mode
 
 
 def _expanded_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
@@ -2437,7 +3280,7 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
 
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
-    print("[cyan]plan[/cyan]: codex(5.3) -> gpt(5.2) -> codex(5.3)")
+    print(f"[cyan]plan[/cyan]: {planning_flow_summary()}")
     pipeline_config = AgentPipelineConfig(
         slug=config.slug,
         competition_url=config.competition_url,
@@ -2463,7 +3306,7 @@ def _print_top1_info(top1_info: dict[str, object]) -> None:
 
 
 def _print_agent_prompt(prompt_path: Path, prompt_text: str) -> None:
-    print(f"[cyan]codex prompt[/cyan]: {prompt_path}")
+    print(f"[cyan]{IMPLEMENTATION_AGENT.log_alias} prompt[/cyan]: {prompt_path}")
     builtins.print(prompt_text.rstrip())
     builtins.print("")
 
@@ -2475,7 +3318,7 @@ def _read_agent_response(path: Path) -> str:
 
 
 def _print_agent_response(response_path: Path, response_text: str) -> None:
-    print(f"[cyan]codex response[/cyan]: {response_path}")
+    print(f"[cyan]{IMPLEMENTATION_AGENT.log_alias} response[/cyan]: {response_path}")
     builtins.print(response_text)
     builtins.print("")
 
@@ -2609,6 +3452,295 @@ def _normalize_score_source_name(value: object) -> str:
 def _is_trusted_offline_score_source(score_source: str) -> bool:
     """Return whether score source is trusted for offline model-selection decisions."""
     return _normalize_score_source_name(score_source) in _TRUSTED_SCORE_SOURCES
+
+
+def _normalize_score_source_list(value: object) -> list[str]:
+    normalized: list[str] = []
+    if not isinstance(value, list):
+        return normalized
+    for item in value:
+        candidate = _normalize_score_source_name(item)
+        if candidate and candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
+
+
+def _build_evaluation_contract(
+    *,
+    paths: CompetitionPaths,
+    eval_spec: dict[str, object],
+    target_metric: str | None,
+    target_direction: str | None,
+    split_strategy: str | None,
+) -> dict[str, object]:
+    faithfulness = eval_spec.get("faithfulness") if isinstance(eval_spec.get("faithfulness"), dict) else {}
+    accepted_score_sources = _normalize_score_source_list(
+        faithfulness.get("accepted_score_sources") if isinstance(faithfulness, dict) else None
+    )
+    require_full_dataset_default = paths.slug.strip().lower() in _FULL_DATASET_REQUIRED_COMPETITIONS
+    expected_metric = canonical_metric(target_metric) if isinstance(target_metric, str) and target_metric else None
+    contract = {
+        "expected_metric": expected_metric,
+        "expected_direction": (
+            str(target_direction).strip().lower()
+            if isinstance(target_direction, str) and str(target_direction).strip().lower() in {"minimize", "maximize"}
+            else None
+        ),
+        "expected_split_strategy": _normalize_split_strategy_name(split_strategy),
+        "accepted_score_sources": accepted_score_sources or list(_DEFAULT_ACCEPTED_SCORE_SOURCES),
+        "require_metric_match": (
+            bool(faithfulness.get("require_metric_match"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_metric_match"), bool)
+            else True
+        ),
+        "require_split_match": (
+            bool(faithfulness.get("require_split_match"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_split_match"), bool)
+            else True
+        ),
+        "require_trusted_score_source": (
+            bool(faithfulness.get("require_trusted_score_source"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_trusted_score_source"), bool)
+            else True
+        ),
+        "require_competition_faithful": (
+            bool(faithfulness.get("require_competition_faithful"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_competition_faithful"), bool)
+            else True
+        ),
+        "require_full_dataset": (
+            bool(faithfulness.get("require_full_dataset"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_full_dataset"), bool)
+            else require_full_dataset_default
+        ),
+    }
+    return contract
+
+
+def _extract_competition_faithfulness(
+    *,
+    evaluation: EvaluationResult,
+    kernel_metrics_payload: dict[str, object] | None,
+    evaluation_report: EvaluationReport | None,
+    evaluation_contract: dict[str, object] | None,
+) -> dict[str, object]:
+    payload = kernel_metrics_payload or {}
+    contract = evaluation_contract or {}
+    accepted_score_sources = _normalize_score_source_list(contract.get("accepted_score_sources"))
+    if not accepted_score_sources:
+        accepted_score_sources = list(_DEFAULT_ACCEPTED_SCORE_SOURCES)
+
+    expected_metric = str(contract.get("expected_metric") or "").strip() or None
+    actual_metric = str(payload.get("metric") or evaluation.metric or "").strip() or None
+    expected_split = _normalize_split_strategy_name(contract.get("expected_split_strategy"))
+    actual_split = _normalize_split_strategy_name(payload.get("split_strategy"))
+    readiness_payload = payload.get("readiness")
+    if actual_split is None and isinstance(readiness_payload, dict):
+        actual_split = _normalize_split_strategy_name(readiness_payload.get("split_strategy"))
+    if actual_split is None and evaluation_report is not None:
+        actual_split = _normalize_split_strategy_name(evaluation_report.split_strategy)
+
+    score_source = _normalize_score_source_name(payload.get("score_source") or evaluation.score_source)
+    score_source_mismatch = score_source not in accepted_score_sources
+    derived_noncompetitive = any(token in score_source for token in _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS)
+
+    dataset_mode_raw = payload.get("dataset_mode")
+    if dataset_mode_raw is None:
+        dataset_mode_raw = payload.get("data_mode")
+    if dataset_mode_raw is None:
+        data_resolution = payload.get("data_resolution")
+        if isinstance(data_resolution, dict):
+            dataset_mode_raw = data_resolution.get("mode")
+    dataset_mode = str(dataset_mode_raw).strip().lower() if isinstance(dataset_mode_raw, str) else None
+
+    full_dataset_resolved_raw = payload.get("full_dataset_resolved")
+    if full_dataset_resolved_raw is None:
+        data_resolution = payload.get("data_resolution")
+        if isinstance(data_resolution, dict):
+            full_dataset_resolved_raw = data_resolution.get("full_dataset_resolved")
+    full_dataset_resolved = bool(full_dataset_resolved_raw) if isinstance(full_dataset_resolved_raw, bool) else None
+
+    competition_faithful_raw = payload.get("competition_faithful")
+    if isinstance(competition_faithful_raw, bool):
+        competition_faithful = competition_faithful_raw
+    elif isinstance(payload.get("noncompetitive"), bool):
+        competition_faithful = not bool(payload.get("noncompetitive"))
+    elif derived_noncompetitive:
+        competition_faithful = False
+    else:
+        competition_faithful = None
+
+    if full_dataset_resolved is None and dataset_mode is not None:
+        full_dataset_resolved = dataset_mode in {"full", "competitive", "complete"}
+    elif full_dataset_resolved is None and derived_noncompetitive:
+        full_dataset_resolved = False
+
+    metric_match = True
+    if expected_metric:
+        metric_match = _metrics_equivalent(expected_metric, actual_metric)
+
+    split_match = True
+    if expected_split:
+        split_match = actual_split == expected_split
+
+    data_faithful = True
+    if bool(contract.get("require_full_dataset")) and full_dataset_resolved is False:
+        data_faithful = False
+    if bool(contract.get("require_competition_faithful")) and competition_faithful is False:
+        data_faithful = False
+
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if bool(contract.get("require_metric_match")) and expected_metric and not metric_match:
+        reasons.append("competition_metric_mismatch")
+        warnings.append(f"expected_metric={expected_metric},actual_metric={actual_metric or 'unknown'}")
+    if bool(contract.get("require_split_match")) and expected_split and not split_match:
+        reasons.append("competition_split_mismatch")
+        warnings.append(f"expected_split={expected_split},actual_split={actual_split or 'unknown'}")
+    if bool(contract.get("require_trusted_score_source")) and score_source_mismatch:
+        reasons.append("competition_score_source_mismatch")
+        warnings.append(
+            f"accepted_score_sources={','.join(accepted_score_sources)},actual_score_source={score_source or 'unknown'}"
+        )
+    if bool(contract.get("require_competition_faithful")) and competition_faithful is False:
+        reasons.append("competition_evaluation_unfaithful")
+        warnings.append("competition_faithful=false")
+    if bool(contract.get("require_full_dataset")) and full_dataset_resolved is False:
+        reasons.append("missing_competitive_data")
+        warnings.append(f"dataset_mode={dataset_mode or 'unknown'}")
+
+    faithful = not reasons
+    return {
+        "faithful": faithful,
+        "expected_metric": expected_metric,
+        "actual_metric": actual_metric,
+        "expected_split_strategy": expected_split,
+        "actual_split_strategy": actual_split,
+        "score_source": score_source,
+        "accepted_score_sources": accepted_score_sources,
+        "competition_faithful": competition_faithful,
+        "dataset_mode": dataset_mode,
+        "full_dataset_resolved": full_dataset_resolved,
+        "metric_match": metric_match,
+        "split_match": split_match,
+        "data_faithful": data_faithful,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
+def _infer_capacity_tier(
+    *,
+    kernel_metrics_payload: dict[str, object] | None,
+    model_summary: dict[str, object] | None,
+) -> str:
+    payload = kernel_metrics_payload or {}
+    summary = model_summary or {}
+    text_candidates: list[str] = []
+    for key in ("selected_pipeline", "chosen_pipeline", "model_name", "pipeline_name"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            text_candidates.append(raw.strip().lower())
+    pipelines = payload.get("pipelines")
+    if isinstance(pipelines, list):
+        for item in pipelines[:5]:
+            if isinstance(item, dict):
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    text_candidates.append(name.strip().lower())
+    for key in ("model_name", "selected_pipeline", "pipeline_name"):
+        raw = summary.get(key)
+        if isinstance(raw, str) and raw.strip():
+            text_candidates.append(raw.strip().lower())
+    models = summary.get("models")
+    if isinstance(models, list):
+        for item in models[:5]:
+            if isinstance(item, str) and item.strip():
+                text_candidates.append(item.strip().lower())
+
+    tier = "medium"
+    for text in text_candidates:
+        if any(marker in text for marker in _EXTREME_CAPACITY_MARKERS):
+            return "extreme"
+        if any(marker in text for marker in _HIGH_CAPACITY_MARKERS):
+            tier = "high"
+            continue
+        if tier != "high" and any(marker in text for marker in _LOW_CAPACITY_MARKERS):
+            tier = "low"
+            continue
+        if tier not in {"high", "extreme"} and any(marker in text for marker in _MEDIUM_CAPACITY_MARKERS):
+            tier = "medium"
+    return tier
+
+
+def _infer_data_tier(
+    *,
+    competition_faithfulness: dict[str, object] | None,
+    evaluation_contract: dict[str, object] | None,
+) -> str:
+    faithfulness = competition_faithfulness or {}
+    contract = evaluation_contract or {}
+    if bool(contract.get("require_full_dataset")) and faithfulness.get("full_dataset_resolved") is False:
+        return "minimum_submit_data"
+    if bool(faithfulness.get("faithful")):
+        return "high_accuracy_data"
+    if bool(faithfulness.get("metric_match")) and bool(faithfulness.get("split_match")):
+        return "trusted_eval_data"
+    return "minimum_submit_data"
+
+
+def _build_accuracy_potential(
+    *,
+    evaluation: EvaluationResult,
+    kernel_metrics_payload: dict[str, object] | None,
+    model_summary: dict[str, object] | None,
+    quality_guard: dict[str, object] | None,
+    evaluation_contract: dict[str, object] | None,
+) -> dict[str, object]:
+    payload = kernel_metrics_payload or {}
+    guard = quality_guard or {}
+    faithfulness = (
+        guard.get("competition_faithfulness") if isinstance(guard.get("competition_faithfulness"), dict) else {}
+    )
+    reasons_raw = guard.get("reasons")
+    reasons = [str(item) for item in reasons_raw if isinstance(item, str)] if isinstance(reasons_raw, list) else []
+    capacity_tier = _infer_capacity_tier(kernel_metrics_payload=payload, model_summary=model_summary)
+    data_tier = _infer_data_tier(
+        competition_faithfulness=faithfulness if isinstance(faithfulness, dict) else None,
+        evaluation_contract=evaluation_contract,
+    )
+    trusted = _is_trusted_offline_score_source(evaluation.score_source)
+    faithful = bool(faithfulness.get("faithful", False))
+    capacity_priority = _CAPACITY_TIER_PRIORITY.get(capacity_tier, 0)
+    data_priority = {"minimum_submit_data": 0, "trusted_eval_data": 1, "high_accuracy_data": 2}.get(data_tier, 0)
+    blocked_by_submit_only = (
+        all(
+            reason in {"competition_split_mismatch", "competition_evaluation_unfaithful", "missing_competitive_data"}
+            for reason in reasons
+        )
+        if reasons
+        else False
+    )
+    eligible = faithful or trusted or (capacity_priority >= 2 and (blocked_by_submit_only or data_priority >= 1))
+    status = "frontier" if eligible and capacity_priority >= 2 else ("trusted" if faithful or trusted else "blocked")
+    primary_reason = "trusted_competition_faithful"
+    if status == "frontier" and not faithful:
+        primary_reason = "high_capacity_candidate_requires_better_data_or_eval"
+    elif reasons:
+        primary_reason = reasons[0]
+    return {
+        "status": status,
+        "eligible": eligible,
+        "trusted": trusted,
+        "faithful": faithful,
+        "capacity_tier": capacity_tier,
+        "capacity_priority": capacity_priority,
+        "data_tier": data_tier,
+        "data_priority": data_priority,
+        "frontier_priority": capacity_priority * 10 + data_priority * 3 + int(faithful) + int(trusted),
+        "primary_reason": primary_reason,
+        "quality_reasons": reasons,
+    }
 
 
 def _extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) -> float | None:
@@ -3012,6 +4144,8 @@ def _build_kernel_quality_guard(
     *,
     evaluation: EvaluationResult,
     kernel_metrics_payload: dict[str, object] | None,
+    evaluation_report: EvaluationReport | None,
+    evaluation_contract: dict[str, object] | None,
     logs_dir: Path | None,
     direction: str,
     iteration: int,
@@ -3045,6 +4179,21 @@ def _build_kernel_quality_guard(
             warnings.append(f"oracle_mode={oracle_mode or 'unknown'}")
             if not force_submit:
                 block_submit = True
+
+    competition_faithfulness = _extract_competition_faithfulness(
+        evaluation=evaluation,
+        kernel_metrics_payload=payload,
+        evaluation_report=evaluation_report,
+        evaluation_contract=evaluation_contract,
+    )
+    for reason in competition_faithfulness.get("reasons", []):
+        if isinstance(reason, str) and reason not in reasons:
+            reasons.append(reason)
+            if not force_submit:
+                block_submit = True
+    for warning in competition_faithfulness.get("warnings", []):
+        if isinstance(warning, str) and warning not in warnings:
+            warnings.append(warning)
 
     baseline_candidates = _extract_baseline_candidates_from_metrics_payload(payload)
     log_text = _collect_kernel_log_text(logs_dir)
@@ -3151,6 +4300,7 @@ def _build_kernel_quality_guard(
         "is_final_iteration": is_final_iteration,
         "reasons": reasons,
         "warnings": warnings,
+        "competition_faithfulness": competition_faithfulness,
         "baseline": {
             "best_source": best_baseline_source,
             "best_score": best_baseline_score,
@@ -3177,6 +4327,18 @@ def _build_kernel_quality_guard(
     }
 
 
+def _iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationResult) -> bool:
+    payload = _load_json_object(metrics_path)
+    if isinstance(payload, dict):
+        quality_guard = payload.get("quality_guard")
+        if isinstance(quality_guard, dict) and isinstance(quality_guard.get("allow_submit"), bool):
+            return bool(quality_guard.get("allow_submit"))
+        faithfulness = payload.get("competition_faithfulness")
+        if isinstance(faithfulness, dict) and isinstance(faithfulness.get("faithful"), bool):
+            return bool(faithfulness.get("faithful"))
+    return _is_trusted_offline_score_source(evaluation.score_source)
+
+
 def _build_metrics_payload(
     *,
     run_id: str,
@@ -3193,6 +4355,9 @@ def _build_metrics_payload(
     evaluation_by_source: dict[str, EvaluationResult] | None = None,
     evaluation_report: EvaluationReport | None = None,
     readiness_target: float | None = None,
+    evaluation_contract: dict[str, object] | None = None,
+    competition_faithfulness: dict[str, object] | None = None,
+    accuracy_potential: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload = {
         "run_id": run_id,
@@ -3231,6 +4396,12 @@ def _build_metrics_payload(
             "repeats": evaluation_report.repeats,
             "drift_auc": evaluation_report.drift_auc,
         }
+    if evaluation_contract:
+        payload["evaluation_contract"] = evaluation_contract
+    if competition_faithfulness:
+        payload["competition_faithfulness"] = competition_faithfulness
+    if accuracy_potential:
+        payload["accuracy_potential"] = accuracy_potential
     return payload
 
 
@@ -3324,6 +4495,17 @@ def _build_iteration_evaluation_report(
     return report, payload, cache
 
 
+def _build_eval_data_cache_fallback(*, split_strategy: str | None, cv_folds: int) -> dict[str, object]:
+    normalized_split = _normalize_split_strategy_name(split_strategy) or "kfold"
+    return {
+        "split_strategy": normalized_split,
+        "n_splits": max(2, int(cv_folds)),
+        "split_index_fingerprints": [],
+        "drift_train_x": None,
+        "drift_test_x": None,
+    }
+
+
 def _extract_fold_scores_for_report(
     *,
     evaluation: EvaluationResult,
@@ -3352,13 +4534,7 @@ def _ensure_eval_data_cache(
 ) -> dict[str, object]:
     if eval_data_cache is not None:
         return eval_data_cache
-    fallback = {
-        "split_strategy": "kfold",
-        "n_splits": max(2, int(cv_folds)),
-        "split_index_fingerprints": [],
-        "drift_train_x": None,
-        "drift_test_x": None,
-    }
+    fallback = _build_eval_data_cache_fallback(split_strategy=split_strategy, cv_folds=cv_folds)
     if score_source == "holdout":
         return fallback
     try:
@@ -3379,8 +4555,7 @@ def _ensure_eval_data_cache(
             )
             fingerprints.extend(_build_split_index_fingerprints(split=split_for_seed, y=y, seed=expanded_seed))
     except Exception:  # noqa: BLE001
-        split = SplitStrategyFactory.create(y=[0, 1, 0, 1], strategy="kfold", n_splits=2, seed=seed)
-        fingerprints = []
+        return fallback
     drift_cols_raw = list(data.feature_columns or [])
     drift_cols: list[str] = []
     seen_drift_cols: set[str] = set()
@@ -3701,6 +4876,7 @@ def _build_diagnostics(
     loop_decision_score: float | None = None,
     loop_decision_source: str = "offline",
     quality_guard: dict[str, object] | None = None,
+    accuracy_potential: dict[str, object] | None = None,
 ) -> str:
     direction = evaluation.direction
     decision_score = evaluation.value if loop_decision_score is None else loop_decision_score
@@ -3752,6 +4928,7 @@ def _build_diagnostics(
     if quality_guard:
         reasons = quality_guard.get("reasons")
         warning_values = quality_guard.get("warnings")
+        faithfulness = quality_guard.get("competition_faithfulness")
         reason_text = (
             ", ".join(str(item) for item in reasons if isinstance(item, str))
             if isinstance(reasons, list) and reasons
@@ -3766,6 +4943,25 @@ def _build_diagnostics(
             "Kernel quality guard: "
             f"allow_submit={bool(quality_guard.get('allow_submit', True))}, "
             f"reasons={reason_text}, warnings={warning_text}"
+        )
+        if isinstance(faithfulness, dict):
+            lines.append(
+                "Competition faithfulness: "
+                f"faithful={bool(faithfulness.get('faithful', False))}, "
+                f"metric={faithfulness.get('actual_metric') or 'unknown'}"
+                f"/{faithfulness.get('expected_metric') or 'unknown'}, "
+                f"split={faithfulness.get('actual_split_strategy') or 'unknown'}"
+                f"/{faithfulness.get('expected_split_strategy') or 'unknown'}, "
+                f"dataset_mode={faithfulness.get('dataset_mode') or 'unknown'}"
+            )
+    if accuracy_potential:
+        lines.append(
+            "Accuracy frontier: "
+            f"status={accuracy_potential.get('status')}, "
+            f"eligible={bool(accuracy_potential.get('eligible', False))}, "
+            f"capacity_tier={accuracy_potential.get('capacity_tier')}, "
+            f"data_tier={accuracy_potential.get('data_tier')}, "
+            f"reason={accuracy_potential.get('primary_reason')}"
         )
     lines += [
         "",
@@ -3844,7 +5040,7 @@ def _run_kernel_source_preflight_fixes(
             raise KernelFailedError(f"Kernel source preflight failed after automatic fixes.\n{preflight_error}")
         print(
             "[yellow]kernel preflight[/yellow]: source contract check failed; "
-            f"invoking codex fix (attempt {attempt}/{_MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS})"
+            f"invoking {IMPLEMENTATION_AGENT.log_alias} fix (attempt {attempt}/{_MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS})"
         )
         _run_kernel_fix(
             config=config,
@@ -3914,13 +5110,18 @@ def _run_improvement(
     pending_problem_insights: list[dict[str, object]],
     current_score: float | None = None,
     current_score_source: str = "offline",
+    minimum_improvement_mode: str | None = None,
+    minimum_improvement_reason: str | None = None,
+    target_medal: str | None = None,
+    target_rank_percentile: float | None = None,
     forced_improvement_mode: str | None = None,
     forced_improvement_reason: str | None = None,
+    extra_policy_notes: list[str] | None = None,
     enforce_code_reference_implementation: bool = False,
     code_reference_enforcement_reason: str | None = None,
     best_score_so_far: float | None = None,
 ) -> None:
-    prompt_template = config.paths.codex_improve_template.read_text(encoding="utf-8")
+    prompt_template = render_prompt_identity(config.paths.codex_improve_template.read_text(encoding="utf-8"))
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "prompt.md"
@@ -3931,6 +5132,13 @@ def _run_improvement(
         top1_score,
         evaluation.direction,
     )
+    upgraded_mode = _upgrade_improvement_mode(improvement_mode, minimum_improvement_mode)
+    if upgraded_mode != improvement_mode:
+        print(
+            "[yellow]improve mode floor[/yellow]: "
+            f"{improvement_mode} -> {upgraded_mode} ({minimum_improvement_reason or 'policy'})"
+        )
+        improvement_mode = upgraded_mode
     if forced_improvement_mode:
         print(
             "[yellow]improve mode override[/yellow]: "
@@ -3955,6 +5163,7 @@ def _run_improvement(
         code_reference_status = "at_or_above_code_reference"
     required_reference_notebook = _load_required_reference_notebook(config.paths)
     base_prompt_text = prompt_template.format(
+        **prompt_identity_format_args(),
         slug=config.slug,
         iteration=iteration,
         plan_path=str(config.paths.plan_path),
@@ -3992,11 +5201,42 @@ def _run_improvement(
         code_reference_status=code_reference_status,
         kernel_main=str(kernel_main_path),
     )
+    if infer_deliverable_mode_from_paths(config.paths) == "writeup":
+        base_prompt_text += (
+            "\n\nWriteup mode is active for this competition.\n"
+            "Do not optimize only for submission.csv production. Treat offline metrics and any CSV artifacts as "
+            "proxy evidence supporting the final judged writeup package.\n"
+        )
     if forced_improvement_reason:
         base_prompt_text += (
             "\n\nForced improvement mode policy is active.\n"
             f"Reason: {forced_improvement_reason}\n"
             "Do not propose minor_tuning; make a major_overhaul plan.\n"
+        )
+    elif minimum_improvement_reason:
+        base_prompt_text += (
+            "\n\nMinimum improvement mode policy is active.\n"
+            f"Reason: {minimum_improvement_reason}\n"
+            "Do not propose minor_tuning while this policy remains active.\n"
+        )
+    if target_rank_percentile is not None:
+        medal_label = target_medal or "rank"
+        base_prompt_text += (
+            "\n\nMedal-aware search policy:\n"
+            f"- target_medal: {medal_label}\n"
+            f"- target_rank_percentile: {target_rank_percentile * 100:.2f}%\n"
+            "- Until this leaderboard percentile is reached, keep search breadth high and "
+            "avoid same-family-only tweaks.\n"
+        )
+    if _requires_tabular_multi_family_policy(_load_dataset_profile(config.paths)):
+        base_prompt_text += (
+            "\n\nHigh-accuracy tabular policy is active.\n"
+            "- This dataset is tabular binary with meaningful categorical structure.\n"
+            "- The next iteration must keep multi-family exploration active.\n"
+            "- Require CatBoost raw categorical, XGBoost with leak-safe target/stat encodings, "
+            "and LightGBM or a second CatBoost/XGBoost variant.\n"
+            "- If two or more model pipelines exist, require at least one OOF-based blend "
+            "candidate (weighted/rank/logit blend).\n"
         )
     if best_score_so_far is not None:
         base_prompt_text += (
@@ -4007,6 +5247,14 @@ def _run_improvement(
             "- If suspiciously high CV is detected, keep leak fixes but preserve competitive model strength "
             "instead of defaulting to a weak baseline.\n"
         )
+    if extra_policy_notes:
+        note_lines = []
+        for note in extra_policy_notes:
+            clean = str(note).strip()
+            if clean:
+                note_lines.append(f"- {clean}")
+        if note_lines:
+            base_prompt_text += "\n\nAdditional repair targets:\n" + "\n".join(note_lines) + "\n"
     code_reference_gate_lines = [
         "## Code Reference Gate",
         f"- Code snapshot: {config.paths.code_md_path}",
@@ -4099,9 +5347,9 @@ def _run_improvement(
     prompt_text = base_prompt_text
     if strategy_text:
         prompt_text = (
-            "# Codex Improvement Implementation\n\n"
-            "Implement the GPT-authored improvement prompt below as the primary plan.\n\n"
-            "## GPT 5.2 Extra-High Improvement Prompt\n"
+            f"# {IMPLEMENTATION_AGENT.display_name} Improvement Implementation\n\n"
+            f"Implement the {STRATEGY_AGENT.display_name}-authored improvement prompt below as the primary plan.\n\n"
+            f"## {STRATEGY_AGENT.display_name} Extra-High Improvement Prompt\n"
             f"{strategy_text}\n\n"
             "## Local Context (for file paths and constraints)\n"
             f"{base_prompt_text}\n"
@@ -4110,7 +5358,7 @@ def _run_improvement(
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
 
-    print("[cyan]improve[/cyan]: running codex implementer")
+    print(f"[cyan]improve[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} implementer")
     # Codex runner always writes execution logs (codex_exec.jsonl / codex_last_message.txt)
     # under the provided output_dir (agent_dir). Include it in the allowlist so the guard
     # does not fail on its own transcripts.
@@ -4151,7 +5399,7 @@ def _run_improvement(
         response = _read_agent_response(result.last_message_path)
         _print_agent_response(result.last_message_path, response)
         if result.returncode != 0:
-            raise RuntimeError("Codex improvement failed.")
+            raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} improvement failed.")
         return response, result.last_message_path
 
     response_text, _ = _run_improve_codex_pass(current_prompt_path=prompt_path, stage_suffix="")
@@ -4165,7 +5413,8 @@ def _run_improvement(
         if implementation_issues:
             print(
                 "[yellow]code reference guard[/yellow]: "
-                "required reference implementation missing; rerunning codex with strict repair prompt."
+                "required reference implementation missing; rerunning "
+                f"{IMPLEMENTATION_AGENT.log_alias} with strict repair prompt."
             )
             repair_prompt_path = agent_dir / f"code_reference_repair_prompt-{iteration:02d}.md"
             repair_prompt_text = _build_code_reference_repair_prompt(
@@ -4235,8 +5484,8 @@ def _build_improvement_strategy_prompt(
     return f"""\
 # Kagglebot Improvement Strategy
 
-You are GPT 5.2 in extra-high reasoning mode.
-Design a concrete improvement prompt for Codex 5.3 (extra-high), which will implement changes.
+You are {STRATEGY_AGENT.display_name} in extra-high reasoning mode.
+Design a concrete improvement prompt for {IMPLEMENTATION_AGENT.display_name} (extra-high), which will implement changes.
 
 Competition: {slug}
 Run ID: {run_id}
@@ -4250,7 +5499,7 @@ Top1 gap: {"unavailable" if top1_gap is None else f"{top1_gap:.6f}"}
 Delta vs previous best: {"unavailable" if delta_offline is None else f"{delta_offline:.6f}"}
 Improvement mode: {improvement_mode}
 
-## Existing Codex Improvement Prompt Draft
+## Existing {IMPLEMENTATION_AGENT.display_name} Improvement Prompt Draft
 
 ```
 {codex_prompt}
@@ -4262,7 +5511,7 @@ Improvement mode: {improvement_mode}
 
 ## Required Output
 
-Return concise, actionable implementation instructions for Codex:
+Return concise, actionable implementation instructions for {IMPLEMENTATION_AGENT.display_name}:
 1) What to change and why (root-cause hypothesis of current gap).
 2) Exact file-level edits and model/training changes.
 3) Validation checks after edits (what metrics/logs to confirm).
@@ -4280,10 +5529,16 @@ def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bo
     result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
     strategy_text = _read_agent_response(result.last_message_path).strip()
     if result.returncode != 0:
-        print("[yellow]improve[/yellow]: gpt improvement strategy failed, falling back to direct codex prompt")
+        print(
+            f"[yellow]improve[/yellow]: gpt improvement strategy failed, "
+            f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
+        )
         return ""
     if not strategy_text:
-        print("[yellow]improve[/yellow]: gpt improvement strategy empty, falling back to direct codex prompt")
+        print(
+            f"[yellow]improve[/yellow]: gpt improvement strategy empty, "
+            f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
+        )
         return ""
     return strategy_text
 
@@ -4409,7 +5664,7 @@ def _run_kernel_fix(
             )
         return
 
-    prompt_template = config.paths.codex_kernel_fix_template.read_text(encoding="utf-8")
+    prompt_template = render_prompt_identity(config.paths.codex_kernel_fix_template.read_text(encoding="utf-8"))
     prompt_path = agent_dir / "kernel_fix_prompt.md"
     missing_module = _extract_missing_module(error_message)
     blocked_modules = _load_blocked_modules(config.paths.context_dir)
@@ -4419,6 +5674,7 @@ def _run_kernel_fix(
         _save_blocked_modules(config.paths.context_dir, blocked_modules)
     blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = prompt_template.format(
+        **prompt_identity_format_args(),
         slug=config.slug,
         run_id=run_id,
         iteration=iteration,
@@ -4458,7 +5714,7 @@ def _run_kernel_fix(
     if strategy_skip_reason:
         print(
             "[yellow]kernel fix[/yellow]: "
-            f"skipping gpt strategy ({strategy_skip_reason}); invoking codex fixer directly."
+            f"skipping gpt strategy ({strategy_skip_reason}); invoking {IMPLEMENTATION_AGENT.log_alias} fixer directly."
         )
     else:
         strategy_prompt = _build_error_strategy_prompt(
@@ -4480,7 +5736,7 @@ def _run_kernel_fix(
         )
     if strategy_text:
         prompt_text += (
-            "\n\n## GPT 5.2 Extra-High Error-Fix Strategy\n"
+            f"\n\n## {STRATEGY_AGENT.display_name} Extra-High Error-Fix Strategy\n"
             "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
             f"{strategy_text}\n"
         )
@@ -4527,13 +5783,14 @@ def _run_kernel_fix(
         if codex_pass > 1:
             print(
                 "[yellow]kernel fix[/yellow]: "
-                f"retrying codex pass {codex_pass}/{codex_pass_limit} with previous failure context."
+                f"retrying {IMPLEMENTATION_AGENT.log_alias} pass "
+                f"{codex_pass}/{codex_pass_limit} with previous failure context."
             )
         before = _snapshot_tree(config.paths.repo_root)
         pass_output_dir = (
             agent_dir if codex_pass == 1 else agent_dir / f"kernel_fix_pass-{attempt:02d}-{codex_pass:02d}"
         )
-        print("[cyan]kernel fix[/cyan]: running codex fixer")
+        print(f"[cyan]kernel fix[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} fixer")
         result = run_codex(
             pass_prompt_path,
             pass_output_dir,
@@ -4565,14 +5822,14 @@ def _run_kernel_fix(
         last_response_text = response_text
         if result.returncode != 0:
             retry_feedback = (
-                "Codex kernel-fix step failed with non-zero exit status.\n"
+                f"{IMPLEMENTATION_AGENT.display_name} kernel-fix step failed with non-zero exit status.\n"
                 f"returncode={result.returncode}\n"
                 f"pass={codex_pass}/{codex_pass_limit}\n"
                 f"response={response_text}"
             )
             if codex_pass < codex_pass_limit:
                 continue
-            raise RuntimeError("Codex kernel-fix step failed.")
+            raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} kernel-fix step failed.")
 
         if not changed:
             regenerated = _maybe_regenerate_kernel_sources_once(
@@ -4600,7 +5857,8 @@ def _run_kernel_fix(
                         "iteration": iteration,
                         "error_message": error_message,
                         "fix_summary": (
-                            "Codex kernel-fix made no edits; regenerated kernel sources once and verification passed."
+                            f"{IMPLEMENTATION_AGENT.display_name} kernel-fix made no edits; "
+                            "regenerated kernel sources once and verification passed."
                         ),
                         "resolved": True,
                     }
@@ -4625,7 +5883,9 @@ def _run_kernel_fix(
             )
         return
 
-    raise RuntimeError("Kernel fix exhausted codex retry passes without resolving the error.")
+    raise RuntimeError(
+        f"Kernel fix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error."
+    )
 
 
 def _run_metric_only_competition_metric_fix(
@@ -4638,7 +5898,7 @@ def _run_metric_only_competition_metric_fix(
     attempt: int,
     pending_error_fixes: list[dict[str, object]] | None = None,
 ) -> None:
-    """Apply a metric-only kernel fix using Codex without GPT strategy mediation."""
+    """Apply a metric-only kernel fix using the implementation agent without GPT strategy mediation."""
     policy_prefix = (
         "Metric-only repair policy:\n"
         "- Edit ONLY competition metric selection/reporting logic in kernel outputs.\n"
@@ -4704,7 +5964,7 @@ def _rerun_kernel_for_metric_recheck(
         resolved_submission = _resolve_iteration_submission_artifact(iter_dir)
         if resolved_submission is None:
             raise RuntimeError(
-                "Metric recheck failed: submission.csv artifact is missing for same-iteration metric-only recheck."
+                "Metric recheck failed: submission artifact is missing for same-iteration metric-only recheck."
             )
         rechecked_submission_path = _copy_submission_artifact_to_iteration_dir(
             source=resolved_submission,
@@ -4895,6 +6155,9 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     error_text = "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip()
     submit_autofix = isinstance(error, SubmitAbortedError)
     submit_context = ""
+    submit_file_fix_required = False
+    submit_file_fix_baseline_path: Path | None = None
+    submit_file_fix_baseline_sha256: str | None = None
     if isinstance(error, KaggleCliError):
         if error.command:
             error_text = f"{error_text}\n\nKaggle CLI command:\n{shlex.join(error.command)}"
@@ -4902,6 +6165,37 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
     if submit_autofix:
         submit_context = _build_submit_autofix_context(run_dir)
+        latest_submit_attempt = _load_latest_submit_attempt(run_dir)
+        latest_submit_detail = "\n".join(
+            part
+            for part in (
+                str(latest_submit_attempt.get("stdout_tail") or ""),
+                str(latest_submit_attempt.get("stderr_tail") or ""),
+            )
+            if part
+        )
+        submit_file_fix_required = _submit_error_requires_file_fix(
+            reason=latest_submit_attempt.get("reason"),
+            error_kind=latest_submit_attempt.get("error_kind"),
+            detail=latest_submit_detail,
+        )
+        if submit_file_fix_required:
+            submit_file_fix_baseline_path = _resolve_submit_autofix_submission_artifact(
+                config=config,
+                run_id=run_id,
+                run_dir=run_dir,
+            )
+            submit_file_fix_baseline_sha256 = _sha256_or_none(submit_file_fix_baseline_path)
+        _prepared_submission_path, prepared_submission_summary = _prepare_submit_file_autofix(
+            config=config,
+            run_id=run_id,
+            run_dir=run_dir,
+        )
+        if prepared_submission_summary:
+            submit_context = (
+                f"{submit_context}\n\ndeterministic_submit_file_autofix:\n{prepared_submission_summary}".strip()
+            )
+            error_text = f"{error_text}\n\nDeterministic Submit File Autofix:\n{prepared_submission_summary}"
         if submit_context:
             error_text = f"{error_text}\n\nSubmit Failure Context:\n{submit_context}"
     attempt_tag = f"{attempt:02d}"
@@ -4920,6 +6214,15 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         allowed_prefixes=allowed_prefixes,
         submit_context=submit_context,
     )
+    if submit_file_fix_required:
+        prompt_text += """
+
+## Submission File Repair Contract
+
+Kaggle rejected the submission artifact itself. This autofix is not complete unless the submission file bytes or
+artifact path change, and `run_state.json` records `submit_autofix_submission_path` pointing to the repaired file.
+If you repair the file in place, ensure the file contents actually change.
+"""
     strategy_stage = "submit_autofix" if submit_autofix else "autofix"
     strategy_label = "submit autofix" if submit_autofix else "autofix"
     print(
@@ -4943,14 +6246,16 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         stage_label=strategy_label,
     )
     if not strategy_text.strip():
-        raise RuntimeError(
-            "Autofix strategy generation failed: strict autofix path requires GPT strategy output before Codex edits."
+        print(
+            f"[yellow]{strategy_label}[/yellow]: gpt strategy unavailable, "
+            f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
         )
-    prompt_text += (
-        "\n\n## GPT 5.2 Extra-High Error-Fix Strategy\n"
-        "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
-        f"{strategy_text}\n"
-    )
+    else:
+        prompt_text += (
+            f"\n\n## {STRATEGY_AGENT.display_name} Extra-High Error-Fix Strategy\n"
+            "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
+            f"{strategy_text}\n"
+        )
     prompt_path = autofix_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, prompt_text)
@@ -4972,7 +6277,8 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         if codex_pass > 1:
             print(
                 "[yellow]autofix[/yellow]: "
-                f"retrying codex pass {codex_pass}/{MAX_AUTOFIX_CODEX_PASSES} with previous failure context."
+                f"retrying {IMPLEMENTATION_AGENT.log_alias} pass "
+                f"{codex_pass}/{MAX_AUTOFIX_CODEX_PASSES} with previous failure context."
             )
 
         before = _snapshot_tree(config.paths.repo_root)
@@ -4999,14 +6305,31 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         _print_agent_response(result.last_message_path, response_text)
         if result.returncode != 0:
             retry_feedback = (
-                "Codex autofix step failed with non-zero exit status.\n"
+                f"{IMPLEMENTATION_AGENT.display_name} autofix step failed with non-zero exit status.\n"
                 f"returncode={result.returncode}\n"
                 f"pass={codex_pass}/{MAX_AUTOFIX_CODEX_PASSES}\n"
                 f"response={response_text}"
             )
             if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
                 continue
-            raise RuntimeError("Codex autofix step failed.")
+            raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} autofix step failed.")
+
+        if submit_file_fix_required and not _submit_file_fix_contract_satisfied(
+            run_dir=run_dir,
+            baseline_path=submit_file_fix_baseline_path,
+            baseline_sha256=submit_file_fix_baseline_sha256,
+        ):
+            retry_feedback = (
+                "Submission file repair contract not satisfied.\n"
+                "Kaggle rejected the submission artifact itself, so this autofix must change the prepared "
+                "submission file bytes or output path.\n"
+                f"baseline_submission_path={submit_file_fix_baseline_path}\n"
+                f"baseline_submission_sha256={submit_file_fix_baseline_sha256}\n"
+                "Record the repaired artifact in run_state.json as submit_autofix_submission_path."
+            )
+            if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
+                continue
+            raise RuntimeError("Submit autofix did not repair the submission artifact required by Kaggle.")
 
         try:
             _run_verify(config.verify_cmd, dry_run=config.dry_run)
@@ -5017,7 +6340,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             raise
         return
 
-    raise RuntimeError("Autofix exhausted codex retry passes without resolving the error.")
+    raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
 
 
 def _autofix_allowed_prefixes(config: AutopilotConfig) -> list[Path]:
@@ -5067,13 +6390,14 @@ def _build_autofix_prompt(
     if submit_context:
         submit_context_block = (
             "\n## Submit Context\n\n"
-            "This is a submit-stage failure. Prioritize fixing the submission path and output format first.\n\n"
+            "This is a submit-stage failure. Use `repair_target` to decide whether to fix the submission artifact, "
+            "submit mode/kernel path, or a platform/manual blocker.\n\n"
             "```\n"
             f"{submit_context}\n"
             "```\n"
         )
     return f"""\
-# Kagglebot Codex: Auto-Fix
+# Kagglebot {IMPLEMENTATION_AGENT.display_name}: Auto-Fix
 
 ## Context
 
@@ -5128,10 +6452,11 @@ def _build_error_strategy_prompt(
     codex_prompt: str,
 ) -> str:
     return f"""\
-# Kagglebot GPT Error Strategy
+# Kagglebot {STRATEGY_AGENT.display_name} Error Strategy
 
-You are GPT 5.2 in extra-high reasoning mode.
-Think through the failure and produce a concrete fix strategy for Codex 5.3 (extra high), which will apply edits.
+You are {STRATEGY_AGENT.display_name} in extra-high reasoning mode.
+Think through the failure and produce a concrete fix strategy for
+{IMPLEMENTATION_AGENT.display_name} (extra high), which will apply edits.
 
 Stage: {stage}
 Competition: {slug}
@@ -5145,7 +6470,7 @@ Compute: {compute} ({accelerator})
 {error_text}
 ```
 
-## Codex Fix Prompt (current)
+## {IMPLEMENTATION_AGENT.display_name} Fix Prompt (current)
 
 ```
 {codex_prompt}
@@ -5153,7 +6478,7 @@ Compute: {compute} ({accelerator})
 
 ## Required Output
 
-Return concise, actionable instructions for Codex:
+Return concise, actionable instructions for {IMPLEMENTATION_AGENT.display_name}:
 1) Root cause hypothesis.
 2) Minimal file edits (paths + what to change).
 3) Safety checks to run after edits.
@@ -5179,10 +6504,16 @@ def _run_error_strategy(
     result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
     strategy_text = _read_agent_response(result.last_message_path).strip()
     if result.returncode != 0:
-        print(f"[yellow]{stage_label}[/yellow]: gpt strategy failed, continuing with direct codex fix")
+        print(
+            f"[yellow]{stage_label}[/yellow]: gpt strategy failed, "
+            f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
+        )
         return ""
     if not strategy_text:
-        print(f"[yellow]{stage_label}[/yellow]: gpt strategy empty, continuing with direct codex fix")
+        print(
+            f"[yellow]{stage_label}[/yellow]: gpt strategy empty, "
+            f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
+        )
         return ""
     return strategy_text
 
@@ -5630,7 +6961,10 @@ def _maybe_apply_lightweight_runtime_fix(
             "autofix will retry without modifying kernel sources.\n"
         )
         note_path.write_text(note, encoding="utf-8")
-        print(f"[yellow]{stage_label}[/yellow]: wrote {artifact_name}; retrying without codex edits")
+        print(
+            f"[yellow]{stage_label}[/yellow]: wrote {artifact_name}; "
+            f"retrying without {IMPLEMENTATION_AGENT.log_alias} edits"
+        )
         return artifact_name
     return None
 
@@ -5667,103 +7001,6 @@ def _record_blocked_module(context_dir: Path, module: str) -> list[str]:
     return existing
 
 
-def _write_iteration_state_marker(
-    *,
-    iter_dir: Path,
-    run_id: str,
-    iteration: int,
-    submission_path: Path,
-    metrics_path: Path,
-    evaluation_report_path: Path,
-    submit_phase_required: bool,
-    submit_phase_finished: bool | None = None,
-    submit_allowed_by_gate: bool,
-    submit_phase_state: str,
-    submitted: bool,
-    readiness_score: float,
-) -> None:
-    if submit_phase_finished is None:
-        submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate) or submitted
-
-    payload = {
-        "run_id": run_id,
-        "iteration": iteration,
-        "iteration_complete": True,
-        "trained": True,
-        "submission_exists": submission_path.exists(),
-        "submission_path": str(submission_path),
-        "metrics_exists": metrics_path.exists(),
-        "metrics_path": str(metrics_path),
-        "evaluation_report_exists": evaluation_report_path.exists(),
-        "evaluation_report_path": str(evaluation_report_path),
-        "submit_phase_required": submit_phase_required,
-        "submit_phase_finished": submit_phase_finished,
-        "submit_allowed_by_gate": submit_allowed_by_gate,
-        "submit_phase_state": submit_phase_state,
-        "submitted": submitted,
-        "readiness_score": readiness_score,
-        "completed_at": datetime.now(UTC).isoformat(),
-    }
-    path = iter_dir / _ITERATION_STATE_FILENAME
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _load_iteration_state_marker(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if isinstance(payload, dict):
-        return payload
-    return {}
-
-
-def _is_iteration_marker_complete(payload: dict[str, object], *, require_submit_phase: bool) -> bool:
-    if not payload:
-        return False
-    if not bool(payload.get("iteration_complete")):
-        return False
-    if require_submit_phase and not bool(payload.get("submit_phase_finished")):
-        return False
-    if require_submit_phase and bool(payload.get("submit_allowed_by_gate")) and not bool(payload.get("submitted")):
-        return False
-    return True
-
-
-def _load_submit_phase_completed_iterations(run_dir: Path) -> set[int]:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return set()
-    completed: set[int] = set()
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return completed
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        action = str(payload.get("action_taken") or "").strip().lower()
-        if action not in _LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS:
-            continue
-        iteration = _to_int(payload.get("iteration"))
-        if iteration is None:
-            sub_path = str(payload.get("sub_path") or "").strip()
-            if sub_path:
-                iteration = _infer_iteration_from_submission_path(Path(sub_path))
-        if iteration is not None and iteration > 0:
-            completed.add(iteration)
-    return completed
-
-
 def _resume_best_submitted_offline_score(
     *,
     paths: CompetitionPaths,
@@ -5772,33 +7009,33 @@ def _resume_best_submitted_offline_score(
     target_metric: str,
     max_iterations: int,
 ) -> float | None:
-    """Resume the best offline score among iterations that actually submitted."""
-    run_dir = paths.run_dir(run_id)
-    if not run_dir.exists():
-        return None
-    best_score: float | None = None
-    for iter_dir in sorted(run_dir.glob("iter-*")):
-        if not iter_dir.is_dir():
-            continue
-        try:
-            iteration = int(iter_dir.name.split("-")[1])
-        except (IndexError, ValueError):
-            continue
-        if iteration > max_iterations:
-            continue
-        marker_path = iter_dir / _ITERATION_STATE_FILENAME
-        marker_payload = _load_iteration_state_marker(marker_path)
-        if not bool(marker_payload.get("submitted")):
-            continue
-        metrics_path = iter_dir / "metrics.json"
-        if not metrics_path.exists():
-            continue
-        evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
-        if evaluation is None:
-            continue
-        if _update_best_score(best_score, evaluation.value, metric_direction, 0.0):
-            best_score = evaluation.value
-    return best_score
+    return _state_resume_best_submitted_offline_score(
+        paths=paths,
+        run_id=run_id,
+        metric_direction=metric_direction,
+        target_metric=target_metric,
+        max_iterations=max_iterations,
+        load_kernel_metrics=_load_kernel_metrics,
+    )
+
+
+def _resume_best_submittable_iteration_state(
+    *,
+    paths: CompetitionPaths,
+    run_id: str,
+    metric_direction: str,
+    target_metric: str,
+    max_iterations: int,
+) -> tuple[float | None, Path | None]:
+    return _state_resume_best_submittable_iteration_state(
+        paths=paths,
+        run_id=run_id,
+        metric_direction=metric_direction,
+        target_metric=target_metric,
+        max_iterations=max_iterations,
+        load_kernel_metrics=_load_kernel_metrics,
+        iteration_metrics_allow_submit=_iteration_metrics_allow_submit,
+    )
 
 
 def _resume_iteration_state(
@@ -5810,209 +7047,16 @@ def _resume_iteration_state(
     max_iterations: int,
     require_submit_phase: bool = False,
 ) -> tuple[int, float | None, Path | None]:
-    run_dir = paths.run_dir(run_id)
-    if not run_dir.exists():
-        return 1, None, None
-    best_score: float | None = None
-    best_submission: Path | None = None
-    completed_iters: list[int] = []
-    legacy_submit_phase_iters = _load_submit_phase_completed_iterations(run_dir) if require_submit_phase else set()
-    for iter_dir in sorted(run_dir.glob("iter-*")):
-        if not iter_dir.is_dir():
-            continue
-        try:
-            iteration = int(iter_dir.name.split("-")[1])
-        except (IndexError, ValueError):
-            continue
-        if iteration > max_iterations:
-            continue
-        submission_path = _resolve_iteration_submission_artifact(iter_dir)
-        metrics_path = iter_dir / "metrics.json"
-        if submission_path is None and not metrics_path.exists():
-            continue
-        if submission_path is not None and not metrics_path.exists():
-            print(
-                "[yellow]resume[/yellow]: "
-                f"iter-{iteration} has submission artifact but no metrics.json; treating as incomplete."
-            )
-            continue
-        if metrics_path.exists() and submission_path is None:
-            print(
-                "[yellow]resume[/yellow]: "
-                f"iter-{iteration} has metrics.json but no submission artifact; treating as incomplete."
-            )
-            continue
-
-        marker_path = iter_dir / _ITERATION_STATE_FILENAME
-        marker_payload = _load_iteration_state_marker(marker_path)
-        marker_complete = _is_iteration_marker_complete(marker_payload, require_submit_phase=require_submit_phase)
-        legacy_complete = False
-        if not marker_complete:
-            if require_submit_phase:
-                legacy_complete = iteration in legacy_submit_phase_iters
-            else:
-                legacy_complete = True
-            if not legacy_complete:
-                phase_note = "submit phase completion" if require_submit_phase else "completion marker"
-                print(
-                    "[yellow]resume[/yellow]: "
-                    f"iter-{iteration} missing {phase_note} ({marker_path.name}); treating as incomplete."
-                )
-                continue
-            print(
-                "[yellow]resume[/yellow]: "
-                f"iter-{iteration} has no {marker_path.name}; inferred completion from legacy artifacts."
-            )
-
-        evaluation = None
-        try:
-            evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
-        except Exception:  # noqa: BLE001
-            evaluation = None
-        if evaluation is None:
-            print(
-                "[yellow]resume[/yellow]: "
-                f"{metrics_path} is missing a valid offline metric; treating iter-{iteration} as incomplete."
-            )
-            continue
-
-        completed_iters.append(iteration)
-        if submission_path is None:
-            continue
-        if best_submission is None:
-            best_submission = submission_path
-        if best_score is None:
-            best_score = evaluation.value
-        else:
-            if _meets_target(evaluation.value, best_score, metric_direction):
-                best_score = evaluation.value
-                best_submission = submission_path
-    if not completed_iters:
-        return 1, best_score, best_submission
-    next_iter = max(completed_iters) + 1
-    return next_iter, best_score, best_submission
-
-
-def _newest_existing_path(candidates: list[Path]) -> Path | None:
-    existing: list[tuple[float, int, Path]] = []
-    for candidate in candidates:
-        try:
-            if not candidate.exists():
-                continue
-            stat = candidate.stat()
-            existing.append((float(stat.st_mtime), int(stat.st_size), candidate))
-        except OSError:
-            continue
-    if not existing:
-        return None
-    existing.sort(reverse=True)
-    return existing[0][2]
-
-
-def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
-    primary = _newest_existing_path(
-        [
-            iter_dir / filename,
-            iter_dir / "output" / filename,
-        ]
+    return _state_resume_iteration_state(
+        paths=paths,
+        run_id=run_id,
+        metric_direction=metric_direction,
+        target_metric=target_metric,
+        max_iterations=max_iterations,
+        require_submit_phase=require_submit_phase,
+        load_kernel_metrics=_load_kernel_metrics,
+        infer_iteration_from_submission_path=_infer_iteration_from_submission_path,
     )
-    if primary is not None:
-        return primary
-
-    # Fallback for resumed/older runs where support artifacts were left only in
-    # staged kernel directories instead of iter-*/output.
-    run_dir = iter_dir.parent
-    runs_dir = run_dir.parent
-    competition_dir = runs_dir.parent
-    kernel_run_dir = competition_dir / "kernels" / run_dir.name
-    fallback_candidates: list[Path] = [
-        kernel_run_dir / "outputs" / filename,
-        competition_dir / "kernel" / "outputs" / filename,
-    ]
-    try:
-        iteration = int(iter_dir.name.split("-", 1)[1])
-    except (IndexError, ValueError):
-        iteration = None
-    if iteration is not None:
-        fallback_candidates.extend(
-            [
-                kernel_run_dir / f"local-iter-{iteration}" / "outputs" / filename,
-                kernel_run_dir / f"submit-iter-{iteration}" / "outputs" / filename,
-            ]
-        )
-    for root in (kernel_run_dir, competition_dir / "kernel" / "outputs"):
-        if not root.exists():
-            continue
-        try:
-            fallback_candidates.extend(path for path in root.rglob(filename) if path.is_file())
-        except OSError:
-            continue
-    return _newest_existing_path(fallback_candidates)
-
-
-def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
-    candidates: list[Path] = [iter_dir / "submission.csv", iter_dir / "output" / "submission.csv"]
-    for root in (iter_dir, iter_dir / "output"):
-        if not root.exists():
-            continue
-        try:
-            for path in root.rglob("submission.*"):
-                if path.is_file():
-                    candidates.append(path)
-        except OSError:
-            continue
-    return _newest_existing_path(candidates)
-
-
-def _copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
-    destination = iter_dir / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if source.resolve() == destination.resolve():
-            return destination
-    except OSError:
-        pass
-    shutil.copy2(source, destination)
-    return destination
-
-
-def _copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, iter_dir: Path) -> None:
-    """Copy optional kernel support artifacts into the canonical iteration output directory."""
-    if not kernel_output_dir.exists():
-        return
-    output_dir = iter_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("oof_predictions.csv", "split_diagnostics.json", "feature_suspects.csv"):
-        source = kernel_output_dir / filename
-        if not source.exists() or not source.is_file():
-            continue
-        destination = output_dir / filename
-        try:
-            if source.resolve() == destination.resolve():
-                continue
-        except OSError:
-            pass
-        shutil.copy2(source, destination)
-
-
-def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: int) -> int | None:
-    latest: int | None = None
-    for iter_dir in sorted(run_dir.glob("iter-*")):
-        if not iter_dir.is_dir():
-            continue
-        try:
-            iteration = int(iter_dir.name.split("-", 1)[1])
-        except (IndexError, ValueError):
-            continue
-        if iteration > max_iterations:
-            continue
-        submission_path = _resolve_iteration_submission_artifact(iter_dir)
-        metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
-        if submission_path is None or metrics_path is None:
-            continue
-        if latest is None or iteration > latest:
-            latest = iteration
-    return latest
 
 
 def _load_submit_retry_artifacts(
@@ -6025,37 +7069,16 @@ def _load_submit_retry_artifacts(
     target_metric: str,
     require_submit_phase: bool,
 ) -> tuple[Path, Path, EvaluationResult] | None:
-    if not require_submit_phase:
-        return None
-
-    marker_payload = _load_iteration_state_marker(iter_dir / _ITERATION_STATE_FILENAME)
-    marker_pending = (
-        bool(marker_payload.get("trained"))
-        and bool(marker_payload.get("submit_allowed_by_gate"))
-        and (not bool(marker_payload.get("submit_phase_finished")))
+    return _state_load_submit_retry_artifacts(
+        run_dir=run_dir,
+        iter_dir=iter_dir,
+        iteration=iteration,
+        max_iterations=max_iterations,
+        metric_direction=metric_direction,
+        target_metric=target_metric,
+        require_submit_phase=require_submit_phase,
+        load_kernel_metrics=_load_kernel_metrics,
     )
-
-    legacy_pending = False
-    if not marker_pending:
-        latest_iter = _latest_iteration_with_training_artifacts(run_dir=run_dir, max_iterations=max_iterations)
-        run_state = _load_run_state(run_dir)
-        if bool(run_state.get("submit_attempted")) and not bool(run_state.get("submit_ok")):
-            legacy_pending = latest_iter == iteration
-        elif not marker_payload and latest_iter == iteration:
-            # Legacy runs may have submit failures without iteration_state/run_state.
-            # If the latest iteration already has both artifacts, prefer submit-only resume.
-            legacy_pending = True
-    if not (marker_pending or legacy_pending):
-        return None
-
-    submission_path = _resolve_iteration_submission_artifact(iter_dir)
-    metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
-    if submission_path is None or metrics_path is None:
-        return None
-    evaluation = _load_kernel_metrics(metrics_path, metric_direction, target_metric)
-    if evaluation is None:
-        return None
-    return submission_path, metrics_path, evaluation
 
 
 def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:
@@ -6121,15 +7144,56 @@ def _attempt_submit(
     submission_path: Path,
     best_score: float | None,
     problem_types: list[str],
+    submit_mode: str = "file",
 ) -> dict[str, object] | None:
     if not config.submit or config.dry_run:
         return None
     run_dir = config.paths.run_dir(run_id)
+    _clear_stale_submit_autofix_artifact(run_dir=run_dir, submission_path=submission_path)
     run_state = _load_run_state(run_dir)
+    submit_failure_context = _load_submit_failure_context(run_dir)
+    latest_submit_attempt = _load_latest_submit_attempt(run_dir)
     submit_code_fingerprint = _compute_submit_code_fingerprint(config)
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
+    submit_retry_detail = "\n".join(
+        part
+        for part in (
+            str(latest_submit_attempt.get("stdout_tail") or ""),
+            str(latest_submit_attempt.get("stderr_tail") or ""),
+        )
+        if part
+    )
+    repaired_submission_path = _path_from_submit_reference(run_state.get("submit_autofix_submission_path"))
+    input_submission_path = submission_path
+    repair_target = str(submit_failure_context.get("repair_target") or "").strip().lower()
+    failed_submission_artifact = _path_from_submit_reference(
+        submit_failure_context.get("submission_artifact_path") or submit_failure_context.get("submission_ref")
+    )
+    if (
+        repaired_submission_path is not None
+        and repaired_submission_path.exists()
+        and (
+            (
+                repair_target == _SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+                and (failed_submission_artifact is None or failed_submission_artifact == submission_path)
+            )
+            or (
+                not repair_target
+                and _submit_error_requires_file_fix(
+                    reason=run_state.get("last_reason") or latest_submit_attempt.get("reason"),
+                    error_kind=run_state.get("last_error_kind") or latest_submit_attempt.get("error_kind"),
+                    detail=submit_retry_detail,
+                )
+            )
+        )
+    ):
+        input_submission_path = repaired_submission_path
+        print(
+            "[yellow]submit retry[/yellow]: "
+            f"using repaired submission artifact from submit autofix: {input_submission_path}"
+        )
 
-    message = _submission_message(config, run_id, best_score, submission_path=submission_path)
+    message = _submission_message(config, run_id, best_score, submission_path=input_submission_path)
     submission_service = SubmissionService(
         SubmissionConfig(
             slug=config.slug,
@@ -6145,14 +7209,14 @@ def _attempt_submit(
     submitted_at = datetime.now(UTC)
 
     try:
-        prepared_submission_path = submission_service.validate_and_prepare_submission(submission_path)
+        prepared_submission_path = submission_service.validate_and_prepare_submission(input_submission_path)
     except SubmissionValidationError as exc:
         fingerprint = compute_error_fingerprint("", str(exc))
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
-            submission_ref=submission_path,
+            submission_ref=input_submission_path,
             code_fingerprint=submit_code_fingerprint,
             fingerprint=fingerprint,
             error_kind="validation",
@@ -6199,13 +7263,17 @@ def _attempt_submit(
         )
 
     constraints = _load_competition_rule_constraints(config.paths)
-    notebook_submit_required = bool(constraints.notebook_submissions_only)
+    notebook_submit_required = normalize_submit_mode(submit_mode, default="file") == "notebook"
+    if constraints.notebook_submissions_only and not notebook_submit_required:
+        notebook_submit_required = True
+        print("[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit")
     notebook_fallback_activated = notebook_submit_required
     if notebook_submit_required:
-        print("[yellow]submit mode[/yellow]: notebook-only competition detected; using notebook submit")
+        print("[yellow]submit mode[/yellow]: using notebook submit")
 
     if not notebook_submit_required:
         last_submission_path = str(run_state.get("last_submission_path") or "").strip()
+        last_submission_sha = str(latest_submit_attempt.get("sub_sha256") or "").strip()
         last_reason = str(run_state.get("last_reason") or "").strip().lower()
         last_code_fingerprint = str(run_state.get("last_submit_code_fingerprint") or "").strip()
         allow_same_path_retry_reasons = {
@@ -6214,10 +7282,16 @@ def _attempt_submit(
             "unclassified_submit_error",
         }
         if last_submission_path and Path(last_submission_path) == prepared_submission_path and not allow_force:
+            current_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
             if last_reason in allow_same_path_retry_reasons:
                 print(
                     "[yellow]submit retry[/yellow]: previous submit failed with "
                     f"reason={last_reason}; retrying same artifact to allow notebook fallback."
+                )
+            elif last_submission_sha and current_submission_sha and last_submission_sha != current_submission_sha:
+                print(
+                    "[yellow]submit retry[/yellow]: same artifact path but submission file contents changed; "
+                    "retrying repaired artifact."
                 )
             elif last_code_fingerprint and last_code_fingerprint != submit_code_fingerprint:
                 print(
@@ -6497,11 +7571,12 @@ def _attempt_submit(
         outcome_status = _normalize_submission_outcome_status(outcome.get("status"))
         outcome["status"] = outcome_status
         if outcome_status in _FAILED_SUBMISSION_OUTCOME_STATUSES:
-            raw_payload = outcome.get("raw")
-            if isinstance(raw_payload, dict):
-                raw_detail = normalize_error_text(json.dumps(raw_payload, ensure_ascii=True), max_chars=1200)
-            else:
-                raw_detail = normalize_error_text(str(raw_payload or outcome_status), max_chars=1200)
+            raw_detail = _build_kaggle_submit_error_detail(
+                slug=config.slug,
+                message=message,
+                submitted_at=submitted_at,
+                outcome=outcome,
+            )
             return _abort_submit_for_run(
                 config=config,
                 run_id=run_id,
@@ -6528,6 +7603,7 @@ def _attempt_submit(
         )
     else:
         print("[yellow]submission result[/yellow]: score not available yet; knowledge update skipped")
+    _mark_submit_failure_context_resolved(run_dir=run_dir, resolution="submitted", submission_ref=submission_ref)
     return {
         "message": message,
         "submission_path": submission_ref,
@@ -6690,6 +7766,22 @@ def _abort_submit_for_run(
             "submit_attempts_count": int(prior.get("submit_attempts_count", 0)) + 1,
         },
     )
+    _save_submit_failure_context(
+        run_dir,
+        _build_submit_failure_context_payload(
+            run_dir=run_dir,
+            submission_ref=submission_ref_text,
+            artifact_path=artifact_path,
+            code_fingerprint=code_fingerprint or "",
+            fingerprint=fingerprint,
+            error_kind=error_kind,
+            reason=reason,
+            message=message,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+            exit_code=exit_code,
+        ),
+    )
     knowledge_submission_path = artifact_path or Path(submission_ref_text)
     _record_submit_reason_knowledge(
         config=config,
@@ -6717,148 +7809,430 @@ def _append_submit_attempt(*, run_dir: Path, payload: dict[str, object]) -> None
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
-def _load_run_state(run_dir: Path) -> dict[str, object]:
-    state_path = run_dir / "run_state.json"
-    if not state_path.exists():
-        attempted = _has_submit_attempt_records(run_dir)
-        return {"submit_attempted": attempted, "submit_ok": False}
+def _submit_failure_context_path(run_dir: Path) -> Path:
+    return run_dir / _SUBMIT_FAILURE_CONTEXT_FILENAME
+
+
+def _load_submit_failure_context(run_dir: Path) -> dict[str, object]:
+    path = _submit_failure_context_path(run_dir)
+    if not path.exists():
+        return {}
     try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    if not payload.get("submit_attempted"):
-        payload["submit_attempted"] = _has_submit_attempt_records(run_dir)
-    if "last_submit_fingerprint" not in payload and payload.get("last_fingerprint"):
-        payload["last_submit_fingerprint"] = payload.get("last_fingerprint")
-    if "last_fingerprint" not in payload and payload.get("last_submit_fingerprint"):
-        payload["last_fingerprint"] = payload.get("last_submit_fingerprint")
-    if bool(payload.get("submit_attempted")) and not bool(payload.get("submit_ok")):
-        if _has_successful_submit_attempt(run_dir):
-            payload["submit_ok"] = True
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_submit_failure_context(run_dir: Path, payload: dict[str, object]) -> None:
+    path = _submit_failure_context_path(run_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _submit_failure_manual_next_step(*, reason: str, detail: str) -> str:
+    normalized_reason = str(reason or "").strip().lower()
+    lowered_detail = str(detail or "").strip().lower()
+    if normalized_reason == "kaggle_credentials_missing":
+        return "Configure ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY before retrying submit."
+    if normalized_reason == "rules_not_accepted":
+        return "Accept the competition rules in the Kaggle browser UI, then retry submit."
+    if normalized_reason == "local_submission_guardrail":
+        if "duplicate" in lowered_detail:
+            return "Change the submission predictions before retrying, or use --force-submit only when intentional."
+        if "cooldown" in lowered_detail or "rate limit" in lowered_detail:
+            return "Wait for the submission cooldown/rate-limit window to expire before retrying."
+        return "Resolve the local submission guardrail before retrying submit."
+    return "Resolve the manual submit blocker, then retry submit."
+
+
+def _submit_error_targets_submit_mode(*, reason: str, detail: str) -> bool:
+    normalized_reason = str(reason or "").strip().lower()
+    lowered_detail = str(detail or "").strip().lower()
+    if normalized_reason == "notebook_only_submission_required":
+        return True
+    mode_markers = (
+        "notebook",
+        "kernel",
+        "internet access",
+        "enable_internet",
+        "competition does not allow internet",
+        "submission not allowed",
+        "output file name and the version label",
+    )
+    return any(marker in lowered_detail for marker in mode_markers)
+
+
+def _classify_submit_failure_repair(
+    *,
+    reason: object,
+    error_kind: object,
+    detail: str,
+) -> tuple[str, bool, str]:
+    normalized_reason = str(reason or "").strip().lower()
+    normalized_kind = str(error_kind or "").strip().lower()
+    normalized_detail = str(detail or "").strip()
+    if normalized_reason in {"kaggle_credentials_missing", "rules_not_accepted", "local_submission_guardrail"}:
+        return (
+            _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
+            False,
+            _submit_failure_manual_next_step(reason=normalized_reason, detail=normalized_detail),
+        )
+    if _submit_error_requires_file_fix(
+        reason=normalized_reason,
+        error_kind=normalized_kind,
+        detail=normalized_detail,
+    ):
+        return (_SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT, True, "")
+    if _submit_error_targets_submit_mode(reason=normalized_reason, detail=normalized_detail):
+        return (_SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE, True, "")
+    if normalized_reason in {
+        "submission_polling_error",
+        "submission_polling_timeout",
+        "submission_polling_invalid_payload",
+    } or normalized_reason.startswith("submission_poll_status_"):
+        return (_SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM, True, "")
+    if normalized_kind in {"transient", "unknown"}:
+        return (_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN, True, "")
+    return (_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN, True, "")
+
+
+def _build_submit_failure_context_payload(
+    *,
+    run_dir: Path,
+    submission_ref: str,
+    artifact_path: Path | None,
+    code_fingerprint: str,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    message: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    exit_code: int | None,
+) -> dict[str, object]:
+    detail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
+    repair_target, repairable, manual_next_step = _classify_submit_failure_repair(
+        reason=reason,
+        error_kind=error_kind,
+        detail=detail,
+    )
+    latest_submit_attempt = _load_latest_submit_attempt(run_dir)
+    run_state = _load_run_state(run_dir)
+    summary = normalize_error_text("\n".join(part for part in (message, detail) if part), max_chars=1200)
+    payload: dict[str, object] = {
+        "ts": datetime.now(UTC).isoformat(),
+        "active": True,
+        "error_kind": error_kind,
+        "reason": reason,
+        "fingerprint": fingerprint,
+        "code_fingerprint": code_fingerprint,
+        "repair_target": repair_target,
+        "repairable": repairable,
+        "manual_next_step": manual_next_step,
+        "message": message,
+        "summary": summary,
+        "submit_mode": "notebook" if submission_ref.startswith("kernel:") else "file",
+        "submission_ref": submission_ref,
+        "submission_artifact_path": str(artifact_path) if artifact_path is not None else "",
+        "submission_artifact_sha256": _sha256_or_none(artifact_path),
+        "stdout_tail": stdout_tail[-_SUBMIT_STDOUT_TAIL_CHARS:],
+        "stderr_tail": stderr_tail[-_SUBMIT_STDERR_TAIL_CHARS:],
+        "exit_code": exit_code,
+        "latest_submit_attempt": latest_submit_attempt,
+        "run_state_excerpt": {
+            "submit_attempted": bool(run_state.get("submit_attempted")),
+            "submit_ok": bool(run_state.get("submit_ok")),
+            "last_reason": run_state.get("last_reason"),
+            "last_error_kind": run_state.get("last_error_kind"),
+            "last_submission_path": run_state.get("last_submission_path"),
+            "submit_autofix_submission_path": run_state.get("submit_autofix_submission_path"),
+        },
+    }
     return payload
 
 
-def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
+def _mark_submit_failure_context_resolved(
+    *,
+    run_dir: Path,
+    resolution: str,
+    submission_ref: str | None = None,
+) -> None:
+    payload = _load_submit_failure_context(run_dir)
+    if not payload:
+        return
+    payload["active"] = False
+    payload["resolution"] = resolution
+    payload["resolved_at"] = datetime.now(UTC).isoformat()
+    if submission_ref is not None:
+        payload["resolved_submission_ref"] = submission_ref
+    _save_submit_failure_context(run_dir, payload)
+
+
+def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path) -> None:
     state = _load_run_state(run_dir)
-    state.update(updates)
-    state["submit_attempted"] = bool(state.get("submit_attempted")) or _has_submit_attempt_records(run_dir)
-    state["submit_ok"] = bool(state.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
-    state["updated_at"] = datetime.now(UTC).isoformat()
-    state_path = run_dir / "run_state.json"
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    repaired_path = _path_from_submit_reference(state.get("submit_autofix_submission_path"))
+    if repaired_path is None:
+        return
+    failure_context = _load_submit_failure_context(run_dir)
+    if not failure_context:
+        return
+    failed_artifact_path = _path_from_submit_reference(
+        failure_context.get("submission_artifact_path") or failure_context.get("submission_ref")
+    )
+    if failed_artifact_path is None:
+        return
+    if submission_path == failed_artifact_path or submission_path == repaired_path:
+        return
+    _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
+    failure_context["stale_repaired_artifact_cleared_at"] = datetime.now(UTC).isoformat()
+    failure_context["superseded_by_submission_path"] = str(submission_path)
+    _save_submit_failure_context(run_dir, failure_context)
 
 
-def _has_submit_attempt_records(run_dir: Path) -> bool:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
+def _submit_error_text_indicates_file_issue(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
         return False
-    try:
-        for line in attempts_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                return True
-    except OSError:
-        return False
+    return any(marker in lowered for marker in _SUBMIT_FILE_ERROR_MARKERS)
+
+
+def _submit_error_requires_file_fix(*, reason: object, error_kind: object, detail: str) -> bool:
+    normalized_reason = str(reason or "").strip().lower()
+    normalized_kind = str(error_kind or "").strip().lower()
+    if normalized_reason == "local_submission_validation_failed":
+        return True
+    if normalized_reason.startswith("submission_poll_status_") and _submit_error_text_indicates_file_issue(detail):
+        return True
+    if normalized_kind == "validation" and _submit_error_text_indicates_file_issue(detail):
+        return True
     return False
 
 
-def _has_successful_submit_attempt(run_dir: Path) -> bool:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
+def _path_from_submit_reference(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text or text.startswith("kernel:"):
+        return None
+    try:
+        return Path(text)
+    except TypeError:
+        return None
+
+
+def _resolve_submit_autofix_submission_artifact(*, config: AutopilotConfig, run_id: str, run_dir: Path) -> Path | None:
+    state = _load_run_state(run_dir)
+    latest = _load_latest_submit_attempt(run_dir)
+    failure_context = _load_submit_failure_context(run_dir)
+    candidates = (
+        state.get("submit_autofix_submission_path"),
+        failure_context.get("submission_artifact_path"),
+        latest.get("sub_path"),
+        state.get("last_submission_path"),
+    )
+    for candidate in candidates:
+        path = _path_from_submit_reference(candidate)
+        if path is None:
+            continue
+        if path.exists() and path.is_file():
+            return path
+    for iteration in range(MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES, 0, -1):
+        iter_dir = config.paths.iter_dir(run_id, iteration)
+        if not iter_dir.exists():
+            continue
+        resolved = _resolve_iteration_submission_artifact(iter_dir)
+        if resolved is not None and resolved.exists():
+            return resolved
+    return None
+
+
+def _build_kaggle_submit_error_detail(
+    *,
+    slug: str,
+    message: str,
+    submitted_at: datetime,
+    outcome: dict[str, object],
+) -> str:
+    def _extract_row_message(row: dict[str, object]) -> str:
+        for key in (
+            "errorDescription",
+            "error_description",
+            "failureReason",
+            "failure_reason",
+            "error",
+            "message",
+            "comments",
+            "comment",
+            "description",
+        ):
+            value = row.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    row: dict[str, object] | None = None
+    raw_payload = outcome.get("raw")
+    if isinstance(raw_payload, dict):
+        row = dict(raw_payload)
+    try:
+        rows = list_competition_submissions(slug, dry_run=False)
+        selector = SubmissionOutcomeService(fetch_rows=lambda current_slug: rows)
+        matched = selector._select_submission_row(rows=rows, message=message, submitted_at=submitted_at)  # noqa: SLF001
+        if isinstance(matched, dict):
+            row = dict(matched)
+    except Exception:
+        pass
+
+    details: list[str] = []
+    if row:
+        row_message = _extract_row_message(row)
+        if row_message:
+            details.append(f"Kaggle reported: {row_message}")
+        details.append(f"Kaggle submission row: {json.dumps(row, ensure_ascii=True)}")
+    elif raw_payload is not None:
+        details.append(f"Kaggle submission raw payload: {json.dumps(raw_payload, ensure_ascii=True)}")
+    else:
+        details.append(f"Kaggle submission status: {outcome.get('status') or 'unknown'}")
+    return normalize_error_text("\n".join(details), max_chars=1200)
+
+
+def _prepare_submit_file_autofix(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    run_dir: Path,
+) -> tuple[Path | None, str]:
+    latest = _load_latest_submit_attempt(run_dir)
+    detail = "\n".join(
+        part for part in (str(latest.get("stdout_tail") or ""), str(latest.get("stderr_tail") or "")) if part
+    )
+    if not _submit_error_requires_file_fix(
+        reason=latest.get("reason"),
+        error_kind=latest.get("error_kind"),
+        detail=detail,
+    ):
+        return None, ""
+
+    source = _resolve_submit_autofix_submission_artifact(config=config, run_id=run_id, run_dir=run_dir)
+    if source is None:
+        return None, "submit autofix could not locate the submission artifact to repair."
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug=config.slug,
+            data_dir=config.paths.data_dir,
+            sample_submission_path=config.paths.sample_submission_path,
+            submission_ledger_path=config.paths.submission_ledger_path,
+            dry_run=True,
+            force_submit=True,
+            bypass_rate_limit=True,
+        )
+    )
+
+    try:
+        fixed = service.validate_and_prepare_submission(source)
+    except SubmissionValidationError as exc:
+        return None, f"submit autofix could not deterministically repair submission file: {exc}"
+
+    if not fixed.exists():
+        return None, "submit autofix prepared a submission path but the fixed artifact does not exist."
+
+    _save_run_state(
+        run_dir,
+        {
+            "submit_autofix_submission_path": str(fixed),
+        },
+    )
+    if fixed == source:
+        return fixed, (
+            "submit autofix inspected the Kaggle-rejected submission artifact, "
+            "but no deterministic file rewrite was available; source generation still needs a fix."
+        )
+    return fixed, (
+        "submit autofix created a repaired submission artifact from the Kaggle-rejected file.\n"
+        f"- original_submission_path: {source}\n"
+        f"- fixed_submission_path: {fixed}"
+    )
+
+
+def _submit_file_fix_contract_satisfied(
+    *,
+    run_dir: Path,
+    baseline_path: Path | None,
+    baseline_sha256: str | None,
+) -> bool:
+    state = _load_run_state(run_dir)
+    candidate = _path_from_submit_reference(state.get("submit_autofix_submission_path"))
+    if candidate is None or not candidate.exists():
         return False
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    candidate_sha256 = _sha256_or_none(candidate)
+    if candidate_sha256 is None:
         return False
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and bool(payload.get("ok")):
-            return True
-    return False
-
-
-def _count_successful_submit_attempts(run_dir: Path) -> int:
-    """Count successful Kaggle submit actions recorded for this run."""
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return 0
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-    count = 0
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if not bool(payload.get("ok")):
-            continue
-        action_taken = str(payload.get("action_taken") or "").strip().lower()
-        if action_taken and action_taken != "submit":
-            continue
-        count += 1
-    return count
-
-
-def _load_submit_fingerprints(run_dir: Path) -> list[str]:
-    fingerprints: list[str] = []
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return fingerprints
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return fingerprints
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        fingerprint = str(row.get("fingerprint") or "").strip()
-        if not fingerprint:
-            continue
-        fingerprints.append(fingerprint)
-    return fingerprints
-
-
-def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return {}
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    for raw in reversed(lines):
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return {}
+    if baseline_path is None or baseline_sha256 is None:
+        return True
+    return candidate != baseline_path or candidate_sha256 != baseline_sha256
 
 
 def _build_submit_autofix_context(run_dir: Path) -> str:
+    failure_context = _load_submit_failure_context(run_dir)
     state = _load_run_state(run_dir)
     latest = _load_latest_submit_attempt(run_dir)
     lines: list[str] = []
+    if failure_context:
+        lines.append("submit_failure_context:")
+        for key in (
+            "ts",
+            "active",
+            "repair_target",
+            "repairable",
+            "reason",
+            "error_kind",
+            "fingerprint",
+            "submit_mode",
+            "submission_ref",
+            "submission_artifact_path",
+            "submission_artifact_sha256",
+            "manual_next_step",
+            "summary",
+        ):
+            value = failure_context.get(key)
+            if value in (None, "", []):
+                continue
+            lines.append(f"- {key}: {value}")
+        latest_context_attempt = failure_context.get("latest_submit_attempt")
+        if isinstance(latest_context_attempt, dict) and latest_context_attempt:
+            lines.append("failure_context_latest_submit_attempt:")
+            for key in (
+                "ts",
+                "ok",
+                "exit_code",
+                "error_kind",
+                "reason",
+                "action_taken",
+                "fingerprint",
+                "sub_path",
+            ):
+                value = latest_context_attempt.get(key)
+                if value in (None, ""):
+                    continue
+                lines.append(f"- {key}: {value}")
+        run_state_excerpt = failure_context.get("run_state_excerpt")
+        if isinstance(run_state_excerpt, dict) and run_state_excerpt:
+            lines.append("failure_context_run_state:")
+            for key in (
+                "submit_attempted",
+                "submit_ok",
+                "last_reason",
+                "last_error_kind",
+                "last_submission_path",
+                "submit_autofix_submission_path",
+            ):
+                value = run_state_excerpt.get(key)
+                if value in (None, ""):
+                    continue
+                lines.append(f"- {key}: {value}")
     state_keys = (
         "submit_attempted",
         "submit_ok",
@@ -6867,6 +8241,7 @@ def _build_submit_autofix_context(run_dir: Path) -> str:
         "last_action",
         "last_submit_fingerprint",
         "last_submission_path",
+        "submit_autofix_submission_path",
     )
     lines.append("run_state:")
     for key in state_keys:
@@ -7027,6 +8402,19 @@ def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
     run_dir = config.paths.run_dir(run_id)
+    failure_context = _load_submit_failure_context(run_dir)
+    if failure_context:
+        if bool(failure_context.get("repairable")):
+            return True
+        reason = str(failure_context.get("reason") or "unknown").strip().lower()
+        repair_target = str(failure_context.get("repair_target") or "unknown").strip().lower()
+        manual_next_step = str(failure_context.get("manual_next_step") or "").strip()
+        suffix = f" next_step={manual_next_step}" if manual_next_step else ""
+        print(
+            "[yellow]autofix skipped[/yellow]: submit abort requires manual intervention "
+            f"(target={repair_target}, reason={reason}){suffix}"
+        )
+        return False
     state = _load_run_state(run_dir)
     kind = str(state.get("last_error_kind") or "").strip().lower()
     reason = str(state.get("last_reason") or "").strip().lower()
@@ -7116,18 +8504,6 @@ def _wait_for_submission_outcome(
     )
 
 
-def _to_float(value: object) -> float | None:
-    if value is None:
-        return None
-    text = str(value).strip().replace(",", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
 def _normalize_submission_outcome_status(value: object) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
@@ -7137,21 +8513,6 @@ def _normalize_submission_outcome_status(value: object) -> str:
         if suffix and "status" in prefix:
             return suffix.strip()
     return raw
-
-
-def _to_int(value: object) -> int | None:
-    if value is None:
-        return None
-    text = str(value).strip().replace(",", "")
-    if not text:
-        return None
-    try:
-        return int(text)
-    except ValueError:
-        try:
-            return int(float(text))
-        except ValueError:
-            return None
 
 
 def _resolve_submission_rank_payload(
@@ -7209,23 +8570,6 @@ def _resolve_submission_rank_payload(
     return payload
 
 
-def _should_force_major_overhaul_by_rank(
-    *,
-    rank: int | None,
-    total_teams: int | None,
-    max_percentile: float,
-    min_teams: int,
-) -> bool:
-    if rank is None or total_teams is None:
-        return False
-    if total_teams < max(1, min_teams):
-        return False
-    if rank <= 0:
-        return False
-    rank_percentile = rank / total_teams
-    return rank_percentile > max_percentile
-
-
 def _build_rank_force_reason(
     *,
     rank: int,
@@ -7253,6 +8597,45 @@ def _infer_iteration_from_submission_path(path: Path) -> int | None:
         return int(name.split("-", 1)[1])
     except Exception:  # noqa: BLE001
         return None
+
+
+def _print_iteration_submit_status(
+    *,
+    iteration: int,
+    max_iterations: int,
+    submit_enabled: bool,
+    submit_allowed_by_gate: bool,
+    submit_phase_state: str,
+    quality_reasons: list[str],
+    competition_faithfulness: dict[str, object] | None = None,
+) -> None:
+    if not submit_enabled:
+        return
+    if submit_allowed_by_gate:
+        print(f"[cyan]submit[/cyan]: iter {iteration}/{max_iterations} attempting submission now.")
+        return
+    detail = ""
+    if quality_reasons and submit_phase_state == "blocked_quality_guard":
+        detail = f" reasons={','.join(quality_reasons)}"
+    if isinstance(competition_faithfulness, dict):
+        metric_detail = ""
+        expected_metric = str(competition_faithfulness.get("expected_metric") or "").strip()
+        actual_metric = str(competition_faithfulness.get("actual_metric") or "").strip()
+        if expected_metric or actual_metric:
+            metric_detail = f" metric={actual_metric or 'unknown'}/{expected_metric or 'unknown'}"
+        split_detail = ""
+        expected_split = str(competition_faithfulness.get("expected_split_strategy") or "").strip()
+        actual_split = str(competition_faithfulness.get("actual_split_strategy") or "").strip()
+        if expected_split or actual_split:
+            split_detail = f" split={actual_split or 'unknown'}/{expected_split or 'unknown'}"
+        dataset_mode = str(competition_faithfulness.get("dataset_mode") or "").strip()
+        dataset_detail = f" dataset_mode={dataset_mode}" if dataset_mode else ""
+        detail = f"{detail}{metric_detail}{split_detail}{dataset_detail}"
+    print(
+        "[cyan]submit[/cyan]: "
+        f"iter {iteration}/{max_iterations} not attempted yet "
+        f"(state={submit_phase_state}{detail})."
+    )
 
 
 def _record_submission_knowledge(
@@ -7578,6 +8961,15 @@ def _effective_best_score_for_progress(
     return prev_best, None
 
 
+def _submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
+    """Select the score used by submit-improvement gating."""
+    if isinstance(online_score, (int, float)):
+        value = float(online_score)
+        if math.isfinite(value):
+            return value, "submission_public_score"
+    return float(offline_score), "offline"
+
+
 def _extract_score_from_text(text: str) -> float | None:
     for match in _CODE_SCORE_RE.finditer(text):
         value = _to_float(match.group(1))
@@ -7763,7 +9155,7 @@ def _build_code_reference_repair_prompt(
         else "- TabICL path is optional for this reference notebook."
     )
     return (
-        "# Codex Improvement Repair: Mandatory Code Reference Implementation\n\n"
+        f"# {IMPLEMENTATION_AGENT.display_name} Improvement Repair: Mandatory Code Reference Implementation\n\n"
         "The previous change did not satisfy mandatory code-reference implementation requirements.\n\n"
         f"- Failed checks: {issues_text}\n"
         f"- Required notebook: {reference.kernel_id} ({reference.title})\n"
@@ -7777,18 +9169,18 @@ def _build_code_reference_repair_prompt(
     )
 
 
-def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:
-    """Check if current score represents an improvement over best score.
-
-    Uses a small epsilon (1e-9) to handle floating point precision issues.
-    """
-    if best is None:
+def _should_update_best_accuracy_candidate(
+    *,
+    current_potential: dict[str, object],
+    best_potential: dict[str, object] | None,
+    current_score: float,
+    best_score: float | None,
+    direction: str,
+) -> bool:
+    if best_potential is None or best_score is None:
         return True
-
-    eps = 1e-9  # Small tolerance for floating point comparison
-    if direction == "minimize":
-        improvement = best - current
-        return improvement >= (min_improvement - eps)
-    else:  # maximize
-        improvement = current - best
-        return improvement >= (min_improvement - eps)
+    current_priority = _to_int(current_potential.get("frontier_priority")) or 0
+    best_priority = _to_int(best_potential.get("frontier_priority")) or 0
+    if current_priority != best_priority:
+        return current_priority > best_priority
+    return _update_best_score(best_score, current_score, direction, 0.0)

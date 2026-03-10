@@ -310,6 +310,38 @@ def test_guard_ignores_generated_kernel_staging_tree(tmp_path: Path) -> None:
     assert staged_kernel.read_text(encoding="utf-8") == "print('changed')\n"
 
 
+def test_guard_ignores_historical_run_submission_compact_csv_churn(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    compact_submission = artifacts_dir / "other" / "runs" / "run123" / "iter-3" / "submission.compact.csv"
+    compact_submission.parent.mkdir(parents=True, exist_ok=True)
+    compact_submission.write_text("id,target\n1,0\n", encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    compact_submission.write_text("id,target\n1,1\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert compact_submission.read_text(encoding="utf-8") == "id,target\n1,1\n"
+
+
 def test_guard_ignores_venv_churn_and_restores_uv_lock(tmp_path: Path) -> None:
     repo_root = tmp_path
     artifacts_dir = repo_root / "artifacts"

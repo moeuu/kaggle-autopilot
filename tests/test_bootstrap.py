@@ -184,6 +184,109 @@ def test_bootstrap_downloads_code_notebooks_and_discussions(tmp_path, monkeypatc
     assert "Fast CV tips" in discussion_md
 
 
+def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> None:
+    def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
+        return [
+            {"name": "rules", "content": "Rules text"},
+            {"name": "description", "content": "Overview text"},
+            {"name": "data-description", "content": "Data text"},
+        ]
+
+    def fake_fetch_text(*args, **kwargs):  # noqa: ANN002, ANN003
+        url = args[0]
+        if url.endswith("/code"):
+            return "<html><body><a href='/code/alice/ref-kernel'>Ref</a></body></html>"
+        if url.endswith("/models"):
+            return "<html><body><h1>Models</h1></body></html>"
+        if url.endswith("/discussions"):
+            return "<html><body></body></html>"
+        return ""
+
+    dataset_calls: list[str] = []
+    competition_calls: list[tuple[str, str]] = []
+
+    def fake_download_competition(slug, dest_dir, *, force, quiet, dry_run=False, progress_callback=None):  # noqa: ANN001, ARG001
+        competition_calls.append((str(slug), str(dest_dir)))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if slug == "demo":
+            (dest_dir / "train.csv").write_text("id,feature,target\n1,10,0\n2,20,1\n", encoding="utf-8")
+            (dest_dir / "test.csv").write_text("id,feature\n3,30\n", encoding="utf-8")
+            (dest_dir / "sample_submission.csv").write_text("id,target\n3,0\n", encoding="utf-8")
+        else:
+            (dest_dir / "external.txt").write_text("external competition data\n", encoding="utf-8")
+        return "ok"
+
+    def fake_download_dataset(dataset_ref, dest_dir, *, slug=None, dry_run=False, force=True, quiet=True):  # noqa: ANN001, ARG001
+        dataset_calls.append(str(dataset_ref))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / "dataset.csv").write_text("id,value\n1,0.5\n", encoding="utf-8")
+        return "ok"
+
+    def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "ref-kernel.ipynb").write_text(
+            json.dumps(
+                {
+                    "cells": [
+                        {
+                            "cell_type": "code",
+                            "source": [
+                                "import kagglehub\n",
+                                "kagglehub.dataset_download('bob/notebook-only-backup')\n",
+                            ],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "kernel-metadata.json").write_text(
+            json.dumps(
+                {
+                    "dataset_sources": ["alice/original-churn"],
+                    "competition_sources": ["external-comp"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return f"pulled {kernel_id}"
+
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_pages", fake_pages)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_text_with_retry", fake_fetch_text)
+    monkeypatch.setattr("kagglebot.bootstrap.kernels_pull", fake_kernels_pull)
+    monkeypatch.setattr("kagglebot.bootstrap.download_competition", fake_download_competition)
+    monkeypatch.setattr("kagglebot.bootstrap.download_dataset", fake_download_dataset)
+    monkeypatch.setattr("kagglebot.bootstrap._list_competition_code_candidates_from_cli", lambda *, slug: [])
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    bootstrap_competition(
+        slug="demo",
+        competition_url="https://www.kaggle.com/competitions/demo",
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        rules_source="url",
+        download=True,
+        dry_run=False,
+    )
+
+    manifest = json.loads(paths.reference_inputs_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["required_reference_kernel_id"] == "alice/ref-kernel"
+    assert manifest["reference_notebooks"]
+    entry = manifest["reference_notebooks"][0]
+    refs = {(item["kind"], item["ref"]) for item in entry["input_sources"]}
+    assert ("dataset", "alice/original-churn") in refs
+    assert ("competition", "external-comp") in refs
+    assert ("dataset", "bob/notebook-only-backup") in refs
+    staged = {(item["kind"], item["ref"], item["status"]) for item in entry["staged_sources"]}
+    assert ("dataset", "alice/original-churn", "staged_dataset") in staged
+    assert ("competition", "external-comp", "staged_competition") in staged
+    assert "alice/original-churn" in dataset_calls
+    assert "bob/notebook-only-backup" in dataset_calls
+    assert any(slug == "external-comp" for slug, _dest in competition_calls)
+
+
 def test_bootstrap_code_uses_top_score_order_and_caps_at_50(tmp_path, monkeypatch) -> None:
     def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
         return [

@@ -13,6 +13,7 @@ from kagglebot.agents.codex_runner import run_codex
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.competition import parse_competition_slug
+from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
@@ -313,7 +314,7 @@ def autopilot(
     auto_eval_spec: bool = typer.Option(
         True,
         "--auto-eval-spec/--no-auto-eval-spec",
-        help="Run GPT-5.2 advisor once to generate/freeze context/evaluation_spec.json (default: on).",
+        help="Run GPT-5.4 advisor once to generate/freeze context/evaluation_spec.json (default: on).",
     ),
     resume_run_id: str | None = typer.Option(None, "--resume-run-id", help="Resume an existing run by run ID."),
     resume_latest: bool = typer.Option(False, "--resume-latest", help="Resume the most recent run."),
@@ -434,6 +435,55 @@ def autopilot(
     except SubmitAbortedError as exc:
         print(f"[red]submit aborted[/red]: {exc}")
         raise typer.Exit(code=exc.exit_code)
+
+
+@app.command("crawl-submission-formats")
+def crawl_submission_formats_cmd(
+    ctx: typer.Context,
+    output_dir: Path = typer.Option(
+        Path("artifacts/competition-submission-formats"),
+        "--output-dir",
+        help="Directory for raw JSONL, normalized CSV, and summary outputs.",
+    ),
+    max_prefix_depth: int = typer.Option(
+        1,
+        "--max-prefix-depth",
+        min=1,
+        help="Adaptive Kaggle API search-prefix depth for discovering historical competitions.",
+    ),
+    max_pages_per_search: int = typer.Option(
+        2,
+        "--max-pages-per-search",
+        min=1,
+        help="Maximum Kaggle API pages to fetch per category/group/search prefix.",
+    ),
+    max_competitions: int | None = typer.Option(
+        None,
+        "--max-competitions",
+        min=1,
+        help="Optional cap on the number of competition pages to scrape.",
+    ),
+    fetch_rules_pages: bool = typer.Option(
+        True,
+        "--fetch-rules-pages/--no-fetch-rules-pages",
+        help="Fetch each competition's rules page in addition to the overview page when needed.",
+    ),
+    resume: bool = typer.Option(
+        True,
+        "--resume/--no-resume",
+        help="Reuse existing raw JSONL output and skip already crawled competition slugs.",
+    ),
+) -> None:
+    cfg = ctx.obj
+    summary = crawl_submission_formats(
+        output_dir=resolve_artifacts_dir(cfg.workdir, output_dir),
+        max_prefix_depth=max_prefix_depth,
+        max_pages_per_search=max_pages_per_search,
+        max_competitions=max_competitions,
+        fetch_rules_pages=fetch_rules_pages,
+        resume=resume,
+    )
+    print(f"[green]crawl complete[/green]: {summary['competition_count']} competitions")
 
 
 @knowledge_app.command("show")

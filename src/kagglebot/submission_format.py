@@ -4,12 +4,22 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.submission_artifacts import (
+    ARTIFACT_CLASS_BUNDLE,
+    ARTIFACT_CLASS_MULTI_FILE_ZIP,
+    ARTIFACT_CLASS_SINGLE_FILE,
+    ARTIFACT_CLASS_TABULAR,
+    ARTIFACT_CLASS_UNKNOWN,
+)
+
 
 @dataclass(frozen=True)
 class SubmissionFormatHint:
     columns: list[str] | None
     delimiter: str | None
     expected_suffixes: list[str] | None
+    artifact_class: str | None = None
+    artifact_container: str | None = None
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s*(.+?)\s*$")
@@ -49,6 +59,42 @@ _CODE_FENCE_LANG_TO_SUFFIX = {
     "parquet": ".parquet",
     "txt": ".txt",
 }
+_BUNDLE_MARKERS = (
+    "model weights",
+    "weights",
+    "inference script",
+    "checkpoint",
+    ".pt",
+    ".pth",
+    ".ckpt",
+    ".h5",
+)
+_MULTI_FILE_ZIP_MARKERS = (
+    "zip file containing",
+    "one file per",
+    "per-image",
+    "per image",
+    "per-sample",
+    "per sample",
+    "masks",
+    ".tif",
+    ".tiff",
+    ".png",
+)
+_NON_ARTIFACT_JSONTXT_CONTEXT_MARKERS = (
+    "example json",
+    "topology json",
+    "metadata json",
+    "json metadata",
+    "description json",
+    "json description",
+    "text description",
+    "txt description",
+    "sample json",
+    "sample txt",
+    "input json",
+    "input txt",
+)
 
 
 def extract_submission_section(markdown: str) -> str | None:
@@ -99,9 +145,20 @@ def _extract_section(
 def parse_submission_format(markdown: str) -> SubmissionFormatHint:
     columns, delimiter = _parse_columns_from_markdown(markdown)
     expected_suffixes = _parse_expected_suffixes_from_markdown(markdown)
+    artifact_class, artifact_container = _infer_artifact_shape(
+        markdown=markdown,
+        columns=columns,
+        expected_suffixes=expected_suffixes,
+    )
     if columns and not columns_look_plausible(columns):
         columns = None
-    return SubmissionFormatHint(columns=columns, delimiter=delimiter, expected_suffixes=expected_suffixes)
+    return SubmissionFormatHint(
+        columns=columns,
+        delimiter=delimiter,
+        expected_suffixes=expected_suffixes,
+        artifact_class=artifact_class,
+        artifact_container=artifact_container,
+    )
 
 
 def load_submission_format_hint(path: Path) -> SubmissionFormatHint | None:
@@ -112,10 +169,18 @@ def load_submission_format_hint(path: Path) -> SubmissionFormatHint | None:
     columns = hint.columns
     delimiter = hint.delimiter
     expected_suffixes = hint.expected_suffixes
+    artifact_class = hint.artifact_class
+    artifact_container = hint.artifact_container
     if columns and not columns_look_plausible(columns):
         columns = None
-    if columns or delimiter or expected_suffixes:
-        return SubmissionFormatHint(columns=columns, delimiter=delimiter, expected_suffixes=expected_suffixes)
+    if columns or delimiter or expected_suffixes or artifact_class:
+        return SubmissionFormatHint(
+            columns=columns,
+            delimiter=delimiter,
+            expected_suffixes=expected_suffixes,
+            artifact_class=artifact_class,
+            artifact_container=artifact_container,
+        )
     return None
 
 
@@ -241,6 +306,8 @@ def _parse_expected_suffixes_from_markdown(markdown: str) -> list[str] | None:
                 merged_tokens.append(token)
 
         for token in merged_tokens:
+            if token in {".json", ".txt"} and _line_looks_like_non_artifact_suffix_context(line_lower):
+                continue
             if token not in order:
                 order[token] = idx
             score = base_score
@@ -253,6 +320,49 @@ def _parse_expected_suffixes_from_markdown(markdown: str) -> list[str] | None:
     ranked = sorted(scores.items(), key=lambda item: (-item[1], order.get(item[0], 0), item[0]))
     suffixes = [suffix for suffix, _ in ranked if suffix in _KNOWN_SUBMISSION_SUFFIXES]
     return suffixes or None
+
+
+def _infer_artifact_shape(
+    *,
+    markdown: str,
+    columns: list[str] | None,
+    expected_suffixes: list[str] | None,
+) -> tuple[str | None, str | None]:
+    lowered = markdown.lower()
+    suffixes = expected_suffixes or []
+    if ".zip" in suffixes:
+        if any(marker in lowered for marker in _BUNDLE_MARKERS):
+            return ARTIFACT_CLASS_BUNDLE, "zip"
+        if any(marker in lowered for marker in _MULTI_FILE_ZIP_MARKERS):
+            return ARTIFACT_CLASS_MULTI_FILE_ZIP, "zip"
+        return ARTIFACT_CLASS_MULTI_FILE_ZIP, "zip"
+    if columns:
+        return ARTIFACT_CLASS_TABULAR, "file"
+    non_tabular_suffixes = [
+        suffix for suffix in suffixes if suffix not in {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
+    ]
+    if non_tabular_suffixes:
+        return ARTIFACT_CLASS_SINGLE_FILE, "file"
+    if any(marker in lowered for marker in _BUNDLE_MARKERS):
+        return ARTIFACT_CLASS_BUNDLE, "zip"
+    if suffixes:
+        filtered = [suffix for suffix in suffixes if not _suffix_is_noise(suffix=suffix, text=lowered)]
+        if filtered and all(suffix in {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"} for suffix in filtered):
+            if any(suffix in {".csv", ".tsv", ".parquet"} for suffix in filtered):
+                return ARTIFACT_CLASS_TABULAR, "file"
+            if any(suffix in {".json", ".jsonl", ".txt"} for suffix in filtered):
+                return ARTIFACT_CLASS_SINGLE_FILE, "file"
+    return ARTIFACT_CLASS_UNKNOWN, None
+
+
+def _suffix_is_noise(*, suffix: str, text: str) -> bool:
+    if suffix not in {".json", ".txt"}:
+        return False
+    return any(marker in text for marker in _NON_ARTIFACT_JSONTXT_CONTEXT_MARKERS)
+
+
+def _line_looks_like_non_artifact_suffix_context(line_lower: str) -> bool:
+    return any(marker in line_lower for marker in _NON_ARTIFACT_JSONTXT_CONTEXT_MARKERS)
 
 
 def _extract_suffixes_from_line(line: str) -> list[str]:

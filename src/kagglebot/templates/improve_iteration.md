@@ -1,4 +1,4 @@
-# Kagglebot Codex: Improvement Iteration
+# Kagglebot {implementation_agent_name}: Improvement Iteration
 
 ## Context
 
@@ -120,6 +120,8 @@ Read diagnostics and metrics to identify why the current score doesn't meet targ
 ### Step 2: Implement Targeted Improvements
 
 Make **1-2 focused changes** per iteration. Avoid changing too many things at once.
+Prefer the highest realistic score ceiling over making the current iteration immediately submittable.
+If forced to choose, preserve a stronger high-potential path rather than collapsing to a weak submit-ready fallback.
 
 If current loop score is below the code reference notebook score, treat the
 `Required Reference Notebook (Execution baseline)` in `context/code.md` as mandatory:
@@ -129,6 +131,15 @@ Use the top1 gap as a guide:
 - **Far from top1** → major overhaul (model family/feature strategy)
 - **Mid gap** → moderate update (features + key hyperparameters)
 - **Near top1** → minor tuning (small hyperparameter tweaks)
+
+Medal-aware override:
+- If the plan includes `target_medal` or `target_rank_percentile` and that leaderboard percentile has not been reached, do **not** propose `minor_tuning`.
+- Keep at least `moderate_update`, and prefer broader model-family search plus ensemble exploration until the target rank band is met.
+
+High-accuracy tabular override:
+- For tabular binary problems with large row count and meaningful categorical structure, keep multiple strong families active.
+- Require CatBoost raw categorical, XGBoost with leak-safe target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant.
+- If 2 or more model pipelines are available, produce at least one OOF blend candidate (weighted/rank/logit blend).
 
 Implementation scope policy:
 - Always apply changes to `artifacts/<slug>/kernel/kernel.py`.

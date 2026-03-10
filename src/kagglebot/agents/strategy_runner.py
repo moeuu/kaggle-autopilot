@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from kagglebot.agents.identity import STRATEGY_AGENT, render_prompt_identity
 from kagglebot.exec_utils import run_command
 
-_DEFAULT_MODEL = "gpt-5.2"
-_DEFAULT_REASONING_EFFORT = "extra_high"
+_DEFAULT_MODEL = STRATEGY_AGENT.model
+_DEFAULT_REASONING_EFFORT = STRATEGY_AGENT.reasoning_effort
+_DEFAULT_TIMEOUT_SEC = 600.0
+_PYTEST_TIMEOUT_SEC = 2.0
+_RUNNER_LABEL = STRATEGY_AGENT.log_alias
 
 
 @dataclass(frozen=True)
@@ -23,7 +29,7 @@ class StrategyResult:
 
 def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> StrategyResult:
     output_dir.mkdir(parents=True, exist_ok=True)
-    prompt_text = prompt_path.read_text(encoding="utf-8")
+    prompt_text = render_prompt_identity(prompt_path.read_text(encoding="utf-8"))
     transcript_path = output_dir / "strategy_exec.txt"
     last_message_path = output_dir / "strategy_last_message.txt"
 
@@ -39,8 +45,11 @@ def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) 
         )
 
     normalized_effort = _normalize_reasoning_effort(_DEFAULT_REASONING_EFFORT)
+    timeout = float(os.environ.get("KAGGLEBOT_STRATEGY_TIMEOUT_SEC", str(_DEFAULT_TIMEOUT_SEC)))
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        timeout = float(os.environ.get("KAGGLEBOT_PYTEST_STRATEGY_TIMEOUT_SEC", str(_PYTEST_TIMEOUT_SEC)))
     args = [
-        "codex",
+        STRATEGY_AGENT.cli_command,
         "exec",
         "-m",
         _DEFAULT_MODEL,
@@ -61,16 +70,30 @@ def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) 
     ]
     stop_event = threading.Event()
     start_time = time.monotonic()
-    print("gpt running... (0s total)", flush=True)
+    print(f"{_RUNNER_LABEL} running... (0s total)", flush=True)
     heartbeat = threading.Thread(target=_heartbeat, args=(stop_event, start_time), daemon=True)
     heartbeat.start()
     try:
-        result = run_command(args, input_text=prompt_text)
+        result = run_command(args, input_text=prompt_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        total_elapsed = int(time.monotonic() - start_time)
+        stop_event.set()
+        heartbeat.join(timeout=1.0)
+        message = f"Strategy runner timed out after {int(timeout)}s (elapsed={total_elapsed}s)."
+        transcript_path.write_text(message + "\n", encoding="utf-8")
+        last_message_path.write_text(message + "\n", encoding="utf-8")
+        return StrategyResult(
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            returncode=124,
+            stdout=message,
+            stderr=message,
+        )
     finally:
         stop_event.set()
         heartbeat.join(timeout=1.0)
     total_elapsed = int(time.monotonic() - start_time)
-    print(f"gpt done... ({total_elapsed}s total, exit={result.returncode})", flush=True)
+    print(f"{_RUNNER_LABEL} done... ({total_elapsed}s total, exit={result.returncode})", flush=True)
     transcript_path.write_text(result.stdout, encoding="utf-8")
     last_message = last_message_path.read_text(encoding="utf-8").strip() if last_message_path.exists() else ""
     if not last_message:
@@ -95,13 +118,13 @@ def _normalize_reasoning_effort(effort: str) -> str:
 def _heartbeat(stop_event: threading.Event, start_time: float, interval: float = 30.0) -> None:
     while not stop_event.wait(interval):
         elapsed = int(time.monotonic() - start_time)
-        print(f"gpt running... ({elapsed}s total)", flush=True)
+        print(f"{_RUNNER_LABEL} running... ({elapsed}s total)", flush=True)
 
 
 @lru_cache(maxsize=1)
 def _codex_help() -> str:
     try:
-        result = run_command(["codex", "exec", "--help"])
+        result = run_command([STRATEGY_AGENT.cli_command, "exec", "--help"])
     except FileNotFoundError:
         return ""
     if result.returncode != 0:

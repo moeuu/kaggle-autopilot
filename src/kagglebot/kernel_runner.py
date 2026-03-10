@@ -7,13 +7,16 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import psutil
 from rich import print
 
 from kagglebot.compute import detect_local_gpu
@@ -24,7 +27,7 @@ from kagglebot.exceptions import (
     KernelTimeoutError,
     RulesNotAcceptedError,
 )
-from kagglebot.exec_utils import run_command
+from kagglebot.exec_utils import CommandResult
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -36,6 +39,7 @@ from kagglebot.kaggle_api import (
 )
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.solution_guard import ensure_solution_path_allowed
+from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
 _COLUMN_MAP_FILENAME = "column_map.json"
@@ -54,6 +58,9 @@ _TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
 _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER = "# kagglebot: transformers-eval-strategy-shim"
 _KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
+_LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
+_LOCAL_KERNEL_MEMORY_CAP_ENV = "KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB"
+_LOCAL_KERNEL_MEMORY_CAP_RATIO = 0.80
 _LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 _ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
@@ -67,6 +74,26 @@ _BVS_TIMM_FAILURE_MARKERS = (
     "skipping tri_branch_timm_gated because timm is unavailable",
     "falling back to smallspectralencoder for rgb",
 )
+_TRUSTED_KERNEL_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
+_URBAN_FLOOD_SAMPLEISH_SCORE_SOURCES = frozenset(
+    {
+        "sample_diagnostic",
+        "sample_mode_smoke_cv",
+        "sample",
+        "fallback",
+    }
+)
+_URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES = frozenset(
+    {
+        "1d_nodes_dynamic_all.csv",
+        "2d_nodes_dynamic_all.csv",
+        "test_1d_nodes_dynamic_all.csv",
+        "test_2d_nodes_dynamic_all.csv",
+        "timesteps.csv",
+        "test_timesteps.csv",
+        "sample_submission.csv",
+    }
+)
 
 _PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_seed(?P<seed>\d+)_fold(?P<fold>\d+)")
 _PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
@@ -78,6 +105,61 @@ _PIPELINE_DONE_RE = re.compile(r"\bPipeline\s+(?P<pipeline>[A-Za-z0-9][A-Za-z0-9
 
 def _requires_bvs_kernel_contract(slug: str) -> bool:
     return slug.strip().lower().startswith(_BVS_KERNEL_CONTRACT_SLUG_PREFIX)
+
+
+def _normalize_kernel_score_source(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _looks_like_urban_flood_flat_full_root(data_dir: Path) -> bool:
+    if not data_dir.exists() or not data_dir.is_dir():
+        return False
+    names = {child.name for child in data_dir.iterdir() if child.is_file()}
+    return _URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES.issubset(names)
+
+
+def _normalize_local_kernel_metrics(
+    *,
+    slug: str,
+    data_dir: Path,
+    metrics_path: Path | None,
+    score_source: str,
+) -> Path | None:
+    if slug.strip().lower() != "urban-flood-modelling":
+        return metrics_path
+    if metrics_path is None or not metrics_path.exists():
+        return metrics_path
+    if not _looks_like_urban_flood_flat_full_root(data_dir):
+        return metrics_path
+
+    try:
+        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return metrics_path
+    if not isinstance(payload, dict):
+        return metrics_path
+
+    normalized_payload_source = _normalize_kernel_score_source(payload.get("score_source"))
+    requested_source = _normalize_kernel_score_source(score_source)
+    if requested_source not in _TRUSTED_KERNEL_SCORE_SOURCES:
+        requested_source = "cv"
+
+    if normalized_payload_source not in _URBAN_FLOOD_SAMPLEISH_SCORE_SOURCES and bool(
+        payload.get("full_dataset_resolved")
+    ):
+        return metrics_path
+
+    payload["score_source"] = requested_source
+    payload["dataset_kind"] = "full"
+    payload["dataset_mode"] = "full"
+    payload["full_dataset_resolved"] = True
+    payload["data_root_layout"] = "flat_full"
+    payload["metrics_normalized_by"] = "kernel_runner.local_full_data_guard"
+    try:
+        metrics_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        return metrics_path
+    return metrics_path
 
 
 def _collect_local_kernel_log_text(logs_dir: Path) -> str:
@@ -98,6 +180,215 @@ def _collect_local_kernel_log_text(logs_dir: Path) -> str:
         if text:
             chunks.append(text)
     return "\n".join(chunks)
+
+
+@dataclass(frozen=True)
+class _LocalKernelExecResult:
+    command_result: CommandResult
+    peak_rss_bytes: int
+    memory_cap_bytes: int | None
+    killed_for_memory: bool = False
+    memory_kill_message: str | None = None
+
+
+def _find_runtime_hyperparameter_sequence_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            paths.extend(_find_runtime_hyperparameter_sequence_paths(item, prefix=f"{prefix}.{key}"))
+        return paths
+    if isinstance(value, (list, tuple)):
+        paths.append(prefix)
+    return paths
+
+
+def _validate_local_kernel_plan_runtime_hyperparameters(plan_path: Path) -> None:
+    if not plan_path.exists():
+        return
+    try:
+        payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise KernelFailedError(f"Local kernel staged plan is unreadable: {plan_path} ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise KernelFailedError(f"Local kernel staged plan must be a JSON object: {plan_path}")
+
+    pipelines = payload.get("pipelines")
+    if not isinstance(pipelines, list):
+        return
+
+    for index, item in enumerate(pipelines):
+        if not isinstance(item, dict) or "key_hyperparameters" not in item:
+            continue
+        name = str(item.get("name") or f"pipeline_{index + 1}")
+        key_hyperparameters = item.get("key_hyperparameters")
+        if not isinstance(key_hyperparameters, dict):
+            raise KernelFailedError(
+                f"Local kernel staged plan has non-object key_hyperparameters for pipeline '{name}'."
+            )
+        sequence_paths = _find_runtime_hyperparameter_sequence_paths(key_hyperparameters)
+        if sequence_paths:
+            raise KernelFailedError(
+                "Local kernel staged plan contains unresolved hyperparameter sequences for pipeline "
+                f"'{name}': {', '.join(sequence_paths)}"
+            )
+
+
+def _resolve_local_kernel_memory_cap_bytes(env: dict[str, str]) -> int | None:
+    override_raw = env.get(_LOCAL_KERNEL_MEMORY_CAP_ENV)
+    if override_raw is not None and str(override_raw).strip():
+        try:
+            override_mb = int(str(override_raw).strip())
+        except ValueError as exc:
+            raise KernelFailedError(
+                f"{_LOCAL_KERNEL_MEMORY_CAP_ENV} must be a positive integer number of MiB."
+            ) from exc
+        if override_mb <= 0:
+            raise KernelFailedError(f"{_LOCAL_KERNEL_MEMORY_CAP_ENV} must be a positive integer number of MiB.")
+        return override_mb * 1024 * 1024
+
+    available_bytes = int(psutil.virtual_memory().available)
+    if available_bytes <= 0:
+        return None
+    return max(512 * 1024 * 1024, int(available_bytes * _LOCAL_KERNEL_MEMORY_CAP_RATIO))
+
+
+def _local_kernel_process_tree_rss_bytes(pid: int) -> int:
+    try:
+        root = psutil.Process(pid)
+    except psutil.Error:
+        return 0
+
+    total = 0
+    seen: set[int] = set()
+    processes = [root]
+    try:
+        processes.extend(root.children(recursive=True))
+    except psutil.Error:
+        pass
+
+    for proc in processes:
+        if proc.pid in seen:
+            continue
+        seen.add(proc.pid)
+        try:
+            total += int(proc.memory_info().rss)
+        except psutil.Error:
+            continue
+    return total
+
+
+def _terminate_local_kernel_process(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+
+    try:
+        if os.name != "nt":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except (OSError, ProcessLookupError):
+        return
+
+    deadline = time.monotonic() + 2.0
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    if proc.poll() is not None:
+        return
+
+    try:
+        if os.name != "nt":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        return
+
+
+def _run_local_kernel_once(
+    *,
+    kernel_path: Path,
+    kernel_stage_dir: Path,
+    current_env: dict[str, str],
+    timeout_sec: int | None,
+    line_callback: Callable[[str], None] | None,
+) -> _LocalKernelExecResult:
+    args = [sys.executable, str(kernel_path)]
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        args,
+        cwd=str(kernel_stage_dir),
+        env=current_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
+
+    memory_cap_bytes = _resolve_local_kernel_memory_cap_bytes(current_env)
+    memory_state = {
+        "peak_rss_bytes": 0,
+        "killed_for_memory": False,
+        "memory_kill_message": None,
+    }
+    memory_stop = threading.Event()
+
+    def _watch_memory() -> None:
+        while not memory_stop.wait(_LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC):
+            if proc.poll() is not None:
+                break
+            rss_bytes = _local_kernel_process_tree_rss_bytes(proc.pid)
+            memory_state["peak_rss_bytes"] = max(memory_state["peak_rss_bytes"], rss_bytes)
+            if memory_cap_bytes is None or rss_bytes <= memory_cap_bytes:
+                continue
+            memory_state["killed_for_memory"] = True
+            memory_state["memory_kill_message"] = (
+                "Local kernel exceeded host memory guard "
+                f"({rss_bytes // (1024 * 1024)} MiB RSS > {memory_cap_bytes // (1024 * 1024)} MiB cap)."
+            )
+            _terminate_local_kernel_process(proc)
+            break
+
+    memory_thread = threading.Thread(target=_watch_memory, daemon=True, name="kb-local-kernel-memory-watchdog")
+    memory_thread.start()
+
+    stdout_chunks: list[str] = []
+    try:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                stdout_chunks.append(line)
+                if hasattr(sys.stdout, "write"):
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                if line_callback is not None:
+                    try:
+                        line_callback(line)
+                    except Exception:
+                        pass
+        returncode = proc.wait(timeout=timeout_sec)
+    finally:
+        memory_stop.set()
+        memory_thread.join(timeout=1.0)
+        memory_state["peak_rss_bytes"] = max(
+            memory_state["peak_rss_bytes"], _local_kernel_process_tree_rss_bytes(proc.pid)
+        )
+
+    duration = time.monotonic() - start
+    return _LocalKernelExecResult(
+        command_result=CommandResult(
+            args=args,
+            returncode=returncode,
+            stdout="".join(stdout_chunks),
+            stderr="",
+            duration_sec=duration,
+        ),
+        peak_rss_bytes=int(memory_state["peak_rss_bytes"]),
+        memory_cap_bytes=memory_cap_bytes,
+        killed_for_memory=bool(memory_state["killed_for_memory"]),
+        memory_kill_message=(
+            str(memory_state["memory_kill_message"]) if memory_state["memory_kill_message"] is not None else None
+        ),
+    )
 
 
 def _extract_kernel_size_markers(log_text: str) -> list[int]:
@@ -600,6 +891,13 @@ def _extract_kernel_id_from_push(output: str) -> str | None:
 
 
 def find_submission_file(output_dir: Path) -> Path | None:
+    manifest_path = find_submission_manifest(output_dir)
+    if manifest_path is not None:
+        _, submission_path, staging_dir, members = resolve_manifest_references(manifest_path)
+        if submission_path is not None and submission_path.exists() and submission_path.is_file():
+            return submission_path
+        if staging_dir is not None or members:
+            return manifest_path
     candidate = _find_output_file(output_dir, "submission.csv")
     if candidate:
         return candidate
@@ -778,7 +1076,7 @@ def run_kernel_local(
     timeout_minutes: int | None,
     strict_accelerator: bool = False,
 ) -> KernelRunResult:
-    del score_source, metric, direction, holdout_frac, cv_folds, seed
+    del metric, direction, holdout_frac, cv_folds, seed
 
     kernel_source_dir = base_dir / slug / "kernel"
     kernel_stage_dir = base_dir / slug / "kernels" / run_id / f"local-iter-{iteration}"
@@ -808,6 +1106,7 @@ def run_kernel_local(
         ],
     )
     kernel_path = kernel_stage_dir / "kernel.py"
+    _validate_local_kernel_plan_runtime_hyperparameters(kernel_stage_dir / "plan.json")
 
     if strict_accelerator and accelerator == "gpu":
         availability = detect_local_gpu()
@@ -874,6 +1173,9 @@ def run_kernel_local(
     )
     for note in env_notes:
         print(f"[yellow]kernel local[/yellow]: {note}")
+    memory_cap_bytes = _resolve_local_kernel_memory_cap_bytes(env)
+    if memory_cap_bytes is not None:
+        print(f"[yellow]kernel local[/yellow]: host memory guard active at {memory_cap_bytes // (1024 * 1024)} MiB RSS")
 
     heartbeat_stop = threading.Event()
     heartbeat = threading.Thread(
@@ -893,17 +1195,17 @@ def run_kernel_local(
     heartbeat.start()
     try:
 
-        def run_once(*, current_env: dict[str, str]):
-            return run_command(
-                [sys.executable, str(kernel_path)],
-                cwd=kernel_stage_dir,
-                env=current_env,
-                timeout=timeout_sec,
-                stream_output=True,
+        def run_once_with_watchdog(*, current_env: dict[str, str]) -> _LocalKernelExecResult:
+            return _run_local_kernel_once(
+                kernel_path=kernel_path,
+                kernel_stage_dir=kernel_stage_dir,
+                current_env=current_env,
+                timeout_sec=timeout_sec,
                 line_callback=progress_tracker.observe_line,
             )
 
-        result = run_once(current_env=env)
+        exec_result = run_once_with_watchdog(current_env=env)
+        result = exec_result.command_result
     except subprocess.TimeoutExpired as exc:
         raise KernelTimeoutError(f"Local kernel timed out after {timeout_sec}s.") from exc
     finally:
@@ -912,6 +1214,15 @@ def run_kernel_local(
 
     (logs_dir / "local_kernel_stdout.log").write_text(result.stdout, encoding="utf-8")
     (logs_dir / "local_kernel_stderr.log").write_text(result.stderr, encoding="utf-8")
+
+    if exec_result.killed_for_memory:
+        detail = ""
+        stdout_tail = truncate_lines(result.stdout[-4000:], max_lines=80)
+        if stdout_tail:
+            detail = f"\n{stdout_tail}"
+        raise KernelFailedError(
+            f"{exec_result.memory_kill_message} Peak RSS={exec_result.peak_rss_bytes // (1024 * 1024)} MiB.{detail}"
+        )
 
     if result.returncode != 0:
         combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
@@ -932,9 +1243,19 @@ def run_kernel_local(
                 pass
             time.sleep(2.0)
 
-            retry_result = run_once(current_env=retry_env)
+            retry_exec_result = run_once_with_watchdog(current_env=retry_env)
+            retry_result = retry_exec_result.command_result
             (logs_dir / "local_kernel_stdout_oom_retry.log").write_text(retry_result.stdout, encoding="utf-8")
             (logs_dir / "local_kernel_stderr_oom_retry.log").write_text(retry_result.stderr, encoding="utf-8")
+            if retry_exec_result.killed_for_memory:
+                detail = ""
+                stdout_tail = truncate_lines(retry_result.stdout[-4000:], max_lines=80)
+                if stdout_tail:
+                    detail = f"\n{stdout_tail}"
+                raise KernelFailedError(
+                    f"{retry_exec_result.memory_kill_message} "
+                    f"Peak RSS={retry_exec_result.peak_rss_bytes // (1024 * 1024)} MiB.{detail}"
+                )
             if retry_result.returncode == 0:
                 result = retry_result
                 (logs_dir / "local_kernel_stdout.log").write_text(result.stdout, encoding="utf-8")
@@ -982,6 +1303,12 @@ def run_kernel_local(
         metrics_dst = _copy_artifact_if_needed(
             source=metrics_src,
             destination=output_dir / "metrics.json",
+        )
+        metrics_dst = _normalize_local_kernel_metrics(
+            slug=slug,
+            data_dir=base_dir / slug / "data",
+            metrics_path=metrics_dst,
+            score_source=score_source,
         )
     _enforce_competition_kernel_contract(
         slug=slug,

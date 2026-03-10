@@ -12,6 +12,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from kagglebot.agents.identity import IMPLEMENTATION_AGENT
+from kagglebot.knowledge.classification import (
+    classify_cause_category,
+    classify_error_category,
+    classify_fix_category,
+)
 from kagglebot.knowledge.repositories import InsightRepository, TaxonomyRepository
 from kagglebot.paths import KnowledgePaths
 from kagglebot.solver.io import find_competition_files, infer_prediction_kind, infer_submission_layout, infer_task
@@ -215,12 +221,12 @@ def record_problem_type_insight(
     if not types:
         types = ["unknown"]
 
-    cause_category = _classify_cause_category(why_poor)
-    fix_category = _classify_fix_category(how_improved)
+    cause_category = classify_cause_category(why_poor)
+    fix_category = classify_fix_category(how_improved)
     if cause_category == "unknown":
-        cause_category = _classify_cause_category(f"{why_poor}\n{how_improved}")
+        cause_category = classify_cause_category(f"{why_poor}\n{how_improved}")
     if fix_category == "unknown":
-        fix_category = _classify_fix_category(f"{how_improved}\n{why_poor}")
+        fix_category = classify_fix_category(f"{how_improved}\n{why_poor}")
     normalized_outcome = _normalize_outcome_bucket(outcome_bucket)
 
     now = int(time.time())
@@ -354,7 +360,7 @@ def record_error_fix_insight(
         types = ["unknown"]
 
     normalized_outcome = _normalize_outcome_bucket(outcome_bucket)
-    category = _classify_error_category(error_message)
+    category = classify_error_category(error_message)
     error_text = _shorten_text(error_message, 2000)
     fix_text = _shorten_text(fix_summary, 2000)
     fingerprint = hashlib.sha256(" ".join(error_text.split()).encode("utf-8")).hexdigest()[:16]
@@ -410,60 +416,6 @@ def _shorten_text(text: str, max_chars: int) -> str:
     if len(compact) <= max_chars:
         return compact
     return compact[: max_chars - 3].rstrip() + "..."
-
-
-def _classify_cause_category(text: str) -> str:
-    normalized = text.lower()
-    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("data_leakage", ("leak", "target leak", "leakage")),
-        ("overfitting", ("overfit", "train/val gap", "generalization gap")),
-        ("underfitting", ("underfit", "model too simple", "high bias")),
-        ("feature_engineering", ("feature", "encoding", "missing value", "imputation")),
-        ("hyperparameter", ("hyperparameter", "learning rate", "max_depth", "n_estimators", "regularization")),
-        ("validation_strategy", ("cross-validation", "cv", "fold", "holdout", "split strategy")),
-        ("class_imbalance", ("imbalance", "minority class", "class weight", "threshold")),
-        ("resource_constraints", ("gpu utilization", "resource", "timeout", "batch size")),
-    )
-    for category, keywords in rules:
-        if any(keyword in normalized for keyword in keywords):
-            return category
-    return "unknown"
-
-
-def _classify_fix_category(text: str) -> str:
-    normalized = text.lower()
-    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("stronger_model", ("catboost", "xgboost", "lightgbm", "transformer", "neural network", "model upgrade")),
-        ("feature_engineering", ("feature", "encoding", "imputation", "interaction", "transformation")),
-        ("hyperparameter_tuning", ("hyperparameter", "learning rate", "max_depth", "n_estimators", "tuning")),
-        ("regularization", ("regularization", "dropout", "early stopping", "l1", "l2")),
-        ("validation_strategy", ("cross-validation", "cv", "fold", "holdout", "split")),
-        ("ensembling", ("ensemble", "stacking", "blending", "average")),
-        ("data_cleaning", ("outlier", "duplicate", "cleaning", "leakage fix")),
-        ("training_budget", ("epoch", "iterations", "batch size", "training budget")),
-    )
-    for category, keywords in rules:
-        if any(keyword in normalized for keyword in keywords):
-            return category
-    return "unknown"
-
-
-def _classify_error_category(text: str) -> str:
-    normalized = text.lower()
-    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("dependency_missing", ("modulenotfounderror", "no module named", "importerror")),
-        ("schema_mismatch", ("missing columns", "column", "schema", "keyerror")),
-        ("device_mismatch", ("same device", "cuda", "cpu", "device")),
-        ("oom", ("out of memory", "cuda out of memory", "oom")),
-        ("network", ("connectionerror", "dns", "network", "name resolution")),
-        ("kaggle_cli", ("kaggle cli", "competitions submit", "kernels push")),
-        ("timeout", ("timeout", "timed out", "deadline exceeded")),
-        ("validation", ("row count mismatch", "submission", "validation error")),
-    )
-    for category, keywords in rules:
-        if any(keyword in normalized for keyword in keywords):
-            return category
-    return "unknown"
 
 
 def _normalize_outcome_bucket(value: str | None) -> str:
@@ -774,7 +726,7 @@ def build_plan_and_initial_prompt(
     n_cols = profile.get("train_cols", 0)
 
     lines = [
-        "# Kagglebot Codex: Plan + Implement (Iteration 1)",
+        f"# Kagglebot {IMPLEMENTATION_AGENT.display_name}: Plan + Implement (Iteration 1)",
         "",
         "## Competition Overview",
         "",
@@ -915,7 +867,7 @@ def build_improve_template() -> str:
       {code_reference_delta}, {code_reference_status}
     """
     return """\
-# Kagglebot Codex: Improvement Iteration
+# Kagglebot {implementation_agent_name}: Improvement Iteration
 
 ## Context
 
@@ -986,6 +938,8 @@ Read the diagnostics and metrics files to understand:
 
 Make **targeted, incremental changes** to improve the current loop-decision score
 (submission preferred; offline fallback).
+Prefer the highest realistic score ceiling over making the current iteration immediately submittable.
+If forced to choose, keep a stronger high-potential path instead of collapsing to a weak submit-ready fallback.
 
 Before changing the model, read overview.md/data.md and respect any constraints or data caveats.
 
@@ -1599,7 +1553,7 @@ def _ensure_table_column(conn: sqlite3.Connection, table: str, column: str, defi
 def build_kernel_fix_template() -> str:
     """Build the kernel-failure fix prompt template."""
     return """\
-# Kagglebot Codex: Kernel Failure Fix
+# Kagglebot {implementation_agent_name}: Kernel Failure Fix
 
 ## Context
 

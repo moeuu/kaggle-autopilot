@@ -13,8 +13,15 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
+from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.competition import rules_url_for_slug
-from kagglebot.kaggle_api import DownloadProgressCallback, download_competition, kernels_pull, list_competition_kernels
+from kagglebot.kaggle_api import (
+    DownloadProgressCallback,
+    download_competition,
+    download_dataset,
+    kernels_pull,
+    list_competition_kernels,
+)
 from kagglebot.knowledge import (
     build_improve_template,
     build_kernel_fix_template,
@@ -112,6 +119,15 @@ def bootstrap_competition(
     profile = _write_dataset_profile(paths)
     _cache_sample_submission(paths)
     _mirror_sample_submission_to_data(paths)
+    stage_reference_notebook_inputs(
+        paths=paths,
+        slug=slug,
+        download=download,
+        quiet=quiet,
+        dry_run=dry_run,
+        download_competition_fn=download_competition,
+        download_dataset_fn=download_dataset,
+    )
 
     taxonomy = ensure_taxonomy(knowledge_paths)
     similar = resolve_similar_improvements(

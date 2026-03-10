@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kagglebot.orchestrator.agent_pipeline import _write_plan_payload
+from kagglebot.orchestrator.agent_pipeline import _validate_plan_payload, _write_plan_payload
 from kagglebot.paths import CompetitionPaths
 
 
@@ -140,3 +140,116 @@ def test_write_plan_payload_forces_cv_for_non_generalizable_score_source(tmp_pat
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["score_source"] == "cv"
+
+
+def test_write_plan_payload_scalarizes_pipeline_key_hyperparameters(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps(
+            {
+                "task": "classification",
+                "modality": "tabular",
+                "train_rows": 5000,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+
+    payload = _base_payload()
+    payload["score_source"] = "cv"
+    payload["pipelines"] = [
+        {
+            "name": "pipe1",
+            "features": ["basic"],
+            "models": ["XGBoost"],
+            "key_hyperparameters": {
+                "dropout": [0.05, 0.1],
+                "optimizer": {"lr": [0.01, 0.005]},
+                "empty": [],
+            },
+            "runtime_memory": "low",
+            "failure_modes": ["overfit"],
+            "fallbacks": ["smaller"],
+        },
+        {
+            "name": "pipe2",
+            "features": ["basic"],
+            "models": ["LightGBM"],
+            "key_hyperparameters": {"depth": [6, 8]},
+            "runtime_memory": "low",
+            "failure_modes": ["overfit"],
+            "fallbacks": ["shallower"],
+        },
+    ]
+
+    _write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["pipelines"][0]["key_hyperparameters"] == {
+        "dropout": 0.05,
+        "optimizer": {"lr": 0.01},
+    }
+    assert persisted["pipelines"][1]["key_hyperparameters"] == {"depth": 6}
+
+
+def test_write_plan_payload_sets_default_bronze_target_for_leaderboard(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps(
+            {
+                "task": "classification",
+                "modality": "tabular",
+                "train_rows": 5000,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    _write_plan_payload(paths, _base_payload())
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["target_medal"] == "bronze"
+    assert persisted["target_rank_percentile"] == 0.1
+
+
+def test_validate_plan_payload_requires_multi_family_blend_for_high_accuracy_tabular() -> None:
+    payload = _base_payload()
+    payload["pipelines"] = [
+        {
+            "name": "xgb_only",
+            "features": ["basic"],
+            "models": ["XGBoost"],
+            "key_hyperparameters": {"depth": 6},
+            "runtime_memory": "medium",
+            "failure_modes": ["overfit"],
+            "fallbacks": ["smaller xgb"],
+        },
+        {
+            "name": "xgb_only_v2",
+            "features": ["basic"],
+            "models": ["XGBoost"],
+            "key_hyperparameters": {"depth": 8},
+            "runtime_memory": "medium",
+            "failure_modes": ["overfit"],
+            "fallbacks": ["smaller xgb"],
+        },
+    ]
+    profile = {
+        "task": "classification",
+        "modality": "tabular",
+        "tags": ["tabular", "binary"],
+        "train_rows": 10000,
+        "categorical_columns": ["a", "b", "c"],
+        "high_cardinality_columns": ["c"],
+    }
+
+    issues = _validate_plan_payload(payload, profile=profile)
+
+    assert any("CatBoost" in issue for issue in issues)
+    assert any("LightGBM or a second CatBoost/XGBoost variant" in issue for issue in issues)
+    assert any("OOF blend" in issue for issue in issues)

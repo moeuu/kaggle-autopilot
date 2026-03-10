@@ -57,6 +57,53 @@ def test_validate_advisor_payload_schema_rejects_extra_keys() -> None:
     assert any("unexpected keys" in item for item in issues)
 
 
+def test_validate_advisor_payload_schema_accepts_optional_faithfulness() -> None:
+    payload = _valid_payload()
+    payload["evaluation_spec"]["faithfulness"] = {
+        "accepted_score_sources": ["cv", "holdout"],
+        "require_metric_match": True,
+        "require_split_match": True,
+        "require_trusted_score_source": True,
+        "require_competition_faithful": True,
+        "require_full_dataset": False,
+    }
+    spec, _, _, issues = validate_advisor_payload(payload)
+    assert issues == []
+    assert spec is not None
+    faithfulness = spec.get("faithfulness")
+    assert isinstance(faithfulness, dict)
+    assert faithfulness["accepted_score_sources"] == ["cv", "holdout"]
+
+
+def test_validate_advisor_payload_accepts_deliverable_mode_writeup() -> None:
+    payload = _valid_payload()
+    payload["evaluation_spec"]["deliverable_mode"] = "writeup"
+    spec, _, _, issues = validate_advisor_payload(payload)
+    assert issues == []
+    assert spec is not None
+    assert spec["deliverable_mode"] == "writeup"
+
+
+def test_validate_advisor_payload_canonicalizes_legacy_csv_deliverable_mode() -> None:
+    payload = _valid_payload()
+    payload["evaluation_spec"]["deliverable_mode"] = "csv"
+    spec, _, _, issues = validate_advisor_payload(payload)
+    assert issues == []
+    assert spec is not None
+    assert spec["deliverable_mode"] == "leaderboard"
+
+
+def test_validate_advisor_payload_accepts_medal_target_fields() -> None:
+    payload = _valid_payload()
+    payload["evaluation_spec"]["target_medal"] = "bronze"
+    payload["evaluation_spec"]["target_rank_percentile"] = 0.1
+    spec, _, _, issues = validate_advisor_payload(payload)
+    assert issues == []
+    assert spec is not None
+    assert spec["target_medal"] == "bronze"
+    assert spec["target_rank_percentile"] == 0.1
+
+
 def test_evaluation_advisor_fallback_writes_spec_when_unavailable(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
@@ -103,6 +150,96 @@ def test_evaluation_advisor_fallback_prefers_context_metric_over_profile_metric(
     spec, source = advisor.ensure_spec()
     assert source == "fallback"
     assert spec["metric_name"] == "auc"
+
+
+def test_evaluation_advisor_fallback_infers_writeup_mode_from_context(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "accuracy", "task": "classification", "modality": "tabular"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("This hackathon is judged by a panel and requires a writeup.\n", encoding="utf-8")
+    paths.overview_md_path.write_text(
+        "Scoring follows a rubric with documentation and writeup quality.\n",
+        encoding="utf-8",
+    )
+    paths.submission_format_md_path.write_text(
+        "Writeup submission details are described in the overview.\n",
+        encoding="utf-8",
+    )
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+    assert source == "fallback"
+    assert spec["deliverable_mode"] == "writeup"
+    assert spec["submit_mode"] == "file"
+
+
+def test_evaluation_advisor_fallback_keeps_csv_mode_when_writeup_terms_are_negative(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "auc", "task": "classification", "modality": "tabular"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("You may select up to two Final Submissions for judging.\n", encoding="utf-8")
+    paths.overview_md_path.write_text(
+        "This is a normal leaderboard CSV competition, not a judged/writeup competition.\n",
+        encoding="utf-8",
+    )
+    paths.submission_format_md_path.write_text(
+        "Submissions must contain id,target probability predictions.\n"
+        "This supports deliverable_mode=csv rather than writeup.\n",
+        encoding="utf-8",
+    )
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+    assert source == "fallback"
+    assert spec["deliverable_mode"] == "leaderboard"
+    assert spec["submit_mode"] == "file"
+    assert spec["target_medal"] == "bronze"
+    assert spec["target_rank_percentile"] == 0.1
+
+
+def test_evaluation_advisor_fallback_infers_notebook_submit_mode_from_context(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "auc", "task": "classification", "modality": "tabular"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text(
+        "Submissions to this competition must be made through Notebooks.\n",
+        encoding="utf-8",
+    )
+    paths.overview_md_path.write_text("Leaderboard competition.\n", encoding="utf-8")
+    paths.submission_format_md_path.write_text("Upload predictions after running a notebook.\n", encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+    assert source == "fallback"
+    assert spec["deliverable_mode"] == "leaderboard"
+    assert spec["submit_mode"] == "notebook"
 
 
 def test_evaluation_advisor_refreshes_stale_frozen_spec(tmp_path: Path) -> None:

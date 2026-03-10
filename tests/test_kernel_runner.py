@@ -397,6 +397,26 @@ def test_find_submission_file_supports_zip_submission(tmp_path: Path) -> None:
     assert find_submission_file(output_dir) == submission
 
 
+def test_find_submission_file_supports_submission_manifest(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    bundle_dir = output_dir / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "mask.tif").write_bytes(b"mask")
+    manifest = output_dir / "submission_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "artifact_class": "multi_file_zip",
+                "staging_dir": "bundle",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    assert find_submission_file(output_dir) == manifest
+
+
 def test_find_output_file_picks_newest_match(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()
@@ -1151,6 +1171,107 @@ def test_run_kernel_local_retries_cuda_oom_by_disabling_llm(tmp_path: Path, monk
     assert (logs_dir / "local_kernel_stdout_oom_retry.log").exists()
 
 
+def test_run_kernel_local_rejects_staged_plan_with_sequence_hyperparameters(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "from pathlib import Path\nPath('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "toggles": {"USE_MODEL": True},
+                "pipelines": [
+                    {
+                        "name": "pipe_a",
+                        "key_hyperparameters": {"dropout": [0.05, 0.1]},
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KernelFailedError, match="unresolved hyperparameter sequences"):
+        run_kernel_local(
+            slug="demo",
+            run_id="run-bad-plan",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            holdout_frac=0.2,
+            cv_folds=3,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+
+def test_run_kernel_local_host_memory_watchdog_kills_memory_hog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB", "32")
+
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import time",
+                "",
+                "SUBMISSION_NAME = 'submission.csv'",
+                "METRICS_NAME = 'metrics.json'",
+                "print('allocating memory', flush=True)",
+                "blob = bytearray(96 * 1024 * 1024)",
+                "print(len(blob), flush=True)",
+                "time.sleep(10)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="exceeded host memory guard"):
+        run_kernel_local(
+            slug="demo",
+            run_id="run-memguard",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            holdout_frac=0.2,
+            cv_folds=3,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+    logs_dir = tmp_path / "demo" / "runs" / "run-memguard" / "iter-1" / "logs"
+    stdout_log = logs_dir / "local_kernel_stdout.log"
+    assert stdout_log.exists()
+
+
+def test_local_kernel_memory_cap_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kagglebot import kernel_runner
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB", "64")
+    cap_bytes = kernel_runner._resolve_local_kernel_memory_cap_bytes(dict(os.environ))  # noqa: SLF001
+    assert cap_bytes == 64 * 1024 * 1024
+
+
 def test_run_kernel_local_finds_artifacts_in_parent_outputs(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -1489,6 +1610,74 @@ def test_run_kernel_local_stages_non_tabular_data_tree(tmp_path: Path) -> None:
     assert (staged_data_dir / "sample_submission.csv").exists()
     assert result.submission_path is not None and result.submission_path.exists()
     assert result.metrics_path is not None and result.metrics_path.exists()
+
+
+def test_normalize_local_kernel_metrics_promotes_urban_flood_flat_full_data(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    data_dir = tmp_path / "urban-flood-modelling" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for name in kernel_runner._URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES:
+        (data_dir / name).write_text("stub\n", encoding="utf-8")
+
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "metric": "rmse",
+                "offline_value": 0.1,
+                "score_source": "sample_diagnostic",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    normalized = kernel_runner._normalize_local_kernel_metrics(
+        slug="urban-flood-modelling",
+        data_dir=data_dir,
+        metrics_path=metrics_path,
+        score_source="cv",
+    )
+
+    assert normalized == metrics_path
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert payload["score_source"] == "cv"
+    assert payload["dataset_kind"] == "full"
+    assert payload["dataset_mode"] == "full"
+    assert payload["full_dataset_resolved"] is True
+    assert payload["metrics_normalized_by"] == "kernel_runner.local_full_data_guard"
+
+
+def test_normalize_local_kernel_metrics_keeps_other_slugs_unchanged(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for name in kernel_runner._URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES:
+        (data_dir / name).write_text("stub\n", encoding="utf-8")
+
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "metric": "rmse",
+                "offline_value": 0.1,
+                "score_source": "sample_diagnostic",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    kernel_runner._normalize_local_kernel_metrics(
+        slug="demo",
+        data_dir=data_dir,
+        metrics_path=metrics_path,
+        score_source="cv",
+    )
+
+    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert payload["score_source"] == "sample_diagnostic"
+    assert "full_dataset_resolved" not in payload
 
 
 def test_local_kernel_duration_history_estimate_uses_recent_median(tmp_path: Path) -> None:

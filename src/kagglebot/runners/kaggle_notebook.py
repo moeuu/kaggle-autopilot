@@ -12,6 +12,7 @@ from rich import print
 
 from kagglebot import kaggle_cli
 from kagglebot.runners.base import RunContext, RunResult
+from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 KERNEL_TEMPLATE = r"""
 import json
@@ -497,7 +498,7 @@ class KaggleNotebookRunner:
 
         submission_path = find_submission_file(output_dir)
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)
-        local_submission = paths.submissions_dir / f"{run_id}_submission.csv"
+        local_submission = paths.submissions_dir / f"{run_id}_{submission_path.name}"
         shutil.copy2(submission_path, local_submission)
 
         summary["submission_path"] = str(local_submission)
@@ -598,6 +599,13 @@ def resolve_kaggle_username(explicit: str | None) -> str:
 
 
 def find_submission_file(output_dir: Path) -> Path:
+    manifest_path = find_submission_manifest(output_dir)
+    if manifest_path is not None:
+        _, submission_path, staging_dir, members = resolve_manifest_references(manifest_path)
+        if submission_path is not None and submission_path.exists() and submission_path.is_file():
+            return submission_path
+        if staging_dir is not None or members:
+            return manifest_path
     matches = [path for path in output_dir.rglob("submission.csv") if path.is_file()]
     if not matches:
         raise FileNotFoundError(f"No submission.csv found under {output_dir}")

@@ -96,3 +96,58 @@ def test_ensure_eval_data_cache_drift_selection_avoids_strict_getitem(monkeypatc
     assert cache["drift_test_x"] is not None
     assert list(cache["drift_train_x"].columns) == ["oare_id", "feature"]
     assert list(cache["drift_test_x"].columns) == ["oare_id", "feature"]
+
+
+def test_ensure_eval_data_cache_preserves_requested_timeseries_split_on_fallback(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    config = AutopilotConfig(
+        run_id="run-1",
+        slug="demo",
+        competition_url=None,
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        agent="codex",
+        compute="local_cpu",
+        accelerator="cpu",
+        strict_accelerator=False,
+        kaggle_username=None,
+        kernel_name=None,
+        internet=None,
+        time_budget_min=None,
+        seed=42,
+        score_source="cv",
+        holdout_frac=0.2,
+        cv_folds=5,
+        target_metric=None,
+        target_score=None,
+        target_direction=None,
+        max_iterations=1,
+        max_total_min=5,
+        patience=1,
+        min_improvement=0.0,
+        submit=False,
+        force_submit=False,
+        message=None,
+        verify_cmd=":",
+        dry_run=True,
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot.load_competition_data",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    cache = _ensure_eval_data_cache(
+        config=config,
+        cv_folds=5,
+        split_strategy="timeseries_split",
+        seed=42,
+        eval_seeds=[42],
+        eval_repeats=1,
+        score_source="cv",
+        eval_data_cache=None,
+    )
+
+    assert cache["split_strategy"] == "timeseries_split"
+    assert cache["n_splits"] == 5

@@ -13,7 +13,7 @@ Use this checklist when changing autopilot behavior.
 
 ## 2. Planning Pipeline Safety
 
-- [ ] Planning order remains `codex -> gpt -> codex`.
+- [ ] Planning order remains `gpt -> gpt -> gpt`.
 - [ ] GPT output sections are validated (`STRATEGY`, `RESEARCH_SOURCES_JSONL`, `RESEARCH_SUMMARY_MD`, `PLAN_JSON`, `CODEX_INSTRUCTIONS`).
 - [ ] Research artifacts are persisted to `context/research_*.{jsonl,md}`.
 - [ ] Plan validation rejects malformed or underspecified pipeline configs.

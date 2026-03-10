@@ -30,7 +30,7 @@ Return output with these exact section markers:
 Provide a deep solution strategy. Include model choices, preprocessing, CV plan, and risk notes.
 
 ===CODEX_IMPLEMENTATION_INSTRUCTIONS===
-Give Codex a step-by-step implementation plan with exact file paths to modify and acceptance criteria.
+Give {{implementation_agent_name}} a step-by-step implementation plan with exact file paths to modify and acceptance criteria.
 Include explicit instructions to update `artifacts/<slug>/plan.json` with:
 target_metric, target_score, target_direction, score_source, holdout_frac, cv_folds, seed, and any other required defaults.
 

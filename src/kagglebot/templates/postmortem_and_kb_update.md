@@ -1,4 +1,4 @@
-# Kagglebot Codex: Postmortem & Knowledge Base Update
+# Kagglebot {implementation_agent_name}: Postmortem & Knowledge Base Update
 
 ## Run Summary
 

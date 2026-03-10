@@ -667,6 +667,24 @@ def kernels_pull(
     return _run_kaggle(args, slug, dry_run=dry_run)
 
 
+def download_dataset(
+    dataset_ref: str,
+    dest_dir: Path,
+    *,
+    slug: str | None = None,
+    dry_run: bool = False,
+    force: bool = True,
+    quiet: bool = True,
+) -> str:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    args = ["kaggle", "datasets", "download", "-d", dataset_ref, "-p", str(dest_dir)]
+    if force:
+        args.append("--force")
+    if quiet:
+        args.append("--quiet")
+    return _run_kaggle(args, slug, dry_run=dry_run)
+
+
 def kernels_list(
     *, mine: bool = False, user: str | None = None, sort_by: str = "dateCreated", dry_run: bool = False
 ) -> str:

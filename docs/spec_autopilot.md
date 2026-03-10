@@ -26,13 +26,13 @@ Common options:
 - `--max-iterations`, `--patience`, `--min-improvement`, `--max-total-min`
 - `--internet auto|off|on`
 
-## 2. Planning Contract (`codex -> gpt -> codex`)
+## 2. Planning Contract (`gpt -> gpt -> gpt`)
 
 Autopilot planning is fixed to:
 
-1. Codex brief (`gpt-5.3-codex`, extra high)
-2. GPT strategy (`gpt-5.2`, extra high)
-3. Codex kernel implementation (`gpt-5.3-codex`, extra high)
+1. GPT brief (`gpt-5.4`, extra high)
+2. GPT strategy (`gpt-5.4`, extra high)
+3. GPT kernel implementation (`gpt-5.4`, extra high)
 
 GPT strategy output must include:
 - `===STRATEGY===`

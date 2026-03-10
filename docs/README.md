@@ -17,4 +17,4 @@ Notes:
 
 - Legacy planning/task docs were removed to reduce maintenance overhead.
 - The files above are the supported documentation set.
-- Planning pipeline is `codex -> gpt -> codex` and persists research artifacts to `knowledge/research/<problem_type>/<slug>/` (with working copies under `artifacts/<slug>/context/`).
+- Planning pipeline is `gpt -> gpt -> gpt` and persists research artifacts to `knowledge/research/<problem_type>/<slug>/` (with working copies under `artifacts/<slug>/context/`).

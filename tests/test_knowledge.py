@@ -156,6 +156,41 @@ def test_error_fix_insight_record_and_resolve(tmp_path) -> None:
     assert "featurewiz" in rendered
 
 
+def test_knowledge_classifies_external_signal_and_online_mismatch(tmp_path) -> None:
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+
+    record_error_fix_insight(
+        knowledge_paths=knowledge_paths,
+        slug="comp-c",
+        run_id="run-3",
+        iteration=1,
+        problem_types=["tabular:binary"],
+        error_message="ORIG_proba constant_fallback: original_data_found=false and reference inputs missing.",
+        fix_summary="Recover original data from reference inputs and disable constant_fallback.",
+        resolved=False,
+        outcome_bucket="unknown",
+        submission_score=None,
+    )
+    error_insights = resolve_error_fix_insights(knowledge_paths, ["tabular:binary"], limit=5)
+    assert error_insights[0]["error_category"] == "external_signal_missing"
+
+    record_problem_type_insight(
+        knowledge_paths=knowledge_paths,
+        slug="comp-c",
+        run_id="run-3",
+        iteration=2,
+        problem_types=["tabular:binary"],
+        why_poor="Offline improved but public leaderboard regressed, indicating an online mismatch.",
+        how_improved="Ban same-family-only tuning and increase model-family diversity with blending.",
+        delta_offline=None,
+        outcome_bucket="low",
+        submission_score=0.812,
+    )
+    problem_insights = resolve_problem_type_insights(knowledge_paths, ["tabular:binary"], limit=5)
+    assert problem_insights[0]["cause_category"] == "online_mismatch"
+    assert problem_insights[0]["fix_category"] == "model_diversification"
+
+
 def test_record_iteration_upserts_on_duplicate_run_iteration(tmp_path) -> None:
     knowledge_paths = KnowledgePaths(workdir=tmp_path)
 

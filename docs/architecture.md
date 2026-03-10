@@ -7,7 +7,7 @@ This document describes the current autopilot execution architecture.
 `kagglebot autopilot` executes in three major phases:
 
 1. Bootstrap context
-2. Agent pipeline (`codex -> gpt -> codex`)
+2. Agent pipeline (`gpt -> gpt -> gpt`)
 3. Iterative train/evaluate/improve/submit loop
 
 ## 1) Bootstrap Context
@@ -19,7 +19,7 @@ Bootstrap prepares `artifacts/<slug>/context/`:
 - sample submission snapshot
 - top1 public score snapshot
 
-## 2) Agent Pipeline (`codex -> gpt -> codex`)
+## 2) Agent Pipeline (`gpt -> gpt -> gpt`)
 
 Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 
@@ -54,6 +54,8 @@ Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 ## 3) Iteration Loop
 
 Main loop is in `src/kagglebot/autopilot.py`.
+Supporting state/resume helpers now live in `src/kagglebot/autopilot_state.py`, and score/policy helpers live in
+`src/kagglebot/autopilot_helpers.py`, so the main file stays focused on orchestration.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)

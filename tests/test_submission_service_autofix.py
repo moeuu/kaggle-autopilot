@@ -186,8 +186,8 @@ def test_validate_and_prepare_autofixes_missing_required_id_suffix(tmp_path: Pat
     validate_submission(str(prepared), str(sample_path), data_dir=data_dir)
 
     df = pd.read_csv(prepared)
-    assert list(df.columns) == ["Id", "Category"]
-    assert df["Id"].tolist() == ["val_0001.tif", "val_0002.tif"]
+    assert list(df.columns) == ["id", "prediction"]
+    assert df["id"].tolist() == ["val_0001.tif", "val_0002.tif"]
 
 
 def test_validate_and_prepare_does_not_autofix_header_only_sample_when_mapping_is_ambiguous(tmp_path: Path) -> None:

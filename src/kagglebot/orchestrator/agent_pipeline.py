@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kagglebot.agents.codex_runner import run_codex
+from kagglebot.agents.identity import (
+    BRIEF_AGENT,
+    IMPLEMENTATION_AGENT,
+    STRATEGY_AGENT,
+    prompt_identity_mapping,
+    render_prompt_identity,
+)
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.knowledge import (
@@ -26,13 +33,24 @@ from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.types import PlanConfig
 from kagglebot.validators import scan_text_for_secrets
+from kagglebot.writeup import (
+    infer_deliverable_mode_from_paths,
+    infer_submit_mode_from_paths,
+    summarize_writeup_requirements,
+)
 
-_PLANNING_CODEX_MODEL = "gpt-5.3-codex"
-_PLANNING_REASONING_EFFORT = "extra_high"
+_PLANNING_CODEX_MODEL = IMPLEMENTATION_AGENT.model
+_PLANNING_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
 _ACCURACY_FIRST_MIN_MAX_ITERATIONS = 12
 _ACCURACY_FIRST_MIN_PATIENCE = 4
 _ACCURACY_FIRST_MIN_CV_FOLDS = 5
 _ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
+_DEFAULT_TARGET_MEDAL = "bronze"
+_MEDAL_TARGET_PERCENTILES = {
+    "bronze": 0.10,
+    "silver": 0.05,
+    "gold": 0.01,
+}
 
 
 @dataclass(frozen=True)
@@ -136,7 +154,7 @@ def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, outpu
     _assert_no_secrets(prompt_text)
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
-    _print_block("codex brief prompt (sent)", prompt_text)
+    _print_block(f"{BRIEF_AGENT.log_alias} brief prompt (sent)", prompt_text)
 
     brief_path = paths.context_agent_dir / "brief_for_strategy.md"
     brief_text, error_text = _run_codex_brief_with_retry(
@@ -147,7 +165,7 @@ def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, outpu
     )
     if not brief_text:
         brief_text = _build_fallback_brief(paths, config, error_text)
-    _print_block("codex brief (used for GPT)", brief_text)
+    _print_block(f"{BRIEF_AGENT.log_alias} brief (used for {STRATEGY_AGENT.log_alias})", brief_text)
     brief_path.write_text(brief_text + "\n", encoding="utf-8")
     return brief_path
 
@@ -186,7 +204,7 @@ def _run_codex_brief_with_retry(
         brief_text = _read_text(result.last_message_path).strip()
         if result.returncode == 0 and brief_text:
             return brief_text, ""
-        last_error = result.stderr or "Codex brief returned empty output."
+        last_error = result.stderr or f"{BRIEF_AGENT.display_name} brief returned empty output."
         attempt += 1
     return "", last_error
 
@@ -275,7 +293,7 @@ def _run_strategy_plan(
                     research_sources_text=research_sources_text,
                     research_summary_text=research_summary_text,
                 )
-            raise KaggleBotError(f"GPT strategy failed: {result.stderr or response_text}")
+            raise KaggleBotError(f"{STRATEGY_AGENT.display_name} strategy failed: {result.stderr or response_text}")
 
         strategy_text, instructions_text = _split_strategy_output(response_text)
         instructions_text = _ensure_kernel_instruction_reference(
@@ -294,12 +312,13 @@ def _run_strategy_plan(
             research_sources_issue,
             research_summary_text,
             research_summary_issue,
+            profile=_load_dataset_profile_payload(paths),
             require_sources=config.internet != "off",
         )
         if issues:
             if attempt >= _QUALITY_RETRY_LIMIT:
                 issue_text = "\n".join(f"- {issue}" for issue in issues)
-                raise KaggleBotError(f"GPT strategy failed quality gate:\n{issue_text}")
+                raise KaggleBotError(f"{STRATEGY_AGENT.display_name} strategy failed quality gate:\n{issue_text}")
             attempt += 1
             for issue in issues:
                 print(f"[yellow]quality gate[/yellow]: {issue}")
@@ -392,6 +411,15 @@ def _run_codex_kernel_implementation(
             "blocked_modules": blocked_text,
         },
     )
+    if infer_deliverable_mode_from_paths(paths) == "writeup":
+        requirements = summarize_writeup_requirements(paths)
+        prompt_text += (
+            "\n\nWriteup mode is active for this competition.\n"
+            "Do not treat submission.csv as the primary deliverable. Keep train/eval outputs useful as proxy "
+            "evidence, and make sure the implementation can support a final judged writeup package.\n"
+        )
+        if requirements:
+            prompt_text += f"Competition-specific writeup requirements:\n{requirements}\n"
     _assert_no_secrets(prompt_text)
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
@@ -423,9 +451,12 @@ def _run_codex_kernel_implementation(
         auto_repair=True,
     )
     if result.returncode != 0:
-        raise KaggleBotError(f"Codex kernel implementation failed: {result.stderr}")
+        raise KaggleBotError(f"{IMPLEMENTATION_AGENT.display_name} kernel implementation failed: {result.stderr}")
     if not config.dry_run:
-        _print_block("codex kernel implementation result", _read_text(result.last_message_path))
+        _print_block(
+            f"{IMPLEMENTATION_AGENT.log_alias} kernel implementation result",
+            _read_text(result.last_message_path),
+        )
 
 
 def _ensure_context_materials(paths: CompetitionPaths) -> None:
@@ -502,12 +533,13 @@ def _ensure_context_materials(paths: CompetitionPaths) -> None:
 
 def _load_template(name: str) -> str:
     base_dir = Path(__file__).resolve().parents[1] / "prompts"
-    return (base_dir / name).read_text(encoding="utf-8")
+    return render_prompt_identity((base_dir / name).read_text(encoding="utf-8"))
 
 
 def _render_template(template: str, mapping: dict[str, str]) -> str:
     rendered = template
-    for key, value in mapping.items():
+    merged = {**prompt_identity_mapping(), **mapping}
+    for key, value in merged.items():
         rendered = rendered.replace(f"{{{{{key}}}}}", value)
     return rendered
 
@@ -621,6 +653,34 @@ _STOP_POLICY_ABORT_ALIASES = (
 )
 
 
+def _normalize_pipeline_hyperparameter_value(value: object) -> object | None:
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            normalized_item = _normalize_pipeline_hyperparameter_value(item)
+            if normalized_item is None:
+                continue
+            normalized[str(key)] = normalized_item
+        return normalized
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return _normalize_pipeline_hyperparameter_value(value[0])
+    return value
+
+
+def _find_sequence_hyperparameter_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child_prefix = f"{prefix}.{key}"
+            paths.extend(_find_sequence_hyperparameter_paths(item, prefix=child_prefix))
+        return paths
+    if isinstance(value, (list, tuple)):
+        paths.append(prefix)
+    return paths
+
+
 def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     normalized = dict(payload)
     pipelines_raw = normalized.get("pipelines")
@@ -638,6 +698,9 @@ def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
                 if isinstance(models, list) and models and isinstance(models[0], str) and models[0].strip():
                     model_hint = re.sub(r"[^a-zA-Z0-9]+", "_", models[0]).strip("_").lower()
                 pipeline["name"] = model_hint or f"pipeline_{index + 1}"
+            key_hyperparameters = pipeline.get("key_hyperparameters")
+            if isinstance(key_hyperparameters, dict):
+                pipeline["key_hyperparameters"] = _normalize_pipeline_hyperparameter_value(key_hyperparameters) or {}
             pipelines.append(pipeline)
         normalized["pipelines"] = pipelines
 
@@ -664,7 +727,47 @@ def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     return normalized
 
 
-def _validate_plan_payload(payload: dict[str, object]) -> list[str]:
+def _pipeline_texts(pipeline: dict[str, object]) -> list[str]:
+    texts: list[str] = []
+    for key in ("name",):
+        value = pipeline.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip().lower())
+    for key in ("models", "features", "fallbacks", "failure_modes"):
+        value = pipeline.get(key)
+        if isinstance(value, list):
+            texts.extend(str(item).strip().lower() for item in value if str(item).strip())
+        elif isinstance(value, str) and value.strip():
+            texts.append(value.strip().lower())
+    return texts
+
+
+def _validate_high_accuracy_tabular_plan(pipelines: list[dict[str, object]]) -> list[str]:
+    issues: list[str] = []
+    family_counts = {"catboost": 0, "xgboost": 0, "lightgbm": 0}
+    blend_present = False
+    for pipeline in pipelines:
+        texts = _pipeline_texts(pipeline)
+        haystack = " ".join(texts)
+        for family in family_counts:
+            if family in haystack:
+                family_counts[family] += 1
+        if any(token in haystack for token in ("blend", "ensemble", "stack", "rank", "logit", "weighted")):
+            blend_present = True
+    if len(pipelines) < 3:
+        issues.append("PLAN_JSON must include at least 3 pipelines for high-accuracy tabular binary search.")
+    if family_counts["catboost"] < 1:
+        issues.append("PLAN_JSON must include a CatBoost pipeline for raw categorical handling.")
+    if family_counts["xgboost"] < 1:
+        issues.append("PLAN_JSON must include an XGBoost pipeline with leak-safe encoded/stat features.")
+    if family_counts["lightgbm"] < 1 and (family_counts["catboost"] + family_counts["xgboost"] < 3):
+        issues.append("PLAN_JSON must include LightGBM or a second CatBoost/XGBoost variant.")
+    if not blend_present:
+        issues.append("PLAN_JSON must include at least one OOF blend/ensemble candidate.")
+    return issues
+
+
+def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, object] | None = None) -> list[str]:
     payload = _normalize_plan_payload(payload)
     issues: list[str] = []
     required = [
@@ -713,6 +816,21 @@ def _validate_plan_payload(payload: dict[str, object]) -> list[str]:
             ):
                 if key not in item:
                     issues.append(f"PLAN_JSON pipelines[{index}] missing key: {key}.")
+            key_hyperparameters = item.get("key_hyperparameters")
+            if "key_hyperparameters" in item and not isinstance(key_hyperparameters, dict):
+                issues.append(f"PLAN_JSON pipelines[{index}].key_hyperparameters must be an object.")
+            elif isinstance(key_hyperparameters, dict):
+                sequence_paths = _find_sequence_hyperparameter_paths(key_hyperparameters)
+                if sequence_paths:
+                    issues.append(
+                        "PLAN_JSON pipelines"
+                        f"[{index}].key_hyperparameters must contain scalar runtime values; found sequences at "
+                        + ", ".join(sequence_paths)
+                        + "."
+                    )
+        if not issues and profile and _is_high_accuracy_tabular_blend_target(profile):
+            typed_pipelines = [item for item in pipelines if isinstance(item, dict)]
+            issues.extend(_validate_high_accuracy_tabular_plan(typed_pipelines))
     toggles = payload.get("toggles")
     if not isinstance(toggles, dict):
         issues.append("PLAN_JSON toggles must be an object.")
@@ -749,16 +867,16 @@ def _validate_plan_payload(payload: dict[str, object]) -> list[str]:
 
 
 def _write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> None:
-    payload = _apply_plan_guardrails(paths, payload)
+    payload = _normalize_plan_payload(_apply_plan_guardrails(paths, payload))
     existing: dict[str, object] = {}
     if paths.plan_path.exists():
         try:
             existing = json.loads(paths.plan_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             existing = {}
-    merged = {**existing, **payload}
+    merged = _normalize_plan_payload({**existing, **payload})
     defaults = PlanConfig.from_dict(merged).to_dict()
-    persisted = {**merged, **defaults}
+    persisted = _normalize_plan_payload({**merged, **defaults})
     paths.plan_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
 
 
@@ -785,6 +903,19 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
     modality = str(profile.get("modality") or "").strip().lower()
     top_class_ratio = _extract_top_class_ratio(profile)
     severe_imbalance = bool(task == "classification" and top_class_ratio is not None and top_class_ratio >= 0.98)
+    leaderboard_mode = infer_deliverable_mode_from_paths(paths) != "writeup"
+
+    if leaderboard_mode:
+        target_medal = _normalize_target_medal(guarded.get("target_medal"), default=_DEFAULT_TARGET_MEDAL)
+        target_rank_percentile = _normalize_target_rank_percentile(
+            guarded.get("target_rank_percentile"),
+            medal=target_medal,
+            fallback=None,
+        )
+        if target_medal is not None:
+            guarded["target_medal"] = target_medal
+        if target_rank_percentile is not None:
+            guarded["target_rank_percentile"] = target_rank_percentile
 
     score_source = str(guarded.get("score_source") or "").strip().lower()
     if score_source not in {"cv", "holdout"}:
@@ -960,6 +1091,62 @@ def _extract_top_class_ratio(profile: dict[str, object]) -> float | None:
     return None
 
 
+def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _MEDAL_TARGET_PERCENTILES:
+            return normalized
+    return default
+
+
+def _normalize_target_rank_percentile(
+    value: object,
+    *,
+    medal: str | None = None,
+    fallback: float | None = None,
+) -> float | None:
+    parsed: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        parsed = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                parsed = None
+    if parsed is not None and 0.0 < parsed <= 1.0:
+        return parsed
+    if medal is not None:
+        medal_target = _MEDAL_TARGET_PERCENTILES.get(medal)
+        if medal_target is not None:
+            return medal_target
+    if fallback is not None and 0.0 < float(fallback) <= 1.0:
+        return float(fallback)
+    return None
+
+
+def _is_high_accuracy_tabular_blend_target(profile: dict[str, object]) -> bool:
+    modality = str(profile.get("modality") or "").strip().lower()
+    task = str(profile.get("task") or "").strip().lower()
+    tags_raw = profile.get("tags")
+    tags = (
+        [str(item).strip().lower() for item in tags_raw if isinstance(item, str)] if isinstance(tags_raw, list) else []
+    )
+    train_rows = _as_positive_int(profile.get("train_rows")) or 0
+    categorical_count = (
+        len(profile.get("categorical_columns", [])) if isinstance(profile.get("categorical_columns"), list) else 0
+    )
+    high_cardinality_count = (
+        len(profile.get("high_cardinality_columns", []))
+        if isinstance(profile.get("high_cardinality_columns"), list)
+        else 0
+    )
+    binary_like = task == "binary" or "binary" in tags or (task == "classification" and "multiclass" not in tags)
+    mixed_categorical = categorical_count >= 3 or high_cardinality_count >= 1
+    return modality == "tabular" and binary_like and train_rows >= 5000 and mixed_categorical
+
+
 def _adjust_cv_folds_for_imbalance(*, profile: dict[str, object], cv_folds: int) -> int:
     if cv_folds <= 2:
         return cv_folds
@@ -1036,8 +1223,11 @@ def _write_strategy_outputs(
     transcript_path = paths.context_agent_dir / "strategy_transcript.txt"
     transcript_path.write_text(transcript_text, encoding="utf-8")
 
-    _print_block("gpt strategy (human-readable)", strategy_text)
-    _print_block("gpt instructions for codex", instructions_text)
+    _print_block(f"{STRATEGY_AGENT.log_alias} strategy (human-readable)", strategy_text)
+    _print_block(
+        f"{STRATEGY_AGENT.log_alias} instructions for {IMPLEMENTATION_AGENT.log_alias}",
+        instructions_text,
+    )
     _print_block("research summary", research_summary_text)
     strategy_path = paths.context_agent_dir / "strategy_plan.md"
     instructions_path = paths.context_agent_dir / "codex_instructions.md"
@@ -1123,6 +1313,7 @@ def _build_strategy_prompt(
     brief_content: str,
     compact: bool,
 ) -> str:
+    profile = _load_dataset_profile_payload(paths)
     if compact:
         dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 2000)
         submission_format = _truncate(_read_text(paths.submission_format_md_path), 2000)
@@ -1157,6 +1348,26 @@ def _build_strategy_prompt(
             "discussion_snapshot": discussion_snapshot,
         },
     )
+    if infer_deliverable_mode_from_paths(paths) == "writeup":
+        requirements = summarize_writeup_requirements(paths)
+        prompt += (
+            "\n\n[WRITEUP_MODE]\n"
+            "This competition is judged/writeup-based. Treat offline metrics and any submission.csv artifact as "
+            "proxy evidence only. The strategy must end in a competition-specific writeup/report package.\n"
+        )
+        if requirements:
+            prompt += f"Requirements extracted from local context:\n{requirements}\n"
+    elif _is_high_accuracy_tabular_blend_target(profile):
+        prompt += (
+            "\n\n[HIGH_ACCURACY_TABULAR_POLICY]\n"
+            "This is a large tabular binary problem with meaningful categorical structure.\n"
+            "Set `target_medal` to at least bronze and `target_rank_percentile` to 0.10 "
+            "unless stronger evidence supports a harder goal.\n"
+            "The shortlist MUST include CatBoost raw categorical, XGBoost with leak-safe "
+            "target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant.\n"
+            "The plan MUST also include at least one OOF blend candidate "
+            "(weighted/rank/logit blend) so search does not collapse into same-family tuning.\n"
+        )
     if compact:
         prompt += "\n\n[COMPACT]\n"
     return prompt
@@ -1256,6 +1467,7 @@ def _validate_strategy_output(
     research_summary_text: str,
     research_summary_issue: str | None,
     *,
+    profile: dict[str, object] | None,
     require_sources: bool,
 ) -> list[str]:
     issues: list[str] = []
@@ -1299,7 +1511,7 @@ def _validate_strategy_output(
     if plan_payload is None:
         issues.append(plan_issue or "PLAN_JSON section missing or invalid.")
     else:
-        plan_errors = _validate_plan_payload(plan_payload)
+        plan_errors = _validate_plan_payload(plan_payload, profile=profile)
         issues.extend(plan_errors)
     return issues
 
@@ -1342,16 +1554,32 @@ def _validate_research_sources_jsonl(raw: str, *, min_items: int) -> list[str]:
     return issues
 
 
+def _extract_section_heading_title(line: str) -> str | None:
+    stripped = line.strip()
+    atx_match = re.match(r"^#{2,4}\s+(.+?)\s*$", stripped)
+    if atx_match:
+        title = atx_match.group(1)
+    else:
+        bold_match = re.match(r"^\*\*(.+?)\*\*:?\s*$", stripped)
+        if not bold_match:
+            return None
+        title = bold_match.group(1)
+    title = title.strip().rstrip(":")
+    title = re.sub(r"^\d+\s*(?:[\)\.]|[-:])?\s*", "", title).strip()
+    return title.lower()
+
+
 def _count_source_items(text: str) -> int:
     in_sources = False
     count = 0
     for line in text.splitlines():
         stripped = line.strip()
         lowered = stripped.lower()
-        if lowered.startswith("## ") or lowered.startswith("### ") or lowered.startswith("#### "):
-            title = lowered.lstrip("#").strip().rstrip(":")
-            title = re.sub(r"^\d+\s*(?:[\)\.]|[-:])?\s*", "", title).strip()
-            in_sources = title.startswith("source")
+        heading = _extract_section_heading_title(stripped)
+        if heading is not None:
+            if in_sources and not heading.startswith("source"):
+                break
+            in_sources = heading.startswith("source")
             continue
         if lowered.startswith("sources"):
             in_sources = True
@@ -1359,14 +1587,12 @@ def _count_source_items(text: str) -> int:
         if in_sources:
             if not stripped:
                 continue
-            if stripped.startswith(("-", "*")):
+            if re.match(r"^[-*]\s+", stripped):
                 count += 1
                 continue
-            if stripped[0].isdigit() and stripped[1:2] in (".", ")"):
+            if re.match(r"^\d+[\.\)]\s+", stripped):
                 count += 1
                 continue
-            if lowered.startswith("## "):
-                break
     return count
 
 
@@ -1377,6 +1603,7 @@ def _build_fallback_strategy(
     brief_content: str,
     error_text: str,
 ) -> tuple[str, str, dict[str, object], str, str]:
+    deliverable_mode = infer_deliverable_mode_from_paths(paths)
     rules_url = _read_text(paths.rules_url_path).strip() or config.competition_url or "unknown"
     dataset_profile = _summarize_dataset_profile(_read_text(paths.dataset_profile_path))
     submission_format = _summarize_submission_format(_read_text(paths.submission_format_md_path))
@@ -1386,11 +1613,18 @@ def _build_fallback_strategy(
         "# Fallback Strategy (GPT unavailable)",
         "",
         "## Problem",
-        "Use the local context to implement a strong, competition-appropriate model and a valid submission.",
+        (
+            "Use the local context to implement a strong, competition-appropriate model and a valid submission."
+            if deliverable_mode != "writeup"
+            else (
+                "Use the local context to build a judged-competition solution package "
+                "with proxy evidence and a final writeup."
+            )
+        ),
         "",
         "## Data",
         "Use dataset_profile.json, submission_format.md, and sample_submission to infer schema and target.",
-        "Brief (Codex):",
+        f"Brief ({BRIEF_AGENT.display_name}):",
         _truncate(brief_content, 800) or "No brief available.",
         "",
         "Dataset profile (trimmed):",
@@ -1494,9 +1728,9 @@ def _build_fallback_strategy(
     )
 
     instructions_lines = [
-        "# Fallback Codex Instructions",
+        f"# Fallback {IMPLEMENTATION_AGENT.display_name} Instructions",
         "",
-        "GPT was rate-limited. Follow these steps to implement a strong model in kernel.py.",
+        f"{STRATEGY_AGENT.display_name} was rate-limited. Follow these steps to implement a strong model in kernel.py.",
         "",
         "1) Inspect `/kaggle/input/{slug}/` to locate train/test files and the sample submission.",
         "2) If train/test CSV files exist (tabular):",
@@ -1514,6 +1748,14 @@ def _build_fallback_strategy(
         "   - If `/kaggle/working` is writable, mirror artifacts there; if not, skip silently.",
         "5) Keep changes confined to `kernel.py` and helper files under the kernel directory.",
     ]
+    if deliverable_mode == "writeup":
+        instructions_lines.extend(
+            [
+                "6) This is a writeup/judged competition.",
+                "   - Treat `submission.csv` as optional proxy evidence only, not the primary deliverable.",
+                "   - Preserve experiment outputs that can support a final report/writeup package.",
+            ]
+        )
     instructions_text = "\n".join(instructions_lines).replace("{slug}", config.slug).strip()
     return strategy_text, instructions_text, plan_payload, research_sources_text, research_summary_text
 
@@ -1521,12 +1763,16 @@ def _build_fallback_strategy(
 def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
     metric = _load_profile_metric(paths) or _infer_metric_from_context(paths) or "rmse"
     direction = infer_direction(metric, "auto")
+    deliverable_mode = infer_deliverable_mode_from_paths(paths)
+    submit_mode = infer_submit_mode_from_paths(paths)
     top1_score = _load_top1_score(paths)
     if top1_score is None:
         target_score = 0.9 if direction == "maximize" else 0.0
     else:
         target_score = float(top1_score)
     return {
+        "deliverable_mode": deliverable_mode,
+        "submit_mode": submit_mode,
         "target_metric": metric,
         "target_direction": direction,
         "target_score": target_score,
@@ -1804,7 +2050,7 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
     discussion_headings = _extract_headings(paths.discussion_md_path)
 
     lines = [
-        "# Fallback Brief (Codex output missing)",
+        f"# Fallback Brief ({BRIEF_AGENT.display_name} output missing)",
         "",
         f"- slug: {config.slug}",
         f"- url: {config.competition_url or 'unknown'}",
@@ -1812,7 +2058,7 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
         f"- rules_url: {_read_text(paths.rules_url_path).strip() or 'unknown'}",
         "",
         "## Error",
-        error_text or "Codex brief returned empty output.",
+        error_text or f"{BRIEF_AGENT.display_name} brief returned empty output.",
         "",
         "## Context paths",
         f"- overview: {paths.overview_md_path}",
@@ -1988,6 +2234,8 @@ def _allowed_prefixes(root: Path, allowed_prefixes: list[Path]) -> list[str]:
 def _is_noise_path(path: str) -> bool:
     if path.startswith("artifacts/") and "/kernels/" in path:
         return True
+    if _is_volatile_run_submission_output(path):
+        return True
     for prefix in _NOISE_PREFIXES:
         if path.startswith(prefix):
             return True
@@ -1999,6 +2247,15 @@ def _is_noise_path(path: str) -> bool:
         if path.endswith(suffix):
             return True
     return False
+
+
+def _is_volatile_run_submission_output(path: str) -> bool:
+    parts = path.split("/")
+    if len(parts) < 5:
+        return False
+    if parts[0] != "artifacts" or parts[2] != "runs":
+        return False
+    return parts[-1] == "submission.compact.csv"
 
 
 def _is_protected_path(path: str) -> bool:

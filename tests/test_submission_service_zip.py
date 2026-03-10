@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import zipfile
 from pathlib import Path
 
@@ -71,3 +72,78 @@ def test_validate_and_prepare_submission_converts_tabular_to_zip_when_required(t
     with zipfile.ZipFile(prepared, "r") as archive:
         members = sorted(info.filename for info in archive.infolist() if not info.is_dir())
     assert members == ["submission.csv"]
+
+
+def test_validate_and_prepare_submission_builds_multi_file_zip_from_manifest(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "submission_format.md").write_text(
+        "## Submission Format\nYou must submit a ZIP file containing one .tif mask per sample.\n",
+        encoding="utf-8",
+    )
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "a.tif").write_bytes(b"mask-a")
+    nested = bundle_dir / "nested"
+    nested.mkdir()
+    (nested / "b.tif").write_bytes(b"mask-b")
+    manifest_path = tmp_path / "submission_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "artifact_class": "multi_file_zip",
+                "staging_dir": str(bundle_dir.relative_to(tmp_path)),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=tmp_path / "data",
+            sample_submission_path=context_dir / "missing_sample_submission.csv",
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+    prepared = service.validate_and_prepare_submission(manifest_path)
+
+    assert prepared.suffix == ".zip"
+    with zipfile.ZipFile(prepared, "r") as archive:
+        members = sorted(info.filename for info in archive.infolist() if not info.is_dir())
+    assert members == ["a.tif", "nested/b.tif"]
+
+
+def test_validate_and_prepare_submission_builds_bundle_zip_from_directory_input(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "submission_format.md").write_text(
+        "## Submission Format\nSubmit a ZIP archive containing model weights (.pt) and the inference script.\n",
+        encoding="utf-8",
+    )
+
+    bundle_dir = tmp_path / "model_bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "model.pt").write_bytes(b"weights")
+    (bundle_dir / "infer.py").write_text("print('ok')\n", encoding="utf-8")
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=tmp_path / "data",
+            sample_submission_path=context_dir / "missing_sample_submission.csv",
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+    prepared = service.validate_and_prepare_submission(bundle_dir)
+
+    assert prepared.suffix == ".zip"
+    with zipfile.ZipFile(prepared, "r") as archive:
+        members = sorted(info.filename for info in archive.infolist() if not info.is_dir())
+    assert members == ["infer.py", "model.pt"]

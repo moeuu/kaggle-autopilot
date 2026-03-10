@@ -1,4 +1,4 @@
-# Kagglebot Codex: Plan + Initial Model Implementation
+# Kagglebot {implementation_agent_name}: Plan + Initial Model Implementation
 
 ## Competition Overview
 
@@ -124,6 +124,12 @@ Prefer GPU-accelerated supervised models when available.
 - GPU-accelerated GBDT (XGBoost / LightGBM) for large/tabular datasets
 - Deep models only if the competition trend or data type supports it
 - Pretrained transfer models (vision/NLP/audio/video) when competition type and rules allow it
+
+**High-accuracy tabular policy**:
+- If the dataset is tabular binary with large row count and mixed/high-cardinality categoricals, do not stop at one family.
+- Make the plan explicitly include CatBoost raw categorical, XGBoost with leak-safe target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant.
+- Add at least one OOF blend candidate (weighted/rank/logit blend) to the shortlist.
+- Set a medal-aware objective in the plan (`target_medal` / `target_rank_percentile`) so later iterations do not collapse into minor tuning before reaching the target rank band.
 
 **Classification/Regression notes**:
 - Pick loss/metric consistent with rules and sample_submission

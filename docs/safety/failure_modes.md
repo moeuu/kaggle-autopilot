@@ -75,6 +75,7 @@ Symptoms:
 Mitigation:
 - autopilot aborts that submit path to avoid infinite loops
 - use autofix and rerun with changed code/output
+- inspect `artifacts/<slug>/runs/<run-id>/submit_failure_context.json` to see whether the next repair should target the submission artifact, submit mode/kernel path, or a manual blocker
 
 ## 6. Planning Contract Failures
 

@@ -1,6 +1,6 @@
-# Codex Kernel Implementation
+# {{implementation_agent_name}} Kernel Implementation
 
-You are Codex. Implement the kernel for this competition.
+You are {{implementation_agent_name}}. Implement the kernel for this competition.
 
 IMPORTANT:
 - Default edit scope: {{kernel_dir}}
@@ -34,6 +34,8 @@ If a blocked module appears in previous code, remove it and replace with Kaggle-
 (lightgbm, xgboost, catboost, torch, timm, torchvision, opencv, transformers, ultralytics,
 tabicl, sklearn). Prefer the strongest available backend and avoid silent fallback to weak baselines
 when these imports succeed.
+Favor maximum score ceiling over guaranteed submitability: keep higher-capacity model paths alive unless
+they are clearly invalid or dominated.
 If a required package is genuinely missing, add it with `uv add <package>` instead of deleting the
 entire model path.
 If `KAGGLEBOT_DISABLE_XGBOOST=1`, force-disable XGBoost paths even if code previously enabled them.
@@ -69,6 +71,8 @@ Implementation contract for `kernel.py`:
     (do not optimize on a proxy metric that differs from final reported score)
 - Ensemble:
   - Implement only ensemble methods listed in plan.json
+  - If plan.json contains 2 or more model pipelines, build at least one explicit blend candidate from OOF predictions
+    (for example weighted mean, rank blend, or logit blend) unless the plan explicitly forbids ensembling
   - Choose final method by plan primary metric (tie-breaker: simpler/faster)
   - Include at least one simple baseline evaluated on the same folds/windows; never choose a final
     pipeline that is worse than the baseline on the primary offline metric

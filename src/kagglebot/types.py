@@ -27,6 +27,10 @@ class BootstrapMeta:
 
 @dataclass
 class PlanConfig:
+    deliverable_mode: str = "leaderboard"
+    submit_mode: str = "auto"
+    target_medal: str | None = None
+    target_rank_percentile: float | None = None
     target_metric: str | None = None
     target_direction: str = "auto"
     target_score: float | None = None
@@ -65,6 +69,10 @@ class PlanConfig:
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> PlanConfig:
         return cls(
+            deliverable_mode=payload.get("deliverable_mode") or "leaderboard",
+            submit_mode=payload.get("submit_mode") or "auto",
+            target_medal=payload.get("target_medal"),  # type: ignore[arg-type]
+            target_rank_percentile=payload.get("target_rank_percentile"),  # type: ignore[arg-type]
             target_metric=payload.get("target_metric"),
             target_direction=payload.get("target_direction") or "auto",
             target_score=payload.get("target_score"),

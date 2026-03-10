@@ -1,4 +1,4 @@
-"""Tests for the codex -> gpt -> codex agent pipeline."""
+"""Tests for the GPT-5.4 planning pipeline."""
 
 from __future__ import annotations
 
@@ -279,6 +279,57 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
     assert str(paths.data_md_path) in brief_prompt
     assert str(paths.rules_md_path) in brief_prompt
     assert "Problem-type knowledge (test fixture)" in brief_prompt
+
+
+def test_agent_pipeline_does_not_raise_on_successful_strategy_result(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_dir.name == "implement":
+            kernel_path = paths.kernel_source_dir / "kernel.py"
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+        return DummyCodexResult(output_dir)
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return DummyStrategyResult(
+            "\n".join(
+                [
+                    "===STRATEGY===",
+                    _long_strategy_text(),
+                    "===RESEARCH_SOURCES_JSONL===",
+                    _research_sources_jsonl_text(),
+                    "===RESEARCH_SUMMARY_MD===",
+                    _research_summary_text(),
+                    "===PLAN_JSON===",
+                    _plan_json_text(),
+                    "===CODEX_INSTRUCTIONS===",
+                    _long_instructions_text(),
+                ]
+            )
+        )
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    run_agent_pipeline(paths=paths, config=config)
+
+    assert (paths.context_agent_dir / "strategy_plan.md").exists()
+    assert (paths.context_agent_dir / "codex_instructions.md").exists()
 
 
 def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path: Path) -> None:

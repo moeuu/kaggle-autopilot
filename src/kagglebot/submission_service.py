@@ -12,6 +12,17 @@ from kagglebot.exceptions import SubmissionValidationError
 from kagglebot.history import SubmissionLedger
 from kagglebot.submission.guard import run_kaggle_submit
 from kagglebot.submission.validate import infer_required_id_suffix, validate_submission
+from kagglebot.submission_artifacts import (
+    ARTIFACT_CLASS_BUNDLE,
+    ARTIFACT_CLASS_MULTI_FILE_ZIP,
+    ARTIFACT_CLASS_SINGLE_FILE,
+    ARTIFACT_CLASS_TABULAR,
+    ARTIFACT_CLASS_UNKNOWN,
+    SUBMISSION_MANIFEST_FILENAME,
+    find_submission_manifest,
+    normalize_artifact_class,
+    resolve_manifest_references,
+)
 from kagglebot.submission_format import (
     SubmissionFormatHint,
     extract_submission_section,
@@ -83,15 +94,54 @@ class SubmissionService:
         return normalized[:keep].rstrip() + ellipsis
 
     def validate_and_prepare_submission(self, submission_path: Path) -> Path:
-        self._validate_submission_file_exists(submission_path)
+        self._validate_submission_input_exists(submission_path)
         format_hint = self._resolve_submission_format_hint()
+        artifact_class = self._resolve_submission_artifact_class(
+            format_hint=format_hint, submission_path=submission_path
+        )
+        manifest_path = self._resolve_submission_manifest_path(submission_path)
+        if manifest_path is not None:
+            artifact_class, manifest_submission_path, staging_dir, members = resolve_manifest_references(manifest_path)
+            if artifact_class in {ARTIFACT_CLASS_BUNDLE, ARTIFACT_CLASS_MULTI_FILE_ZIP}:
+                prepared_bundle = self._prepare_bundle_submission(
+                    base_path=manifest_path,
+                    submission_path=manifest_submission_path,
+                    staging_dir=staging_dir,
+                    members=members,
+                )
+                return self._enforce_expected_submission_format(
+                    submission_path=prepared_bundle,
+                    format_hint=format_hint,
+                )
+            if manifest_submission_path is not None:
+                submission_path = manifest_submission_path
+                artifact_class = self._resolve_submission_artifact_class(
+                    format_hint=format_hint,
+                    submission_path=submission_path,
+                    manifest_artifact_class=artifact_class,
+                )
+        if submission_path.is_dir():
+            if artifact_class not in {ARTIFACT_CLASS_BUNDLE, ARTIFACT_CLASS_MULTI_FILE_ZIP}:
+                raise SubmissionValidationError(
+                    f"submission path is a directory but artifact class is not bundle/multi_file_zip: {submission_path}"
+                )
+            prepared_bundle = self._prepare_bundle_submission(
+                base_path=submission_path,
+                submission_path=None,
+                staging_dir=submission_path,
+                members=[],
+            )
+            return self._enforce_expected_submission_format(
+                submission_path=prepared_bundle,
+                format_hint=format_hint,
+            )
         if self._is_zip_submission(submission_path):
             self._validate_zip_submission(submission_path)
             return self._enforce_expected_submission_format(
                 submission_path=submission_path,
                 format_hint=format_hint,
             )
-        if not self._is_tabular_submission(submission_path):
+        if artifact_class == ARTIFACT_CLASS_SINGLE_FILE or not self._is_tabular_submission(submission_path):
             self._validate_non_tabular_submission_file(submission_path)
             return self._enforce_expected_submission_format(
                 submission_path=submission_path,
@@ -182,11 +232,9 @@ class SubmissionService:
         return primary_sample
 
     @staticmethod
-    def _validate_submission_file_exists(path: Path) -> None:
+    def _validate_submission_input_exists(path: Path) -> None:
         if not path.exists():
             raise SubmissionValidationError(f"submission file not found: {path}")
-        if not path.is_file():
-            raise SubmissionValidationError(f"submission path is not a file: {path}")
 
     @staticmethod
     def _is_zip_submission(path: Path) -> bool:
@@ -198,6 +246,8 @@ class SubmissionService:
 
     @staticmethod
     def _validate_non_tabular_submission_file(path: Path) -> None:
+        if not path.is_file():
+            raise SubmissionValidationError(f"submission path is not a file: {path}")
         try:
             size = path.stat().st_size
         except OSError as exc:
@@ -258,7 +308,7 @@ class SubmissionService:
     @staticmethod
     def _hint_has_any_signal(hint: SubmissionFormatHint) -> bool:
         """Return whether a parsed hint has usable signals."""
-        return bool(hint.columns or hint.delimiter or hint.expected_suffixes)
+        return bool(hint.columns or hint.delimiter or hint.expected_suffixes or hint.artifact_class)
 
     def _candidate_context_dirs(self) -> list[Path]:
         """Discover possible context directories that may contain submission hints."""
@@ -312,6 +362,38 @@ class SubmissionService:
             f"  file:            {submission_path}"
         )
 
+    def _resolve_submission_artifact_class(
+        self,
+        *,
+        format_hint: SubmissionFormatHint | None,
+        submission_path: Path,
+        manifest_artifact_class: str | None = None,
+    ) -> str:
+        manifest_class = normalize_artifact_class(manifest_artifact_class, default="")
+        if manifest_class:
+            return manifest_class
+        hint_class = normalize_artifact_class(getattr(format_hint, "artifact_class", None), default="")
+        if hint_class:
+            return hint_class
+        if submission_path.is_dir():
+            return ARTIFACT_CLASS_BUNDLE
+        if self._is_zip_submission(submission_path):
+            return ARTIFACT_CLASS_MULTI_FILE_ZIP
+        if self._is_tabular_submission(submission_path):
+            return ARTIFACT_CLASS_TABULAR
+        if submission_path.name == SUBMISSION_MANIFEST_FILENAME:
+            return ARTIFACT_CLASS_UNKNOWN
+        return ARTIFACT_CLASS_SINGLE_FILE
+
+    @staticmethod
+    def _resolve_submission_manifest_path(submission_path: Path) -> Path | None:
+        if submission_path.is_file() and submission_path.name == SUBMISSION_MANIFEST_FILENAME:
+            return submission_path
+        if submission_path.is_dir():
+            return find_submission_manifest(submission_path)
+        parent_manifest = find_submission_manifest(submission_path.parent)
+        return parent_manifest
+
     @staticmethod
     def _expected_submission_suffixes(format_hint: SubmissionFormatHint | None) -> list[str]:
         """Extract normalized expected suffixes from a parsed submission format hint."""
@@ -357,12 +439,62 @@ class SubmissionService:
         return destination
 
     @staticmethod
-    def _build_submission_zip(submission_path: Path) -> Path:
-        """Create a zip archive that contains the provided submission file."""
-        destination = submission_path.with_suffix(".zip")
+    def _build_submission_zip(
+        submission_path: Path,
+        *,
+        members: list[Path] | None = None,
+        staging_dir: Path | None = None,
+    ) -> Path:
+        """Create a zip archive from a single file or a staged directory."""
+        if submission_path.is_dir():
+            source_dir = submission_path
+            archive_members = members or [path for path in source_dir.rglob("*") if path.is_file()]
+            destination = source_dir.parent / f"{source_dir.name}.zip"
+        else:
+            source_dir = staging_dir
+            archive_members = members or [submission_path]
+            destination = submission_path.with_suffix(".zip")
+        if not archive_members:
+            raise SubmissionValidationError(f"submission bundle has no files to archive: {submission_path}")
         with zipfile.ZipFile(destination, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(submission_path, arcname=submission_path.name)
+            for member in archive_members:
+                if not member.exists() or not member.is_file():
+                    raise SubmissionValidationError(f"submission bundle member missing: {member}")
+                if source_dir is not None:
+                    try:
+                        arcname = member.relative_to(source_dir).as_posix()
+                    except ValueError:
+                        arcname = member.name
+                else:
+                    arcname = member.name
+                archive.write(member, arcname=arcname)
         return destination
+
+    def _prepare_bundle_submission(
+        self,
+        *,
+        base_path: Path,
+        submission_path: Path | None,
+        staging_dir: Path | None,
+        members: list[Path],
+    ) -> Path:
+        if submission_path is not None and submission_path.exists() and submission_path.is_file():
+            if self._is_zip_submission(submission_path):
+                self._validate_zip_submission(submission_path)
+                return submission_path
+            if not members and staging_dir is None:
+                return self._build_submission_zip(submission_path)
+        source_dir = staging_dir
+        if source_dir is None and submission_path is not None and submission_path.is_dir():
+            source_dir = submission_path
+        if source_dir is None and base_path.is_dir():
+            source_dir = base_path
+        if source_dir is None:
+            raise SubmissionValidationError("bundle submission requires a staging_dir or archive file")
+        archive_members = members or [path for path in source_dir.rglob("*") if path.is_file()]
+        prepared = self._build_submission_zip(source_dir, members=archive_members)
+        self._validate_zip_submission(prepared)
+        return prepared
 
     def _read_tabular_submission(self, path: Path):
         """Read a tabular submission using a suffix-aware parser."""
@@ -556,7 +688,7 @@ class SubmissionService:
 
         expected_columns = list(expected.columns)
         sample_has_data_rows = self._has_data_rows(sample_path)
-        if not sample_has_data_rows:
+        if not sample_has_data_rows and self._is_synthesized_sample_submission(sample_path):
             format_hint = self._resolve_submission_format_hint()
             if (
                 format_hint is not None
@@ -697,6 +829,15 @@ class SubmissionService:
             "y",
         }
         return bool(id_like and prediction_like)
+
+    @staticmethod
+    def _is_synthesized_sample_submission(path: Path) -> bool:
+        name = path.name.lower()
+        if "sample_submission_synth" in name:
+            return True
+        if ".kagglebot_cache" in {part.lower() for part in path.parts}:
+            return True
+        return False
 
     def _attempt_autofix_submission_columns_only(
         self,

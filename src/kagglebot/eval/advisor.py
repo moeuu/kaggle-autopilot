@@ -11,6 +11,12 @@ from kagglebot.eval.core import MetricRegistry
 from kagglebot.exec_utils import run_command
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.writeup import (
+    infer_deliverable_mode,
+    infer_submit_mode,
+    normalize_deliverable_mode,
+    normalize_submit_mode,
+)
 
 SUPPORTED_SPLIT_STRATEGIES = {
     "kfold",
@@ -31,10 +37,16 @@ SUPPORTED_SUBMISSION_GATES = {
     "readiness_or_final",
     "target_or_final",
 }
+SUPPORTED_MEDAL_TARGETS = {"bronze", "silver", "gold"}
+_MEDAL_TARGET_PERCENTILES = {
+    "bronze": 0.10,
+    "silver": 0.05,
+    "gold": 0.01,
+}
 
 
 class EvaluationAdvisor:
-    """Optional GPT-5.2 + web-search advisor for evaluation spec selection."""
+    """Optional GPT-5.4 + web-search advisor for evaluation spec selection."""
 
     def __init__(
         self,
@@ -173,9 +185,11 @@ class EvaluationAdvisor:
             ">>>\n\n"
             "Task:\n"
             "1) Determine official metric and direction from competition material and web research.\n"
-            "2) Choose split strategy and evaluation parameters compatible with the supported options.\n"
-            "3) Set submission_gate policy; use non-always gates only when rules mention submission-count limits.\n"
-            "4) Include search queries used and concise source summary.\n\n"
+            "2) Determine whether the competition is a leaderboard competition or a judged/writeup competition.\n"
+            "3) Determine whether submissions are uploaded as files or must be submitted through notebooks.\n"
+            "4) Choose split strategy and evaluation parameters compatible with the supported options.\n"
+            "5) Set submission_gate policy; use non-always gates only when rules mention submission-count limits.\n"
+            "6) Include search queries used and concise source summary.\n\n"
             f"Output schema:\n{schema_text}\n"
         )
 
@@ -199,7 +213,15 @@ class EvaluationAdvisor:
             "target_score": top1_score,
             "submission_gate": "always",
         }
+        deliverable_mode = infer_deliverable_mode(context_text)
+        submit_mode = infer_submit_mode(context_text)
+        target_medal = "bronze" if deliverable_mode == "leaderboard" else None
+        target_rank_percentile = _MEDAL_TARGET_PERCENTILES.get(target_medal) if target_medal else None
         spec = {
+            "deliverable_mode": deliverable_mode,
+            "submit_mode": submit_mode,
+            "target_medal": target_medal,
+            "target_rank_percentile": target_rank_percentile,
             "metric_name": metric,
             "direction": direction,
             "split_strategy": split_strategy,
@@ -281,7 +303,7 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
     if not isinstance(spec_raw, dict):
         return None, ["evaluation_spec must be a JSON object"]
 
-    expected = {
+    required = {
         "metric_name",
         "direction",
         "split_strategy",
@@ -294,9 +316,27 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
         "drift_check",
         "stop_policy",
     }
-    issues.extend(_validate_exact_keys(spec_raw, expected, path="evaluation_spec"))
+    optional = {"faithfulness", "deliverable_mode", "submit_mode", "target_medal", "target_rank_percentile"}
+    actual = set(spec_raw.keys())
+    missing = sorted(required - actual)
+    extra = sorted(actual - required - optional)
+    if missing:
+        issues.append(f"evaluation_spec missing keys: {', '.join(missing)}")
+    if extra:
+        issues.append(f"evaluation_spec unexpected keys: {', '.join(extra)}")
 
     metric_name = str(spec_raw.get("metric_name", "")).strip().lower()
+    deliverable_mode = normalize_deliverable_mode(spec_raw.get("deliverable_mode"), default="leaderboard")
+    submit_mode = normalize_submit_mode(spec_raw.get("submit_mode"), default="file")
+    target_medal = _normalize_target_medal(spec_raw.get("target_medal"))
+    if spec_raw.get("target_medal") is not None and target_medal is None:
+        issues.append("evaluation_spec.target_medal must be one of: bronze, silver, gold")
+    target_rank_percentile, target_rank_percentile_issue = _normalize_target_rank_percentile(
+        spec_raw.get("target_rank_percentile"),
+        medal=target_medal,
+    )
+    if target_rank_percentile_issue is not None:
+        issues.append(target_rank_percentile_issue)
     try:
         metric_def = MetricRegistry.definition(metric_name)
     except ValueError:
@@ -353,6 +393,12 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
     stop_policy, stop_issues = _validate_stop_policy(stop_raw)
     issues.extend(stop_issues)
 
+    faithfulness_raw = spec_raw.get("faithfulness")
+    faithfulness: dict[str, object] | None = None
+    if faithfulness_raw is not None:
+        faithfulness, faithfulness_issues = _validate_faithfulness(faithfulness_raw)
+        issues.extend(faithfulness_issues)
+
     if issues:
         return None, issues
 
@@ -365,6 +411,10 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
     assert stop_policy is not None
 
     spec = {
+        "deliverable_mode": deliverable_mode,
+        "submit_mode": submit_mode,
+        "target_medal": target_medal,
+        "target_rank_percentile": target_rank_percentile,
         "metric_name": metric_def.canonical_name,
         "direction": direction,
         "split_strategy": split_strategy,
@@ -377,7 +427,40 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
         "drift_check": drift,
         "stop_policy": stop_policy,
     }
+    if faithfulness is not None:
+        spec["faithfulness"] = faithfulness
     return spec, []
+
+
+def _normalize_target_medal(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in SUPPORTED_MEDAL_TARGETS else None
+
+
+def _normalize_target_rank_percentile(
+    value: object,
+    *,
+    medal: str | None,
+) -> tuple[float | None, str | None]:
+    parsed: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        parsed = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                return None, "evaluation_spec.target_rank_percentile must be a number in (0, 1]"
+    if parsed is not None:
+        if 0.0 < parsed <= 1.0:
+            return parsed, None
+        return None, "evaluation_spec.target_rank_percentile must be in (0, 1]"
+    if medal is not None:
+        return _MEDAL_TARGET_PERCENTILES.get(medal), None
+    return None, None
 
 
 def _validate_readiness_rule(value: object) -> tuple[dict[str, object] | None, list[str]]:
@@ -461,6 +544,50 @@ def _validate_stop_policy(value: object) -> tuple[dict[str, object] | None, list
     }, []
 
 
+def _validate_faithfulness(value: object) -> tuple[dict[str, object] | None, list[str]]:
+    issues: list[str] = []
+    if not isinstance(value, dict):
+        return None, ["evaluation_spec.faithfulness must be an object"]
+    expected = {
+        "accepted_score_sources",
+        "require_metric_match",
+        "require_split_match",
+        "require_trusted_score_source",
+        "require_competition_faithful",
+        "require_full_dataset",
+    }
+    issues.extend(_validate_exact_keys(value, expected, path="evaluation_spec.faithfulness"))
+
+    score_sources = value.get("accepted_score_sources")
+    normalized_sources: list[str] = []
+    if not isinstance(score_sources, list) or not score_sources:
+        issues.append("evaluation_spec.faithfulness.accepted_score_sources must be a non-empty string list")
+    else:
+        for idx, item in enumerate(score_sources):
+            if not isinstance(item, str) or not item.strip():
+                issues.append(f"evaluation_spec.faithfulness.accepted_score_sources[{idx}] must be non-empty str")
+                continue
+            normalized_sources.append(item.strip().lower())
+
+    normalized: dict[str, object] = {"accepted_score_sources": normalized_sources}
+    for key in (
+        "require_metric_match",
+        "require_split_match",
+        "require_trusted_score_source",
+        "require_competition_faithful",
+        "require_full_dataset",
+    ):
+        raw = value.get(key)
+        if not isinstance(raw, bool):
+            issues.append(f"evaluation_spec.faithfulness.{key} must be bool")
+            continue
+        normalized[key] = bool(raw)
+
+    if issues:
+        return None, issues
+    return normalized, []
+
+
 def _validate_exact_keys(value: dict[str, object], expected: set[str], *, path: str) -> list[str]:
     issues: list[str] = []
     actual = set(value.keys())
@@ -524,6 +651,10 @@ def _parse_json_response(text: str) -> dict[str, object] | None:
 def _advisor_response_schema_text() -> str:
     schema = {
         "evaluation_spec": {
+            "deliverable_mode": "leaderboard|writeup",
+            "submit_mode": "file|notebook",
+            "target_medal": "bronze|silver|gold|null",
+            "target_rank_percentile": "0<float<=1|null",
             "metric_name": "one of [auc, logloss, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, spearman]",
             "direction": "maximize|minimize",
             "split_strategy": "kfold|stratified_kfold|group_kfold|timeseries_split",
@@ -546,6 +677,14 @@ def _advisor_response_schema_text() -> str:
                 "min_delta": "number>=0",
                 "no_improve_patience": "int>=0",
                 "same_config_patience": "int>=0",
+            },
+            "faithfulness": {
+                "accepted_score_sources": ["cv", "holdout"],
+                "require_metric_match": "bool",
+                "require_split_match": "bool",
+                "require_trusted_score_source": "bool",
+                "require_competition_faithful": "bool",
+                "require_full_dataset": "bool",
             },
         },
         "sources_summary_md": "markdown summary with source urls and dates",
