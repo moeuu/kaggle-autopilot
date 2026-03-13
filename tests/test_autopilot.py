@@ -22,6 +22,7 @@ from kagglebot.autopilot import (
     _callable_accepts_keyword_argument,
     _detect_online_mismatch_signal,
     _error_strategy_skip_reason,
+    _extract_competition_faithfulness,
     _extract_orig_proba_signal,
     _extract_pseudo_label_failure_signal,
     _infer_kernel_submit_version_label,
@@ -3098,6 +3099,68 @@ def test_run_kernel_fix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_
     assert "Retry Feedback (pass 1)" in retry_prompt.read_text(encoding="utf-8")
 
 
+def test_run_kernel_fix_includes_subgroup_prompt_context(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    iter_dir = config.paths.iter_dir(run_id, 1)
+    (iter_dir / "output").mkdir(parents=True, exist_ok=True)
+    (iter_dir / "output" / "metrics.json").write_text(
+        json.dumps(
+            {
+                "cv_breakdown_by_model_node": {
+                    "model_1_node_type_1": 0.020,
+                    "model_1_node_type_2": 0.015,
+                    "model_2_node_type_1": 0.240,
+                    "model_2_node_type_2": 0.085,
+                },
+                "cv_step_buckets": {
+                    "000-011": 0.05,
+                    "144-155": 0.12,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        captured["prompt"] = prompt_path.read_text(encoding="utf-8")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / "codex_last_message.txt"
+        last_msg.write_text("kernel fix applied\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: ["src/kagglebot/autopilot.py"])
+    monkeypatch.setattr("kagglebot.autopilot._enforce_allowlist_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+
+    _run_kernel_fix(
+        config=config,
+        run_id=run_id,
+        iteration=1,
+        iter_dir=iter_dir,
+        error_message="RuntimeError: kernel failed",
+        attempt=1,
+        pending_error_fixes=[],
+    )
+
+    prompt_text = captured["prompt"]
+    assert "Subgroup repair target:" in prompt_text
+    assert "model=2 node_type=1" in prompt_text
+    assert "(model_id,node_type) granularity" in prompt_text
+
+
 def test_extract_kernel_metric_from_oof_dict() -> None:
     from kagglebot.autopilot import _extract_kernel_metric
 
@@ -3333,6 +3396,52 @@ def test_kernel_quality_guard_blocks_on_severe_validation_mismatch(tmp_path: Pat
         force_submit=False,
     )
     assert final_guard["allow_submit"] is True
+
+
+def test_kernel_quality_guard_surfaces_subgroup_collapse() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="rmse",
+        direction="minimize",
+        value=0.078,
+        std=0.002,
+        train_score=None,
+        val_score=0.078,
+        fold_scores=[0.077, 0.078, 0.079],
+    )
+    payload = {
+        "cv_breakdown_by_model_node": {
+            "model_1_node_type_1": 0.015,
+            "model_1_node_type_2": 0.010,
+            "model_2_node_type_1": 0.220,
+            "model_2_node_type_2": 0.080,
+        },
+        "cv_step_buckets": {
+            "000-011": 0.04,
+            "012-023": 0.05,
+            "144-155": 0.11,
+        },
+    }
+
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload=payload,
+        evaluation_report=None,
+        evaluation_contract=None,
+        logs_dir=None,
+        direction="minimize",
+        iteration=1,
+        max_iterations=3,
+        force_submit=False,
+    )
+
+    assert "cv_subgroup_collapse_detected" in guard["warnings"]
+    subgroup = guard["subgroup_collapse"]
+    assert isinstance(subgroup, dict)
+    assert subgroup["model_id"] == 2
+    assert subgroup["node_type"] == 1
+    assert subgroup["worst_key"] == "model_2_node_type_1"
+    assert "Next iteration must use subgroup-aware selection" in str(subgroup["note"])
 
 
 def test_kernel_quality_guard_blocks_oracle_or_untrusted_score_source() -> None:
@@ -3692,6 +3801,45 @@ def test_metric_alias_equivalence_does_not_trigger_mismatch(monkeypatch, tmp_pat
     guard = iter_metrics.get("quality_guard", {})
     reasons = guard.get("reasons", []) if isinstance(guard, dict) else []
     assert "competition_metric_mismatch" not in reasons
+
+
+def test_competition_faithfulness_prefers_metric_name_over_numeric_metric_payload() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="rmse",
+        direction="minimize",
+        value=0.123,
+        std=None,
+        train_score=None,
+        val_score=0.123,
+        fold_scores=[0.123],
+    )
+    faithfulness = _extract_competition_faithfulness(
+        evaluation=evaluation,
+        kernel_metrics_payload={
+            "metric": 0.123,
+            "metric_name": "standardized_rmse",
+            "score_source": "cv",
+            "split_strategy": "timeseries_split",
+            "full_dataset_resolved": True,
+            "competition_faithful": True,
+        },
+        evaluation_report=None,
+        evaluation_contract={
+            "expected_metric": "standardized_rmse",
+            "expected_split_strategy": "timeseries_split",
+            "accepted_score_sources": ["cv", "holdout"],
+            "require_metric_match": True,
+            "require_split_match": True,
+            "require_trusted_score_source": True,
+            "require_competition_faithful": True,
+            "require_full_dataset": True,
+        },
+    )
+
+    assert faithfulness["actual_metric"] == "standardized_rmse"
+    assert faithfulness["metric_match"] is True
+    assert "competition_metric_mismatch" not in faithfulness["reasons"]
 
 
 def test_metric_mismatch_can_follow_kernel_metric_when_strict_mode_disabled(monkeypatch, tmp_path: Path) -> None:

@@ -273,6 +273,8 @@ _QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE = 2.0
 _QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE = 0.30
 _QUALITY_GUARD_MISMATCH_ABS_MARGIN = 0.05
 _QUALITY_GUARD_STEP_BUCKET_RATIO = 2.5
+_QUALITY_GUARD_SUBGROUP_RATIO = 2.5
+_QUALITY_GUARD_SUBGROUP_ABS_MARGIN = 0.05
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = 0.0
 _QUALITY_GUARD_CODE_REF_ABS_MARGIN = 0.02
 _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = 0.02
@@ -290,6 +292,7 @@ _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
     "oracle",
     "proxy",
 )
+_MODEL_NODE_METRIC_KEY = re.compile(r"^model_(?P<model_id>\d+)_node_type_(?P<node_type>\d+)$")
 _FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
 _CAPACITY_TIER_PRIORITY = {
     "low": 0,
@@ -1921,6 +1924,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 kernel_metrics_payload=kernel_metrics_payload,
                 diagnostics_text=diagnostics,
             )
+            subgroup_collapse_signal = _detect_subgroup_collapse_signal(
+                kernel_metrics_payload=kernel_metrics_payload,
+                direction=metric_direction,
+            )
             online_mismatch_signal = _detect_online_mismatch_signal(
                 previous_best_offline=best_score,
                 current_offline=decision_score,
@@ -1986,6 +1993,29 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "outcome_bucket": "unknown",
                     }
                 )
+            if subgroup_collapse_signal is not None:
+                extra_policy_notes.append(str(subgroup_collapse_signal["note"]))
+                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                    minimum_improvement_mode_next or "minor_tuning",
+                    "moderate_update",
+                )
+                minimum_improvement_reason_next = (
+                    f"{minimum_improvement_reason_next} {subgroup_collapse_signal['note']}".strip()
+                    if minimum_improvement_reason_next
+                    else str(subgroup_collapse_signal["note"])
+                )
+                loop_signal_problems.append(
+                    {
+                        "iteration": iteration,
+                        "why_poor": str(subgroup_collapse_signal["note"]),
+                        "how_improved": (
+                            "Make pipeline and fallback selection subgroup-aware at (model_id,node_type) granularity, "
+                            "and target the collapsed slice before broad model-family tuning."
+                        ),
+                        "delta_offline": None,
+                        "outcome_bucket": "low",
+                    }
+                )
             if online_mismatch_signal is not None:
                 extra_policy_notes.append(str(online_mismatch_signal["note"]))
                 force_major_overhaul_next = True
@@ -2010,6 +2040,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metrics_payload["repair_signals"] = {
                     "orig_proba_constant_fallback": orig_proba_signal,
                     "pseudo_label_failure": pseudo_label_signal,
+                    "subgroup_collapse": subgroup_collapse_signal,
                     "online_mismatch": online_mismatch_signal,
                 }
             metrics_payload["next_iteration_policy"] = {
@@ -3531,7 +3562,16 @@ def _extract_competition_faithfulness(
         accepted_score_sources = list(_DEFAULT_ACCEPTED_SCORE_SOURCES)
 
     expected_metric = str(contract.get("expected_metric") or "").strip() or None
-    actual_metric = str(payload.get("metric") or evaluation.metric or "").strip() or None
+    actual_metric = None
+    metric_name_raw = payload.get("metric_name")
+    if isinstance(metric_name_raw, str) and metric_name_raw.strip():
+        actual_metric = metric_name_raw.strip()
+    else:
+        metric_raw = payload.get("metric")
+        if isinstance(metric_raw, str) and metric_raw.strip():
+            actual_metric = metric_raw.strip()
+        else:
+            actual_metric = str(evaluation.metric or "").strip() or None
     expected_split = _normalize_split_strategy_name(contract.get("expected_split_strategy"))
     actual_split = _normalize_split_strategy_name(payload.get("split_strategy"))
     readiness_payload = payload.get("readiness")
@@ -4140,6 +4180,112 @@ def _is_significantly_worse(
     return (reference - current) > margin
 
 
+def _extract_cv_breakdown_by_model_node(payload: dict[str, object] | None) -> dict[tuple[int, int], float]:
+    if not isinstance(payload, dict):
+        return {}
+    raw = payload.get("cv_breakdown_by_model_node")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[tuple[int, int], float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        match = _MODEL_NODE_METRIC_KEY.match(key.strip())
+        if match is None:
+            continue
+        parsed = _to_float(value)
+        if parsed is None or (not math.isfinite(parsed)):
+            continue
+        out[(int(match.group("model_id")), int(match.group("node_type")))] = float(parsed)
+    return out
+
+
+def _detect_subgroup_collapse_signal(
+    *, kernel_metrics_payload: dict[str, object] | None, direction: str
+) -> dict[str, object] | None:
+    if direction != "minimize":
+        return None
+    scores = _extract_cv_breakdown_by_model_node(kernel_metrics_payload)
+    if len(scores) < 2:
+        return None
+
+    worst_key, worst_score = max(scores.items(), key=lambda item: item[1])
+    best_key, best_score = min(scores.items(), key=lambda item: item[1])
+    if best_score <= 0.0:
+        ratio = float("inf") if worst_score > 0.0 else 1.0
+    else:
+        ratio = worst_score / best_score
+
+    same_model_peers = {key: score for key, score in scores.items() if key[0] == worst_key[0] and key != worst_key}
+    peer_key: tuple[int, int] | None = None
+    peer_score: float | None = None
+    peer_ratio: float | None = None
+    if same_model_peers:
+        peer_key, peer_score = min(same_model_peers.items(), key=lambda item: item[1])
+        if peer_score <= 0.0:
+            peer_ratio = float("inf") if worst_score > 0.0 else 1.0
+        else:
+            peer_ratio = worst_score / peer_score
+
+    collapsed_vs_global = worst_score > max(
+        best_score * _QUALITY_GUARD_SUBGROUP_RATIO,
+        best_score + _QUALITY_GUARD_SUBGROUP_ABS_MARGIN,
+    )
+    collapsed_vs_peer = False
+    if peer_score is not None:
+        collapsed_vs_peer = worst_score > max(
+            peer_score * _QUALITY_GUARD_SUBGROUP_RATIO, peer_score + _QUALITY_GUARD_SUBGROUP_ABS_MARGIN
+        )
+    if not collapsed_vs_global and not collapsed_vs_peer:
+        return None
+
+    worst_bucket_label: str | None = None
+    worst_bucket_score: float | None = None
+    step_buckets = kernel_metrics_payload.get("cv_step_buckets") if isinstance(kernel_metrics_payload, dict) else None
+    if isinstance(step_buckets, dict):
+        parsed_buckets: list[tuple[str, float]] = []
+        for key, value in step_buckets.items():
+            if not isinstance(key, str):
+                continue
+            parsed = _to_float(value)
+            if parsed is None or (not math.isfinite(parsed)):
+                continue
+            parsed_buckets.append((key, float(parsed)))
+        if parsed_buckets:
+            worst_bucket_label, worst_bucket_score = max(parsed_buckets, key=lambda item: item[1])
+
+    note_parts = [
+        "Subgroup collapse detected:",
+        f"model={worst_key[0]} node_type={worst_key[1]} score={worst_score:.6f}",
+    ]
+    if peer_key is not None and peer_score is not None and peer_ratio is not None:
+        note_parts.append(
+            "same-model peer "
+            f"model={peer_key[0]} node_type={peer_key[1]} score={peer_score:.6f} "
+            f"ratio={peer_ratio:.2f}x"
+        )
+    note_parts.append(f"best subgroup score={best_score:.6f} ratio={ratio:.2f}x")
+    if worst_bucket_label is not None and worst_bucket_score is not None:
+        note_parts.append(f"worst step bucket={worst_bucket_label} score={worst_bucket_score:.6f}")
+    note_parts.append("Next iteration must use subgroup-aware selection/fallbacks at (model_id,node_type) granularity.")
+
+    return {
+        "note": "; ".join(note_parts),
+        "model_id": int(worst_key[0]),
+        "node_type": int(worst_key[1]),
+        "worst_key": f"model_{worst_key[0]}_node_type_{worst_key[1]}",
+        "worst_score": float(worst_score),
+        "best_key": f"model_{best_key[0]}_node_type_{best_key[1]}",
+        "best_score": float(best_score),
+        "ratio_vs_best": float(ratio),
+        "peer_key": (f"model_{peer_key[0]}_node_type_{peer_key[1]}" if peer_key is not None else None),
+        "peer_score": float(peer_score) if peer_score is not None else None,
+        "ratio_vs_peer": float(peer_ratio) if peer_ratio is not None else None,
+        "worst_step_bucket": worst_bucket_label,
+        "worst_step_bucket_score": float(worst_bucket_score) if worst_bucket_score is not None else None,
+    }
+
+
 def _build_kernel_quality_guard(
     *,
     evaluation: EvaluationResult,
@@ -4265,6 +4411,13 @@ def _build_kernel_quality_guard(
                 if not is_final_iteration and not force_submit:
                     block_submit = True
 
+    subgroup_collapse_signal = _detect_subgroup_collapse_signal(
+        kernel_metrics_payload=payload,
+        direction=direction,
+    )
+    if subgroup_collapse_signal is not None:
+        warnings.append("cv_subgroup_collapse_detected")
+
     if metric_mismatch_detected:
         reasons.append("competition_metric_mismatch")
         if metric_mismatch_reason:
@@ -4316,6 +4469,7 @@ def _build_kernel_quality_guard(
             "count": len(step_bucket_scores),
             "collapse_detected": step_bucket_collapse,
         },
+        "subgroup_collapse": subgroup_collapse_signal,
         "code_reference": {
             "score": code_reference_score,
             "source": code_reference_source,
@@ -5693,6 +5847,20 @@ def _run_kernel_fix(
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
     )
+    subgroup_metrics_path = iter_dir / "output" / "metrics.json"
+    subgroup_payload = _load_json_object(subgroup_metrics_path) if subgroup_metrics_path.exists() else {}
+    subgroup_collapse_signal = _detect_subgroup_collapse_signal(
+        kernel_metrics_payload=subgroup_payload if isinstance(subgroup_payload, dict) else None,
+        direction="minimize",
+    )
+    if subgroup_collapse_signal is not None:
+        prompt_text = (
+            "Subgroup repair target:\n"
+            f"- {subgroup_collapse_signal['note']}\n"
+            "- Prefer subgroup-aware fixes over global retuning.\n"
+            "- If selection or fallback logic is coarse, refine it to (model_id,node_type) granularity.\n\n"
+            + prompt_text
+        )
     if missing_module:
         prompt_text = (
             f"Missing dependency detected: {missing_module}\n"

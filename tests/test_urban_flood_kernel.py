@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
 
 
 def _load_kernel_module():
@@ -76,3 +79,56 @@ def test_promote_flat_full_resolution_keeps_sample_for_small_root(tmp_path: Path
     )
 
     assert promoted == resolution
+
+
+def test_select_results_by_model_prefers_per_node_type_mix() -> None:
+    mod = _load_kernel_module()
+    result_a = {
+        "name": "pipe_a",
+        "selected_variant": "pipe_a",
+        "metric": 0.30,
+        "cv_event_preds": {
+            (2, 101, 1): np.asarray([[0.0]], dtype=np.float32),
+            (2, 101, 2): np.asarray([[3.0]], dtype=np.float32),
+        },
+        "cv_event_targets": {
+            (2, 101, 1): np.asarray([[0.0]], dtype=np.float32),
+            (2, 101, 2): np.asarray([[1.0]], dtype=np.float32),
+        },
+        "test_event_preds": {
+            (2, 101): np.asarray([[0.0, 3.0]], dtype=np.float32),
+        },
+        "std_lookup": {(2, 1): 1.0, (2, 2): 1.0},
+        "seed_selection": {"2": {"selection": "pipe_a"}},
+    }
+    result_b = {
+        "name": "pipe_b",
+        "selected_variant": "pipe_b",
+        "metric": 0.30,
+        "cv_event_preds": {
+            (2, 101, 1): np.asarray([[2.0]], dtype=np.float32),
+            (2, 101, 2): np.asarray([[1.0]], dtype=np.float32),
+        },
+        "cv_event_targets": {
+            (2, 101, 1): np.asarray([[0.0]], dtype=np.float32),
+            (2, 101, 2): np.asarray([[1.0]], dtype=np.float32),
+        },
+        "test_event_preds": {
+            (2, 101): np.asarray([[2.0, 1.0]], dtype=np.float32),
+        },
+        "std_lookup": {(2, 1): 1.0, (2, 2): 1.0},
+        "seed_selection": {"2": {"selection": "pipe_b"}},
+    }
+
+    selected = mod._select_results_by_model(
+        [result_a, result_b],
+        [2],
+        {2: {101: SimpleNamespace(template=SimpleNamespace(n_1d=1))}},
+    )
+
+    assert selected is not None
+    assert selected["selected_variant"] == "per_model_node_pipeline_mix"
+    assert selected["selected_pipelines_by_model"]["2"]["pipeline"] == "mixed_by_node_type"
+    assert selected["selected_pipelines_by_model_node"]["model_2_node_type_1"]["pipeline"] == "pipe_a"
+    assert selected["selected_pipelines_by_model_node"]["model_2_node_type_2"]["pipeline"] == "pipe_b"
+    assert np.allclose(selected["test_event_preds"][(2, 101)], np.asarray([[0.0, 1.0]], dtype=np.float32))

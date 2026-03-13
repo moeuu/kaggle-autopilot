@@ -123,6 +123,38 @@ def test_validate_and_prepare_compacts_large_csv_when_over_soft_limit(tmp_path: 
     validate_submission(str(prepared), str(sample_path))
 
 
+def test_validate_and_prepare_skips_compact_when_savings_are_tiny(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    sample_path = tmp_path / "sample_submission.csv"
+    sample_path.write_text("id,target\n1,0.0\n2,0.0\n3,0.0\n", encoding="utf-8")
+
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text(
+        "id,target\n1,325.0\n2,302.0\n3,307.0\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("kagglebot.submission_service._KAGGLE_SUBMISSION_SOFT_MAX_BYTES", 1)
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=data_dir,
+            sample_submission_path=sample_path,
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+    prepared = service.validate_and_prepare_submission(submission_path)
+
+    assert prepared == submission_path
+    assert not submission_path.with_name("submission.compact.csv").exists()
+    validate_submission(str(prepared), str(sample_path))
+
+
 def test_validate_and_prepare_autofixes_header_only_sample_by_renaming_columns(tmp_path: Path) -> None:
     sample_path = tmp_path / "sample_submission.csv"
     sample_path.write_text("id,prediction\n", encoding="utf-8")

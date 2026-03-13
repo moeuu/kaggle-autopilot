@@ -34,6 +34,8 @@ from kagglebot.validation import ensure_not_duplicate_submission, ensure_submiss
 _KAGGLE_SUBMISSION_SOFT_MAX_BYTES = 10_000_000
 _KAGGLE_SUBMISSION_MESSAGE_MAX_CHARS = 100
 _KAGGLE_SUBMISSION_COMPACT_FLOAT_FORMAT = "%.10g"
+_KAGGLE_SUBMISSION_COMPACT_MIN_BYTES_SAVED = 32 * 1024
+_KAGGLE_SUBMISSION_COMPACT_MIN_RELATIVE_SAVED = 0.001
 _TABULAR_SUBMISSION_SUFFIXES = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
 _ZIP_SUBMISSION_SUFFIX = ".zip"
 _SAMPLE_STAGE_PATTERN = re.compile(r"(?:stage|phase|round)[_-]?(\d+)", re.IGNORECASE)
@@ -661,7 +663,18 @@ class SubmissionService:
             compact_size = compact_path.stat().st_size
         except OSError:
             return submission_path
-        if compact_size >= size_bytes:
+        bytes_saved = size_bytes - compact_size
+        relative_saved = bytes_saved / size_bytes if size_bytes > 0 else 0.0
+        should_use_compact = (
+            compact_size < size_bytes
+            and bytes_saved >= _KAGGLE_SUBMISSION_COMPACT_MIN_BYTES_SAVED
+            and relative_saved >= _KAGGLE_SUBMISSION_COMPACT_MIN_RELATIVE_SAVED
+        )
+        if not should_use_compact:
+            try:
+                compact_path.unlink()
+            except OSError:
+                pass
             return submission_path
         return compact_path
 
