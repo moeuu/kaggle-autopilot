@@ -34,6 +34,7 @@ app.add_typer(knowledge_app, name="knowledge")
 
 DEFAULT_ARTIFACTS_DIR = Path("/data") / (os.environ.get("USER") or "user") / "kaggle-autopilot-artifacts"
 FALLBACK_ARTIFACTS_DIR = Path("artifacts")
+DEFAULT_KAGGLE_GPU_FULL_QUOTA_HOURS = 30.0
 
 
 @dataclass(frozen=True)
@@ -57,11 +58,7 @@ def _sidecar_min_gpu_quota_minutes(
         if min_gpu_quota_hours_for_new_comp <= 0:
             return None
         return int(min_gpu_quota_hours_for_new_comp * 60)
-    if max_total_min is not None and max_total_min > 0:
-        return max_total_min
-    if time_budget_min is not None and time_budget_min > 0:
-        return time_budget_min * max(1, max_iterations)
-    return None
+    return int(DEFAULT_KAGGLE_GPU_FULL_QUOTA_HOURS * 60)
 
 
 def _preferred_artifacts_dir() -> Path:
@@ -635,7 +632,7 @@ def watch_kaggle_gpu_sidecar(
         min=0.0,
         help=(
             "Do not start a new Kaggle GPU competition unless at least this many GPU hours remain. "
-            "Defaults to --max-total-min. Use 0 to disable."
+            "Defaults to the full Kaggle weekly GPU quota (30h). Use 0 to disable."
         ),
     ),
     allow_slug: list[str] | None = typer.Option(None, "--allow-slug", help="Only consider this slug; repeatable."),

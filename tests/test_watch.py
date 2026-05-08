@@ -723,7 +723,7 @@ def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp
         "lightweight_only": True,
         "lightweight_max_data_bytes": None,
         "lightweight_max_training_min": 120,
-        "kaggle_gpu_min_available_minutes_for_new_competition": 480,
+        "kaggle_gpu_min_available_minutes_for_new_competition": 1800,
     }
 
 
