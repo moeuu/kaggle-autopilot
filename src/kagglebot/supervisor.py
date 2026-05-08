@@ -89,6 +89,7 @@ class WatchConfig:
     lightweight_max_training_min: int | None = 120
     lightweight_preferred_categories: tuple[str, ...] = ("gettingstarted", "playground")
     kaggle_gpu_min_available_minutes_for_new_competition: int | None = None
+    kaggle_gpu_quota_web_lookup: bool = False
 
     @property
     def root_watch_dir(self) -> Path:
@@ -375,9 +376,10 @@ def _resolve_kaggle_gpu_quota_status(config: WatchConfig) -> KaggleGpuQuotaStatu
         if quota is not None:
             return quota
 
-    quota = _fetch_kaggle_gpu_quota_from_web_cookie()
-    if quota is not None:
-        return quota
+    if config.kaggle_gpu_quota_web_lookup:
+        quota = _fetch_kaggle_gpu_quota_from_web_cookie()
+        if quota is not None:
+            return quota
 
     for path in _kaggle_gpu_quota_file_candidates(config):
         quota = _read_kaggle_gpu_quota_file(path)

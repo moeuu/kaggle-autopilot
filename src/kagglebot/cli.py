@@ -682,6 +682,7 @@ def watch_kaggle_gpu_sidecar(
             time_budget_min=time_budget_min,
             max_iterations=max_iterations,
         ),
+        kaggle_gpu_quota_web_lookup=True,
     )
     if once:
         result = run_watch_once(watch_config)
