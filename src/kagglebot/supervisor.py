@@ -217,7 +217,16 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
         candidate = candidates[0]
         run_id = new_run_id()
         resume = False
-        ledger.append("selected", slug=candidate.slug, run_id=run_id, reason="best_candidate")
+        next_slug = _read_next_slug(config)
+        selected_by_next_slug = _slug_matches(candidate.slug, next_slug)
+        ledger.append(
+            "selected",
+            slug=candidate.slug,
+            run_id=run_id,
+            reason="manual_next_slug" if selected_by_next_slug else "best_candidate",
+        )
+        if selected_by_next_slug:
+            _consume_next_slug(config, slug=candidate.slug)
 
     if config.dry_run:
         ledger.append("dry_run", slug=candidate.slug, run_id=run_id)
@@ -674,6 +683,7 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
     ledger = ledger or WatchLedger(config.ledger_path)
     allow = {slug.strip().lower() for slug in config.allow_slugs if slug.strip()}
     block = {slug.strip().lower() for slug in config.block_slugs if slug.strip()}
+    next_slug = _read_next_slug(config)
     records = _all_watch_records(config, primary=ledger)
     cooldown = _cooldown_slugs(records, hours=config.cooldown_hours)
     resource_blocked = _resource_blocked_slugs(records)
@@ -684,11 +694,15 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
         slug = candidate.slug.lower()
         if slug in active:
             continue
+        if next_slug and slug != next_slug:
+            continue
         if allow and slug not in allow:
             continue
-        if slug in block or slug in cooldown:
+        if slug in block and slug != next_slug:
             continue
-        if slug in resource_blocked:
+        if slug in cooldown and slug != next_slug:
+            continue
+        if slug in resource_blocked and slug != next_slug:
             ledger.append("candidate_skipped", slug=candidate.slug, reason="resource_blocked")
             continue
         if candidate.submissions_disabled:
@@ -1249,6 +1263,43 @@ def _resource_block_ttl_hours() -> float:
     except ValueError:
         return _DEFAULT_RESOURCE_BLOCK_TTL_HOURS
     return max(0.0, value)
+
+
+def _next_slug_path(config: WatchConfig) -> Path:
+    raw = os.environ.get("KAGGLEBOT_NEXT_SLUG_FILE")
+    if raw:
+        return Path(raw).expanduser()
+    return config.watch_dir / "next_slug.txt"
+
+
+def _read_next_slug(config: WatchConfig) -> str | None:
+    path = _next_slug_path(config)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        slug = line.strip().lower()
+        if slug and not slug.startswith("#"):
+            return slug
+    return None
+
+
+def _consume_next_slug(config: WatchConfig, *, slug: str) -> None:
+    path = _next_slug_path(config)
+    configured = _read_next_slug(config)
+    if not _slug_matches(slug, configured):
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def _slug_matches(slug: str | None, expected: str | None) -> bool:
+    if not slug or not expected:
+        return False
+    return slug.strip().lower() == expected.strip().lower()
 
 
 def _all_watch_records(config: WatchConfig, *, primary: WatchLedger) -> list[dict[str, object]]:

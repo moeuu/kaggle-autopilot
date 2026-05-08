@@ -127,6 +127,23 @@ def test_select_next_competition_skips_recent_resource_blocks(monkeypatch, tmp_p
     assert [item.slug for item in selected] == ["fresh"]
 
 
+def test_select_next_competition_manual_next_bypasses_cooldown_and_resource_block(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidates = [_competition("fresh", reward="1000 usd"), _competition("birdclef-2026", reward="50000 usd")]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+    config = _config(tmp_path)
+    config.watch_dir.mkdir(parents=True)
+    (config.watch_dir / "next_slug.txt").write_text("birdclef-2026\n", encoding="utf-8")
+    WatchLedger(config.ledger_path).append("failed", slug="birdclef-2026", run_id="old-run")
+    WatchLedger(config.ledger_path).append("resource_blocked", slug="birdclef-2026", run_id="old-run")
+
+    selected = select_next_competition(config)
+
+    assert [item.slug for item in selected] == ["birdclef-2026"]
+
+
 def test_select_next_competition_prioritizes_never_submitted(monkeypatch, tmp_path: Path) -> None:
     candidates = [_competition("submitted"), _competition("never-submitted")]
     monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
@@ -648,6 +665,35 @@ def test_run_watch_once_failure_is_recorded_and_next_cycle_selects_new_competiti
     assert second.status == "finished"
     assert second.slug == "second"
     assert attempts == ["first", "second"]
+
+
+def test_run_watch_once_consumes_manual_next_slug(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "kagglebot.supervisor.list_entered_competitions",
+        lambda **kwargs: [_competition("first"), _competition("birdclef-2026")],
+    )
+    monkeypatch.setattr("kagglebot.supervisor._prepare_competition", lambda **kwargs: None)
+    monkeypatch.setattr("kagglebot.supervisor.run_autopilot", lambda config: None)
+    config = _config(tmp_path)
+    config.watch_dir.mkdir(parents=True)
+    next_slug_path = config.watch_dir / "next_slug.txt"
+    next_slug_path.write_text("birdclef-2026\n", encoding="utf-8")
+
+    result = run_watch_once(config)
+
+    assert result.status == "finished"
+    assert result.slug == "birdclef-2026"
+    assert not next_slug_path.exists()
+    records = WatchLedger(config.ledger_path).records()
+    assert any(
+        record.get("event") == "selected"
+        and record.get("slug") == "birdclef-2026"
+        and record.get("reason") == "manual_next_slug"
+        for record in records
+    )
 
 
 def test_run_watch_once_resource_error_records_resource_block(
