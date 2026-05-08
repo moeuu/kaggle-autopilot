@@ -307,6 +307,7 @@ _QUALITY_GUARD_SUBGROUP_RATIO = 2.5
 _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = 0.05
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = 0.0
 _QUALITY_GUARD_CODE_REF_ABS_MARGIN = 0.02
+_HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
 _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = 0.02
 _BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = 0.01
 _REGRESSION_GUARD_ABS_DROP_PROB = 0.03
@@ -1617,6 +1618,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "competition_score_source_mismatch",
                     "competition_evaluation_unfaithful",
                     "missing_competitive_data",
+                    "external_test_label_transfer_detected",
                 }
                 for reason in quality_reasons
             )
@@ -2041,6 +2043,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "competition_score_source_mismatch",
                 "competition_evaluation_unfaithful",
                 "missing_competitive_data",
+                "external_test_label_transfer_detected",
             ):
                 if blocked_reason in quality_reasons:
                     fallback_submit_blocked_reason = f"latest_iteration_{blocked_reason}"
@@ -4579,6 +4582,7 @@ def _build_accuracy_potential(
     )
     reasons_raw = guard.get("reasons")
     reasons = [str(item) for item in reasons_raw if isinstance(item, str)] if isinstance(reasons_raw, list) else []
+    policy_blocked = any(reason in _HARD_POLICY_BLOCK_REASONS for reason in reasons)
     capacity_tier = _infer_capacity_tier(kernel_metrics_payload=payload, model_summary=model_summary)
     data_tier = _infer_data_tier(
         competition_faithfulness=faithfulness if isinstance(faithfulness, dict) else None,
@@ -4596,8 +4600,18 @@ def _build_accuracy_potential(
         if reasons
         else False
     )
-    eligible = faithful or trusted or (capacity_priority >= 2 and (blocked_by_submit_only or data_priority >= 1))
-    status = "frontier" if eligible and capacity_priority >= 2 else ("trusted" if faithful or trusted else "blocked")
+    eligible = (
+        False
+        if policy_blocked
+        else faithful or trusted or (capacity_priority >= 2 and (blocked_by_submit_only or data_priority >= 1))
+    )
+    status = (
+        "blocked"
+        if policy_blocked
+        else "frontier"
+        if eligible and capacity_priority >= 2
+        else ("trusted" if faithful or trusted else "blocked")
+    )
     primary_reason = "trusted_competition_faithful"
     if status == "frontier" and not faithful:
         primary_reason = "high_capacity_candidate_requires_better_data_or_eval"
@@ -5129,6 +5143,201 @@ def _detect_subgroup_collapse_signal(
     }
 
 
+def _iter_payload_mappings(payload: object):
+    if isinstance(payload, dict):
+        yield payload
+        for value in payload.values():
+            yield from _iter_payload_mappings(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from _iter_payload_mappings(item)
+
+
+def _as_guard_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _first_nested_value(payload: dict[str, object], keys: tuple[str, ...]) -> object | None:
+    normalized_keys = {key.lower() for key in keys}
+    for node in _iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() in normalized_keys:
+                return value
+    return None
+
+
+def _max_nested_float(payload: dict[str, object], keys: tuple[str, ...]) -> float | None:
+    normalized_keys = {key.lower() for key in keys}
+    values: list[float] = []
+    for node in _iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _to_float(value)
+            if parsed is not None and math.isfinite(parsed):
+                values.append(float(parsed))
+    return max(values) if values else None
+
+
+def _max_nested_int(payload: dict[str, object], keys: tuple[str, ...]) -> int | None:
+    normalized_keys = {key.lower() for key in keys}
+    values: list[int] = []
+    for node in _iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _to_int(value)
+            if parsed is not None:
+                values.append(int(parsed))
+    return max(values) if values else None
+
+
+def _min_nested_int(payload: dict[str, object], keys: tuple[str, ...]) -> int | None:
+    normalized_keys = {key.lower() for key in keys}
+    values: list[int] = []
+    for node in _iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _to_int(value)
+            if parsed is not None:
+                values.append(int(parsed))
+    return min(values) if values else None
+
+
+def _any_nested_bool(payload: dict[str, object], keys: tuple[str, ...]) -> bool:
+    normalized_keys = {key.lower() for key in keys}
+    for node in _iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _as_guard_bool(value)
+            if parsed is True:
+                return True
+    return False
+
+
+def _nested_text(payload: dict[str, object], *, limit: int = 20000) -> str:
+    parts: list[str] = []
+    total = 0
+    for node in _iter_payload_mappings(payload):
+        for key, value in node.items():
+            if isinstance(value, (str, int, float, bool)):
+                fragment = f"{key}={value}".lower()
+                parts.append(fragment)
+                total += len(fragment)
+                if total >= limit:
+                    return "\n".join(parts)
+    return "\n".join(parts)
+
+
+def _detect_external_test_label_transfer_signal(payload: dict[str, object] | None) -> dict[str, object] | None:
+    """Detect submissions built by copying hidden test labels from labeled external overlaps.
+
+    External data can be legitimate for pretraining or representation learning. This guard targets a narrower
+    failure mode: all or most competition test rows are matched to a labeled external dataset by exact/near-exact
+    identifiers, image hashes, or bounding boxes, and those external labels become the submission predictions.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return None
+
+    explicit = _any_nested_bool(
+        payload,
+        (
+            "external_test_label_transfer",
+            "test_label_transfer",
+            "test_label_leakage",
+            "external_label_transfer_detected",
+        ),
+    )
+    external_trusted = _any_nested_bool(
+        payload,
+        (
+            "external_overlap_trusted",
+            "external_data_allowed",
+            "external_overlap_used",
+            "external_labels_used",
+        ),
+    )
+    exact_coverage = _any_nested_bool(
+        payload,
+        (
+            "exact_coverage_pass",
+            "external_require_full_exact_coverage",
+            "sha1_equal",
+        ),
+    )
+    text = _nested_text(payload)
+    method_or_manifest_mentions_transfer = (
+        "external_test_label_transfer" in text
+        or "test_label_transfer" in text
+        or "official_multiview_overlap_mapping" in text
+        or ("external" in text and "overlap" in text and "mapping" in text)
+        or ("external_row_id" in text and "predicted_class" in text)
+        or ("match_type_counts" in text and "exact_sha1" in text and "test_selected" in text)
+    )
+
+    test_selected_rows = _max_nested_int(payload, ("test_selected_row_count", "test_override_rows"))
+    submission_rows = _max_nested_int(payload, ("submission_rows", "submission_row_count", "test_row_count"))
+    uncovered_test_rows = _min_nested_int(payload, ("uncovered_test_row_count",))
+    exact_test_image_count = _max_nested_int(
+        payload,
+        ("test_exact_sha1_matched_image_count", "test_selected_exact_sha1_image_count"),
+    )
+    max_image_distance = _max_nested_float(
+        payload,
+        ("max_selected_image_distance", "test_max_selected_image_distance"),
+    )
+    max_bbox_distance = _max_nested_float(
+        payload,
+        ("max_selected_bbox_distance", "test_max_selected_bbox_distance"),
+    )
+    final_method = _first_nested_value(payload, ("final_selected_method", "name"))
+    external_root = _first_nested_value(payload, ("external_root_path", "external_root"))
+
+    full_or_near_full_test_coverage = False
+    if test_selected_rows is not None and test_selected_rows > 0:
+        if uncovered_test_rows == 0:
+            full_or_near_full_test_coverage = True
+        elif submission_rows is not None and submission_rows > 0 and test_selected_rows >= int(0.95 * submission_rows):
+            full_or_near_full_test_coverage = True
+
+    exact_or_near_exact = bool(exact_coverage)
+    if max_image_distance is not None and max_bbox_distance is not None:
+        exact_or_near_exact = exact_or_near_exact or (max_image_distance <= 1e-12 and max_bbox_distance <= 1e-12)
+    if exact_test_image_count is not None and exact_test_image_count > 0:
+        exact_or_near_exact = True
+
+    if not explicit and not (
+        external_trusted
+        and full_or_near_full_test_coverage
+        and exact_or_near_exact
+        and method_or_manifest_mentions_transfer
+    ):
+        return None
+
+    return {
+        "detected": True,
+        "reason": "external labeled data appears to directly determine competition test predictions",
+        "test_selected_row_count": test_selected_rows,
+        "submission_rows": submission_rows,
+        "uncovered_test_row_count": uncovered_test_rows,
+        "test_exact_sha1_image_count": exact_test_image_count,
+        "max_selected_image_distance": max_image_distance,
+        "max_selected_bbox_distance": max_bbox_distance,
+        "final_selected_method": str(final_method) if final_method is not None else None,
+        "external_root": str(external_root) if external_root is not None else None,
+    }
+
+
 def _build_kernel_quality_guard(
     *,
     evaluation: EvaluationResult,
@@ -5168,6 +5377,17 @@ def _build_kernel_quality_guard(
             warnings.append(f"oracle_mode={oracle_mode or 'unknown'}")
             if not force_submit:
                 block_submit = True
+
+    external_label_transfer = _detect_external_test_label_transfer_signal(payload)
+    if external_label_transfer is not None:
+        reasons.append("external_test_label_transfer_detected")
+        warnings.append(
+            "external_test_label_transfer="
+            f"rows={external_label_transfer.get('test_selected_row_count')},"
+            f"uncovered={external_label_transfer.get('uncovered_test_row_count')},"
+            f"method={external_label_transfer.get('final_selected_method') or 'unknown'}"
+        )
+        block_submit = True
 
     competition_faithfulness = _extract_competition_faithfulness(
         evaluation=evaluation,
@@ -5324,6 +5544,7 @@ def _build_kernel_quality_guard(
             "collapse_detected": step_bucket_collapse,
         },
         "subgroup_collapse": subgroup_collapse_signal,
+        "external_label_transfer": external_label_transfer,
         "code_reference": {
             "score": code_reference_score,
             "comparison_score": code_reference_comparison_score,
@@ -5339,6 +5560,8 @@ def _build_kernel_quality_guard(
 def _iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationResult) -> bool:
     payload = _load_json_object(metrics_path)
     if isinstance(payload, dict):
+        if _detect_external_test_label_transfer_signal(payload) is not None:
+            return False
         quality_guard = payload.get("quality_guard")
         if isinstance(quality_guard, dict) and isinstance(quality_guard.get("allow_submit"), bool):
             return bool(quality_guard.get("allow_submit"))

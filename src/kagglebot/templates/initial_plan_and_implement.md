@@ -103,6 +103,12 @@ test = pd.read_csv("{test_path}")
 - Target/frequency encode high-cardinality categoricals (>10 unique values)
 - Scale numeric features (StandardScaler or RobustScaler)
 
+**Anti-leakage policy for external data**:
+- External data may support pretraining, feature learning, or additional supervised training only when rules allow it.
+- Never use external labels to directly assign competition test predictions through exact or near-duplicate matching on row IDs, filenames, hashes, timestamps, bounding boxes, or image/audio/text content.
+- If a public/external dataset appears to contain labeled copies of the competition test rows, exclude that overlap from prediction logic, report it in diagnostics, and build a supervised model that must generalize from allowed training data.
+- Do not select pipelines named or behaving like `external_overlap_mapping`, `official_solution_mapping`, `label_transfer`, or `test_label_lookup`.
+
 **Split for offline evaluation**:
 ```python
 from sklearn.model_selection import train_test_split
@@ -302,6 +308,7 @@ If any criterion fails, the autopilot will retry or abort.
 - Don't overfit: Large models on small datasets fail
 - Don't underfit: Too simple models miss patterns
 - Don't leak: Never use test.csv for validation
+- Don't transfer labels: Never copy hidden/test labels from external labeled overlaps, exact file-hash matches, row-id mappings, or solution-like artifacts
 - Don't ignore format: submission.csv must match sample exactly
 - Don't waste resources: Monitor and maximize GPU/TPU usage
 

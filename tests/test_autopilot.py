@@ -4076,6 +4076,68 @@ def test_kernel_quality_guard_blocks_oracle_or_untrusted_score_source() -> None:
     assert "oracle_override_detected" in reasons
 
 
+def test_kernel_quality_guard_blocks_external_test_label_transfer_even_when_forced() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="macro_f1",
+        direction="maximize",
+        value=1.0,
+        std=0.0,
+        train_score=None,
+        val_score=None,
+        fold_scores=[1.0, 1.0, 1.0],
+    )
+    payload = {
+        "final_selected_method": "official_multiview_overlap_mapping",
+        "submission_rows": 6872,
+        "submission_audit": {
+            "external_overlap_trusted": True,
+            "exact_coverage_pass": True,
+            "external_root_path": "/kaggle/input/some-public-overlap",
+            "test_selected_row_count": 6872,
+            "uncovered_test_row_count": 0,
+            "test_exact_sha1_matched_image_count": 926,
+            "test_max_selected_image_distance": 0.0,
+            "test_max_selected_bbox_distance": 0.0,
+            "official_overlap_audit": {
+                "match_type_counts": {
+                    "test_selected_rows": {"exact_sha1": 6872},
+                },
+            },
+        },
+    }
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload=payload,
+        evaluation_report=None,
+        evaluation_contract=None,
+        logs_dir=None,
+        direction="maximize",
+        iteration=3,
+        max_iterations=3,
+        force_submit=True,
+    )
+
+    assert guard["allow_submit"] is False
+    reasons = guard.get("reasons")
+    assert isinstance(reasons, list)
+    assert "external_test_label_transfer_detected" in reasons
+    transfer = guard.get("external_label_transfer")
+    assert isinstance(transfer, dict)
+    assert transfer["test_selected_row_count"] == 6872
+
+    potential = _build_accuracy_potential(
+        evaluation=evaluation,
+        kernel_metrics_payload=payload,
+        model_summary=None,
+        quality_guard=guard,
+        evaluation_contract=None,
+    )
+    assert potential["eligible"] is False
+    assert potential["status"] == "blocked"
+    assert potential["primary_reason"] == "external_test_label_transfer_detected"
+
+
 def test_kernel_quality_guard_blocks_when_below_code_reference_baseline() -> None:
     evaluation = EvaluationResult(
         score_source="cv",

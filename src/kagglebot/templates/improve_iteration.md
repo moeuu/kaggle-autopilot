@@ -147,6 +147,12 @@ Implementation scope policy:
 - For non-tabular competitions (image/video/audio/text), implement/iterate `custom_main()` in `kernel.py`.
 - If pretrained checkpoints are beneficial, add download + cache logic in `kernel.py` with internet-off fallback.
 
+Anti-leakage policy for external data:
+- External data may support pretraining, feature learning, or additional supervised training only when rules allow it.
+- Never use external labels to directly assign competition test predictions through exact or near-duplicate matching on row IDs, filenames, hashes, timestamps, bounding boxes, or image/audio/text content.
+- If a public/external dataset appears to contain labeled copies of the competition test rows, exclude that overlap from prediction logic, report it in diagnostics, and improve the generalizing model instead.
+- Do not select pipelines named or behaving like `external_overlap_mapping`, `official_solution_mapping`, `label_transfer`, or `test_label_lookup`.
+
 **Recommended Strategies** (pick based on diagnosis):
 
 #### For Underfitting
@@ -369,6 +375,7 @@ uv run pytest -q
 - ❌ NEVER commit secrets (kaggle.json, API keys, tokens)
 - ❌ NEVER add interactive prompts (must be non-interactive)
 - ❌ NEVER use test.csv for local validation split generation
+- ❌ NEVER copy hidden/test labels from external labeled overlaps, exact file-hash matches, row-id mappings, or solution-like artifacts
 - ❌ NEVER bypass safety guardrails
 - ✅ DO keep changes incremental (1-2 focused improvements)
 - ✅ DO document what was tried and why
