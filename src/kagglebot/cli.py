@@ -594,14 +594,14 @@ def watch_kaggle_gpu_sidecar(
     kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username."),
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
     internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
-    time_budget_min: int | None = typer.Option(120, "--time-budget-min", help="Per-kernel time budget in minutes."),
+    time_budget_min: int | None = typer.Option(600, "--time-budget-min", help="Per-kernel time budget in minutes."),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
     holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
     cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
-    max_iterations: int = typer.Option(5, "--max-iterations", min=1, help="Max sidecar iterations per competition."),
+    max_iterations: int = typer.Option(3, "--max-iterations", min=1, help="Max sidecar iterations per competition."),
     max_total_min: int | None = typer.Option(
-        480, "--max-total-min", min=1, help="Max minutes per sidecar competition."
+        1800, "--max-total-min", min=1, help="Max minutes per sidecar competition."
     ),
     patience: int | None = typer.Option(2, "--patience", help="Patience iterations."),
     min_improvement: float | None = typer.Option(None, "--min-improvement", help="Minimum improvement."),
@@ -621,7 +621,7 @@ def watch_kaggle_gpu_sidecar(
         help="Deprecated; lightweight selection is based on estimated training time.",
     ),
     max_training_min: int = typer.Option(
-        120,
+        600,
         "--max-training-min",
         min=1,
         help="Only run candidates with estimated training time at or below this many minutes.",

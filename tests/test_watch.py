@@ -694,6 +694,9 @@ def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp
         captured["lightweight_only"] = config.lightweight_only
         captured["lightweight_max_data_bytes"] = config.lightweight_max_data_bytes
         captured["lightweight_max_training_min"] = config.lightweight_max_training_min
+        captured["time_budget_min"] = config.time_budget_min
+        captured["max_iterations"] = config.max_iterations
+        captured["max_total_min"] = config.max_total_min
         captured["kaggle_gpu_min_available_minutes_for_new_competition"] = (
             config.kaggle_gpu_min_available_minutes_for_new_competition
         )
@@ -711,8 +714,6 @@ def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp
             "--force",
             "watch-kaggle-gpu-sidecar",
             "--once",
-            "--max-training-min",
-            "120",
         ],
     )
 
@@ -722,7 +723,10 @@ def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp
         "state_scope": "kaggle_gpu",
         "lightweight_only": True,
         "lightweight_max_data_bytes": None,
-        "lightweight_max_training_min": 120,
+        "lightweight_max_training_min": 600,
+        "time_budget_min": 600,
+        "max_iterations": 3,
+        "max_total_min": 1800,
         "kaggle_gpu_min_available_minutes_for_new_competition": 1800,
     }
 
