@@ -13,6 +13,7 @@ from kagglebot.supervisor import (
     WatchConfig,
     WatchLedger,
     _parse_kaggle_gpu_quota_text,
+    _read_kaggle_gpu_quota_file,
     run_watch_once,
     select_next_competition,
 )
@@ -405,6 +406,43 @@ def test_parse_kaggle_gpu_quota_text_available_of_total() -> None:
     assert quota.total_minutes == 1800
     assert quota.used_minutes == 924
     assert quota.source == "test"
+
+
+def test_read_kaggle_gpu_quota_file_ignores_stale_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS", raising=False)
+    quota_path = tmp_path / "quota.json"
+    quota_path.write_text(
+        json.dumps(
+            {
+                "available_minutes": 876,
+                "total_minutes": 1800,
+                "updated_at": "2000-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _read_kaggle_gpu_quota_file(quota_path) is None
+
+
+def test_read_kaggle_gpu_quota_file_honors_explicit_expiry(tmp_path: Path) -> None:
+    quota_path = tmp_path / "quota.json"
+    quota_path.write_text(
+        json.dumps(
+            {
+                "available_minutes": 1800,
+                "total_minutes": 1800,
+                "updated_at": "2000-01-01T00:00:00+00:00",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    quota = _read_kaggle_gpu_quota_file(quota_path)
+
+    assert quota is not None
+    assert quota.available_minutes == 1800
 
 
 def test_run_watch_once_blocks_new_kaggle_gpu_competition_when_quota_low(

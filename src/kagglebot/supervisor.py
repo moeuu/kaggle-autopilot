@@ -37,6 +37,7 @@ _REWARD_AMOUNT_RE = re.compile(
     r"(?:\$\s*(?P<dollar>[0-9][0-9,]*(?:\.[0-9]+)?)|(?P<usd>[0-9][0-9,]*(?:\.[0-9]+)?)\s*usd)",
     flags=re.IGNORECASE,
 )
+_DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS = 24.0
 
 
 @dataclass(frozen=True)
@@ -303,7 +304,10 @@ def _new_kaggle_gpu_competition_quota_block(
             "phase": "kaggle_gpu_quota_unavailable",
             "reason": "kaggle_gpu_quota_unavailable",
             "threshold_minutes": threshold,
-            "message": f"Kaggle GPU quota is unavailable; not starting a new competition below safety policy ({threshold_text} required).",
+            "message": (
+                "Kaggle GPU quota is unavailable; not starting a new competition below safety policy "
+                f"({threshold_text} required)."
+            ),
         }
 
     if quota.available_minutes < threshold:
@@ -328,7 +332,10 @@ def _new_kaggle_gpu_competition_quota_block(
             "threshold_minutes": threshold,
             "quota_source": quota.source,
             "quota_refresh_time": quota.refresh_time,
-            "message": f"Kaggle GPU quota is low ({available_text} available; {threshold_text} required); not starting a new competition.",
+            "message": (
+                f"Kaggle GPU quota is low ({available_text} available; {threshold_text} required); "
+                "not starting a new competition."
+            ),
         }
     return None
 
@@ -380,6 +387,8 @@ def _read_kaggle_gpu_quota_file(path: Path) -> KaggleGpuQuotaStatus | None:
     expires_at = _parse_ts(payload.get("expires_at"))
     if expires_at is not None and expires_at <= datetime.now(UTC):
         return None
+    if expires_at is None and _kaggle_gpu_quota_file_is_stale(path=path, payload=payload):
+        return None
     source = f"file:{path}"
     quota = _parse_kaggle_gpu_quota_text(payload.get("text") or payload.get("quota_text"), source=source)
     if quota is not None:
@@ -400,6 +409,38 @@ def _read_kaggle_gpu_quota_file(path: Path) -> KaggleGpuQuotaStatus | None:
         refresh_time=str(payload.get("refresh_time") or payload.get("quota_refresh_time") or "") or None,
         source=source,
     )
+
+
+def _kaggle_gpu_quota_file_is_stale(*, path: Path, payload: dict[str, object]) -> bool:
+    max_age_hours = _kaggle_gpu_quota_file_max_age_hours()
+    if max_age_hours <= 0:
+        return False
+    cache_ts = _kaggle_gpu_quota_file_timestamp(path=path, payload=payload)
+    if cache_ts is None:
+        return True
+    return cache_ts + timedelta(hours=max_age_hours) <= datetime.now(UTC)
+
+
+def _kaggle_gpu_quota_file_timestamp(*, path: Path, payload: dict[str, object]) -> datetime | None:
+    for key in ("updated_at", "refresh_time", "quota_refresh_time"):
+        parsed = _parse_ts(payload.get(key))
+        if parsed is not None:
+            return parsed
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        return None
+
+
+def _kaggle_gpu_quota_file_max_age_hours() -> float:
+    raw = os.environ.get("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS")
+    if raw is None:
+        return _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS
+    return value
 
 
 def _fetch_kaggle_gpu_quota_from_web_cookie() -> KaggleGpuQuotaStatus | None:
