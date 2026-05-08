@@ -219,6 +219,19 @@ def test_download_rate_limit_attempts_reads_env(monkeypatch) -> None:
     assert kaggle_api._download_rate_limit_attempts() == 3
 
 
+def test_download_single_shot_first_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST", "0")
+    assert kaggle_api._download_single_shot_first_enabled() is False
+
+
+def test_rate_limit_retry_sleep_uses_longer_backoff(monkeypatch) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_backoff_sec", lambda: 30.0)
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_max_backoff_sec", lambda: 120.0)
+    error = KaggleCliError("transient", ["kaggle"], exit_code=1, output="429 Too Many Requests")
+
+    assert kaggle_api._compute_retry_sleep_sec(attempt=3, base_backoff=2.0, error=error) == 120.0
+
+
 def test_apply_download_pacing_sleeps_until_interval(monkeypatch) -> None:
     ticks = iter([10.2, 10.5])
     sleeps: list[float] = []
@@ -240,7 +253,7 @@ def test_download_competition_uses_single_shot_for_small_data(monkeypatch, tmp_p
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
-        lambda slug, dry_run: [kaggle_api._CompetitionFile(name="small.csv", size_bytes=128)],  # noqa: ARG005
+        lambda slug, dry_run: pytest.fail("single-shot download should avoid listing competition files"),  # noqa: ARG005
     )
     monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 1024)
 
@@ -264,6 +277,7 @@ def test_download_competition_skips_when_all_files_already_present(monkeypatch, 
         kaggle_api._CompetitionFile(name="a.csv", size_bytes=3),
         kaggle_api._CompetitionFile(name="b.csv", size_bytes=4),
     ]
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", lambda slug, dry_run: files)  # noqa: ARG005
     monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 10_000)
 
@@ -293,6 +307,7 @@ def test_download_competition_skips_when_all_files_already_present(monkeypatch, 
 
 
 def test_download_competition_splits_and_retries_large_data(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -328,6 +343,7 @@ def test_download_competition_splits_and_retries_large_data(monkeypatch, tmp_pat
 
 
 def test_download_competition_split_reports_progress(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -428,6 +444,7 @@ def test_count_downloaded_files_uses_size_to_disambiguate_duplicate_basenames(tm
 
 
 def test_download_competition_split_unbounded_retry(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -453,6 +470,7 @@ def test_download_competition_split_unbounded_retry(monkeypatch, tmp_path) -> No
 
 
 def test_download_competition_split_retries_rate_limit_without_single_shot_fallback(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -465,6 +483,7 @@ def test_download_competition_split_retries_rate_limit_without_single_shot_fallb
     monkeypatch.setattr(kaggle_api, "_download_attempts", lambda: 2)
     monkeypatch.setattr(kaggle_api, "_download_rate_limit_attempts", lambda: None)
     monkeypatch.setattr(kaggle_api, "_download_retry_backoff_sec", lambda: 0.0)
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_backoff_sec", lambda: 0.0)
 
     seen: list[list[str]] = []
     attempts = {"a": 0}
@@ -489,6 +508,7 @@ def test_download_competition_split_retries_rate_limit_without_single_shot_fallb
 
 
 def test_download_competition_split_stops_after_rate_limit_retry_budget(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -497,6 +517,7 @@ def test_download_competition_split_stops_after_rate_limit_retry_budget(monkeypa
     monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 1)
     monkeypatch.setattr(kaggle_api, "_download_rate_limit_attempts", lambda: 2)
     monkeypatch.setattr(kaggle_api, "_download_retry_backoff_sec", lambda: 0.0)
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_backoff_sec", lambda: 0.0)
 
     counter = {"n": 0}
 

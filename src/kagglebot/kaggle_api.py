@@ -30,7 +30,10 @@ _DEFAULT_DOWNLOAD_ATTEMPTS = 8
 _DEFAULT_RATE_LIMIT_DOWNLOAD_ATTEMPTS = _DEFAULT_DOWNLOAD_ATTEMPTS
 _DEFAULT_RETRY_BACKOFF_SEC = 2.0
 _DEFAULT_RETRY_MAX_BACKOFF_SEC = 120.0
+_DEFAULT_RATE_LIMIT_BACKOFF_SEC = 60.0
+_DEFAULT_RATE_LIMIT_MAX_BACKOFF_SEC = 900.0
 _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC = 0.0
+_DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST = True
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,22 @@ def download_competition(
     progress_callback: DownloadProgressCallback | None = None,
 ) -> str:
     dest_dir.mkdir(parents=True, exist_ok=True)
+    single_shot_failed = False
+    if _download_single_shot_first_enabled():
+        args = _competition_download_args(slug=slug, dest_dir=dest_dir, force=force, quiet=quiet, file_name=None)
+        try:
+            return _run_kaggle_with_retry(args, slug=slug, dry_run=dry_run)
+        except KaggleCliError as exc:
+            if _is_rate_limited_download_error(exc):
+                raise
+            if not _is_retryable_download_error(exc):
+                raise
+            logger.warning(
+                "single-shot competition download failed; falling back to split download: %s",
+                _summarize_error_output(exc.output),
+            )
+            single_shot_failed = True
+
     files = _list_competition_files_with_sizes(slug, dry_run=dry_run)
     total_size = sum(file.size_bytes for file in files)
     threshold = _split_download_threshold_bytes()
@@ -104,7 +123,7 @@ def download_competition(
         )
         return ""
 
-    if files and total_size >= threshold:
+    if files and (single_shot_failed or total_size >= threshold):
         return _download_competition_by_file(
             slug,
             dest_dir,
@@ -264,48 +283,39 @@ def _download_rate_limit_attempts() -> int | None:
     return value
 
 
-def _download_retry_backoff_sec() -> float:
-    raw = os.getenv("KAGGLEBOT_DOWNLOAD_RETRY_BACKOFF_SEC")
+def _download_single_shot_first_enabled() -> bool:
+    raw = os.getenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST")
     if raw is None:
-        return _DEFAULT_RETRY_BACKOFF_SEC
-    try:
-        value = float(raw.strip())
-    except ValueError:
-        return _DEFAULT_RETRY_BACKOFF_SEC
-    if value < 0:
-        return _DEFAULT_RETRY_BACKOFF_SEC
-    return value
+        return _DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _download_retry_backoff_sec() -> float:
+    return _read_float_env("KAGGLEBOT_DOWNLOAD_RETRY_BACKOFF_SEC", _DEFAULT_RETRY_BACKOFF_SEC)
 
 
 def _download_retry_max_backoff_sec() -> float:
-    raw = os.getenv("KAGGLEBOT_DOWNLOAD_RETRY_MAX_BACKOFF_SEC")
-    if raw is None:
-        return _DEFAULT_RETRY_MAX_BACKOFF_SEC
-    try:
-        value = float(raw.strip())
-    except ValueError:
-        return _DEFAULT_RETRY_MAX_BACKOFF_SEC
-    if value < 0:
-        return _DEFAULT_RETRY_MAX_BACKOFF_SEC
-    return value
+    return _read_float_env("KAGGLEBOT_DOWNLOAD_RETRY_MAX_BACKOFF_SEC", _DEFAULT_RETRY_MAX_BACKOFF_SEC)
+
+
+def _download_rate_limit_backoff_sec() -> float:
+    return _read_float_env("KAGGLEBOT_DOWNLOAD_RATE_LIMIT_BACKOFF_SEC", _DEFAULT_RATE_LIMIT_BACKOFF_SEC)
+
+
+def _download_rate_limit_max_backoff_sec() -> float:
+    return _read_float_env("KAGGLEBOT_DOWNLOAD_RATE_LIMIT_MAX_BACKOFF_SEC", _DEFAULT_RATE_LIMIT_MAX_BACKOFF_SEC)
 
 
 def _download_min_interval_sec() -> float:
-    raw = os.getenv("KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC")
-    if raw is None:
-        return _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC
-    try:
-        value = float(raw.strip())
-    except ValueError:
-        return _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC
-    if value < 0:
-        return _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC
-    return value
+    return _read_float_env("KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC", _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC)
 
 
-def _compute_retry_sleep_sec(*, attempt: int, base_backoff: float) -> float:
-    sleep_sec = base_backoff * (2 ** (attempt - 1))
+def _compute_retry_sleep_sec(*, attempt: int, base_backoff: float, error: KaggleCliError | None = None) -> float:
     max_backoff = _download_retry_max_backoff_sec()
+    if error is not None and _is_rate_limited_download_error(error):
+        base_backoff = _download_rate_limit_backoff_sec()
+        max_backoff = _download_rate_limit_max_backoff_sec()
+    sleep_sec = base_backoff * (2 ** (attempt - 1))
     return min(sleep_sec, max_backoff)
 
 
@@ -328,6 +338,19 @@ def _read_int_env(name: str, default: int) -> int:
         return int(raw.strip())
     except ValueError:
         return default
+
+
+def _read_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return value
 
 
 def _build_basename_counts(files: list[_CompetitionFile]) -> dict[str, int]:
@@ -463,7 +486,7 @@ def _download_competition_by_file(
                 effective_max_attempts = rate_limit_attempts if _is_rate_limited_download_error(exc) else max_attempts
                 if _should_stop_retrying(attempt=attempt, max_attempts=effective_max_attempts, error=exc):
                     raise
-                sleep_sec = _compute_retry_sleep_sec(attempt=attempt, base_backoff=base_backoff)
+                sleep_sec = _compute_retry_sleep_sec(attempt=attempt, base_backoff=base_backoff, error=exc)
                 _log_download_retry(
                     exc=exc,
                     attempt=attempt,
@@ -525,6 +548,7 @@ def _is_retryable_download_error(exc: KaggleCliError) -> bool:
 
 def _run_kaggle_with_retry(args: list[str], *, slug: str, dry_run: bool) -> str:
     max_attempts = _download_attempts()
+    rate_limit_attempts = _download_rate_limit_attempts()
     base_backoff = _download_retry_backoff_sec()
 
     attempt = 1
@@ -532,10 +556,11 @@ def _run_kaggle_with_retry(args: list[str], *, slug: str, dry_run: bool) -> str:
         try:
             return _run_kaggle(args, slug=slug, dry_run=dry_run)
         except KaggleCliError as exc:
-            if _should_stop_retrying(attempt=attempt, max_attempts=max_attempts, error=exc):
+            effective_max_attempts = rate_limit_attempts if _is_rate_limited_download_error(exc) else max_attempts
+            if _should_stop_retrying(attempt=attempt, max_attempts=effective_max_attempts, error=exc):
                 raise
-            sleep_sec = _compute_retry_sleep_sec(attempt=attempt, base_backoff=base_backoff)
-            _log_download_retry(exc=exc, attempt=attempt, max_attempts=max_attempts, sleep_sec=sleep_sec)
+            sleep_sec = _compute_retry_sleep_sec(attempt=attempt, base_backoff=base_backoff, error=exc)
+            _log_download_retry(exc=exc, attempt=attempt, max_attempts=effective_max_attempts, sleep_sec=sleep_sec)
             if sleep_sec > 0:
                 time.sleep(sleep_sec)
             attempt += 1
