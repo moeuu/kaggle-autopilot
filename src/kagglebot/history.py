@@ -61,6 +61,10 @@ class SubmissionLedger:
         offline_score: float | None = None,
         score_source: str | None = None,
         pipeline_name: str | None = None,
+        submission_kind: str | None = None,
+        out_of_band: bool = False,
+        source_run_id: str | None = None,
+        source_iteration: int | None = None,
     ) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         submission_sha = sha256_file(str(submission_path))
@@ -78,6 +82,10 @@ class SubmissionLedger:
             "offline_score": offline_score,
             "score_source": score_source,
             "pipeline_name": pipeline_name,
+            "submission_kind": submission_kind,
+            "out_of_band": out_of_band,
+            "source_run_id": source_run_id,
+            "source_iteration": source_iteration,
         }
         with self.ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
@@ -90,6 +98,10 @@ class SubmissionLedger:
         submission_path: Path,
         run_id: str | None,
         outcome: dict[str, object],
+        submission_kind: str | None = None,
+        out_of_band: bool = False,
+        source_run_id: str | None = None,
+        source_iteration: int | None = None,
     ) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -101,6 +113,10 @@ class SubmissionLedger:
             "sha256": sha256_file(str(submission_path)),
             "run_id": run_id,
             "outcome": outcome,
+            "submission_kind": submission_kind,
+            "out_of_band": out_of_band,
+            "source_run_id": source_run_id,
+            "source_iteration": source_iteration,
         }
         with self.ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")

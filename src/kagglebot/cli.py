@@ -276,6 +276,16 @@ def submit(
     file: Path = typer.Option(..., "-f", "--file", help="Submission file path."),
     message: str = typer.Option(..., "-m", "--message", help="Submission message."),
     force_submit: bool = typer.Option(False, "--force-submit", help="Allow duplicate submissions."),
+    out_of_band: bool = typer.Option(
+        False,
+        "--out-of-band",
+        help="Record this submit outside the normal run/iteration ledger linkage.",
+    ),
+    submission_kind: str | None = typer.Option(
+        None,
+        "--submission-kind",
+        help="Optional ledger label, e.g. external_test_label_transfer.",
+    ),
 ) -> None:
     cfg = ctx.obj
     slug = parse_competition_slug(competition)
@@ -300,7 +310,16 @@ def submit(
             force_submit=force_submit,
         )
     )
-    submission_service.submit(submission_path=file, message=message, run_id=None)
+    recorded_kind = submission_kind
+    if out_of_band and not recorded_kind:
+        recorded_kind = "out_of_band_manual"
+    submission_service.submit(
+        submission_path=file,
+        message=message,
+        run_id=None,
+        submission_kind=recorded_kind,
+        out_of_band=out_of_band,
+    )
     print("[green]submission complete[/green]")
 
 

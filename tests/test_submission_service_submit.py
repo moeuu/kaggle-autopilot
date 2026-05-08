@@ -59,6 +59,46 @@ def test_submit_prepared_records_submission_on_success(monkeypatch, tmp_path: Pa
     assert rows[0]["run_id"] == "run-1"
 
 
+def test_submit_prepared_records_out_of_band_submit_metadata(monkeypatch, tmp_path: Path) -> None:
+    service, ledger_path = _build_service(tmp_path=tmp_path, dry_run=False)
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.123\n", encoding="utf-8")
+
+    def fake_submit(*, slug: str, submission_file: Path, message: str, dry_run: bool = False) -> SubmitResult:
+        assert slug == "demo"
+        assert submission_file == submission_path
+        assert message == "oob run"
+        assert dry_run is False
+        return SubmitResult(
+            returncode=0,
+            stdout="ok",
+            stderr="",
+            command=["kaggle", "competitions", "submit"],
+            duration_sec=0.1,
+        )
+
+    monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
+
+    service.submit_prepared(
+        prepared_path=submission_path,
+        message="oob run",
+        run_id=None,
+        submission_kind="external_test_label_transfer",
+        out_of_band=True,
+        source_run_id="run-1",
+        source_iteration=5,
+    )
+
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["run_id"] is None
+    assert rows[0]["iteration"] is None
+    assert rows[0]["submission_kind"] == "external_test_label_transfer"
+    assert rows[0]["out_of_band"] is True
+    assert rows[0]["source_run_id"] == "run-1"
+    assert rows[0]["source_iteration"] == 5
+
+
 def test_submit_prepared_truncates_overlong_message(monkeypatch, tmp_path: Path) -> None:
     service, ledger_path = _build_service(tmp_path=tmp_path, dry_run=False)
     submission_path = tmp_path / "submission.csv"

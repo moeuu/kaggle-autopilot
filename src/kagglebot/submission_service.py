@@ -78,12 +78,26 @@ class SubmissionService:
     def __init__(self, config: SubmissionConfig):
         self._config = config
 
-    def submit(self, *, submission_path: Path, message: str, run_id: str | None) -> SubmissionResult:
+    def submit(
+        self,
+        *,
+        submission_path: Path,
+        message: str,
+        run_id: str | None,
+        submission_kind: str | None = None,
+        out_of_band: bool = False,
+        source_run_id: str | None = None,
+        source_iteration: int | None = None,
+    ) -> SubmissionResult:
         prepared_path = self.validate_and_prepare_submission(submission_path)
         return self.submit_prepared(
             prepared_path=prepared_path,
             message=message,
             run_id=run_id,
+            submission_kind=submission_kind,
+            out_of_band=out_of_band,
+            source_run_id=source_run_id,
+            source_iteration=source_iteration,
         )
 
     @staticmethod
@@ -555,6 +569,10 @@ class SubmissionService:
         offline_score: float | None = None,
         score_source: str | None = None,
         pipeline_name: str | None = None,
+        submission_kind: str | None = None,
+        out_of_band: bool = False,
+        source_run_id: str | None = None,
+        source_iteration: int | None = None,
     ) -> SubmissionResult:
         message = self._normalize_submission_message(message)
         ledger = SubmissionLedger(self._config.submission_ledger_path)
@@ -585,6 +603,10 @@ class SubmissionService:
                 offline_score=offline_score,
                 score_source=score_source,
                 pipeline_name=pipeline_name,
+                submission_kind=submission_kind,
+                out_of_band=out_of_band,
+                source_run_id=source_run_id,
+                source_iteration=source_iteration,
             )
         return SubmissionResult(
             message=message,
