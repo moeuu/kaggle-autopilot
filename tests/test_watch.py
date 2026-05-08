@@ -809,7 +809,7 @@ def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp
         "time_budget_min": 600,
         "max_iterations": 3,
         "max_total_min": 1800,
-        "kaggle_gpu_min_available_minutes_for_new_competition": 1800,
+        "kaggle_gpu_min_available_minutes_for_new_competition": 900,
     }
 
 
