@@ -100,6 +100,7 @@ def test_download_competition_does_not_retry_resource_guard(monkeypatch, tmp_pat
         raise KaggleCliResourceError("resource guard", args, exit_code=-9, output="")
 
     monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
 
     with pytest.raises(KaggleCliResourceError):
         kaggle_api.download_competition("demo", tmp_path, force=True, quiet=True)
@@ -280,6 +281,7 @@ def test_apply_download_pacing_sleeps_until_interval(monkeypatch) -> None:
 
 
 def test_download_competition_uses_single_shot_for_small_data(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -307,6 +309,7 @@ def test_download_competition_skips_when_all_files_already_present(monkeypatch, 
         kaggle_api._CompetitionFile(name="a.csv", size_bytes=3),
         kaggle_api._CompetitionFile(name="b.csv", size_bytes=4),
     ]
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", lambda slug, dry_run: files)  # noqa: ARG005
     monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 10_000)
@@ -337,6 +340,7 @@ def test_download_competition_skips_when_all_files_already_present(monkeypatch, 
 
 
 def test_download_competition_splits_and_retries_large_data(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
@@ -373,6 +377,7 @@ def test_download_competition_splits_and_retries_large_data(monkeypatch, tmp_pat
 
 
 def test_download_competition_split_reports_progress(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
@@ -408,6 +413,7 @@ def test_download_competition_split_reports_progress(monkeypatch, tmp_path) -> N
 
 
 def test_download_competition_falls_back_to_split_on_retryable_single_shot_error(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -437,6 +443,7 @@ def test_download_competition_falls_back_to_split_on_retryable_single_shot_error
 
 
 def test_download_competition_split_skips_existing_basename_match(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     existing = tmp_path / "1407735.tif"
     existing.write_bytes(b"x" * 7)
     files = [kaggle_api._CompetitionFile(name="deprecated_train_images/1407735.tif", size_bytes=7)]
@@ -461,7 +468,125 @@ def test_download_competition_split_skips_existing_basename_match(monkeypatch, t
     assert seen == []
 
 
-def test_count_downloaded_files_uses_size_to_disambiguate_duplicate_basenames(tmp_path) -> None:
+def test_streaming_download_preserves_competition_paths(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_chunk_bytes", lambda: 2)
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def iter_content(self, chunk_size):  # noqa: ANN001
+            assert chunk_size == 2
+            yield b"ab"
+            yield b"c"
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def get(self, url, *, headers, stream, timeout):  # noqa: ANN001
+            self.calls.append({"url": url, "headers": headers, "stream": stream, "timeout": timeout})
+            return FakeResponse()
+
+    session = FakeSession()
+    output = kaggle_api._download_competition_file_streaming(
+        slug="demo",
+        dest_dir=tmp_path,
+        file=kaggle_api._CompetitionFile(name="train_audio/123/a.ogg", size_bytes=3),
+        force=True,
+        quiet=True,
+        session=session,
+    )
+
+    assert "train_audio/123/a.ogg" in output
+    assert (tmp_path / "train_audio" / "123" / "a.ogg").read_bytes() == b"abc"
+    assert not (tmp_path / "a.ogg").exists()
+    assert session.calls[0]["stream"] is True
+    assert "train_audio%2F123%2Fa.ogg" in str(session.calls[0]["url"])
+
+
+def test_download_competition_streaming_single_shot_avoids_file_listing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: True)
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: True)
+
+    def fail_list(slug, dry_run):  # noqa: ANN001, ARG001
+        raise AssertionError("streaming single-shot should not list files first")
+
+    monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", fail_list)
+    monkeypatch.setattr(
+        kaggle_api,
+        "_download_competition_all_streaming_with_retry",
+        lambda *, slug, dest_dir, force, quiet: "streamed-all",  # noqa: ARG005
+    )
+
+    progress: list[tuple[int, int, str | None]] = []
+    output = kaggle_api.download_competition(
+        "demo",
+        tmp_path,
+        force=True,
+        quiet=True,
+        progress_callback=lambda done, total, file_name: progress.append((done, total, file_name)),
+    )
+
+    assert output == "streamed-all"
+    assert progress == [(1, 1, "demo.zip")]
+
+
+def test_download_competition_streams_large_data_without_kaggle_cli(monkeypatch, tmp_path) -> None:
+    files = [kaggle_api._CompetitionFile(name="train_audio/123/a.ogg", size_bytes=3)]
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: True)
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
+    monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", lambda slug, dry_run: files)  # noqa: ARG005
+    monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 1)
+
+    class FakeSession:
+        def close(self) -> None:
+            pass
+
+    streamed: list[str] = []
+    monkeypatch.setattr(kaggle_api, "_build_kaggle_download_session", lambda: FakeSession())
+
+    def fake_stream_download(*, slug, dest_dir, file, force, quiet, session):  # noqa: ANN001, ARG001
+        streamed.append(file.name)
+        output_path = dest_dir / file.name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"abc")
+        return f"streamed {file.name}"
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ANN001, ARG001
+        raise AssertionError("large streaming download must not call Kaggle CLI download")
+
+    monkeypatch.setattr(kaggle_api, "_download_competition_file_streaming", fake_stream_download)
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    output = kaggle_api.download_competition("demo", tmp_path, force=True, quiet=True)
+
+    assert output == "streamed train_audio/123/a.ogg"
+    assert streamed == ["train_audio/123/a.ogg"]
+
+
+def test_streaming_count_requires_preserved_path(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: True)
+    monkeypatch.setattr(kaggle_api, "_download_preserve_paths_enabled", lambda: True)
+    files = [kaggle_api._CompetitionFile(name="train_audio/123/a.ogg", size_bytes=3)]
+
+    (tmp_path / "a.ogg").write_bytes(b"abc")
+    assert kaggle_api._count_downloaded_competition_files(tmp_path, files) == 0
+
+    nested = tmp_path / "train_audio" / "123" / "a.ogg"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"abc")
+    assert kaggle_api._count_downloaded_competition_files(tmp_path, files) == 1
+
+
+def test_count_downloaded_files_uses_size_to_disambiguate_duplicate_basenames(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     files = [
         kaggle_api._CompetitionFile(name="deprecated_train_images/1407735.tif", size_bytes=26641798),
         kaggle_api._CompetitionFile(name="train_images/1407735.tif", size_bytes=1059109),
@@ -474,6 +599,7 @@ def test_count_downloaded_files_uses_size_to_disambiguate_duplicate_basenames(tm
 
 
 def test_download_competition_split_unbounded_retry(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
@@ -500,6 +626,7 @@ def test_download_competition_split_unbounded_retry(monkeypatch, tmp_path) -> No
 
 
 def test_download_competition_split_retries_rate_limit_without_single_shot_fallback(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
@@ -538,6 +665,7 @@ def test_download_competition_split_retries_rate_limit_without_single_shot_fallb
 
 
 def test_download_competition_split_stops_after_rate_limit_retry_budget(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
     monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
     monkeypatch.setattr(
         kaggle_api,
