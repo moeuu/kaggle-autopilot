@@ -46,6 +46,24 @@ class AppContext:
     force: bool
 
 
+def _sidecar_min_gpu_quota_minutes(
+    *,
+    min_gpu_quota_hours_for_new_comp: float | None,
+    max_total_min: int | None,
+    time_budget_min: int | None,
+    max_iterations: int,
+) -> int | None:
+    if min_gpu_quota_hours_for_new_comp is not None:
+        if min_gpu_quota_hours_for_new_comp <= 0:
+            return None
+        return int(min_gpu_quota_hours_for_new_comp * 60)
+    if max_total_min is not None and max_total_min > 0:
+        return max_total_min
+    if time_budget_min is not None and time_budget_min > 0:
+        return time_budget_min * max(1, max_iterations)
+    return None
+
+
 def _preferred_artifacts_dir() -> Path:
     preferred = DEFAULT_ARTIFACTS_DIR
     try:
@@ -611,11 +629,14 @@ def watch_kaggle_gpu_sidecar(
         min=1,
         help="Only run candidates with estimated training time at or below this many minutes.",
     ),
-    min_gpu_quota_hours_for_new_comp: float = typer.Option(
-        15.0,
+    min_gpu_quota_hours_for_new_comp: float | None = typer.Option(
+        None,
         "--min-gpu-quota-hours-for-new-comp",
         min=0.0,
-        help="Do not start a new Kaggle GPU competition unless at least this many GPU hours remain. Use 0 to disable.",
+        help=(
+            "Do not start a new Kaggle GPU competition unless at least this many GPU hours remain. "
+            "Defaults to --max-total-min. Use 0 to disable."
+        ),
     ),
     allow_slug: list[str] | None = typer.Option(None, "--allow-slug", help="Only consider this slug; repeatable."),
     block_slug: list[str] | None = typer.Option(None, "--block-slug", help="Never consider this slug; repeatable."),
@@ -658,8 +679,11 @@ def watch_kaggle_gpu_sidecar(
         lightweight_only=True,
         lightweight_max_data_bytes=None,
         lightweight_max_training_min=max_training_min,
-        kaggle_gpu_min_available_minutes_for_new_competition=(
-            None if min_gpu_quota_hours_for_new_comp <= 0 else int(min_gpu_quota_hours_for_new_comp * 60)
+        kaggle_gpu_min_available_minutes_for_new_competition=_sidecar_min_gpu_quota_minutes(
+            min_gpu_quota_hours_for_new_comp=min_gpu_quota_hours_for_new_comp,
+            max_total_min=max_total_min,
+            time_budget_min=time_budget_min,
+            max_iterations=max_iterations,
         ),
     )
     if once:

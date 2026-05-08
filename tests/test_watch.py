@@ -685,5 +685,38 @@ def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp
         "lightweight_only": True,
         "lightweight_max_data_bytes": None,
         "lightweight_max_training_min": 120,
-        "kaggle_gpu_min_available_minutes_for_new_competition": 900,
+        "kaggle_gpu_min_available_minutes_for_new_competition": 480,
     }
+
+
+def test_watch_kaggle_gpu_sidecar_cli_allows_disabling_new_comp_quota_guard(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_watch_once(config):
+        captured["kaggle_gpu_min_available_minutes_for_new_competition"] = (
+            config.kaggle_gpu_min_available_minutes_for_new_competition
+        )
+        return type("Result", (), {"status": "dry_run", "slug": "demo", "run_id": "run-1"})()
+
+    monkeypatch.setattr("kagglebot.cli.run_watch_once", fake_run_watch_once)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "--workdir",
+            str(tmp_path),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--force",
+            "watch-kaggle-gpu-sidecar",
+            "--once",
+            "--min-gpu-quota-hours-for-new-comp",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"kaggle_gpu_min_available_minutes_for_new_competition": None}
