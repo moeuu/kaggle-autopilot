@@ -113,7 +113,7 @@ def test_find_competition_files_uses_ancestor_context_for_nested_data_dir(tmp_pa
     assert test_path.name == "test_synth.csv"
 
 
-def test_find_competition_files_prefers_stage1_sample_over_stage2_by_default(tmp_path: Path) -> None:
+def test_find_competition_files_prefers_stage2_sample_over_stage1_by_default(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,7 +127,7 @@ def test_find_competition_files_prefers_stage1_sample_over_stage2_by_default(tmp
     pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
 
     _, _, sample_path = find_competition_files(data_dir)
-    assert sample_path == stage1
+    assert sample_path == stage2
 
 
 def test_find_competition_files_honors_stage_override(tmp_path: Path, monkeypatch) -> None:
@@ -148,7 +148,7 @@ def test_find_competition_files_honors_stage_override(tmp_path: Path, monkeypatc
     assert sample_path == stage2
 
 
-def test_ensure_sample_submission_prefers_stage1_sample_over_stage2_by_default(tmp_path: Path) -> None:
+def test_ensure_sample_submission_prefers_stage2_sample_over_stage1_by_default(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,7 +160,7 @@ def test_ensure_sample_submission_prefers_stage1_sample_over_stage2_by_default(t
     pd.DataFrame({"ID": ["2026_1_2", "2026_1_3"], "Pred": [0.5, 0.5]}).to_csv(stage2, index=False)
 
     sample_path = ensure_sample_submission(data_dir)
-    assert sample_path == stage1
+    assert sample_path == stage2
 
 
 def test_ensure_sample_submission_honors_stage_override(tmp_path: Path, monkeypatch) -> None:

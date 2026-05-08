@@ -85,6 +85,34 @@ def test_validate_submission_categorical_target_allows_unknown_values(tmp_path: 
     validate_submission(str(submission), str(sample))
 
 
+def test_validate_submission_requires_rna_anchor_columns_to_match_sample(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "ID": ["RNA1_1", "RNA1_2"],
+            "resname": ["A", "C"],
+            "resid": [1, 2],
+            "x_1": [0.0, 0.0],
+            "y_1": [0.0, 0.0],
+            "z_1": [0.0, 0.0],
+        }
+    ).to_csv(sample, index=False)
+    pd.DataFrame(
+        {
+            "ID": ["RNA1_1", "RNA1_2"],
+            "resname": ["G", "C"],
+            "resid": [1, 2],
+            "x_1": [0.1, 0.2],
+            "y_1": [0.3, 0.4],
+            "z_1": [0.5, 0.6],
+        }
+    ).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError, match="anchor column 'resname'"):
+        validate_submission(str(submission), str(sample))
+
+
 def test_validate_submission_reports_multiple_problems(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, None], "target": [0.1, "bad"]}).to_csv(submission, index=False)
@@ -350,6 +378,21 @@ def test_classify_submit_error_unknown() -> None:
     assert classified["kind"] == "unknown"
     assert classified["reason"] == "unclassified_submit_error"
     assert classified["retry_after_seconds"] is None
+
+
+def test_classify_submit_error_ambiguous_notebook_bad_request() -> None:
+    classified = classify_submit_error(
+        "",
+        (
+            "400 Client Error: Bad Request for url: "
+            "https://www.kaggle.com/api/v1/competitions/submissions/submit-notebook/"
+            "deep-past-initiative-machine-translation"
+        ),
+        1,
+    )
+    assert classified["kind"] == "unknown"
+    assert classified["reason"] == "ambiguous_notebook_bad_request"
+    assert classified["retry_after_seconds"] == 3
 
 
 def test_normalize_and_fingerprint_are_stable() -> None:

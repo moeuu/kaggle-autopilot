@@ -41,6 +41,25 @@ class _CompetitionFile:
     size_bytes: int
 
 
+@dataclass(frozen=True)
+class EnteredCompetition:
+    slug: str
+    title: str
+    url: str
+    category: str
+    reward: str
+    evaluation_metric: str
+    deadline: datetime | None
+    enabled_date: datetime | None
+    new_entrant_deadline: datetime | None
+    merger_deadline: datetime | None
+    team_count: int | None
+    max_daily_submissions: int | None
+    is_kernels_submissions_only: bool
+    submissions_disabled: bool
+    source: str
+
+
 DownloadProgressCallback = Callable[[int, int, str | None], None]
 
 
@@ -169,6 +188,14 @@ def _list_competition_files_with_sizes(slug: str, *, dry_run: bool) -> list[_Com
             return files
         seen_tokens.add(next_page_token)
         page_token = next_page_token
+
+
+def competition_total_size_bytes(slug: str, *, dry_run: bool = False) -> int | None:
+    """Return total listed competition file bytes, or None when Kaggle lists no files."""
+    files = _list_competition_files_with_sizes(slug, dry_run=dry_run)
+    if not files:
+        return 0 if dry_run else None
+    return sum(max(0, file.size_bytes) for file in files)
 
 
 def _parse_competition_files_csv(output: str) -> tuple[list[_CompetitionFile], str | None]:
@@ -583,6 +610,104 @@ def list_competition_submissions(slug: str, *, dry_run: bool = False) -> list[di
         if normalized:
             rows.append(normalized)
     return rows
+
+
+def list_entered_competitions(*, page_limit: int = 5, dry_run: bool = False) -> list[EnteredCompetition]:
+    if dry_run:
+        return []
+
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+
+        api = KaggleApi()
+        api.authenticate()
+        competitions: list[EnteredCompetition] = []
+        seen: set[str] = set()
+        for page in range(1, max(1, page_limit) + 1):
+            page_items = api.competitions_list(group="entered", page=page, sort_by="latestDeadline")
+            if not page_items:
+                break
+            for item in page_items:
+                competition = _entered_competition_from_api(item)
+                if not competition.slug or competition.slug in seen:
+                    continue
+                seen.add(competition.slug)
+                competitions.append(competition)
+            if len(page_items) < 20:
+                break
+        return competitions
+    except KaggleCliError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise KaggleCliError(f"Unable to list entered Kaggle competitions: {exc}") from exc
+
+
+def _entered_competition_from_api(competition: object) -> EnteredCompetition:
+    raw_url = str(
+        getattr(competition, "url", None)
+        or getattr(competition, "ref", None)
+        or getattr(competition, "slug", None)
+        or ""
+    ).strip()
+    slug = _competition_slug_from_api_value(raw_url)
+    if not slug:
+        slug = _competition_slug_from_api_value(str(getattr(competition, "title", "") or ""))
+    url = raw_url if raw_url.startswith("http") else f"https://www.kaggle.com/competitions/{slug}"
+    return EnteredCompetition(
+        slug=slug,
+        title=str(getattr(competition, "title", "") or slug),
+        url=url,
+        category=str(getattr(competition, "category", "") or "Unspecified"),
+        reward=str(getattr(competition, "reward", "") or ""),
+        evaluation_metric=str(getattr(competition, "evaluation_metric", "") or ""),
+        deadline=_optional_datetime(getattr(competition, "deadline", None)),
+        enabled_date=_optional_datetime(getattr(competition, "enabled_date", None)),
+        new_entrant_deadline=_optional_datetime(getattr(competition, "new_entrant_deadline", None)),
+        merger_deadline=_optional_datetime(getattr(competition, "merger_deadline", None)),
+        team_count=_optional_int(getattr(competition, "team_count", None)),
+        max_daily_submissions=_optional_int(getattr(competition, "max_daily_submissions", None)),
+        is_kernels_submissions_only=bool(getattr(competition, "is_kernels_submissions_only", False)),
+        submissions_disabled=bool(getattr(competition, "submissions_disabled", False)),
+        source="api-group:entered",
+    )
+
+
+def _competition_slug_from_api_value(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return parse_competition_slug(raw)
+    except ValueError:
+        pass
+    if "/" in raw:
+        raw = raw.rstrip("/").rsplit("/", 1)[-1]
+    try:
+        return parse_competition_slug(raw)
+    except ValueError:
+        return ""
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 def check_rules_accepted(slug: str, *, dry_run: bool = False) -> bool:
@@ -1069,14 +1194,14 @@ def _run_kaggle(args: list[str], slug: str | None, *, dry_run: bool) -> str:
         raise KaggleCliError("Kaggle CLI not found. Install `kaggle` and ensure it is on PATH.", args) from exc
 
     output = result.output
+    if _is_kernel_capacity_limit(output):
+        raise KernelCapacityError(
+            "Kaggle GPU session limit reached; free running GPU sessions and retry.",
+            args,
+            exit_code=result.returncode,
+            output=output,
+        )
     if result.returncode != 0:
-        if _is_kernel_capacity_limit(output):
-            raise KernelCapacityError(
-                "Kaggle GPU session limit reached; free running GPU sessions and retry.",
-                args,
-                exit_code=result.returncode,
-                output=output,
-            )
         if _is_network_error(output):
             raise KaggleNetworkError(
                 "Kaggle CLI failed due to a network or DNS error. Check connectivity to www.kaggle.com and retry.",

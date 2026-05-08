@@ -1,11 +1,16 @@
-"""Tests for the GPT-5.4 planning pipeline."""
+"""Tests for the GPT-5.5 planning pipeline."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig, _extract_plan_json, run_agent_pipeline
+from kagglebot.orchestrator.agent_pipeline import (
+    _STRATEGY_PROMPT_MAX_CHARS,
+    AgentPipelineConfig,
+    _extract_plan_json,
+    run_agent_pipeline,
+)
 from kagglebot.paths import CompetitionPaths
 
 
@@ -19,10 +24,10 @@ class DummyCodexResult:
 
 
 class DummyStrategyResult:
-    def __init__(self, output: str) -> None:
-        self.returncode = 0
+    def __init__(self, output: str, *, returncode: int = 0, stderr: str = "") -> None:
+        self.returncode = returncode
         self.stdout = output
-        self.stderr = ""
+        self.stderr = stderr
 
 
 def _long_strategy_text() -> str:
@@ -332,14 +337,121 @@ def test_agent_pipeline_does_not_raise_on_successful_strategy_result(monkeypatch
     assert (paths.context_agent_dir / "codex_instructions.md").exists()
 
 
-def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path: Path) -> None:
+def test_agent_pipeline_falls_back_when_strategy_times_out(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+
+    codex_calls: list[Path] = []
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        codex_calls.append(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_dir.name == "implement":
+            kernel_path = paths.kernel_source_dir / "kernel.py"
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+        return DummyCodexResult(output_dir)
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        message = "Strategy runner timed out after 600s (elapsed=600s)."
+        return DummyStrategyResult("", returncode=124, stderr=message)
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    run_agent_pipeline(paths=paths, config=config)
+
+    agent_dir = paths.context_agent_dir
+    assert len(codex_calls) == 2
+    assert (agent_dir / "strategy_plan.md").exists()
+    assert (agent_dir / "codex_instructions.md").exists()
+    assert (agent_dir / "strategy_transcript.txt").read_text(encoding="utf-8").find("timed out") != -1
+    assert (paths.context_dir / "research_sources.jsonl").exists()
+    assert (paths.context_dir / "research_summary.md").exists()
+
+
+def test_agent_pipeline_caps_compact_strategy_prompt(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+
+    codex_calls: list[Path] = []
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        codex_calls.append(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_dir.name == "implement":
+            kernel_path = paths.kernel_source_dir / "kernel.py"
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+        return DummyCodexResult(output_dir)
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        assert len(prompt_text) <= _STRATEGY_PROMPT_MAX_CHARS
+        return DummyStrategyResult(
+            "\n".join(
+                [
+                    "===STRATEGY===",
+                    _long_strategy_text(),
+                    "===RESEARCH_SOURCES_JSONL===",
+                    _research_sources_jsonl_text(),
+                    "===RESEARCH_SUMMARY_MD===",
+                    _research_summary_text(),
+                    "===PLAN_JSON===",
+                    _plan_json_text(),
+                    "===CODEX_INSTRUCTIONS===",
+                    _long_instructions_text(),
+                ]
+            )
+        )
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+    monkeypatch.setattr(
+        "kagglebot.orchestrator.agent_pipeline._load_problem_type_knowledge_text",
+        lambda *args, **kwargs: "Prior knowledge.\n" * (_STRATEGY_PROMPT_MAX_CHARS // 8),
+    )
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    run_agent_pipeline(paths=paths, config=config)
+
+    assert len(codex_calls) == 2
+    assert (paths.context_agent_dir / "strategy" / "prompt.md").exists()
+
+
+def test_agent_pipeline_write_guard_blocks_data_dir(monkeypatch, tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
 
     def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
-            (tmp_path / "oops.txt").write_text("nope", encoding="utf-8")
+            train_path = paths.data_dir / "train.csv"
+            train_path.parent.mkdir(parents=True, exist_ok=True)
+            train_path.write_text("id,target\n1,1\n", encoding="utf-8")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
@@ -374,7 +486,7 @@ def test_agent_pipeline_write_guard_blocks_outside_kernel(monkeypatch, tmp_path:
     )
 
     run_agent_pipeline(paths=paths, config=config)
-    assert not (tmp_path / "oops.txt").exists()
+    assert not (paths.data_dir / "train.csv").exists()
 
 
 def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None:
@@ -422,6 +534,56 @@ def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None
 
     run_agent_pipeline(paths=paths, config=config)
     assert (paths.kernel_source_dir / "kernel.py").exists()
+
+
+def test_agent_pipeline_allows_src_write(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_dir.name == "implement":
+            support_path = tmp_path / "src" / "support_fix.py"
+            support_path.parent.mkdir(parents=True, exist_ok=True)
+            support_path.write_text("READY = True\n", encoding="utf-8")
+            kernel_path = paths.kernel_source_dir / "kernel.py"
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text("print('ok')\n", encoding="utf-8")
+        return DummyCodexResult(output_dir)
+
+    def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
+        text = "\n".join(
+            [
+                "===STRATEGY===",
+                _long_strategy_text(),
+                "===RESEARCH_SOURCES_JSONL===",
+                _research_sources_jsonl_text(),
+                "===RESEARCH_SUMMARY_MD===",
+                _research_summary_text(),
+                "===PLAN_JSON===",
+                _plan_json_text(),
+                "===CODEX_INSTRUCTIONS===",
+                _long_instructions_text(),
+            ]
+        )
+        return DummyStrategyResult(text)
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    run_agent_pipeline(paths=paths, config=config)
+    assert (tmp_path / "src" / "support_fix.py").read_text(encoding="utf-8") == "READY = True\n"
 
 
 def test_agent_pipeline_injects_kernel_reference_when_missing(monkeypatch, tmp_path: Path) -> None:

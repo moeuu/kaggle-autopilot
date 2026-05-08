@@ -5,6 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+
+pytestmark = pytest.mark.competition_artifact
 
 
 def _load_kernel_module():

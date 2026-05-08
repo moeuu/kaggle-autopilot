@@ -75,15 +75,13 @@ def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, str]:
     stage_score = _sample_stage_score(path)
     desired_stage = _resolve_desired_submission_stage()
     stage_match = 1 if (desired_stage is not None and stage_score == desired_stage) else 0
-    # Prefer earlier stages by default (stage1 over stage2), since Kaggle often only accepts
-    # the current stage format. Unstaged samples (stage_score=0) remain preferred when they
-    # have data rows, as they're typically the canonical file.
-    stage_preference = 0 if stage_score == 0 else -stage_score
-    # When an explicit desired stage is provided, prefer the closest stage number as a fallback.
+    explicit_stage = 1 if stage_score > 0 else 0
+    stage_preference = stage_score if stage_score > 0 else 0
+    row_count = _tabular_data_row_count(path)
     desired_distance = 0
     if desired_stage is not None:
         desired_distance = -abs(stage_score - desired_stage) if stage_score else -10_000
-    return (name_score, stage_match, desired_distance, stage_preference, path.name.lower())
+    return (name_score, stage_match, explicit_stage, desired_distance, stage_preference, row_count, path.name.lower())
 
 
 def _sample_name_score(path: Path) -> int:
@@ -138,6 +136,22 @@ def _tabular_file_has_data_rows(path: Path) -> bool:
     except OSError:
         return True
     return False
+
+
+def _tabular_data_row_count(path: Path) -> int:
+    """Return the number of non-empty data rows in a tabular file."""
+    if path.suffix.lower() not in {".csv", ".tsv", ".txt"}:
+        return 0
+    non_empty = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                non_empty += 1
+    except OSError:
+        return 0
+    return max(0, non_empty - 1)
 
 
 def ensure_sample_submission(data_dir: Path) -> Path | None:

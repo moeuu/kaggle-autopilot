@@ -98,6 +98,10 @@ class KernelTimeoutError(KaggleBotError):
     exit_code = 11
 
 
+class KernelStillRunningError(KernelTimeoutError):
+    """Kaggle kernel exceeded the local wait budget but is still running remotely."""
+
+
 class KernelFailedError(KaggleBotError):
     """Kaggle kernel completed with a failure status."""
 

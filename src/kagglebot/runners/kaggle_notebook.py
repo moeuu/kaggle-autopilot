@@ -11,6 +11,7 @@ from pathlib import Path
 from rich import print
 
 from kagglebot import kaggle_cli
+from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.runners.base import RunContext, RunResult
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
@@ -446,6 +447,7 @@ class KaggleNotebookRunner:
             competition_slug=slug,
             accelerator=accelerator,
             enable_internet=context.enable_internet,
+            source_config=load_kernel_source_config(paths.plan_path),
         )
         kernel_metadata_path = kernel_dir / "kernel-metadata.json"
         kernel_metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -492,7 +494,7 @@ class KaggleNotebookRunner:
         print(f"[cyan]pushing kernel[/cyan]: {kernel_dir}")
         kaggle_cli.kernels_push(kernel_dir, slug=slug, stream_output=True)
         print(f"[cyan]waiting for kernel[/cyan]: {kernel_id}")
-        _wait_for_kernel(kernel_id, logs_dir=logs_dir, slug=slug)
+        _wait_for_kernel(kernel_id, logs_dir=logs_dir, slug=slug, kernel_dir=kernel_dir)
         print(f"[cyan]downloading kernel output[/cyan]: {output_dir}")
         kaggle_cli.kernels_output(kernel_id, output_dir, slug=slug, stream_output=True, force=True)
 
@@ -548,11 +550,13 @@ def build_kernel_metadata(
     competition_slug: str,
     accelerator: str,
     enable_internet: bool,
+    source_config: KernelSourceConfig | None = None,
 ) -> dict[str, object]:
     enable_gpu = accelerator == "gpu"
     enable_tpu = accelerator == "tpu"
     if enable_gpu and enable_tpu:
         raise ValueError("enable_gpu and enable_tpu cannot both be true.")
+    source_config = source_config or KernelSourceConfig()
     return {
         "id": f"{kaggle_username}/{kernel_slug}",
         "title": title,
@@ -564,9 +568,9 @@ def build_kernel_metadata(
         "enable_tpu": enable_tpu,
         "enable_internet": enable_internet,
         "competition_sources": [competition_slug],
-        "dataset_sources": [],
-        "kernel_sources": [],
-        "model_sources": [],
+        "dataset_sources": list(source_config.dataset_sources),
+        "kernel_sources": list(source_config.kernel_sources),
+        "model_sources": list(source_config.model_sources),
         "keywords": [],
     }
 
@@ -614,7 +618,7 @@ def find_submission_file(output_dir: Path) -> Path:
     return matches[0]
 
 
-def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str) -> None:
+def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str, kernel_dir: Path) -> None:
     timeout_seconds = 60 * 60
     poll_seconds = 15
     start = time.monotonic()
@@ -631,6 +635,9 @@ def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str) -> None:
         if status == "complete":
             return
         if status == "failed":
+            _stop_failed_kernel_run(
+                kernel_id, kernel_dir=kernel_dir, logs_dir=logs_dir, slug=slug, status_output=output
+            )
             raise RuntimeError(f"Kernel run failed: {output}")
         if time.monotonic() - start > timeout_seconds:
             raise TimeoutError("Timed out waiting for kernel completion.")
@@ -639,10 +646,69 @@ def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str) -> None:
 
 def _parse_kernel_status(output: str) -> str:
     text = output.lower()
-    if "error" in text or "failed" in text:
+    if (
+        "failure message" in text
+        or "your notebook failed" in text
+        or "kernelworkerstatus.error" in text
+        or "kernelworkerstatus.failed" in text
+        or 'status "error"' in text
+        or 'status "failed"' in text
+        or " failed" in text
+    ):
         return "failed"
     if "complete" in text or "success" in text:
         return "complete"
     if "running" in text or "queued" in text or "pending" in text:
         return "running"
     return "unknown"
+
+
+def _stop_failed_kernel_run(
+    kernel_id: str,
+    *,
+    kernel_dir: Path,
+    logs_dir: Path,
+    slug: str,
+    status_output: str,
+) -> None:
+    if os.getenv("KAGGLEBOT_STOP_FAILED_KERNEL", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    stop_dir = logs_dir.parent / "kernel-stop"
+    stop_log = logs_dir / "kernel_stop.log"
+    try:
+        metadata_path = kernel_dir / "kernel-metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["id"] = kernel_id
+        metadata["enable_gpu"] = False
+        metadata["enable_tpu"] = False
+        metadata["enable_internet"] = False
+        metadata["code_file"] = "main.py"
+        stop_dir.mkdir(parents=True, exist_ok=True)
+        (stop_dir / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        (stop_dir / "main.py").write_text(
+            "\n".join(
+                [
+                    "from pathlib import Path",
+                    "Path('/kaggle/working/kagglebot_stopped_failed_gpu_kernel.txt').write_text(",
+                    "    'KaggleBot replaced a failed GPU run with a CPU stop marker.\\n',",
+                    "    encoding='utf-8',",
+                    ")",
+                    "print('KaggleBot stop marker completed.')",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        print(f"[yellow]kernel failed[/yellow]: pushing CPU stop marker for {kernel_id}")
+        output = kaggle_cli.kernels_push(stop_dir, slug=slug, stream_output=True)
+        stop_log.write_text(
+            f"status_output:\n{status_output}\n\nstop_marker_output:\n{output}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001
+        stop_log.write_text(
+            f"status_output:\n{status_output}\n\nstop_marker_failed:\n{type(exc).__name__}: {exc}\n",
+            encoding="utf-8",
+        )
+        print(f"[yellow]kernel stop marker failed[/yellow]: {type(exc).__name__}: {exc}")

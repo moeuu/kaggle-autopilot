@@ -46,7 +46,7 @@ Schema/method flexibility:
 **Safe defaults**:
 - Default max iterations: 3 (`--max-iterations` to override)
 - No training time limit (accuracy-first)
-- Internet ON by default (disable with `--internet off`)
+- Internet ON by default, but autopilot forces `--internet off` when captured rules say notebook internet is disabled
 - Each iteration submits and waits for Kaggle score before stop/continue decision
 
 ## Manual Commands
@@ -65,6 +65,9 @@ uv run kagglebot train <competition> --compute local_gpu
 
 # Submit manually
 uv run kagglebot --force submit <competition> -f submission.csv -m "message"
+
+# Keep selecting entered competitions and running autopilot
+uv run kagglebot --force watch --compute local_gpu
 
 # Crawl Kaggle competition submission formats
 uv run kagglebot crawl-submission-formats --output-dir artifacts/competition-submission-formats
@@ -130,6 +133,9 @@ Optional environment knobs:
 - Custom metric hook: use metric string `custom:<module_or_py_path>:<function>`
 - Vision YOLO routing: if sample columns are `filename,right_place,prediction_string` and YOLO folders exist
   (`images/train`, `images/test`, `labels/train`), Kagglebot uses a detection pipeline instead of tabular models.
+- RNA structure routing: if competition data looks like RNA sequence tables plus residue-level coordinate labels/sample
+  (`train_sequences*`, `test_sequences*`, `train_labels*`, coordinate columns like `x_1,y_1,z_1`), Kagglebot classifies the
+  task as `rna_structure` instead of generic tabular and preserves residue-anchor columns during validation.
 - Vision training knobs:
   - `KAGGLEBOT_YOLO_PRETRAIN=1|0` (default `1`) toggles pretrained detector initialization.
   - `KAGGLEBOT_YOLO_EPOCHS=<int>` overrides detector epochs (time-budget caps still apply).
@@ -137,6 +143,7 @@ Optional environment knobs:
 ## Safety Guardrails
 
 - ✅ **Readiness-score-driven loop**: stop/continue uses SRS (offline metric + uncertainty), with optional submission/rank guardrails
+- ✅ **24h watch mode stays scoped to entered competitions**: `watch` never accepts rules or joins competitions automatically
 - ✅ **Strict local validation before submit**: Column order, row count, ID integrity, numeric prediction checks
 - ✅ **Duplicate prevention**: SHA256 hash check against `submissions/ledger.jsonl`
 - ✅ **Rate limiting**: 5-min cooldown between submissions
@@ -149,6 +156,8 @@ Optional environment knobs:
 - ✅ **Medal-aware iteration policy**: leaderboard runs default to a bronze target (`target_medal=bronze`, `target_rank_percentile=0.10`) so `minor_tuning` is suppressed until the run reaches the target rank band
 - ✅ **High-accuracy tabular planning guardrails**: large tabular binary problems with meaningful categoricals must keep multi-family search active (CatBoost + XGBoost + LightGBM/second variant + OOF blend candidate)
 - ✅ **Reference input recovery**: required reference notebooks now emit `context/reference_inputs_manifest.json`, and `--download` stages referenced datasets/competitions into `context/reference_inputs/` for kernels that depend on external/original data
+- ✅ **Competition-scoped policy overrides**: optional `artifacts/<slug>/context/competition_policy.json` can tighten notebook selection, reference-input recovery, repair signals, and fallback evaluation without changing defaults for other competitions
+  - Policy files can also declare generic `required_capabilities` and `execution_hints`, so competition-specific win conditions stay in artifacts while `src/` only gains reusable orchestration/runtime features
 - ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration is forced away from same-family-only tuning toward broader model-family diversification and blending
 
 ## Top1 Public Leaderboard (Reference)
@@ -184,6 +193,7 @@ artifacts/<slug>/
       strategy_transcript.txt    # Raw GPT stage output
   kernel/
     kernel.py                    # Authoritative kernel entrypoint (all compute modes)
+    *.py                         # Optional competition-specific helper modules imported by kernel.py
   prompts/
     codex_plan_and_implement.md   # Initial plan + implementation prompt
     codex_improve.md             # Improvement iteration prompt

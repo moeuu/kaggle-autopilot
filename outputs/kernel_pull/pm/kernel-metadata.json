@@ -1,0 +1,17 @@
+{
+  "id": "packagemanager/pm-109815507-at-02-21-2026-18-03-23",
+  "id_no": 110189711,
+  "title": "PM-109815507-at-02-21-2026-18-03-23",
+  "code_file": "pm-109815507-at-02-21-2026-18-03-23.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

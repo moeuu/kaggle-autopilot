@@ -161,3 +161,4 @@ def test_strategy_prompt_appends_high_accuracy_tabular_policy(tmp_path: Path) ->
     assert "[HIGH_ACCURACY_TABULAR_POLICY]" in prompt
     assert "CatBoost raw categorical" in prompt
     assert "OOF blend candidate" in prompt
+    assert "suite-aware ablations" in prompt

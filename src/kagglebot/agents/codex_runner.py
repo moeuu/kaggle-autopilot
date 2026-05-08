@@ -9,6 +9,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT, render_prompt_identity
+from kagglebot.agents.sandbox_fallback import (
+    append_sandbox_args,
+    detect_sandbox_startup_failure,
+    resolve_agent_sandbox_mode,
+)
 from kagglebot.exec_utils import run_command
 
 _COMMAND_LOG_FIRST_WIDTH = 100
@@ -23,6 +28,9 @@ class CodexResult:
     returncode: int
     stdout: str
     stderr: str
+    sandbox_policy_mode: str = "permissive"
+    used_sandbox_fallback: bool = False
+    sandbox_failure_excerpt: str | None = None
 
 
 def run_codex(
@@ -48,6 +56,7 @@ def run_codex(
             returncode=0,
             stdout="",
             stderr="",
+            sandbox_policy_mode=resolve_agent_sandbox_mode(),
         )
 
     args = [IMPLEMENTATION_AGENT.cli_command, "exec"]
@@ -57,16 +66,16 @@ def run_codex(
     if normalized_effort:
         args += ["-c", f'model_reasoning_effort="{normalized_effort}"']
     supported = _supported_flags()
-    if "--full-auto" in supported:
-        args.append("--full-auto")
-    if "--sandbox" in supported or "-s" in supported:
-        args += ["--sandbox", "workspace-write"]
-    args += [
-        "--json",
-        "--output-last-message",
-        str(last_message_path),
-        "-",
-    ]
+    sandbox_policy_mode = resolve_agent_sandbox_mode()
+    sandbox_mode = "workspace-write" if sandbox_policy_mode in {"fallback", "workspace-write"} else "danger-full-access"
+    dangerously_bypass = sandbox_policy_mode == "permissive"
+    args += _build_shared_args(
+        supported=supported,
+        last_message_path=last_message_path,
+        sandbox_mode=sandbox_mode,
+        dangerously_bypass=dangerously_bypass,
+    )
+    print(f"{_RUNNER_LABEL}: sandbox mode {sandbox_policy_mode}", flush=True)
     stop_event = threading.Event()
     start_time = time.monotonic()
     label = heartbeat_label.strip() if heartbeat_label else None
@@ -78,33 +87,51 @@ def run_codex(
         daemon=True,
     )
     heartbeat.start()
-    stdout_chunks: list[str] = []
-    stderr_text = ""
+    stdout_attempts: list[str] = []
+    stderr_attempts: list[str] = []
     returncode = 0
+    used_sandbox_fallback = False
+    sandbox_failure_excerpt: str | None = None
     try:
-        proc = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        stdout_text, stderr_text, returncode = _run_codex_process(args=args, prompt_text=prompt_text)
+        stdout_attempts.append(stdout_text)
+        if stderr_text:
+            stderr_attempts.append(stderr_text)
+        sandbox_failure_excerpt = detect_sandbox_startup_failure(
+            stdout_text,
+            stderr_text,
+            _read_last_message(last_message_path),
         )
-        if proc.stdin is not None:
-            proc.stdin.write(prompt_text)
-            proc.stdin.close()
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                stdout_chunks.append(line)
-                _emit_codex_event(line)
-        if proc.stderr is not None:
-            stderr_text = proc.stderr.read()
-        returncode = proc.wait()
+        if sandbox_policy_mode == "fallback" and returncode != 0 and sandbox_failure_excerpt is not None:
+            used_sandbox_fallback = True
+            print(f"{_RUNNER_LABEL}: sandbox startup failed; retrying without sandbox", flush=True)
+            retry_args = [IMPLEMENTATION_AGENT.cli_command, "exec"]
+            if model:
+                retry_args += ["-m", model]
+            if normalized_effort:
+                retry_args += ["-c", f'model_reasoning_effort="{normalized_effort}"']
+            retry_args += _build_shared_args(
+                supported=supported,
+                last_message_path=last_message_path,
+                sandbox_mode="danger-full-access",
+                dangerously_bypass=True,
+            )
+            stdout_text, stderr_text, returncode = _run_codex_process(args=retry_args, prompt_text=prompt_text)
+            stdout_attempts.append(stdout_text)
+            if stderr_text:
+                stderr_attempts.append(stderr_text)
     finally:
         stop_event.set()
         heartbeat.join(timeout=1.0)
     total_elapsed = int(time.monotonic() - start_time)
     print(f"{_RUNNER_LABEL} done... ({total_elapsed}s total, exit={returncode}){label_suffix}", flush=True)
-    stdout_text = "".join(stdout_chunks)
+    stdout_text = "".join(stdout_attempts)
+    stderr_text = "\n\n".join(chunk for chunk in stderr_attempts if chunk.strip())
+    if used_sandbox_fallback and sandbox_failure_excerpt:
+        if stderr_text:
+            stderr_text = f"{sandbox_failure_excerpt}\n\n{stderr_text}"
+        else:
+            stderr_text = sandbox_failure_excerpt
     transcript_path.write_text(stdout_text, encoding="utf-8")
     if not last_message_path.exists():
         last_message_path.write_text("", encoding="utf-8")
@@ -114,7 +141,62 @@ def run_codex(
         returncode=returncode,
         stdout=stdout_text,
         stderr=stderr_text,
+        sandbox_policy_mode=sandbox_policy_mode,
+        used_sandbox_fallback=used_sandbox_fallback,
+        sandbox_failure_excerpt=sandbox_failure_excerpt,
     )
+
+
+def _build_shared_args(
+    *,
+    supported: set[str],
+    last_message_path: Path,
+    sandbox_mode: str,
+    dangerously_bypass: bool = False,
+) -> list[str]:
+    args: list[str] = []
+    append_sandbox_args(
+        args,
+        supported,
+        sandbox_mode=sandbox_mode,
+        dangerously_bypass=dangerously_bypass,
+        include_full_auto=not dangerously_bypass and sandbox_mode == "workspace-write",
+    )
+    args += [
+        "--json",
+        "--output-last-message",
+        str(last_message_path),
+        "-",
+    ]
+    return args
+
+
+def _run_codex_process(*, args: list[str], prompt_text: str) -> tuple[str, str, int]:
+    stdout_chunks: list[str] = []
+    stderr_text = ""
+    proc = subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.stdin is not None:
+        proc.stdin.write(prompt_text)
+        proc.stdin.close()
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            stdout_chunks.append(line)
+            _emit_codex_event(line)
+    if proc.stderr is not None:
+        stderr_text = proc.stderr.read()
+    return "".join(stdout_chunks), stderr_text, proc.wait()
+
+
+def _read_last_message(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _normalize_reasoning_effort(effort: str | None) -> str | None:
@@ -123,9 +205,8 @@ def _normalize_reasoning_effort(effort: str | None) -> str | None:
     normalized = effort.strip().lower().replace("-", "_").replace(" ", "_")
     if not normalized:
         return None
-    # The CLI accepts low/medium/high; map user-facing "extra high" to high.
-    if normalized == "extra_high":
-        return "high"
+    if normalized in {"extra_high", "xhgih"}:
+        return "xhigh"
     return normalized
 
 

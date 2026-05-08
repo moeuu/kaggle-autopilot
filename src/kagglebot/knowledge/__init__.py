@@ -20,10 +20,41 @@ from kagglebot.knowledge.classification import (
 )
 from kagglebot.knowledge.repositories import InsightRepository, TaxonomyRepository
 from kagglebot.paths import KnowledgePaths
-from kagglebot.solver.io import find_competition_files, infer_prediction_kind, infer_submission_layout, infer_task
+from kagglebot.rna_structure import detect_rna_structure_task, extract_target_id, load_rna_structure_task
+from kagglebot.solver.io import (
+    ensure_sample_submission,
+    find_competition_files,
+    infer_prediction_kind,
+    infer_submission_layout,
+    infer_task,
+)
 
 _PROFILE_MAX_TABLE_BYTES_DEFAULT = 256 * 1024 * 1024
 _PROFILE_SAMPLE_ROWS = 200_000
+_SLUG_DATASET_PROFILE_OVERRIDES: dict[str, dict[str, object]] = {
+    "deep-past-initiative-machine-translation": {
+        "task": "translation",
+        "task_by_target": {"translation": "translation"},
+        "prediction_kind_by_target": {"translation": "text"},
+        "metric": "Geometric Mean of the BLEU and the chrF++ scores",
+        "split_strategy_hint": "group_kfold",
+        "group_column_hint": "oare_id",
+        "tags": ["text", "translation", "n_rows_small", "high_cardinality_cats"],
+    }
+}
+
+
+def _dataset_slug(data_dir: Path) -> str:
+    return str(data_dir.parent.name).strip().lower()
+
+
+def _apply_dataset_profile_override(data_dir: Path, profile: dict[str, object]) -> dict[str, object]:
+    override = _SLUG_DATASET_PROFILE_OVERRIDES.get(_dataset_slug(data_dir))
+    if not override:
+        return profile
+    updated = dict(profile)
+    updated.update(override)
+    return updated
 
 
 @dataclass(frozen=True)
@@ -113,6 +144,12 @@ def derive_problem_types(profile: dict[str, object]) -> list[str]:
         "text",
         "image",
         "timeseries",
+        "rna_structure",
+        "rna",
+        "sequence",
+        "structure",
+        "coordinate_regression",
+        "residue_level_output",
         "regression",
         "binary",
         "multiclass",
@@ -440,9 +477,28 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         profile["tags"] = []
         return profile
 
+    if detect_rna_structure_task(data_dir):
+        try:
+            task = load_rna_structure_task(data_dir)
+        except Exception as exc:  # noqa: BLE001
+            profile["status"] = "invalid_rna_structure_data"
+            profile["error"] = str(exc)
+            profile["tags"] = ["rna_structure", "rna", "sequence", "structure"]
+            return profile
+        profile.update(_build_rna_structure_profile(task))
+        return _apply_dataset_profile_override(data_dir, profile)
+
     try:
         train_path, test_path, sample_path = find_competition_files(data_dir)
     except FileNotFoundError as exc:
+        submission_only_profile = _build_submission_only_pairwise_profile(
+            data_dir=data_dir,
+            file_samples=file_samples,
+            max_table_bytes=_profile_max_table_bytes(),
+        )
+        if submission_only_profile is not None:
+            profile.update(submission_only_profile)
+            return profile
         profile["status"] = "missing_required_files"
         profile["error"] = str(exc)
         profile["tags"] = []
@@ -538,7 +594,198 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             },
         }
     )
-    return profile
+    return _apply_dataset_profile_override(data_dir, profile)
+
+
+def _build_rna_structure_profile(task) -> dict[str, object]:
+    train_sequences = task.train_sequences
+    test_sequences = task.test_sequences
+    train_labels = task.train_labels
+    sample = task.sample_submission
+    sequence_lengths = train_sequences[task.sequence_column].astype(str).str.len()
+    sample_target_ids = sample[task.sample_id_column].astype(str).map(extract_target_id)
+    train_target_ids = train_labels[task.label_id_column].astype(str).map(extract_target_id)
+
+    missingness_by_column = {col: float(val) for col, val in train_sequences.isna().mean().items()}
+    dtype_by_column = {col: str(dtype) for col, dtype in train_sequences.dtypes.items()}
+    categorical_columns = [
+        str(col)
+        for col in train_sequences.columns
+        if train_sequences[col].dtype == "object" and str(col) not in {task.sequence_column, task.sequence_id_column}
+    ]
+    numeric_columns = [
+        str(col)
+        for col in train_sequences.columns
+        if pd.api.types.is_numeric_dtype(train_sequences[col]) and str(col) != task.sequence_column
+    ]
+    target_columns = list(task.sample_coordinate_columns)
+    target_column = target_columns[0]
+    coordinate_triplets = [triplet.copy_index for triplet in task.sample_coordinate_triplets]
+    return {
+        "status": "ok",
+        "train_file": task.files.train_sequences_path.name,
+        "test_file": task.files.test_sequences_path.name,
+        "labels_file": task.files.train_labels_path.name,
+        "sample_submission_file": task.files.sample_submission_path.name,
+        "train_rows": len(train_sequences),
+        "train_cols": len(train_sequences.columns),
+        "test_rows": len(test_sequences),
+        "test_cols": len(test_sequences.columns),
+        "id_column": task.sample_id_column,
+        "sequence_id_column": task.sequence_id_column,
+        "target_column": target_column,
+        "target_columns": target_columns,
+        "task": "regression",
+        "task_by_target": {column: "regression" for column in target_columns},
+        "prediction_kind_by_target": {column: "continuous" for column in target_columns},
+        "metric": "coord_rmse",
+        "missingness": float(train_sequences.isna().mean().mean()),
+        "missingness_by_column": missingness_by_column,
+        "dtype_by_column": dtype_by_column,
+        "categorical_columns": categorical_columns,
+        "numeric_columns": numeric_columns,
+        "high_cardinality_columns": [],
+        "modality": "rna_structure",
+        "target_kind": task.target_kind,
+        "sample_anchor_columns": list(task.sample_anchor_columns),
+        "sequence_column": task.sequence_column,
+        "sequence_length_stats": {
+            "min": int(sequence_lengths.min()) if not sequence_lengths.empty else 0,
+            "median": float(sequence_lengths.median()) if not sequence_lengths.empty else 0.0,
+            "max": int(sequence_lengths.max()) if not sequence_lengths.empty else 0,
+        },
+        "residue_rows_train": int(len(train_labels)),
+        "residue_rows_test": int(len(sample)),
+        "coordinate_triplets": coordinate_triplets,
+        "tags": [
+            "rna_structure",
+            "rna",
+            "sequence",
+            "structure",
+            "coordinate_regression",
+            "residue_level_output",
+            _size_tag(len(train_sequences)),
+        ],
+        "target_stats": {
+            "n_targets_train": int(train_target_ids.nunique()),
+            "n_targets_test": int(sample_target_ids.nunique()),
+            "n_coordinate_triplets": len(task.sample_coordinate_triplets),
+        },
+        "train_only_columns": [str(col) for col in train_sequences.columns if col not in test_sequences.columns],
+        "test_only_columns": [str(col) for col in test_sequences.columns if col not in train_sequences.columns],
+        "profile_sampling": {
+            "enabled": False,
+            "max_table_bytes": _profile_max_table_bytes(),
+            "max_rows": _PROFILE_SAMPLE_ROWS,
+            "train": False,
+            "test": False,
+            "sample_submission": False,
+        },
+    }
+
+
+def _build_submission_only_pairwise_profile(
+    *,
+    data_dir: Path,
+    file_samples: list[str],
+    max_table_bytes: int,
+) -> dict[str, object] | None:
+    sample_path = ensure_sample_submission(data_dir)
+    if sample_path is None:
+        return None
+
+    try:
+        sample, sample_row_count, sample_sampled = _read_table_for_profile(sample_path, max_table_bytes=max_table_bytes)
+    except Exception:  # noqa: BLE001
+        return None
+
+    if sample.empty or len(sample.columns) < 2:
+        return None
+
+    id_col = str(sample.columns[0])
+    target_cols = [str(col) for col in sample.columns[1:] if str(col).strip()]
+    if not target_cols:
+        return None
+    target_col = target_cols[0]
+    prediction_kind = infer_prediction_kind(sample[target_col])
+    if prediction_kind not in {"probability", "continuous"}:
+        return None
+
+    file_names = {path.name for path in _find_tabular_files(data_dir)}
+    looks_like_march_mania = _looks_like_march_mania_pairwise_competition(
+        file_names=file_names,
+        sample_path=sample_path,
+        sample=sample,
+        data_dir=data_dir,
+    )
+    if not looks_like_march_mania:
+        return None
+
+    return {
+        "status": "ok",
+        "sample_submission_file": sample_path.name,
+        "train_rows": None,
+        "train_cols": None,
+        "test_rows": sample_row_count if sample_row_count is not None else len(sample),
+        "test_cols": len(sample.columns),
+        "id_column": id_col,
+        "target_column": target_col,
+        "target_columns": target_cols,
+        "task": "classification",
+        "task_by_target": {col: "classification" for col in target_cols},
+        "prediction_kind_by_target": {col: prediction_kind for col in target_cols},
+        "metric": "brier_score",
+        "missingness": 0.0,
+        "missingness_by_column": {col: float(val) for col, val in sample.isna().mean().items()},
+        "dtype_by_column": {col: str(dtype) for col, dtype in sample.dtypes.items()},
+        "categorical_columns": [],
+        "numeric_columns": [],
+        "high_cardinality_columns": [],
+        "modality": "tabular",
+        "tags": ["tabular", "binary"],
+        "competition_structure": "submission_only_pairwise_probability",
+        "split_strategy_hint": "group_kfold",
+        "group_column_hint": "Season",
+        "note": (
+            "Competition does not ship canonical train/test tables. "
+            "Build a pregame matchup table from season history and submit pairwise win probabilities."
+        ),
+        "profile_sampling": {
+            "enabled": bool(sample_sampled),
+            "max_table_bytes": max_table_bytes,
+            "max_rows": _PROFILE_SAMPLE_ROWS,
+            "train": False,
+            "test": False,
+            "sample_submission": sample_sampled,
+        },
+        "file_samples": file_samples,
+    }
+
+
+def _looks_like_march_mania_pairwise_competition(
+    *,
+    file_names: set[str],
+    sample_path: Path,
+    sample: pd.DataFrame,
+    data_dir: Path,
+) -> bool:
+    required_any = {
+        "MRegularSeasonCompactResults.csv",
+        "WRegularSeasonCompactResults.csv",
+        "MNCAATourneyCompactResults.csv",
+        "WNCAATourneyCompactResults.csv",
+    }
+    if not required_any.issubset(file_names):
+        return False
+    if tuple(str(col) for col in sample.columns[:2]) != ("ID", "Pred"):
+        return False
+    first_id = str(sample.iloc[0]["ID"]) if len(sample) else ""
+    if not re.fullmatch(r"\d{4}_\d+_\d+", first_id):
+        return False
+    lowered = str(sample_path.name).lower()
+    if "samplesubmission" in lowered or "sample_submission" in lowered:
+        return True
+    return "march-machine-learning-mania" in str(data_dir).lower()
 
 
 def _profile_max_table_bytes() -> int:
@@ -711,6 +958,20 @@ def _size_tag(n_rows: int) -> str:
     return "n_rows_large"
 
 
+def _format_dataset_dimensions(profile: dict[str, object]) -> str:
+    train_rows = profile.get("train_rows")
+    train_cols = profile.get("train_cols")
+    if isinstance(train_rows, int) and isinstance(train_cols, int):
+        return f"{train_rows:,} rows × {train_cols} columns"
+
+    test_rows = profile.get("test_rows")
+    test_cols = profile.get("test_cols")
+    if isinstance(test_rows, int) and isinstance(test_cols, int):
+        return f"train table unavailable; sample/test view: {test_rows:,} rows × {test_cols} columns"
+
+    return "unknown"
+
+
 def build_plan_and_initial_prompt(
     *,
     slug: str,
@@ -722,8 +983,7 @@ def build_plan_and_initial_prompt(
     tags = profile.get("tags", [])
     task = profile.get("task", "unknown")
     metric = profile.get("metric", "rmse")
-    n_rows = profile.get("train_rows", 0)
-    n_cols = profile.get("train_cols", 0)
+    dataset_dimensions = _format_dataset_dimensions(profile)
 
     lines = [
         f"# Kagglebot {IMPLEMENTATION_AGENT.display_name}: Plan + Implement (Iteration 1)",
@@ -735,7 +995,7 @@ def build_plan_and_initial_prompt(
         f"**Rules URL**: {rules_url}",
         f"**Task**: {task}",
         f"**Metric (confirm via rules)**: {metric}",
-        f"**Dataset**: {n_rows:,} rows × {n_cols} columns",
+        f"**Dataset**: {dataset_dimensions}",
         f"**Tags**: {', '.join(tags) if tags else 'None'}",
         "",
         "## Compute Context",
@@ -836,6 +1096,8 @@ def build_plan_and_initial_prompt(
         "- If data is non-tabular or requires custom parsing, implement custom_main() in kernel.py.",
         "- If pretrained checkpoints are likely beneficial, implement download + cache logic in kernel.py",
         "  and provide a fallback path when internet is unavailable.",
+        "- When reusable text/translation helpers emerge, move them into `src/kagglebot/kernel_runtime/`",
+        "  and keep competition-specific metadata joins / dictionaries inside `kernel.py`.",
         "- For vision/multimodal tasks, prefer strong prepared backbones (e.g., timm/ConvNeXt)",
         "  and avoid silent downgrade to weak fallback models when imports succeed.",
         "- If GPU runs finish in under ~1 minute, increase model iterations/trees or use CV to better utilize GPU.",

@@ -30,9 +30,9 @@ Common options:
 
 Autopilot planning is fixed to:
 
-1. GPT brief (`gpt-5.4`, extra high)
-2. GPT strategy (`gpt-5.4`, extra high)
-3. GPT kernel implementation (`gpt-5.4`, extra high)
+1. GPT brief (`gpt-5.5`, xhigh)
+2. GPT strategy (`gpt-5.5`, xhigh)
+3. GPT kernel implementation (`gpt-5.5`, xhigh)
 
 GPT strategy output must include:
 - `===STRATEGY===`

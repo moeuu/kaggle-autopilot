@@ -1,6 +1,101 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+from kagglebot.exceptions import KaggleBotError
 from kagglebot.orchestrator import agent_pipeline
+from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig
+from kagglebot.paths import CompetitionPaths
+
+
+def test_codex_brief_guard_ignores_sibling_competition_artifact_churn(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "kaggle-autopilot-artifacts")
+    paths.context_agent_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = paths.context_agent_dir / "brief"
+    prompt_path = output_dir / "prompt.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text("brief prompt\n", encoding="utf-8")
+
+    other_context = paths.artifacts_dir / "other-slug" / "context"
+    other_context.mkdir(parents=True, exist_ok=True)
+    other_guard = other_context / "zero_overlap_drift_guard.json"
+    other_guard.write_text('{"status":"original"}\n', encoding="utf-8")
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        other_guard.write_text('{"status":"changed"}\n', encoding="utf-8")
+        last_message_path = output_dir / "last_message.txt"
+        last_message_path.write_text("Brief text\n", encoding="utf-8")
+        return SimpleNamespace(last_message_path=last_message_path, returncode=0, stderr="")
+
+    monkeypatch.setattr(agent_pipeline, "run_codex", fake_run_codex)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    brief_text, error_text = agent_pipeline._run_codex_brief_with_retry(
+        prompt_path=prompt_path,
+        output_dir=output_dir,
+        paths=paths,
+        config=config,
+    )
+
+    assert brief_text == "Brief text"
+    assert error_text == ""
+    assert other_guard.read_text(encoding="utf-8") == '{"status":"changed"}\n'
+
+
+def test_codex_brief_guard_rejects_active_context_edits_outside_agent(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "kaggle-autopilot-artifacts")
+    paths.context_agent_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = paths.context_agent_dir / "brief"
+    prompt_path = output_dir / "prompt.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text("brief prompt\n", encoding="utf-8")
+
+    guard_path = paths.context_dir / "zero_overlap_drift_guard.json"
+    guard_path.write_text('{"status":"original"}\n', encoding="utf-8")
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        guard_path.write_text('{"status":"changed"}\n', encoding="utf-8")
+        last_message_path = output_dir / "last_message.txt"
+        last_message_path.write_text("Brief text\n", encoding="utf-8")
+        return SimpleNamespace(last_message_path=last_message_path, returncode=0, stderr="")
+
+    monkeypatch.setattr(agent_pipeline, "run_codex", fake_run_codex)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    try:
+        agent_pipeline._run_codex_brief_with_retry(
+            prompt_path=prompt_path,
+            output_dir=output_dir,
+            paths=paths,
+            config=config,
+        )
+    except KaggleBotError as exc:
+        message = str(exc)
+        assert "Agent write-guard failed in codex_brief" in message
+        assert "context/zero_overlap_drift_guard.json" in message
+    else:
+        raise AssertionError("expected active competition context edit to be rejected")
 
 
 def test_guard_restores_other_competition_kernel(tmp_path: Path) -> None:
@@ -413,3 +508,106 @@ def test_guard_allows_explicit_dependency_file_edits(tmp_path: Path) -> None:
 
     assert "albumentations" in pyproject_path.read_text(encoding="utf-8")
     assert uv_lock_path.read_text(encoding="utf-8") == "lock-version = 2\n"
+
+
+def test_repo_root_write_policy_allows_src_but_restores_data_and_generated_kernels(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    src_path = repo_root / "src" / "demo.py"
+    data_path = repo_root / "artifacts" / "demo" / "data" / "train.csv"
+    staged_kernel_path = repo_root / "artifacts" / "demo" / "kernels" / "run123" / "local-iter-1" / "kernel.py"
+    src_path.parent.mkdir(parents=True, exist_ok=True)
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    src_path.write_text("VALUE = 1\n", encoding="utf-8")
+    data_path.write_text("id,target\n1,0\n", encoding="utf-8")
+    staged_kernel_path.write_text("print('original')\n", encoding="utf-8")
+
+    policy = agent_pipeline._repo_root_write_policy(
+        repo_root=repo_root,
+        denied_prefixes=[repo_root / "artifacts" / "demo" / "data", repo_root / "artifacts" / "demo" / "kernels"],
+    )
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, policy)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    src_path.write_text("VALUE = 2\n", encoding="utf-8")
+    data_path.write_text("id,target\n1,1\n", encoding="utf-8")
+    staged_kernel_path.write_text("print('changed')\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=policy,
+        stage="test_broad_policy",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert src_path.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert data_path.read_text(encoding="utf-8") == "id,target\n1,0\n"
+    assert staged_kernel_path.read_text(encoding="utf-8") == "print('original')\n"
+
+
+def test_repo_root_write_policy_rejects_sensitive_repo_files(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    env_path = repo_root / ".env.local"
+    env_path.write_text("TOKEN=old\n", encoding="utf-8")
+    policy = agent_pipeline._repo_root_write_policy(
+        repo_root=repo_root,
+        denied_prefixes=[repo_root / "artifacts" / "demo" / "data", repo_root / "artifacts" / "demo" / "kernels"],
+    )
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, policy)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    env_path.write_text("TOKEN=new\n", encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    agent_pipeline._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=policy,
+        stage="test_sensitive_repo_path",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert env_path.read_text(encoding="utf-8") == "TOKEN=old\n"
+
+
+def test_guard_rejects_external_sensitive_path_edits(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    tracked = repo_root / "src" / "demo.py"
+    tracked.parent.mkdir(parents=True, exist_ok=True)
+    tracked.write_text("VALUE = 1\n", encoding="utf-8")
+    external_path = tmp_path / "outside" / "kaggle.json"
+    external_path.parent.mkdir(parents=True, exist_ok=True)
+    external_path.write_text('{"username":"demo"}\n', encoding="utf-8")
+
+    policy = agent_pipeline.WriteGuardPolicy(
+        allowed_prefixes=(repo_root,),
+        external_guard_paths=(external_path,),
+    )
+    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, policy)
+    before = agent_pipeline._snapshot_tree(repo_root)
+
+    external_path.write_text('{"username":"changed"}\n', encoding="utf-8")
+    after = agent_pipeline._snapshot_tree(repo_root)
+
+    try:
+        agent_pipeline._enforce_allowlist_changes(
+            root=repo_root,
+            before=before,
+            after=after,
+            allowed_prefixes=policy,
+            stage="test_external_guard",
+            guard_snapshot=guard_snapshot,
+            auto_repair=True,
+        )
+    except KaggleBotError as exc:
+        assert "forbidden external path edited" in str(exc)
+        assert str(external_path) in str(exc)
+    else:
+        raise AssertionError("expected forbidden external path edit to be rejected")

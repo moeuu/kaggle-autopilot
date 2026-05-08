@@ -11,6 +11,7 @@ import numpy as np
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    brier_score_loss,
     f1_score,
     log_loss,
     mean_absolute_error,
@@ -37,6 +38,10 @@ def canonical_metric(metric: str) -> str:
         "rocauc": "auc",
         "logloss": "logloss",
         "crossentropy": "logloss",
+        "brier": "brier_score",
+        "brierloss": "brier_score",
+        "brierscore": "brier_score",
+        "brierscoreloss": "brier_score",
         "accuracy": "accuracy",
         "acc": "accuracy",
         "f1": "f1",
@@ -63,7 +68,7 @@ def infer_direction(metric: str, explicit: str | None = None) -> Direction:
         return explicit  # type: ignore[return-value]
 
     metric_name = canonical_metric(metric)
-    if metric_name in {"rmse", "rmsle", "mae", "mape", "mse", "logloss"}:
+    if metric_name in {"rmse", "rmsle", "mae", "mape", "mse", "logloss", "brier_score"}:
         return "minimize"
     if metric_name in {"auc", "accuracy", "f1", "precision", "recall", "average_precision", "r2", "r_squared"}:
         return "maximize"
@@ -77,7 +82,7 @@ def infer_direction(metric: str, explicit: str | None = None) -> Direction:
 
 
 def metric_requires_proba(metric: str) -> bool:
-    return canonical_metric(metric) in {"logloss", "auc", "average_precision"}
+    return canonical_metric(metric) in {"logloss", "auc", "average_precision", "brier_score"}
 
 
 def compute_metric(metric: str, y_true, y_pred) -> float:
@@ -100,6 +105,15 @@ def compute_metric(metric: str, y_true, y_pred) -> float:
         return float(r2_score(y_true, y_pred))
     if metric_name == "logloss":
         return float(log_loss(y_true, y_pred))
+    if metric_name == "brier_score":
+        y_pred_arr = np.asarray(y_pred, dtype=float)
+        if y_pred_arr.ndim == 2:
+            if y_pred_arr.shape[1] == 1:
+                y_pred_arr = y_pred_arr[:, 0]
+            else:
+                y_pred_arr = y_pred_arr[:, -1]
+        y_pred_arr = np.clip(y_pred_arr, 0.0, 1.0)
+        return float(brier_score_loss(y_true, y_pred_arr))
     if metric_name == "auc":
         y_pred_arr = np.asarray(y_pred)
         if y_pred_arr.ndim == 2 and y_pred_arr.shape[1] > 2:

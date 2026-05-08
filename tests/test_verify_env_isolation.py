@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from kagglebot import autopilot as autopilot_module
 from kagglebot.exec_utils import CommandResult
 
@@ -51,3 +53,24 @@ def test_run_verify_does_not_modify_env_for_non_pytest(monkeypatch) -> None:
     autopilot_module._run_verify("uv run ruff check .", dry_run=False)
 
     assert captured.get("env") is None
+
+
+def test_run_verify_mirrors_external_artifacts_before_pytest(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "tests").mkdir()
+    external_artifacts = tmp_path / "external-artifacts"
+    source_kernel = external_artifacts / "demo" / "kernel"
+    source_kernel.mkdir(parents=True)
+    expected_kernel = repo_root / "artifacts" / "demo" / "kernel" / "kernel.py"
+    (source_kernel / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def fake_run_command(args, **kwargs):  # noqa: ANN003
+        assert expected_kernel.exists()
+        assert expected_kernel.read_text(encoding="utf-8") == "VALUE = 1\n"
+        return CommandResult(args=args, returncode=0, stdout="", stderr="", duration_sec=0.0)
+
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setattr(autopilot_module, "run_command", fake_run_command)
+
+    autopilot_module._run_verify("pytest -q", dry_run=False, artifacts_dir=external_artifacts)

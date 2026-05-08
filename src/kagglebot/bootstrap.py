@@ -15,6 +15,7 @@ from pathlib import Path
 
 from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.competition import rules_url_for_slug
+from kagglebot.competition_policy import NotebookSelectionPolicy, load_competition_policy
 from kagglebot.kaggle_api import (
     DownloadProgressCallback,
     download_competition,
@@ -31,7 +32,12 @@ from kagglebot.knowledge import (
     resolve_similar_improvements,
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
-from kagglebot.submission_format import extract_submission_section, load_submission_format_hint, parse_submission_format
+from kagglebot.solver.io import ensure_sample_submission
+from kagglebot.submission_format import (
+    extract_submission_section,
+    load_submission_format_hint,
+    parse_submission_format,
+)
 from kagglebot.types import BootstrapMeta, PlanConfig, RulesInfo
 from kagglebot.validators import safe_extract_zip
 
@@ -127,6 +133,7 @@ def bootstrap_competition(
         dry_run=dry_run,
         download_competition_fn=download_competition,
         download_dataset_fn=download_dataset,
+        download_kernel_fn=kernels_pull,
     )
 
     taxonomy = ensure_taxonomy(knowledge_paths)
@@ -482,7 +489,12 @@ def _extract_code_candidates(*, html_text: str) -> list[dict[str, object]]:
     return entries
 
 
-def _sort_code_candidates(candidates: list[dict[str, object]], *, score_direction: str) -> list[dict[str, object]]:
+def _sort_code_candidates(
+    candidates: list[dict[str, object]],
+    *,
+    score_direction: str,
+    selection_policy: NotebookSelectionPolicy | None = None,
+) -> list[dict[str, object]]:
     """Sort notebook candidates by score, with votes/recency fallbacks."""
 
     minimize_score = score_direction == "minimize"
@@ -491,10 +503,12 @@ def _sort_code_candidates(candidates: list[dict[str, object]], *, score_directio
         raw_score = candidate.get("score")
         has_score = isinstance(raw_score, (int, float))
         score_value = float(raw_score) if has_score else 0.0
+        score_boost = _candidate_keyword_boost(candidate, selection_policy)
+        adjusted_score = score_value - score_boost if minimize_score else score_value + score_boost
         if has_score:
-            score_key = score_value if minimize_score else -score_value
+            score_key = adjusted_score if minimize_score else -adjusted_score
         else:
-            score_key = 0.0
+            score_key = score_boost if minimize_score else -score_boost
         vote_key = -_parse_vote_count(candidate.get("total_votes"))
         recency_key = -_parse_last_run_epoch(candidate.get("last_run_time"))
         order = int(candidate.get("source_order") or 0)
@@ -529,6 +543,93 @@ def _select_required_reference_notebook(entries: list[dict[str, object]]) -> dic
         if not _is_likely_leak_or_placeholder_notebook(entry):
             return entry
     return entries[0]
+
+
+def _candidate_text(candidate: dict[str, object]) -> str:
+    return " ".join(
+        [
+            str(candidate.get("kernel_id") or ""),
+            str(candidate.get("title") or ""),
+            str(candidate.get("summary") or ""),
+        ]
+    ).lower()
+
+
+def _candidate_keyword_boost(candidate: dict[str, object], selection_policy: NotebookSelectionPolicy | None) -> float:
+    if selection_policy is None:
+        return 0.0
+    text = _candidate_text(candidate)
+    boost = 0.0
+    for keyword, weight in selection_policy.keyword_boosts.items():
+        clean = keyword.strip().lower()
+        if clean and clean in text:
+            boost += float(weight)
+    return boost
+
+
+def _candidate_keyword_hits(candidate: dict[str, object], keywords: tuple[str, ...]) -> tuple[int, list[str]]:
+    text = _candidate_text(candidate)
+    hits = [keyword for keyword in keywords if keyword.strip() and keyword.strip().lower() in text]
+    return len(hits), hits
+
+
+def _select_keyword_reference_notebook(
+    entries: list[dict[str, object]],
+    *,
+    keywords: tuple[str, ...],
+    excluded_kernel_ids: set[str] | None = None,
+) -> dict[str, object] | None:
+    excluded = excluded_kernel_ids or set()
+    ranked: list[tuple[int, int, float, int, dict[str, object]]] = []
+    for order, entry in enumerate(entries):
+        kernel_id = str(entry.get("kernel_id") or "").strip()
+        if not kernel_id or kernel_id in excluded or _is_likely_leak_or_placeholder_notebook(entry):
+            continue
+        hit_count, _hits = _candidate_keyword_hits(entry, keywords)
+        if hit_count <= 0:
+            continue
+        ranked.append(
+            (
+                hit_count,
+                _parse_vote_count(entry.get("total_votes")),
+                _parse_last_run_epoch(entry.get("last_run_time")),
+                -order,
+                entry,
+            )
+        )
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][-1]
+
+
+def _select_reference_notebooks(
+    entries: list[dict[str, object]],
+    *,
+    selection_policy: NotebookSelectionPolicy | None = None,
+) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    required = _select_required_reference_notebook(entries)
+    ensemble: dict[str, object] | None = None
+    selection_reason: str | None = None
+    if selection_policy is None:
+        return required, None, None
+
+    policy_required = _select_keyword_reference_notebook(
+        entries,
+        keywords=selection_policy.required_reference_keywords,
+    )
+    if policy_required is not None:
+        if required is None or policy_required != required:
+            selection_reason = "Policy keyword match prioritized a competition-specific execution baseline."
+        required = policy_required
+
+    required_kernel_id = str(required.get("kernel_id") or "").strip() if isinstance(required, dict) else ""
+    ensemble = _select_keyword_reference_notebook(
+        entries,
+        keywords=selection_policy.ensemble_reference_keywords,
+        excluded_kernel_ids={required_kernel_id} if required_kernel_id else set(),
+    )
+    return required, ensemble, selection_reason
 
 
 def _parse_vote_count(raw: object) -> int:
@@ -808,6 +909,8 @@ def _summarize_notebook_source(path: Path | None) -> str:
 def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, timeout: int) -> str | None:
     code_url = f"https://www.kaggle.com/competitions/{slug}/code"
     html_text = _fetch_text_with_retry(code_url, timeout=timeout) or ""
+    competition_policy = load_competition_policy(paths)
+    selection_policy = competition_policy.notebook_selection if competition_policy.active else None
     candidates = _list_competition_code_candidates_from_cli(slug=slug)
     candidate_source = "kaggle kernels list --competition --sort-by scoreDescending"
     if not candidates:
@@ -817,7 +920,11 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
         candidate_source = "competition code page HTML"
 
     score_direction = _resolve_code_score_direction(paths=paths)
-    candidates = _sort_code_candidates(candidates, score_direction=score_direction)
+    candidates = _sort_code_candidates(
+        candidates,
+        score_direction=score_direction,
+        selection_policy=selection_policy,
+    )
     limit = _read_int_env(
         _CODE_NOTEBOOK_LIMIT_ENV,
         default=_CODE_NOTEBOOK_DEFAULT_DOWNLOAD,
@@ -860,6 +967,10 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
             }
         )
 
+    required_entry, ensemble_entry, policy_selection_reason = _select_reference_notebooks(
+        entries,
+        selection_policy=selection_policy,
+    )
     index_payload = {
         "source_url": code_url,
         "candidate_source": candidate_source,
@@ -867,9 +978,10 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
         "fetched_at": datetime.now(UTC).isoformat(),
         "notebook_count": len(entries),
         "top_kernel_id": str(entries[0]["kernel_id"]) if entries else "",
-        "required_reference_kernel_id": str(_select_required_reference_notebook(entries).get("kernel_id") or "")
-        if entries
-        else "",
+        "required_reference_kernel_id": str(required_entry.get("kernel_id") or "") if required_entry else "",
+        "ensemble_reference_kernel_id": str(ensemble_entry.get("kernel_id") or "") if ensemble_entry else "",
+        "policy_tags": list(competition_policy.archetype_tags),
+        "required_capabilities": list(competition_policy.required_capabilities),
         "notebooks": entries,
     }
     paths.code_notebooks_index_path.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
@@ -887,7 +999,6 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
         top_entry = entries[0]
         top_score = top_entry.get("score")
         top_score_text = f"{float(top_score):.6f}" if isinstance(top_score, (int, float)) else "unknown"
-        required_entry = _select_required_reference_notebook(entries)
         required_is_top = bool(required_entry) and required_entry == top_entry
         required_score = required_entry.get("score") if required_entry else None
         required_score_text = f"{float(required_score):.6f}" if isinstance(required_score, (int, float)) else "unknown"
@@ -913,11 +1024,32 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
                         "- selection_reason: Top-ranked notebook is usable."
                         if required_is_top
                         else (
-                            "- selection_reason: Top-ranked notebook appears leak-like/placeholder; "
-                            "using the highest-ranked non-leak notebook."
+                            f"- selection_reason: {policy_selection_reason}"
+                            if policy_selection_reason
+                            else (
+                                "- selection_reason: Top-ranked notebook appears leak-like/placeholder; "
+                                "using the highest-ranked non-leak notebook."
+                            )
                         )
                     ),
                     "- instruction: Treat this notebook as a mandatory baseline reference before adding improvements.",
+                    "",
+                ]
+            )
+        if ensemble_entry:
+            ensemble_score = ensemble_entry.get("score")
+            ensemble_score_text = (
+                f"{float(ensemble_score):.6f}" if isinstance(ensemble_score, (int, float)) else "unknown"
+            )
+            lines.extend(
+                [
+                    "## Ensemble Reference Notebook (Blend blueprint)",
+                    f"- kernel_id: {ensemble_entry['kernel_id']}",
+                    f"- title: {ensemble_entry['title']}",
+                    f"- notebook_score: {ensemble_score_text}",
+                    f"- total_votes: {int(ensemble_entry.get('total_votes') or 0)}",
+                    "- instruction: Treat this notebook as an ensemble/feature blueprint "
+                    "after the execution baseline is reproduced.",
                     "",
                 ]
             )
@@ -1453,33 +1585,34 @@ def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
 
 def _cache_sample_submission(paths: CompetitionPaths) -> None:
     format_hint = load_submission_format_hint(paths.submission_format_md_path)
-    if paths.sample_submission_path.exists():
-        if not paths.sample_submission_head_path.exists():
+    candidate = ensure_sample_submission(paths.data_dir)
+    if candidate is None or not candidate.exists():
+        if paths.sample_submission_path.exists() and not paths.sample_submission_head_path.exists():
             _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
         return
-    tabular = _find_tabular_files(paths.data_dir)
-    if not tabular:
-        return
-    for path in tabular:
-        if "sample_submission" in path.name.lower():
-            if path.suffix.lower() == ".csv":
-                shutil.copy2(path, paths.sample_submission_path)
-            else:
-                try:
-                    frame = _read_table(path, format_hint=format_hint)
-                except Exception:
-                    return
-                frame.to_csv(paths.sample_submission_path, index=False)
-            _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
+    if candidate.suffix.lower() == ".csv":
+        shutil.copy2(candidate, paths.sample_submission_path)
+    else:
+        try:
+            frame = _read_table(candidate, format_hint=format_hint)
+        except Exception:
             return
+        frame.to_csv(paths.sample_submission_path, index=False)
+    _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
 
 
 def _mirror_sample_submission_to_data(paths: CompetitionPaths) -> None:
     source = paths.sample_submission_path
     destination = paths.data_dir / "sample_submission.csv"
-    if not source.exists() or destination.exists():
+    if not source.exists():
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        try:
+            if source.read_bytes() == destination.read_bytes():
+                return
+        except OSError:
+            pass
     shutil.copy2(source, destination)
 
 

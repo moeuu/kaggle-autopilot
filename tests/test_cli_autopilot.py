@@ -10,6 +10,34 @@ from kagglebot.exceptions import SubmitAbortedError
 from kagglebot.paths import CompetitionPaths
 
 
+def test_autopilot_uses_preferred_artifacts_dir_by_default(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    captured: dict[str, Path] = {}
+
+    def fake_bootstrap(**kwargs):
+        captured["artifacts_dir"] = kwargs["paths"].artifacts_dir
+
+    monkeypatch.setattr("kagglebot.cli._preferred_artifacts_dir", lambda: Path("/data/kaggle-autopilot-artifacts"))
+    monkeypatch.setattr("kagglebot.cli.bootstrap_competition", fake_bootstrap)
+    monkeypatch.setattr("kagglebot.cli.run_autopilot", lambda config: None)  # noqa: ARG005
+
+    result = runner.invoke(
+        app,
+        [
+            "--workdir",
+            str(tmp_path),
+            "autopilot",
+            "playground-series-s6e2",
+            "--compute",
+            "local_gpu",
+            "--no-auto-eval-spec",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["artifacts_dir"] == Path("/data/kaggle-autopilot-artifacts")
+
+
 def test_autopilot_submit_aborted_exits_clean(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
 

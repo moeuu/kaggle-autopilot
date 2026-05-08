@@ -66,6 +66,13 @@ _NOTEBOOK_SUBMIT_PATTERNS = (
     re.compile(r"notebook[- ]only submissions?"),
     re.compile(r"submit(?:ted)?\s+through\s+notebooks?"),
 )
+_CODE_COMPETITION_PATTERNS = (
+    re.compile(r"\bcode competition\b"),
+    re.compile(r"\bcode competition faq\b"),
+    re.compile(r"\bkernel submissions only\b"),
+    re.compile(r"\bnotebook-only competition\b"),
+    re.compile(r"\bhidden(?:/| or )full test\b"),
+)
 
 
 def normalize_deliverable_mode(value: object, *, default: str = "leaderboard") -> str:
@@ -125,6 +132,13 @@ def infer_submit_mode(*texts: str, default: str = "file") -> str:
     return default
 
 
+def infer_code_competition(*texts: str, default: bool = False) -> bool:
+    lines = [line.strip().lower() for text in texts for line in text.splitlines() if line.strip()]
+    if not lines:
+        return default
+    return any(pattern.search(line) for line in lines for pattern in _CODE_COMPETITION_PATTERNS)
+
+
 def infer_deliverable_mode_from_paths(
     paths: CompetitionPaths,
     *,
@@ -169,6 +183,29 @@ def infer_submit_mode_from_paths(
         except OSError:
             continue
     return infer_submit_mode(*texts, default=default)
+
+
+def infer_code_competition_from_paths(
+    paths: CompetitionPaths,
+    *,
+    explicit: object = None,
+    default: bool = False,
+) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    texts = []
+    for path in (
+        paths.rules_md_path,
+        paths.overview_md_path,
+        paths.data_md_path,
+        paths.submission_format_md_path,
+        paths.context_dir / "eval_advisor" / "sources_summary.md",
+    ):
+        try:
+            texts.append(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    return infer_code_competition(*texts, default=default)
 
 
 def summarize_writeup_requirements(paths: CompetitionPaths, *, max_lines: int = 8) -> str:

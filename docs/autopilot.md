@@ -16,6 +16,16 @@ uv run kagglebot autopilot https://www.kaggle.com/competitions/<slug> \
   --compute local_gpu
 ```
 
+For long-running operation across competitions already entered by the Kaggle account:
+
+```bash
+uv run kagglebot --force watch --compute local_gpu
+```
+
+`watch` selects from `group=entered`, runs one competition at a time, records its loop state under
+`artifacts/_watch/`, and then selects again. It does not accept rules, join competitions, or consider
+unentered competitions.
+
 Supported compute values:
 - `local_gpu`
 - `kaggle_gpu`
@@ -25,9 +35,9 @@ Supported compute values:
 
 Autopilot planning is fixed to:
 
-1. GPT (`gpt-5.4`, extra high): reads local context and writes a brief.
-2. GPT (`gpt-5.4`, extra high): performs strategy planning with live web search when available.
-3. GPT (`gpt-5.4`, extra high): implements kernel code from frozen instructions.
+1. GPT (`gpt-5.5`, xhigh): reads local context and writes a brief.
+2. GPT (`gpt-5.5`, xhigh): performs strategy planning with live web search when available.
+3. GPT (`gpt-5.5`, xhigh): implements kernel code from frozen instructions.
 
 The GPT stage now produces and the pipeline persists:
 - `artifacts/<slug>/context/research_sources.jsonl`
@@ -63,10 +73,12 @@ Submission behavior:
 ## Important Defaults
 
 - `--max-iterations`: default runtime behavior is 3 unless overridden by CLI
-- `--internet`: default `on` for autopilot
+- `--internet`: default `on` for autopilot, but forced to `off` when captured competition rules ban notebook internet access
 - Submission in autopilot is enabled by default
 - Data bootstrap checks existing competition files and skips re-download when local file count/size already matches
 - `--agent` and `--submit` are not part of autopilot CLI
+- RNA sequence/structure datasets with residue-level coordinate submissions are profiled as `rna_structure` instead of generic tabular when the schema matches that family.
+- Local kernel runs default to conservative worker/runtime guards: `KAGGLEBOT_NUM_WORKERS=0`, torch shared-memory fallback `file_system`, a best-effort higher `RLIMIT_NOFILE`, and a local stall watchdog so `watch` can fail and resume cleanly instead of showing a stale `local kernel running` state forever.
 - Submission schema handling is flexible:
   - supports ID-based alignment when an ID column exists
   - falls back to row-order alignment when no reliable ID column exists
@@ -98,6 +110,23 @@ Submission behavior:
 --resume-run-id RUN_ID
 --resume-latest
 ```
+
+## Watch Flags
+
+```text
+watch --once
+watch --submit-policy improved|none
+watch --max-total-min INT      # default: no wall-clock limit
+watch --max-iterations INT     # default 12
+watch --allow-slug SLUG
+watch --block-slug SLUG
+```
+
+`--submit-policy improved` disables the initial contract-probe submit and only submits when an artifact improves over
+a previously submitted checkpoint. Use `--submit-policy none` for artifact generation without live submissions.
+
+Selection priority favors entered competitions with monetary prizes, competitions with no local submission history, and
+submitted competitions with poor current rank percentile where there is more leaderboard headroom.
 
 ## Artifacts
 

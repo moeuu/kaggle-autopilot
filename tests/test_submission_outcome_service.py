@@ -73,6 +73,44 @@ def test_submission_outcome_service_handles_prefixed_error_status_as_terminal() 
     assert outcome.get("score") is None
 
 
+def test_submission_outcome_service_handles_failed_status_as_terminal() -> None:
+    rows = [
+        {
+            "description": "demo",
+            "status": "failed",
+            "date": "2026-02-16T10:00:00Z",
+        }
+    ]
+    service = SubmissionOutcomeService(fetch_rows=lambda slug: rows, max_attempts=3, poll_interval_sec=0.0)
+    outcome = service.wait_for_outcome(
+        slug="demo",
+        message="demo",
+        submitted_at=datetime.now(UTC),
+    )
+    assert isinstance(outcome, dict)
+    assert outcome.get("status") == "failed"
+    assert outcome.get("score") is None
+
+
+def test_submission_outcome_service_treats_complete_without_score_as_terminal_success() -> None:
+    rows = [
+        {
+            "description": "demo",
+            "status": "complete",
+            "date": "2026-02-16T10:00:00Z",
+        }
+    ]
+    service = SubmissionOutcomeService(fetch_rows=lambda slug: rows, max_attempts=3, poll_interval_sec=0.0)
+    outcome = service.wait_for_outcome(
+        slug="demo",
+        message="demo",
+        submitted_at=datetime.now(UTC),
+    )
+    assert isinstance(outcome, dict)
+    assert outcome.get("status") == "complete"
+    assert outcome.get("score") is None
+
+
 def test_submission_outcome_service_raises_after_consecutive_fetch_errors() -> None:
     calls = {"count": 0}
 

@@ -8,6 +8,14 @@ import pandas as pd
 
 from kagglebot.compute import Compute, detect_local_gpu
 from kagglebot.exceptions import GPUNotAvailableError
+from kagglebot.rna_structure import (
+    build_coordinate_baseline_predictions,
+    detect_rna_structure_task,
+    evaluate_coordinate_predictions,
+    extract_target_id,
+    load_rna_structure_task,
+    write_rna_structure_submission,
+)
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.solver.io import load_competition_data
 from kagglebot.training import (
@@ -51,6 +59,13 @@ def train_evaluate_and_predict(
     target_override: str | None,
 ) -> TrainingOutcome:
     del score_source, metric, direction, holdout_frac, cv_folds, plan_score_source
+
+    if detect_rna_structure_task(data_dir):
+        return _train_rna_structure_submission(
+            data_dir=data_dir,
+            output_path=output_path,
+            seed=seed,
+        )
 
     # Force vision routing first for the shemagh detection schema so target overrides cannot bypass detector training.
     base_data = load_competition_data(data_dir)
@@ -218,6 +233,108 @@ def _select_device(*, compute: Compute, strict_accelerator: bool) -> str:
             "No local GPU detected for --compute local_gpu. Disable --strict-accelerator to fall back to CPU."
         )
     return "cpu"
+
+
+def _train_rna_structure_submission(
+    *,
+    data_dir: Path,
+    output_path: Path,
+    seed: int,
+) -> TrainingOutcome:
+    task = load_rna_structure_task(data_dir)
+    label_id_column = task.label_id_column
+    sample_id_column = task.sample_id_column
+
+    target_ids = sorted({str(value).strip() for value in task.train_sequences[task.sequence_id_column].astype(str)})
+    if len(target_ids) < 2:
+        raise RuntimeError("RNA structure baseline requires at least two labeled targets for holdout evaluation.")
+
+    rng = np.random.default_rng(seed)
+    shuffled = list(target_ids)
+    rng.shuffle(shuffled)
+    split_index = max(1, int(round(len(shuffled) * 0.8)))
+    if split_index >= len(shuffled):
+        split_index = len(shuffled) - 1
+    train_ids = set(shuffled[:split_index])
+    valid_ids = set(shuffled[split_index:])
+    if not train_ids or not valid_ids:
+        raise RuntimeError("Unable to create a non-empty RNA structure train/validation split.")
+
+    train_labels = task.train_labels[
+        task.train_labels[label_id_column].astype(str).map(extract_target_id).isin(train_ids)
+    ].copy()
+    valid_labels = task.train_labels[
+        task.train_labels[label_id_column].astype(str).map(extract_target_id).isin(valid_ids)
+    ].copy()
+    if train_labels.empty or valid_labels.empty:
+        raise RuntimeError("RNA structure baseline split produced empty train or validation labels.")
+
+    valid_sample = task.sample_submission[
+        task.sample_submission[sample_id_column].astype(str).map(extract_target_id).isin(valid_ids)
+    ].copy()
+    valid_predictions = build_coordinate_baseline_predictions(
+        train_labels=train_labels,
+        sample_submission=valid_sample,
+        label_id_column=label_id_column,
+    )
+    valid_submission_path = output_path.parent / "validation_submission.csv"
+    write_rna_structure_submission(
+        sample_submission=valid_sample,
+        predictions_by_target=valid_predictions,
+        output_path=valid_submission_path,
+    )
+    valid_submission = pd.read_csv(valid_submission_path)
+    val_rmse = evaluate_coordinate_predictions(
+        truth=valid_labels,
+        predictions=valid_submission,
+        id_column=sample_id_column,
+    )
+
+    submission_predictions = build_coordinate_baseline_predictions(
+        train_labels=task.train_labels,
+        sample_submission=task.sample_submission,
+        label_id_column=label_id_column,
+    )
+    write_rna_structure_submission(
+        sample_submission=task.sample_submission,
+        predictions_by_target=submission_predictions,
+        output_path=output_path,
+    )
+
+    model_summary = {
+        "model": "rna_coordinate_mean_baseline",
+        "task": task.target_kind,
+        "sequence_id_column": task.sequence_id_column,
+        "sample_id_column": task.sample_id_column,
+        "label_id_column": task.label_id_column,
+        "coordinate_triplets": len(task.sample_coordinate_triplets),
+        "train_targets": len(train_ids),
+        "valid_targets": len(valid_ids),
+        "val_rmse": float(val_rmse),
+    }
+    print(
+        "[local train] model=rna_coordinate_mean_baseline "
+        f"val_rmse={float(val_rmse):.6f} "
+        f"targets={len(train_ids) + len(valid_ids)}",
+        flush=True,
+    )
+
+    return TrainingOutcome(
+        submission_path=output_path,
+        evaluation=EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=float(val_rmse),
+            std=0.0,
+            train_score=None,
+            val_score=float(val_rmse),
+            fold_scores=[float(val_rmse)],
+        ),
+        model_name="rna_coordinate_mean_baseline",
+        model_summary=model_summary,
+        accelerator="cpu",
+    )
 
 
 def _accelerator_label(device: str) -> str:

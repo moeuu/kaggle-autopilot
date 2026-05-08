@@ -14,6 +14,8 @@ Rules URL: {{rules_url}}
 Execution rule:
 - Use a single authoritative implementation in `artifacts/<slug>/kernel/kernel.py`.
 - `local_gpu` and `kaggle_gpu` must share the same algorithm/pipeline; only execution location differs.
+- A `local_gpu` iteration must fit under 24 hours; target `time_budget_min <= 1200` unless competition rules impose a lower limit.
+- For image/video/audio/text tasks, do not multiply full fine-tuning by 3 seeds x 5 folds. Use one strong full-training seed and at most 3 full-training folds, then preserve accuracy with pretrained backbones, cached embeddings, TTA, OOF blending, or lightweight heads for extra seeds.
 
 {{implementation_agent_name}} interpretation (summary of overview/data/rules + dataset profile):
 <<<
@@ -61,6 +63,7 @@ Prioritize maximum achievable accuracy over submitability.
 Prefer a stronger candidate that is not yet submission-ready over a weaker submit-ready fallback.
 Do not simplify the strategy merely to guarantee a submission.
 If accelerator is GPU/TPU, prefer accelerator-optimized training and longer schedules.
+Longer schedules must stay inside the runtime budget; spend compute on the strongest backbone/features before adding full seed/fold repeats.
 If the gap to top1 is large, recommend a major model upgrade (architecture or feature strategy).
 If near top1, recommend targeted tuning/ablations.
 If the dataset is tabular binary with large row count and meaningful categorical structure, do NOT collapse into single-family tuning:
@@ -143,8 +146,9 @@ Provide a JSON object with these keys (do not wrap in markdown):
 - target_score (number; use top1 public score as a realistic target)
 - score_source ("cv" preferred for accuracy-first search; use holdout only when CV is infeasible)
 - holdout_frac (number, e.g. 0.2)
-- cv_folds (int, prefer 5-10 for robust ranking)
+- cv_folds (int, prefer 5-10 for tabular; for image/video/audio/text use <=3 full-training folds plus cached/TTA/lightweight validation)
 - seed (int)
+- time_budget_min (int|null; for local_gpu prefer <=1200)
 - max_iterations (int, prefer >=12 for hard competitions)
 - patience (int, prefer >=4 so promising runs are not cut early)
 - min_improvement (number)
@@ -152,7 +156,7 @@ Provide a JSON object with these keys (do not wrap in markdown):
   - `key_hyperparameters` must be the chosen runtime configuration for that shortlisted pipeline.
   - Do not put unresolved search grids or arrays in `key_hyperparameters`; each value must be a concrete scalar or nested object of concrete scalar values.
 - toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default)
-- evaluation_protocol (object; include `cv_type`, `n_folds`, `seeds` (>=3), and `primary_metric` based on the competition)
+- evaluation_protocol (object; include `cv_type`, `n_folds`, `seeds`, and `primary_metric` based on the competition; use >=3 seeds for cheap/tabular evaluation, but only one full-training seed for heavy deep-learning runs)
 - stop_policy (object; include exact keys `max_iterations` and `error_fingerprint_abort`; `error_fingerprint_abort` may be bool or object)
 
 ===CODEX_INSTRUCTIONS===
@@ -170,6 +174,7 @@ Require the implementation to include:
 - Per-model OOF/test predictions saved as `.npy` under both `/kaggle/working` and local output dir
 - Ensemble selection only if shortlisted in plan (e.g., stacking/blending/rank-mean)
 - Final method chosen by plan primary metric (tie-breaker: simpler/faster)
+- Keep the full kernel within the local GPU budget; do not implement a full-training seed x fold x model-family Cartesian product when cached embeddings, staged ablations, TTA, or lightweight heads can preserve score signal faster.
 - Never include oracle overrides (`build_oracle_game_map`, `apply_oracle_override`, `KAGGLEBOT_ORACLE_MODE`) or leaderboard-proxy score reporting
 - Submission validation (columns, rows, no NaN/inf, clipped if needed)
 Call out robust categorical missing-value handling:

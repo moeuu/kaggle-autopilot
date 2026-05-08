@@ -7,14 +7,18 @@ import gzip
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import pytest
 
-from kagglebot.exceptions import KernelFailedError
+from kagglebot.exceptions import KernelFailedError, KernelStillRunningError
 from kagglebot.kernel_runner import (
     _append_local_kernel_duration_history,
     _build_local_kernel_progress_tracker,
+    _copy_competition_external_assets,
+    _copy_kernel_sources,
+    _copy_shared_kernel_runtime_modules,
     _ensure_training_progress_shim,
     _estimate_local_kernel_duration_seconds,
     _extract_pipeline_done_from_line,
@@ -23,8 +27,13 @@ from kagglebot.kernel_runner import (
     _find_output_file,
     _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
+    _LocalKernelLogFilterState,
     _resolve_fold_current,
+    _resolve_kernel_slug,
     _resolve_seed_current,
+    _resolve_submit_kernel_slug,
+    _run_local_kernel_once,
+    _should_suppress_local_kernel_log_line,
     find_submission_file,
     resolve_kaggle_username,
     run_kernel,
@@ -36,6 +45,18 @@ from kagglebot.kernel_runner import (
 
 def test_sanitize_kernel_slug() -> None:
     assert sanitize_kernel_slug("KaggleBot Titan! 2024") == "kagglebot-titan-2024"
+
+
+def test_submit_kernel_slug_stays_distinct_when_long_slug_is_truncated() -> None:
+    slug = "deep-past-initiative-machine-translation"
+    run_id = "20260318T153341Z-52de3f45"
+    train_slug = _resolve_kernel_slug(None, slug, run_id, 1)
+    submit_slug = _resolve_submit_kernel_slug(None, slug, run_id, 1)
+
+    assert train_slug == "kagglebot-deep-past-initiative-machine-t-de3f45-i1"
+    assert submit_slug.startswith("kagglebot-submit-")
+    assert submit_slug != train_slug
+    assert len(submit_slug) <= 50
 
 
 def test_resolve_kaggle_username_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,8 +117,16 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    plan_payload = {
+        "toggles": {"USE_MODEL": True},
+        "kaggle_kernel_sources": {
+            "dataset_sources": ["alice/demo-dataset"],
+            "kernel_sources": ["bob/demo-kernel"],
+            "model_sources": ["carol/demo-model/PyTorch/default/1"],
+        },
+    }
     plan_path = tmp_path / "demo" / "plan.json"
-    plan_path.write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+    plan_path.write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
     run_kernel(
         slug="demo",
         run_id="run-1",
@@ -122,6 +151,9 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     assert payload["enable_tpu"] is False
     assert payload["kernel_type"] == "script"
     assert payload["code_file"] == "kernel.py"
+    assert payload["dataset_sources"] == ["alice/demo-dataset"]
+    assert payload["kernel_sources"] == ["bob/demo-kernel"]
+    assert payload["model_sources"] == ["carol/demo-model/PyTorch/default/1"]
     kernel_text = (tmp_path / "demo" / "kernels" / "run-1" / "kernel.py").read_text(encoding="utf-8")
     assert "# kagglebot:competition_slug" in kernel_text
     assert "_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = \"demo\"" in kernel_text
@@ -134,7 +166,7 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     assert not wrapper_path.exists()
     staged_plan = tmp_path / "demo" / "kernels" / "run-1" / "plan.json"
     assert staged_plan.exists()
-    assert json.loads(staged_plan.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
+    assert json.loads(staged_plan.read_text(encoding="utf-8")) == plan_payload
 
 
 def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
@@ -172,6 +204,126 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert payload["competition_sources"] == ["demo"]
     assert payload["code_file"] == "kernel.py"
+
+
+def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "demo"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "output").mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "output" / "stale-submission.csv").write_text("id,target\n1,0.1\n", encoding="utf-8")
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "KERNEL_DIR = Path(__file__).resolve().parent",
+                "ARTIFACT_DIR = KERNEL_DIR.parent",
+                "ARTIFACT_ROOT = KERNEL_DIR.parent",
+                "DATA = Path('/kaggle/input/demo/test.csv')",
+                "LOCAL_OUTPUT_DIR = KERNEL_DIR / 'outputs'",
+                "LOCAL_OUT = KERNEL_DIR / 'outputs'",
+                "ARTIFACT_OUT = ARTIFACT_DIR.joinpath('outputs')",
+                "ROOT_OUT = ARTIFACT_ROOT / 'output'",
+                "OUT = Path('/kaggle/working/submission.csv')",
+                "MET = Path('/kaggle/working/metrics.json')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / slug / "plan.json").write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    run_submit_kernel(
+        slug=slug,
+        run_id="run-1",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=False,
+        submission_path=submission_path,
+        mode="inference",
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    kernel_dir = tmp_path / slug / "kernels" / "run-1" / "submit-iter-1"
+    kernel_text = (kernel_dir / "kernel.py").read_text(encoding="utf-8")
+    assert "SUBMISSION_GZIP_B64" not in kernel_text
+    assert "# kagglebot:submit_inference" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '0'" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_DO_INFER'] = '1'" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_SUBMIT_NOTEBOOK'] = '1'" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_SUBMIT_SKIP_CV'] = '1'" in kernel_text
+    assert "/kaggle/working/submission.csv" in kernel_text
+    assert "/kaggle/working/metrics.json" in kernel_text
+    assert "LOCAL_OUTPUT_DIR = KERNEL_DIR / 'outputs'" not in kernel_text
+    assert "KERNEL_DIR / 'outputs'" not in kernel_text
+    assert "ARTIFACT_DIR.joinpath('outputs')" not in kernel_text
+    assert "ARTIFACT_ROOT / 'output'" not in kernel_text
+    assert (
+        "LOCAL_OUTPUT_DIR = Path('/kaggle/working')" in kernel_text
+        or "LOCAL_OUTPUT_DIR = KAGGLE_WORKING_DIR" in kernel_text
+    )
+    assert "Path('/kaggle/working')" in kernel_text
+    assert not (kernel_dir / "output").exists()
+
+
+@pytest.mark.parametrize(
+    "output_expr",
+    [
+        "OUT = Path('/kaggle/src/output')",
+        "OUT = Path('/kaggle/src/outputs')",
+        "OUT = Path('/kaggle/src').joinpath('outputs')",
+    ],
+)
+def test_run_submit_kernel_inference_mode_rejects_read_only_output_patterns(
+    tmp_path: Path,
+    output_expr: str,
+) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "demo"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "DATA = Path('/kaggle/input/demo/test.csv')",
+                output_expr,
+                "SUB = Path('/kaggle/working/submission.csv')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / slug / "plan.json").write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="Invalid notebook submit artifact"):
+        run_submit_kernel(
+            slug=slug,
+            run_id="run-1",
+            iteration=1,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            enable_internet=False,
+            submission_path=submission_path,
+            mode="inference",
+            dry_run=True,
+            timeout_minutes=None,
+        )
 
 
 def test_kernel_push_injects_competition_slug_before_push(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,6 +426,131 @@ def test_kernel_push_clears_stale_output_before_wait(tmp_path: Path, monkeypatch
     )
     assert observed["stale_log_exists"] is False
     assert observed["stale_submission_exists"] is False
+
+
+def test_kernel_push_resumes_prior_running_kernel_without_new_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1"
+    output_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "output"
+    logs_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "logs"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    (logs_dir / "kernel_push-01.txt").write_text("Kernel version 1 successfully pushed.\n", encoding="utf-8")
+
+    statuses = iter(
+        [
+            'user/kernel-slug has status "KernelWorkerStatus.RUNNING"',
+            'user/kernel-slug has status "KernelWorkerStatus.COMPLETE"',
+        ]
+    )
+    monkeypatch.setattr(kernel_runner, "kernels_status", lambda *args, **kwargs: next(statuses))
+    monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
+    monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
+    monkeypatch.setattr(kernel_runner, "kernels_push", lambda *args, **kwargs: pytest.fail("unexpected push"))
+    output_calls: list[str] = []
+    monkeypatch.setattr(
+        kernel_runner, "kernels_output", lambda kernel_id, *args, **kwargs: output_calls.append(kernel_id)
+    )
+
+    preparation = kernel_runner.KernelPreparation(
+        kernel_dir=kernel_dir,
+        output_dir=output_dir,
+        logs_dir=logs_dir,
+        kernel_slug="kernel-slug",
+        kernel_id="user/kernel-slug",
+    )
+    kernel_id = kernel_runner.KernelJobMonitor().push_and_wait(
+        preparation=preparation,
+        slug="demo",
+        timeout_minutes=1,
+    )
+
+    assert kernel_id == "user/kernel-slug"
+    assert output_calls == ["user/kernel-slug"]
+
+
+def test_wait_for_kernel_timeout_marks_remote_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    times = iter([0.0, 0.0, 61.0, 62.0])
+    monkeypatch.setattr(kernel_runner.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_status",
+        lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.RUNNING"',
+    )
+    monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
+    monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
+    monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(KernelStillRunningError, match="still kernelworkerstatus.running"):
+        kernel_runner._wait_for_kernel("user/kernel-slug", "demo", 1, output_dir=tmp_path)  # noqa: SLF001
+
+
+def test_kernel_push_aborts_immediately_on_invalid_attached_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1"
+    output_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "output"
+    logs_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "logs"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    (kernel_dir / "kernel-metadata.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_push",
+        lambda *args, **kwargs: (
+            "The following are not valid dataset sources and could not be added to the kernel: "
+            "['alice/missing-dataset']\n"
+            "Kernel version 1 successfully pushed."
+        ),
+    )
+
+    observed = {"wait_called": False, "output_called": False}
+
+    def fake_wait(*args, **kwargs) -> None:
+        observed["wait_called"] = True
+
+    def fake_output(*args, **kwargs) -> None:
+        observed["output_called"] = True
+
+    monkeypatch.setattr(kernel_runner, "_wait_for_kernel_registration", lambda *args, **kwargs: "user/kernel-slug")
+    monkeypatch.setattr(kernel_runner, "_wait_for_kernel", fake_wait)
+    monkeypatch.setattr(kernel_runner, "kernels_output", fake_output)
+
+    preparation = kernel_runner.KernelPreparation(
+        kernel_dir=kernel_dir,
+        output_dir=output_dir,
+        logs_dir=logs_dir,
+        kernel_slug="kernel-slug",
+        kernel_id="user/kernel-slug",
+    )
+
+    with pytest.raises(KernelFailedError, match="alice/missing-dataset"):
+        kernel_runner.KernelJobMonitor().push_and_wait(
+            preparation=preparation,
+            slug="demo",
+            timeout_minutes=1,
+        )
+
+    assert observed["wait_called"] is False
+    assert observed["output_called"] is False
 
 
 def test_ensure_kernel_competition_slug_env_rewrites_stale_slug(tmp_path: Path) -> None:
@@ -415,6 +692,108 @@ def test_find_submission_file_supports_submission_manifest(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert find_submission_file(output_dir) == manifest
+
+
+def test_copy_kernel_sources_skips_output_dirs_and_copy_external_assets(tmp_path: Path) -> None:
+    base_dir = tmp_path / "artifacts"
+    slug = "playground-series-s6e3"
+    kernel_source_dir = base_dir / slug / "kernel"
+    (kernel_source_dir / "output").mkdir(parents=True, exist_ok=True)
+    (kernel_source_dir / "outputs").mkdir(parents=True, exist_ok=True)
+    (kernel_source_dir / "__pycache__").mkdir(parents=True, exist_ok=True)
+    (kernel_source_dir / "kernel.py").write_text("from runtime import main\n", encoding="utf-8")
+    (kernel_source_dir / "runtime.py").write_text("def main():\n    pass\n", encoding="utf-8")
+    (kernel_source_dir / "output" / "submission.csv").write_text("id,target\n", encoding="utf-8")
+    (kernel_source_dir / "outputs" / "submission.csv").write_text("id,target\n", encoding="utf-8")
+    (kernel_source_dir / "__pycache__" / "kernel.pyc").write_bytes(b"pyc")
+
+    external_dir = base_dir / slug / "external"
+    external_dir.mkdir(parents=True, exist_ok=True)
+    (external_dir / "WA_Fn-UseC_-Telco-Customer-Churn.csv").write_text("customerID,Churn\nx,No\n", encoding="utf-8")
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+
+    _copy_kernel_sources(kernel_source_dir, kernel_dir)
+    _copy_shared_kernel_runtime_modules(kernel_dir)
+    _copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_dir)
+
+    assert (kernel_dir / "kernel.py").exists()
+    assert (kernel_dir / "runtime.py").exists()
+    assert (kernel_dir / "tabular_ensemble.py").exists()
+    assert (kernel_dir / "WA_Fn-UseC_-Telco-Customer-Churn.csv").exists()
+    assert not (kernel_dir / "output").exists()
+    assert not (kernel_dir / "outputs").exists()
+    assert not (kernel_dir / "__pycache__").exists()
+
+
+def test_run_local_kernel_once_does_not_wait_for_inherited_stdout_holders(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(
+        (
+            "import subprocess\n"
+            "import sys\n"
+            "\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+            "print('kernel parent exited', flush=True)\n"
+        ),
+        encoding="utf-8",
+    )
+
+    started = time.monotonic()
+    result = _run_local_kernel_once(
+        kernel_path=kernel_path,
+        kernel_stage_dir=tmp_path,
+        current_env=os.environ.copy(),
+        timeout_sec=5,
+        line_callback=None,
+        progress_tracker=None,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.command_result.returncode == 0
+    assert "kernel parent exited" in result.command_result.stdout
+    assert elapsed < 5
+
+
+def test_should_suppress_local_kernel_log_line_filters_fragmentation_and_catboost_noise() -> None:
+    state = _LocalKernelLogFilterState()
+    lines = [
+        "/tmp/kernel.py:1036: PerformanceWarning: DataFrame is highly fragmented.\n",
+        "  out[ratio_col] = out[t1] / (out[t2].abs() + 1e-6)\n",
+        "Default metric period is 5 because BrierScore is/are not implemented for GPU\n",
+        "training fold=1\n",
+    ]
+
+    suppressed = [_should_suppress_local_kernel_log_line(line, state=state) for line in lines]
+
+    assert suppressed == [True, True, True, False]
+
+
+def test_run_local_kernel_once_suppresses_known_warning_noise(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(
+        (
+            "print('/tmp/kernel.py:1036: PerformanceWarning: DataFrame is highly fragmented.', flush=True)\n"
+            "print('  out[ratio_col] = out[t1] / (out[t2].abs() + 1e-6)', flush=True)\n"
+            "print('Default metric period is 5 because BrierScore is/are not implemented for GPU', flush=True)\n"
+            "print('training fold=1', flush=True)\n"
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_local_kernel_once(
+        kernel_path=kernel_path,
+        kernel_stage_dir=tmp_path,
+        current_env=os.environ.copy(),
+        timeout_sec=5,
+        line_callback=None,
+        progress_tracker=None,
+    )
+
+    assert result.command_result.returncode == 0
+    assert "training fold=1" in result.command_result.stdout
+    assert "PerformanceWarning" not in result.command_result.stdout
+    assert "BrierScore is/are not implemented for GPU" not in result.command_result.stdout
 
 
 def test_find_output_file_picks_newest_match(tmp_path: Path) -> None:
@@ -687,6 +1066,10 @@ def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
 
     assert env["KAGGLEBOT_DISABLE_KAGGLE_WORKING_WRITES"] == "1"
     assert env["KAGGLEBOT_LOCAL_WORKING_DIR"] == str(tmp_path / "local-working")
+    assert env["KAGGLEBOT_NUM_WORKERS"] == "0"
+    assert env["KAGGLEBOT_TORCH_SHARING_STRATEGY"] == "file_system"
+    assert env["KAGGLEBOT_LOCAL_NOFILE"] == "4096"
+    assert env["KAGGLEBOT_LOCAL_KERNEL_STALL_SEC"] == "900"
     assert env["KAGGLEBOT_DO_TRAIN"] == "1"
     assert env["KAGGLEBOT_FORCE_TRAIN"] == "1"
     assert env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] == "1"
@@ -697,6 +1080,8 @@ def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
     assert any("xgboost unavailable" in note for note in notes)
     assert any("LightGBM GPU probe failed" in note for note in notes)
     assert any("KAGGLEBOT_ALLOW_MODEL_DOWNLOAD=1" in note for note in notes)
+    assert any("KAGGLEBOT_NUM_WORKERS=0" in note for note in notes)
+    assert any("KAGGLEBOT_TORCH_SHARING_STRATEGY=file_system" in note for note in notes)
 
 
 def test_inject_pipeline_cfg_fallback_replaces_keyerror(tmp_path: Path) -> None:
@@ -872,13 +1257,277 @@ def test_run_kernel_local_executes_staged_copy(tmp_path: Path) -> None:
     assert "demo" in staged_text
     staged_sitecustomize = tmp_path / "demo" / "kernels" / "run-5" / "local-iter-1" / "sitecustomize.py"
     assert staged_sitecustomize.exists()
-    assert "kagglebot: train-progress-shim" in staged_sitecustomize.read_text(encoding="utf-8")
+    staged_sitecustomize_text = staged_sitecustomize.read_text(encoding="utf-8")
+    assert "kagglebot: train-progress-shim" in staged_sitecustomize_text
+    assert "kagglebot: torch-runtime-guard-shim" in staged_sitecustomize_text
     staged_plan_local = tmp_path / "demo" / "kernels" / "run-5" / "local-iter-1" / "plan.json"
     staged_plan_parent = tmp_path / "demo" / "kernels" / "run-5" / "plan.json"
     assert staged_plan_local.exists()
     assert staged_plan_parent.exists()
     assert json.loads(staged_plan_local.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
     assert json.loads(staged_plan_parent.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
+
+
+def test_run_kernel_local_fails_fast_when_local_kernel_stalls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "print('submission.csv', flush=True)",
+                "print('metrics.json', flush=True)",
+                "print('kernel start', flush=True)",
+                "time.sleep(10)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "demo" / "plan.json").write_text(
+        json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8"
+    )
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "5")
+
+    with pytest.raises(KernelFailedError, match="Local kernel stalled"):
+        run_kernel_local(
+            slug="demo",
+            run_id="run-stall",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            holdout_frac=0.2,
+            cv_folds=3,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+    stdout_log = tmp_path / "demo" / "runs" / "run-stall" / "iter-1" / "logs" / "local_kernel_stdout.log"
+    assert stdout_log.exists()
+    assert "kernel start" in stdout_log.read_text(encoding="utf-8")
+
+
+def test_run_kernel_local_dry_run_stages_required_seq2seq_models(tmp_path: Path) -> None:
+    slug = "deep-past-initiative-machine-translation"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "print('/kaggle/input/demo/train.csv')",
+                "print('submission.csv')",
+                "print('metrics.json')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plan_payload = {
+        "toggles": {"USE_MODEL": True},
+        "kaggle_kernel_sources": {
+            "pipeline_model_hints": {
+                "pooled_multi_byt5_mbr": ["google/byt5-base"],
+            },
+            "required_local_seq2seq_pipelines": ["pooled_multi_byt5_mbr"],
+        },
+    }
+    (tmp_path / slug / "plan.json").write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
+    model_dir = tmp_path / slug / "kernels" / "old-run" / "local-iter-1" / "models" / "google--byt5-base"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("config.json", "tokenizer_config.json", "pytorch_model.bin"):
+        (model_dir / filename).write_text("x", encoding="utf-8")
+
+    result = run_kernel_local(
+        slug=slug,
+        run_id="run-local-models",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="cv",
+        metric="gmean",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        dry_run=True,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.kernel_id == f"local/{slug}"
+    staged_model_dir = tmp_path / slug / "kernels" / "run-local-models" / "local-iter-1" / "models" / "google_byt5_base"
+    assert staged_model_dir.exists()
+    assert (staged_model_dir / "config.json").exists()
+
+
+def test_stage_resolved_model_hints_rejects_artem_alias_pointing_to_google_large(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    google_dir = tmp_path / "models--google--byt5-large" / "snapshots" / "abc123"
+    google_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("config.json", "tokenizer_config.json", "model.safetensors"):
+        (google_dir / filename).write_text("x", encoding="utf-8")
+    alias_dir = tmp_path / "artemgoncarov_dpc_byt5_large"
+    alias_dir.symlink_to(google_dir, target_is_directory=True)
+
+    staged = kernel_runner._stage_resolved_model_hints(
+        hints=["artemgoncarov/dpc-byt5-large"],
+        candidate_dirs=[alias_dir, google_dir],
+        staged_root=tmp_path / "staged-models",
+    )
+
+    assert staged == []
+
+
+def test_stage_resolved_model_hints_rejects_mattia_alias_pointing_to_assiaben(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    assiaben_dir = tmp_path / "dataset__assiaben__final-byt5" / "byt5-akkadian-optimized-34x"
+    assiaben_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("config.json", "tokenizer_config.json", "model.safetensors"):
+        (assiaben_dir / filename).write_text("x", encoding="utf-8")
+    alias_dir = tmp_path / "mattiaangeli_byt5_akkadian_mbr_pytorch_default_6"
+    alias_dir.symlink_to(assiaben_dir, target_is_directory=True)
+
+    staged = kernel_runner._stage_resolved_model_hints(
+        hints=["mattiaangeli/byt5-akkadian-mbr/PyTorch/default/6"],
+        candidate_dirs=[alias_dir, assiaben_dir],
+        staged_root=tmp_path / "staged-models",
+    )
+
+    assert staged == []
+
+
+def test_run_kernel_local_dry_run_fails_when_required_seq2seq_models_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slug = "deep-past-initiative-machine-translation"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "print('/kaggle/input/demo/train.csv')",
+                "print('submission.csv')",
+                "print('metrics.json')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plan_payload = {
+        "toggles": {"USE_MODEL": True},
+        "kaggle_kernel_sources": {
+            "pipeline_model_hints": {
+                "pooled_multi_byt5_mbr": ["mattiaangeli/byt5-akkadian-mbr/PyTorch/default/6"],
+            },
+            "required_local_seq2seq_pipelines": ["pooled_multi_byt5_mbr"],
+        },
+    }
+    (tmp_path / slug / "plan.json").write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
+
+    home = tmp_path / "fake-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    with pytest.raises(KernelFailedError, match="Required local seq2seq model sources could not be resolved"):
+        run_kernel_local(
+            slug=slug,
+            run_id="run-missing-models",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="cv",
+            metric="gmean",
+            direction="maximize",
+            holdout_frac=0.2,
+            cv_folds=5,
+            seed=42,
+            dry_run=True,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+
+def test_run_kernel_local_dry_run_stages_text_runtime_aux_inputs(tmp_path: Path) -> None:
+    slug = "demo-translation"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text("print('submission.csv')\nprint('metrics.json')\n", encoding="utf-8")
+    (tmp_path / slug / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / slug / "context").mkdir(parents=True, exist_ok=True)
+    (tmp_path / slug / "data" / "lexicon.csv").write_text("token,norm\n", encoding="utf-8")
+    (tmp_path / slug / "context" / "metadata.csv").write_text("id,value\n", encoding="utf-8")
+    plan_payload = {
+        "text_runtime": {
+            "required_aux_inputs": ["data/lexicon.csv", "context/metadata.csv"],
+            "metadata_supervision": "high_precision",
+            "constraint_rewrite_mode": "soft",
+            "group_key_columns": ["document_id"],
+        }
+    }
+    (tmp_path / slug / "plan.json").write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
+
+    result = run_kernel_local(
+        slug=slug,
+        run_id="run-text-runtime",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="cv",
+        metric="gmean",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        dry_run=True,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.kernel_id == f"local/{slug}"
+    staged_kernel_dir = tmp_path / slug / "kernels" / "run-text-runtime" / "local-iter-1"
+    assert (staged_kernel_dir / "text_translation.py").exists()
+    assert (staged_kernel_dir / "aux_inputs" / "data" / "lexicon.csv").exists()
+    assert (staged_kernel_dir / "aux_inputs" / "context" / "metadata.csv").exists()
+
+
+def test_run_kernel_local_dry_run_fails_when_required_text_aux_inputs_missing(tmp_path: Path) -> None:
+    slug = "demo-translation"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text("print('submission.csv')\nprint('metrics.json')\n", encoding="utf-8")
+    (tmp_path / slug / "plan.json").write_text(
+        json.dumps({"text_runtime": {"required_aux_inputs": ["data/missing_lexicon.csv"]}}, indent=2),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KernelFailedError, match="Required text runtime aux inputs could not be resolved"):
+        run_kernel_local(
+            slug=slug,
+            run_id="run-missing-aux",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="cv",
+            metric="gmean",
+            direction="maximize",
+            holdout_frac=0.2,
+            cv_folds=5,
+            seed=42,
+            dry_run=True,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
 
 
 def test_run_kernel_local_enforces_bvs_contract_rejects_regressed_kernel(tmp_path: Path) -> None:
@@ -1745,6 +2394,7 @@ def test_extract_training_stage_from_line() -> None:
 
 def test_extract_pipeline_progress_from_line() -> None:
     assert _extract_pipeline_start_from_line("[kernel] Running pipeline: tri_blend_stack") == "tri_blend_stack"
+    assert _extract_pipeline_start_from_line("Training pipeline: tri_blend_stack") == "tri_blend_stack"
     assert (
         _extract_pipeline_done_from_line("[kernel] Pipeline tri_blend_stack: CV=0.125 method=weighted_mean_log")
         == "tri_blend_stack"
@@ -1795,6 +2445,27 @@ def test_progress_tracker_reports_generic_activity(tmp_path: Path) -> None:
     assert "pipelines_done=1" in suffix
     assert "artifacts=" in suffix
     assert "last_artifact=" in suffix
+
+
+def test_progress_tracker_reports_runtime_pipeline_suite_and_model(tmp_path: Path) -> None:
+    tracker = _build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo")
+
+    tracker.observe_line("Training pipeline: catboost_origstats_multiseed_fast__origw0800")
+    tracker.observe_line("Suite: comp_plus_orig")
+    tracker.observe_line("[kernel] train start: model=catboost.CatBoostClassifier rows=123 cols=45")
+    tracker.observe_line("[kernel] CatBoost GPU failed; retrying on CPU: RuntimeError: CUDA out of memory")
+
+    snapshot = tracker.snapshot()
+    assert snapshot["current_pipeline"] == "catboost_origstats_multiseed_fast__origw0800"
+    assert snapshot["current_suite"] == "comp_plus_orig"
+    assert snapshot["current_model"] == "catboost.CatBoostClassifier"
+    assert snapshot["last_fallback_reason"] == "RuntimeError: CUDA out of memory"
+
+    suffix = _format_local_kernel_activity_suffix(tracker)
+    assert "pipeline=catboost_origstats_multiseed_fast__origw0800" in suffix
+    assert "suite=comp_plus_orig" in suffix
+    assert "model=catboost.CatBoostClassifier" in suffix
+    assert "fallback=RuntimeError: CUDA out of memory" in suffix
 
 
 def test_progress_tracker_reports_artifact_activity(tmp_path: Path) -> None:

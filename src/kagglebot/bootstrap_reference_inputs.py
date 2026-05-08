@@ -5,7 +5,8 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kagglebot.kaggle_api import download_competition, download_dataset
+from kagglebot.competition_policy import load_competition_policy
+from kagglebot.kaggle_api import download_competition, download_dataset, kernels_pull
 from kagglebot.paths import CompetitionPaths
 from kagglebot.validators import safe_extract_zip
 
@@ -26,11 +27,17 @@ def stage_reference_notebook_inputs(
     dry_run: bool,
     download_competition_fn=download_competition,
     download_dataset_fn=download_dataset,
+    download_kernel_fn=kernels_pull,
 ) -> None:
     index_path = paths.code_notebooks_index_path
     manifest_payload: dict[str, object] = {
         "generated_at": datetime.now(UTC).isoformat(),
         "required_reference_kernel_id": "",
+        "ensemble_reference_kernel_id": "",
+        "required_datasets": [],
+        "required_capabilities": [],
+        "missing_required_sources": [],
+        "policy_tags": [],
         "reference_notebooks": [],
     }
     if not index_path.exists():
@@ -48,17 +55,24 @@ def stage_reference_notebook_inputs(
     notebooks = index_payload.get("notebooks")
     if not isinstance(notebooks, list):
         notebooks = []
+    competition_policy = load_competition_policy(paths)
     required_kernel_id = str(index_payload.get("required_reference_kernel_id") or "").strip()
+    ensemble_kernel_id = str(index_payload.get("ensemble_reference_kernel_id") or "").strip()
     manifest_payload["required_reference_kernel_id"] = required_kernel_id
+    manifest_payload["ensemble_reference_kernel_id"] = ensemble_kernel_id
+    manifest_payload["required_datasets"] = list(competition_policy.reference_inputs.required_datasets)
+    manifest_payload["required_capabilities"] = list(competition_policy.required_capabilities)
+    manifest_payload["policy_tags"] = list(competition_policy.archetype_tags)
+    effective_download = bool(download or competition_policy.reference_inputs.proactive)
+    target_ids = [kernel_id for kernel_id in (required_kernel_id, ensemble_kernel_id) if kernel_id]
     target_entries = [
-        item
-        for item in notebooks
-        if isinstance(item, dict) and str(item.get("kernel_id") or "").strip() == required_kernel_id
+        item for item in notebooks if isinstance(item, dict) and str(item.get("kernel_id") or "").strip() in target_ids
     ]
     if not target_entries:
         target_entries = [item for item in notebooks if isinstance(item, dict)][:1]
 
     manifest_entries: list[dict[str, object]] = []
+    discovered_required_sources: set[tuple[str, str]] = set()
     for entry in target_entries:
         notebook_dir = Path(str(entry.get("local_dir") or "")).expanduser() if entry.get("local_dir") else None
         source_file = (
@@ -67,9 +81,14 @@ def stage_reference_notebook_inputs(
             else (_choose_notebook_source_file(notebook_dir) if notebook_dir else None)
         )
         metadata = _load_notebook_metadata(notebook_dir) if notebook_dir else {}
+        metadata_sources = _collect_metadata_input_sources(metadata)
+        notebook_sources = _collect_notebook_text_input_sources(source_file)
+        summary_sources = _collect_free_text_input_sources(str(entry.get("summary") or ""), source="summary_text")
         input_sources = _merge_reference_input_sources(
-            _collect_metadata_input_sources(metadata),
-            _collect_notebook_text_input_sources(source_file),
+            metadata_sources,
+            notebook_sources,
+            summary_sources,
+            _policy_reference_sources(paths=paths),
         )
         staged_sources: list[dict[str, object]] = []
         if input_sources and notebook_dir is not None:
@@ -78,12 +97,18 @@ def stage_reference_notebook_inputs(
                 current_slug=slug,
                 kernel_id=str(entry.get("kernel_id") or ""),
                 input_sources=input_sources,
-                download=download,
+                download=effective_download,
                 quiet=quiet,
                 dry_run=dry_run,
                 download_competition_fn=download_competition_fn,
                 download_dataset_fn=download_dataset_fn,
+                download_kernel_fn=download_kernel_fn,
             )
+        for source in _merge_reference_input_sources(metadata_sources, notebook_sources, summary_sources):
+            kind = str(source.get("kind") or "").strip().lower()
+            ref = str(source.get("ref") or "").strip()
+            if kind and ref:
+                discovered_required_sources.add((kind, ref))
         manifest_entries.append(
             {
                 "kernel_id": str(entry.get("kernel_id") or ""),
@@ -96,6 +121,11 @@ def stage_reference_notebook_inputs(
             }
         )
     manifest_payload["reference_notebooks"] = manifest_entries
+    manifest_payload["missing_required_sources"] = [
+        ref
+        for ref in competition_policy.reference_inputs.required_datasets
+        if ("dataset", ref) not in discovered_required_sources
+    ]
     paths.reference_inputs_manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
 
 
@@ -244,6 +274,47 @@ def _collect_notebook_text_input_sources(path: Path | None) -> list[dict[str, st
     return sources
 
 
+def _collect_free_text_input_sources(text: str, *, source: str) -> list[dict[str, str]]:
+    if not text.strip():
+        return []
+    sources: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_source(kind: str, ref: str) -> None:
+        value = ref.strip().strip("/")
+        if not value:
+            return
+        key = (kind, value)
+        if key in seen:
+            return
+        seen.add(key)
+        sources.append({"kind": kind, "ref": value, "source": source})
+
+    for match in _NOTEBOOK_DATASET_REF_RE.finditer(text):
+        add_source("dataset", match.group("ref"))
+    for match in _NOTEBOOK_COMPETITION_REF_RE.finditer(text):
+        add_source("competition", match.group("slug"))
+    for match in _NOTEBOOK_KERNEL_REF_RE.finditer(text):
+        add_source("kernel", match.group("ref"))
+    return sources
+
+
+def _policy_reference_sources(*, paths: CompetitionPaths) -> list[dict[str, str]]:
+    policy = load_competition_policy(paths)
+    if not policy.active:
+        return []
+    sources: list[dict[str, str]] = []
+    for ref in policy.reference_inputs.required_datasets:
+        sources.append({"kind": "dataset", "ref": ref, "source": "competition_policy.required_datasets"})
+    for ref in policy.reference_inputs.extra_dataset_refs:
+        sources.append({"kind": "dataset", "ref": ref, "source": "competition_policy.extra_dataset_refs"})
+    for ref in policy.reference_inputs.extra_kernel_refs:
+        sources.append({"kind": "kernel", "ref": ref, "source": "competition_policy.extra_kernel_refs"})
+    for ref in policy.reference_inputs.extra_competition_refs:
+        sources.append({"kind": "competition", "ref": ref, "source": "competition_policy.extra_competition_refs"})
+    return sources
+
+
 def _merge_reference_input_sources(*sources_lists: list[dict[str, str]]) -> list[dict[str, str]]:
     merged: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -272,6 +343,7 @@ def _stage_reference_sources(
     dry_run: bool,
     download_competition_fn,
     download_dataset_fn,
+    download_kernel_fn,
 ) -> list[dict[str, object]]:
     staged: list[dict[str, object]] = []
     for source in input_sources:
@@ -285,6 +357,8 @@ def _stage_reference_sources(
         error = ""
         if kind == "competition" and ref == current_slug:
             status = "already_present_current_competition"
+        elif _stage_dir_has_content(stage_dir):
+            status = f"already_staged_{kind}"
         elif not download:
             status = "discovered_not_downloaded"
         elif dry_run:
@@ -300,6 +374,9 @@ def _stage_reference_sources(
                     download_competition_fn(ref, stage_dir, force=True, quiet=quiet)
                     _unzip_downloads(stage_dir)
                     status = "staged_competition"
+                elif kind == "kernel":
+                    download_kernel_fn(ref, stage_dir, slug=current_slug, dry_run=False, metadata=True)
+                    status = "staged_kernel"
                 else:
                     status = "unsupported_source_type"
             except Exception as exc:  # noqa: BLE001
@@ -317,6 +394,15 @@ def _stage_reference_sources(
             }
         )
     return staged
+
+
+def _stage_dir_has_content(stage_dir: Path) -> bool:
+    if not stage_dir.exists() or not stage_dir.is_dir():
+        return False
+    try:
+        return any(stage_dir.iterdir())
+    except OSError:
+        return False
 
 
 def _unzip_downloads(data_dir: Path) -> None:

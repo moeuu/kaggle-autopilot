@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
+from sklearn.metrics import average_precision_score, brier_score_loss, f1_score, roc_auc_score
 
 from kagglebot.solver.metrics import compute_metric, infer_direction, metric_requires_proba
 
@@ -41,3 +41,18 @@ def test_f1_from_probability_predictions() -> None:
 
 def test_mape_direction_is_minimize() -> None:
     assert infer_direction("MAPE") == "minimize"
+
+
+def test_brier_score_alias_requires_probability() -> None:
+    assert metric_requires_proba("Brier Score") is True
+
+
+def test_brier_score_alias_computes_score() -> None:
+    y_true = np.array([0, 1, 0, 1, 1])
+    y_pred = np.array([0.1, 0.8, 0.3, 0.7, 0.9])
+    expected = brier_score_loss(y_true, y_pred)
+    assert compute_metric("Brier Score", y_true, y_pred) == expected
+
+
+def test_brier_score_direction_is_minimize() -> None:
+    assert infer_direction("Brier Score") == "minimize"

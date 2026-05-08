@@ -3,7 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kagglebot.agents.codex_runner import run_codex
@@ -45,6 +46,8 @@ _ACCURACY_FIRST_MIN_MAX_ITERATIONS = 12
 _ACCURACY_FIRST_MIN_PATIENCE = 4
 _ACCURACY_FIRST_MIN_CV_FOLDS = 5
 _ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
+_HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text", "rna_structure"})
+_HEAVY_MAX_FULL_TRAIN_FOLDS = 3
 _DEFAULT_TARGET_MEDAL = "bronze"
 _MEDAL_TARGET_PERCENTILES = {
     "bronze": 0.10,
@@ -181,9 +184,14 @@ def _run_codex_brief_with_retry(
     attempt = 0
     last_error = ""
     while attempt <= retries:
-        allowed_prefixes = [paths.context_agent_dir]
-        guard_snapshot = _backup_guarded_files(config.repo_root, allowed_prefixes)
-        before = _snapshot_tree(config.repo_root)
+        guard_root = paths.base_dir
+        write_policy = WriteGuardPolicy(
+            allowed_prefixes=(paths.context_agent_dir,),
+            denied_prefixes=(paths.data_dir, paths.kernels_dir),
+            external_guard_paths=_default_external_guard_paths(config.repo_root),
+        )
+        guard_snapshot = _backup_guarded_files(guard_root, write_policy)
+        before = _snapshot_tree(guard_root)
         result = run_codex(
             prompt_path,
             output_dir,
@@ -191,12 +199,12 @@ def _run_codex_brief_with_retry(
             model=_PLANNING_CODEX_MODEL,
             reasoning_effort=_PLANNING_REASONING_EFFORT,
         )
-        after = _snapshot_tree(config.repo_root)
+        after = _snapshot_tree(guard_root)
         _enforce_allowlist_changes(
-            root=config.repo_root,
+            root=guard_root,
             before=before,
             after=after,
-            allowed_prefixes=allowed_prefixes,
+            allowed_prefixes=write_policy,
             stage="codex_brief",
             guard_snapshot=guard_snapshot,
             auto_repair=True,
@@ -226,7 +234,11 @@ def _run_strategy_plan(
         brief_content=brief_content,
         compact=compact_mode,
     )
-    prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+    prompt_text = _append_problem_type_knowledge_with_budget(
+        prompt_text,
+        knowledge_text,
+        compact=compact_mode,
+    )
     if len(prompt_text) > _STRATEGY_PROMPT_MAX_CHARS:
         compact_mode = True
         print("[yellow]note[/yellow]: GPT prompt too large; using compact context to avoid length limits.")
@@ -237,7 +249,11 @@ def _run_strategy_plan(
             brief_content=brief_content,
             compact=compact_mode,
         )
-        prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+        prompt_text = _append_problem_type_knowledge_with_budget(
+            prompt_text,
+            knowledge_text,
+            compact=compact_mode,
+        )
 
     attempt = 0
     plan_payload: dict[str, object] | None = None
@@ -265,11 +281,15 @@ def _run_strategy_plan(
                     brief_content=brief_content,
                     compact=compact_mode,
                 )
-                prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+                prompt_text = _append_problem_type_knowledge_with_budget(
+                    prompt_text,
+                    knowledge_text,
+                    compact=compact_mode,
+                )
                 continue
-            if _is_strategy_rate_limited(response_text, result.stderr):
+            if _should_use_fallback_strategy(response_text, result.stderr):
                 error_text = (result.stderr or response_text).strip()
-                print("[yellow]note[/yellow]: GPT rate-limited; using fallback strategy.")
+                print("[yellow]note[/yellow]: GPT strategy failed; using fallback strategy.")
                 (
                     strategy_text,
                     instructions_text,
@@ -331,7 +351,11 @@ def _run_strategy_plan(
                 compact=compact_mode,
                 issues=issues,
             )
-            prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+            prompt_text = _append_problem_type_knowledge_with_budget(
+                prompt_text,
+                knowledge_text,
+                compact=compact_mode,
+            )
             if len(prompt_text) > _STRATEGY_PROMPT_MAX_CHARS and not compact_mode:
                 compact_mode = True
                 prompt_text = _apply_quality_gate(
@@ -342,7 +366,11 @@ def _run_strategy_plan(
                     compact=compact_mode,
                     issues=issues,
                 )
-                prompt_text = _append_problem_type_knowledge(prompt_text, knowledge_text)
+                prompt_text = _append_problem_type_knowledge_with_budget(
+                    prompt_text,
+                    knowledge_text,
+                    compact=compact_mode,
+                )
             continue
         break
 
@@ -424,14 +452,11 @@ def _run_codex_kernel_implementation(
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
-    allowed_prefixes = [
-        paths.kernel_source_dir,
-        paths.runs_dir,
-        paths.context_dir,
-        config.repo_root / "pyproject.toml",
-        config.repo_root / "uv.lock",
-    ]
-    guard_snapshot = _backup_guarded_files(config.repo_root, allowed_prefixes)
+    write_policy = _repo_root_write_policy(
+        repo_root=config.repo_root,
+        denied_prefixes=[paths.data_dir, paths.kernels_dir],
+    )
+    guard_snapshot = _backup_guarded_files(config.repo_root, write_policy)
     before = _snapshot_tree(config.repo_root)
     result = run_codex(
         prompt_path,
@@ -445,7 +470,7 @@ def _run_codex_kernel_implementation(
         root=config.repo_root,
         before=before,
         after=after,
-        allowed_prefixes=allowed_prefixes,
+        allowed_prefixes=write_policy,
         stage="codex_kernel_implementation",
         guard_snapshot=guard_snapshot,
         auto_repair=True,
@@ -704,6 +729,28 @@ def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
             pipelines.append(pipeline)
         normalized["pipelines"] = pipelines
 
+    suites_raw = normalized.get("suites")
+    if isinstance(suites_raw, list):
+        suites: list[object] = []
+        for index, item in enumerate(suites_raw):
+            if not isinstance(item, dict):
+                suites.append(item)
+                continue
+            suite = dict(item)
+            name = suite.get("name")
+            if not isinstance(name, str) or not name.strip():
+                train_mode = suite.get("train_mode")
+                feature_recipe = suite.get("feature_recipe")
+                hint = ""
+                if isinstance(train_mode, str) and train_mode.strip():
+                    hint = train_mode.strip().lower()
+                elif isinstance(feature_recipe, str) and feature_recipe.strip():
+                    hint = feature_recipe.strip().lower()
+                hint = re.sub(r"[^a-zA-Z0-9]+", "_", hint).strip("_")
+                suite["name"] = hint or f"suite_{index + 1}"
+            suites.append(suite)
+        normalized["suites"] = suites
+
     stop_policy_raw = normalized.get("stop_policy")
     if not isinstance(stop_policy_raw, dict):
         return normalized
@@ -742,7 +789,14 @@ def _pipeline_texts(pipeline: dict[str, object]) -> list[str]:
     return texts
 
 
-def _validate_high_accuracy_tabular_plan(pipelines: list[dict[str, object]]) -> list[str]:
+_VALID_SUITE_TRAIN_MODES = {"competition_only", "competition_plus_original", "original_only"}
+_VALID_SUITE_PROMOTION_STAGES = {"ablation_fast", "full_eval"}
+
+
+def _validate_high_accuracy_tabular_plan(
+    pipelines: list[dict[str, object]],
+    suites: list[dict[str, object]] | None,
+) -> list[str]:
     issues: list[str] = []
     family_counts = {"catboost": 0, "xgboost": 0, "lightgbm": 0}
     blend_present = False
@@ -764,6 +818,24 @@ def _validate_high_accuracy_tabular_plan(pipelines: list[dict[str, object]]) -> 
         issues.append("PLAN_JSON must include LightGBM or a second CatBoost/XGBoost variant.")
     if not blend_present:
         issues.append("PLAN_JSON must include at least one OOF blend/ensemble candidate.")
+    if not suites:
+        issues.append(
+            "PLAN_JSON must include suite-aware ablations for high-accuracy tabular search "
+            "(competition_only, competition_plus_original, orig_signal_only)."
+        )
+        return issues
+    suite_names = {str(item.get("name") or "").strip() for item in suites}
+    train_modes = {str(item.get("train_mode") or "").strip() for item in suites}
+    feature_recipes = {str(item.get("feature_recipe") or "").strip() for item in suites}
+    promotion_stages = {str(item.get("promotion_stage") or "").strip() for item in suites}
+    if "competition_only" not in train_modes:
+        issues.append("PLAN_JSON suites must include a competition_only suite.")
+    if "competition_plus_original" not in train_modes:
+        issues.append("PLAN_JSON suites must include a competition_plus_original suite.")
+    if "orig_signal_only" not in feature_recipes and "orig_signal_only" not in suite_names:
+        issues.append("PLAN_JSON suites must include an orig_signal_only ablation suite.")
+    if "full_eval" not in promotion_stages:
+        issues.append("PLAN_JSON suites must include at least one full_eval suite.")
     return issues
 
 
@@ -795,6 +867,46 @@ def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obj
         issues.append("PLAN_JSON score_source must be one of: holdout, cv.")
     if not isinstance(payload.get("target_score"), (int, float)):
         issues.append("PLAN_JSON target_score must be a number.")
+    suites = payload.get("suites")
+    typed_suites: list[dict[str, object]] | None = None
+    if suites is not None:
+        if not isinstance(suites, list):
+            issues.append("PLAN_JSON suites must be an array when provided.")
+        else:
+            typed_suites = []
+            suite_names: set[str] = set()
+            for index, item in enumerate(suites):
+                if not isinstance(item, dict):
+                    issues.append(f"PLAN_JSON suites[{index}] must be an object.")
+                    continue
+                typed_suites.append(item)
+                for key in ("name", "train_mode", "feature_recipe", "lightweight", "promotion_stage"):
+                    if key not in item:
+                        issues.append(f"PLAN_JSON suites[{index}] missing key: {key}.")
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    normalized_name = name.strip()
+                    if normalized_name in suite_names:
+                        issues.append(f"PLAN_JSON suites[{index}] duplicates suite name: {normalized_name}.")
+                    suite_names.add(normalized_name)
+                train_mode = item.get("train_mode")
+                if train_mode is not None and train_mode not in _VALID_SUITE_TRAIN_MODES:
+                    issues.append(
+                        "PLAN_JSON suites"
+                        f"[{index}].train_mode must be one of: {', '.join(sorted(_VALID_SUITE_TRAIN_MODES))}."
+                    )
+                feature_recipe = item.get("feature_recipe")
+                if "feature_recipe" in item and (not isinstance(feature_recipe, str) or not feature_recipe.strip()):
+                    issues.append(f"PLAN_JSON suites[{index}].feature_recipe must be a non-empty string.")
+                lightweight = item.get("lightweight")
+                if "lightweight" in item and not isinstance(lightweight, bool):
+                    issues.append(f"PLAN_JSON suites[{index}].lightweight must be a boolean.")
+                promotion_stage = item.get("promotion_stage")
+                if promotion_stage is not None and promotion_stage not in _VALID_SUITE_PROMOTION_STAGES:
+                    issues.append(
+                        "PLAN_JSON suites"
+                        f"[{index}].promotion_stage must be one of: {', '.join(sorted(_VALID_SUITE_PROMOTION_STAGES))}."
+                    )
     pipelines = payload.get("pipelines")
     if not isinstance(pipelines, list):
         issues.append("PLAN_JSON pipelines must be an array.")
@@ -830,7 +942,7 @@ def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obj
                     )
         if not issues and profile and _is_high_accuracy_tabular_blend_target(profile):
             typed_pipelines = [item for item in pipelines if isinstance(item, dict)]
-            issues.extend(_validate_high_accuracy_tabular_plan(typed_pipelines))
+            issues.extend(_validate_high_accuracy_tabular_plan(typed_pipelines, typed_suites))
     toggles = payload.get("toggles")
     if not isinstance(toggles, dict):
         issues.append("PLAN_JSON toggles must be an object.")
@@ -844,8 +956,8 @@ def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obj
             if key not in evaluation_protocol:
                 issues.append(f"PLAN_JSON evaluation_protocol missing key: {key}.")
         seeds = evaluation_protocol.get("seeds")
-        if not isinstance(seeds, list) or len(seeds) < 3:
-            issues.append("PLAN_JSON evaluation_protocol.seeds must be a list with >=3 seeds.")
+        if not isinstance(seeds, list) or len(seeds) < 1:
+            issues.append("PLAN_JSON evaluation_protocol.seeds must be a non-empty list.")
         n_folds = evaluation_protocol.get("n_folds")
         if not isinstance(n_folds, int) or n_folds < 2:
             issues.append("PLAN_JSON evaluation_protocol.n_folds must be an integer >= 2.")
@@ -924,7 +1036,9 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
             "[yellow]plan guardrail[/yellow]: non-generalizable score_source is not allowed; forcing score_source=cv."
         )
 
-    if _should_force_accuracy_first_cv(modality=modality):
+    accuracy_first_cv = _should_force_accuracy_first_cv(modality=modality)
+    heavy_deep_learning = _is_heavy_deep_learning_modality(modality=modality)
+    if accuracy_first_cv:
         score_source = str(guarded.get("score_source") or "").strip().lower()
         if score_source != "cv":
             guarded["score_source"] = "cv"
@@ -944,9 +1058,27 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
             if protocol_folds is None or protocol_folds < cv_folds:
                 evaluation_protocol["n_folds"] = cv_folds
 
+    if heavy_deep_learning:
+        cv_folds = _as_positive_int(guarded.get("cv_folds"))
+        protocol_folds = (
+            _as_positive_int(evaluation_protocol.get("n_folds")) if evaluation_protocol is not None else None
+        )
+        requested_folds = max([value for value in (cv_folds, protocol_folds) if value is not None], default=None)
+        if requested_folds is not None and requested_folds > _HEAVY_MAX_FULL_TRAIN_FOLDS:
+            guarded["cv_folds"] = _HEAVY_MAX_FULL_TRAIN_FOLDS
+            if evaluation_protocol is not None:
+                evaluation_protocol["n_folds"] = _HEAVY_MAX_FULL_TRAIN_FOLDS
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                f"heavy modality detected; capping full-training folds at {_HEAVY_MAX_FULL_TRAIN_FOLDS}. "
+                "Use cached embeddings, TTA, or lightweight heads for extra validation."
+            )
+
     eval_seeds = _normalize_seed_list(guarded.get("eval_seeds"))
     protocol_seeds = _normalize_seed_list(evaluation_protocol.get("seeds")) if evaluation_protocol is not None else []
-    if len(eval_seeds) < 3 or len(protocol_seeds) < 3:
+    if _should_force_multi_seed_evaluation(modality=modality, task=task, profile=profile) and (
+        len(eval_seeds) < 3 or len(protocol_seeds) < 3
+    ):
         guarded["eval_seeds"] = list(_ACCURACY_FIRST_EVAL_SEEDS)
         if evaluation_protocol is not None:
             evaluation_protocol["seeds"] = list(_ACCURACY_FIRST_EVAL_SEEDS)
@@ -954,6 +1086,18 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
             "[yellow]plan guardrail[/yellow]: "
             f"forcing evaluation seeds={_ACCURACY_FIRST_EVAL_SEEDS} for lower-variance model ranking."
         )
+    elif heavy_deep_learning:
+        selected_seeds = eval_seeds or protocol_seeds or [_ACCURACY_FIRST_EVAL_SEEDS[0]]
+        if len(selected_seeds) > 1:
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                f"heavy modality detected; using one full-training seed ({selected_seeds[0]}). "
+                "Use extra seeds only for cheap heads/blends or final confirmation."
+            )
+            selected_seeds = [selected_seeds[0]]
+        guarded["eval_seeds"] = list(selected_seeds)
+        if evaluation_protocol is not None:
+            evaluation_protocol["seeds"] = list(selected_seeds)
 
     max_iterations = _as_positive_int(guarded.get("max_iterations"))
     if max_iterations is None or max_iterations < _ACCURACY_FIRST_MIN_MAX_ITERATIONS:
@@ -983,7 +1127,11 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
             guarded["score_source"] = "cv"
             print("[yellow]plan guardrail[/yellow]: detected severe class imbalance; forcing score_source=cv.")
 
-        if evaluation_protocol is not None:
+        if evaluation_protocol is not None and _should_force_multi_seed_evaluation(
+            modality=modality,
+            task=task,
+            profile=profile,
+        ):
             seeds = evaluation_protocol.get("seeds")
             normalized_seeds = [seed for seed in seeds if isinstance(seed, int)] if isinstance(seeds, list) else []
             if len(normalized_seeds) < 3:
@@ -1016,7 +1164,7 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
                     f"[yellow]plan guardrail[/yellow]: detected severe class imbalance; enabling {classifier_keys[0]}."
                 )
 
-    if toggles is not None and modality in {"image", "video", "audio", "text"}:
+    if toggles is not None and modality in {"image", "video", "audio", "text", "rna_structure"}:
         allow_pretrained = toggles.get("ALLOW_PRETRAINED_WEIGHTS")
         if isinstance(allow_pretrained, bool) and not allow_pretrained and not _rules_disallow_external_data(paths):
             toggles["ALLOW_PRETRAINED_WEIGHTS"] = True
@@ -1065,7 +1213,19 @@ def _normalize_seed_list(value: object) -> list[int]:
 
 def _should_force_accuracy_first_cv(*, modality: str) -> bool:
     """Return whether score_source should default to CV for this modality."""
-    return modality not in {"image", "video", "audio", "text"}
+    return not _is_heavy_deep_learning_modality(modality=modality)
+
+
+def _should_force_multi_seed_evaluation(*, modality: str, task: str, profile: dict[str, object]) -> bool:
+    if task == "classification":
+        top_class_ratio = _extract_top_class_ratio(profile)
+        if top_class_ratio is not None and top_class_ratio >= 0.98:
+            return True
+    return not _is_heavy_deep_learning_modality(modality=modality)
+
+
+def _is_heavy_deep_learning_modality(*, modality: str) -> bool:
+    return str(modality or "").strip().lower() in _HEAVY_DEEP_LEARNING_MODALITIES
 
 
 def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:
@@ -1303,6 +1463,12 @@ _STRATEGY_RATE_LIMIT_MARKERS = (
     "error 429",
     "status 429",
 )
+_STRATEGY_TIMEOUT_MARKERS = (
+    "strategy runner timed out",
+    "timed out",
+    "timeout",
+    "deadline exceeded",
+)
 
 
 def _build_strategy_prompt(
@@ -1367,6 +1533,8 @@ def _build_strategy_prompt(
             "target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant.\n"
             "The plan MUST also include at least one OOF blend candidate "
             "(weighted/rank/logit blend) so search does not collapse into same-family tuning.\n"
+            "The PLAN_JSON MUST include suite-aware ablations for competition-only training, "
+            "competition-plus-original training, and an orig-signal-only lightweight suite.\n"
         )
     if compact:
         prompt += "\n\n[COMPACT]\n"
@@ -1406,6 +1574,23 @@ def _append_problem_type_knowledge(prompt_text: str, knowledge_text: str) -> str
     return f"{prompt_text}\n\n## Problem-Type Knowledge\n{clean}\n"
 
 
+def _append_problem_type_knowledge_with_budget(prompt_text: str, knowledge_text: str, *, compact: bool) -> str:
+    combined = _append_problem_type_knowledge(prompt_text, knowledge_text)
+    if len(combined) <= _STRATEGY_PROMPT_MAX_CHARS or not compact:
+        return combined
+    clean = knowledge_text.strip()
+    if not clean:
+        return prompt_text
+    prefix = "\n\n## Problem-Type Knowledge\n"
+    remaining = _STRATEGY_PROMPT_MAX_CHARS - len(prompt_text) - len(prefix) - 1
+    if remaining <= 0:
+        return prompt_text
+    trimmed = _truncate_exact(clean, remaining)
+    if not trimmed:
+        return prompt_text
+    return f"{prompt_text}{prefix}{trimmed}\n"
+
+
 def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Path, limit: int = 5) -> str:
     try:
         profile_text = _read_text(paths.dataset_profile_path)
@@ -1441,9 +1626,9 @@ def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Pat
         return "No prior problem-type insights available."
 
 
-def _is_strategy_rate_limited(stdout: str, stderr: str) -> bool:
+def _should_use_fallback_strategy(stdout: str, stderr: str) -> bool:
     haystack = f"{stdout}\n{stderr}".lower()
-    return any(marker in haystack for marker in _STRATEGY_RATE_LIMIT_MARKERS)
+    return any(marker in haystack for marker in _STRATEGY_RATE_LIMIT_MARKERS + _STRATEGY_TIMEOUT_MARKERS)
 
 
 def _format_fallback_transcript(error_text: str) -> str:
@@ -1741,6 +1926,9 @@ def _build_fallback_strategy(
         "   - Train at least two model families and compare offline metrics.",
         "   - Metric: use accuracy/F1/AUC for classification, RMSE/MAE for regression if unknown.",
         "3) If data is non-tabular or target is unclear:",
+        "   - For RNA sequence/structure tasks, treat each molecule/target as the split unit, not each residue row.",
+        "   - Use sequence-aware or structure-aware models, preserve sample_submission anchor columns exactly, "
+        "and write residue-level coordinates in the provided column order.",
         "   - Use modality-appropriate models (CNN/transformer/sequence model).",
         "   - Only fall back to sample_submission if no valid training path exists.",
         "4) Always write:",
@@ -1810,6 +1998,29 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
                 "runtime_memory": "low runtime, low memory",
                 "failure_modes": ["underfitting on complex datasets"],
                 "fallbacks": ["move to stronger family", "add informative features"],
+            },
+        ],
+        "suites": [
+            {
+                "name": "competition_only",
+                "train_mode": "competition_only",
+                "feature_recipe": "full",
+                "lightweight": False,
+                "promotion_stage": "full_eval",
+            },
+            {
+                "name": "competition_plus_original",
+                "train_mode": "competition_plus_original",
+                "feature_recipe": "full",
+                "lightweight": False,
+                "promotion_stage": "ablation_fast",
+            },
+            {
+                "name": "orig_signal_only",
+                "train_mode": "competition_only",
+                "feature_recipe": "orig_signal_only",
+                "lightweight": True,
+                "promotion_stage": "ablation_fast",
             },
         ],
         "toggles": {
@@ -1994,6 +2205,18 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "\n... (truncated)"
 
 
+def _truncate_exact(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    suffix = "\n... (truncated)"
+    if max_chars <= len(suffix):
+        return text[:max_chars].rstrip()
+    return text[: max_chars - len(suffix)].rstrip() + suffix
+
+
 def _read_sample_submission_head(paths: CompetitionPaths, max_lines: int = 5) -> str:
     head_path = paths.sample_submission_head_path
     if head_path.exists():
@@ -2109,6 +2332,14 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
 class GuardSnapshot:
     backup: dict[str, bytes]
     oversized: set[str]
+    external_backup: dict[str, bytes | None] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WriteGuardPolicy:
+    allowed_prefixes: tuple[Path, ...]
+    denied_prefixes: tuple[Path, ...] = ()
+    external_guard_paths: tuple[Path, ...] = ()
 
 
 _NOISE_PREFIXES = (
@@ -2120,6 +2351,7 @@ _NOISE_PREFIXES = (
     ".venv/",
 )
 _NOISE_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
+_DISCORD_NOTIFIER_STATE_FILENAME = "discord_notifier_state.json"
 
 
 def _snapshot_tree(root: Path) -> dict[str, tuple[int, int]]:
@@ -2135,8 +2367,68 @@ def _snapshot_tree(root: Path) -> dict[str, tuple[int, int]]:
     return snapshot
 
 
-def _backup_guarded_files(root: Path, allowed_prefixes: list[Path]) -> GuardSnapshot:
-    allowed = _allowed_prefixes(root, allowed_prefixes)
+def _default_external_guard_paths(repo_root: Path) -> tuple[Path, ...]:
+    return (
+        repo_root / ".git" / "HEAD",
+        repo_root / ".git" / "index",
+        repo_root / ".git" / "config",
+        repo_root / ".git" / "packed-refs",
+        repo_root / ".git" / "refs",
+        repo_root / ".git" / "logs",
+        Path.home() / ".kaggle" / "kaggle.json",
+    )
+
+
+def _repo_root_write_policy(
+    *,
+    repo_root: Path,
+    denied_prefixes: list[Path],
+    extra_allowed_prefixes: list[Path] | None = None,
+    extra_external_guard_paths: list[Path] | None = None,
+) -> WriteGuardPolicy:
+    allowed_prefixes = [repo_root]
+    if extra_allowed_prefixes:
+        allowed_prefixes.extend(extra_allowed_prefixes)
+    external_guard_paths = list(_default_external_guard_paths(repo_root))
+    if extra_external_guard_paths:
+        external_guard_paths.extend(extra_external_guard_paths)
+    return WriteGuardPolicy(
+        allowed_prefixes=tuple(allowed_prefixes),
+        denied_prefixes=tuple(denied_prefixes),
+        external_guard_paths=tuple(dict.fromkeys(external_guard_paths)),
+    )
+
+
+def _coerce_write_policy(
+    root: Path,
+    allowed_prefixes: list[Path] | WriteGuardPolicy,
+    denied_prefixes: list[Path] | None = None,
+    external_guard_paths: list[Path] | None = None,
+) -> WriteGuardPolicy:
+    del root
+    if isinstance(allowed_prefixes, WriteGuardPolicy):
+        return allowed_prefixes
+    return WriteGuardPolicy(
+        allowed_prefixes=tuple(allowed_prefixes),
+        denied_prefixes=tuple(denied_prefixes or []),
+        external_guard_paths=tuple(external_guard_paths or []),
+    )
+
+
+def _backup_guarded_files(
+    root: Path,
+    allowed_prefixes: list[Path] | WriteGuardPolicy,
+    denied_prefixes: list[Path] | None = None,
+    external_guard_paths: list[Path] | None = None,
+) -> GuardSnapshot:
+    policy = _coerce_write_policy(
+        root,
+        allowed_prefixes,
+        denied_prefixes=denied_prefixes,
+        external_guard_paths=external_guard_paths,
+    )
+    allowed = _allowed_prefixes(root, policy.allowed_prefixes)
+    denied = _allowed_prefixes(root, list(policy.denied_prefixes))
     backup: dict[str, bytes] = {}
     oversized: set[str] = set()
     for path in root.rglob("*"):
@@ -2145,11 +2437,11 @@ def _backup_guarded_files(root: Path, allowed_prefixes: list[Path]) -> GuardSnap
         rel = path.relative_to(root).as_posix()
         if rel.startswith(".git/"):
             continue
-        if _is_noise_path(rel):
+        if _is_noise_path(rel, denied):
             continue
-        if not _is_protected_path(rel):
+        if not (_is_protected_path(rel) or _is_denied(rel, denied)):
             continue
-        if _is_allowed(rel, allowed):
+        if _is_allowed(rel, allowed, denied):
             continue
         try:
             size = path.stat().st_size
@@ -2162,7 +2454,11 @@ def _backup_guarded_files(root: Path, allowed_prefixes: list[Path]) -> GuardSnap
             backup[rel] = path.read_bytes()
         except OSError:
             continue
-    return GuardSnapshot(backup=backup, oversized=oversized)
+    return GuardSnapshot(
+        backup=backup,
+        oversized=oversized,
+        external_backup=_snapshot_external_guard_paths(policy.external_guard_paths),
+    )
 
 
 def _enforce_allowlist_changes(
@@ -2170,21 +2466,35 @@ def _enforce_allowlist_changes(
     root: Path,
     before: dict[str, tuple[int, int]],
     after: dict[str, tuple[int, int]],
-    allowed_prefixes: list[Path],
+    allowed_prefixes: list[Path] | WriteGuardPolicy,
     stage: str,
     guard_snapshot: GuardSnapshot | None = None,
     auto_repair: bool = False,
+    denied_prefixes: list[Path] | None = None,
+    external_guard_paths: list[Path] | None = None,
 ) -> None:
-    allowed = _allowed_prefixes(root, allowed_prefixes)
+    policy = _coerce_write_policy(
+        root,
+        allowed_prefixes,
+        denied_prefixes=denied_prefixes,
+        external_guard_paths=external_guard_paths,
+    )
+    _verify_external_guard_paths(stage=stage, guard_snapshot=guard_snapshot, paths=policy.external_guard_paths)
+    allowed = _allowed_prefixes(root, policy.allowed_prefixes)
+    denied = _allowed_prefixes(root, list(policy.denied_prefixes))
     changed = _diff_snapshots(before, after)
-    unauthorized = [path for path in changed if not _is_allowed(path, allowed) and not _is_noise_path(path)]
+    unauthorized = [
+        path for path in changed if not _is_allowed(path, allowed, denied) and not _is_noise_path(path, denied)
+    ]
     if not unauthorized:
         return
     if auto_repair and guard_snapshot is not None:
-        errors = _repair_unauthorized_changes(root, unauthorized, guard_snapshot, before)
+        errors = _repair_unauthorized_changes(root, unauthorized, guard_snapshot, before, denied)
         after_repair = _snapshot_tree(root)
         changed = _diff_snapshots(before, after_repair)
-        unauthorized = [path for path in changed if not _is_allowed(path, allowed) and not _is_noise_path(path)]
+        unauthorized = [
+            path for path in changed if not _is_allowed(path, allowed, denied) and not _is_noise_path(path, denied)
+        ]
         unauthorized = _filter_restored_paths(root, unauthorized, guard_snapshot)
         if not unauthorized:
             return
@@ -2215,7 +2525,8 @@ def _allowed_prefixes(root: Path, allowed_prefixes: list[Path]) -> list[str]:
         except ValueError:
             continue
         rel_clean = rel.rstrip("/")
-        if not rel_clean:
+        if rel_clean in {"", "."}:
+            allowed.append("/")
             continue
         if prefix.exists():
             if prefix.is_dir():
@@ -2228,10 +2539,15 @@ def _allowed_prefixes(root: Path, allowed_prefixes: list[Path]) -> list[str]:
             allowed.append(rel_clean)
         else:
             allowed.append(rel_clean + "/")
-    return allowed
+    return list(dict.fromkeys(allowed))
 
 
-def _is_noise_path(path: str) -> bool:
+def _is_noise_path(path: str, denied_prefixes: list[str] | None = None) -> bool:
+    denied = denied_prefixes or []
+    if _is_denied(path, denied):
+        return False
+    if _is_discord_notifier_state_path(path):
+        return True
     if path.startswith("artifacts/") and "/kernels/" in path:
         return True
     if _is_volatile_run_submission_output(path):
@@ -2247,6 +2563,48 @@ def _is_noise_path(path: str) -> bool:
         if path.endswith(suffix):
             return True
     return False
+
+
+def _is_discord_notifier_state_path(path: str) -> bool:
+    parts = path.split("/")
+    return len(parts) >= 3 and parts[-1] == _DISCORD_NOTIFIER_STATE_FILENAME and "_watch" in parts[:-1]
+
+
+def _snapshot_external_guard_paths(paths: Sequence[Path]) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for path in paths:
+        key = str(path)
+        if key in snapshot:
+            continue
+        try:
+            if path.is_file():
+                snapshot[key] = path.read_bytes()
+            elif path.is_dir():
+                lines: list[str] = []
+                for child in sorted(path.rglob("*")):
+                    if not child.is_file():
+                        continue
+                    stat = child.stat()
+                    rel = child.relative_to(path).as_posix()
+                    lines.append(f"{rel}\t{stat.st_mtime_ns}\t{stat.st_size}")
+                snapshot[key] = "\n".join(lines).encode("utf-8")
+            else:
+                snapshot[key] = None
+        except OSError:
+            snapshot[key] = None
+    return snapshot
+
+
+def _verify_external_guard_paths(*, stage: str, guard_snapshot: GuardSnapshot | None, paths: Sequence[Path]) -> None:
+    if guard_snapshot is None or not guard_snapshot.external_backup:
+        return
+    current = _snapshot_external_guard_paths(paths)
+    changed: list[str] = []
+    for key, original in guard_snapshot.external_backup.items():
+        if current.get(key) != original:
+            changed.append(key)
+    if changed:
+        raise KaggleBotError(f"Agent write-guard failed in {stage}: forbidden external path edited: {sorted(changed)}")
 
 
 def _is_volatile_run_submission_output(path: str) -> bool:
@@ -2282,6 +2640,15 @@ def _is_protected_path(path: str) -> bool:
             continue
         if path == entry:
             return True
+    return False
+
+
+def _is_sensitive_repo_path(path: str) -> bool:
+    name = Path(path).name.lower()
+    if name == "kaggle.json":
+        return True
+    if name.startswith(".env"):
+        return True
     return False
 
 
@@ -2349,10 +2716,11 @@ def _repair_unauthorized_changes(
     unauthorized: list[str],
     guard_snapshot: GuardSnapshot,
     before: dict[str, tuple[int, int]],
+    denied_prefixes: list[str],
 ) -> list[str]:
     errors: list[str] = []
     for rel in unauthorized:
-        if _is_noise_path(rel):
+        if _is_noise_path(rel, denied_prefixes):
             _remove_path(root / rel)
             continue
         if rel in guard_snapshot.oversized:
@@ -2390,8 +2758,10 @@ def _remove_path(path: Path) -> None:
         return
 
 
-def _is_allowed(path: str, allowed_prefixes: list[str]) -> bool:
-    for prefix in allowed_prefixes:
+def _matches_prefix(path: str, prefixes: list[str]) -> bool:
+    for prefix in prefixes:
+        if prefix == "/":
+            return True
         if prefix.endswith("/"):
             if path.startswith(prefix):
                 return True
@@ -2399,6 +2769,14 @@ def _is_allowed(path: str, allowed_prefixes: list[str]) -> bool:
         if path == prefix:
             return True
     return False
+
+
+def _is_denied(path: str, denied_prefixes: list[str]) -> bool:
+    return _matches_prefix(path, denied_prefixes) or _is_sensitive_repo_path(path)
+
+
+def _is_allowed(path: str, allowed_prefixes: list[str], denied_prefixes: list[str]) -> bool:
+    return _matches_prefix(path, allowed_prefixes) and not _is_denied(path, denied_prefixes)
 
 
 def _assert_no_secrets(text: str) -> None:

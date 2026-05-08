@@ -15,6 +15,7 @@ from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.competition import parse_competition_slug
 from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute
+from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.exec_utils import run_command
@@ -25,10 +26,14 @@ from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
+from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
 knowledge_app = typer.Typer(add_completion=False, help="Knowledge base commands.")
 app.add_typer(knowledge_app, name="knowledge")
+
+DEFAULT_ARTIFACTS_DIR = Path("/data") / (os.environ.get("USER") or "user") / "kaggle-autopilot-artifacts"
+FALLBACK_ARTIFACTS_DIR = Path("artifacts")
 
 
 @dataclass(frozen=True)
@@ -41,10 +46,27 @@ class AppContext:
     force: bool
 
 
+def _preferred_artifacts_dir() -> Path:
+    preferred = DEFAULT_ARTIFACTS_DIR
+    try:
+        if preferred.exists():
+            if os.access(preferred, os.W_OK | os.X_OK):
+                return preferred
+        elif preferred.parent.exists() and os.access(preferred.parent, os.W_OK | os.X_OK):
+            return preferred
+    except OSError:
+        pass
+    return FALLBACK_ARTIFACTS_DIR
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
-    artifacts_dir: Path = typer.Option(Path("artifacts"), "--artifacts-dir", help="Artifacts directory."),
+    artifacts_dir: Path | None = typer.Option(
+        None,
+        "--artifacts-dir",
+        help="Artifacts directory. Defaults to /data/<user> when writable, otherwise ./artifacts.",
+    ),
     workdir: Path = typer.Option(Path("."), "--workdir", help="Working directory."),
     dry_run: bool = typer.Option(False, "--dry-run/--no-dry-run", help="Skip external side effects."),
     interactive: bool = typer.Option(
@@ -55,9 +77,13 @@ def main(
     log_level: str = typer.Option("INFO", "--log-level", help="Logging level."),
     force: bool = typer.Option(False, "--force", help="Allow external side effects (downloads/submissions)."),
 ) -> None:
+    resolved_artifacts_dir = resolve_artifacts_dir(
+        workdir.resolve(),
+        artifacts_dir if artifacts_dir is not None else _preferred_artifacts_dir(),
+    )
     ctx.obj = AppContext(
         workdir=workdir.resolve(),
-        artifacts_dir=resolve_artifacts_dir(workdir.resolve(), artifacts_dir),
+        artifacts_dir=resolved_artifacts_dir,
         dry_run=dry_run,
         interactive=interactive,
         log_level=log_level,
@@ -314,7 +340,7 @@ def autopilot(
     auto_eval_spec: bool = typer.Option(
         True,
         "--auto-eval-spec/--no-auto-eval-spec",
-        help="Run GPT-5.4 advisor once to generate/freeze context/evaluation_spec.json (default: on).",
+        help="Run GPT-5.5 advisor once to generate/freeze context/evaluation_spec.json (default: on).",
     ),
     resume_run_id: str | None = typer.Option(None, "--resume-run-id", help="Resume an existing run by run ID."),
     resume_latest: bool = typer.Option(False, "--resume-latest", help="Resume the most recent run."),
@@ -435,6 +461,220 @@ def autopilot(
     except SubmitAbortedError as exc:
         print(f"[red]submit aborted[/red]: {exc}")
         raise typer.Exit(code=exc.exit_code)
+
+
+@app.command()
+def watch(
+    ctx: typer.Context,
+    once: bool = typer.Option(False, "--once", help="Run one select/autopilot cycle and exit."),
+    compute: Compute = typer.Option(Compute.local_gpu, "--compute", help="Compute target."),
+    accelerator: str = typer.Option("auto", "--accelerator", help="auto|gpu|tpu"),
+    kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username."),
+    kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
+    internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
+    time_budget_min: int | None = typer.Option(
+        1200,
+        "--time-budget-min",
+        help="Per-kernel time budget in minutes. Defaults to 1200 for local GPU watch.",
+    ),
+    seed: int | None = typer.Option(None, "--seed", help="Random seed."),
+    score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
+    holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
+    cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
+    max_iterations: int = typer.Option(5, "--max-iterations", min=1, help="Max autopilot iterations per competition."),
+    max_total_min: int | None = typer.Option(
+        None,
+        "--max-total-min",
+        min=1,
+        help="Max minutes per competition. Omit for no wall-clock limit.",
+    ),
+    patience: int | None = typer.Option(None, "--patience", help="Patience iterations."),
+    min_improvement: float | None = typer.Option(None, "--min-improvement", help="Minimum improvement."),
+    submit_policy: str = typer.Option("improved", "--submit-policy", help="improved|none"),
+    verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
+    auto_eval_spec: bool = typer.Option(
+        True,
+        "--auto-eval-spec/--no-auto-eval-spec",
+        help="Generate/freeze context/evaluation_spec.json before autopilot.",
+    ),
+    page_limit: int = typer.Option(5, "--page-limit", min=1, help="Entered competition list page limit."),
+    sleep_empty_sec: int = typer.Option(1800, "--sleep-empty-sec", min=1, help="Sleep when no candidates exist."),
+    sleep_error_sec: int = typer.Option(300, "--sleep-error-sec", min=1, help="Sleep after skipped/failed cycles."),
+    cooldown_hours: float = typer.Option(24.0, "--cooldown-hours", min=0.0, help="Cooldown after finish/failure."),
+    allow_slug: list[str] | None = typer.Option(None, "--allow-slug", help="Only consider this slug; repeatable."),
+    block_slug: list[str] | None = typer.Option(None, "--block-slug", help="Never consider this slug; repeatable."),
+    strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
+) -> None:
+    cfg = ctx.obj
+    normalized_submit_policy = submit_policy.strip().lower()
+    if normalized_submit_policy not in {"improved", "none"}:
+        raise typer.BadParameter("--submit-policy must be improved or none.", param_hint="--submit-policy")
+    if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
+        raise typer.BadParameter("Refusing to run watch with submissions enabled without --force.")
+
+    watch_config = WatchConfig(
+        workdir=cfg.workdir,
+        artifacts_dir=cfg.artifacts_dir,
+        compute=compute.value,
+        accelerator=_resolve_accelerator(compute.value, accelerator),
+        strict_accelerator=strict_accelerator,
+        kaggle_username=kaggle_username,
+        kernel_name=kernel_name,
+        internet=internet,
+        time_budget_min=time_budget_min,
+        seed=seed,
+        score_source=score_source,
+        holdout_frac=holdout_frac,
+        cv_folds=cv_folds,
+        max_iterations=max_iterations,
+        max_total_min=max_total_min,
+        patience=patience,
+        min_improvement=min_improvement,
+        submit_policy=normalized_submit_policy,
+        verify_cmd=verify_cmd,
+        auto_eval_spec=auto_eval_spec,
+        page_limit=page_limit,
+        allow_slugs=tuple(allow_slug or ()),
+        block_slugs=tuple(block_slug or ()),
+        cooldown_hours=cooldown_hours,
+        dry_run=cfg.dry_run,
+        force=cfg.force,
+    )
+    if once:
+        result = run_watch_once(watch_config)
+        print(f"[green]watch cycle[/green]: {result.status} slug={result.slug} run_id={result.run_id}")
+        return
+    run_watch_forever(
+        watch_config,
+        sleep_empty_sec=sleep_empty_sec,
+        sleep_error_sec=sleep_error_sec,
+    )
+
+
+@app.command("watch-kaggle-gpu-sidecar")
+def watch_kaggle_gpu_sidecar(
+    ctx: typer.Context,
+    once: bool = typer.Option(False, "--once", help="Run one Kaggle GPU sidecar cycle and exit."),
+    interval_sec: int = typer.Option(1800, "--interval-sec", min=1, help="Sleep after no capacity/no candidates."),
+    sleep_error_sec: int = typer.Option(300, "--sleep-error-sec", min=1, help="Sleep after skipped/failed cycles."),
+    kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username."),
+    kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
+    internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
+    time_budget_min: int | None = typer.Option(120, "--time-budget-min", help="Per-kernel time budget in minutes."),
+    seed: int | None = typer.Option(None, "--seed", help="Random seed."),
+    score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
+    holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
+    cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
+    max_iterations: int = typer.Option(5, "--max-iterations", min=1, help="Max sidecar iterations per competition."),
+    max_total_min: int | None = typer.Option(
+        480, "--max-total-min", min=1, help="Max minutes per sidecar competition."
+    ),
+    patience: int | None = typer.Option(2, "--patience", help="Patience iterations."),
+    min_improvement: float | None = typer.Option(None, "--min-improvement", help="Minimum improvement."),
+    submit_policy: str = typer.Option("improved", "--submit-policy", help="improved|none"),
+    verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
+    auto_eval_spec: bool = typer.Option(
+        True,
+        "--auto-eval-spec/--no-auto-eval-spec",
+        help="Generate/freeze context/evaluation_spec.json before autopilot.",
+    ),
+    page_limit: int = typer.Option(5, "--page-limit", min=1, help="Entered competition list page limit."),
+    cooldown_hours: float = typer.Option(24.0, "--cooldown-hours", min=0.0, help="Cooldown after finish/failure."),
+    max_data_gb: float = typer.Option(
+        2.0,
+        "--max-data-gb",
+        min=0.01,
+        help="Deprecated; lightweight selection is based on estimated training time.",
+    ),
+    max_training_min: int = typer.Option(
+        120,
+        "--max-training-min",
+        min=1,
+        help="Only run candidates with estimated training time at or below this many minutes.",
+    ),
+    min_gpu_quota_hours_for_new_comp: float = typer.Option(
+        15.0,
+        "--min-gpu-quota-hours-for-new-comp",
+        min=0.0,
+        help="Do not start a new Kaggle GPU competition unless at least this many GPU hours remain. Use 0 to disable.",
+    ),
+    allow_slug: list[str] | None = typer.Option(None, "--allow-slug", help="Only consider this slug; repeatable."),
+    block_slug: list[str] | None = typer.Option(None, "--block-slug", help="Never consider this slug; repeatable."),
+) -> None:
+    cfg = ctx.obj
+    normalized_submit_policy = submit_policy.strip().lower()
+    if normalized_submit_policy not in {"improved", "none"}:
+        raise typer.BadParameter("--submit-policy must be improved or none.", param_hint="--submit-policy")
+    if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
+        raise typer.BadParameter("Refusing to run Kaggle GPU sidecar with submissions enabled without --force.")
+
+    watch_config = WatchConfig(
+        workdir=cfg.workdir,
+        artifacts_dir=cfg.artifacts_dir,
+        compute=Compute.kaggle_gpu.value,
+        accelerator="gpu",
+        strict_accelerator=False,
+        kaggle_username=kaggle_username,
+        kernel_name=kernel_name,
+        internet=internet,
+        time_budget_min=time_budget_min,
+        seed=seed,
+        score_source=score_source,
+        holdout_frac=holdout_frac,
+        cv_folds=cv_folds,
+        max_iterations=max_iterations,
+        max_total_min=max_total_min,
+        patience=patience,
+        min_improvement=min_improvement,
+        submit_policy=normalized_submit_policy,
+        verify_cmd=verify_cmd,
+        auto_eval_spec=auto_eval_spec,
+        page_limit=page_limit,
+        allow_slugs=tuple(allow_slug or ()),
+        block_slugs=tuple(block_slug or ()),
+        cooldown_hours=cooldown_hours,
+        dry_run=cfg.dry_run,
+        force=cfg.force,
+        state_scope="kaggle_gpu",
+        lightweight_only=True,
+        lightweight_max_data_bytes=None,
+        lightweight_max_training_min=max_training_min,
+        kaggle_gpu_min_available_minutes_for_new_competition=(
+            None if min_gpu_quota_hours_for_new_comp <= 0 else int(min_gpu_quota_hours_for_new_comp * 60)
+        ),
+    )
+    if once:
+        result = run_watch_once(watch_config)
+        print(f"[green]kaggle gpu sidecar[/green]: {result.status} slug={result.slug} run_id={result.run_id}")
+        return
+    run_watch_forever(
+        watch_config,
+        sleep_empty_sec=interval_sec,
+        sleep_error_sec=sleep_error_sec,
+    )
+
+
+@app.command("discord-notifier")
+def discord_notifier(
+    ctx: typer.Context,
+    once: bool = typer.Option(False, "--once", help="Send one status notification and exit."),
+    interval_sec: int = typer.Option(300, "--interval-sec", min=1, help="Polling interval."),
+    heartbeat_sec: int = typer.Option(1800, "--heartbeat-sec", min=1, help="Send unchanged status at this interval."),
+    force: bool = typer.Option(False, "--force", help="Send even if the status snapshot has not changed."),
+) -> None:
+    cfg = ctx.obj
+    if once:
+        run_discord_notifier_once(
+            artifacts_dir=cfg.artifacts_dir,
+            heartbeat_sec=heartbeat_sec,
+            force=force,
+        )
+        return
+    run_discord_notifier_forever(
+        artifacts_dir=cfg.artifacts_dir,
+        interval_sec=interval_sec,
+        heartbeat_sec=heartbeat_sec,
+    )
 
 
 @app.command("crawl-submission-formats")

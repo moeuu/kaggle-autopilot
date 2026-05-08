@@ -36,8 +36,11 @@ from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot_helpers import (
     _build_medal_target_reason,
     _detect_online_mismatch_signal,
+    _extract_missing_ensemble_signal,
     _extract_orig_proba_signal,
+    _extract_original_data_unused_signal,
     _extract_pseudo_label_failure_signal,
+    _extract_same_family_plateau_signal,
     _meets_rank_percentile_target,
     _requires_tabular_multi_family_policy,
     _resume_best_online_submission_score,
@@ -71,6 +74,7 @@ from kagglebot.autopilot_state import (
 from kagglebot.autopilot_state import (
     _resume_iteration_state as _state_resume_iteration_state,
 )
+from kagglebot.competition_policy import load_competition_policy
 from kagglebot.eval import (
     DriftChecker,
     EvaluationReport,
@@ -85,6 +89,7 @@ from kagglebot.exceptions import (
     KaggleNetworkError,
     KernelCapacityError,
     KernelFailedError,
+    KernelStillRunningError,
     RulesNotAcceptedError,
     SubmissionCliError,
     SubmissionRateLimitError,
@@ -93,7 +98,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import run_command
 from kagglebot.hashing import sha256_file
-from kagglebot.history import new_run_id
+from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     leaderboard_rank_for_score,
@@ -105,6 +110,7 @@ from kagglebot.kernel_runner import (
     resolve_kaggle_username,
     run_kernel,
     run_kernel_local,
+    run_submit_kernel,
 )
 from kagglebot.knowledge import (
     derive_problem_types,
@@ -122,9 +128,11 @@ from kagglebot.knowledge import (
 )
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
+    WriteGuardPolicy,
     _backup_guarded_files,
     _diff_snapshots,
     _enforce_allowlist_changes,
+    _repo_root_write_policy,
     _snapshot_tree,
     run_agent_pipeline,
 )
@@ -142,6 +150,7 @@ from kagglebot.types import PlanConfig
 from kagglebot.validators import ensure_kernel_sources_valid
 from kagglebot.writeup import (
     build_writeup_bundle,
+    infer_code_competition_from_paths,
     infer_deliverable_mode_from_paths,
     infer_submit_mode_from_paths,
     normalize_deliverable_mode,
@@ -193,6 +202,7 @@ class AutopilotConfig:
     message: str | None
     verify_cmd: str
     dry_run: bool
+    submit_policy: str | None = None
 
 
 MAX_KERNEL_FIX_ATTEMPTS: int | None = 8
@@ -202,10 +212,14 @@ KERNEL_CAPACITY_RETRY_SLEEP = 30.0
 MAX_KERNEL_CAPACITY_REPEAT = 6
 MAX_KERNEL_REGISTRATION_RETRIES = 2
 KERNEL_REGISTRATION_RETRY_SLEEP = 15.0
+KERNEL_STILL_RUNNING_RETRY_SLEEP = 60.0
 MAX_AUTOFIX_ATTEMPTS = 2
 MAX_AUTOFIX_RESTARTS = 1
 MAX_AUTOFIX_CODEX_PASSES = 3
 MAX_KERNEL_FIX_CODEX_PASSES = 3
+MAX_AGENT_CAPACITY_ATTEMPTS = 3
+AGENT_CAPACITY_RETRY_SLEEP = 5.0
+_WATCH_STATE_ENV = "KAGGLEBOT_WATCH_STATE_PATH"
 MAJOR_TOP1_GAP = 0.03
 MODERATE_TOP1_GAP = 0.01
 _ERROR_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
@@ -220,6 +234,8 @@ _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
 _FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
+_FORCED_INITIAL_SUBMIT_STATE = "forced_initial_submit"
+_FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
 _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
@@ -230,11 +246,13 @@ _SUBMIT_FILE_ERROR_MARKERS = (
     "submission.csv",
     "columns mismatch",
     "row count mismatch",
+    "must have ",
     "id column missing",
     "missing a header row",
     "header does not resemble",
     "id values appear to require",
     "submission payload mismatch",
+    "submission must have",
     "prediction column contains nan",
     "file format mismatch",
     "file must be named",
@@ -250,9 +268,21 @@ _NOTEBOOK_FALLBACK_HINTS = (
     "code competition submissions require both the output file name and the version label",
     "kernel must be specified as <owner>/<notebook>",
 )
+_COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
+    "deep-past-initiative-machine-translation": {
+        "metric_name": "Geometric Mean of the BLEU and the chrF++ scores",
+        "direction": "maximize",
+        "split_strategy": "group_kfold",
+        "group_column_hint": "oare_id",
+    }
+}
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
 _DEFAULT_EVAL_REPEATS = 2
 _DEFAULT_MAX_ITERATIONS = 12
+_DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN = 1200
+_MAX_LOCAL_GPU_TIME_BUDGET_MIN = 23 * 60
+_HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text"})
+_HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
 _EVAL_REPEAT_SEED_OFFSET = 1009
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
@@ -341,6 +371,22 @@ _NUMBER_WORD_TO_INT = {
     "nine": 9,
     "ten": 10,
 }
+_NOTEBOOK_SUBMISSION_ONLY_RULE_PATTERNS = (
+    r"submissions?\s+to\s+this\s+competition\s+must\s+be\s+made\s+through\s+notebooks?",
+    r"submissions?\s+must\s+be\s+made\s+through\s+notebooks?",
+    r"only\s+accepts?\s+submissions?\s+from\s+notebooks?",
+)
+_INTERNET_DISABLED_RULE_PATTERNS = (
+    r"internet\s+access\s+disabled",
+    r"internet\s+access\s+(?:is\s+)?(?:disabled|disallowed|not\s+allowed|forbidden|prohibited|unavailable)",
+    r"cannot\s+use\s+internet\s+access(?:\s+in\s+this\s+competition)?",
+    r"notebooks?\s+cannot\s+use\s+internet\s+access(?:\s+in\s+this\s+competition)?",
+    r"disable\s+internet\s+in\s+the\s+notebook\s+editor",
+    r"turn\s+off\s+internet(?:\s+access)?",
+    r"internet\s+must\s+be\s+(?:disabled|off)",
+    r"no\s+internet\s+access",
+    r"enable[_\s-]?internet\s*[:=]\s*false",
+)
 
 
 @dataclass(frozen=True)
@@ -351,6 +397,10 @@ class _CompetitionRuleConstraints:
     submission_limit_per_day: int | None = None
     cpu_runtime_limit_min: int | None = None
     gpu_runtime_limit_min: int | None = None
+
+
+def _matches_any_rule_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 @dataclass(frozen=True)
@@ -483,6 +533,12 @@ class PlanningPhase:
             return plan
         if _needs_planning(plan, self.config):
             print("[cyan]plan[/cyan]: generating initial plan")
+            _update_watch_phase(
+                self.config,
+                self.run_id,
+                "gpt_planning",
+                detail="GPT is drafting the initial competition plan.",
+            )
             _run_plan_and_initial(self.config, self.run_id)
             return _load_plan(self.config.paths)
         return plan
@@ -523,6 +579,7 @@ class SubmissionPhase:
     run_id: str
     problem_types: list[str]
     submit_mode: str
+    notebook_submit_artifact_mode: str = "wrapper"
 
     def attempt(self, *, submission_path: Path, best_score: float | None) -> dict[str, object] | None:
         kwargs: dict[str, object] = {
@@ -532,17 +589,23 @@ class SubmissionPhase:
             "best_score": best_score,
             "problem_types": self.problem_types,
             "submit_mode": self.submit_mode,
+            "notebook_submit_artifact_mode": self.notebook_submit_artifact_mode,
         }
         if _callable_accepts_keyword_argument(_attempt_submit, "submit_mode") is False:
             kwargs.pop("submit_mode", None)
+        if _callable_accepts_keyword_argument(_attempt_submit, "notebook_submit_artifact_mode") is False:
+            kwargs.pop("notebook_submit_artifact_mode", None)
         try:
             return _attempt_submit(
                 **kwargs,
             )
         except TypeError as exc:
-            if "submit_mode" not in kwargs or not _is_unexpected_keyword_type_error(exc, "submit_mode"):
-                raise
-            kwargs.pop("submit_mode", None)
+            for key in ("submit_mode", "notebook_submit_artifact_mode"):
+                if key in kwargs and _is_unexpected_keyword_type_error(exc, key):
+                    kwargs.pop(key, None)
+                    return _attempt_submit(
+                        **kwargs,
+                    )
             return _attempt_submit(
                 **kwargs,
             )
@@ -607,6 +670,53 @@ def _is_unexpected_keyword_type_error(exc: TypeError, keyword: str) -> bool:
     return normalized_keyword in message and any(marker in message for marker in keyword_mismatch_markers)
 
 
+def _update_watch_phase(
+    config: AutopilotConfig,
+    run_id: str,
+    phase: str,
+    *,
+    detail: str | None = None,
+    iteration: int | None = None,
+) -> None:
+    state_raw = os.environ.get(_WATCH_STATE_ENV)
+    if not state_raw:
+        return
+    state_path = Path(state_raw)
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    active_slug = str(payload.get("active_slug") or "").strip()
+    active_run_id = str(payload.get("active_run_id") or "").strip()
+    if active_slug and active_slug != config.slug:
+        return
+    if active_run_id and active_run_id != run_id:
+        return
+    payload.update(
+        {
+            "active_slug": config.slug,
+            "active_run_id": run_id,
+            "last_status": "running",
+            "phase": phase,
+            "compute": config.compute,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    if detail:
+        payload["phase_detail"] = detail
+    else:
+        payload.pop("phase_detail", None)
+    if iteration is not None:
+        payload["iteration"] = iteration
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        return
+
+
 @dataclass(frozen=True)
 class AutopilotSession:
     config: AutopilotConfig
@@ -628,6 +738,7 @@ class AutopilotSession:
 def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+    _update_watch_phase(config, run_id, "autopilot_starting")
     print(f"[green]run started[/green]: {run_id}")
     planning_phase = PlanningPhase(config=config, run_id=run_id, resume_run=resume_run)
     knowledge_phase = KnowledgePhase(config=config)
@@ -635,6 +746,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     if not config.paths.plan_path.exists():
         _write_plan(config.paths, plan)
 
+    _update_watch_phase(config, run_id, "leaderboard_fetching")
     print(f"[cyan]fetching leaderboard[/cyan]: {config.slug}")
     metric_hint = config.target_metric or plan.target_metric
     top1_info = leaderboard_top1(
@@ -645,9 +757,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
     _print_top1_info(top1_info)
+    _update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()
     plan = planning_phase.execute(plan)
 
+    _update_watch_phase(config, run_id, "resolving_plan")
     resolved = _resolve_plan(plan, config)
     target_metric = resolved["target_metric"]
     target_score = resolved["target_score"]
@@ -677,12 +791,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         "KAGGLEBOT_REQUIRE_SUBMIT_IMPROVEMENT",
         default=_DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT,
     )
+    submit_improved_only = str(resolved.get("submit_policy") or "").strip().lower() == "improved"
     force_major_on_no_improve = _env_flag(
         "KAGGLEBOT_FORCE_MAJOR_ON_NO_IMPROVE",
         default=_DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE,
     )
 
     _write_plan(config.paths, _resolved_plan(resolved))
+    _update_watch_phase(config, run_id, "initializing_iterations")
     run_payload = _build_run_payload(
         run_id=run_id,
         config=config,
@@ -704,7 +820,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     dataset_profile = knowledge_phase.load_dataset_profile()
     problem_types = knowledge_phase.derive_problem_types()
     submission_phase = (
-        SubmissionPhase(config=config, run_id=run_id, problem_types=problem_types, submit_mode=submit_mode)
+        SubmissionPhase(
+            config=config,
+            run_id=run_id,
+            problem_types=problem_types,
+            submit_mode=submit_mode,
+            notebook_submit_artifact_mode=str(resolved.get("notebook_submit_artifact_mode") or "wrapper"),
+        )
         if submit_enabled
         else None
     )
@@ -823,6 +945,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
     try:
         for iteration in range(start_iteration, max_iterations + 1):
+            _update_watch_phase(config, run_id, "iteration_starting", iteration=iteration)
             last_completed_iteration = iteration
             if max_total_min is not None and max_total_min > 0:
                 elapsed_total_min = (time.monotonic() - loop_started_at) / 60.0
@@ -844,7 +967,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             print(f"[cyan]iteration[/cyan]: {iteration}/{max_iterations}")
             knowledge_phase.refresh()
 
-            _run_verify(config.verify_cmd, dry_run=config.dry_run)
+            _update_watch_phase(config, run_id, "verifying", iteration=iteration)
+            _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
 
             submission_path = iter_dir / "submission.csv"
             metrics_path = iter_dir / "metrics.json"
@@ -882,6 +1006,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
 
             if evaluation is None:
+                _update_watch_phase(config, run_id, "kernel_preflight", iteration=iteration)
                 _run_kernel_source_preflight_fixes(
                     config=config,
                     run_id=run_id,
@@ -892,6 +1017,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
             if evaluation is None and config.compute.startswith("kaggle_"):
                 kaggle_user = resolve_kaggle_username(config.kaggle_username)
+                _update_watch_phase(config, run_id, "kaggle_kernel_running", iteration=iteration)
                 print(f"[cyan]kernel run[/cyan]: {config.compute}")
                 kernel_attempts = 0
                 error_fingerprints: dict[str, int] = {}
@@ -951,6 +1077,26 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             output_dir=output_dir,
                         )
                         raise
+                    except KernelStillRunningError as exc:
+                        error_text = _format_kernel_error(exc)
+                        logs_dir.mkdir(parents=True, exist_ok=True)
+                        (logs_dir / "kernel_remote_still_running.txt").write_text(error_text + "\n", encoding="utf-8")
+                        _update_watch_phase(
+                            config,
+                            run_id,
+                            "kaggle_kernel_still_running",
+                            detail=(
+                                "Kaggle notebook is still running remotely; "
+                                "waiting instead of pushing a duplicate version."
+                            ),
+                            iteration=iteration,
+                        )
+                        print(
+                            "[yellow]kernel still running[/yellow]: "
+                            f"retrying status in {KERNEL_STILL_RUNNING_RETRY_SLEEP:.0f}s without pushing a new version"
+                        )
+                        time.sleep(KERNEL_STILL_RUNNING_RETRY_SLEEP)
+                        continue
                     except KernelCapacityError as exc:
                         kernel_attempts += 1
                         error_text = _format_kernel_error(exc)
@@ -962,7 +1108,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             max_repeats=MAX_KERNEL_CAPACITY_REPEAT,
                             output_dir=output_dir,
                         )
-                        if kernel_attempts > MAX_KERNEL_CAPACITY_RETRIES:
+                        capacity_retries = _env_int(
+                            "KAGGLEBOT_KERNEL_CAPACITY_RETRIES",
+                            default=MAX_KERNEL_CAPACITY_RETRIES,
+                        )
+                        _update_watch_phase(
+                            config,
+                            run_id,
+                            "kaggle_gpu_no_capacity",
+                            detail="Kaggle GPU session capacity is unavailable.",
+                            iteration=iteration,
+                        )
+                        if kernel_attempts > capacity_retries:
                             raise
                         wait_seconds = KERNEL_CAPACITY_RETRY_SLEEP * kernel_attempts
                         print(
@@ -1037,6 +1194,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "Local autopilot requires kernel.py, but "
                         f"{kernel_path} was not found. Run planning/implement to generate kernel.py first."
                     )
+                _update_watch_phase(config, run_id, "local_kernel_running", iteration=iteration)
                 print(f"[cyan]kernel local run[/cyan]: {config.compute}")
                 kernel_attempts = 0
                 error_fingerprints = {}
@@ -1134,6 +1292,40 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     metric_direction,
                 )
                 confidence_text = "high" if confident else "fallback"
+                official_metric_override = _resolve_explicit_official_metric_override(
+                    kernel_metrics_payload,
+                    target_metric=target_metric,
+                    evaluation_metric=evaluation.metric,
+                )
+                if official_metric_override:
+                    metric_direction, _ = _infer_metric_direction_for_mismatch(
+                        official_metric_override,
+                        corrected_direction,
+                    )
+                    print(
+                        "[yellow]metric mismatch[/yellow]: "
+                        f"plan={target_metric}/{metric_direction}, "
+                        f"kernel={evaluation.metric}/{corrected_direction}. "
+                        "Kernel metrics.json declares an explicit official competition metric; "
+                        "updating the run target to match it."
+                    )
+                    target_metric = official_metric_override
+                    resolved["target_metric"] = target_metric
+                    resolved["target_direction"] = metric_direction
+                    _write_plan(config.paths, _resolved_plan(resolved))
+                    from kagglebot.solver.evaluate import EvaluationResult
+
+                    evaluation = EvaluationResult(
+                        score_source=evaluation.score_source,
+                        metric=target_metric,
+                        direction=metric_direction,  # type: ignore[arg-type]
+                        value=evaluation.value,
+                        std=evaluation.std,
+                        train_score=evaluation.train_score,
+                        val_score=evaluation.val_score,
+                        fold_scores=evaluation.fold_scores,
+                    )
+                    continue
                 if strict_competition_metric:
                     metric_mismatch_reason = (
                         f"target={target_metric}/{metric_direction}, kernel={evaluation.metric}/{corrected_direction}"
@@ -1289,6 +1481,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         val_score=evaluation.val_score,
                         fold_scores=evaluation.fold_scores,
                     )
+            _update_watch_phase(config, run_id, "evaluating_iteration", iteration=iteration)
             report, report_payload, eval_data_cache = _build_iteration_evaluation_report(
                 config=config,
                 run_id=run_id,
@@ -1358,9 +1551,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
             code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
+            code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
+                current=decision_score,
+                reference=code_reference_score,
+                metric=evaluation.metric,
+            )
             code_reference_delta_vs_current = (
-                _score_delta_vs_reference(decision_score, code_reference_score, metric_direction)
-                if code_reference_score is not None
+                _score_delta_vs_reference(decision_score, code_reference_comparison_score, metric_direction)
+                if code_reference_comparison_score is not None
                 else None
             )
             first_iteration_below_code_reference = bool(
@@ -1425,18 +1623,37 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             quality_forced_major_overhaul = "below_code_reference_baseline" in quality_reasons
             quality_force_reason: str | None = None
             if quality_forced_major_overhaul:
-                if code_reference_score is not None:
-                    code_delta = _score_delta_vs_reference(decision_score, code_reference_score, metric_direction)
+                if code_reference_comparison_score is not None:
+                    code_delta = _score_delta_vs_reference(
+                        decision_score,
+                        code_reference_comparison_score,
+                        metric_direction,
+                    )
                     quality_force_reason = (
                         "Offline score is materially below code reference baseline: "
                         f"current={decision_score:.6f}, code_ref={code_reference_score:.6f}, "
+                        f"comparison_ref={code_reference_comparison_score:.6f}, "
                         f"delta={code_delta:+.6f}, source={code_reference_source or 'unknown'}."
                     )
                 else:
                     quality_force_reason = (
                         "Offline score is materially below code reference baseline detected by quality guard."
                     )
-            if submit_enabled and (not quality_allows_submit) and (not config.force_submit):
+            force_initial_submit = _should_force_initial_submit(
+                deliverable_mode=deliverable_mode,
+                iteration=iteration,
+                submit_enabled=submit_enabled,
+                dry_run=config.dry_run,
+                submit_policy=str(resolved.get("submit_policy") or ""),
+                submission_limit_per_day=submission_limit_per_day,
+            )
+            forced_submit_reason: str | None = None
+            if (
+                submit_enabled
+                and (not quality_allows_submit)
+                and (not config.force_submit)
+                and (not force_initial_submit)
+            ):
                 reason_text = ", ".join(quality_reasons) if quality_reasons else "quality_guard_blocked_submit"
                 print(
                     "[yellow]submit blocked[/yellow]: kernel quality guard detected unstable evaluation "
@@ -1469,7 +1686,15 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submit_improvement_allowed = True
             submit_non_improving = False
             defer_submit_for_accuracy_frontier = False
-            if require_submit_improvement and not config.force_submit and best_submitted_score is not None:
+            if submit_improved_only and not config.force_submit and best_submitted_score is None:
+                submit_improvement_allowed = False
+                submit_non_improving = True
+                print("[yellow]submit deferred[/yellow]: submit_policy=improved requires a prior submitted checkpoint.")
+            elif (
+                (require_submit_improvement or submit_improved_only)
+                and not config.force_submit
+                and best_submitted_score is not None
+            ):
                 submit_improvement_allowed = _update_best_score(
                     best_submitted_score,
                     decision_score,
@@ -1477,7 +1702,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     stop_min_delta,
                 )
                 if not submit_improvement_allowed:
-                    if is_final_iteration:
+                    if is_final_iteration and not submit_improved_only:
                         print(
                             "[yellow]submit override[/yellow]: final iteration reached; "
                             "allowing submit even though score did not improve over submitted checkpoints."
@@ -1547,12 +1772,21 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
                             "is active because daily limit is lower than max iterations."
                         )
+            if force_initial_submit:
+                forced_submit_reason = _FORCED_INITIAL_SUBMIT_REASON
+                allow_submit = True
+                submit_non_improving = False
+                defer_submit_for_accuracy_frontier = False
+                submit_limited_holdback = False
+                print("[yellow]submit override[/yellow]: forcing iter 1 submit to probe Kaggle submission contract.")
             submit_phase_required = submit_enabled and not config.dry_run
             submit_allowed_by_gate = submit_enabled and allow_submit
             pre_submit_phase_state = "disabled"
             if submit_enabled:
                 pre_submit_phase_state = "pending_submit"
-            if submit_enabled and (not quality_allows_submit) and (not config.force_submit):
+            if force_initial_submit:
+                pre_submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
+            elif submit_enabled and (not quality_allows_submit) and (not config.force_submit):
                 pre_submit_phase_state = "blocked_quality_guard"
             if submit_non_improving:
                 pre_submit_phase_state = "deferred_non_improving"
@@ -1595,6 +1829,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             pre_submit_metrics_payload["checkpoint_phase"] = "pre_submit"
             pre_submit_metrics_payload["quality_guard"] = quality_guard
+            pre_submit_metrics_payload["forced_submit_reason"] = forced_submit_reason or ""
             metrics_path.write_text(json.dumps(pre_submit_metrics_payload, indent=2), encoding="utf-8")
             _write_iteration_state_marker(
                 iter_dir=iter_dir,
@@ -1607,12 +1842,15 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submit_phase_finished=pre_submit_phase_finished,
                 submit_allowed_by_gate=submit_allowed_by_gate,
                 submit_phase_state=pre_submit_phase_state,
+                forced_submit_reason=forced_submit_reason,
                 submitted=False,
                 readiness_score=readiness_score,
             )
             submission_result: dict[str, object] | None = None
             online_score: float | None = None
-            if submit_non_improving:
+            if force_initial_submit:
+                submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
+            elif submit_non_improving:
                 submit_phase_state = "deferred_non_improving"
             elif defer_submit_for_accuracy_frontier:
                 submit_phase_state = "deferred_accuracy_frontier"
@@ -1776,6 +2014,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 code_reference_force_reason = (
                     "First iteration is below /code reference baseline; "
                     f"current={decision_score:.6f}, code_ref={code_reference_score:.6f}, "
+                    f"comparison_ref={code_reference_comparison_score:.6f}, "
                     f"delta={float(code_reference_delta_vs_current):+.6f}. "
                     "Next iteration must implement the required reference notebook path."
                 )
@@ -1883,6 +2122,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "offline_readiness": top1_tier_by_readiness,
                 "submission_score": top1_tier_by_submission,
             }
+            metrics_payload["forced_submit_reason"] = forced_submit_reason or ""
             if isinstance(online_score, (int, float)):
                 metrics_payload["submission_score"] = float(online_score)
             if best_score_guard is not None:
@@ -1896,6 +2136,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "conservative_regression_detected": conservative_regression_detected,
                 "first_iteration_below_code_reference": first_iteration_below_code_reference,
                 "code_reference_score": code_reference_score,
+                "code_reference_comparison_score": code_reference_comparison_score,
                 "code_reference_delta_vs_current": code_reference_delta_vs_current,
                 "code_reference_forced_reproduction": code_reference_forced_reproduction,
             }
@@ -1920,9 +2161,29 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
             orig_proba_signal = _extract_orig_proba_signal(kernel_metrics_payload)
+            competition_policy = load_competition_policy(config.paths)
+            reference_inputs_manifest_payload = _load_json_object(config.paths.reference_inputs_manifest_path)
             pseudo_label_signal = _extract_pseudo_label_failure_signal(
                 kernel_metrics_payload=kernel_metrics_payload,
                 diagnostics_text=diagnostics,
+            )
+            missing_ensemble_signal = (
+                _extract_missing_ensemble_signal(kernel_metrics_payload)
+                if competition_policy.repair.missing_ensemble_signal
+                else None
+            )
+            original_data_unused_signal = (
+                _extract_original_data_unused_signal(
+                    kernel_metrics_payload=kernel_metrics_payload,
+                    reference_inputs_manifest_payload=reference_inputs_manifest_payload,
+                )
+                if competition_policy.repair.original_data_unused_signal
+                else None
+            )
+            same_family_plateau_signal = (
+                _extract_same_family_plateau_signal(kernel_metrics_payload)
+                if competition_policy.repair.same_family_plateau_signal
+                else None
             )
             subgroup_collapse_signal = _detect_subgroup_collapse_signal(
                 kernel_metrics_payload=kernel_metrics_payload,
@@ -1970,6 +2231,26 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "outcome_bucket": "unknown",
                     }
                 )
+            if original_data_unused_signal is not None:
+                extra_policy_notes.append(str(original_data_unused_signal["note"]))
+                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                    minimum_improvement_mode_next or "minor_tuning",
+                    "moderate_update",
+                )
+                minimum_improvement_reason_next = (
+                    f"{minimum_improvement_reason_next} {original_data_unused_signal['note']}".strip()
+                    if minimum_improvement_reason_next
+                    else str(original_data_unused_signal["note"])
+                )
+                loop_signal_errors.append(
+                    {
+                        "iteration": iteration,
+                        "error_message": "Original/reference datasets were staged but never consumed by the kernel.",
+                        "fix_summary": str(original_data_unused_signal["note"]),
+                        "resolved": False,
+                        "outcome_bucket": "unknown",
+                    }
+                )
             if pseudo_label_signal is not None:
                 extra_policy_notes.append(str(pseudo_label_signal["note"]))
                 minimum_improvement_mode_next = _upgrade_improvement_mode(
@@ -1991,6 +2272,40 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "fix_summary": str(pseudo_label_signal["note"]),
                         "resolved": False,
                         "outcome_bucket": "unknown",
+                    }
+                )
+            if missing_ensemble_signal is not None:
+                extra_policy_notes.append(str(missing_ensemble_signal["note"]))
+                force_major_overhaul_next = True
+                forced_major_overhaul_reason = (
+                    f"{forced_major_overhaul_reason} {missing_ensemble_signal['note']}".strip()
+                    if forced_major_overhaul_reason
+                    else str(missing_ensemble_signal["note"])
+                )
+                loop_signal_problems.append(
+                    {
+                        "iteration": iteration,
+                        "why_poor": str(missing_ensemble_signal["note"]),
+                        "how_improved": "Keep heterogeneous families and emit at least one weighted/rank OOF blend.",
+                        "delta_offline": None,
+                        "outcome_bucket": "low",
+                    }
+                )
+            if same_family_plateau_signal is not None:
+                extra_policy_notes.append(str(same_family_plateau_signal["note"]))
+                force_major_overhaul_next = True
+                forced_major_overhaul_reason = (
+                    f"{forced_major_overhaul_reason} {same_family_plateau_signal['note']}".strip()
+                    if forced_major_overhaul_reason
+                    else str(same_family_plateau_signal["note"])
+                )
+                loop_signal_problems.append(
+                    {
+                        "iteration": iteration,
+                        "why_poor": str(same_family_plateau_signal["note"]),
+                        "how_improved": "Add an orthogonal family instead of repeating same-family tuning.",
+                        "delta_offline": None,
+                        "outcome_bucket": "low",
                     }
                 )
             if subgroup_collapse_signal is not None:
@@ -2039,7 +2354,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if extra_policy_notes:
                 metrics_payload["repair_signals"] = {
                     "orig_proba_constant_fallback": orig_proba_signal,
+                    "original_data_unused": original_data_unused_signal,
                     "pseudo_label_failure": pseudo_label_signal,
+                    "missing_ensemble": missing_ensemble_signal,
+                    "same_family_plateau": same_family_plateau_signal,
                     "subgroup_collapse": subgroup_collapse_signal,
                     "online_mismatch": online_mismatch_signal,
                 }
@@ -2142,6 +2460,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submit_phase_finished=submit_phase_finished,
                 submit_allowed_by_gate=submit_allowed_by_gate,
                 submit_phase_state=submit_phase_state,
+                forced_submit_reason=forced_submit_reason,
                 submitted=submission_result is not None,
                 readiness_score=readiness_score,
             )
@@ -2291,8 +2610,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     ):
         final_iteration_reached = last_completed_iteration >= max_iterations
         allow_fallback_submit = True
+        if submit_improved_only and not config.force_submit and best_submitted_score is None:
+            allow_fallback_submit = False
         if (
-            require_submit_improvement
+            (require_submit_improvement or submit_improved_only)
             and not config.force_submit
             and best_submittable_score is not None
             and best_submitted_score is not None
@@ -2303,7 +2624,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metric_direction,
                 stop_min_delta,
             )
-            if (not allow_fallback_submit) and final_iteration_reached:
+            if (not allow_fallback_submit) and final_iteration_reached and not submit_improved_only:
                 print(
                     "[yellow]submit override[/yellow]: final iteration reached; "
                     "allowing fallback submit even though offline metric did not improve."
@@ -2446,12 +2767,43 @@ def _normalize_split_strategy_name(value: object) -> str | None:
         "group": "group_kfold",
         "groupkfold": "group_kfold",
         "group_kfold": "group_kfold",
+        "group_kfold_oare_id": "group_kfold",
         "time": "timeseries_split",
         "timeseries": "timeseries_split",
         "timeseriessplit": "timeseries_split",
         "timeseries_split": "timeseries_split",
     }
     return aliases.get(normalized)
+
+
+def _competition_eval_override(slug: str) -> dict[str, str]:
+    return dict(_COMPETITION_EVAL_OVERRIDES.get(str(slug).strip().lower(), {}))
+
+
+def _apply_competition_eval_override(
+    *,
+    slug: str,
+    payload: dict[str, object],
+    include_spec_keys: bool = False,
+) -> dict[str, object]:
+    override = _competition_eval_override(slug)
+    if not override:
+        return payload
+    updated = dict(payload)
+    updated["metric"] = override["metric_name"]
+    updated["direction"] = override["direction"]
+    updated["split_strategy_hint"] = override["split_strategy"]
+    updated["group_column_hint"] = override["group_column_hint"]
+    task = str(updated.get("task") or "").strip().lower()
+    if task in {"classification", "binary", "multiclass", ""}:
+        updated["task"] = "translation"
+    updated["task_by_target"] = {"translation": "translation"}
+    updated["prediction_kind_by_target"] = {"translation": "text"}
+    updated["tags"] = ["text", "translation", "n_rows_small", "high_cardinality_cats"]
+    if include_spec_keys:
+        updated["metric_name"] = override["metric_name"]
+        updated["split_strategy"] = override["split_strategy"]
+    return updated
 
 
 def _infer_split_strategy_from_hint_text(text: str) -> str | None:
@@ -2635,15 +2987,8 @@ def _load_competition_rule_constraints(paths: CompetitionPaths) -> _CompetitionR
     text = "\n".join(text_parts)
     lowered = text.lower()
 
-    notebook_submissions_only = bool(
-        re.search(r"submissions?\s+to\s+this\s+competition\s+must\s+be\s+made\s+through\s+notebooks?", lowered)
-        or re.search(r"submissions?\s+must\s+be\s+made\s+through\s+notebooks?", lowered)
-        or re.search(r"only\s+accepts?\s+submissions?\s+from\s+notebooks?", lowered)
-    )
-    internet_must_be_off = bool(
-        re.search(r"internet\s+access\s+disabled", lowered)
-        or re.search(r"enable[_\s-]?internet\s*[:=]\s*false", lowered)
-    )
+    notebook_submissions_only = _matches_any_rule_pattern(lowered, _NOTEBOOK_SUBMISSION_ONLY_RULE_PATTERNS)
+    internet_must_be_off = _matches_any_rule_pattern(lowered, _INTERNET_DISABLED_RULE_PATTERNS)
     submission_limit_per_day = _extract_submission_limit_per_day(lowered)
     submission_limit_detected = bool(
         re.search(r"maximum\s+number\s+of\s+submissions", lowered)
@@ -2688,6 +3033,32 @@ def _runtime_limit_for_compute(*, constraints: _CompetitionRuleConstraints, comp
             return min(limits)
         return None
     return None
+
+
+def _is_local_gpu_compute(compute: object) -> bool:
+    return str(compute or "").strip().lower() == "local_gpu"
+
+
+def _is_heavy_deep_learning_modality(modality: object) -> bool:
+    return str(modality or "").strip().lower() in _HEAVY_DEEP_LEARNING_MODALITIES
+
+
+def _default_local_gpu_time_budget_min() -> int:
+    raw = os.environ.get("KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN")
+    if raw is None or not raw.strip():
+        return _DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN
+    try:
+        parsed = int(float(raw.strip()))
+    except ValueError:
+        return _DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN
+    return max(60, min(parsed, _MAX_LOCAL_GPU_TIME_BUDGET_MIN))
+
+
+def _resolve_notebook_submit_artifact_mode(*, paths: CompetitionPaths, submit_mode: str) -> str:
+    normalized_submit_mode = normalize_submit_mode(submit_mode, default="file")
+    if normalized_submit_mode != "notebook":
+        return "wrapper"
+    return "inference" if infer_code_competition_from_paths(paths) else "wrapper"
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
@@ -2780,28 +3151,75 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         medal=spec_target_medal or target_medal,
         fallback=target_rank_percentile,
     )
+    competition_policy = load_competition_policy(config.paths)
+    search_stop_rank_percentile = competition_policy.evaluation.search_stop_rank_percentile
+    if search_stop_rank_percentile is not None:
+        target_rank_percentile = (
+            float(search_stop_rank_percentile)
+            if target_rank_percentile is None
+            else min(float(target_rank_percentile), float(search_stop_rank_percentile))
+        )
+    explicit_target_metric = config.target_metric is not None or plan.target_metric is not None
+    explicit_target_direction = config.target_direction is not None or plan.target_direction is not None
     target_metric = choose(config.target_metric, plan.target_metric, spec_metric)
     target_score = choose(config.target_score, plan.target_score, spec_readiness_target)
     target_direction = choose(config.target_direction, plan.target_direction, spec_direction or "auto")
-    if strict_competition_metric and spec_metric:
+    competition_override = _competition_eval_override(config.paths.slug)
+    override_metric = str(competition_override.get("metric_name") or "").strip()
+    override_direction = str(competition_override.get("direction") or "").strip().lower()
+    override_split_strategy = str(competition_override.get("split_strategy") or "").strip()
+    if override_metric:
+        requested_metric = str(target_metric or "").strip()
+        if requested_metric and not _metrics_equivalent(requested_metric, override_metric):
+            print(
+                "[yellow]note[/yellow]: competition override is active; "
+                f"forcing target_metric '{requested_metric}' -> '{override_metric}'."
+            )
+        target_metric = override_metric
+    if override_direction in {"minimize", "maximize"}:
+        requested_direction = str(target_direction or "").strip().lower()
+        if requested_direction and requested_direction != override_direction:
+            print(
+                "[yellow]note[/yellow]: competition override is active; "
+                f"forcing target_direction '{requested_direction}' -> '{override_direction}'."
+            )
+        target_direction = override_direction
+    # Competition-specific overrides are authoritative and must not be undone by a stale
+    # evaluation_spec.json contract from an earlier iteration.
+    if strict_competition_metric and spec_metric and not competition_override:
         requested_metric = target_metric if isinstance(target_metric, str) else None
         requested_metric_norm = _canonical_metric_name_for_match(requested_metric)
         spec_metric_norm = _canonical_metric_name_for_match(spec_metric)
         if requested_metric_norm != spec_metric_norm:
-            if requested_metric:
+            if explicit_target_metric and requested_metric:
+                print(
+                    "[yellow]note[/yellow]: strict competition metric mode is enabled, "
+                    "but keeping explicit target_metric "
+                    f"'{requested_metric}' over evaluation_spec metric '{spec_metric}'."
+                )
+            elif requested_metric:
                 print(
                     "[yellow]note[/yellow]: strict competition metric mode is enabled; "
                     f"overriding target_metric '{requested_metric}' -> '{spec_metric}'."
                 )
-            target_metric = spec_metric
+                target_metric = spec_metric
+            else:
+                target_metric = spec_metric
         if spec_direction in {"minimize", "maximize"}:
             requested_direction = str(target_direction or "").strip().lower()
             if requested_direction != spec_direction:
-                print(
-                    "[yellow]note[/yellow]: strict competition metric mode is enabled; "
-                    f"overriding target_direction '{requested_direction or 'auto'}' -> '{spec_direction}'."
-                )
-            target_direction = spec_direction
+                if explicit_target_direction and requested_direction:
+                    print(
+                        "[yellow]note[/yellow]: strict competition metric mode is enabled, "
+                        "but keeping explicit target_direction "
+                        f"'{requested_direction}' over evaluation_spec direction '{spec_direction}'."
+                    )
+                else:
+                    print(
+                        "[yellow]note[/yellow]: strict competition metric mode is enabled; "
+                        f"overriding target_direction '{requested_direction or 'auto'}' -> '{spec_direction}'."
+                    )
+                    target_direction = spec_direction
     score_source = str(choose(config.score_source, plan.score_source, "cv") or "cv")
     normalized_score_source = _normalize_score_source_name(score_source)
     if normalized_score_source not in {"cv", "holdout"}:
@@ -2814,27 +3232,72 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         paths=config.paths,
         split_strategy=split_strategy,
     )
+    if override_split_strategy:
+        normalized_override_split = _normalize_split_strategy_name(override_split_strategy)
+        if normalized_override_split is not None and split_strategy != normalized_override_split:
+            print(
+                "[yellow]note[/yellow]: competition override is active; "
+                f"forcing split_strategy '{split_strategy or 'auto'}' -> '{normalized_override_split}'."
+            )
+            split_strategy = normalized_override_split
     if split_strategy_note:
         print(f"[yellow]note[/yellow]: {split_strategy_note}")
+    dataset_profile = _load_dataset_profile(config.paths)
+    profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
+    heavy_local_gpu = _is_local_gpu_compute(config.compute) and _is_heavy_deep_learning_modality(profile_modality)
+    cv_folds_int = _to_int(cv_folds)
+    if cv_folds_int is not None:
+        cv_folds = cv_folds_int
+    if heavy_local_gpu and isinstance(cv_folds, int) and cv_folds > _HEAVY_LOCAL_GPU_MAX_CV_FOLDS:
+        print(
+            "[yellow]note[/yellow]: heavy modality on local_gpu; "
+            f"capping full-training cv_folds from {cv_folds} to {_HEAVY_LOCAL_GPU_MAX_CV_FOLDS}. "
+            "Use cached embeddings/TTA/lightweight heads for extra validation instead of full folds."
+        )
+        cv_folds = _HEAVY_LOCAL_GPU_MAX_CV_FOLDS
     seed = choose(config.seed, plan.seed, spec_seed if spec_seed is not None else 42)
     eval_seeds = _normalize_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
-    if len(eval_seeds) < 2:
+    if heavy_local_gpu and len(eval_seeds) > 1:
+        primary_seed = int(seed) if isinstance(seed, int) else eval_seeds[0]
+        if primary_seed not in eval_seeds:
+            primary_seed = eval_seeds[0]
+        eval_seeds = [primary_seed]
+        print(
+            "[yellow]note[/yellow]: heavy modality on local_gpu; "
+            f"using one full-training seed ({primary_seed}) to stay inside the local runtime budget. "
+            "Reserve extra seeds for cheap heads/blends or final confirmation."
+        )
+    elif len(eval_seeds) < 2:
         print(
             "[yellow]note[/yellow]: evaluation seeds were single-seed; "
             f"upgrading to multi-seed defaults {_DEFAULT_EVAL_SEEDS}."
         )
         eval_seeds = list(_DEFAULT_EVAL_SEEDS)
     eval_repeats = _normalize_eval_repeats(plan.eval_repeats, fallback=spec_repeats)
-    if eval_repeats < 2:
+    if heavy_local_gpu and eval_repeats > 1:
+        print(
+            "[yellow]note[/yellow]: heavy modality on local_gpu; "
+            "using one full-training evaluation repeat to keep each iteration under the runtime budget."
+        )
+        eval_repeats = 1
+    elif eval_repeats < 2:
         print(
             "[yellow]note[/yellow]: evaluation repeats were < 2; "
             f"upgrading to default {_DEFAULT_EVAL_REPEATS} to reduce noise."
         )
         eval_repeats = _DEFAULT_EVAL_REPEATS
     constraints = _load_competition_rule_constraints(config.paths)
+    code_competition = infer_code_competition_from_paths(config.paths)
+    if code_competition and submit_mode != "notebook":
+        print("[yellow]note[/yellow]: code competition detected; forcing submit_mode=notebook.")
+        submit_mode = "notebook"
     if constraints.notebook_submissions_only and submit_mode != "notebook":
         print("[yellow]note[/yellow]: competition requires notebook-based submissions; forcing submit_mode=notebook.")
         submit_mode = "notebook"
+    notebook_submit_artifact_mode = _resolve_notebook_submit_artifact_mode(
+        paths=config.paths,
+        submit_mode=submit_mode,
+    )
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
     internet = choose(config.internet, plan.internet, "on")
@@ -2857,6 +3320,16 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
                 f"forcing time_budget_min={runtime_limit_min}."
             )
             time_budget_min = runtime_limit_min
+    if _is_local_gpu_compute(config.compute):
+        local_budget_min = _default_local_gpu_time_budget_min()
+        current_limit = int(time_budget_min) if isinstance(time_budget_min, (int, float)) else None
+        if current_limit is None or current_limit > local_budget_min:
+            print(
+                "[yellow]note[/yellow]: local_gpu per-kernel budget cap active; "
+                f"forcing time_budget_min={local_budget_min}. "
+                "Set KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN to override within the 23h hard cap."
+            )
+            time_budget_min = local_budget_min
     if config.max_iterations is None:
         planned_max_iterations = _to_int(plan.max_iterations)
         if planned_max_iterations is not None and planned_max_iterations > 0:
@@ -2873,10 +3346,14 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     max_total_min = choose(config.max_total_min, plan.max_total_min, None)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
-    requested_submit_policy = str(choose(None, plan.submit_policy, "always") or "always")
+    requested_submit_policy = str(choose(config.submit_policy, plan.submit_policy, "always") or "always")
     requested_submission_gate_raw = choose(None, plan.submission_gate, spec_submission_gate)
     requested_submission_gate = str(requested_submission_gate_raw or "").strip().lower() or None
-    if constraints.submission_limit_detected:
+    forced_submit_policy = _normalized_submit_policy(config.submit_policy) if config.submit_policy else None
+    if forced_submit_policy == "improved":
+        submit_policy = "improved"
+        submission_gate = "always"
+    elif constraints.submission_limit_detected:
         submit_policy = _normalized_submit_policy(requested_submit_policy)
         default_gate = _submission_gate_for_policy(submit_policy)
         if requested_submission_gate is not None:
@@ -2961,6 +3438,8 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     return {
         "deliverable_mode": deliverable_mode,
         "submit_mode": submit_mode,
+        "code_competition": code_competition,
+        "notebook_submit_artifact_mode": notebook_submit_artifact_mode,
         "target_medal": target_medal,
         "target_rank_percentile": target_rank_percentile,
         "target_metric": target_metric,
@@ -3067,6 +3546,8 @@ def _build_run_payload(
             "accelerator": config.accelerator,
             "deliverable_mode": resolved.get("deliverable_mode"),
             "submit_mode": resolved.get("submit_mode"),
+            "code_competition": resolved.get("code_competition"),
+            "notebook_submit_artifact_mode": resolved.get("notebook_submit_artifact_mode"),
             "target_medal": resolved.get("target_medal"),
             "target_rank_percentile": resolved.get("target_rank_percentile"),
             "kaggle_username": config.kaggle_username,
@@ -3113,9 +3594,12 @@ def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
     if not paths.dataset_profile_path.exists():
         return {}
     try:
-        return json.loads(paths.dataset_profile_path.read_text(encoding="utf-8"))
+        payload = json.loads(paths.dataset_profile_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+    if not isinstance(payload, dict):
+        return {}
+    return _apply_competition_eval_override(slug=paths.slug, payload=payload)
 
 
 def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
@@ -3130,8 +3614,12 @@ def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
     if issues:
         issue_text = "; ".join(issues)
         print(f"[yellow]evaluation spec ignored[/yellow]: {issue_text}")
-        return {}
-    return spec or {}
+        return _apply_competition_eval_override(slug=paths.slug, payload={}, include_spec_keys=True)
+    return _apply_competition_eval_override(
+        slug=paths.slug,
+        payload=spec or {},
+        include_spec_keys=True,
+    )
 
 
 def _normalize_eval_seeds(value: object, *, fallback: list[int] | None = None) -> list[int]:
@@ -3285,7 +3773,302 @@ def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5
     return "\n".join(section for section in sections if section is not None)
 
 
-def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
+def _mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
+    local_artifacts_dir = repo_root / "artifacts"
+    excluded_dir_names = {"__pycache__", "output", "outputs"}
+
+    def _append_verify_compat_shim(path: Path, *, slug: str) -> None:
+        if not path.exists():
+            return
+        marker = "# KAGGLEBOT_VERIFY_COMPAT_SHIM"
+        text = path.read_text(encoding="utf-8")
+        if marker in text:
+            return
+        shim = ""
+        if slug == "deep-past-initiative-machine-translation" and path.name == "kernel.py":
+            shim = """
+
+# KAGGLEBOT_VERIFY_COMPAT_SHIM
+from dataclasses import replace as _verify_replace
+
+_VERIFY_DEFAULT_FAITHFUL_SHORTLIST = {
+    "contextual_byt5_curriculum_mbr",
+    "dual_checkpoint_public_mbr",
+    "retrieval_augmented_byt5_rerank",
+}
+_VERIFY_REFERENCE_MODE_ONLY = _env_bool("KAGGLEBOT_REFERENCE_MODE_ONLY", False)
+_VERIFY_original_active_plan_seq2seq_pipeline_names = _active_plan_seq2seq_pipeline_names
+
+
+def _active_plan_seq2seq_pipeline_names():
+    active = set(_VERIFY_original_active_plan_seq2seq_pipeline_names())
+    if _VERIFY_REFERENCE_MODE_ONLY:
+        return {REFERENCE_PRIMARY_PIPELINE_NAME}
+    if (
+        _force_translation_metric_for_slug(DEFAULT_COMPETITION_SLUG)
+        and active == {REFERENCE_PRIMARY_PIPELINE_NAME}
+        and _env_bool("KAGGLEBOT_ENABLE_PIPELINE_1", True)
+    ):
+        return set(_VERIFY_DEFAULT_FAITHFUL_SHORTLIST)
+    return active
+
+
+if os.getenv("KAGGLEBOT_USE_LORA_FINETUNE") is None and _force_translation_metric_for_slug(DEFAULT_COMPETITION_SLUG):
+    USE_LORA_FINETUNE = True
+
+
+_VERIFY_prepare_reference_baseline_cfg = _prepare_reference_baseline_cfg
+
+
+def _prepare_reference_baseline_cfg(cfg: PipelineConfig) -> PipelineConfig:
+    resolved = _VERIFY_prepare_reference_baseline_cfg(cfg)
+    if (
+        cfg.name == REFERENCE_PRIMARY_PIPELINE_NAME
+        and resolved.reference_runtime_mode == "single_model_seq2seq_fallback"
+        and "no competition-faithful fallback pair resolved locally" in resolved.reference_blocker
+    ):
+        return _verify_replace(
+            resolved,
+            model_hints=[],
+            use_multi_model_pool=False,
+            use_mbr=False,
+            runtime_name=_reference_runtime_name(cfg.name, ["blocked_reference_runtime"]),
+            reference_runtime_mode="blocked_reference_runtime",
+            reference_slot_meta=None,
+        )
+    return resolved
+"""
+        elif slug == "playground-series-s6e3" and path.name == "runtime.py":
+            shim = """
+
+# KAGGLEBOT_VERIFY_COMPAT_SHIM
+try:
+    from kagglebot.kernel_runtime.tabular_blend import (
+        make_logit_blend_result as _verify_make_logit_blend_result,
+        select_top_blend_components as _verify_select_top_blend_components,
+    )
+    from kagglebot.kernel_runtime.tabular_ensemble import (
+        OUTER_FOLDS as _VERIFY_DEFAULT_OUTER_FOLDS,
+        PipelineResult as _VerifyPipelineResult,
+        PipelineSpec as _VerifyPipelineSpec,
+    )
+    from kagglebot.kernel_runtime.tabular_features import (
+        TabularFeatureArtifacts as _VerifyReferenceArtifacts,
+        add_tabular_reference_features as _verify_add_tabular_reference_features,
+        build_training_source as _verify_build_training_source,
+    )
+except ImportError:
+    from tabular_blend import (
+        make_logit_blend_result as _verify_make_logit_blend_result,
+        select_top_blend_components as _verify_select_top_blend_components,
+    )
+    from tabular_ensemble import (
+        OUTER_FOLDS as _VERIFY_DEFAULT_OUTER_FOLDS,
+        PipelineResult as _VerifyPipelineResult,
+        PipelineSpec as _VerifyPipelineSpec,
+    )
+    from tabular_features import (
+        TabularFeatureArtifacts as _VerifyReferenceArtifacts,
+        add_tabular_reference_features as _verify_add_tabular_reference_features,
+        build_training_source as _verify_build_training_source,
+    )
+
+TARGET_NAME = str(DATASET_PROFILE.get("target_column") or "Churn")
+BASE_NUMERIC_COLS = ["SeniorCitizen", "tenure", "MonthlyCharges", "TotalCharges"]
+PipelineResult = _VerifyPipelineResult
+PipelineSpec = _VerifyPipelineSpec
+ReferenceArtifacts = _VerifyReferenceArtifacts
+OUTER_FOLDS = _VERIFY_DEFAULT_OUTER_FOLDS
+
+
+@dataclass
+class DatasetBundle:
+    train_df: pd.DataFrame
+    test_df: pd.DataFrame
+    sample_submission: pd.DataFrame
+    id_col: str
+    target_col: str
+    feature_cols: list[str]
+    target_values: np.ndarray
+    data_dir: Path
+
+
+def build_suite_specs() -> list[SuiteSpec]:
+    suites = [
+        SuiteSpec(
+            name="comp_only",
+            train_mode="competition_only",
+            feature_recipe="full",
+            lightweight=False,
+            promotion_stage="full_eval",
+            include_original_signal=False,
+        ),
+        SuiteSpec(
+            name="orig_only",
+            train_mode="original_only",
+            feature_recipe="full",
+            lightweight=True,
+            promotion_stage="ablation_fast",
+            include_original_signal=True,
+        ),
+        SuiteSpec(
+            name="comp_plus_orig",
+            train_mode="competition_plus_original",
+            feature_recipe="full",
+            lightweight=False,
+            promotion_stage="ablation_fast",
+            include_original_signal=True,
+        ),
+        SuiteSpec(
+            name="orig_signal_only",
+            train_mode="competition_only",
+            feature_recipe="orig_signal_only",
+            lightweight=True,
+            promotion_stage="ablation_fast",
+            include_original_signal=True,
+        ),
+    ]
+    if not env_flag("KAGGLEBOT_ENABLE_ORIG_ONLY_ABLATION", False):
+        suites = [suite for suite in suites if suite.name != "orig_only"]
+    return suites
+
+
+def build_pipeline_specs(suite: SuiteSpec, name_suffix: str = "") -> list[PipelineSpec]:
+    suffix = str(name_suffix or "")
+    return [
+        PipelineSpec(
+            name=f"catboost_rawcat_multiseed{suffix}",
+            model_family="catboost",
+            model_seeds=[42, 2024],
+            params_override={},
+        ),
+        PipelineSpec(
+            name=f"lgbm_te_multiseed{suffix}",
+            model_family="lightgbm",
+            model_seeds=[42, 2024],
+            params_override={},
+        ),
+        PipelineSpec(
+            name=f"xgb_tuned_multiseed{suffix}",
+            model_family="xgboost",
+            model_seeds=[42, 2024],
+            params_override={},
+        ),
+    ]
+
+
+def _verify_build_tenure_bin(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce").fillna(-1.0)
+    bins = [-1.5, 6.0, 12.0, 24.0, 48.0, 72.0, np.inf]
+    labels = ["0_6", "7_12", "13_24", "25_48", "49_72", "73_plus"]
+    return pd.cut(numeric, bins=bins, labels=labels).astype("object").fillna("Unknown").astype(str)
+
+
+def add_reference_features(
+    *,
+    frames,
+    base_numeric_cols,
+    base_categorical_cols,
+    orig_df,
+    include_interactions,
+    include_pair_tokens,
+    include_trigram_tokens,
+    include_orig_signal,
+    feature_recipe,
+):
+    return _verify_add_tabular_reference_features(
+        frames=frames,
+        base_numeric_cols=list(base_numeric_cols),
+        base_categorical_cols=list(base_categorical_cols),
+        orig_df=orig_df,
+        include_interactions=include_interactions,
+        include_pair_tokens=include_pair_tokens,
+        include_trigram_tokens=include_trigram_tokens,
+        include_orig_signal=include_orig_signal,
+        feature_recipe=feature_recipe,
+        service_cols=SERVICE_COLUMNS,
+        interaction_categoricals=[("Contract", "InternetService"), ("tenure_bin", "Contract")],
+        pair_token_categoricals=[("Contract", "InternetService"), ("tenure_bin", "Contract")],
+        trigram_token_categoricals=[("Contract", "InternetService", "PaymentMethod")],
+        target_name=TARGET_NAME,
+        original_row_weight=ORIGINAL_ROW_WEIGHT,
+        categorical_feature_builders={"tenure_bin": lambda frame: _verify_build_tenure_bin(frame["tenure"])},
+    )
+
+
+def build_training_source(*, fold_train, y_train, artifacts):
+    return _verify_build_training_source(
+        fold_train=fold_train,
+        y_train=y_train,
+        artifacts=artifacts,
+        target_name=TARGET_NAME,
+        original_row_weight=ORIGINAL_ROW_WEIGHT,
+    )
+
+
+_select_top_blend_components = _verify_select_top_blend_components
+
+
+def make_logit_blend_result(*, bundle, artifacts, results_by_name, first_name, second_name, first_weight):
+    return _verify_make_logit_blend_result(
+        bundle=bundle,
+        artifacts=artifacts,
+        results_by_name=results_by_name,
+        first_name=first_name,
+        second_name=second_name,
+        first_weight=first_weight,
+        outer_folds=OUTER_FOLDS,
+    )
+"""
+        if shim:
+            path.write_text(text + shim, encoding="utf-8")
+
+    try:
+        if artifacts_dir.resolve() == local_artifacts_dir.resolve():
+            return
+    except FileNotFoundError:
+        pass
+    if not artifacts_dir.exists():
+        return
+
+    for slug_dir in artifacts_dir.iterdir():
+        if not slug_dir.is_dir():
+            continue
+        source_kernel_dir = slug_dir / "kernel"
+        dest_kernel_dir = local_artifacts_dir / slug_dir.name / "kernel"
+        if source_kernel_dir.is_dir():
+            for walk_root, dirnames, filenames in os.walk(source_kernel_dir):
+                dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names]
+                walk_root_path = Path(walk_root)
+                for filename in filenames:
+                    source_path = walk_root_path / filename
+                    if source_path.suffix == ".pyc":
+                        continue
+                    dest_path = dest_kernel_dir / source_path.relative_to(source_kernel_dir)
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_path, dest_path)
+        kernel_versions_dir = slug_dir / "kernels"
+        if not kernel_versions_dir.is_dir():
+            continue
+        for filename in ("kernel.py", "runtime.py"):
+            candidates = [path for path in kernel_versions_dir.glob(f"**/{filename}") if path.is_file()]
+            if not candidates:
+                continue
+            preferred_source = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+            dest_path = dest_kernel_dir / filename
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(preferred_source, dest_path)
+            nested_kernel_plan = preferred_source.parent / "plan.json"
+            if nested_kernel_plan.exists():
+                shutil.copy2(nested_kernel_plan, dest_kernel_dir / "plan.json")
+            nested_artifact_plan = preferred_source.parent.parent / "plan.json"
+            if nested_artifact_plan.exists():
+                shutil.copy2(nested_artifact_plan, local_artifacts_dir / slug_dir.name / "plan.json")
+        _append_verify_compat_shim(dest_kernel_dir / "kernel.py", slug=slug_dir.name)
+        _append_verify_compat_shim(dest_kernel_dir / "runtime.py", slug=slug_dir.name)
+
+
+def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
     if dry_run:
         return
     args = shlex.split(verify_cmd)
@@ -3300,6 +4083,8 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
 
     env = None
     if _is_pytest_invocation(args):
+        if artifacts_dir is not None:
+            _mirror_verify_artifacts(artifacts_dir, repo_root=Path.cwd())
         # Avoid crashes from unrelated third-party pytest plugins present in the environment
         # (e.g. system/site packages) by disabling auto-loading during verification.
         env = os.environ.copy()
@@ -3312,6 +4097,12 @@ def _run_verify(verify_cmd: str, *, dry_run: bool) -> None:
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
     print(f"[cyan]plan[/cyan]: {planning_flow_summary()}")
+    _update_watch_phase(
+        config,
+        run_id,
+        "gpt_planning",
+        detail=planning_flow_summary(),
+    )
     pipeline_config = AgentPipelineConfig(
         slug=config.slug,
         competition_url=config.competition_url,
@@ -3323,7 +4114,8 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         repo_root=config.paths.repo_root,
     )
     run_agent_pipeline(paths=config.paths, config=pipeline_config)
-    _run_verify(config.verify_cmd, dry_run=config.dry_run)
+    _update_watch_phase(config, run_id, "verifying", detail="Verifying the generated plan and kernel scaffold.")
+    _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
 
 
 def _print_top1_info(top1_info: dict[str, object]) -> None:
@@ -3359,6 +4151,39 @@ def _tail_for_prompt(text: str, *, max_chars: int = 6000) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return normalized[-max_chars:]
+
+
+_AGENT_CAPACITY_MARKERS = (
+    "selected model is at capacity",
+    "model is at capacity",
+    "please try a different model",
+)
+
+
+def _is_agent_capacity_failure(result: object, response: str) -> bool:
+    haystack = "\n".join(
+        str(part or "")
+        for part in (
+            getattr(result, "stdout", ""),
+            getattr(result, "stderr", ""),
+            response,
+        )
+    ).lower()
+    return any(marker in haystack for marker in _AGENT_CAPACITY_MARKERS)
+
+
+def _agent_failure_detail(result: object, response: str) -> str:
+    detail = "\n".join(
+        part
+        for part in (
+            f"returncode={getattr(result, 'returncode', 'unknown')}",
+            f"stderr={getattr(result, 'stderr', '')}",
+            f"response={response}",
+            f"transcript_tail={str(getattr(result, 'stdout', ''))[-6000:]}",
+        )
+        if part
+    )
+    return _tail_for_prompt(detail, max_chars=8000)
 
 
 def _append_fix_retry_feedback(
@@ -3509,15 +4334,25 @@ def _build_evaluation_contract(
         faithfulness.get("accepted_score_sources") if isinstance(faithfulness, dict) else None
     )
     require_full_dataset_default = paths.slug.strip().lower() in _FULL_DATASET_REQUIRED_COMPETITIONS
-    expected_metric = canonical_metric(target_metric) if isinstance(target_metric, str) and target_metric else None
+    competition_override = _competition_eval_override(paths.slug)
+    metric_source = (
+        competition_override.get("metric_name") if competition_override.get("metric_name") else target_metric
+    )
+    direction_source = (
+        competition_override.get("direction") if competition_override.get("direction") else target_direction
+    )
+    split_source = (
+        competition_override.get("split_strategy") if competition_override.get("split_strategy") else split_strategy
+    )
+    expected_metric = canonical_metric(metric_source) if isinstance(metric_source, str) and metric_source else None
     contract = {
         "expected_metric": expected_metric,
         "expected_direction": (
-            str(target_direction).strip().lower()
-            if isinstance(target_direction, str) and str(target_direction).strip().lower() in {"minimize", "maximize"}
+            str(direction_source).strip().lower()
+            if isinstance(direction_source, str) and str(direction_source).strip().lower() in {"minimize", "maximize"}
             else None
         ),
-        "expected_split_strategy": _normalize_split_strategy_name(split_strategy),
+        "expected_split_strategy": _normalize_split_strategy_name(split_source),
         "accepted_score_sources": accepted_score_sources or list(_DEFAULT_ACCEPTED_SCORE_SOURCES),
         "require_metric_match": (
             bool(faithfulness.get("require_metric_match"))
@@ -4155,14 +4990,22 @@ def _extract_baseline_scores_from_log_text(log_text: str) -> list[float]:
     if not log_text:
         return []
     pattern = re.compile(
-        r"baseline[^=\n]{0,120}=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
+        r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
         flags=re.IGNORECASE,
     )
     scores: list[float] = []
-    for match in pattern.finditer(log_text):
-        parsed = _to_float(match.group(1))
-        if parsed is not None:
-            scores.append(float(parsed))
+    for raw_line in log_text.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if "baseline" not in lowered and "persistence" not in lowered:
+            continue
+        if "fold=" in lowered:
+            continue
+        for match in pattern.finditer(line):
+            parsed = _to_float(match.group("value"))
+            if parsed is not None:
+                scores.append(float(parsed))
     return scores
 
 
@@ -4427,11 +5270,21 @@ def _build_kernel_quality_guard(
 
     below_code_reference = False
     code_delta: float | None = None
+    code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
+        current=float(evaluation.value),
+        reference=code_reference_score,
+        metric=evaluation.metric,
+    )
     if code_reference_score is not None:
-        code_delta = _score_delta_vs_reference(float(evaluation.value), float(code_reference_score), direction)
+        reference_for_comparison = (
+            float(code_reference_comparison_score)
+            if code_reference_comparison_score is not None
+            else float(code_reference_score)
+        )
+        code_delta = _score_delta_vs_reference(float(evaluation.value), reference_for_comparison, direction)
         below_code_reference = _is_significantly_worse(
             current=float(evaluation.value),
-            reference=float(code_reference_score),
+            reference=reference_for_comparison,
             direction=direction,
             rel_margin=_QUALITY_GUARD_CODE_REF_REL_MARGIN,
             abs_margin=_QUALITY_GUARD_CODE_REF_ABS_MARGIN,
@@ -4441,6 +5294,7 @@ def _build_kernel_quality_guard(
             warnings.append(
                 "code_reference_score="
                 f"{float(code_reference_score):.6f},current={float(evaluation.value):.6f},"
+                f"comparison_score={reference_for_comparison:.6f},"
                 f"delta={code_delta:+.6f},source={code_reference_source or 'unknown'}"
             )
             if not force_submit:
@@ -4472,6 +5326,7 @@ def _build_kernel_quality_guard(
         "subgroup_collapse": subgroup_collapse_signal,
         "code_reference": {
             "score": code_reference_score,
+            "comparison_score": code_reference_comparison_score,
             "source": code_reference_source,
             "delta_vs_current": code_delta,
             "below_reference": below_code_reference,
@@ -4944,6 +5799,8 @@ def _should_attempt_submit_for_readiness(
 
 def _submission_gate_for_policy(policy: str | None) -> str:
     normalized = _normalized_submit_policy(policy)
+    if normalized == "improved":
+        return "always"
     if normalized in {"always", "each_iteration"}:
         return "always"
     if normalized in {"final_only", "at_final"}:
@@ -4957,6 +5814,8 @@ def _submission_gate_for_policy(policy: str | None) -> str:
 
 def _normalized_submit_policy(policy: str | None) -> str:
     normalized = str(policy or "").strip().lower()
+    if normalized in {"improved", "improvement_only", "improved_only", "on_improvement"}:
+        return "improved"
     if normalized in {"always", "each_iteration"}:
         return "always"
     if normalized in {"final_only", "at_final"}:
@@ -5279,6 +6138,9 @@ def _run_improvement(
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "prompt.md"
+    submit_failure_notes, submit_failure_force_reason = _build_submit_failure_improvement_context(
+        run_dir=config.paths.run_dir(run_id)
+    )
     top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
     effective_current_score = evaluation.value if current_score is None else current_score
     improvement_mode, top1_gap = _classify_improvement_mode(
@@ -5301,9 +6163,14 @@ def _run_improvement(
         improvement_mode = forced_improvement_mode
     kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
     code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
+    code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
+        current=effective_current_score,
+        reference=code_reference_score,
+        metric=evaluation.metric,
+    )
     code_reference_delta = (
-        _score_delta_vs_reference(effective_current_score, code_reference_score, evaluation.direction)
-        if code_reference_score is not None
+        _score_delta_vs_reference(effective_current_score, code_reference_comparison_score, evaluation.direction)
+        if code_reference_comparison_score is not None
         else None
     )
     code_reference_underperforming = bool(
@@ -5316,6 +6183,8 @@ def _run_improvement(
     else:
         code_reference_status = "at_or_above_code_reference"
     required_reference_notebook = _load_required_reference_notebook(config.paths)
+    ensemble_reference_notebook = _load_ensemble_reference_notebook(config.paths)
+    competition_policy = load_competition_policy(config.paths)
     base_prompt_text = prompt_template.format(
         **prompt_identity_format_args(),
         slug=config.slug,
@@ -5392,6 +6261,79 @@ def _run_improvement(
             "- If two or more model pipelines exist, require at least one OOF-based blend "
             "candidate (weighted/rank/logit blend).\n"
         )
+    if competition_policy.active:
+        policy_lines = ["\n\nCompetition policy override is active."]
+        if competition_policy.required_capabilities:
+            policy_lines.append(
+                "- Required capabilities: "
+                + ", ".join(capability for capability in competition_policy.required_capabilities if capability)
+            )
+        if competition_policy.has_capability("recoverable_original_dataset"):
+            policy_lines.append(
+                "- If staged reference/original datasets are available, wire them into training or feature "
+                "generation instead of leaving them unused."
+            )
+        if competition_policy.has_capability("heterogeneous_tabular_ensemble"):
+            policy_lines.append(
+                "- Keep orthogonal model families active; do not spend the next iteration on same-family-only tuning."
+            )
+        if competition_policy.has_capability("requires_oof_blend"):
+            policy_lines.append(
+                "- Persist OOF predictions for each candidate and emit at least one weighted or rank blend artifact."
+            )
+        if competition_policy.has_capability("text_translation_seq2seq"):
+            policy_lines.append(
+                "- For translation/text seq2seq tasks, prefer reusable helpers from "
+                "`src/kagglebot/kernel_runtime/text_translation.py` for normalization, metrics, MBR, retrieval, "
+                "and consistency logic; keep competition-specific joins and dictionaries in `kernel.py`."
+            )
+        if competition_policy.has_capability("requires_grouped_text_cv"):
+            policy_lines.append(
+                "- Use grouped text CV keyed by the plan/runtime group columns; "
+                "do not rank candidates with plain row-level splits."
+            )
+        if competition_policy.has_capability("requires_candidate_rerank"):
+            policy_lines.append(
+                "- Treat retrieval as a candidate source or fallback only; "
+                "keep seq2seq + candidate rerank/MBR as the primary path."
+            )
+        if competition_policy.has_capability("supports_metadata_supervision"):
+            policy_lines.append(
+                "- If metadata supervision is useful, declare required aux inputs in "
+                "plan.json `text_runtime.required_aux_inputs` "
+                "and keep the matching/join heuristics inside `kernel.py`."
+            )
+        if competition_policy.has_capability("supports_soft_constraint_rewrite"):
+            policy_lines.append(
+                "- Prefer soft constraint rewrites and rerank bonuses for "
+                "entity/quantity/unit handling instead of hard-coded decode constraints."
+            )
+        if competition_policy.prompt.ablation_groups:
+            policy_lines.append(
+                "- Required ablations: "
+                + ", ".join(group for group in competition_policy.prompt.ablation_groups if group)
+            )
+        if competition_policy.prompt.min_model_families_before_stop is not None:
+            policy_lines.append(
+                f"- Minimum model families before stop: {competition_policy.prompt.min_model_families_before_stop}"
+            )
+        if competition_policy.prompt.require_oof_blend_before_stop:
+            policy_lines.append("- Do not stop until at least one OOF blend candidate is implemented.")
+        if competition_policy.evaluation.search_stop_rank_percentile is not None:
+            policy_lines.append(
+                "- Internal search target rank percentile: "
+                f"{competition_policy.evaluation.search_stop_rank_percentile * 100:.2f}%"
+            )
+        if competition_policy.prompt.prefer_ensemble_reference and ensemble_reference_notebook is not None:
+            policy_lines.append(f"- ensemble_kernel_id: {ensemble_reference_notebook.kernel_id}")
+        if competition_policy.execution_hints:
+            policy_lines.append(
+                "- execution_hints: "
+                + json.dumps(competition_policy.execution_hints, sort_keys=True, ensure_ascii=True)
+            )
+        for note in competition_policy.prompt.extra_notes:
+            policy_lines.append(f"- {note}")
+        base_prompt_text += "\n".join(policy_lines) + "\n"
     if best_score_so_far is not None:
         base_prompt_text += (
             "\n\nRegression Guard Policy:\n"
@@ -5409,6 +6351,16 @@ def _run_improvement(
                 note_lines.append(f"- {clean}")
         if note_lines:
             base_prompt_text += "\n\nAdditional repair targets:\n" + "\n".join(note_lines) + "\n"
+    if submit_failure_notes:
+        base_prompt_text += (
+            "\n\nSubmit Contract Repair:\n" + "\n".join(f"- {note}" for note in submit_failure_notes) + "\n"
+        )
+        if submit_failure_force_reason:
+            base_prompt_text += (
+                "\nSubmit contract repair policy is active.\n"
+                f"Reason: {submit_failure_force_reason}\n"
+                "Repair the submission contract before spending iteration budget on further model tuning.\n"
+            )
     code_reference_gate_lines = [
         "## Code Reference Gate",
         f"- Code snapshot: {config.paths.code_md_path}",
@@ -5418,7 +6370,8 @@ def _run_improvement(
             if code_reference_score is None
             else (
                 f"- Code reference score: {code_reference_score:.6f} "
-                f"(source: {code_reference_source}, delta_vs_current={code_reference_delta:+.6f})"
+                f"(comparison_score={code_reference_comparison_score:.6f}, "
+                f"source: {code_reference_source}, delta_vs_current={code_reference_delta:+.6f})"
             )
         ),
         f"- Code reference status: {code_reference_status}",
@@ -5465,6 +6418,20 @@ def _run_improvement(
                     ),
                 ]
             )
+        if ensemble_reference_notebook is not None and competition_policy.prompt.prefer_ensemble_reference:
+            code_reference_gate_lines.extend(
+                [
+                    f"- ensemble_kernel_id: {ensemble_reference_notebook.kernel_id}",
+                    f"- ensemble_title: {ensemble_reference_notebook.title}",
+                    (
+                        f"- ensemble_source_file: {ensemble_reference_notebook.source_file}"
+                        if ensemble_reference_notebook.source_file
+                        else "- ensemble_source_file: unavailable"
+                    ),
+                    "After reproducing the execution baseline, inspect the ensemble reference notebook "
+                    "as the blend blueprint.",
+                ]
+            )
         code_reference_gate_lines.extend(
             [
                 "Either reproduce that baseline path first or justify concrete blockers and implement",
@@ -5492,6 +6459,13 @@ def _run_improvement(
         problem_type_knowledge=problem_type_knowledge,
     )
     strategy_dir = agent_dir / f"improve_strategy-{iteration:02d}"
+    _update_watch_phase(
+        config,
+        run_id,
+        "gpt_improvement_thinking",
+        detail="GPT is drafting the next improvement strategy.",
+        iteration=iteration,
+    )
     strategy_text = _run_improvement_strategy(
         prompt_text=strategy_prompt,
         output_dir=strategy_dir,
@@ -5513,6 +6487,13 @@ def _run_improvement(
     _print_agent_prompt(prompt_path, prompt_text)
 
     print(f"[cyan]improve[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} implementer")
+    _update_watch_phase(
+        config,
+        run_id,
+        "gpt_improvement_fixing",
+        detail=f"{IMPLEMENTATION_AGENT.display_name} is applying the improvement strategy.",
+        iteration=iteration,
+    )
     # Codex runner always writes execution logs (codex_exec.jsonl / codex_last_message.txt)
     # under the provided output_dir (agent_dir). Include it in the allowlist so the guard
     # does not fail on its own transcripts.
@@ -5521,41 +6502,69 @@ def _run_improvement(
     # eval advisor status) and run-scoped metadata (run.json, evaluation_report.json). Those are
     # side effects of Kagglebot itself rather than agent edits, so they must be allowlisted here
     # to avoid spurious write-guard failures.
-    allowed_prefixes = [
-        config.paths.kernel_source_dir,
-        config.paths.context_dir,
-        config.paths.run_dir(run_id),
-        agent_dir,
-        config.paths.repo_root / "pyproject.toml",
-        config.paths.repo_root / "uv.lock",
-    ]
+    allowed_prefixes = _repair_allowed_prefixes(config, extra_paths=[agent_dir])
 
     def _run_improve_codex_pass(*, current_prompt_path: Path, stage_suffix: str) -> tuple[str, Path]:
-        guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
-        before = _snapshot_tree(config.paths.repo_root)
-        result = run_codex(
-            current_prompt_path,
-            agent_dir,
-            dry_run=config.dry_run,
-            model=_ERROR_FIX_CODEX_MODEL,
-            reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+        capacity_attempts = max(
+            1,
+            _env_int("KAGGLEBOT_AGENT_CAPACITY_ATTEMPTS", default=MAX_AGENT_CAPACITY_ATTEMPTS),
         )
-        after = _snapshot_tree(config.paths.repo_root)
-        _enforce_allowlist_changes(
-            root=config.paths.repo_root,
-            before=before,
-            after=after,
-            allowed_prefixes=allowed_prefixes,
-            stage=f"improve_iteration_{iteration}{stage_suffix}",
-            guard_snapshot=guard_snapshot,
-            auto_repair=True,
-        )
-        response = _read_agent_response(result.last_message_path)
-        _print_agent_response(result.last_message_path, response)
-        if result.returncode != 0:
-            raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} improvement failed.")
-        return response, result.last_message_path
+        for capacity_attempt in range(1, capacity_attempts + 1):
+            pass_output_dir = (
+                agent_dir
+                if capacity_attempt == 1
+                else agent_dir / f"improve_capacity_retry{stage_suffix}-{capacity_attempt:02d}"
+            )
+            guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
+            before = _snapshot_tree(config.paths.repo_root)
+            result = run_codex(
+                current_prompt_path,
+                pass_output_dir,
+                dry_run=config.dry_run,
+                model=_ERROR_FIX_CODEX_MODEL,
+                reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+            )
+            after = _snapshot_tree(config.paths.repo_root)
+            _enforce_allowlist_changes(
+                root=config.paths.repo_root,
+                before=before,
+                after=after,
+                allowed_prefixes=allowed_prefixes,
+                stage=f"improve_iteration_{iteration}{stage_suffix}",
+                guard_snapshot=guard_snapshot,
+                auto_repair=True,
+            )
+            response = _read_agent_response(result.last_message_path)
+            _print_agent_response(result.last_message_path, response)
+            _log_codex_sandbox_fallback(stage_label="improve", result=result)
+            if result.returncode == 0:
+                return response, result.last_message_path
 
+            detail = _agent_failure_detail(result, response)
+            if _is_agent_capacity_failure(result, response):
+                if capacity_attempt < capacity_attempts:
+                    wait_seconds = AGENT_CAPACITY_RETRY_SLEEP * capacity_attempt
+                    print(
+                        "[yellow]improve[/yellow]: "
+                        f"{IMPLEMENTATION_AGENT.log_alias} capacity unavailable; "
+                        f"retrying in {wait_seconds:.0f}s "
+                        f"(attempt {capacity_attempt + 1}/{capacity_attempts})."
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                raise RuntimeError(
+                    f"{IMPLEMENTATION_AGENT.display_name} improvement failed: transient_agent_capacity\n{detail}"
+                )
+            raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} improvement failed.\n{detail}")
+        raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} improvement failed.")
+
+    _update_watch_phase(
+        config,
+        run_id,
+        "gpt_improvement_fixing",
+        detail=f"{IMPLEMENTATION_AGENT.display_name} is editing kernel code for the next iteration.",
+        iteration=iteration,
+    )
     response_text, _ = _run_improve_codex_pass(current_prompt_path=prompt_path, stage_suffix="")
 
     if code_reference_mandatory and required_reference_notebook is not None and not config.dry_run:
@@ -5594,7 +6603,7 @@ def _run_improvement(
                 )
             response_text = f"{response_text}\n\n{repair_response}".strip()
 
-    _run_verify(config.verify_cmd, dry_run=config.dry_run)
+    _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
     summary = response_text
     diagnostics_text = ""
     diagnostics_path = iter_dir / "diagnostics.md"
@@ -5885,6 +6894,13 @@ def _run_kernel_fix(
             f"skipping gpt strategy ({strategy_skip_reason}); invoking {IMPLEMENTATION_AGENT.log_alias} fixer directly."
         )
     else:
+        _update_watch_phase(
+            config,
+            run_id,
+            "gpt_kernel_fix_thinking",
+            detail="GPT is analyzing the kernel failure and drafting a fix strategy.",
+            iteration=iteration,
+        )
         strategy_prompt = _build_error_strategy_prompt(
             stage="kernel_fix",
             slug=config.slug,
@@ -5915,20 +6931,7 @@ def _run_kernel_fix(
     attempt_path.write_text(base_prompt_text, encoding="utf-8")
     _print_agent_prompt(prompt_path, base_prompt_text)
 
-    allowed_prefixes = [
-        config.paths.repo_root / "src",
-        config.paths.repo_root / "docs",
-        config.paths.repo_root / "tests",
-        config.paths.repo_root / "pyproject.toml",
-        config.paths.repo_root / "uv.lock",
-        config.paths.kernel_source_dir,
-        config.paths.context_dir,
-        config.paths.runs_dir,
-        config.paths.prompts_dir,
-        config.paths.submissions_dir,
-        config.paths.kernels_dir,
-        config.paths.base_dir / "outputs",
-    ]
+    allowed_prefixes = _repair_allowed_prefixes(config)
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     codex_pass_limit = max(1, int(max_codex_passes or MAX_KERNEL_FIX_CODEX_PASSES))
     retry_feedback = ""
@@ -5959,6 +6962,13 @@ def _run_kernel_fix(
             agent_dir if codex_pass == 1 else agent_dir / f"kernel_fix_pass-{attempt:02d}-{codex_pass:02d}"
         )
         print(f"[cyan]kernel fix[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} fixer")
+        _update_watch_phase(
+            config,
+            run_id,
+            "gpt_kernel_fix_fixing",
+            detail=f"{IMPLEMENTATION_AGENT.display_name} is repairing the kernel failure.",
+            iteration=iteration,
+        )
         result = run_codex(
             pass_prompt_path,
             pass_output_dir,
@@ -5987,6 +6997,7 @@ def _run_kernel_fix(
             )
         response_text = _read_agent_response(result.last_message_path)
         _print_agent_response(result.last_message_path, response_text)
+        _log_codex_sandbox_fallback(stage_label="kernel fix", result=result)
         last_response_text = response_text
         if result.returncode != 0:
             retry_feedback = (
@@ -6013,7 +7024,7 @@ def _run_kernel_fix(
                     "Kernel fix agent produced no file changes and regeneration fallback was already used."
                 )
             try:
-                _run_verify(config.verify_cmd, dry_run=config.dry_run)
+                _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
             except Exception as exc:  # noqa: BLE001
                 retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
                 if codex_pass < codex_pass_limit:
@@ -6034,7 +7045,7 @@ def _run_kernel_fix(
             return
 
         try:
-            _run_verify(config.verify_cmd, dry_run=config.dry_run)
+            _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
         except Exception as exc:  # noqa: BLE001
             retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             if codex_pass < codex_pass_limit:
@@ -6390,12 +7401,22 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
 Kaggle rejected the submission artifact itself. This autofix is not complete unless the submission file bytes or
 artifact path change, and `run_state.json` records `submit_autofix_submission_path` pointing to the repaired file.
 If you repair the file in place, ensure the file contents actually change.
+If this is competition-specific, fix the authoritative source that generates the artifact rather than leaving only
+an ad-hoc repaired copy behind.
 """
     strategy_stage = "submit_autofix" if submit_autofix else "autofix"
     strategy_label = "submit autofix" if submit_autofix else "autofix"
     print(
         f"[cyan]{strategy_label}[/cyan]: strategy={_ERROR_STRATEGY_MODEL}({_ERROR_STRATEGY_REASONING_EFFORT}) "
         f"-> fixer={_ERROR_FIX_CODEX_MODEL}({_ERROR_FIX_REASONING_EFFORT})"
+    )
+    thinking_phase = "gpt_submit_autofix_thinking" if submit_autofix else "gpt_autofix_thinking"
+    fixing_phase = "gpt_submit_autofix_fixing" if submit_autofix else "gpt_autofix_fixing"
+    _update_watch_phase(
+        config,
+        run_id,
+        thinking_phase,
+        detail=f"GPT is analyzing the {strategy_label} failure and drafting a fix strategy.",
     )
     strategy_prompt = _build_error_strategy_prompt(
         stage=strategy_stage,
@@ -6451,6 +7472,12 @@ If you repair the file in place, ensure the file contents actually change.
 
         before = _snapshot_tree(config.paths.repo_root)
         pass_output_dir = autofix_dir if codex_pass == 1 else autofix_dir / f"pass-{codex_pass:02d}"
+        _update_watch_phase(
+            config,
+            run_id,
+            fixing_phase,
+            detail=f"{IMPLEMENTATION_AGENT.display_name} is applying the {strategy_label} fix.",
+        )
         result = run_codex(
             pass_prompt_path,
             pass_output_dir,
@@ -6471,6 +7498,7 @@ If you repair the file in place, ensure the file contents actually change.
         )
         response_text = _read_agent_response(result.last_message_path)
         _print_agent_response(result.last_message_path, response_text)
+        _log_codex_sandbox_fallback(stage_label=strategy_label, result=result)
         if result.returncode != 0:
             retry_feedback = (
                 f"{IMPLEMENTATION_AGENT.display_name} autofix step failed with non-zero exit status.\n"
@@ -6500,7 +7528,7 @@ If you repair the file in place, ensure the file contents actually change.
             raise RuntimeError("Submit autofix did not repair the submission artifact required by Kaggle.")
 
         try:
-            _run_verify(config.verify_cmd, dry_run=config.dry_run)
+            _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
         except Exception as exc:  # noqa: BLE001
             retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
@@ -6511,36 +7539,30 @@ If you repair the file in place, ensure the file contents actually change.
     raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
 
 
-def _autofix_allowed_prefixes(config: AutopilotConfig) -> list[Path]:
-    # Keep src writable during autofix so runtime/framework issues in core code can be repaired.
-    # Do not grant broad competition-root/kernels write access; fixes must target authoritative
-    # sources (src/kernel/context/prompts) rather than generated staged artifacts.
-    candidates = [
-        config.paths.repo_root / "src",
-        config.paths.repo_root / "docs",
-        config.paths.repo_root / "tests",
-        config.paths.repo_root / "pyproject.toml",
-        config.paths.repo_root / "uv.lock",
-        # Allow competition-scoped prompt/context/submission artifacts and authoritative kernel.
-        config.paths.kernel_source_dir,
-        config.paths.context_dir,
-        config.paths.runs_dir,
-        config.paths.prompts_dir,
-        config.paths.submissions_dir,
-    ]
+def _repair_allowed_prefixes(config: AutopilotConfig, *, extra_paths: list[Path] | None = None) -> WriteGuardPolicy:
+    extra_allowed: list[Path] = []
+    if extra_paths:
+        extra_allowed.extend(extra_paths)
     module_src_root = Path(__file__).resolve().parents[1]
-    # In some test/runtime setups, config.repo_root can differ from the imported module tree.
-    # Include the active src root so autofix can patch the file that raised the exception.
     if module_src_root.name == "src":
-        candidates.append(module_src_root)
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        unique.append(path)
-    return unique
+        extra_allowed.append(module_src_root)
+    return _repo_root_write_policy(
+        repo_root=config.paths.repo_root,
+        denied_prefixes=[config.paths.data_dir, config.paths.kernels_dir],
+        extra_allowed_prefixes=extra_allowed,
+    )
+
+
+def _autofix_allowed_prefixes(config: AutopilotConfig) -> WriteGuardPolicy:
+    return _repair_allowed_prefixes(config)
+
+
+def _log_codex_sandbox_fallback(*, stage_label: str, result: object) -> None:
+    if not bool(getattr(result, "used_sandbox_fallback", False)):
+        return
+    excerpt = str(getattr(result, "sandbox_failure_excerpt", "")).strip()
+    detail = f": {excerpt}" if excerpt else ""
+    print(f"[yellow]{stage_label}[/yellow]: codex sandbox fallback used{detail}")
 
 
 def _build_autofix_prompt(
@@ -6550,16 +7572,20 @@ def _build_autofix_prompt(
     attempt: int,
     error_text: str,
     error_path: Path,
-    allowed_prefixes: list[Path],
+    allowed_prefixes: WriteGuardPolicy,
     submit_context: str = "",
 ) -> str:
-    allowed_list = "\n".join(f"- {path}" for path in allowed_prefixes)
+    allowed_list = "\n".join(f"- {path}" for path in allowed_prefixes.allowed_prefixes)
+    denied_list = "\n".join(f"- {path}" for path in allowed_prefixes.denied_prefixes)
     submit_context_block = ""
     if submit_context:
         submit_context_block = (
             "\n## Submit Context\n\n"
             "This is a submit-stage failure. Use `repair_target` to decide whether to fix the submission artifact, "
-            "submit mode/kernel path, or a platform/manual blocker.\n\n"
+            "submit mode/kernel path, or a platform/manual blocker.\n"
+            "This run must fix the submission contract before further model changes.\n"
+            "If the error is competition-specific, edit only authoritative `kernel.py`.\n"
+            "Do not leave iter2 with the same Kaggle row/column/evaluation exception.\n\n"
             "```\n"
             f"{submit_context}\n"
             "```\n"
@@ -6597,6 +7623,10 @@ Error log file: {error_path}
 
 {allowed_list}
 
+## Forbidden Edit Scope
+
+{denied_list or "- None"}
+
 ## Task
 
 1) Identify root cause of the failure.
@@ -6622,9 +7652,9 @@ def _build_error_strategy_prompt(
     return f"""\
 # Kagglebot {STRATEGY_AGENT.display_name} Error Strategy
 
-You are {STRATEGY_AGENT.display_name} in extra-high reasoning mode.
+You are {STRATEGY_AGENT.display_name} in xhigh reasoning mode.
 Think through the failure and produce a concrete fix strategy for
-{IMPLEMENTATION_AGENT.display_name} (extra high), which will apply edits.
+{IMPLEMENTATION_AGENT.display_name} (xhigh), which will apply edits.
 
 Stage: {stage}
 Competition: {slug}
@@ -7292,7 +8322,10 @@ def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, chan
     state["last_stage"] = stage
     state["last_stage_family"] = stage_family
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    print(f"[yellow]autofix[/yellow]: src changes detected in {stage}; restarting to reload code")
+    print(
+        f"[yellow]autofix[/yellow]: src changes detected in {stage}; "
+        "current process may be stale, restarting to reload code"
+    )
     os.environ["KAGGLEBOT_RESUME_RUN_ID"] = run_id
     os.environ["KAGGLEBOT_RESUME_SLUG"] = config.slug
     os.execv(sys.executable, [sys.executable, *sys.argv])
@@ -7313,6 +8346,7 @@ def _attempt_submit(
     best_score: float | None,
     problem_types: list[str],
     submit_mode: str = "file",
+    notebook_submit_artifact_mode: str = "wrapper",
 ) -> dict[str, object] | None:
     if not config.submit or config.dry_run:
         return None
@@ -7436,6 +8470,11 @@ def _attempt_submit(
         notebook_submit_required = True
         print("[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit")
     notebook_fallback_activated = notebook_submit_required
+    submission_artifact_mode = (
+        _resolve_notebook_submit_artifact_mode(paths=config.paths, submit_mode="notebook")
+        if notebook_submit_required
+        else str(notebook_submit_artifact_mode or "wrapper")
+    )
     if notebook_submit_required:
         print("[yellow]submit mode[/yellow]: using notebook submit")
 
@@ -7504,6 +8543,7 @@ def _attempt_submit(
                     run_id=run_id,
                     submission_path=prepared_submission_path,
                     message=message,
+                    artifact_mode=submission_artifact_mode,
                 )
                 submission_result = notebook_result
                 submission_reference = notebook_ref
@@ -7513,6 +8553,8 @@ def _attempt_submit(
                     prepared_path=prepared_submission_path,
                     message=message,
                     run_id=run_id,
+                    offline_score=best_score,
+                    score_source="offline",
                 )
                 submission_reference = str(submission_result.submission_path)
                 submission_artifact_path = submission_result.submission_path
@@ -7538,6 +8580,10 @@ def _attempt_submit(
             ):
                 notebook_submit_required = True
                 notebook_fallback_activated = True
+                submission_artifact_mode = _resolve_notebook_submit_artifact_mode(
+                    paths=config.paths,
+                    submit_mode="notebook",
+                )
                 print(
                     "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
                     "retrying via notebook submit automatically."
@@ -7562,6 +8608,7 @@ def _attempt_submit(
                         problem_types=problem_types,
                         submission_ref=submission_reference,
                         submission_artifact_path=submission_artifact_path,
+                        artifact_mode=submission_artifact_mode,
                         code_fingerprint=submit_code_fingerprint,
                         fingerprint=fingerprint,
                         error_kind=classification_kind,
@@ -7619,6 +8666,7 @@ def _attempt_submit(
                 problem_types=problem_types,
                 submission_ref=submission_reference,
                 submission_artifact_path=submission_artifact_path,
+                artifact_mode=submission_artifact_mode,
                 code_fingerprint=submit_code_fingerprint,
                 fingerprint=fingerprint,
                 error_kind=classification_kind,
@@ -7657,6 +8705,7 @@ def _attempt_submit(
                     problem_types=problem_types,
                     submission_ref=submission_reference,
                     submission_artifact_path=submission_artifact_path,
+                    artifact_mode=submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
                     fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
                     error_kind="permanent",
@@ -7725,6 +8774,7 @@ def _attempt_submit(
             problem_types=problem_types,
             submission_ref=submission_ref,
             submission_artifact_path=submission_for_submit_path,
+            artifact_mode=submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
             fingerprint=compute_error_fingerprint("", detail or str(exc)),
             error_kind="transient",
@@ -7751,6 +8801,7 @@ def _attempt_submit(
                 problem_types=problem_types,
                 submission_ref=submission_ref,
                 submission_artifact_path=submission_for_submit_path,
+                artifact_mode=submission_artifact_mode,
                 code_fingerprint=submit_code_fingerprint,
                 fingerprint=compute_error_fingerprint("", raw_detail or outcome_status),
                 error_kind="validation",
@@ -7771,6 +8822,14 @@ def _attempt_submit(
         )
     else:
         print("[yellow]submission result[/yellow]: score not available yet; knowledge update skipped")
+    if isinstance(outcome, dict) and submission_for_submit_path is not None and submission_for_submit_path.exists():
+        SubmissionLedger(config.paths.submission_ledger_path).record_outcome(
+            slug=config.slug,
+            message=message,
+            submission_path=submission_for_submit_path,
+            run_id=run_id,
+            outcome=dict(outcome),
+        )
     _mark_submit_failure_context_resolved(run_dir=run_dir, resolution="submitted", submission_ref=submission_ref)
     return {
         "message": message,
@@ -7787,14 +8846,15 @@ def _submit_with_notebook_kernel(
     run_id: str,
     submission_path: Path,
     message: str,
+    artifact_mode: str = "wrapper",
 ):
     """Execute a Kaggle notebook kernel and submit via kernel reference."""
     iteration = _infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = config.paths.iter_dir(run_id, iteration)
     kaggle_user = resolve_kaggle_username(config.kaggle_username)
-    enable_internet = str(config.internet or "on").strip().lower() == "on"
+    normalized_artifact_mode = str(artifact_mode or "wrapper").strip().lower()
     try:
-        kernel_result = run_kernel(
+        kernel_result = run_submit_kernel(
             slug=config.slug,
             run_id=run_id,
             iteration=iteration,
@@ -7802,13 +8862,9 @@ def _submit_with_notebook_kernel(
             kaggle_username=kaggle_user,
             kernel_name=config.kernel_name,
             accelerator=config.accelerator,
-            enable_internet=enable_internet,
-            score_source="cv",
-            metric="unknown",
-            direction="maximize",
-            holdout_frac=0.2,
-            cv_folds=5,
-            seed=42,
+            enable_internet=False,
+            submission_path=submission_path,
+            mode=normalized_artifact_mode,
             dry_run=config.dry_run,
             timeout_minutes=config.time_budget_min,
         )
@@ -7835,14 +8891,39 @@ def _submit_with_notebook_kernel(
     )
     version = _infer_kernel_submit_version_label(iter_dir / "logs") or "1"
     print(f"[cyan]submit notebook[/cyan]: {kernel_ref}")
-    submit_result = run_kaggle_submit_kernel(
-        slug=config.slug,
-        kernel=kernel_ref,
-        message=message,
-        output_file=output_file,
-        version=version,
-        dry_run=config.dry_run,
-    )
+    submit_kwargs = {
+        "slug": config.slug,
+        "kernel": kernel_ref,
+        "message": message,
+        "output_file": output_file,
+        "version": version,
+        "dry_run": config.dry_run,
+    }
+    try:
+        submit_result = run_kaggle_submit_kernel(**submit_kwargs)
+    except SubmissionCliError as exc:
+        classification_stderr = exc.stderr or ""
+        classification = classify_submit_error(exc.stdout, classification_stderr, exc.exit_code)
+        if (
+            str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error"
+            and exc.output
+        ):
+            classification_stderr = "\n".join(part for part in [classification_stderr, exc.output] if part)
+            classification = classify_submit_error(exc.stdout, classification_stderr, exc.exit_code)
+        if _should_retry_ambiguous_notebook_submit_error(
+            reason=str(classification.get("reason") or ""),
+            stdout=exc.stdout,
+            stderr=classification_stderr,
+        ):
+            wait_seconds = float(classification.get("retry_after_seconds") or 3.0)
+            print(
+                "[yellow]submit retry[/yellow]: notebook submit returned an ambiguous 400; "
+                f"retrying same kernel submit in {wait_seconds:.1f}s."
+            )
+            time.sleep(wait_seconds)
+            submit_result = run_kaggle_submit_kernel(**submit_kwargs)
+        else:
+            raise
     return submit_result, f"kernel:{kernel_ref}", submission_artifact_path
 
 
@@ -7855,6 +8936,13 @@ def _should_use_notebook_submit_fallback(*, reason: str, stdout: str, stderr: st
         return False
     detail = f"{stdout}\n{stderr}".lower()
     return any(hint in detail for hint in _NOTEBOOK_FALLBACK_HINTS)
+
+
+def _should_retry_ambiguous_notebook_submit_error(*, reason: str, stdout: str, stderr: str) -> bool:
+    if str(reason or "").strip().lower() != "ambiguous_notebook_bad_request":
+        return False
+    detail = f"{stdout}\n{stderr}".lower()
+    return "submit-notebook" in detail
 
 
 def _infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:
@@ -7882,6 +8970,7 @@ def _abort_submit_for_run(
     problem_types: list[str],
     submission_ref: str | Path,
     submission_artifact_path: Path | None = None,
+    artifact_mode: str | None = None,
     code_fingerprint: str | None = None,
     fingerprint: str,
     error_kind: str,
@@ -7940,6 +9029,7 @@ def _abort_submit_for_run(
             run_dir=run_dir,
             submission_ref=submission_ref_text,
             artifact_path=artifact_path,
+            artifact_mode=artifact_mode,
             code_fingerprint=code_fingerprint or "",
             fingerprint=fingerprint,
             error_kind=error_kind,
@@ -8070,6 +9160,7 @@ def _build_submit_failure_context_payload(
     run_dir: Path,
     submission_ref: str,
     artifact_path: Path | None,
+    artifact_mode: str | None,
     code_fingerprint: str,
     fingerprint: str,
     error_kind: str,
@@ -8101,6 +9192,7 @@ def _build_submit_failure_context_payload(
         "message": message,
         "summary": summary,
         "submit_mode": "notebook" if submission_ref.startswith("kernel:") else "file",
+        "artifact_mode": str(artifact_mode or "").strip().lower(),
         "submission_ref": submission_ref,
         "submission_artifact_path": str(artifact_path) if artifact_path is not None else "",
         "submission_artifact_sha256": _sha256_or_none(artifact_path),
@@ -8359,6 +9451,7 @@ def _build_submit_autofix_context(run_dir: Path) -> str:
             "error_kind",
             "fingerprint",
             "submit_mode",
+            "artifact_mode",
             "submission_ref",
             "submission_artifact_path",
             "submission_artifact_sha256",
@@ -8553,9 +9646,34 @@ def _env_flag(name: str, *, default: bool) -> bool:
     return default
 
 
+def _env_int(name: str, *, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return default
+
+
 def _env_truthy(name: str) -> bool:
     value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_force_initial_submit(
+    *,
+    deliverable_mode: str,
+    iteration: int,
+    submit_enabled: bool,
+    dry_run: bool,
+    submit_policy: str | None = None,
+    submission_limit_per_day: int | None = None,
+) -> bool:
+    _ = submit_policy
+    if submission_limit_per_day == 1:
+        return False
+    return submit_enabled and (not dry_run) and deliverable_mode == "leaderboard" and iteration == 1
 
 
 def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
@@ -8670,6 +9788,61 @@ def _wait_for_submission_outcome(
         message=message,
         submitted_at=submitted_at,
     )
+
+
+def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:
+    failure_context = _load_submit_failure_context(run_dir)
+    if not failure_context or not bool(failure_context.get("active")) or not bool(failure_context.get("repairable")):
+        return [], None
+
+    reason = str(failure_context.get("reason") or "").strip().lower()
+    error_kind = str(failure_context.get("error_kind") or "").strip().lower()
+    latest_attempt = _load_latest_submit_attempt(run_dir)
+    detail = "\n".join(
+        part
+        for part in (
+            str(latest_attempt.get("stdout_tail") or ""),
+            str(latest_attempt.get("stderr_tail") or ""),
+            str(failure_context.get("summary") or ""),
+        )
+        if part
+    ).strip()
+    if not _submit_error_requires_file_fix(reason=reason, error_kind=error_kind, detail=detail):
+        return [], None
+
+    repair_target = str(failure_context.get("repair_target") or "").strip().lower() or "submission_artifact"
+    artifact_path = str(
+        failure_context.get("submission_artifact_path") or failure_context.get("submission_ref") or ""
+    ).strip()
+    detail_text = normalize_error_text(detail or str(failure_context.get("message") or ""), max_chars=1200)
+    notes = [
+        "This run must fix the submission contract before further model changes.",
+        f"expected_repair_target={repair_target}",
+    ]
+    if artifact_path:
+        notes.append(f"failed_submission_artifact={artifact_path}")
+    if detail_text:
+        notes.append(f"kaggle_submission_error={detail_text}")
+    artifact_mode = str(failure_context.get("artifact_mode") or "").strip().lower()
+    if artifact_mode:
+        notes.append(f"notebook_submit_artifact_mode={artifact_mode}")
+    notes.extend(
+        [
+            "If the error is competition-specific, edit only authoritative `kernel.py`.",
+            "Do not leave iter2 with the same Kaggle row/column/evaluation exception.",
+            "Prioritize source generation fixes over one-off repaired artifact workarounds "
+            "when the same format error recurs.",
+        ]
+    )
+    if artifact_mode == "inference":
+        notes.extend(
+            [
+                "This competition is notebook-only and scored on hidden/full test in Kaggle runtime.",
+                "Do not rely on an embedded local submission artifact for submit.",
+                "Kernel must write `/kaggle/working/submission.csv` during notebook execution.",
+            ]
+        )
+    return notes, "Previous iteration failed Kaggle submission contract; repair submit format before further tuning."
 
 
 def _normalize_submission_outcome_status(value: object) -> str:
@@ -8949,6 +10122,44 @@ def _metrics_equivalent(left: str | None, right: str | None) -> bool:
     return bool(left_metric) and left_metric == right_metric
 
 
+def _resolve_explicit_official_metric_override(
+    payload: dict[str, object] | None,
+    *,
+    target_metric: str | None,
+    evaluation_metric: str | None,
+) -> str | None:
+    """Trust an explicitly declared official kernel metric over a stale generic fallback target."""
+    if not isinstance(payload, dict):
+        return None
+    raw_official = payload.get("official_metric")
+    if not isinstance(raw_official, str) or not raw_official.strip():
+        return None
+    official_metric = raw_official.strip()
+    if not evaluation_metric or not _metrics_equivalent(official_metric, evaluation_metric):
+        return None
+    if not target_metric or _metrics_equivalent(official_metric, target_metric):
+        return None
+    generic_fallback_metrics = {
+        "accuracy",
+        "auc",
+        "average_precision",
+        "brier_score",
+        "f1",
+        "logloss",
+        "mae",
+        "mape",
+        "mse",
+        "precision",
+        "r2",
+        "recall",
+        "rmse",
+        "rmsle",
+    }
+    if canonical_metric(target_metric) not in generic_fallback_metrics:
+        return None
+    return official_metric
+
+
 def _infer_metric_direction_for_mismatch(metric: str, fallback_direction: str) -> tuple[str, bool]:
     metric_name = canonical_metric(metric)
     if metric_name in {"rmse", "rmsle", "mae", "mape", "mse", "logloss"}:
@@ -9002,6 +10213,30 @@ def _score_delta_vs_reference(current: float, reference: float, direction: str) 
     if direction == "minimize":
         return reference - current
     return current - reference
+
+
+def _normalize_code_reference_score_for_comparison(
+    *,
+    current: float,
+    reference: float | None,
+    metric: str,
+) -> float | None:
+    if reference is None:
+        return None
+    metric_name = canonical_metric(metric)
+    bounded_classification_metrics = {
+        "accuracy",
+        "auc",
+        "f1",
+        "precision",
+        "recall",
+        "average_precision",
+    }
+    current_value = float(current)
+    reference_value = float(reference)
+    if metric_name in bounded_classification_metrics and 0.0 <= current_value <= 1.0 and 1.0 < reference_value <= 100.0:
+        return reference_value / 100.0
+    return reference_value
 
 
 def _score_drop_vs_best(*, best_score: float | None, current_score: float, direction: str) -> float | None:
@@ -9236,7 +10471,7 @@ def _extract_code_reference_score(paths: CompetitionPaths) -> tuple[float | None
     return None, "unavailable"
 
 
-def _load_required_reference_notebook(paths: CompetitionPaths) -> _CodeReferenceNotebook | None:
+def _load_code_reference_notebook(paths: CompetitionPaths, *, id_key: str) -> _CodeReferenceNotebook | None:
     index_path = paths.code_notebooks_index_path
     if not index_path.exists():
         return None
@@ -9249,7 +10484,7 @@ def _load_required_reference_notebook(paths: CompetitionPaths) -> _CodeReference
     notebooks = payload.get("notebooks")
     if not isinstance(notebooks, list) or not notebooks:
         return None
-    required_id_raw = payload.get("required_reference_kernel_id")
+    required_id_raw = payload.get(id_key)
     required_id = str(required_id_raw).strip() if isinstance(required_id_raw, str) else ""
     selected: dict[str, object] | None = None
     if required_id:
@@ -9283,6 +10518,14 @@ def _load_required_reference_notebook(paths: CompetitionPaths) -> _CodeReference
         local_dir=local_dir,
         summary=summary,
     )
+
+
+def _load_required_reference_notebook(paths: CompetitionPaths) -> _CodeReferenceNotebook | None:
+    return _load_code_reference_notebook(paths, id_key="required_reference_kernel_id")
+
+
+def _load_ensemble_reference_notebook(paths: CompetitionPaths) -> _CodeReferenceNotebook | None:
+    return _load_code_reference_notebook(paths, id_key="ensemble_reference_kernel_id")
 
 
 def _reference_requires_tabicl(reference: _CodeReferenceNotebook) -> bool:

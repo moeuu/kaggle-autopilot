@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import ast
 import base64
+import codecs
 import gzip
 import json
 import os
 import re
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from kagglebot.exceptions import (
     KaggleCliError,
     KaggleNetworkError,
     KernelFailedError,
+    KernelStillRunningError,
     KernelTimeoutError,
     RulesNotAcceptedError,
 )
@@ -37,6 +40,7 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
+from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config, pipeline_env_suffix
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
@@ -54,12 +58,18 @@ _ZERO_OVERLAP_DRIFT_GUARD_FILENAME = "zero_overlap_drift_guard.json"
 _ZERO_OVERLAP_DRIFT_SHIM_MARKER = "# kagglebot: zero-overlap-drift-shim"
 _KAGGLE_WORKING_REDIRECT_SHIM_MARKER = "# kagglebot: kaggle-working-redirect-shim"
 _LGBM_GPU_GUARD_SHIM_MARKER = "# kagglebot: lgbm-gpu-guard-shim"
+_TORCH_RUNTIME_GUARD_SHIM_MARKER = "# kagglebot: torch-runtime-guard-shim"
 _TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
 _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER = "# kagglebot: transformers-eval-strategy-shim"
 _KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
+_KERNEL_SUBMIT_INFERENCE_MARKER = "# kagglebot:submit_inference"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
+_LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
+_LOCAL_KERNEL_EXIT_PIPE_DRAIN_SEC = 1.0
 _LOCAL_KERNEL_MEMORY_CAP_ENV = "KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB"
+_LOCAL_KERNEL_STALL_ENV = "KAGGLEBOT_LOCAL_KERNEL_STALL_SEC"
+_LOCAL_KERNEL_DEFAULT_STALL_SEC = 900.0
 _LOCAL_KERNEL_MEMORY_CAP_RATIO = 0.80
 _LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
@@ -99,8 +109,21 @@ _PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_s
 _PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
     r"\b(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*seed=(?P<seed>\d+)\s+fold=(?P<fold>\d+)\b"
 )
-_PIPELINE_START_RE = re.compile(r"\bRunning pipeline:\s*(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)")
+_PIPELINE_START_RE = re.compile(r"\b(?:Running|Training)\s+pipeline:\s*(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)")
 _PIPELINE_DONE_RE = re.compile(r"\bPipeline\s+(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:")
+_PIPELINE_SUITE_RE = re.compile(r"\bSuite:\s*(?P<suite>[A-Za-z0-9][A-Za-z0-9_.-]*)")
+_TRAIN_MODEL_START_RE = re.compile(r"\btrain start:\s*model=(?P<model>[A-Za-z0-9][A-Za-z0-9_.-]*)")
+_CATBOOST_FALLBACK_RE = re.compile(r"\bCatBoost GPU failed; retrying on CPU:\s*(?P<reason>.+)")
+_BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
+    r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
+    r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+    re.IGNORECASE,
+)
+_INVALID_KERNEL_SOURCE_RE = re.compile(
+    r"The following are not valid (?P<kind>dataset|model|kernel) sources "
+    r"and could not be added to the kernel:\s*(?P<items>\[[^\n]+\])",
+    re.IGNORECASE,
+)
 
 
 def _requires_bvs_kernel_contract(slug: str) -> bool:
@@ -189,6 +212,37 @@ class _LocalKernelExecResult:
     memory_cap_bytes: int | None
     killed_for_memory: bool = False
     memory_kill_message: str | None = None
+    killed_for_stall: bool = False
+    stall_kill_message: str | None = None
+
+
+@dataclass
+class _LocalKernelLogFilterState:
+    suppress_next_fragment_source_line: bool = False
+
+
+_SUPPRESSED_LOCAL_KERNEL_LOG_MARKERS = (
+    "PerformanceWarning: DataFrame is highly fragmented.",
+    "This is usually the result of calling `frame.insert` many times, which has poor performance.",
+    "Consider joining all columns at once using pd.concat(axis=1) instead.",
+    "To get a de-fragmented frame, use `newframe = frame.copy()`",
+    "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+    "Default metric period is 5 because BrierScore is/are not implemented for GPU",
+)
+
+
+def _should_suppress_local_kernel_log_line(line: str, *, state: _LocalKernelLogFilterState) -> bool:
+    if "PerformanceWarning: DataFrame is highly fragmented." in line:
+        state.suppress_next_fragment_source_line = True
+        return True
+
+    if state.suppress_next_fragment_source_line:
+        stripped = line.strip()
+        if stripped:
+            state.suppress_next_fragment_source_line = False
+            return True
+
+    return any(marker in line for marker in _SUPPRESSED_LOCAL_KERNEL_LOG_MARKERS)
 
 
 def _find_runtime_hyperparameter_sequence_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
@@ -252,6 +306,19 @@ def _resolve_local_kernel_memory_cap_bytes(env: dict[str, str]) -> int | None:
     return max(512 * 1024 * 1024, int(available_bytes * _LOCAL_KERNEL_MEMORY_CAP_RATIO))
 
 
+def _resolve_local_kernel_stall_timeout_sec(env: dict[str, str]) -> float | None:
+    raw = str(env.get(_LOCAL_KERNEL_STALL_ENV, str(int(_LOCAL_KERNEL_DEFAULT_STALL_SEC)))).strip()
+    if not raw:
+        return _LOCAL_KERNEL_DEFAULT_STALL_SEC
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise KernelFailedError(f"{_LOCAL_KERNEL_STALL_ENV} must be a positive number of seconds.") from exc
+    if value <= 0:
+        return None
+    return max(5.0, value)
+
+
 def _local_kernel_process_tree_rss_bytes(pid: int) -> int:
     try:
         root = psutil.Process(pid)
@@ -305,6 +372,30 @@ def _terminate_local_kernel_process(proc: subprocess.Popen[str]) -> None:
         return
 
 
+def _terminate_local_kernel_process_group(proc: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        _terminate_local_kernel_process(proc)
+        return
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return
+
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(proc.pid, 0)
+        except (OSError, ProcessLookupError):
+            return
+        time.sleep(0.05)
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        return
+
+
 def _run_local_kernel_once(
     *,
     kernel_path: Path,
@@ -312,6 +403,7 @@ def _run_local_kernel_once(
     current_env: dict[str, str],
     timeout_sec: int | None,
     line_callback: Callable[[str], None] | None,
+    progress_tracker: _LocalKernelProgressTracker | None,
 ) -> _LocalKernelExecResult:
     args = [sys.executable, str(kernel_path)]
     start = time.monotonic()
@@ -331,6 +423,11 @@ def _run_local_kernel_once(
         "killed_for_memory": False,
         "memory_kill_message": None,
     }
+    stall_state = {
+        "killed_for_stall": False,
+        "stall_kill_message": None,
+    }
+    stall_timeout_sec = _resolve_local_kernel_stall_timeout_sec(current_env)
     memory_stop = threading.Event()
 
     def _watch_memory() -> None:
@@ -353,20 +450,118 @@ def _run_local_kernel_once(
     memory_thread.start()
 
     stdout_chunks: list[str] = []
+    proc_stdout = proc.stdout
     try:
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                stdout_chunks.append(line)
-                if hasattr(sys.stdout, "write"):
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                if line_callback is not None:
-                    try:
-                        line_callback(line)
-                    except Exception:
-                        pass
-        returncode = proc.wait(timeout=timeout_sec)
+        if proc_stdout is not None:
+            stdout_fd = proc_stdout.fileno()
+            os.set_blocking(stdout_fd, False)
+            selector = selectors.DefaultSelector()
+            selector.register(stdout_fd, selectors.EVENT_READ)
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            pending = ""
+            log_filter_state = _LocalKernelLogFilterState()
+            deadline = None if timeout_sec is None else start + timeout_sec
+            last_data_at = start
+            process_exited_at: float | None = None
+
+            def _emit_text(text: str, *, final: bool) -> None:
+                nonlocal pending
+                if not text and not final:
+                    return
+                pending += text
+                if not final:
+                    lines = pending.splitlines(keepends=True)
+                    if lines and not lines[-1].endswith(("\n", "\r")):
+                        pending = lines.pop()
+                    else:
+                        pending = ""
+                else:
+                    lines = pending.splitlines(keepends=True) if pending else []
+                    pending = ""
+                for line in lines:
+                    if _should_suppress_local_kernel_log_line(line, state=log_filter_state):
+                        continue
+                    stdout_chunks.append(line)
+                    if hasattr(sys.stdout, "write"):
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                    if line_callback is not None:
+                        try:
+                            line_callback(line)
+                        except Exception:
+                            pass
+
+            while True:
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
+                    _terminate_local_kernel_process(proc)
+                    raise subprocess.TimeoutExpired(args, timeout_sec)
+
+                wait_timeout = _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC
+                if deadline is not None:
+                    wait_timeout = min(wait_timeout, max(0.0, deadline - now))
+                events = selector.select(timeout=wait_timeout)
+                saw_data = False
+                if events:
+                    while True:
+                        try:
+                            chunk = os.read(stdout_fd, 65536)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            _emit_text(decoder.decode(b"", final=True), final=True)
+                            selector.unregister(stdout_fd)
+                            selector.close()
+                            proc_stdout.close()
+                            proc_stdout = None
+                            remaining_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+                            returncode = proc.wait(timeout=remaining_timeout)
+                            break
+                        saw_data = True
+                        last_data_at = time.monotonic()
+                        _emit_text(decoder.decode(chunk), final=False)
+                    if proc_stdout is None:
+                        break
+
+                if proc.poll() is not None:
+                    if process_exited_at is None:
+                        process_exited_at = time.monotonic()
+                    if saw_data:
+                        process_exited_at = time.monotonic()
+                        continue
+                    if time.monotonic() - max(process_exited_at, last_data_at) >= _LOCAL_KERNEL_EXIT_PIPE_DRAIN_SEC:
+                        _terminate_local_kernel_process_group(proc)
+                        _emit_text(decoder.decode(b"", final=True), final=True)
+                        selector.unregister(stdout_fd)
+                        selector.close()
+                        proc_stdout.close()
+                        proc_stdout = None
+                        returncode = proc.wait(timeout=1.0)
+                        break
+                else:
+                    process_exited_at = None
+                    if (
+                        progress_tracker is not None
+                        and stall_timeout_sec is not None
+                        and not bool(stall_state["killed_for_stall"])
+                    ):
+                        stall_message = _detect_local_kernel_stall(
+                            progress_tracker=progress_tracker,
+                            stall_timeout_sec=stall_timeout_sec,
+                        )
+                        if stall_message is not None:
+                            stall_state["killed_for_stall"] = True
+                            stall_state["stall_kill_message"] = stall_message
+                            _terminate_local_kernel_process_group(proc)
+                            process_exited_at = time.monotonic()
+        else:
+            returncode = proc.wait(timeout=timeout_sec)
     finally:
+        if proc_stdout is not None:
+            try:
+                proc_stdout.close()
+            except OSError:
+                pass
         memory_stop.set()
         memory_thread.join(timeout=1.0)
         memory_state["peak_rss_bytes"] = max(
@@ -388,6 +583,8 @@ def _run_local_kernel_once(
         memory_kill_message=(
             str(memory_state["memory_kill_message"]) if memory_state["memory_kill_message"] is not None else None
         ),
+        killed_for_stall=bool(stall_state["killed_for_stall"]),
+        stall_kill_message=(str(stall_state["stall_kill_message"]) if stall_state["stall_kill_message"] else None),
     )
 
 
@@ -521,11 +718,19 @@ def _apply_local_runtime_env_defaults(
     notes: list[str] = []
     env.setdefault("KAGGLEBOT_LOCAL_WORKING_DIR", str(local_working_dir))
     env.setdefault("KAGGLEBOT_DISABLE_KAGGLE_WORKING_WRITES", "1")
+    env.setdefault("KAGGLEBOT_NUM_WORKERS", "0")
+    env.setdefault("KAGGLEBOT_TORCH_SHARING_STRATEGY", "file_system")
+    env.setdefault("KAGGLEBOT_LOCAL_NOFILE", "4096")
+    env.setdefault(_LOCAL_KERNEL_STALL_ENV, str(int(_LOCAL_KERNEL_DEFAULT_STALL_SEC)))
     env["KAGGLEBOT_DO_TRAIN"] = "1"
     env["KAGGLEBOT_FORCE_TRAIN"] = "1"
     env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] = "1"
     notes.append("forcing KAGGLEBOT_DO_TRAIN=1 and KAGGLEBOT_FORCE_TRAIN=1")
     notes.append("forcing KAGGLEBOT_ALLOW_MODEL_DOWNLOAD=1")
+    notes.append(f"defaulting KAGGLEBOT_NUM_WORKERS={env['KAGGLEBOT_NUM_WORKERS']} for local kernels")
+    notes.append(f"defaulting KAGGLEBOT_TORCH_SHARING_STRATEGY={env['KAGGLEBOT_TORCH_SHARING_STRATEGY']}")
+    notes.append(f"defaulting KAGGLEBOT_LOCAL_NOFILE={env['KAGGLEBOT_LOCAL_NOFILE']}")
+    notes.append(f"defaulting {_LOCAL_KERNEL_STALL_ENV}={env[_LOCAL_KERNEL_STALL_ENV]}")
 
     if not _module_available("xgboost"):
         env.setdefault("USE_XGB", "0")
@@ -580,6 +785,7 @@ class KernelPreparation:
     logs_dir: Path
     kernel_slug: str
     kernel_id: str
+    runtime_bootstrap_mode: str = "force_train"
 
 
 @dataclass(frozen=True)
@@ -612,23 +818,24 @@ class KernelSubmitBuildConfig:
     accelerator: str
     enable_internet: bool
     submission_path: Path
+    mode: str
     dry_run: bool
 
 
 def _resolve_submit_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
     if kernel_name:
-        candidate = f"{sanitize_kernel_slug(kernel_name)}-submit"
-        return sanitize_kernel_slug(candidate)
-    suffix = f"{run_id[-6:]}-i{iteration}"
-    prefix = f"kagglebot-{slug}-submit"
-    max_len = 50
-    allowed_prefix_len = max_len - len(suffix) - 1
-    if allowed_prefix_len < 1:
-        prefix = "kagglebot-submit"
-    else:
-        prefix = prefix[:allowed_prefix_len].rstrip("-")
-    base = f"{prefix}-{suffix}"
-    return sanitize_kernel_slug(base)
+        return _build_versioned_kernel_slug(
+            prefix_parts=("submit", sanitize_kernel_slug(kernel_name)),
+            run_id=run_id,
+            iteration=iteration,
+            fallback_prefix="submit",
+        )
+    return _build_versioned_kernel_slug(
+        prefix_parts=("kagglebot", "submit", slug),
+        run_id=run_id,
+        iteration=iteration,
+        fallback_prefix="kagglebot-submit",
+    )
 
 
 _SUBMISSION_KERNEL_TEMPLATE = """\
@@ -706,6 +913,7 @@ class KernelPackageBuilder:
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
         custom_kernel_dir = config.base_dir / config.slug / "kernel"
         custom_kernel_path = custom_kernel_dir / "kernel.py"
+        source_config = load_kernel_source_config(config.base_dir / config.slug / "plan.json")
         ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=config.base_dir, slug=config.slug)
         if not custom_kernel_path.exists():
             raise KernelFailedError(
@@ -714,6 +922,8 @@ class KernelPackageBuilder:
                 "Generate/update artifacts/<slug>/kernel/kernel.py before running training."
             )
         _copy_kernel_sources(custom_kernel_dir, kernel_dir)
+        _copy_shared_kernel_runtime_modules(kernel_dir)
+        _copy_competition_external_assets(base_dir=config.base_dir, slug=config.slug, kernel_dir=kernel_dir)
         _sync_plan_snapshot(
             plan_path=config.base_dir / config.slug / "plan.json",
             targets=[kernel_dir / "plan.json"],
@@ -744,6 +954,7 @@ class KernelPackageBuilder:
             accelerator=config.accelerator,
             enable_internet=config.enable_internet,
             competition_slug=config.slug,
+            source_config=source_config,
         )
         validate_kernel_package(kernel_dir)
         return KernelPreparation(
@@ -780,16 +991,50 @@ class KernelSubmitPackageBuilder:
 
         kernel_slug = _resolve_submit_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
-
-        (kernel_dir / "kernel.py").write_text(
-            _render_submission_kernel_script(config.submission_path),
-            encoding="utf-8",
-        )
-
-        _ensure_kernel_import_path(kernel_dir)
-        _inject_competition_slug_env(kernel_dir, config.slug)
-        _inject_force_train_env(kernel_dir)
-        ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
+        submit_mode = str(config.mode or "wrapper").strip().lower()
+        if submit_mode == "inference":
+            custom_kernel_dir = config.base_dir / config.slug / "kernel"
+            custom_kernel_path = custom_kernel_dir / "kernel.py"
+            context_dir = config.base_dir / config.slug / "context"
+            source_config = load_kernel_source_config(config.base_dir / config.slug / "plan.json")
+            ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=config.base_dir, slug=config.slug)
+            if not custom_kernel_path.exists():
+                raise KernelFailedError(
+                    f"Authoritative kernel entrypoint is missing for notebook submit. Expected: {custom_kernel_path}."
+                )
+            _copy_kernel_sources(custom_kernel_dir, kernel_dir)
+            _copy_shared_kernel_runtime_modules(kernel_dir)
+            _copy_competition_external_assets(base_dir=config.base_dir, slug=config.slug, kernel_dir=kernel_dir)
+            _sync_plan_snapshot(
+                plan_path=config.base_dir / config.slug / "plan.json",
+                targets=[kernel_dir / "plan.json"],
+            )
+            _ensure_kernel_import_path(kernel_dir)
+            _inject_competition_slug_env(kernel_dir, config.slug)
+            _inline_kernel_modules(kernel_dir)
+            _inject_data_dir_resolver(kernel_dir)
+            _inject_pipeline_cfg_fallback(kernel_dir)
+            _inject_column_map_shim(kernel_dir, context_dir)
+            _inject_column_fill_shim(kernel_dir, context_dir)
+            _inject_object_coerce_shim(kernel_dir, context_dir)
+            _inject_device_coerce_shim(kernel_dir, context_dir)
+            _inject_training_progress_shim(kernel_dir)
+            _inject_transformers_eval_strategy_shim(kernel_dir)
+            _prepare_zero_overlap_drift_guard(base_dir=config.base_dir, slug=config.slug, context_dir=context_dir)
+            _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+            _inject_submit_inference_env(kernel_dir)
+            _sanitize_submit_inference_output_roots(kernel_dir)
+            _validate_inference_submit_kernel(kernel_dir)
+            ensure_kernel_sources_valid(kernel_dir)
+        else:
+            source_config = None
+            (kernel_dir / "kernel.py").write_text(
+                _render_submission_kernel_script(config.submission_path),
+                encoding="utf-8",
+            )
+            _ensure_kernel_import_path(kernel_dir)
+            _inject_competition_slug_env(kernel_dir, config.slug)
+            ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
         _write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
@@ -799,6 +1044,7 @@ class KernelSubmitPackageBuilder:
             accelerator=config.accelerator,
             enable_internet=config.enable_internet,
             competition_slug=config.slug,
+            source_config=source_config,
         )
         validate_kernel_package(kernel_dir)
         return KernelPreparation(
@@ -807,6 +1053,7 @@ class KernelSubmitPackageBuilder:
             logs_dir=logs_dir,
             kernel_slug=kernel_slug,
             kernel_id=kernel_id,
+            runtime_bootstrap_mode="submit_inference" if submit_mode == "inference" else "none",
         )
 
 
@@ -820,13 +1067,31 @@ class KernelJobMonitor:
         timeout_minutes: int | None,
     ) -> str:
         _ensure_kernel_competition_slug_env(preparation.kernel_dir, slug)
-        _ensure_kernel_force_train_env(preparation.kernel_dir)
+        if preparation.runtime_bootstrap_mode == "force_train":
+            _ensure_kernel_force_train_env(preparation.kernel_dir)
+        elif preparation.runtime_bootstrap_mode == "submit_inference":
+            _ensure_kernel_submit_inference_env(preparation.kernel_dir)
         _clear_stale_kernel_output(preparation.output_dir)
-        print(f"[cyan]kernel push[/cyan]: {preparation.kernel_dir}")
         push_attempt = 1
         kernel_id = preparation.kernel_id
+        pending_kernel_id = _read_pending_remote_kernel_id(preparation.logs_dir) or _last_pushed_kernel_id(
+            preparation.logs_dir,
+            kernel_id,
+        )
+        if pending_kernel_id:
+            resumed_kernel_id = _resume_prior_kernel_if_active(
+                preparation=preparation,
+                kernel_id=pending_kernel_id,
+                slug=slug,
+                timeout_minutes=timeout_minutes,
+            )
+            if resumed_kernel_id:
+                return resumed_kernel_id
+
+        print(f"[cyan]kernel push[/cyan]: {preparation.kernel_dir}")
         push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
         _write_push_log(preparation.logs_dir, push_attempt, push_output)
+        _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
         pushed_kernel_id = _extract_kernel_id_from_push(push_output)
         if pushed_kernel_id and pushed_kernel_id != kernel_id:
             print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
@@ -838,6 +1103,7 @@ class KernelJobMonitor:
             push_attempt += 1
             push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
             _write_push_log(preparation.logs_dir, push_attempt, push_output)
+            _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
             pushed_kernel_id = _extract_kernel_id_from_push(push_output)
             if pushed_kernel_id and pushed_kernel_id != kernel_id:
                 print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
@@ -851,7 +1117,13 @@ class KernelJobMonitor:
             kernel_id = resolved_id
 
         print(f"[cyan]kernel status[/cyan]: {kernel_id}")
-        _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=preparation.output_dir)
+        _wait_for_kernel_and_record_pending(
+            preparation=preparation,
+            kernel_id=kernel_id,
+            slug=slug,
+            timeout_minutes=timeout_minutes,
+        )
+        _clear_pending_remote_kernel(preparation.logs_dir)
         print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
         kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
         return kernel_id
@@ -888,6 +1160,42 @@ def _extract_kernel_id_from_push(output: str) -> str | None:
         if match:
             return f"{match.group('user')}/{match.group('slug')}"
     return None
+
+
+def _extract_invalid_kernel_push_sources(output: str) -> dict[str, list[str]]:
+    invalid_sources: dict[str, list[str]] = {}
+    if not output:
+        return invalid_sources
+
+    for match in _INVALID_KERNEL_SOURCE_RE.finditer(output):
+        kind = str(match.group("kind") or "").strip().lower()
+        raw_items = str(match.group("items") or "").strip()
+        if not kind or not raw_items:
+            continue
+        try:
+            parsed_items = ast.literal_eval(raw_items)
+        except (SyntaxError, ValueError):
+            parsed_items = []
+        if not isinstance(parsed_items, list):
+            continue
+        cleaned = [str(item).strip() for item in parsed_items if str(item).strip()]
+        if cleaned:
+            invalid_sources.setdefault(kind, []).extend(cleaned)
+
+    for kind, refs in list(invalid_sources.items()):
+        invalid_sources[kind] = list(dict.fromkeys(refs))
+    return invalid_sources
+
+
+def _raise_for_invalid_kernel_push_sources(output: str, *, kernel_dir: Path) -> None:
+    invalid_sources = _extract_invalid_kernel_push_sources(output)
+    if not invalid_sources:
+        return
+    details = ", ".join(f"{kind}={','.join(refs)}" for kind, refs in sorted(invalid_sources.items()) if refs)
+    raise KernelFailedError(
+        "Kaggle kernel push rejected source references: "
+        f"{details}. Fix {kernel_dir / 'kernel-metadata.json'} before retrying."
+    )
 
 
 def find_submission_file(output_dir: Path) -> Path | None:
@@ -1020,6 +1328,7 @@ def run_submit_kernel(
     accelerator: str,
     enable_internet: bool,
     submission_path: Path,
+    mode: str = "wrapper",
     dry_run: bool,
     timeout_minutes: int | None,
 ) -> KernelRunResult:
@@ -1033,6 +1342,7 @@ def run_submit_kernel(
         accelerator=accelerator,
         enable_internet=enable_internet,
         submission_path=submission_path,
+        mode=mode,
         dry_run=dry_run,
     )
     preparation = KernelSubmitPackageBuilder().prepare(build_config)
@@ -1097,7 +1407,10 @@ def run_kernel_local(
         raise KernelFailedError(f"Local kernel execution requires {kernel_path} to exist.")
     if kernel_stage_dir.exists():
         shutil.rmtree(kernel_stage_dir)
-    shutil.copytree(kernel_source_dir, kernel_stage_dir)
+    kernel_stage_dir.mkdir(parents=True, exist_ok=True)
+    _copy_kernel_sources(kernel_source_dir, kernel_stage_dir)
+    _copy_shared_kernel_runtime_modules(kernel_stage_dir)
+    _copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_stage_dir)
     _sync_plan_snapshot(
         plan_path=base_dir / slug / "plan.json",
         targets=[
@@ -1125,6 +1438,7 @@ def run_kernel_local(
     _inject_device_coerce_shim(kernel_stage_dir, context_dir)
     _inject_kaggle_working_redirect_shim(kernel_stage_dir)
     _inject_lgbm_gpu_guard_shim(kernel_stage_dir)
+    _inject_torch_runtime_guard_shim(kernel_stage_dir)
     _inject_training_progress_shim(kernel_stage_dir)
     _inject_transformers_eval_strategy_shim(kernel_stage_dir)
     _prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
@@ -1133,6 +1447,20 @@ def run_kernel_local(
     _inject_force_train_env(kernel_stage_dir)
     _ensure_training_progress_shim(kernel_stage_dir)
     ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
+    local_aux_env, local_aux_notes = _stage_local_kernel_aux_inputs(
+        base_dir=base_dir,
+        slug=slug,
+        kernel_stage_dir=kernel_stage_dir,
+    )
+    for note in local_aux_notes:
+        print(f"[yellow]kernel local[/yellow]: {note}")
+    local_model_env, local_model_notes = _stage_local_kernel_models(
+        base_dir=base_dir,
+        slug=slug,
+        kernel_stage_dir=kernel_stage_dir,
+    )
+    for note in local_model_notes:
+        print(f"[yellow]kernel local[/yellow]: {note}")
 
     if dry_run:
         return KernelRunResult(
@@ -1166,6 +1494,10 @@ def run_kernel_local(
     env.setdefault("KAGGLEBOT_RUN_ID", run_id)
     env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
     env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
+    for key, value in local_aux_env.items():
+        env[key] = value
+    for key, value in local_model_env.items():
+        env[key] = value
     env_notes = _apply_local_runtime_env_defaults(
         env=env,
         accelerator=accelerator,
@@ -1202,6 +1534,7 @@ def run_kernel_local(
                 current_env=current_env,
                 timeout_sec=timeout_sec,
                 line_callback=progress_tracker.observe_line,
+                progress_tracker=progress_tracker,
             )
 
         exec_result = run_once_with_watchdog(current_env=env)
@@ -1223,6 +1556,13 @@ def run_kernel_local(
         raise KernelFailedError(
             f"{exec_result.memory_kill_message} Peak RSS={exec_result.peak_rss_bytes // (1024 * 1024)} MiB.{detail}"
         )
+
+    if exec_result.killed_for_stall:
+        detail = ""
+        stdout_tail = truncate_lines(result.stdout[-4000:], max_lines=80)
+        if stdout_tail:
+            detail = f"\n{stdout_tail}"
+        raise KernelFailedError(f"{exec_result.stall_kill_message or 'Local kernel stalled.'}{detail}")
 
     if result.returncode != 0:
         combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
@@ -1255,6 +1595,14 @@ def run_kernel_local(
                 raise KernelFailedError(
                     f"{retry_exec_result.memory_kill_message} "
                     f"Peak RSS={retry_exec_result.peak_rss_bytes // (1024 * 1024)} MiB.{detail}"
+                )
+            if retry_exec_result.killed_for_stall:
+                detail = ""
+                stdout_tail = truncate_lines(retry_result.stdout[-4000:], max_lines=80)
+                if stdout_tail:
+                    detail = f"\n{stdout_tail}"
+                raise KernelFailedError(
+                    f"{retry_exec_result.stall_kill_message or 'Local kernel stalled after CUDA OOM retry.'}{detail}"
                 )
             if retry_result.returncode == 0:
                 result = retry_result
@@ -1319,6 +1667,9 @@ def run_kernel_local(
         "oof_predictions.csv",
         "split_diagnostics.json",
         "feature_suspects.csv",
+        "submission_manifest.json",
+        "metrics_summary.json",
+        "cv_results.json",
     ):
         optional_src = _resolve_local_kernel_artifact_file(
             kernel_dir=kernel_stage_dir,
@@ -1379,6 +1730,361 @@ def _stage_local_kernel_context_profile(*, base_dir: Path, slug: str, run_dir: P
         else:
             target_path.unlink(missing_ok=True)
     shutil.copy2(source_path, target_path)
+
+
+def _stage_local_kernel_aux_inputs(
+    *,
+    base_dir: Path,
+    slug: str,
+    kernel_stage_dir: Path,
+) -> tuple[dict[str, str], list[str]]:
+    source_config = load_kernel_source_config(base_dir / slug / "plan.json")
+    text_runtime = source_config.text_runtime
+    if not text_runtime.active and not source_config.domain_adaptation.allow_kernel_finetune:
+        return {}, []
+
+    env_updates: dict[str, str] = {}
+    notes: list[str] = []
+    if source_config.domain_adaptation.allow_kernel_finetune:
+        env_updates["KAGGLEBOT_ALLOW_KERNEL_FINETUNE"] = "1"
+    if text_runtime.metadata_supervision:
+        env_updates["KAGGLEBOT_TEXT_METADATA_SUPERVISION"] = text_runtime.metadata_supervision
+    if text_runtime.constraint_rewrite_mode:
+        env_updates["KAGGLEBOT_TEXT_CONSTRAINT_REWRITE_MODE"] = text_runtime.constraint_rewrite_mode
+    if text_runtime.group_key_columns:
+        env_updates["KAGGLEBOT_TEXT_GROUP_KEYS"] = ",".join(text_runtime.group_key_columns)
+
+    if not text_runtime.required_aux_inputs:
+        return env_updates, notes
+
+    competition_dir = base_dir / slug
+    aux_root = kernel_stage_dir / "aux_inputs"
+    staged_relpaths: list[str] = []
+    missing: list[str] = []
+    for spec in text_runtime.required_aux_inputs:
+        resolved = _resolve_required_aux_input(competition_dir=competition_dir, spec=spec)
+        if resolved is None:
+            missing.append(spec)
+            continue
+        relpath = _relative_aux_stage_path(competition_dir=competition_dir, source_path=resolved, spec=spec)
+        target_path = aux_root / relpath
+        _stage_local_path_alias(source_path=resolved, target_path=target_path)
+        staged_relpaths.append(relpath.as_posix())
+
+    if missing:
+        missing_text = ", ".join(sorted(missing))
+        raise KernelFailedError(
+            "Required text runtime aux inputs could not be resolved: "
+            f"{missing_text}. Checked competition root, data/, and context/."
+        )
+
+    env_updates["KAGGLEBOT_AUX_INPUT_ROOT"] = str(aux_root)
+    env_updates["KAGGLEBOT_REQUIRED_AUX_INPUTS"] = ",".join(staged_relpaths)
+    notes.append(f"staged {len(staged_relpaths)} text aux input(s)")
+    return env_updates, notes
+
+
+def _resolve_required_aux_input(*, competition_dir: Path, spec: str) -> Path | None:
+    raw = str(spec).strip().strip("/")
+    if not raw:
+        return None
+    candidates: list[Path] = []
+    raw_path = competition_dir / raw
+    if "/" in raw or "\\" in raw:
+        candidates.append(raw_path)
+    else:
+        candidates.extend(
+            [
+                competition_dir / "data" / raw,
+                competition_dir / "context" / raw,
+                competition_dir / raw,
+            ]
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def _relative_aux_stage_path(*, competition_dir: Path, source_path: Path, spec: str) -> Path:
+    try:
+        relative = source_path.resolve().relative_to(competition_dir.resolve())
+    except ValueError:
+        relative = Path(str(spec).strip().strip("/")).name
+    return Path(relative)
+
+
+def _stage_local_path_alias(*, source_path: Path, target_path: Path) -> None:
+    if source_path.is_dir():
+        _stage_local_data_alias(source_dir=source_path, target_dir=target_path)
+        return
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if target_path.exists() or target_path.is_symlink():
+        if target_path.is_dir() and not target_path.is_symlink():
+            shutil.rmtree(target_path, ignore_errors=True)
+        else:
+            target_path.unlink(missing_ok=True)
+    try:
+        target_path.symlink_to(source_path)
+    except Exception:
+        shutil.copy2(source_path, target_path)
+
+
+_LOCAL_MODEL_SCAN_MAX_DEPTH = 4
+_LOADABLE_MODEL_CONFIG_FILENAMES = ("config.json", "tokenizer_config.json")
+_LOADABLE_MODEL_WEIGHT_FILENAMES = ("pytorch_model.bin", "model.safetensors", "tf_model.h5", "flax_model.msgpack")
+
+
+def _stage_local_kernel_models(
+    *,
+    base_dir: Path,
+    slug: str,
+    kernel_stage_dir: Path,
+) -> tuple[dict[str, str], list[str]]:
+    source_config = load_kernel_source_config(base_dir / slug / "plan.json")
+    if not source_config.pipeline_model_hints and not source_config.model_sources:
+        return {}, []
+
+    candidate_dirs = _discover_local_model_dirs(base_dir=base_dir, slug=slug)
+    staged_root = kernel_stage_dir / "models"
+    staged_root.mkdir(parents=True, exist_ok=True)
+
+    env_updates: dict[str, str] = {}
+    notes: list[str] = []
+
+    generic_paths = _stage_resolved_model_hints(
+        hints=source_config.model_sources,
+        candidate_dirs=candidate_dirs,
+        staged_root=staged_root,
+    )
+    if generic_paths:
+        env_updates["KAGGLEBOT_MODEL_PATHS"] = ",".join(str(path) for path in generic_paths)
+        notes.append(f"staged {len(generic_paths)} generic local model source(s)")
+
+    unresolved_required: list[str] = []
+    for pipeline_name, hints in source_config.pipeline_model_hints.items():
+        staged_paths = _stage_resolved_model_hints(
+            hints=hints,
+            candidate_dirs=candidate_dirs,
+            staged_root=staged_root,
+        )
+        if staged_paths:
+            env_updates[f"KAGGLEBOT_MODEL_PATHS_{pipeline_env_suffix(pipeline_name)}"] = ",".join(
+                str(path) for path in staged_paths
+            )
+            notes.append(f"staged {len(staged_paths)} local model source(s) for pipeline={pipeline_name}")
+            continue
+        if pipeline_name in source_config.required_local_seq2seq_pipelines:
+            unresolved_required.append(pipeline_name)
+
+    if unresolved_required:
+        required_text = ", ".join(sorted(unresolved_required))
+        raise KernelFailedError(
+            "Required local seq2seq model sources could not be resolved for "
+            f"{required_text}. Checked prior kernel model caches, kernel/models, "
+            "context/reference_inputs, and Hugging Face snapshot cache."
+        )
+    return env_updates, notes
+
+
+def _stage_resolved_model_hints(
+    *,
+    hints: Sequence[str],
+    candidate_dirs: Sequence[Path],
+    staged_root: Path,
+) -> list[Path]:
+    staged_paths: list[Path] = []
+    seen_sources: set[Path] = set()
+    for hint in hints:
+        resolved = _resolve_local_model_dir_for_hint(hint=hint, candidate_dirs=candidate_dirs)
+        if resolved is None or resolved in seen_sources:
+            continue
+        seen_sources.add(resolved)
+        target_dir = staged_root / _sanitize_local_model_stage_name(hint)
+        _stage_local_data_alias(source_dir=resolved, target_dir=target_dir)
+        staged_paths.append(target_dir)
+    return staged_paths
+
+
+def _discover_local_model_dirs(*, base_dir: Path, slug: str) -> list[Path]:
+    competition_dir = base_dir / slug
+    kernels_dir = competition_dir / "kernels"
+    roots: list[Path] = [
+        competition_dir / "kernel" / "models",
+        competition_dir / "context" / "reference_inputs",
+    ]
+    if kernels_dir.exists():
+        roots.extend(sorted(kernels_dir.glob("*/models")))
+        roots.extend(sorted(kernels_dir.glob("*/local-iter-*/models")))
+
+    hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
+    if hf_cache.exists():
+        roots.extend(sorted(hf_cache.glob("models--*/snapshots/*")))
+
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for candidate in _iter_dirs_within_depth(root, _LOCAL_MODEL_SCAN_MAX_DEPTH):
+            if not _looks_like_local_model_dir(candidate):
+                continue
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            discovered.append(candidate)
+    return discovered
+
+
+def _iter_dirs_within_depth(root: Path, max_depth: int) -> list[Path]:
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    out: list[Path] = []
+    while stack:
+        current, depth = stack.pop()
+        out.append(current)
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted((child for child in current.iterdir() if child.is_dir()), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for child in reversed(children):
+            stack.append((child, depth + 1))
+    return out
+
+
+def _looks_like_local_model_dir(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    has_config = any((path / filename).exists() for filename in _LOADABLE_MODEL_CONFIG_FILENAMES)
+    has_weights = any((path / filename).exists() for filename in _LOADABLE_MODEL_WEIGHT_FILENAMES)
+    return has_config and has_weights
+
+
+def _resolve_local_model_dir_for_hint(*, hint: str, candidate_dirs: Sequence[Path]) -> Path | None:
+    hint_text = str(hint).strip()
+    if not hint_text:
+        return None
+    ranked_candidates = [
+        path for path in candidate_dirs if _local_model_candidate_matches_hint(path=path, hint=hint_text)
+    ]
+    ranked = sorted(
+        ranked_candidates,
+        key=lambda path: _local_model_rank_key(path=path, hint=hint_text),
+    )
+    if not ranked:
+        return None
+    best = ranked[0]
+    score = -_local_model_rank_key(path=best, hint=hint_text)[0]
+    if score <= 0:
+        return None
+    return best
+
+
+def _compact_model_ref_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _model_hint_owner_slug_tokens(hint: str) -> tuple[str, str] | None:
+    raw = str(hint).strip().strip("/").lower()
+    if not raw:
+        return None
+    parts = [part for part in raw.split("/") if part]
+    if len(parts) < 2:
+        return None
+    owner = _compact_model_ref_text(parts[0])
+    slug = _compact_model_ref_text(parts[1])
+    if not owner or not slug:
+        return None
+    return owner, slug
+
+
+def _local_model_owner_slug_match(path: Path, hint: str) -> int:
+    owner_slug = _model_hint_owner_slug_tokens(hint)
+    if owner_slug is None:
+        return 1
+    owner_token, slug_token = owner_slug
+    compact_path = _compact_model_ref_text(path)
+    try:
+        compact_resolved = _compact_model_ref_text(path.resolve())
+    except OSError:
+        compact_resolved = compact_path
+    raw_match = owner_token in compact_path and slug_token in compact_path
+    resolved_match = owner_token in compact_resolved and slug_token in compact_resolved
+    if path.exists() and raw_match and not resolved_match:
+        return -1
+    if resolved_match:
+        return 3
+    if raw_match and not path.exists():
+        return 2
+    return 0
+
+
+def _local_model_candidate_matches_hint(*, path: Path, hint: str) -> bool:
+    return _local_model_owner_slug_match(path, hint) > 0
+
+
+def _local_model_rank_key(*, path: Path, hint: str) -> tuple[int, int, int, str]:
+    text = str(path).lower()
+    name = path.name.lower()
+    owner_slug_score = _local_model_owner_slug_match(path, hint)
+    score = 0
+    for alias in _model_ref_aliases(hint):
+        if not alias:
+            continue
+        if name == alias:
+            score += 120
+        elif text.endswith(f"/{alias}") or text.endswith(f"\\{alias}"):
+            score += 100
+        elif f"/{alias}/" in text or f"\\{alias}\\" in text:
+            score += 70
+        elif alias in name:
+            score += 55
+        elif alias in text:
+            score += 35
+    lowered_hint = hint.lower()
+    for token, weight in (
+        ("byt5", 45),
+        ("akkadian", 30),
+        ("final-byt5", 25),
+        ("dpc", 20),
+        ("google", 10),
+    ):
+        if token in lowered_hint and token in text:
+            score += weight
+    depth = len(path.parts)
+    return (-owner_slug_score, -score, depth, len(text), text)
+
+
+def _model_ref_aliases(hint: str) -> tuple[str, ...]:
+    raw = str(hint).strip().strip("/").lower()
+    if not raw:
+        return ()
+    aliases: list[str] = [
+        raw,
+        raw.replace("/", "--"),
+        raw.replace("/", "-"),
+        raw.split("/")[-1],
+    ]
+    if raw.startswith("models--"):
+        aliases.append(raw.removeprefix("models--"))
+    tokens = [token for token in re.split(r"[^a-z0-9]+", raw) if token]
+    aliases.extend(tokens)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for alias in aliases:
+        cleaned = alias.strip("-_/")
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+    return tuple(ordered)
+
+
+def _sanitize_local_model_stage_name(hint: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", str(hint)).strip("_").lower()
+    return slug or "model"
 
 
 def _stage_local_data_alias(*, source_dir: Path, target_dir: Path) -> None:
@@ -1556,6 +2262,9 @@ class _LocalKernelProgressTracker:
     lines_seen: int = 0
     last_output_monotonic: float | None = None
     current_pipeline: str | None = None
+    current_suite: str | None = None
+    current_model: str | None = None
+    last_fallback_reason: str | None = None
     completed_pipelines: set[str] = field(default_factory=set)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -1569,6 +2278,21 @@ class _LocalKernelProgressTracker:
         if started_pipeline is not None:
             with self._lock:
                 self.current_pipeline = started_pipeline
+
+        current_suite = _extract_pipeline_suite_from_line(line)
+        if current_suite is not None:
+            with self._lock:
+                self.current_suite = current_suite
+
+        current_model = _extract_train_model_start_from_line(line)
+        if current_model is not None:
+            with self._lock:
+                self.current_model = current_model
+
+        fallback_reason = _extract_catboost_fallback_reason_from_line(line)
+        if fallback_reason is not None:
+            with self._lock:
+                self.last_fallback_reason = fallback_reason
 
         completed_pipeline = _extract_pipeline_done_from_line(line)
         if completed_pipeline is not None:
@@ -1627,6 +2351,9 @@ class _LocalKernelProgressTracker:
             lines_seen = self.lines_seen
             last_output = self.last_output_monotonic
             current_pipeline = self.current_pipeline
+            current_suite = self.current_suite
+            current_model = self.current_model
+            last_fallback_reason = self.last_fallback_reason
             completed_count = len(self.completed_pipelines)
         last_log_age_sec = None if last_output is None else max(0.0, now - last_output)
         artifact_count, last_artifact_age_sec = _scan_watch_dirs_activity(
@@ -1637,6 +2364,9 @@ class _LocalKernelProgressTracker:
             "lines_seen": lines_seen,
             "last_log_age_sec": last_log_age_sec,
             "current_pipeline": current_pipeline,
+            "current_suite": current_suite,
+            "current_model": current_model,
+            "last_fallback_reason": last_fallback_reason,
             "completed_pipeline_count": completed_count,
             "artifact_count": artifact_count,
             "last_artifact_age_sec": last_artifact_age_sec,
@@ -1702,6 +2432,44 @@ def _build_local_kernel_progress_tracker(
     )
 
 
+def _detect_local_kernel_stall(
+    *,
+    progress_tracker: _LocalKernelProgressTracker,
+    stall_timeout_sec: float,
+) -> str | None:
+    snapshot = progress_tracker.snapshot()
+    ages: list[float] = []
+    for key in ("last_log_age_sec", "last_artifact_age_sec"):
+        value = snapshot.get(key)
+        if isinstance(value, (int, float)):
+            ages.append(float(value))
+    if ages:
+        newest_activity_age_sec = min(ages)
+    else:
+        newest_activity_age_sec = max(0.0, time.monotonic() - progress_tracker.started_at_monotonic)
+    if newest_activity_age_sec < stall_timeout_sec:
+        return None
+
+    lines_seen = int(snapshot.get("lines_seen", 0))
+    artifact_count = int(snapshot.get("artifact_count", 0))
+    last_log_age_sec = snapshot.get("last_log_age_sec")
+    last_artifact_age_sec = snapshot.get("last_artifact_age_sec")
+    pipeline = str(snapshot.get("current_pipeline") or "unknown")
+    model = str(snapshot.get("current_model") or "unknown")
+    last_log_text = "none"
+    if isinstance(last_log_age_sec, (int, float)):
+        last_log_text = f"{int(last_log_age_sec)}s ago"
+    last_artifact_text = "none"
+    if isinstance(last_artifact_age_sec, (int, float)):
+        last_artifact_text = f"{int(last_artifact_age_sec)}s ago"
+    return (
+        "Local kernel stalled: no stdout or artifact activity within the local watchdog budget "
+        f"({int(stall_timeout_sec)}s). lines={lines_seen}, last_log={last_log_text}, "
+        f"artifacts={artifact_count}, last_artifact={last_artifact_text}, "
+        f"pipeline={pipeline}, model={model}."
+    )
+
+
 def _extract_training_stage_from_line(line: str) -> tuple[str, int, int] | None:
     inline_match = _PIPELINE_SEED_FOLD_INLINE_RE.search(line)
     if inline_match:
@@ -1732,12 +2500,36 @@ def _extract_pipeline_start_from_line(line: str) -> str | None:
     return pipeline or None
 
 
+def _extract_pipeline_suite_from_line(line: str) -> str | None:
+    match = _PIPELINE_SUITE_RE.search(line)
+    if not match:
+        return None
+    suite = str(match.group("suite")).strip()
+    return suite or None
+
+
 def _extract_pipeline_done_from_line(line: str) -> str | None:
     match = _PIPELINE_DONE_RE.search(line)
     if not match:
         return None
     pipeline = str(match.group("pipeline")).strip()
     return pipeline or None
+
+
+def _extract_train_model_start_from_line(line: str) -> str | None:
+    match = _TRAIN_MODEL_START_RE.search(line)
+    if not match:
+        return None
+    model = str(match.group("model")).strip()
+    return model or None
+
+
+def _extract_catboost_fallback_reason_from_line(line: str) -> str | None:
+    match = _CATBOOST_FALLBACK_RE.search(line)
+    if not match:
+        return None
+    reason = str(match.group("reason")).strip()
+    return reason or None
 
 
 def _resolve_seed_current(*, seed: int, expected_seeds: list[int]) -> int | None:
@@ -1879,6 +2671,9 @@ def _format_local_kernel_activity_suffix(progress_tracker: _LocalKernelProgressT
     lines_seen = int(snapshot.get("lines_seen", 0))
     last_log_age_sec = snapshot.get("last_log_age_sec")
     current_pipeline = snapshot.get("current_pipeline")
+    current_suite = snapshot.get("current_suite")
+    current_model = snapshot.get("current_model")
+    last_fallback_reason = snapshot.get("last_fallback_reason")
     completed_pipeline_count = int(snapshot.get("completed_pipeline_count", 0))
     artifact_count = int(snapshot.get("artifact_count", 0))
     last_artifact_age_sec = snapshot.get("last_artifact_age_sec")
@@ -1889,11 +2684,21 @@ def _format_local_kernel_activity_suffix(progress_tracker: _LocalKernelProgressT
     if isinstance(last_artifact_age_sec, (int, float)):
         last_artifact_text = f"{int(last_artifact_age_sec)}s ago"
     pipeline_text = str(current_pipeline) if current_pipeline else "unknown"
-    return (
-        f" (logs={lines_seen}, last_log={last_log_text}, "
-        f"pipeline={pipeline_text}, pipelines_done={completed_pipeline_count}, "
-        f"artifacts={artifact_count}, last_artifact={last_artifact_text})"
-    )
+    parts = [
+        f"logs={lines_seen}",
+        f"last_log={last_log_text}",
+        f"pipeline={pipeline_text}",
+    ]
+    if current_suite:
+        parts.append(f"suite={current_suite}")
+    if current_model:
+        parts.append(f"model={current_model}")
+    parts.append(f"pipelines_done={completed_pipeline_count}")
+    parts.append(f"artifacts={artifact_count}")
+    parts.append(f"last_artifact={last_artifact_text}")
+    if current_model and last_fallback_reason:
+        parts.append(f"fallback={truncate_lines(last_fallback_reason, max_lines=1, max_chars=120)}")
+    return " (" + ", ".join(parts) + ")"
 
 
 def _format_local_gpu_activity_suffix(*, accelerator: str) -> str:
@@ -2017,16 +2822,49 @@ def _copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
 def _resolve_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
     if kernel_name:
         return sanitize_kernel_slug(kernel_name)
+    return _build_versioned_kernel_slug(
+        prefix_parts=("kagglebot", slug),
+        run_id=run_id,
+        iteration=iteration,
+        fallback_prefix="kagglebot",
+    )
+
+
+def _build_versioned_kernel_slug(
+    *,
+    prefix_parts: tuple[str, ...],
+    run_id: str,
+    iteration: int,
+    fallback_prefix: str,
+) -> str:
     suffix = f"{run_id[-6:]}-i{iteration}"
-    prefix = f"kagglebot-{slug}"
+    prefix = "-".join(part for part in prefix_parts if part)
     max_len = 50
     allowed_prefix_len = max_len - len(suffix) - 1
     if allowed_prefix_len < 1:
-        prefix = "kagglebot"
+        prefix = fallback_prefix
     else:
         prefix = prefix[:allowed_prefix_len].rstrip("-")
-    base = f"{prefix}-{suffix}"
-    return sanitize_kernel_slug(base)
+    return sanitize_kernel_slug(f"{prefix}-{suffix}")
+
+
+def _metadata_source_lists(
+    *,
+    existing_meta: dict[str, object],
+    source_config: KernelSourceConfig | None,
+) -> tuple[list[str], list[str], list[str]]:
+    source_config = source_config or KernelSourceConfig()
+    dataset_sources = list(source_config.dataset_sources)
+    model_sources = list(source_config.model_sources)
+    if source_config.has_explicit_kernel_sources():
+        kernel_sources = list(source_config.kernel_sources)
+    else:
+        raw_existing = existing_meta.get("kernel_sources")
+        if isinstance(raw_existing, list):
+            kernel_sources = [str(item).strip() for item in raw_existing if str(item).strip()]
+        else:
+            kernel_sources = []
+    return dataset_sources, kernel_sources, model_sources
 
 
 def _write_kernel_metadata(
@@ -2039,12 +2877,17 @@ def _write_kernel_metadata(
     accelerator: str,
     enable_internet: bool,
     competition_slug: str,
+    source_config: KernelSourceConfig | None = None,
 ) -> None:
     meta_path = kernel_dir / "kernel-metadata.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     else:
         meta = {}
+    dataset_sources, kernel_sources, model_sources = _metadata_source_lists(
+        existing_meta=meta,
+        source_config=source_config,
+    )
     meta.update(
         {
             "id": kernel_id,
@@ -2057,9 +2900,9 @@ def _write_kernel_metadata(
             "enable_tpu": accelerator == "tpu",
             "enable_internet": bool(enable_internet),
             "competition_sources": [competition_slug],
-            "dataset_sources": [],
-            "kernel_sources": [],
-            "model_sources": [],
+            "dataset_sources": dataset_sources,
+            "kernel_sources": kernel_sources,
+            "model_sources": model_sources,
         }
     )
     if meta["enable_gpu"] and meta["enable_tpu"]:
@@ -2069,13 +2912,37 @@ def _write_kernel_metadata(
 
 def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
     for path in source_dir.iterdir():
+        if path.name in {"output", "outputs", "__pycache__"}:
+            continue
         dest_path = dest_dir / path.name
         if path.is_dir():
             if dest_path.exists():
                 shutil.rmtree(dest_path)
             shutil.copytree(path, dest_path)
         elif path.is_file():
+            if path.suffix == ".pyc":
+                continue
             shutil.copy2(path, dest_path)
+
+
+def _copy_competition_external_assets(*, base_dir: Path, slug: str, kernel_dir: Path) -> None:
+    external_dir = base_dir / slug / "external"
+    if not external_dir.exists():
+        return
+    for path in external_dir.iterdir():
+        if not path.is_file():
+            continue
+        shutil.copy2(path, kernel_dir / path.name)
+
+
+def _copy_shared_kernel_runtime_modules(kernel_dir: Path) -> None:
+    runtime_dir = Path(__file__).resolve().parent / "kernel_runtime"
+    if not runtime_dir.exists():
+        return
+    for path in sorted(runtime_dir.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        shutil.copy2(path, kernel_dir / path.name)
 
 
 def _sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
@@ -2517,6 +3384,56 @@ def _strip_force_train_bootstrap(lines: list[str]) -> list[str]:
     return stripped
 
 
+def _inject_submit_inference_env(kernel_dir: Path) -> None:
+    """Inject environment bootstrap that disables training and forces inference-only submit notebooks."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_SUBMIT_INFERENCE_MARKER in text:
+        return
+
+    resolver_block = [
+        _KERNEL_SUBMIT_INFERENCE_MARKER,
+        "import os as _kb_os",
+        "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '0'",
+        "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '0'",
+        "_kb_os.environ['KAGGLEBOT_DO_INFER'] = '1'",
+        "_kb_os.environ['KAGGLEBOT_SUBMIT_NOTEBOOK'] = '1'",
+        "_kb_os.environ['KAGGLEBOT_SUBMIT_SKIP_CV'] = '1'",
+        "del _kb_os",
+        "",
+    ]
+    lines = _strip_force_train_bootstrap(text.splitlines())
+    insert_at = _find_bootstrap_block_end(lines)
+    if insert_at is None:
+        insert_at = _find_bootstrap_insertion_index(lines)
+    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
+    updated = "\n".join(lines)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _strip_submit_inference_bootstrap(lines: list[str]) -> list[str]:
+    stripped = lines
+    while _KERNEL_SUBMIT_INFERENCE_MARKER in stripped:
+        start = stripped.index(_KERNEL_SUBMIT_INFERENCE_MARKER)
+        end = None
+        search_end = min(start + 12, len(stripped))
+        for idx in range(start + 1, search_end):
+            if stripped[idx].strip() == "del _kb_os":
+                end = idx + 1
+                if end < len(stripped) and stripped[end].strip() == "":
+                    end += 1
+                break
+        if end is None:
+            stripped = stripped[:start] + stripped[start + 1 :]
+        else:
+            stripped = stripped[:start] + stripped[end:]
+    return stripped
+
+
 def _ensure_kernel_competition_slug_env(kernel_dir: Path, competition_slug: str) -> None:
     """Ensure the kernel runtime can resolve the competition slug on Kaggle.
 
@@ -2579,6 +3496,144 @@ def _ensure_kernel_force_train_env(kernel_dir: Path) -> None:
         raise KernelFailedError(
             "Failed to inject force-train bootstrap into kernel.py. "
             "Refusing to push a kernel that may auto-disable training."
+        )
+
+
+def _ensure_kernel_submit_inference_env(kernel_dir: Path) -> None:
+    """Ensure staged notebook submit kernel disables training and keeps inference on."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    expected_train_line = "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '0'"
+    expected_force_line = "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '0'"
+    expected_infer_line = "_kb_os.environ['KAGGLEBOT_DO_INFER'] = '1'"
+    expected_submit_line = "_kb_os.environ['KAGGLEBOT_SUBMIT_NOTEBOOK'] = '1'"
+    expected_skip_cv_line = "_kb_os.environ['KAGGLEBOT_SUBMIT_SKIP_CV'] = '1'"
+    if (
+        _KERNEL_SUBMIT_INFERENCE_MARKER in text
+        and expected_train_line in text
+        and expected_force_line in text
+        and expected_infer_line in text
+        and expected_submit_line in text
+        and expected_skip_cv_line in text
+    ):
+        return
+    stripped_lines = _strip_submit_inference_bootstrap(_strip_force_train_bootstrap(text.splitlines()))
+    stripped_text = "\n".join(stripped_lines)
+    if text.endswith("\n"):
+        stripped_text += "\n"
+    kernel_path.write_text(stripped_text, encoding="utf-8")
+    _inject_submit_inference_env(kernel_dir)
+    updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if (
+        _KERNEL_SUBMIT_INFERENCE_MARKER not in updated
+        or expected_train_line not in updated
+        or expected_force_line not in updated
+        or expected_infer_line not in updated
+        or expected_submit_line not in updated
+        or expected_skip_cv_line not in updated
+    ):
+        raise KernelFailedError(
+            "Failed to inject submit-inference bootstrap into kernel.py. "
+            "Refusing to push a notebook submit kernel that may still force training."
+        )
+
+
+def _sanitize_submit_inference_output_roots(kernel_dir: Path) -> None:
+    """Rewrite staged submit-kernel output roots from the source tree into `/kaggle/working`."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    working_root = "KAGGLE_WORKING_DIR" if re.search(r"\bKAGGLE_WORKING_DIR\b", text) else "Path('/kaggle/working')"
+    updated = text
+    patterns = (
+        re.compile(r"\b(?:KERNEL_DIR|ARTIFACT_DIR|ARTIFACT_ROOT)\s*/\s*(['\"])(?:output|outputs)\1"),
+        re.compile(r"\b(?:KERNEL_DIR|ARTIFACT_DIR|ARTIFACT_ROOT)\.joinpath\(\s*(['\"])(?:output|outputs)\1\s*\)"),
+        re.compile(
+            r"(^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*)"
+            r"(?:KERNEL_DIR|ARTIFACT_DIR|ARTIFACT_ROOT)\s*/\s*(['\"])(?:output|outputs)\2",
+            re.MULTILINE,
+        ),
+        re.compile(
+            r"(^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*)"
+            r"(?:KERNEL_DIR|ARTIFACT_DIR|ARTIFACT_ROOT)\.joinpath\(\s*(['\"])(?:output|outputs)\2\s*\)",
+            re.MULTILINE,
+        ),
+    )
+    for pattern in patterns:
+        if pattern.groups >= 2:
+            updated = pattern.sub(rf"\1{working_root}", updated)
+        else:
+            updated = pattern.sub(working_root, updated)
+    if updated != text:
+        kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _validate_inference_submit_kernel(kernel_dir: Path) -> None:
+    """Reject notebook submit kernels that still look like local wrapper artifacts or write to read-only paths."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        raise KernelFailedError("Notebook submit kernel is missing kernel.py.")
+    if (kernel_dir / "output").exists():
+        raise KernelFailedError(
+            "Invalid notebook submit artifact for code competition inference mode: "
+            "found staged output directory in notebook package."
+        )
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    lowered = text.lower()
+    suspicious_fragments = (
+        ("submit_only metrics payload", '"kind": "submit_only"'),
+        ("embedded submission wrapper payload", "submission_gzip_b64"),
+        ("read-only kaggle source output path", "/kaggle/src/output"),
+        ("read-only kaggle source outputs path", "/kaggle/src/outputs"),
+    )
+    for label, fragment in suspicious_fragments:
+        if fragment in lowered:
+            raise KernelFailedError(
+                f"Invalid notebook submit artifact for code competition inference mode: found {label} in staged kernel."
+            )
+    direct_readonly_patterns = (
+        (
+            "read-only kaggle source joinpath output path",
+            re.compile(r"/kaggle/src['\"]?\s*\)?\s*\.joinpath\(\s*[\"']outputs?[\"']\s*\)", re.IGNORECASE),
+        ),
+        (
+            "staged output root assignment under kaggle source",
+            re.compile(
+                r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+                r"(?:KERNEL_DIR|ARTIFACT_DIR|ARTIFACT_ROOT)\s*(?:/\s*[\"']outputs?[\"']|\.joinpath\(\s*[\"']outputs?[\"']\s*\))",
+                re.IGNORECASE | re.MULTILINE,
+            ),
+        ),
+    )
+    for label, pattern in direct_readonly_patterns:
+        if pattern.search(text):
+            raise KernelFailedError(
+                f"Invalid notebook submit artifact for code competition inference mode: found {label} in staged kernel."
+            )
+    readonly_root_patterns = {
+        var_name: re.compile(rf"\b{var_name}\s*=.*?/kaggle/src\b", re.IGNORECASE)
+        for var_name in ("kernel_dir", "artifact_dir", "artifact_root")
+    }
+    output_usage_templates = (
+        ("output mirror path", r"\b{var}\s*/\s*[\"']outputs?[\"']"),
+        ("output mirror joinpath", r"\b{var}\.joinpath\(\s*[\"']outputs?[\"']\s*\)"),
+    )
+    for var_name, root_pattern in readonly_root_patterns.items():
+        if not root_pattern.search(text):
+            continue
+        for label_suffix, usage_template in output_usage_templates:
+            if re.search(usage_template.format(var=var_name), text, re.IGNORECASE):
+                raise KernelFailedError(
+                    "Invalid notebook submit artifact for code competition inference mode: "
+                    f"found staged {var_name} {label_suffix} in staged kernel."
+                )
+    if "/kaggle/working" not in lowered and "kaggle_working" not in lowered:
+        raise KernelFailedError(
+            "Invalid notebook submit artifact for code competition inference mode: "
+            "kernel does not appear to write outputs under /kaggle/working."
         )
 
 
@@ -3231,6 +4286,54 @@ def _inject_lgbm_gpu_guard_shim(kernel_dir: Path) -> None:
     site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
+def _inject_torch_runtime_guard_shim(kernel_dir: Path) -> None:
+    site_path = kernel_dir / "sitecustomize.py"
+    shim = [
+        _TORCH_RUNTIME_GUARD_SHIM_MARKER,
+        "import os",
+        "",
+        "def _kb_local_kernel_mode() -> bool:",
+        "    value = str(os.environ.get('KAGGLEBOT_LOCAL_KERNEL', '0')).strip().lower()",
+        "    return value in {'1', 'true', 'yes', 'on'}",
+        "",
+        "def _kb_patch_torch_runtime_guard() -> None:",
+        "    if not _kb_local_kernel_mode():",
+        "        return",
+        "    target_nofile = str(os.environ.get('KAGGLEBOT_LOCAL_NOFILE', '')).strip()",
+        "    if target_nofile:",
+        "        try:",
+        "            import resource",
+        "            desired = max(256, int(target_nofile))",
+        "            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)",
+        "            hard_cap = desired if hard is None or int(hard) < 0 else int(hard)",
+        "            new_soft = min(max(int(soft), desired), hard_cap)",
+        "            if new_soft > int(soft):",
+        "                resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))",
+        "        except Exception:",
+        "            pass",
+        "    strategy = str(os.environ.get('KAGGLEBOT_TORCH_SHARING_STRATEGY', '')).strip()",
+        "    if strategy:",
+        "        try:",
+        "            import torch.multiprocessing as _kb_tmp",
+        "            getter = getattr(_kb_tmp, 'get_sharing_strategy', None)",
+        "            current = getter() if callable(getter) else None",
+        "            if current != strategy:",
+        "                _kb_tmp.set_sharing_strategy(strategy)",
+        "        except Exception:",
+        "            pass",
+        "",
+        "_kb_patch_torch_runtime_guard()",
+        "",
+    ]
+    if site_path.exists():
+        text = site_path.read_text(encoding="utf-8", errors="ignore")
+        if _TORCH_RUNTIME_GUARD_SHIM_MARKER in text:
+            return
+        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
+        return
+    site_path.write_text("\n".join(shim), encoding="utf-8")
+
+
 def _inject_training_progress_shim(kernel_dir: Path) -> None:
     site_path = kernel_dir / "sitecustomize.py"
     shim = (
@@ -3767,6 +4870,134 @@ STATUS_ERROR_SLEEP = 10.0
 MAX_STATUS_ERRORS = 6
 KERNEL_REGISTER_RETRIES = 24
 KERNEL_REGISTER_SLEEP = 5.0
+PENDING_REMOTE_KERNEL_FILENAME = "remote_kernel_pending.json"
+
+
+def _pending_remote_kernel_path(logs_dir: Path) -> Path:
+    return logs_dir / PENDING_REMOTE_KERNEL_FILENAME
+
+
+def _write_pending_remote_kernel(logs_dir: Path, *, kernel_id: str, kernel_slug: str) -> None:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "kernel_id": kernel_id,
+        "kernel_slug": kernel_slug,
+        "recorded_at_unix": time.time(),
+    }
+    _pending_remote_kernel_path(logs_dir).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _clear_pending_remote_kernel(logs_dir: Path) -> None:
+    try:
+        _pending_remote_kernel_path(logs_dir).unlink()
+    except FileNotFoundError:
+        return
+
+
+def _read_pending_remote_kernel_id(logs_dir: Path) -> str | None:
+    path = _pending_remote_kernel_path(logs_dir)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    kernel_id = payload.get("kernel_id") if isinstance(payload, dict) else None
+    if kernel_id is None:
+        return None
+    return str(kernel_id).strip() or None
+
+
+def _last_pushed_kernel_id(logs_dir: Path, default_kernel_id: str) -> str | None:
+    for path in sorted(logs_dir.glob("kernel_push-*.txt"), reverse=True):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        pushed_kernel_id = _extract_kernel_id_from_push(text)
+        if pushed_kernel_id:
+            return pushed_kernel_id
+        if "successfully pushed" in text.lower():
+            return default_kernel_id
+    return None
+
+
+def _is_kernel_status_running(status: str) -> bool:
+    lowered = status.lower()
+    return "running" in lowered or "queued" in lowered
+
+
+def _is_kernel_status_complete(status: str) -> bool:
+    return "complete" in status.lower()
+
+
+def _is_kernel_status_failed(status: str) -> bool:
+    lowered = status.lower()
+    return "error" in lowered or "fail" in lowered
+
+
+def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
+    status = (last_status or "unknown").lower()
+    if _is_kernel_status_running(status):
+        raise KernelStillRunningError(
+            f"Kaggle kernel {kernel_id} is still {status} after the local wait budget; "
+            "leaving the remote run active and refusing to push a duplicate version."
+        )
+    _raise_kernel_timeout(kernel_id, last_status)
+
+
+def _wait_for_kernel_and_record_pending(
+    *,
+    preparation: KernelPreparation,
+    kernel_id: str,
+    slug: str,
+    timeout_minutes: int | None,
+) -> None:
+    try:
+        _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=preparation.output_dir)
+    except KernelStillRunningError:
+        _write_pending_remote_kernel(preparation.logs_dir, kernel_id=kernel_id, kernel_slug=preparation.kernel_slug)
+        raise
+
+
+def _resume_prior_kernel_if_active(
+    *,
+    preparation: KernelPreparation,
+    kernel_id: str,
+    slug: str,
+    timeout_minutes: int | None,
+) -> str | None:
+    try:
+        output = kernels_status(kernel_id, slug=slug, dry_run=False)
+    except KaggleCliError as exc:
+        _write_pending_remote_kernel(preparation.logs_dir, kernel_id=kernel_id, kernel_slug=preparation.kernel_slug)
+        raise KernelStillRunningError(
+            f"Kaggle kernel {kernel_id} has a prior push record, but its status could not be verified; "
+            "refusing to push a duplicate version."
+        ) from exc
+
+    status = _parse_kernel_status(output).lower()
+    if _is_kernel_status_failed(status):
+        _clear_pending_remote_kernel(preparation.logs_dir)
+        print(f"[yellow]kernel resume[/yellow]: prior remote kernel failed ({status}); pushing a new version")
+        return None
+    if not (_is_kernel_status_running(status) or _is_kernel_status_complete(status)):
+        print(f"[yellow]kernel resume[/yellow]: prior remote kernel status is {status}; pushing a new version")
+        return None
+
+    _clear_stale_kernel_output(preparation.output_dir)
+    print(f"[yellow]kernel resume[/yellow]: waiting for existing remote kernel {kernel_id} ({status})")
+    if _is_kernel_status_running(status):
+        _wait_for_kernel_and_record_pending(
+            preparation=preparation,
+            kernel_id=kernel_id,
+            slug=slug,
+            timeout_minutes=timeout_minutes,
+        )
+    _clear_pending_remote_kernel(preparation.logs_dir)
+    print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
+    kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
+    return kernel_id
 
 
 def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, output_dir: Path) -> None:
@@ -3794,7 +5025,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
                 )
                 print(message)
                 if deadline is not None and time.monotonic() > deadline:
-                    raise KernelTimeoutError("Kaggle kernel did not complete within timeout.") from exc
+                    _raise_kernel_timeout(kernel_id, last_status)
                 if MAX_STATUS_ERRORS is not None and status_errors >= MAX_STATUS_ERRORS:
                     kernel_url = f"https://www.kaggle.com/code/{kernel_id}"
                     raise KaggleNetworkError(
@@ -3809,7 +5040,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
             message = f"[yellow]kernel status failed[/yellow]: {detail or 'unknown error'} (attempt {status_errors})"
             print(message)
             if deadline is not None and time.monotonic() > deadline:
-                raise KernelTimeoutError("Kaggle kernel did not complete within timeout.") from exc
+                _raise_kernel_timeout(kernel_id, last_status)
             if MAX_STATUS_ERRORS is not None and status_errors >= MAX_STATUS_ERRORS:
                 raise KernelFailedError(
                     f"Kaggle kernel status failed {status_errors} times. Last error: {detail or 'unknown error'}"
@@ -3832,7 +5063,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
                 log_failure = truncate_lines(log_failure, max_lines=5)
                 message = f"Kaggle kernel error detected in logs.\n\n--- kernel log tail ---\n{log_failure}"
                 raise KernelFailedError(message)
-        if status in {"running", "queued"}:
+        if _is_kernel_status_running(status):
             if log_state.last_heartbeat == 0.0 or now - log_state.last_heartbeat >= HEARTBEAT_INTERVAL:
                 elapsed = max(0, int(now - started_at))
                 timeout_hint = ""
@@ -3847,9 +5078,9 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
                         f"(elapsed={elapsed}s{timeout_hint}, no new logs for {since:.0f}s)"
                     )
                 log_state.last_heartbeat = now
-        if "complete" in status:
+        if _is_kernel_status_complete(status):
             return
-        if "error" in status or "fail" in status:
+        if _is_kernel_status_failed(status):
             _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
             log_tail = _collect_log_tail(output_dir)
             message = f"Kaggle kernel failed: {output}"
@@ -3859,7 +5090,7 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
             raise KernelFailedError(message)
         time.sleep(STATUS_ERROR_SLEEP)
         if deadline is not None and time.monotonic() > deadline:
-            raise KernelTimeoutError("Kaggle kernel did not complete within timeout.")
+            _raise_kernel_timeout(kernel_id, last_status)
 
 
 @dataclass
@@ -3925,7 +5156,7 @@ def _clear_stale_kernel_output(output_dir: Path) -> None:
 
 
 def _parse_kernel_status(output: str) -> str:
-    match = re.search(r"status\\s+\\\"?([A-Za-z0-9_.-]+)\\\"?", output)
+    match = re.search(r"status\s+\"?([A-Za-z0-9_.-]+)\"?", output)
     if match:
         return match.group(1)
     return output.strip() or "unknown"

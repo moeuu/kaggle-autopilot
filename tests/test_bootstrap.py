@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 
-from kagglebot.bootstrap import _mirror_sample_submission_to_data, _write_sample_head, bootstrap_competition
+from kagglebot.bootstrap import (
+    _cache_sample_submission,
+    _mirror_sample_submission_to_data,
+    _write_sample_head,
+    bootstrap_competition,
+)
+from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 
@@ -203,6 +209,7 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
         return ""
 
     dataset_calls: list[str] = []
+    kernel_calls: list[str] = []
     competition_calls: list[tuple[str, str]] = []
 
     def fake_download_competition(slug, dest_dir, *, force, quiet, dry_run=False, progress_callback=None):  # noqa: ANN001, ARG001
@@ -223,6 +230,7 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
         return "ok"
 
     def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
+        kernel_calls.append(str(kernel_id))
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "ref-kernel.ipynb").write_text(
             json.dumps(
@@ -245,6 +253,7 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
                 {
                     "dataset_sources": ["alice/original-churn"],
                     "competition_sources": ["external-comp"],
+                    "kernel_sources": ["carol/shared-model"],
                 }
             ),
             encoding="utf-8",
@@ -278,12 +287,15 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
     refs = {(item["kind"], item["ref"]) for item in entry["input_sources"]}
     assert ("dataset", "alice/original-churn") in refs
     assert ("competition", "external-comp") in refs
+    assert ("kernel", "carol/shared-model") in refs
     assert ("dataset", "bob/notebook-only-backup") in refs
     staged = {(item["kind"], item["ref"], item["status"]) for item in entry["staged_sources"]}
     assert ("dataset", "alice/original-churn", "staged_dataset") in staged
     assert ("competition", "external-comp", "staged_competition") in staged
+    assert ("kernel", "carol/shared-model", "staged_kernel") in staged
     assert "alice/original-churn" in dataset_calls
     assert "bob/notebook-only-backup" in dataset_calls
+    assert "carol/shared-model" in kernel_calls
     assert any(slug == "external-comp" for slug, _dest in competition_calls)
 
 
@@ -596,6 +608,237 @@ def test_bootstrap_code_uses_non_leak_required_reference_when_top_ranked_looks_l
     assert "selection_reason: Top-ranked notebook appears leak-like/placeholder" in code_text
 
 
+def test_bootstrap_code_policy_selects_required_and_ensemble_references(tmp_path, monkeypatch) -> None:
+    def fake_pages(*, slug: str, rules_url: str, timeout: int = 10):  # noqa: ARG001
+        return [
+            {"name": "rules", "content": "Rules text"},
+            {"name": "description", "content": "Overview text"},
+            {"name": "data-description", "content": "Data text"},
+        ]
+
+    def fake_fetch_text(*args, **kwargs):  # noqa: ANN002, ANN003
+        url = args[0]
+        if url.endswith("/code"):
+            return "<html><body><h1>Code</h1></body></html>"
+        if url.endswith("/models"):
+            return "<html><body><h1>Models</h1></body></html>"
+        if url.endswith("/discussions"):
+            return "<html><body></body></html>"
+        return ""
+
+    def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
+        notebook = output_dir / "notebook.ipynb"
+        notebook.write_text(json.dumps({"cells": []}), encoding="utf-8")
+        return f"ok:{kernel_id}"
+
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_pages", fake_pages)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_text_with_retry", fake_fetch_text)
+    monkeypatch.setattr("kagglebot.bootstrap.kernels_pull", fake_kernels_pull)
+    monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "required_capabilities": ["recoverable_original_dataset", "requires_oof_blend"],
+                "notebook_selection": {
+                    "keyword_boosts": {"original dataset": 0.05, "blend": 0.02},
+                    "required_reference_keywords": ["original dataset"],
+                    "ensemble_reference_keywords": ["blend", "oof"],
+                },
+                "prompt": {"prefer_ensemble_reference": True},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    candidates = [
+        {
+            "kernel_id": "user/highest-raw",
+            "title": "Strong baseline",
+            "url": "https://www.kaggle.com/code/user/highest-raw",
+            "score": 0.9500,
+            "total_votes": 100,
+            "last_run_time": "2026-02-24 10:00:00",
+            "source_order": 0,
+        },
+        {
+            "kernel_id": "user/original-dataset-baseline",
+            "title": "Original Dataset baseline",
+            "url": "https://www.kaggle.com/code/user/original-dataset-baseline",
+            "score": 0.9300,
+            "total_votes": 20,
+            "last_run_time": "2026-02-24 11:00:00",
+            "source_order": 1,
+        },
+        {
+            "kernel_id": "user/oof-blend-stack",
+            "title": "OOF Blend Stack",
+            "url": "https://www.kaggle.com/code/user/oof-blend-stack",
+            "score": 0.9200,
+            "total_votes": 30,
+            "last_run_time": "2026-02-24 12:00:00",
+            "source_order": 2,
+        },
+    ]
+    monkeypatch.setattr("kagglebot.bootstrap._list_competition_code_candidates_from_cli", lambda *, slug: candidates)
+
+    bootstrap_competition(
+        slug="demo",
+        competition_url="https://www.kaggle.com/competitions/demo",
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        rules_source="url",
+        download=False,
+        dry_run=False,
+    )
+
+    code_index = json.loads(paths.code_notebooks_index_path.read_text(encoding="utf-8"))
+    assert code_index["required_reference_kernel_id"] == "user/original-dataset-baseline"
+    assert code_index["ensemble_reference_kernel_id"] == "user/oof-blend-stack"
+    assert code_index["required_capabilities"] == ["recoverable_original_dataset", "requires_oof_blend"]
+    code_text = paths.code_md_path.read_text(encoding="utf-8")
+    assert "Ensemble Reference Notebook (Blend blueprint)" in code_text
+
+
+def test_stage_reference_inputs_policy_records_required_datasets_and_ensemble_reference(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.code_notebooks_dir.mkdir(parents=True, exist_ok=True)
+    first_dir = paths.code_notebooks_dir / "required"
+    second_dir = paths.code_notebooks_dir / "ensemble"
+    first_dir.mkdir(parents=True, exist_ok=True)
+    second_dir.mkdir(parents=True, exist_ok=True)
+    (first_dir / "kernel-metadata.json").write_text(
+        json.dumps({"dataset_sources": ["alice/original-data"]}),
+        encoding="utf-8",
+    )
+    (first_dir / "notebook.ipynb").write_text(json.dumps({"cells": []}), encoding="utf-8")
+    (second_dir / "notebook.ipynb").write_text(json.dumps({"cells": []}), encoding="utf-8")
+    paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "archetype_tags": ["recoverable_original_dataset"],
+                "required_capabilities": ["recoverable_original_dataset"],
+                "reference_inputs": {
+                    "proactive": True,
+                    "required_datasets": ["alice/original-data", "bob/missing-data"],
+                    "extra_kernel_refs": ["carol/shared-model"],
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "ensemble_reference_kernel_id": "alice/ensemble-kernel",
+                "notebooks": [
+                    {
+                        "kernel_id": "alice/ref-kernel",
+                        "title": "Required",
+                        "local_dir": str(first_dir),
+                        "source_file": str(first_dir / "notebook.ipynb"),
+                        "summary": "",
+                    },
+                    {
+                        "kernel_id": "alice/ensemble-kernel",
+                        "title": "Ensemble",
+                        "local_dir": str(second_dir),
+                        "source_file": str(second_dir / "notebook.ipynb"),
+                        "summary": "",
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    stage_reference_notebook_inputs(
+        paths=paths,
+        slug="demo",
+        download=False,
+        quiet=True,
+        dry_run=False,
+    )
+
+    manifest = json.loads(paths.reference_inputs_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["ensemble_reference_kernel_id"] == "alice/ensemble-kernel"
+    assert manifest["required_datasets"] == ["alice/original-data", "bob/missing-data"]
+    assert manifest["required_capabilities"] == ["recoverable_original_dataset"]
+    assert manifest["missing_required_sources"] == ["bob/missing-data"]
+    assert manifest["policy_tags"] == ["recoverable_original_dataset"]
+
+
+def test_stage_reference_inputs_policy_proactively_downloads_required_datasets(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.code_notebooks_dir.mkdir(parents=True, exist_ok=True)
+    notebook_dir = paths.code_notebooks_dir / "required"
+    notebook_dir.mkdir(parents=True, exist_ok=True)
+    (notebook_dir / "kernel-metadata.json").write_text(
+        json.dumps({"dataset_sources": ["alice/original-data"]}),
+        encoding="utf-8",
+    )
+    (notebook_dir / "notebook.ipynb").write_text(json.dumps({"cells": []}), encoding="utf-8")
+    paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "reference_inputs": {
+                    "proactive": True,
+                    "required_datasets": ["alice/original-data"],
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [
+                    {
+                        "kernel_id": "alice/ref-kernel",
+                        "title": "Required",
+                        "local_dir": str(notebook_dir),
+                        "source_file": str(notebook_dir / "notebook.ipynb"),
+                        "summary": "",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    dataset_calls: list[str] = []
+
+    def fake_download_dataset(ref, output_dir, *, slug, dry_run, force, quiet):  # noqa: ANN001, ARG001
+        dataset_calls.append(str(ref))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    stage_reference_notebook_inputs(
+        paths=paths,
+        slug="demo",
+        download=False,
+        quiet=True,
+        dry_run=False,
+        download_dataset_fn=fake_download_dataset,
+    )
+
+    manifest = json.loads(paths.reference_inputs_manifest_path.read_text(encoding="utf-8"))
+    staged = manifest["reference_notebooks"][0]["staged_sources"]
+    assert dataset_calls == ["alice/original-data"]
+    assert staged[0]["status"] == "staged_dataset"
+
+
 def test_mirror_sample_submission_to_data(tmp_path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
@@ -633,3 +876,33 @@ def test_write_sample_head_reads_limited_rows(tmp_path, monkeypatch) -> None:
         "1,0.1",
         "2,0.2",
     ]
+
+
+def test_cache_sample_submission_prefers_stage2_for_multistage_competition(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.sample_submission_path.write_text("id,target\n", encoding="utf-8")
+
+    stage1 = paths.data_dir / "SampleSubmissionStage1.csv"
+    stage1.write_text("ID,Pred\n2022_1_2,0.5\n2022_1_3,0.5\n", encoding="utf-8")
+    stage2 = paths.data_dir / "SampleSubmissionStage2.csv"
+    stage2.write_text("ID,Pred\n2026_1_2,0.5\n2026_1_3,0.5\n2026_2_3,0.5\n", encoding="utf-8")
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.read_text(encoding="utf-8") == stage2.read_text(encoding="utf-8")
+    assert "2026_1_2" in paths.sample_submission_head_path.read_text(encoding="utf-8")
+
+
+def test_mirror_sample_submission_to_data_overwrites_stale_destination(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.sample_submission_path.write_text("ID,Pred\n2026_1_2,0.5\n2026_1_3,0.5\n", encoding="utf-8")
+    data_sample = paths.data_dir / "sample_submission.csv"
+    data_sample.write_text("ID,Pred\n2022_1_2,0.5\n", encoding="utf-8")
+
+    _mirror_sample_submission_to_data(paths)
+
+    assert data_sample.read_text(encoding="utf-8") == paths.sample_submission_path.read_text(encoding="utf-8")

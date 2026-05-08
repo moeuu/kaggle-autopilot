@@ -80,7 +80,11 @@ class SubmissionService:
 
     def submit(self, *, submission_path: Path, message: str, run_id: str | None) -> SubmissionResult:
         prepared_path = self.validate_and_prepare_submission(submission_path)
-        return self.submit_prepared(prepared_path=prepared_path, message=message, run_id=run_id)
+        return self.submit_prepared(
+            prepared_path=prepared_path,
+            message=message,
+            run_id=run_id,
+        )
 
     @staticmethod
     def _normalize_submission_message(message: str) -> str:
@@ -212,25 +216,17 @@ class SubmissionService:
                 continue
             seen.add(resolved)
             deduped.append(candidate)
-        desired_stage = self._resolve_desired_submission_stage()
-        primary_stage = self._sample_stage_score(primary_sample)
-        primary_has_rows = primary_sample.exists() and self._has_data_rows(primary_sample)
+        valid_candidates: list[Path] = []
         for candidate in deduped:
-            candidate_stage = self._sample_stage_score(candidate)
-            if desired_stage is None and primary_has_rows and primary_stage == 0 and candidate_stage > 0:
-                # If the configured sample submission has data rows but lacks an explicit stage
-                # marker in its filename, treat it as the canonical template and avoid switching
-                # to staged samples implicitly. Multi-stage competitions often ship both stage
-                # templates, but Kaggle will only accept one at a time.
-                continue
-            if desired_stage is None and primary_stage > 0 and candidate_stage > 0 and candidate_stage > primary_stage:
-                # Avoid jumping to a later stage when no explicit override is set.
-                continue
             try:
                 validate_submission(str(submission_path), str(candidate), data_dir=self._config.data_dir)
             except SubmissionValidationError:
                 continue
-            return candidate
+            valid_candidates.append(candidate)
+        if valid_candidates:
+            return max(valid_candidates, key=self._sample_candidate_key)
+        if deduped:
+            return max(deduped, key=self._sample_candidate_key)
         return primary_sample
 
     @staticmethod
@@ -548,7 +544,18 @@ class SubmissionService:
             return
         frame.to_csv(destination, index=False, sep=",")
 
-    def submit_prepared(self, *, prepared_path: Path, message: str, run_id: str | None) -> SubmissionResult:
+    def submit_prepared(
+        self,
+        *,
+        prepared_path: Path,
+        message: str,
+        run_id: str | None,
+        iteration: int | None = None,
+        metrics_path: Path | None = None,
+        offline_score: float | None = None,
+        score_source: str | None = None,
+        pipeline_name: str | None = None,
+    ) -> SubmissionResult:
         message = self._normalize_submission_message(message)
         ledger = SubmissionLedger(self._config.submission_ledger_path)
         if not self._config.bypass_rate_limit:
@@ -573,6 +580,11 @@ class SubmissionService:
                 message=message,
                 submission_path=prepared_path,
                 run_id=run_id,
+                iteration=iteration,
+                metrics_path=metrics_path,
+                offline_score=offline_score,
+                score_source=score_source,
+                pipeline_name=pipeline_name,
             )
         return SubmissionResult(
             message=message,
@@ -584,12 +596,7 @@ class SubmissionService:
 
     def _resolve_sample_submission(self) -> Path:
         sample_path = self._config.sample_submission_path
-        if sample_path.exists():
-            if self._has_data_rows(sample_path):
-                return sample_path
         synthesized = self._config.data_dir / ".kagglebot_cache" / "sample_submission_synth.csv"
-        if synthesized.exists() and self._has_data_rows(synthesized):
-            return synthesized
 
         from kagglebot.solver.io import ensure_sample_submission, find_competition_files
 
@@ -599,14 +606,29 @@ class SubmissionService:
         except FileNotFoundError:
             pass
         ensured = ensure_sample_submission(self._config.data_dir)
-        for candidate in (discovered, ensured, synthesized):
+        candidates: list[Path] = []
+        for candidate in (sample_path, discovered, ensured, synthesized):
             if candidate is None:
                 continue
             if candidate.exists() and self._has_data_rows(candidate):
-                return candidate
+                candidates.append(candidate)
         discovered_text_sample = self._find_usable_sample_submission_in_data_dir()
         if discovered_text_sample is not None:
-            return discovered_text_sample
+            candidates.append(discovered_text_sample)
+        if candidates:
+            deduped: list[Path] = []
+            seen: set[Path] = set()
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve()
+                except OSError:
+                    continue
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                deduped.append(candidate)
+            if deduped:
+                return max(deduped, key=self._sample_candidate_key)
         return sample_path
 
     def _prepare_submission_path(self, sample_path: Path, submission_path: Path) -> Path:
@@ -1215,11 +1237,21 @@ class SubmissionService:
         stage_score = SubmissionService._sample_stage_score(path)
         desired_stage = SubmissionService._resolve_desired_submission_stage()
         stage_match = 1 if (desired_stage is not None and stage_score == desired_stage) else 0
-        stage_preference = 0 if stage_score == 0 else -stage_score
+        explicit_stage = 1 if stage_score > 0 else 0
+        stage_preference = stage_score if stage_score > 0 else 0
+        row_count = SubmissionService._sample_data_row_count(path)
         desired_distance = 0
         if desired_stage is not None:
             desired_distance = -abs(stage_score - desired_stage) if stage_score else -10_000
-        return (name_score, stage_match, desired_distance, stage_preference, path.name.lower())
+        return (
+            name_score,
+            stage_match,
+            explicit_stage,
+            desired_distance,
+            stage_preference,
+            row_count,
+            path.name.lower(),
+        )
 
     @staticmethod
     def _sample_name_score(path: Path) -> int:
@@ -1269,3 +1301,16 @@ class SubmissionService:
         except OSError:
             return False
         return False
+
+    @staticmethod
+    def _sample_data_row_count(path: Path) -> int:
+        non_empty = 0
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    non_empty += 1
+        except OSError:
+            return 0
+        return max(0, non_empty - 1)

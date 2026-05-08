@@ -21,6 +21,7 @@ def test_metric_registry_basic_metrics() -> None:
     assert MetricRegistry.score("accuracy", y_true, y_pred) == pytest.approx(1.0)
     assert MetricRegistry.score("f1", y_true, y_pred) == pytest.approx(1.0)
     assert MetricRegistry.score("logloss", y_true, y_prob) < 0.3
+    assert MetricRegistry.score("brier_score", y_true, y_prob) == pytest.approx(0.025)
 
 
 def test_metric_registry_regression_and_correlations() -> None:

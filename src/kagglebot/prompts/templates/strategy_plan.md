@@ -28,11 +28,12 @@ Return output with these exact section markers:
 
 ===STRATEGY_PLAN===
 Provide a deep solution strategy. Include model choices, preprocessing, CV plan, and risk notes.
+For local_gpu, keep each iteration under 24 hours (target time_budget_min <= 1200). For image/video/audio/text, avoid full seed x fold x model-family multiplication; use one strong full-training seed, <=3 full-training folds, and preserve accuracy with pretrained backbones, cached embeddings, TTA, OOF blends, or lightweight heads.
 
 ===CODEX_IMPLEMENTATION_INSTRUCTIONS===
 Give {{implementation_agent_name}} a step-by-step implementation plan with exact file paths to modify and acceptance criteria.
 Include explicit instructions to update `artifacts/<slug>/plan.json` with:
-target_metric, target_score, target_direction, score_source, holdout_frac, cv_folds, seed, and any other required defaults.
+target_metric, target_score, target_direction, score_source, holdout_frac, cv_folds, seed, time_budget_min, and any other required defaults.
 
 ===REFERENCES===
 List papers, repos, blog posts, and links used to justify the plan.

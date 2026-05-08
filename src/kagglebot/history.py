@@ -32,6 +32,11 @@ def sha256_file_bytes(payload: bytes) -> str:
 class SubmissionLedger:
     ledger_path: Path
 
+    @staticmethod
+    def _is_submit_event(record: dict[str, object]) -> bool:
+        event = record.get("event")
+        return event in (None, "submit")
+
     def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
         fingerprint = submission_fingerprint(slug, message, submission_path)
         if not self.ledger_path.exists():
@@ -44,16 +49,58 @@ class SubmissionLedger:
                 return True
         return False
 
-    def record(self, *, slug: str, message: str, submission_path: Path, run_id: str | None) -> None:
+    def record(
+        self,
+        *,
+        slug: str,
+        message: str,
+        submission_path: Path,
+        run_id: str | None,
+        iteration: int | None = None,
+        metrics_path: Path | None = None,
+        offline_score: float | None = None,
+        score_source: str | None = None,
+        pipeline_name: str | None = None,
+    ) -> None:
+        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        submission_sha = sha256_file(str(submission_path))
+        record = {
+            "ts": datetime.now(UTC).isoformat(),
+            "event": "submit",
+            "slug": slug,
+            "message": message,
+            "submission_path": str(submission_path),
+            "sha256": submission_sha,
+            "fingerprint": submission_fingerprint(slug, message, submission_path),
+            "run_id": run_id,
+            "iteration": iteration,
+            "metrics_path": str(metrics_path) if metrics_path is not None else None,
+            "offline_score": offline_score,
+            "score_source": score_source,
+            "pipeline_name": pipeline_name,
+        }
+        with self.ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def record_outcome(
+        self,
+        *,
+        slug: str,
+        message: str,
+        submission_path: Path,
+        run_id: str | None,
+        outcome: dict[str, object],
+    ) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "ts": datetime.now(UTC).isoformat(),
+            "event": "outcome",
             "slug": slug,
             "message": message,
             "submission_path": str(submission_path),
             "sha256": sha256_file(str(submission_path)),
-            "fingerprint": submission_fingerprint(slug, message, submission_path),
             "run_id": run_id,
+            "outcome": outcome,
         }
         with self.ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
@@ -66,6 +113,8 @@ class SubmissionLedger:
             if not line.strip():
                 continue
             rec = json.loads(line)
+            if not self._is_submit_event(rec):
+                continue
             ts_str = rec.get("ts")
             if not ts_str:
                 continue
@@ -89,6 +138,8 @@ class SubmissionLedger:
             if not line.strip():
                 continue
             rec = json.loads(line)
+            if not self._is_submit_event(rec):
+                continue
             ts_str = rec.get("ts")
             if not ts_str:
                 continue

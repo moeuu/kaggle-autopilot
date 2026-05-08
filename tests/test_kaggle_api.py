@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kagglebot import kaggle_api
-from kagglebot.exceptions import KaggleCliError, RulesNotAcceptedError
+from kagglebot.exceptions import KaggleCliError, KernelCapacityError, RulesNotAcceptedError
+from kagglebot.exec_utils import CommandResult
 
 
 def test_check_rules_accepted(monkeypatch) -> None:
@@ -56,6 +59,22 @@ def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
     assert "-c" in captured["args"]
     assert "-p" in captured["args"]
     assert result["score"] == 0.123
+
+
+def test_kernels_push_detects_capacity_limit_even_on_zero_exit(monkeypatch) -> None:
+    def fake_run_command(args, *, dry_run=False, **kwargs):  # noqa: ARG001
+        return CommandResult(
+            args=args,
+            returncode=0,
+            stdout="Kernel push error: Maximum batch GPU session count of 2 reached.",
+            stderr="",
+            duration_sec=0.1,
+        )
+
+    monkeypatch.setattr(kaggle_api, "run_command", fake_run_command)
+
+    with pytest.raises(KernelCapacityError, match="GPU session limit"):
+        kaggle_api.kernels_push(Path("kernel"), slug="demo", dry_run=False)
 
 
 def test_leaderboard_top1_prefers_score_columns(monkeypatch, tmp_path) -> None:
@@ -152,6 +171,19 @@ def test_list_competition_files_with_sizes_handles_paging(monkeypatch) -> None:
     assert len(calls) == 2
     assert "--page-token" not in calls[0]
     assert calls[1][-2:] == ["--page-token", "p2"]
+
+
+def test_competition_total_size_bytes_sums_listed_files(monkeypatch) -> None:
+    monkeypatch.setattr(
+        kaggle_api,
+        "_list_competition_files_with_sizes",
+        lambda slug, dry_run: [
+            kaggle_api._CompetitionFile(name="train.csv", size_bytes=100),
+            kaggle_api._CompetitionFile(name="test.csv", size_bytes=200),
+        ],
+    )
+
+    assert kaggle_api.competition_total_size_bytes("demo") == 300
 
 
 def test_list_competition_files_with_sizes_retries_retryable_errors(monkeypatch) -> None:

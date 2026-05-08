@@ -242,6 +242,114 @@ def _extract_pseudo_label_failure_signal(
     }
 
 
+def _extract_missing_ensemble_signal(kernel_metrics_payload: dict[str, object] | None) -> dict[str, object] | None:
+    payload = kernel_metrics_payload or {}
+    if not isinstance(payload, dict):
+        return None
+    model_families_raw = payload.get("model_families")
+    model_families = (
+        sorted({str(item).strip().lower() for item in model_families_raw if str(item).strip()})
+        if isinstance(model_families_raw, list)
+        else []
+    )
+    if len(model_families) < 2:
+        return None
+    blend_method = str(payload.get("blend_method") or payload.get("final_kind") or "").strip().lower()
+    component_models_raw = payload.get("component_models")
+    component_models = (
+        [str(item).strip() for item in component_models_raw if str(item).strip()]
+        if isinstance(component_models_raw, list)
+        else []
+    )
+    if blend_method in {"blend", "rank_blend", "weighted_blend"} and len(component_models) >= 2:
+        return None
+    return {
+        "model_families": model_families,
+        "component_models": component_models,
+        "note": (
+            "Multiple model families were trained but no OOF blend was selected or emitted. "
+            f"model_families={model_families}. "
+            "Next iteration must keep heterogeneous pipelines and produce a weighted or rank OOF blend candidate."
+        ),
+    }
+
+
+def _extract_original_data_unused_signal(
+    *,
+    kernel_metrics_payload: dict[str, object] | None,
+    reference_inputs_manifest_payload: dict[str, object] | None,
+) -> dict[str, object] | None:
+    manifest = reference_inputs_manifest_payload or {}
+    payload = kernel_metrics_payload or {}
+    if not isinstance(manifest, dict) or not isinstance(payload, dict):
+        return None
+    required_datasets_raw = manifest.get("required_datasets")
+    required_datasets = (
+        [str(item).strip() for item in required_datasets_raw if str(item).strip()]
+        if isinstance(required_datasets_raw, list)
+        else []
+    )
+    reference_notebooks = manifest.get("reference_notebooks")
+    staged_dataset_count = 0
+    if isinstance(reference_notebooks, list):
+        for notebook in reference_notebooks:
+            if not isinstance(notebook, dict):
+                continue
+            staged_sources = notebook.get("staged_sources")
+            if not isinstance(staged_sources, list):
+                continue
+            for item in staged_sources:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("kind") or "").strip().lower() == "dataset":
+                    staged_dataset_count += 1
+    if not required_datasets and staged_dataset_count == 0:
+        return None
+    original_data_found = payload.get("original_data_found")
+    external_data_used = payload.get("external_data_used")
+    if original_data_found is True or external_data_used is True:
+        return None
+    return {
+        "required_datasets": required_datasets,
+        "staged_dataset_count": staged_dataset_count,
+        "note": (
+            "Reference/original datasets were staged but the kernel did not use them. "
+            f"required_datasets={required_datasets}, staged_dataset_count={staged_dataset_count}, "
+            f"original_data_found={original_data_found}, external_data_used={external_data_used}. "
+            "Next iteration must wire the staged original data into feature generation instead of "
+            "falling back to competition-only features."
+        ),
+    }
+
+
+def _extract_same_family_plateau_signal(kernel_metrics_payload: dict[str, object] | None) -> dict[str, object] | None:
+    payload = kernel_metrics_payload or {}
+    if not isinstance(payload, dict):
+        return None
+    model_families_raw = payload.get("model_families")
+    model_families = (
+        sorted({str(item).strip().lower() for item in model_families_raw if str(item).strip()})
+        if isinstance(model_families_raw, list)
+        else []
+    )
+    if len(model_families) != 1:
+        return None
+    pipelines_raw = payload.get("pipelines")
+    pipeline_count = len(pipelines_raw) if isinstance(pipelines_raw, list) else 0
+    selected_pipeline = str(payload.get("selected_pipeline") or payload.get("final_pipeline") or "").strip()
+    return {
+        "model_family": model_families[0],
+        "pipeline_count": pipeline_count,
+        "selected_pipeline": selected_pipeline,
+        "note": (
+            "Search remains stuck in a same-family plateau. "
+            f"model_family={model_families[0]}, pipeline_count={pipeline_count}, "
+            f"selected_pipeline={selected_pipeline or 'unknown'}. "
+            "Next iteration must add an orthogonal family instead of spending another pass on same-family tuning."
+        ),
+    }
+
+
 def _detect_online_mismatch_signal(
     *,
     previous_best_offline: float | None,

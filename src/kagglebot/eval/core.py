@@ -11,6 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    brier_score_loss,
     f1_score,
     log_loss,
     mean_absolute_error,
@@ -48,6 +49,10 @@ class MetricRegistry:
         "rocaucscore": "auc",
         "logloss": "logloss",
         "crossentropy": "logloss",
+        "brier": "brier_score",
+        "brierloss": "brier_score",
+        "brierscore": "brier_score",
+        "brierscoreloss": "brier_score",
         "accuracy": "accuracy",
         "acc": "accuracy",
         "f1": "f1",
@@ -66,6 +71,7 @@ class MetricRegistry:
     _DEFINITIONS = {
         "auc": MetricDefinition(canonical_name="auc", direction="maximize"),
         "logloss": MetricDefinition(canonical_name="logloss", direction="minimize"),
+        "brier_score": MetricDefinition(canonical_name="brier_score", direction="minimize"),
         "accuracy": MetricDefinition(canonical_name="accuracy", direction="maximize"),
         "f1": MetricDefinition(canonical_name="f1", direction="maximize"),
         "rmse": MetricDefinition(canonical_name="rmse", direction="minimize"),
@@ -107,6 +113,8 @@ class MetricRegistry:
             return cls._score_auc(y_true_arr, y_pred_arr)
         if metric == "logloss":
             return cls._score_logloss(y_true_arr, y_pred_arr)
+        if metric == "brier_score":
+            return cls._score_brier_score(y_true_arr, y_pred_arr)
         if metric == "accuracy":
             return float(accuracy_score(y_true_arr, cls._as_labels(y_pred_arr)))
         if metric == "f1":
@@ -163,6 +171,17 @@ class MetricRegistry:
             return float(log_loss(y_true, y_pred))
         y_pred = np.clip(np.asarray(y_pred, dtype=float), 1e-15, 1.0 - 1e-15)
         return float(log_loss(y_true, y_pred))
+
+    @staticmethod
+    def _score_brier_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        y_pred_arr = np.asarray(y_pred, dtype=float)
+        if y_pred_arr.ndim == 2:
+            if y_pred_arr.shape[1] == 1:
+                y_pred_arr = y_pred_arr[:, 0]
+            else:
+                y_pred_arr = y_pred_arr[:, -1]
+        y_pred_arr = np.clip(y_pred_arr, 0.0, 1.0)
+        return float(brier_score_loss(y_true, y_pred_arr))
 
     @staticmethod
     def _score_smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:

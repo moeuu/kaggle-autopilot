@@ -95,6 +95,10 @@ class CompetitionPaths:
         return self.context_dir / "code_notebooks_index.json"
 
     @property
+    def competition_policy_path(self) -> Path:
+        return self.context_dir / "competition_policy.json"
+
+    @property
     def models_md_path(self) -> Path:
         return self.context_dir / "models.md"
 

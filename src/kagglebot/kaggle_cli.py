@@ -5,9 +5,9 @@ from pathlib import Path
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     competitions_files,
-    kernels_push,
     kernels_status,
 )
+from kagglebot.kaggle_api import kernels_push as _kernels_push
 from kagglebot.kaggle_api import (
     download_competition as _download_competition,
 )
@@ -56,6 +56,17 @@ def submit_competition(
 ) -> str:
     _ = stream_output
     return _submit_competition(slug, submission_file, message, dry_run=dry_run)
+
+
+def kernels_push(
+    kernel_dir: Path,
+    *,
+    slug: str | None = None,
+    stream_output: bool = False,
+    dry_run: bool = False,
+) -> str:
+    _ = stream_output
+    return _kernels_push(kernel_dir, slug=slug, dry_run=dry_run)
 
 
 def kernels_output(

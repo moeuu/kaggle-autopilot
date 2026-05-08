@@ -133,7 +133,7 @@ def test_submission_service_prefers_real_data_sample_when_placeholders_exist(tmp
     assert prepared == submission_path
 
 
-def test_submission_service_prefers_stage1_sample_over_stage2_by_default(tmp_path: Path) -> None:
+def test_submission_service_prefers_stage2_sample_over_stage1_by_default(tmp_path: Path) -> None:
     comp_root = tmp_path / "comp"
     data_dir = comp_root / "data"
     context_dir = comp_root / "context"
@@ -162,23 +162,19 @@ def test_submission_service_prefers_stage1_sample_over_stage2_by_default(tmp_pat
     )
     service = SubmissionService(config)
     resolved_sample = service._resolve_sample_submission()
-    assert resolved_sample == stage1
+    assert resolved_sample == stage2
 
     prepared = service.validate_and_prepare_submission(submission_path)
-    assert prepared.exists()
-    assert prepared.name.endswith(".autofixed.csv")
+    assert prepared == submission_path
 
 
-def test_submission_service_does_not_switch_to_staged_sample_when_context_sample_has_rows(tmp_path: Path) -> None:
+def test_submission_service_prefers_valid_higher_stage_over_context_sample_when_available(tmp_path: Path) -> None:
     comp_root = tmp_path / "comp"
     data_dir = comp_root / "data"
     context_dir = comp_root / "context"
     data_dir.mkdir(parents=True, exist_ok=True)
     context_dir.mkdir(parents=True, exist_ok=True)
 
-    # Context provides a real sample submission with rows, but the filename is the canonical
-    # `sample_submission.csv` (no explicit stage marker). The service should treat it as
-    # canonical and avoid implicitly switching to staged templates.
     context_sample = context_dir / "sample_submission.csv"
     pd.DataFrame({"ID": ["2022_1_2", "2022_1_3", "2022_2_3"], "Pred": [0.5, 0.5, 0.5]}).to_csv(
         context_sample, index=False
@@ -201,13 +197,11 @@ def test_submission_service_does_not_switch_to_staged_sample_when_context_sample
         force_submit=True,
     )
     service = SubmissionService(config)
+    resolved_sample = service._resolve_sample_submission()
+    assert resolved_sample == stage2
 
     prepared = service.validate_and_prepare_submission(submission_path)
-    assert prepared.exists()
-    assert prepared.name.endswith(".autofixed.csv")
-    prepared_df = pd.read_csv(prepared)
-    assert list(prepared_df.columns) == ["ID", "Pred"]
-    assert len(prepared_df) == 3
+    assert prepared == submission_path
 
 
 def test_submission_service_allows_stage_override_via_env(tmp_path: Path, monkeypatch) -> None:

@@ -35,6 +35,7 @@ def _write_iteration_state_marker(
     submit_phase_finished: bool | None = None,
     submit_allowed_by_gate: bool,
     submit_phase_state: str,
+    forced_submit_reason: str | None = None,
     submitted: bool,
     readiness_score: float,
 ) -> None:
@@ -56,6 +57,7 @@ def _write_iteration_state_marker(
         "submit_phase_finished": submit_phase_finished,
         "submit_allowed_by_gate": submit_allowed_by_gate,
         "submit_phase_state": submit_phase_state,
+        "forced_submit_reason": forced_submit_reason or "",
         "submitted": submitted,
         "readiness_score": readiness_score,
         "completed_at": datetime.now(UTC).isoformat(),

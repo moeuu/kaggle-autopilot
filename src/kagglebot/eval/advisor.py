@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.agents.strategy_runner import StrategyResult, run_strategy
+from kagglebot.competition_policy import load_competition_policy
 from kagglebot.eval.core import MetricRegistry
 from kagglebot.exec_utils import run_command
 from kagglebot.paths import CompetitionPaths
@@ -46,7 +47,7 @@ _MEDAL_TARGET_PERCENTILES = {
 
 
 class EvaluationAdvisor:
-    """Optional GPT-5.4 + web-search advisor for evaluation spec selection."""
+    """Optional GPT-5.5 + web-search advisor for evaluation spec selection."""
 
     def __init__(
         self,
@@ -158,6 +159,7 @@ class EvaluationAdvisor:
             "Supported metrics:\n"
             "- auc\n"
             "- logloss\n"
+            "- brier_score\n"
             "- accuracy\n"
             "- f1\n"
             "- rmse\n"
@@ -195,6 +197,7 @@ class EvaluationAdvisor:
 
     def _fallback_spec(self, *, reason: str) -> dict[str, object]:
         profile = _load_json(self.paths.dataset_profile_path)
+        competition_policy = load_competition_policy(self.paths)
         context_text = "\n".join(
             [
                 _read_trimmed(self.paths.rules_md_path, limit_chars=4000),
@@ -244,6 +247,7 @@ class EvaluationAdvisor:
             f"- local://{self.paths.overview_md_path.name} (reason: {reason})\n"
             f"- local://{self.paths.dataset_profile_path.name} (reason: {reason})\n"
         )
+        spec = _apply_fallback_policy_overrides(spec, competition_policy)
         self._persist_sources_summary(sources_summary=sources_summary, queries=[])
         return spec
 
@@ -296,6 +300,34 @@ def validate_advisor_payload(
     if issues:
         return None, None, None, issues
     return spec, sources_summary, [str(item).strip() for item in queries], []
+
+
+def _apply_fallback_policy_overrides(
+    spec: dict[str, object],
+    competition_policy,
+) -> dict[str, object]:
+    if not competition_policy.active:
+        return spec
+    payload = dict(spec)
+    overrides = dict(competition_policy.evaluation.fallback_overrides)
+    if "seeds" in overrides and isinstance(overrides["seeds"], list):
+        payload["seeds"] = [int(item) for item in overrides["seeds"] if isinstance(item, (int, float))]
+    if "repeats" in overrides and isinstance(overrides["repeats"], (int, float)):
+        payload["repeats"] = max(1, int(overrides["repeats"]))
+    if "ci_method" in overrides and str(overrides["ci_method"]).strip().lower() in SUPPORTED_CI_METHODS:
+        payload["ci_method"] = str(overrides["ci_method"]).strip().lower()
+    if "ci_alpha" in overrides and isinstance(overrides["ci_alpha"], (int, float)):
+        payload["ci_alpha"] = float(overrides["ci_alpha"])
+    if "n_splits" in overrides and isinstance(overrides["n_splits"], (int, float)):
+        payload["n_splits"] = max(2, int(overrides["n_splits"]))
+    search_stop = competition_policy.evaluation.search_stop_rank_percentile
+    if search_stop is not None:
+        current = payload.get("target_rank_percentile")
+        if not isinstance(current, (int, float)):
+            payload["target_rank_percentile"] = float(search_stop)
+        else:
+            payload["target_rank_percentile"] = min(float(current), float(search_stop))
+    return payload
 
 
 def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None, list[str]]:
@@ -655,7 +687,9 @@ def _advisor_response_schema_text() -> str:
             "submit_mode": "file|notebook",
             "target_medal": "bronze|silver|gold|null",
             "target_rank_percentile": "0<float<=1|null",
-            "metric_name": "one of [auc, logloss, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, spearman]",
+            "metric_name": (
+                "one of [auc, logloss, brier_score, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, spearman]"
+            ),
             "direction": "maximize|minimize",
             "split_strategy": "kfold|stratified_kfold|group_kfold|timeseries_split",
             "n_splits": "int>=2",
@@ -772,6 +806,7 @@ def _extract_metric_candidates_from_text(context_text: str) -> list[str]:
     patterns = [
         (r"\bauc\b|\broc[-\s_]?auc\b", "auc"),
         (r"\blog\s*loss\b|\bcross[-\s_]?entropy\b", "logloss"),
+        (r"\bbrier(?:[-\s_]?score)?(?:[-\s_]?loss)?\b", "brier_score"),
         (r"\baccuracy\b|\bacc\b", "accuracy"),
         (r"\bf1\b", "f1"),
         (r"\brmsle\b", "rmsle"),

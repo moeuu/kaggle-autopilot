@@ -219,6 +219,29 @@ def test_write_plan_payload_sets_default_bronze_target_for_leaderboard(tmp_path:
 
 def test_validate_plan_payload_requires_multi_family_blend_for_high_accuracy_tabular() -> None:
     payload = _base_payload()
+    payload["suites"] = [
+        {
+            "name": "competition_only",
+            "train_mode": "competition_only",
+            "feature_recipe": "full",
+            "lightweight": False,
+            "promotion_stage": "full_eval",
+        },
+        {
+            "name": "competition_plus_original",
+            "train_mode": "competition_plus_original",
+            "feature_recipe": "full",
+            "lightweight": False,
+            "promotion_stage": "ablation_fast",
+        },
+        {
+            "name": "orig_signal_only",
+            "train_mode": "competition_only",
+            "feature_recipe": "orig_signal_only",
+            "lightweight": True,
+            "promotion_stage": "ablation_fast",
+        },
+    ]
     payload["pipelines"] = [
         {
             "name": "xgb_only",
@@ -253,3 +276,48 @@ def test_validate_plan_payload_requires_multi_family_blend_for_high_accuracy_tab
     assert any("CatBoost" in issue for issue in issues)
     assert any("LightGBM or a second CatBoost/XGBoost variant" in issue for issue in issues)
     assert any("OOF blend" in issue for issue in issues)
+
+
+def test_validate_plan_payload_requires_suite_aware_ablation_for_high_accuracy_tabular() -> None:
+    payload = _base_payload()
+    payload["pipelines"] = [
+        {
+            "name": "catboost_raw",
+            "features": ["raw_cat"],
+            "models": ["CatBoost"],
+            "key_hyperparameters": {"depth": 8},
+            "runtime_memory": "medium",
+            "failure_modes": ["overfit"],
+            "fallbacks": ["shallower"],
+        },
+        {
+            "name": "xgb_encoded",
+            "features": ["target_encoding"],
+            "models": ["XGBoost"],
+            "key_hyperparameters": {"depth": 6},
+            "runtime_memory": "medium",
+            "failure_modes": ["overfit"],
+            "fallbacks": ["smaller"],
+        },
+        {
+            "name": "blend_rank",
+            "features": ["oof_predictions"],
+            "models": ["weighted rank blend"],
+            "key_hyperparameters": {"weights": "search"},
+            "runtime_memory": "low",
+            "failure_modes": ["no gain"],
+            "fallbacks": ["single best"],
+        },
+    ]
+    profile = {
+        "task": "classification",
+        "modality": "tabular",
+        "tags": ["tabular", "binary"],
+        "train_rows": 10000,
+        "categorical_columns": ["a", "b", "c"],
+        "high_cardinality_columns": ["c"],
+    }
+
+    issues = _validate_plan_payload(payload, profile=profile)
+
+    assert any("suite-aware ablations" in issue for issue in issues)

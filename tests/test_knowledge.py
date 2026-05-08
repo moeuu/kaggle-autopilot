@@ -7,6 +7,7 @@ import sqlite3
 import kagglebot.knowledge as knowledge_mod
 from kagglebot.knowledge import (
     build_dataset_profile,
+    build_plan_and_initial_prompt,
     derive_problem_types,
     ensure_taxonomy,
     format_error_fix_insights,
@@ -95,6 +96,79 @@ def test_build_dataset_profile_does_not_treat_times_suffix_as_timeseries(tmp_pat
 
     assert profile["status"] == "ok"
     assert profile["modality"] == "tabular"
+
+
+def test_build_dataset_profile_handles_march_mania_submission_only_format(tmp_path) -> None:
+    data_dir = tmp_path / "march-machine-learning-mania-2026" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "MRegularSeasonCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2025,10,1101,70,1102,65,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "WRegularSeasonCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2025,10,3101,80,3102,72,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "MNCAATourneyCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2024,136,1101,75,1102,70,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "WNCAATourneyCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2024,136,3101,77,3102,71,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "SampleSubmissionStage1.csv").write_text(
+        "ID,Pred\n2026_1101_1102,0.5\n2026_3101_3102,0.5\n",
+        encoding="utf-8",
+    )
+
+    profile = build_dataset_profile(data_dir)
+
+    assert profile["status"] == "ok"
+    assert profile["sample_submission_file"] == "SampleSubmissionStage1.csv"
+    assert profile["id_column"] == "ID"
+    assert profile["target_column"] == "Pred"
+    assert profile["task"] == "classification"
+    assert profile["metric"] == "brier_score"
+    assert profile["split_strategy_hint"] == "group_kfold"
+    assert "binary" in profile["tags"]
+
+
+def test_build_plan_and_initial_prompt_handles_unknown_train_dimensions(tmp_path) -> None:
+    data_dir = tmp_path / "march-machine-learning-mania-2026" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "MRegularSeasonCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2025,10,1101,70,1102,65,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "WRegularSeasonCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2025,10,3101,80,3102,72,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "MNCAATourneyCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2024,136,1101,75,1102,70,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "WNCAATourneyCompactResults.csv").write_text(
+        "Season,DayNum,WTeamID,WScore,LTeamID,LScore,WLoc,NumOT\n2024,136,3101,77,3102,71,N,0\n",
+        encoding="utf-8",
+    )
+    (data_dir / "SampleSubmissionStage1.csv").write_text(
+        "ID,Pred\n2026_1101_1102,0.5\n2026_3101_3102,0.5\n",
+        encoding="utf-8",
+    )
+
+    profile = build_dataset_profile(data_dir)
+
+    prompt = build_plan_and_initial_prompt(
+        slug="march-machine-learning-mania-2026",
+        rules_url="https://www.kaggle.com/competitions/march-machine-learning-mania-2026",
+        profile=profile,
+        taxonomy={},
+        similar_improvements=[],
+    )
+
+    assert "**Dataset**: train table unavailable; sample/test view: 2 rows × 2 columns" in prompt
 
 
 def test_problem_type_insight_record_and_resolve(tmp_path) -> None:

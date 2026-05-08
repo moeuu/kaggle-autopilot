@@ -17,6 +17,7 @@ from kagglebot.submission_format import (
 _PLACEHOLDER_SAMPLE_MAX_ROWS = 10
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
 _FILENAME_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?P<ext>[A-Za-z0-9]{2,8})\b")
+_COORD_COL_RE = re.compile(r"^(?:x|y|z)_\d+$", re.IGNORECASE)
 
 
 def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path | None = None) -> None:
@@ -115,6 +116,20 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
     if expected_row_count is not None and len(submission) != expected_row_count:
         problems.append(f"row count mismatch:\n  expected: {expected_row_count}\n  actual:   {len(submission)}")
+
+    anchor_columns = _resolve_anchor_columns(expected_columns)
+    if sample_has_data_rows and anchor_columns:
+        for column in anchor_columns:
+            if column not in sample.columns or column not in submission.columns:
+                continue
+            sample_values = sample[column].where(sample[column].notna(), "").astype(str)
+            submission_values = submission[column].where(submission[column].notna(), "").astype(str)
+            if len(sample_values) != len(submission_values):
+                continue
+            if not sample_values.equals(submission_values):
+                problems.append(
+                    f"anchor column '{column}' must match sample_submission.csv exactly for structured outputs."
+                )
 
     if id_col not in submission.columns:
         if len(expected_columns) == len(actual_columns):
@@ -243,6 +258,16 @@ def _maybe_load_evaluation_ids(data_dir: Path) -> list[str] | None:
     if not sample_ids:
         return None
     return sample_ids
+
+
+def _resolve_anchor_columns(expected_columns: list[str]) -> list[str]:
+    coord_positions = [index for index, column in enumerate(expected_columns) if _COORD_COL_RE.fullmatch(str(column))]
+    if not coord_positions:
+        return []
+    first_coord = min(coord_positions)
+    if first_coord <= 1:
+        return []
+    return expected_columns[1:first_coord]
 
 
 def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submission_ids: list[str]) -> str | None:

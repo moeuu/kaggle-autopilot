@@ -44,6 +44,38 @@ def test_normalize_plan_payload_injects_pipeline_names() -> None:
     assert pipelines[2]["name"] == "pipeline_3"
 
 
+def test_normalize_plan_payload_injects_suite_names() -> None:
+    payload = {
+        "suites": [
+            {
+                "train_mode": "competition_only",
+                "feature_recipe": "full",
+                "lightweight": False,
+                "promotion_stage": "full_eval",
+            },
+            {
+                "name": "already_set",
+                "train_mode": "competition_plus_original",
+                "feature_recipe": "full",
+                "lightweight": False,
+                "promotion_stage": "ablation_fast",
+            },
+            {
+                "feature_recipe": "orig_signal_only",
+                "lightweight": True,
+                "promotion_stage": "ablation_fast",
+            },
+        ]
+    }
+
+    normalized = agent_pipeline._normalize_plan_payload(payload)  # noqa: SLF001
+    suites = normalized["suites"]
+    assert isinstance(suites, list)
+    assert suites[0]["name"] == "competition_only"
+    assert suites[1]["name"] == "already_set"
+    assert suites[2]["name"] == "orig_signal_only"
+
+
 def test_validate_plan_payload_tolerates_missing_pipeline_names() -> None:
     payload = {
         "target_metric": "roc_auc",

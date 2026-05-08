@@ -46,6 +46,7 @@ dependencies = [
     "optuna>=4.7.0",
     "kornia>=0.8.2",
     "iterative-stratification>=0.1.9",
+    "sacrebleu>=2.6.0",
 ]
 
 [project.scripts]
@@ -78,7 +79,8 @@ typeCheckingMode = "basic"
 exclude = ["src/kagglebot/knowledge/__init__.py"]
 
 [tool.pytest.ini_options]
-addopts = "-p no:launch_testing -p no:launch_ros"
+addopts = "-p no:launch_testing -p no:launch_ros -m 'not competition_artifact'"
 markers = [
+    "competition_artifact: tests generated competition artifact kernels/runtimes (opt-in)",
     "integration: requires Kaggle CLI + credentials (opt-in)",
 ]

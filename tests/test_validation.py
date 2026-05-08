@@ -228,3 +228,94 @@ def test_submission_rate_limit_default_cooldown_is_five_minutes(tmp_path):
 
     with pytest.raises(SubmissionRateLimitError, match="cooldown"):
         ensure_submission_rate_limit(ledger)
+
+
+def test_submission_rate_limit_ignores_outcome_events(tmp_path):
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
+    now = datetime.now(UTC)
+    entries = [
+        {
+            "ts": (now - timedelta(hours=20)).isoformat(),
+            "event": "submit",
+            "sha256": "a",
+            "fingerprint": "f1",
+            "slug": "demo",
+            "submission_path": "sub.csv",
+            "message": "m1",
+            "run_id": "r1",
+        },
+        {
+            "ts": (now - timedelta(hours=20) + timedelta(seconds=30)).isoformat(),
+            "event": "outcome",
+            "sha256": "a",
+            "slug": "demo",
+            "submission_path": "sub.csv",
+            "message": "m1",
+            "run_id": "r1",
+            "outcome": {"status": "complete"},
+        },
+        {
+            "ts": (now - timedelta(hours=12)).isoformat(),
+            "event": "submit",
+            "sha256": "b",
+            "fingerprint": "f2",
+            "slug": "demo",
+            "submission_path": "sub2.csv",
+            "message": "m2",
+            "run_id": "r2",
+        },
+        {
+            "ts": (now - timedelta(hours=12) + timedelta(seconds=30)).isoformat(),
+            "event": "outcome",
+            "sha256": "b",
+            "slug": "demo",
+            "submission_path": "sub2.csv",
+            "message": "m2",
+            "run_id": "r2",
+            "outcome": {"status": "complete"},
+        },
+        {
+            "ts": (now - timedelta(hours=6)).isoformat(),
+            "event": "submit",
+            "sha256": "c",
+            "fingerprint": "f3",
+            "slug": "demo",
+            "submission_path": "sub3.csv",
+            "message": "m3",
+            "run_id": "r3",
+        },
+        {
+            "ts": (now - timedelta(hours=6) + timedelta(seconds=30)).isoformat(),
+            "event": "outcome",
+            "sha256": "c",
+            "slug": "demo",
+            "submission_path": "sub3.csv",
+            "message": "m3",
+            "run_id": "r3",
+            "outcome": {"status": "complete"},
+        },
+        {
+            "ts": (now - timedelta(minutes=6)).isoformat(),
+            "event": "submit",
+            "sha256": "d",
+            "fingerprint": "f4",
+            "slug": "demo",
+            "submission_path": "sub4.csv",
+            "message": "m4",
+            "run_id": "r4",
+        },
+        {
+            "ts": (now - timedelta(minutes=5, seconds=30)).isoformat(),
+            "event": "outcome",
+            "sha256": "d",
+            "slug": "demo",
+            "submission_path": "sub4.csv",
+            "message": "m4",
+            "run_id": "r4",
+            "outcome": {"status": "complete"},
+        },
+    ]
+    ledger.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.ledger_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    ensure_submission_rate_limit(ledger)

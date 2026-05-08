@@ -34,8 +34,8 @@ class AgentIdentity:
 
 
 PRIMARY_AGENT = AgentIdentity(
-    model=os.environ.get("KAGGLEBOT_PRIMARY_MODEL", "gpt-5.4"),
-    reasoning_effort=os.environ.get("KAGGLEBOT_PRIMARY_REASONING_EFFORT", "extra_high"),
+    model=os.environ.get("KAGGLEBOT_PRIMARY_MODEL", "gpt-5.5"),
+    reasoning_effort=os.environ.get("KAGGLEBOT_PRIMARY_REASONING_EFFORT", "xhigh"),
     cli_command=os.environ.get("KAGGLEBOT_AGENT_CLI_COMMAND", "codex"),
     log_alias=os.environ.get("KAGGLEBOT_AGENT_LOG_ALIAS", "gpt"),
     display_family=os.environ.get("KAGGLEBOT_AGENT_DISPLAY_FAMILY", "GPT"),

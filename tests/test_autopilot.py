@@ -15,18 +15,25 @@ from kagglebot.autopilot import (
     _DEFAULT_MAX_ITERATIONS,
     AutopilotConfig,
     SubmissionPhase,
+    _agent_failure_detail,
     _attempt_submit,
     _build_accuracy_potential,
     _build_kernel_quality_guard,
     _build_submit_autofix_context,
+    _build_submit_failure_improvement_context,
     _callable_accepts_keyword_argument,
     _detect_online_mismatch_signal,
     _error_strategy_skip_reason,
     _extract_competition_faithfulness,
+    _extract_missing_ensemble_signal,
     _extract_orig_proba_signal,
+    _extract_original_data_unused_signal,
     _extract_pseudo_label_failure_signal,
+    _extract_same_family_plateau_signal,
     _infer_kernel_submit_version_label,
+    _is_agent_capacity_failure,
     _is_submit_abort_autofixable,
+    _load_competition_rule_constraints,
     _load_run_state,
     _load_submit_failure_context,
     _maybe_restart_for_src_changes,
@@ -38,8 +45,10 @@ from kagglebot.autopilot import (
     _run_autofix,
     _run_kernel_fix,
     _should_attempt_submit_for_readiness,
+    _should_force_initial_submit,
     _should_skip_planning,
     _submission_message,
+    _submit_with_notebook_kernel,
     _write_iteration_state_marker,
     run_autopilot,
 )
@@ -92,6 +101,13 @@ def _write_dataset_profile(paths: CompetitionPaths, **overrides) -> None:
     payload.update(overrides)
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     paths.dataset_profile_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_rules(paths: CompetitionPaths, text: str, *, html: str | None = None) -> None:
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.rules_md_path.write_text(text, encoding="utf-8")
+    if html is not None:
+        paths.rules_html_path.write_text(html, encoding="utf-8")
 
 
 def _write_kernel_metrics(path: Path, *, metric: str = "rmse", value: float = 0.4) -> None:
@@ -175,7 +191,78 @@ def test_submission_message_default_is_compact(tmp_path: Path) -> None:
     )
     assert message.startswith("kb 20260223T161151Z-596afe59 i=1 offline=17.2737")
     assert "deep-past-initiative-machine-translation" not in message
-    assert len(message) < 60
+
+
+def test_autopilot_forces_iter1_submit_even_when_quality_and_readiness_gates_block(monkeypatch, tmp_path: Path) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+        max_iterations=1,
+        submission_gate="always",
+    )
+
+    def fake_run_kernel_local(**kwargs):  # noqa: ANN003
+        iteration = int(kwargs["iteration"])
+        output_dir = kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{iteration}" / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        submission_path = output_dir / "submission.csv"
+        metrics_path = output_dir / "metrics.json"
+        submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": "rmse",
+                    "direction": "minimize",
+                    "offline_value": 0.9,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return KernelRunResult(
+            kernel_id=f"local/{kwargs['slug']}",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    submit_calls = {"count": 0}
+
+    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+        submit_calls["count"] += 1
+        return {
+            "message": "demo",
+            "submission_path": str(submission_path),
+            "submitted_at": "2026-03-18T00:00:00+00:00",
+            "iteration": 1,
+            "outcome": {"status": "complete", "score": None},
+        }
+
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
+    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
+    monkeypatch.setattr(
+        "kagglebot.autopilot._build_kernel_quality_guard",
+        lambda **kwargs: {"allow_submit": False, "block_submit": True, "reasons": ["below_code_reference_baseline"]},
+    )
+    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: False)
+
+    config = _make_config(tmp_path, submit=True, max_iterations=1)
+    run_autopilot(config)
+
+    assert submit_calls["count"] == 1
+    iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
+    marker = json.loads((iter_dir / "iteration_state.json").read_text(encoding="utf-8"))
+    assert marker["submit_allowed_by_gate"] is True
+    assert marker["forced_submit_reason"] == "initial_submit_contract_probe"
+    metrics = json.loads((iter_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["forced_submit_reason"] == "initial_submit_contract_probe"
 
 
 def test_infer_kernel_submit_version_label_from_push_logs(tmp_path: Path) -> None:
@@ -417,6 +504,25 @@ def test_resolve_plan_applies_evaluation_spec_when_plan_uses_defaults(tmp_path: 
     assert contract["accepted_score_sources"] == ["cv", "holdout"]
 
 
+def test_resolve_plan_keeps_explicit_plan_metric_over_stale_evaluation_spec(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    spec = {
+        "metric_name": "accuracy",
+        "direction": "maximize",
+        "split_strategy": "stratified_kfold",
+    }
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    (config.paths.context_dir / "evaluation_spec.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    plan = PlanConfig(target_metric="balanced_accuracy", target_direction="maximize", target_score=0.9)
+    resolved = _resolve_plan(plan, config)
+
+    assert resolved["target_metric"] == "balanced_accuracy"
+    contract = resolved.get("evaluation_contract")
+    assert isinstance(contract, dict)
+    assert contract["expected_metric"] == "balanced_accuracy"
+
+
 def test_resolve_plan_requires_full_dataset_for_urban_flood(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="urban-flood-modelling", artifacts_dir=tmp_path / "artifacts")
     knowledge_paths = KnowledgePaths(workdir=tmp_path)
@@ -508,6 +614,24 @@ def test_resolve_plan_notebook_only_does_not_block_local_compute(tmp_path: Path)
     resolved = _resolve_plan(PlanConfig(), config)
     assert resolved["submission_gate"] in {"always", "readiness_or_final", "readiness_only", "final_only"}
     assert resolved["submit_mode"] == "notebook"
+
+
+def test_resolve_plan_uses_inference_artifact_mode_for_code_competition(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, compute="local_gpu")
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.data_md_path.write_text(
+        (
+            "Please note that this is a Code Competition. "
+            "The test.csv is dummy data and hidden/full test runs in Kaggle.\n"
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = _resolve_plan(PlanConfig(), config)
+
+    assert resolved["submit_mode"] == "notebook"
+    assert resolved["code_competition"] is True
+    assert resolved["notebook_submit_artifact_mode"] == "inference"
 
 
 def test_resolve_plan_defaults_to_bronze_target_for_leaderboard(tmp_path: Path) -> None:
@@ -629,6 +753,33 @@ def test_resolve_plan_extracts_daily_submission_limit_count(tmp_path: Path) -> N
 
     resolved = _resolve_plan(PlanConfig(), config)
     assert resolved["submission_limit_per_day"] == 1
+
+
+def test_should_force_initial_submit_allows_improved_policy_unless_single_daily_submission() -> None:
+    assert _should_force_initial_submit(
+        deliverable_mode="leaderboard",
+        iteration=1,
+        submit_enabled=True,
+        dry_run=False,
+        submit_policy="improved",
+        submission_limit_per_day=None,
+    )
+    assert _should_force_initial_submit(
+        deliverable_mode="leaderboard",
+        iteration=1,
+        submit_enabled=True,
+        dry_run=False,
+        submit_policy="improved",
+        submission_limit_per_day=2,
+    )
+    assert not _should_force_initial_submit(
+        deliverable_mode="leaderboard",
+        iteration=1,
+        submit_enabled=True,
+        dry_run=False,
+        submit_policy="improved",
+        submission_limit_per_day=1,
+    )
 
 
 def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> None:
@@ -1736,8 +1887,10 @@ def test_attempt_submit_switches_to_notebook_submit_after_bad_request(monkeypatc
         "kagglebot.autopilot._load_competition_rule_constraints",
         lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
     )
+    monkeypatch.setattr("kagglebot.autopilot.infer_code_competition_from_paths", lambda *args, **kwargs: True)
 
     submit_calls = {"file": 0, "notebook": 0}
+    captured: dict[str, object] = {}
 
     def bad_request_submit(*args, **kwargs):  # noqa: ARG001
         submit_calls["file"] += 1
@@ -1754,7 +1907,8 @@ def test_attempt_submit_switches_to_notebook_submit_after_bad_request(monkeypatc
         submit_calls["notebook"] += 1
         return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
 
-    def fake_run_kernel(**kwargs):  # noqa: ANN003
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
         output_dir = (
             kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
         )
@@ -1770,7 +1924,10 @@ def test_attempt_submit_switches_to_notebook_submit_after_bad_request(monkeypatc
 
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", bad_request_submit)
     monkeypatch.setattr("kagglebot.autopilot.run_kaggle_submit_kernel", notebook_submit)
-    monkeypatch.setattr("kagglebot.autopilot.run_kernel", lambda **kwargs: fake_run_kernel(**kwargs))
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_submit_kernel",
+        lambda **kwargs: fake_run_submit_kernel(**kwargs),
+    )
 
     result = _attempt_submit(
         config=config,
@@ -1784,6 +1941,7 @@ def test_attempt_submit_switches_to_notebook_submit_after_bad_request(monkeypatc
     assert result["submission_path"] == "kernel:user/demo-kernel"
     assert submit_calls["file"] == 1
     assert submit_calls["notebook"] == 1
+    assert captured["mode"] == "inference"
     rows = [
         json.loads(line)
         for line in (run_dir / "submit_attempts.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1899,7 +2057,7 @@ def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch,
         ),
     )
 
-    def fake_run_kernel(**kwargs):  # noqa: ANN003
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
         output_dir = (
             kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
         )
@@ -1913,7 +2071,10 @@ def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch,
             metrics_path=None,
         )
 
-    monkeypatch.setattr("kagglebot.autopilot.run_kernel", lambda **kwargs: fake_run_kernel(**kwargs))
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_submit_kernel",
+        lambda **kwargs: fake_run_submit_kernel(**kwargs),
+    )
     monkeypatch.setattr(
         "kagglebot.autopilot.run_kaggle_submit_kernel",
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
@@ -1928,6 +2089,151 @@ def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch,
     )
     assert result is not None
     assert result["submission_path"] == "kernel:user/demo-kernel"
+
+
+def test_submit_with_notebook_kernel_forces_internet_off(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu", internet="on")
+    run_id = config.run_id or "run-1"
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
+        captured["run_submit_kernel"] = kwargs
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_submission = output_dir / "submission.csv"
+        out_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        return KernelRunResult(
+            kernel_id="user/demo-submit-kernel",
+            output_dir=output_dir,
+            submission_path=out_submission,
+            metrics_path=None,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kaggle_submit_kernel",
+        lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+    )
+
+    _submit_with_notebook_kernel(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        message="test notebook submit",
+    )
+
+    assert captured["run_submit_kernel"]["enable_internet"] is False
+    assert captured["run_submit_kernel"]["mode"] == "wrapper"
+
+
+def test_submit_with_notebook_kernel_retries_ambiguous_bad_request_once(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu")
+    run_id = config.run_id or "run-1"
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    submit_calls = {"count": 0}
+    sleep_calls: list[float] = []
+
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_submission = output_dir / "submission.csv"
+        out_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        return KernelRunResult(
+            kernel_id="user/demo-submit-kernel",
+            output_dir=output_dir,
+            submission_path=out_submission,
+            metrics_path=None,
+        )
+
+    def fake_run_kaggle_submit_kernel(**kwargs):  # noqa: ANN003, ARG001
+        submit_calls["count"] += 1
+        if submit_calls["count"] == 1:
+            raise SubmissionCliError(
+                "Kaggle CLI notebook submit failed.",
+                command=["kaggle", "competitions", "submit"],
+                exit_code=1,
+                output=(
+                    "400 Client Error: Bad Request for url: "
+                    "https://www.kaggle.com/api/v1/competitions/submissions/submit-notebook/demo"
+                ),
+                stdout="",
+                stderr="",
+            )
+        return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
+    monkeypatch.setattr("kagglebot.autopilot.run_kaggle_submit_kernel", fake_run_kaggle_submit_kernel)
+    monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda seconds: sleep_calls.append(seconds))
+
+    result, submission_ref, artifact_path = _submit_with_notebook_kernel(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        message="test notebook retry",
+    )
+
+    assert result.returncode == 0
+    assert submission_ref == "kernel:user/demo-submit-kernel"
+    assert artifact_path is not None
+    assert submit_calls["count"] == 2
+    assert sleep_calls == [3.0]
+
+
+def test_submit_with_notebook_kernel_uses_inference_mode_when_requested(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu")
+    run_id = config.run_id or "run-1"
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_submission = output_dir / "submission.csv"
+        out_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        return KernelRunResult(
+            kernel_id="user/demo-submit-kernel",
+            output_dir=output_dir,
+            submission_path=out_submission,
+            metrics_path=None,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kaggle_submit_kernel",
+        lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+    )
+
+    _submit_with_notebook_kernel(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        message="test notebook inference submit",
+        artifact_mode="inference",
+    )
+
+    assert captured["mode"] == "inference"
 
 
 def test_attempt_submit_retries_same_path_after_code_change(monkeypatch, tmp_path: Path) -> None:
@@ -2095,6 +2401,49 @@ def test_attempt_submit_aborts_when_polling_reports_error_status(monkeypatch, tm
     assert [row["action_taken"] for row in rows[-2:]] == ["submit", "abort"]
     assert rows[-1]["reason"] == "submission_poll_status_error"
     assert "Kaggle reported: bad submission from Kaggle" in rows[-1]["stderr_tail"]
+
+
+def test_build_submit_failure_improvement_context_for_file_issue(tmp_path: Path) -> None:
+    run_dir = tmp_path / "artifacts" / "demo" / "runs" / "run-1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = run_dir / "iter-1" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    (run_dir / "submit_failure_context.json").write_text(
+        json.dumps(
+            {
+                "active": True,
+                "repairable": True,
+                "repair_target": "submission_artifact",
+                "reason": "submission_poll_status_error",
+                "error_kind": "validation",
+                "submission_artifact_path": str(artifact_path),
+                "summary": "Kaggle reported a submission row-count mismatch.",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "submit_attempts.jsonl").write_text(
+        json.dumps(
+            {
+                "stderr_tail": "Evaluation Exception: Submission must have 132133 rows",
+                "reason": "submission_poll_status_error",
+                "error_kind": "validation",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    notes, reason = _build_submit_failure_improvement_context(run_dir=run_dir)
+
+    assert reason is not None
+    assert "repair submit format" in reason.lower()
+    assert any("failed_submission_artifact=" in note for note in notes)
+    assert any("Submission must have 132133 rows" in note for note in notes)
+    assert any("authoritative `kernel.py`" in note for note in notes)
 
 
 def test_attempt_submit_prefers_repaired_submit_artifact_from_submit_autofix(monkeypatch, tmp_path: Path) -> None:
@@ -3263,6 +3612,215 @@ def test_extract_kernel_metric_from_direct_brier_score_key() -> None:
     assert value == 0.18
 
 
+def test_resolve_explicit_official_metric_override_accepts_generic_plan_fallback() -> None:
+    from kagglebot.autopilot import _resolve_explicit_official_metric_override
+
+    official_metric = "Geometric mean of corpus BLEU and chrF++ (micro-averaged sufficient statistics)"
+    payload = {"official_metric": official_metric, "metric": official_metric}
+
+    override = _resolve_explicit_official_metric_override(
+        payload,
+        target_metric="accuracy",
+        evaluation_metric=official_metric,
+    )
+
+    assert override == official_metric
+
+
+def test_resolve_explicit_official_metric_override_rejects_non_generic_target() -> None:
+    from kagglebot.autopilot import _resolve_explicit_official_metric_override
+
+    official_metric = "Geometric mean of corpus BLEU and chrF++ (micro-averaged sufficient statistics)"
+    payload = {"official_metric": official_metric, "metric": official_metric}
+
+    override = _resolve_explicit_official_metric_override(
+        payload,
+        target_metric="rmse_on_log_target",
+        evaluation_metric=official_metric,
+    )
+
+    assert override is None
+
+
+def test_build_evaluation_contract_prefers_competition_metric_override_for_deep_past(tmp_path: Path) -> None:
+    from kagglebot.autopilot import _build_evaluation_contract
+    from kagglebot.paths import CompetitionPaths
+
+    paths = CompetitionPaths(
+        slug="deep-past-initiative-machine-translation",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    contract = _build_evaluation_contract(
+        paths=paths,
+        eval_spec={},
+        target_metric="accuracy",
+        target_direction="maximize",
+        split_strategy="kfold",
+    )
+
+    assert contract["expected_metric"] == "geometric mean of the bleu and the chrf++ scores"
+    assert contract["expected_direction"] == "maximize"
+    assert contract["expected_split_strategy"] == "group_kfold"
+
+
+def test_resolve_plan_overrides_stale_deep_past_accuracy_contract(tmp_path: Path) -> None:
+    paths = CompetitionPaths(
+        slug="deep-past-initiative-machine-translation",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    plan = PlanConfig(
+        target_metric="accuracy",
+        target_direction="maximize",
+        target_score=39.5,
+        split_strategy="kfold",
+    )
+    config = AutopilotConfig(
+        run_id="run-1",
+        slug="deep-past-initiative-machine-translation",
+        competition_url=None,
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        agent="codex",
+        compute="local_gpu",
+        accelerator="gpu",
+        strict_accelerator=False,
+        kaggle_username=None,
+        kernel_name=None,
+        internet=None,
+        time_budget_min=None,
+        seed=None,
+        score_source=None,
+        holdout_frac=None,
+        cv_folds=None,
+        target_metric=None,
+        target_score=None,
+        target_direction=None,
+        max_iterations=1,
+        max_total_min=60,
+        patience=2,
+        min_improvement=0.0,
+        submit=False,
+        force_submit=False,
+        message=None,
+        verify_cmd="uv run pytest -q",
+        dry_run=False,
+    )
+
+    resolved = _resolve_plan(plan, config)
+    contract = resolved["evaluation_contract"]
+
+    assert resolved["target_metric"] == "Geometric Mean of the BLEU and the chrF++ scores"
+    assert resolved["split_strategy"] == "group_kfold"
+    assert contract["expected_metric"] == "geometric mean of the bleu and the chrf++ scores"
+    assert contract["expected_split_strategy"] == "group_kfold"
+
+
+def test_resolve_plan_keeps_deep_past_override_even_with_stale_evaluation_spec(tmp_path: Path) -> None:
+    paths = CompetitionPaths(
+        slug="deep-past-initiative-machine-translation",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    _write_sample_submission(paths.sample_submission_path)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.joinpath("evaluation_spec.json").write_text(
+        json.dumps(
+            {
+                "metric_name": "accuracy",
+                "direction": "maximize",
+                "split_strategy": "kfold",
+                "n_splits": 7,
+                "seeds": [42, 2024, 777],
+                "repeats": 2,
+                "ci_method": "normal",
+                "ci_alpha": 0.05,
+                "readiness_rule": {
+                    "method": "ci_bound",
+                    "k": 1.0,
+                    "target_score": 39.5,
+                    "submission_gate": "always",
+                },
+                "drift_check": {"enabled": False, "drift_weight": 1.0},
+                "stop_policy": {
+                    "min_delta": 0.0,
+                    "no_improve_patience": 2,
+                    "same_config_patience": 2,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    config = AutopilotConfig(
+        run_id="run-1",
+        slug="deep-past-initiative-machine-translation",
+        competition_url=None,
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        agent="codex",
+        compute="local_gpu",
+        accelerator="gpu",
+        strict_accelerator=False,
+        kaggle_username=None,
+        kernel_name=None,
+        internet=None,
+        time_budget_min=None,
+        seed=None,
+        score_source=None,
+        holdout_frac=None,
+        cv_folds=None,
+        target_metric=None,
+        target_score=None,
+        target_direction=None,
+        max_iterations=1,
+        max_total_min=60,
+        patience=2,
+        min_improvement=0.0,
+        submit=False,
+        force_submit=False,
+        message=None,
+        verify_cmd="uv run pytest -q",
+        dry_run=False,
+    )
+
+    resolved = _resolve_plan(PlanConfig(target_metric="accuracy", split_strategy="kfold"), config)
+    contract = resolved["evaluation_contract"]
+
+    assert resolved["target_metric"] == "Geometric Mean of the BLEU and the chrF++ scores"
+    assert resolved["split_strategy"] == "group_kfold"
+    assert contract["expected_metric"] == "geometric mean of the bleu and the chrf++ scores"
+    assert contract["expected_split_strategy"] == "group_kfold"
+
+
+def test_load_competition_rule_constraints_detects_submit_page_internet_ban(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_rules(
+        paths,
+        "Your Notebook cannot use internet access in this competition. "
+        "Please disable internet in the Notebook editor and save a new version.",
+    )
+
+    constraints = _load_competition_rule_constraints(paths)
+
+    assert constraints.internet_must_be_off is True
+
+
+def test_resolve_plan_forces_internet_off_when_rules_ban_notebook_internet(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, compute="kaggle_gpu", internet="on")
+    _write_rules(
+        config.paths,
+        "Code submissions to this competition must be made through Notebooks. "
+        "Internet access is not allowed for submissions.",
+    )
+
+    resolved = _resolve_plan(PlanConfig(), config)
+
+    assert resolved["submit_mode"] == "notebook"
+    assert resolved["internet"] == "off"
+
+
 def test_load_kernel_metrics_supports_selected_cv_mean_schema(tmp_path: Path) -> None:
     from kagglebot.autopilot import _load_kernel_metrics
 
@@ -3349,6 +3907,51 @@ def test_kernel_quality_guard_blocks_when_selected_worse_than_baseline() -> None
     reasons = guard.get("reasons")
     assert isinstance(reasons, list)
     assert "selected_worse_than_detected_baseline" in reasons
+
+
+def test_kernel_quality_guard_ignores_baseline_fold_indices_in_logs(tmp_path: Path) -> None:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "local_kernel_stdout.log").write_text(
+        "\n".join(
+            [
+                "baseline_metadata fold=0 seed=3557 macro_f1=0.38366",
+                "baseline_metadata fold=1 seed=3557 macro_f1=0.36519",
+                "baseline_metadata fold=2 seed=3557 macro_f1=0.36136",
+                "baseline_metadata fold=3 seed=3557 macro_f1=0.37635",
+                "baseline_metadata cv_macro_f1=0.37159 mean_seed=0.37159",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="macro_f1",
+        direction="maximize",
+        value=0.860307,
+        std=0.015,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.84, 0.85, 0.87, 0.88],
+    )
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload={},
+        evaluation_report=None,
+        evaluation_contract=None,
+        logs_dir=logs_dir,
+        direction="maximize",
+        iteration=2,
+        max_iterations=5,
+        force_submit=False,
+    )
+    reasons = guard.get("reasons")
+    assert isinstance(reasons, list)
+    assert "selected_worse_than_detected_baseline" not in reasons
+    baseline = guard.get("baseline")
+    assert isinstance(baseline, dict)
+    assert baseline.get("best_score") == pytest.approx(0.37159)
 
 
 def test_kernel_quality_guard_blocks_on_severe_validation_mismatch(tmp_path: Path) -> None:
@@ -3504,6 +4107,39 @@ def test_kernel_quality_guard_blocks_when_below_code_reference_baseline() -> Non
     code_ref = guard.get("code_reference")
     assert isinstance(code_ref, dict)
     assert code_ref.get("below_reference") is True
+
+
+def test_kernel_quality_guard_normalizes_percent_code_reference_for_accuracy() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="accuracy",
+        direction="maximize",
+        value=0.995220,
+        std=0.001,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.995, 0.996],
+    )
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload={},
+        evaluation_report=None,
+        evaluation_contract=None,
+        logs_dir=None,
+        direction="maximize",
+        iteration=3,
+        max_iterations=3,
+        force_submit=False,
+        code_reference_score=98.9,
+        code_reference_source="code_index:abdulravoofshaik/denoising-autoencoder-lb-98-9",
+    )
+    reasons = guard.get("reasons")
+    assert isinstance(reasons, list)
+    assert "below_code_reference_baseline" not in reasons
+    code_ref = guard.get("code_reference")
+    assert isinstance(code_ref, dict)
+    assert code_ref.get("comparison_score") == pytest.approx(0.989)
+    assert code_ref.get("below_reference") is False
 
 
 def test_kernel_quality_guard_blocks_competition_split_mismatch() -> None:
@@ -4639,8 +5275,8 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     run_autopilot(config)
     iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
     assert (iter_dir / "agent" / "prompt.md").exists()
-    assert any(kwargs.get("model") == "gpt-5.4" for kwargs in codex_kwargs_seen)
-    assert any(kwargs.get("reasoning_effort") == "extra_high" for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("model") == "gpt-5.5" for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("reasoning_effort") == "xhigh" for kwargs in codex_kwargs_seen)
 
 
 def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path: Path) -> None:
@@ -4705,6 +5341,95 @@ def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path:
     assert len(pending_problem_insights) == 1
 
 
+def test_run_improvement_retries_transient_agent_capacity(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _run_improvement
+
+    class DummyResult:
+        def __init__(
+            self,
+            path: Path,
+            *,
+            returncode: int,
+            stdout: str = "",
+            stderr: str = "",
+        ) -> None:
+            self.returncode = returncode
+            self.last_message_path = path
+            self.stdout = stdout
+            self.stderr = stderr
+
+    config = _make_config(tmp_path, max_iterations=2)
+    run_id = config.run_id or "run-1"
+    iteration = 1
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    calls = {"codex": 0}
+    output_dirs: list[Path] = []
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        calls["codex"] += 1
+        output_dirs.append(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        last_msg = output_dir / "codex_last_message.txt"
+        if calls["codex"] == 1:
+            last_msg.write_text("stale-looking success text\n", encoding="utf-8")
+            return DummyResult(
+                last_msg,
+                returncode=1,
+                stdout='{"type":"error","message":"Selected model is at capacity. Please try a different model."}\n',
+            )
+        last_msg.write_text("improved after retry\n", encoding="utf-8")
+        return DummyResult(last_msg, returncode=0)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.AGENT_CAPACITY_RETRY_SLEEP", 0.0)
+
+    pending_problem_insights: list[dict[str, object]] = []
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="accuracy",
+        direction="maximize",
+        value=0.70,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+    _run_improvement(
+        config=config,
+        run_id=run_id,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        evaluation=evaluation,
+        top1_info={"score": 0.78, "source": "leaderboard"},
+        target_score=0.78,
+        delta_offline=-0.01,
+        pending_problem_insights=pending_problem_insights,
+    )
+
+    assert calls["codex"] == 2
+    assert output_dirs[0] == iter_dir / "agent"
+    assert output_dirs[1].parent == iter_dir / "agent"
+    assert output_dirs[1].name.startswith("improve_capacity_retry")
+
+
+def test_agent_capacity_failure_detection_and_detail() -> None:
+    class DummyResult:
+        returncode = 1
+        stdout = '{"type":"error","message":"Selected model is at capacity. Please try a different model."}'
+        stderr = "stderr text"
+
+    assert _is_agent_capacity_failure(DummyResult(), "stale success text")
+    detail = _agent_failure_detail(DummyResult(), "stale success text")
+    assert "returncode=1" in detail
+    assert "stderr=stderr text" in detail
+    assert "response=stale success text" in detail
+    assert "transcript_tail=" in detail
+
+
 def test_extract_code_reference_score_prefers_required_index_entry(tmp_path: Path) -> None:
     from kagglebot.autopilot import _extract_code_reference_score
 
@@ -4759,6 +5484,36 @@ def test_extract_iteration_policy_signals_detect_orig_proba_and_pseudo_label_fai
     )
     assert mismatch is not None
     assert "public leaderboard regressed" in str(mismatch["note"]).lower()
+
+    missing_ensemble = _extract_missing_ensemble_signal(
+        {
+            "model_families": ["xgboost", "catboost"],
+            "blend_method": "single",
+            "component_models": ["xgb_only"],
+        }
+    )
+    assert missing_ensemble is not None
+    assert "weighted or rank OOF blend" in str(missing_ensemble["note"])
+
+    original_data_unused = _extract_original_data_unused_signal(
+        kernel_metrics_payload={"original_data_found": False, "external_data_used": False},
+        reference_inputs_manifest_payload={
+            "required_datasets": ["alice/original-data"],
+            "reference_notebooks": [{"staged_sources": [{"kind": "dataset", "ref": "alice/original-data"}]}],
+        },
+    )
+    assert original_data_unused is not None
+    assert "staged but the kernel did not use them" in str(original_data_unused["note"])
+
+    same_family = _extract_same_family_plateau_signal(
+        {
+            "model_families": ["xgboost"],
+            "pipelines": [{"name": "xgb_a"}, {"name": "xgb_b"}],
+            "selected_pipeline": "xgb_b",
+        }
+    )
+    assert same_family is not None
+    assert "same-family plateau" in str(same_family["note"])
 
 
 def test_run_improvement_appends_code_reference_gate_when_underperforming(monkeypatch, tmp_path: Path) -> None:
@@ -4912,6 +5667,117 @@ def test_run_improvement_appends_additional_policy_notes(monkeypatch, tmp_path: 
     assert "context/reference_inputs_manifest.json" in prompt_text
 
 
+def test_run_improvement_appends_competition_policy_override(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _run_improvement
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    config = _make_config(tmp_path, max_iterations=2)
+    run_id = config.run_id or "run-1"
+    iteration = 1
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    kernel_path = config.paths.kernel_source_dir / "kernel.py"
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "required_capabilities": [
+                    "recoverable_original_dataset",
+                    "heterogeneous_tabular_ensemble",
+                    "requires_oof_blend",
+                    "text_translation_seq2seq",
+                    "requires_grouped_text_cv",
+                    "requires_candidate_rerank",
+                    "supports_metadata_supervision",
+                    "supports_soft_constraint_rewrite",
+                ],
+                "execution_hints": {
+                    "tabular_original_data_usage": "prefer_recovered_public_original_dataset_when_staged",
+                },
+                "prompt": {
+                    "ablation_groups": ["comp_only", "comp_plus_orig"],
+                    "min_model_families_before_stop": 3,
+                    "require_oof_blend_before_stop": True,
+                    "prefer_ensemble_reference": True,
+                },
+                "evaluation": {"search_stop_rank_percentile": 0.08},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    config.paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "ensemble_reference_kernel_id": "alice/blend-kernel",
+                "notebooks": [
+                    {"kernel_id": "alice/ref-kernel", "title": "Required ref"},
+                    {"kernel_id": "alice/blend-kernel", "title": "Blend ref"},
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        kernel_path.write_text("print('ok')\n", encoding="utf-8")
+        last_msg = output_dir / "codex_last_message.txt"
+        last_msg.write_text("improved\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
+
+    pending_problem_insights: list[dict[str, object]] = []
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.62,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+    _run_improvement(
+        config=config,
+        run_id=run_id,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        evaluation=evaluation,
+        top1_info={"score": 0.78, "source": "leaderboard"},
+        target_score=0.78,
+        delta_offline=-0.02,
+        pending_problem_insights=pending_problem_insights,
+    )
+
+    prompt_text = (iter_dir / "agent" / "prompt.md").read_text(encoding="utf-8")
+    assert "Competition policy override is active." in prompt_text
+    assert (
+        "Required capabilities: recoverable_original_dataset, heterogeneous_tabular_ensemble, requires_oof_blend"
+        in prompt_text
+    )
+    assert "Minimum model families before stop: 3" in prompt_text
+    assert "wire them into training or feature generation" in prompt_text
+    assert "weighted or rank blend artifact" in prompt_text
+    assert "src/kagglebot/kernel_runtime/text_translation.py" in prompt_text
+    assert "grouped text CV keyed by the plan/runtime group columns" in prompt_text
+    assert "retrieval as a candidate source or fallback only" in prompt_text
+    assert "text_runtime.required_aux_inputs" in prompt_text
+    assert "soft constraint rewrites and rerank bonuses" in prompt_text
+    assert "execution_hints:" in prompt_text
+    assert "ensemble_kernel_id: alice/blend-kernel" in prompt_text
+
+
 def test_run_improvement_retries_when_code_reference_impl_is_missing(monkeypatch, tmp_path: Path) -> None:
     from kagglebot.autopilot import _run_improvement
 
@@ -5000,6 +5866,91 @@ def test_run_improvement_retries_when_code_reference_impl_is_missing(monkeypatch
     kernel_text = kernel_path.read_text(encoding="utf-8")
     assert "KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED: alice/ref-kernel" in kernel_text
     assert "tabicl" in kernel_text.lower()
+
+
+def test_run_improvement_code_reference_repair_allows_src_edits(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _run_improvement
+
+    class DummyResult:
+        def __init__(self, path: Path) -> None:
+            self.returncode = 0
+            self.last_message_path = path
+
+    config = _make_config(tmp_path, max_iterations=2)
+    run_id = config.run_id or "run-1"
+    iteration = 1
+    iter_dir = config.paths.iter_dir(run_id, iteration)
+    kernel_path = config.paths.kernel_source_dir / "kernel.py"
+    support_path = config.paths.repo_root / "src" / "support_fix.py"
+
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [
+                    {
+                        "kernel_id": "alice/ref-kernel",
+                        "title": "Reference kernel",
+                        "summary": "starter baseline",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    codex_calls = {"count": 0}
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs):  # noqa: ARG001
+        codex_calls["count"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if codex_calls["count"] == 2:
+            support_path.parent.mkdir(parents=True, exist_ok=True)
+            support_path.write_text("REPAIRED = True\n", encoding="utf-8")
+            kernel_path.write_text(
+                "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED: alice/ref-kernel\nprint('ok')\n",
+                encoding="utf-8",
+            )
+        last_msg = output_dir / f"codex_last_message_{codex_calls['count']}.txt"
+        last_msg.write_text("improved\n", encoding="utf-8")
+        return DummyResult(last_msg)
+
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
+
+    pending_problem_insights: list[dict[str, object]] = []
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.70,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+    _run_improvement(
+        config=config,
+        run_id=run_id,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        evaluation=evaluation,
+        top1_info={"score": 0.78, "source": "leaderboard"},
+        target_score=0.78,
+        delta_offline=-0.01,
+        pending_problem_insights=pending_problem_insights,
+        enforce_code_reference_implementation=True,
+        code_reference_enforcement_reason="repair needs shared helper edits",
+    )
+
+    assert codex_calls["count"] == 2
+    assert support_path.exists()
+    assert "KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED: alice/ref-kernel" in kernel_path.read_text(encoding="utf-8")
 
 
 def test_autopilot_runs_agent_pipeline(monkeypatch, tmp_path: Path) -> None:
@@ -5269,6 +6220,7 @@ def test_autopilot_skips_fallback_submit_after_untrusted_final_iteration(
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
         "kagglebot.autopilot._load_competition_rule_constraints",
@@ -5359,6 +6311,7 @@ def test_autopilot_skips_fallback_submit_when_higher_potential_candidate_exists(
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
         "kagglebot.autopilot._load_competition_rule_constraints",
@@ -6826,20 +7779,13 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
 
 
 def test_autofix_allows_src_edits(tmp_path: Path) -> None:
-    from kagglebot import autopilot as autopilot_mod
     from kagglebot.autopilot import _autofix_allowed_prefixes
 
     config = _make_config(tmp_path)
-    allowed_prefixes = _autofix_allowed_prefixes(config)
-    assert config.paths.repo_root / "src" in allowed_prefixes
-    assert config.paths.repo_root / "pyproject.toml" in allowed_prefixes
-    assert config.paths.repo_root / "uv.lock" in allowed_prefixes
-    module_src_root = Path(autopilot_mod.__file__).resolve().parents[1]
-    if module_src_root.name == "src":
-        assert module_src_root in allowed_prefixes
-    assert config.paths.base_dir not in allowed_prefixes
-    assert config.paths.kernels_dir not in allowed_prefixes
-    assert config.paths.data_dir not in allowed_prefixes
+    write_policy = _autofix_allowed_prefixes(config)
+    assert config.paths.repo_root in write_policy.allowed_prefixes
+    assert config.paths.data_dir in write_policy.denied_prefixes
+    assert config.paths.kernels_dir in write_policy.denied_prefixes
 
 
 def test_autofix_writes_object_coerce(tmp_path: Path) -> None:

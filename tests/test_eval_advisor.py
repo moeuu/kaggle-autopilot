@@ -48,6 +48,17 @@ def test_validate_advisor_payload_schema_passes() -> None:
     assert queries is not None
 
 
+def test_validate_advisor_payload_accepts_brier_score_metric() -> None:
+    payload = _valid_payload()
+    payload["evaluation_spec"]["metric_name"] = "brier_score"
+    payload["evaluation_spec"]["direction"] = "minimize"
+    spec, _, _, issues = validate_advisor_payload(payload)
+    assert issues == []
+    assert spec is not None
+    assert spec["metric_name"] == "brier_score"
+    assert spec["direction"] == "minimize"
+
+
 def test_validate_advisor_payload_schema_rejects_extra_keys() -> None:
     payload = _valid_payload()
     payload["evaluation_spec"]["unsupported"] = True  # type: ignore[index]
@@ -150,6 +161,48 @@ def test_evaluation_advisor_fallback_prefers_context_metric_over_profile_metric(
     spec, source = advisor.ensure_spec()
     assert source == "fallback"
     assert spec["metric_name"] == "auc"
+
+
+def test_evaluation_advisor_fallback_applies_competition_policy_overrides(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "auc", "task": "classification", "modality": "tabular"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Evaluation metric is ROC-AUC.\n", encoding="utf-8")
+    paths.overview_md_path.write_text("Leaderboard competition.\n", encoding="utf-8")
+    paths.submission_format_md_path.write_text("id,target\n", encoding="utf-8")
+    paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "evaluation": {
+                    "fallback_overrides": {
+                        "seeds": [42, 2025],
+                        "repeats": 2,
+                        "ci_method": "bootstrap",
+                    },
+                    "search_stop_rank_percentile": 0.08,
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+    assert source == "fallback"
+    assert spec["seeds"] == [42, 2025]
+    assert spec["repeats"] == 2
+    assert spec["ci_method"] == "bootstrap"
+    assert spec["target_rank_percentile"] == 0.08
 
 
 def test_evaluation_advisor_fallback_infers_writeup_mode_from_context(tmp_path: Path) -> None:

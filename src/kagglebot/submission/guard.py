@@ -285,8 +285,31 @@ def compute_error_fingerprint(stdout: str, stderr: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _is_ambiguous_notebook_bad_request(text: str) -> bool:
+    normalized = normalize_error_text(text, max_chars=12000).lower()
+    if "submit-notebook" not in normalized:
+        return False
+    if "400 client error" not in normalized and "bad request" not in normalized:
+        return False
+    informative_hints = (
+        "only accepts submissions from notebooks",
+        "must be made through notebooks",
+        "output file name and the version label",
+        "kernel must be specified as",
+        "accept the rules",
+        "you must accept",
+        "unauthorized",
+        "api credentials",
+        "submission limit",
+        "competition is not accepting submissions",
+    )
+    return not any(hint in normalized for hint in informative_hints)
+
+
 def classify_submit_error(stdout: str, stderr: str, returncode: int) -> dict[str, object]:
     merged = f"{stdout}\n{stderr}"
+    if _is_ambiguous_notebook_bad_request(merged):
+        return {"kind": "unknown", "reason": "ambiguous_notebook_bad_request", "retry_after_seconds": 3}
     for reason, patterns in _PERMANENT_RULES:
         if any(pattern.search(merged) for pattern in patterns):
             return {"kind": "permanent", "reason": reason, "retry_after_seconds": None}
