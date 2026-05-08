@@ -13,7 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.competition import parse_competition_slug
-from kagglebot.exceptions import KaggleCliError, KaggleNetworkError, KernelCapacityError, RulesNotAcceptedError
+from kagglebot.exceptions import (
+    KaggleCliError,
+    KaggleCliResourceError,
+    KaggleNetworkError,
+    KernelCapacityError,
+    RulesNotAcceptedError,
+)
 from kagglebot.exec_utils import run_command
 from kagglebot.submission.guard import run_kaggle_submit
 from kagglebot.validators import safe_extract_zip
@@ -34,6 +40,7 @@ _DEFAULT_RATE_LIMIT_BACKOFF_SEC = 60.0
 _DEFAULT_RATE_LIMIT_MAX_BACKOFF_SEC = 900.0
 _DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC = 0.0
 _DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST = True
+_DEFAULT_KAGGLE_CLI_MEMORY_LIMIT_MB = 8192
 
 logger = logging.getLogger(__name__)
 
@@ -524,6 +531,8 @@ def _summarize_error_output(output: str) -> str:
 
 
 def _is_retryable_download_error(exc: KaggleCliError) -> bool:
+    if isinstance(exc, KaggleCliResourceError):
+        return False
     if isinstance(exc, KaggleNetworkError):
         return True
     if exc.exit_code in {130, 137, 143}:
@@ -1214,11 +1223,18 @@ def _matches_slug(ref: str | None, slug: str) -> bool:
 
 def _run_kaggle(args: list[str], slug: str | None, *, dry_run: bool) -> str:
     try:
-        result = run_command(args, dry_run=dry_run)
+        result = run_command(args, dry_run=dry_run, memory_limit_mb=_kaggle_cli_memory_limit_mb())
     except FileNotFoundError as exc:
         raise KaggleCliError("Kaggle CLI not found. Install `kaggle` and ensure it is on PATH.", args) from exc
 
     output = result.output
+    if _is_kaggle_cli_resource_error(result):
+        raise KaggleCliResourceError(
+            f"Kaggle CLI hit the host resource guard or was killed (exit code {result.returncode}).",
+            args,
+            exit_code=result.returncode,
+            output=output,
+        )
     if _is_kernel_capacity_limit(output):
         raise KernelCapacityError(
             "Kaggle GPU session limit reached; free running GPU sessions and retry.",
@@ -1243,6 +1259,35 @@ def _run_kaggle(args: list[str], slug: str | None, *, dry_run: bool) -> str:
             output=output,
         )
     return output
+
+
+def _kaggle_cli_memory_limit_mb() -> int | None:
+    raw = os.getenv("KAGGLEBOT_KAGGLE_CLI_MEMORY_LIMIT_MB")
+    if raw is None:
+        return _DEFAULT_KAGGLE_CLI_MEMORY_LIMIT_MB
+    try:
+        value = int(float(raw.strip()))
+    except ValueError:
+        return _DEFAULT_KAGGLE_CLI_MEMORY_LIMIT_MB
+    if value <= 0:
+        return None
+    return value
+
+
+def _is_kaggle_cli_resource_error(result: object) -> bool:
+    returncode = getattr(result, "returncode", None)
+    output = str(getattr(result, "output", "") or "").lower()
+    if returncode in {-9, 137}:
+        return True
+    resource_tokens = (
+        "memoryerror",
+        "cannot allocate memory",
+        "out of memory",
+        "oom-kill",
+        "oom killed",
+        "killed process",
+    )
+    return any(token in output for token in resource_tokens)
 
 
 def _is_rules_not_accepted(output: str) -> bool:

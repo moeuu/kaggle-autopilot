@@ -14,7 +14,12 @@ from rich import print
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.eval import EvaluationAdvisor
-from kagglebot.exceptions import KernelCapacityError, RulesNotAcceptedError, SubmitAbortedError
+from kagglebot.exceptions import (
+    KaggleCliResourceError,
+    KernelCapacityError,
+    RulesNotAcceptedError,
+    SubmitAbortedError,
+)
 from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import (
     EnteredCompetition,
@@ -38,6 +43,7 @@ _REWARD_AMOUNT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS = 24.0
+_DEFAULT_RESOURCE_BLOCK_TTL_HOURS = 168.0
 
 
 @dataclass(frozen=True)
@@ -268,6 +274,21 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
         _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "no_capacity"})
         print("[yellow]watch[/yellow]: kaggle_gpu capacity unavailable; leaving local_gpu as the only active runner")
         return WatchCycleResult(status="no_capacity", slug=candidate.slug, run_id=run_id, reason=str(exc))
+    except KaggleCliResourceError as exc:
+        reason = "kaggle_cli_resource_limit"
+        ledger.append("resource_blocked", slug=candidate.slug, run_id=run_id, reason=reason, error=str(exc))
+        _write_state(
+            config.state_path,
+            {
+                "active_slug": None,
+                "active_run_id": None,
+                "last_status": "skipped",
+                "phase": "resource_blocked",
+                "reason": reason,
+            },
+        )
+        print(f"[yellow]watch[/yellow]: resource guard blocked {candidate.slug}; skipping retry for now")
+        return WatchCycleResult(status="skipped", slug=candidate.slug, run_id=run_id, reason=reason)
     except Exception as exc:  # noqa: BLE001
         ledger.append("failed", slug=candidate.slug, run_id=run_id, reason=type(exc).__name__, error=str(exc))
         _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
@@ -651,7 +672,9 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
     ledger = ledger or WatchLedger(config.ledger_path)
     allow = {slug.strip().lower() for slug in config.allow_slugs if slug.strip()}
     block = {slug.strip().lower() for slug in config.block_slugs if slug.strip()}
-    cooldown = _cooldown_slugs(_all_watch_records(config, primary=ledger), hours=config.cooldown_hours)
+    records = _all_watch_records(config, primary=ledger)
+    cooldown = _cooldown_slugs(records, hours=config.cooldown_hours)
+    resource_blocked = _resource_blocked_slugs(records)
     active = _active_slugs(config)
     candidates = list_entered_competitions(page_limit=config.page_limit, dry_run=config.dry_run)
     filtered: list[tuple[bool, float, int, EnteredCompetition]] = []
@@ -662,6 +685,9 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
         if allow and slug not in allow:
             continue
         if slug in block or slug in cooldown:
+            continue
+        if slug in resource_blocked:
+            ledger.append("candidate_skipped", slug=candidate.slug, reason="resource_blocked")
             continue
         if candidate.submissions_disabled:
             continue
@@ -1194,6 +1220,33 @@ def _cooldown_slugs(records: list[dict[str, object]], *, hours: float) -> set[st
         if slug and ts is not None and ts >= cutoff:
             slugs.add(slug)
     return slugs
+
+
+def _resource_blocked_slugs(records: list[dict[str, object]]) -> set[str]:
+    hours = _resource_block_ttl_hours()
+    if hours <= 0:
+        return set()
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    slugs: set[str] = set()
+    for record in records:
+        if record.get("event") != "resource_blocked":
+            continue
+        ts = _parse_ts(record.get("ts"))
+        slug = str(record.get("slug") or "").strip().lower()
+        if slug and ts is not None and ts >= cutoff:
+            slugs.add(slug)
+    return slugs
+
+
+def _resource_block_ttl_hours() -> float:
+    raw = os.environ.get("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS")
+    if raw is None:
+        return _DEFAULT_RESOURCE_BLOCK_TTL_HOURS
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return _DEFAULT_RESOURCE_BLOCK_TTL_HOURS
+    return max(0.0, value)
 
 
 def _all_watch_records(config: WatchConfig, *, primary: WatchLedger) -> list[dict[str, object]]:

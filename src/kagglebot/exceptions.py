@@ -42,6 +42,12 @@ class KaggleNetworkError(KaggleCliError):
     exit_code = 16
 
 
+class KaggleCliResourceError(KaggleCliError):
+    """Kaggle CLI was killed or failed due to host resource pressure."""
+
+    exit_code = 17
+
+
 class KernelCapacityError(KaggleCliError):
     """Kaggle GPU session capacity limit reached."""
 

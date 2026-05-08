@@ -71,6 +71,7 @@ def run_command(
     dry_run: bool = False,
     stream_output: bool = False,
     line_callback: Callable[[str], None] | None = None,
+    memory_limit_mb: int | None = None,
 ) -> CommandResult:
     """
     Execute an external command safely (no shell).
@@ -96,6 +97,7 @@ def run_command(
         return CommandResult(args=args, returncode=0, stdout="", stderr="", duration_sec=0.0)
 
     start = time.monotonic()
+    preexec_fn = _memory_limit_preexec(memory_limit_mb)
     if stream_output:
         proc = subprocess.Popen(
             args,
@@ -106,6 +108,7 @@ def run_command(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=os.name != "nt",
+            preexec_fn=preexec_fn,
         )
         stdout_chunks: list[str] = []
         if input_text is not None and proc.stdin is not None:
@@ -215,6 +218,7 @@ def run_command(
         capture_output=True,
         check=False,
         timeout=timeout,
+        preexec_fn=preexec_fn,
     )
     duration = time.monotonic() - start
     return CommandResult(
@@ -224,3 +228,22 @@ def run_command(
         stderr=completed.stderr or "",
         duration_sec=duration,
     )
+
+
+def _memory_limit_preexec(memory_limit_mb: int | None) -> Callable[[], None] | None:
+    if os.name == "nt" or memory_limit_mb is None or memory_limit_mb <= 0:
+        return None
+
+    limit_bytes = int(memory_limit_mb) * 1024 * 1024
+
+    def _set_memory_limit() -> None:
+        try:
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+        except Exception:  # noqa: BLE001
+            # Best-effort guard: command execution should still work if the platform
+            # refuses address-space limits.
+            return
+
+    return _set_memory_limit

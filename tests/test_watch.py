@@ -7,7 +7,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from kagglebot.cli import app
-from kagglebot.exceptions import KernelCapacityError
+from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError
 from kagglebot.kaggle_api import EnteredCompetition
 from kagglebot.supervisor import (
     WatchConfig,
@@ -110,6 +110,17 @@ def test_select_next_competition_skips_recent_failures(monkeypatch, tmp_path: Pa
     monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
     config = _config(tmp_path)
     WatchLedger(config.ledger_path).append("failed", slug="failed-recently", run_id="run-1")
+
+    selected = select_next_competition(config)
+
+    assert [item.slug for item in selected] == ["fresh"]
+
+
+def test_select_next_competition_skips_recent_resource_blocks(monkeypatch, tmp_path: Path) -> None:
+    candidates = [_competition("resource-heavy"), _competition("fresh")]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+    config = _config(tmp_path)
+    WatchLedger(config.ledger_path).append("resource_blocked", slug="resource-heavy", run_id="run-1")
 
     selected = select_next_competition(config)
 
@@ -637,6 +648,31 @@ def test_run_watch_once_failure_is_recorded_and_next_cycle_selects_new_competiti
     assert second.status == "finished"
     assert second.slug == "second"
     assert attempts == ["first", "second"]
+
+
+def test_run_watch_once_resource_error_records_resource_block(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "kagglebot.supervisor.list_entered_competitions",
+        lambda **kwargs: [_competition("resource-heavy"), _competition("fresh")],
+    )
+
+    def fake_prepare_competition(**kwargs) -> None:  # noqa: ANN003
+        raise KaggleCliResourceError("resource guard", ["kaggle"], exit_code=-9)
+
+    monkeypatch.setattr("kagglebot.supervisor._prepare_competition", fake_prepare_competition)
+    config = _config(tmp_path)
+
+    result = run_watch_once(config)
+    selected_after = select_next_competition(config)
+
+    records = WatchLedger(config.ledger_path).records()
+    assert result.status == "skipped"
+    assert result.reason == "kaggle_cli_resource_limit"
+    assert any(record.get("event") == "resource_blocked" for record in records)
+    assert [item.slug for item in selected_after] == ["fresh"]
 
 
 def test_watch_cli_requires_force_for_enabled_submissions(tmp_path: Path) -> None:

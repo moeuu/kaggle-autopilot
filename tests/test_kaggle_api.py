@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from kagglebot import kaggle_api
-from kagglebot.exceptions import KaggleCliError, KernelCapacityError, RulesNotAcceptedError
+from kagglebot.exceptions import KaggleCliError, KaggleCliResourceError, KernelCapacityError, RulesNotAcceptedError
 from kagglebot.exec_utils import CommandResult
 
 
@@ -75,6 +75,36 @@ def test_kernels_push_detects_capacity_limit_even_on_zero_exit(monkeypatch) -> N
 
     with pytest.raises(KernelCapacityError, match="GPU session limit"):
         kaggle_api.kernels_push(Path("kernel"), slug="demo", dry_run=False)
+
+
+def test_run_kaggle_applies_memory_limit_and_classifies_sigkill(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, *, dry_run=False, memory_limit_mb=None, **kwargs):  # noqa: ARG001
+        captured["memory_limit_mb"] = memory_limit_mb
+        return CommandResult(args=args, returncode=-9, stdout="", stderr="", duration_sec=0.1)
+
+    monkeypatch.setattr(kaggle_api, "run_command", fake_run_command)
+
+    with pytest.raises(KaggleCliResourceError):
+        kaggle_api._run_kaggle(["kaggle", "competitions", "download", "-c", "demo"], slug="demo", dry_run=False)
+
+    assert captured["memory_limit_mb"] == 8192
+
+
+def test_download_competition_does_not_retry_resource_guard(monkeypatch, tmp_path) -> None:
+    calls = {"n": 0}
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        calls["n"] += 1
+        raise KaggleCliResourceError("resource guard", args, exit_code=-9, output="")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    with pytest.raises(KaggleCliResourceError):
+        kaggle_api.download_competition("demo", tmp_path, force=True, quiet=True)
+
+    assert calls["n"] == 1
 
 
 def test_leaderboard_top1_prefers_score_columns(monkeypatch, tmp_path) -> None:
