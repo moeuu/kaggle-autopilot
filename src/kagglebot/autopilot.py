@@ -17,7 +17,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -236,6 +236,7 @@ _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
 _FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
 _FORCED_INITIAL_SUBMIT_STATE = "forced_initial_submit"
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
+_SPARE_DAILY_SUBMIT_REASON = "spare_daily_submission_slot"
 _SUBMIT_FAILED_DEFERRED_STATE = "submit_failed_deferred"
 _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
@@ -309,6 +310,12 @@ _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = 0.05
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = 0.0
 _QUALITY_GUARD_CODE_REF_ABS_MARGIN = 0.02
 _HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
+_SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = frozenset(
+    {
+        "selected_worse_than_detected_baseline",
+        "below_code_reference_baseline",
+    }
+)
 _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = 0.02
 _BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = 0.01
 _REGRESSION_GUARD_ABS_DROP_PROB = 0.03
@@ -1650,7 +1657,34 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submit_policy=str(resolved.get("submit_policy") or ""),
                 submission_limit_per_day=submission_limit_per_day,
             )
+            is_final_iteration = iteration >= max_iterations
+            successful_submit_count = _submission_count_for_daily_limit(
+                slug=config.slug,
+                run_dir=run_dir,
+                submission_limit_per_day=submission_limit_per_day,
+                dry_run=config.dry_run,
+            )
+            spare_daily_submission_slot = _has_spare_daily_submission_slot(
+                submission_limit_per_day=submission_limit_per_day,
+                submissions_used_today=successful_submit_count,
+                iteration=iteration,
+                max_iterations=max_iterations,
+            )
             forced_submit_reason: str | None = None
+            if (
+                submit_enabled
+                and (not quality_allows_submit)
+                and (not config.force_submit)
+                and (not force_initial_submit)
+                and spare_daily_submission_slot
+                and _quality_reasons_allow_spare_submit(quality_reasons)
+            ):
+                quality_allows_submit = True
+                forced_submit_reason = _SPARE_DAILY_SUBMIT_REASON
+                print(
+                    "[yellow]submit override[/yellow]: spare daily submission slots remain; "
+                    "allowing submit through soft quality guard reasons."
+                )
             if (
                 submit_enabled
                 and (not quality_allows_submit)
@@ -1684,15 +1718,23 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     best_submittable_score = decision_score
                     best_submittable_submission = submission_path
 
-            is_final_iteration = iteration >= max_iterations
-            successful_submit_count = _count_successful_submit_attempts(run_dir)
             submit_improvement_allowed = True
             submit_non_improving = False
             defer_submit_for_accuracy_frontier = False
             if submit_improved_only and not config.force_submit and best_submitted_score is None:
-                submit_improvement_allowed = False
-                submit_non_improving = True
-                print("[yellow]submit deferred[/yellow]: submit_policy=improved requires a prior submitted checkpoint.")
+                if submit_enabled and spare_daily_submission_slot and quality_allows_submit:
+                    forced_submit_reason = forced_submit_reason or _SPARE_DAILY_SUBMIT_REASON
+                    print(
+                        "[yellow]submit override[/yellow]: spare daily submission slots remain; "
+                        "allowing submit without a prior submitted checkpoint."
+                    )
+                else:
+                    submit_improvement_allowed = False
+                    submit_non_improving = True
+                    print(
+                        "[yellow]submit deferred[/yellow]: submit_policy=improved requires "
+                        "a prior submitted checkpoint."
+                    )
             elif (
                 (require_submit_improvement or submit_improved_only)
                 and not config.force_submit
@@ -1711,6 +1753,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "allowing submit even though score did not improve over submitted checkpoints."
                         )
                         submit_improvement_allowed = True
+                    elif submit_enabled and spare_daily_submission_slot and quality_allows_submit:
+                        forced_submit_reason = forced_submit_reason or _SPARE_DAILY_SUBMIT_REASON
+                        submit_improvement_allowed = True
+                        print(
+                            "[yellow]submit override[/yellow]: spare daily submission slots remain; "
+                            "allowing non-improving checkpoint submit."
+                        )
                     else:
                         submit_non_improving = True
                         print(
@@ -1734,6 +1783,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "[yellow]submit deferred[/yellow]: preserving a higher-potential unsubmitted candidate "
                         "instead of auto-submitting a weaker artifact."
                     )
+            if (
+                defer_submit_for_accuracy_frontier
+                and spare_daily_submission_slot
+                and quality_allows_submit
+                and submit_improvement_allowed
+            ):
+                defer_submit_for_accuracy_frontier = False
+                forced_submit_reason = forced_submit_reason or _SPARE_DAILY_SUBMIT_REASON
+                print(
+                    "[yellow]submit override[/yellow]: spare daily submission slots remain; "
+                    "not preserving a higher-potential candidate for later."
+                )
             allow_submit = _should_attempt_submit_for_readiness(
                 gate=submission_gate,
                 readiness_score=decision_score,
@@ -5964,6 +6025,127 @@ def _resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[fl
     return prev_score, streak
 
 
+def _parse_kaggle_submission_timestamp(value: str | None) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    text = value.strip()
+    assume_utc = False
+    if text.upper().endswith(" UTC"):
+        text = text[:-4].strip()
+        assume_utc = True
+    text = text.replace("Z", "+00:00")
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+
+    if parsed.tzinfo is None or assume_utc:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _submission_row_timestamp(row: dict[str, str]) -> datetime | None:
+    for key, value in row.items():
+        normalized = str(key).strip().lower().replace("_", "").replace(" ", "")
+        if normalized in {"date", "submissiondate", "submitted", "submittedat"}:
+            return _parse_kaggle_submission_timestamp(value)
+    return None
+
+
+def _count_submission_rows_on_utc_day(
+    rows: list[dict[str, str]],
+    *,
+    now: datetime | None = None,
+) -> int:
+    now_utc = (now or datetime.now(UTC)).astimezone(UTC)
+    day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    count = 0
+    for row in rows:
+        ts = _submission_row_timestamp(row)
+        if ts is not None and day_start <= ts < day_end:
+            count += 1
+    return count
+
+
+def _count_submission_rows_in_recent_window(
+    rows: list[dict[str, str]],
+    *,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=1),
+) -> int:
+    now_utc = (now or datetime.now(UTC)).astimezone(UTC)
+    window_start = now_utc - window
+    count = 0
+    for row in rows:
+        ts = _submission_row_timestamp(row)
+        if ts is not None and window_start <= ts <= now_utc:
+            count += 1
+    return count
+
+
+def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) -> int | None:
+    if dry_run:
+        return 0
+    try:
+        rows = list_competition_submissions(slug, dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001 - quota lookup must not fail a training iteration.
+        print(f"[yellow]submit quota warning[/yellow]: could not fetch today's Kaggle submissions ({exc}).")
+        return None
+    now = datetime.now(UTC)
+    return max(
+        _count_submission_rows_on_utc_day(rows, now=now),
+        _count_submission_rows_in_recent_window(rows, now=now),
+    )
+
+
+def _submission_count_for_daily_limit(
+    *,
+    slug: str,
+    run_dir: Path,
+    submission_limit_per_day: int | None,
+    dry_run: bool = False,
+) -> int:
+    fallback_count = _count_successful_submit_attempts(run_dir)
+    if not isinstance(submission_limit_per_day, int) or submission_limit_per_day <= 0:
+        return fallback_count
+
+    daily_count = _count_daily_competition_submissions(slug, dry_run=dry_run)
+    if daily_count is None:
+        return fallback_count
+    return max(0, int(daily_count))
+
+
+def _has_spare_daily_submission_slot(
+    *,
+    submission_limit_per_day: int | None,
+    submissions_used_today: int,
+    iteration: int,
+    max_iterations: int,
+) -> bool:
+    if not isinstance(submission_limit_per_day, int) or submission_limit_per_day <= 0:
+        return False
+    remaining_slots = max(0, submission_limit_per_day - max(0, int(submissions_used_today)))
+    remaining_iterations = max(1, int(max_iterations) - int(iteration) + 1)
+    return remaining_slots >= remaining_iterations
+
+
+def _quality_reasons_allow_spare_submit(reasons: list[str]) -> bool:
+    if not reasons:
+        return False
+    return all(reason in _SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS for reason in reasons)
+
+
 def _non_final_submission_checkpoints(*, max_iterations: int, non_final_slots: int) -> set[int]:
     """Spread non-final submit slots across the loop to avoid early budget burn."""
     if max_iterations <= 1 or non_final_slots <= 0:
@@ -6016,6 +6198,14 @@ def _should_attempt_submit_for_readiness(
         non_final_slots = max(0, submission_limit_per_day - 1)
         if non_final_slots <= 0:
             return False
+
+        if _has_spare_daily_submission_slot(
+            submission_limit_per_day=submission_limit_per_day,
+            submissions_used_today=successful_submissions,
+            iteration=iteration,
+            max_iterations=max_iterations,
+        ):
+            return True
 
         if successful_submissions >= non_final_slots:
             return top1_tier or met_target

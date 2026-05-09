@@ -6,6 +6,7 @@ import json
 import os
 import zipfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +23,8 @@ from kagglebot.autopilot import (
     _build_submit_autofix_context,
     _build_submit_failure_improvement_context,
     _callable_accepts_keyword_argument,
+    _count_submission_rows_in_recent_window,
+    _count_submission_rows_on_utc_day,
     _detect_online_mismatch_signal,
     _error_strategy_skip_reason,
     _extract_competition_faithfulness,
@@ -30,6 +33,7 @@ from kagglebot.autopilot import (
     _extract_original_data_unused_signal,
     _extract_pseudo_label_failure_signal,
     _extract_same_family_plateau_signal,
+    _has_spare_daily_submission_slot,
     _infer_kernel_submit_version_label,
     _is_agent_capacity_failure,
     _is_submit_abort_autofixable,
@@ -37,6 +41,7 @@ from kagglebot.autopilot import (
     _load_run_state,
     _load_submit_failure_context,
     _maybe_restart_for_src_changes,
+    _quality_reasons_allow_spare_submit,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
     _resolve_submission_rank_payload,
@@ -756,6 +761,51 @@ def test_resolve_plan_extracts_daily_submission_limit_count(tmp_path: Path) -> N
     assert resolved["submission_limit_per_day"] == 1
 
 
+def test_count_submission_rows_on_utc_day_uses_kaggle_cli_dates() -> None:
+    rows = [
+        {"date": "2026-05-09 06:16:21.527000", "status": "COMPLETE"},
+        {"date": "2026-05-09T23:59:59+00:00", "status": "ERROR"},
+        {"date": "2026-05-08 22:44:27.263000", "status": "COMPLETE"},
+        {"date": "not-a-date", "status": "COMPLETE"},
+    ]
+
+    assert _count_submission_rows_on_utc_day(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
+
+
+def test_count_submission_rows_in_recent_window_covers_rolling_daily_limits() -> None:
+    rows = [
+        {"date": "2026-05-09 06:16:21.527000", "status": "COMPLETE"},
+        {"date": "2026-05-08 22:44:27.263000", "status": "COMPLETE"},
+        {"date": "2026-05-08 12:48:07.633000", "status": "COMPLETE"},
+    ]
+
+    assert _count_submission_rows_in_recent_window(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
+
+
+def test_has_spare_daily_submission_slot_requires_slots_for_remaining_iterations() -> None:
+    assert _has_spare_daily_submission_slot(
+        submission_limit_per_day=5,
+        submissions_used_today=2,
+        iteration=3,
+        max_iterations=5,
+    )
+    assert not _has_spare_daily_submission_slot(
+        submission_limit_per_day=5,
+        submissions_used_today=3,
+        iteration=3,
+        max_iterations=5,
+    )
+
+
+def test_quality_reasons_allow_spare_submit_only_for_soft_blocks() -> None:
+    assert _quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline"])
+    assert _quality_reasons_allow_spare_submit(
+        ["selected_worse_than_detected_baseline", "below_code_reference_baseline"]
+    )
+    assert not _quality_reasons_allow_spare_submit(["external_test_label_transfer_detected"])
+    assert not _quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline", "untrusted_score_source"])
+
+
 def test_should_force_initial_submit_allows_improved_policy_unless_single_daily_submission() -> None:
     assert _should_force_initial_submit(
         deliverable_mode="leaderboard",
@@ -868,6 +918,20 @@ def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions(
             max_iterations=10,
             submission_limit_per_day=5,
             successful_submissions=0,
+            top1_score=0.80,
+        )
+        is True
+    )
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="always",
+            readiness_score=0.20,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=9,
+            max_iterations=10,
+            submission_limit_per_day=5,
+            successful_submissions=1,
             top1_score=0.80,
         )
         is True
@@ -2801,6 +2865,86 @@ def test_autopilot_allows_non_improving_submit_on_final_iteration(monkeypatch, t
         (config.paths.iter_dir(config.run_id or "run-1", 2) / "iteration_state.json").read_text(encoding="utf-8")
     )
     assert iter2_state["submit_phase_state"] == "submitted"
+
+
+def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_plan(
+        paths,
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+    )
+    _write_rules(paths, "You may submit 5 submissions per day.\n")
+
+    train_calls = {"count": 0}
+    submit_calls = {"count": 0}
+
+    def fake_train(*args, **kwargs):  # noqa: ARG001
+        train_calls["count"] += 1
+        output_path = kwargs["output_path"]
+        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        values = {1: 0.30, 2: 0.31, 3: 0.32}
+        evaluation = EvaluationResult(
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            value=values[train_calls["count"]],
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+        return TrainingOutcome(
+            submission_path=output_path,
+            evaluation=evaluation,
+            model_name="ridge",
+            model_summary={},
+            accelerator="cpu",
+        )
+
+    def fake_submit(*args, **kwargs):  # noqa: ARG001
+        submit_calls["count"] += 1
+        return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    def fake_quality_guard(**kwargs):
+        if kwargs["iteration"] == 1:
+            return {
+                "allow_submit": True,
+                "reasons": [],
+                "competition_faithfulness": {"faithful": True, "trusted": True},
+            }
+        return {
+            "allow_submit": False,
+            "reasons": ["selected_worse_than_detected_baseline"],
+            "competition_faithfulness": {"faithful": True, "trusted": True},
+        }
+
+    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.25})
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot._build_kernel_quality_guard", fake_quality_guard)
+    monkeypatch.setattr("kagglebot.autopilot._submission_count_for_daily_limit", lambda **kwargs: 1)
+    monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
+    monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._resolve_submission_rank_payload", lambda **kwargs: {})
+
+    config = _make_config(
+        tmp_path, paths=paths, submit=True, max_iterations=3, force_submit=False, submit_policy="improved"
+    )
+    run_autopilot(config)
+
+    assert train_calls["count"] == 3
+    assert submit_calls["count"] == 3
+    iter2_state = json.loads((config.paths.iter_dir(config.run_id or "run-1", 2) / "iteration_state.json").read_text())
+    assert iter2_state["submit_phase_state"] == "submitted"
+    assert iter2_state["forced_submit_reason"] == "spare_daily_submission_slot"
 
 
 def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatch, tmp_path: Path) -> None:
