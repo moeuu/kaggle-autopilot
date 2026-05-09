@@ -45,6 +45,7 @@ from kagglebot.autopilot import (
     _run_autofix,
     _run_kernel_fix,
     _should_attempt_submit_for_readiness,
+    _should_defer_submit_abort_to_next_iteration,
     _should_force_initial_submit,
     _should_skip_planning,
     _submission_message,
@@ -3079,6 +3080,34 @@ def test_attempt_submit_persists_submit_failure_context_for_validation_abort(mon
     assert "prediction column contains NaN" in str(context["summary"])
 
 
+def test_should_defer_nonfinal_kaggle_gpu_submit_abort_to_next_iteration(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "submit_failure_context.json").write_text(
+        json.dumps({"active": True, "repairable": True, "reason": "local_submission_validation_failed"}),
+        encoding="utf-8",
+    )
+
+    assert _should_defer_submit_abort_to_next_iteration(
+        compute="kaggle_gpu",
+        run_dir=run_dir,
+        iteration=1,
+        max_iterations=3,
+    )
+    assert not _should_defer_submit_abort_to_next_iteration(
+        compute="kaggle_gpu",
+        run_dir=run_dir,
+        iteration=3,
+        max_iterations=3,
+    )
+    assert not _should_defer_submit_abort_to_next_iteration(
+        compute="local_gpu",
+        run_dir=run_dir,
+        iteration=1,
+        max_iterations=3,
+    )
+
+
 def test_attempt_submit_persists_manual_submit_failure_context_for_rules_block(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_id = config.run_id or "run-1"
@@ -3610,6 +3639,15 @@ def test_extract_kernel_metric_from_direct_brier_score_key() -> None:
     metric, value = _extract_kernel_metric(payload, "brier_score")
     assert metric == "brier_score"
     assert value == 0.18
+
+
+def test_metrics_equivalent_accepts_umud_metric_alias() -> None:
+    from kagglebot.autopilot import _metrics_equivalent
+
+    assert _metrics_equivalent(
+        "UMUD normalized MAE",
+        "UMUD Score: normalized mean absolute error across pa_deg, fl_mm, and mt_mm",
+    )
 
 
 def test_resolve_explicit_official_metric_override_accepts_generic_plan_fallback() -> None:

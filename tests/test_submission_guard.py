@@ -251,6 +251,32 @@ def test_validate_submission_accepts_inferred_required_id_suffix_when_present(tm
     validate_submission(str(submission), str(sample), data_dir=data_dir)
 
 
+def test_validate_submission_does_not_infer_suffix_when_real_sample_ids_are_suffixless(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "test_set").mkdir(parents=True, exist_ok=True)
+    for stem in ("0", "1", "2"):
+        (data_dir / "test_set" / f"{stem}.png").write_bytes(b"PNG")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text(
+        "id,image_id,prediction_string\n"
+        "0,0,0.9 1 2 3 4\n"
+        "1,1, \n"
+        "2,2,0.8 5 6 7 8\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    submission.write_text(
+        "id,image_id,prediction_string\n"
+        "0,0,0.9 1 2 3 4\n"
+        "1,1, \n"
+        "2,2,0.8 5 6 7 8\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
 def test_validate_submission_checks_overview_hint_not_only_sample(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     context_dir = data_dir / "context"

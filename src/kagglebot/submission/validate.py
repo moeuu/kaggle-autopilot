@@ -279,6 +279,8 @@ def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submiss
     }
     if not ids_without_suffix:
         return None
+    if _real_sample_has_suffixless_primary_ids(sample_csv):
+        return None
 
     suffix_counts: dict[str, int] = {}
     for path in data_dir.rglob("*"):
@@ -306,6 +308,28 @@ def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submiss
     if len(full_coverage) == 1:
         return full_coverage[0]
     return None
+
+
+def _real_sample_has_suffixless_primary_ids(sample_csv: Path) -> bool:
+    if not _has_data_rows(sample_csv) or _is_synthesized_sample_submission(sample_csv):
+        return False
+    try:
+        delim = _sniff_delimiter(sample_csv, default=_default_delimiter_for_path(sample_csv))
+        sample_header = pd.read_csv(sample_csv, sep=delim, nrows=0)
+        sample_columns = list(sample_header.columns)
+        if not sample_columns:
+            return False
+        id_col = sample_columns[0]
+        sample_ids = pd.read_csv(sample_csv, sep=delim, usecols=[id_col], dtype={id_col: str})[id_col]
+    except Exception:  # noqa: BLE001
+        return False
+    for raw in sample_ids.tolist():
+        if pd.isna(raw):
+            continue
+        value = str(raw).strip()
+        if value and not Path(value).suffix:
+            return True
+    return False
 
 
 def _preferred_id_suffix_from_context(sample_csv: Path) -> str | None:

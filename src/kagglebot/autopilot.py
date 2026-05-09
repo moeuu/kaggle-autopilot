@@ -236,6 +236,7 @@ _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
 _FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
 _FORCED_INITIAL_SUBMIT_STATE = "forced_initial_submit"
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
+_SUBMIT_FAILED_DEFERRED_STATE = "submit_failed_deferred"
 _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
@@ -1849,6 +1850,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 readiness_score=readiness_score,
             )
             submission_result: dict[str, object] | None = None
+            submit_failed_deferred = False
             online_score: float | None = None
             if force_initial_submit:
                 submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
@@ -1867,9 +1869,22 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         best_score=decision_score,
                     )
                 except SubmitAbortedError:
-                    run_payload["status"] = "submit_failed"
-                    (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
-                    raise
+                    if _should_defer_submit_abort_to_next_iteration(
+                        compute=config.compute,
+                        run_dir=run_dir,
+                        iteration=iteration,
+                        max_iterations=max_iterations,
+                    ):
+                        submit_failed_deferred = True
+                        submit_phase_state = _SUBMIT_FAILED_DEFERRED_STATE
+                        print(
+                            "[yellow]submit deferred[/yellow]: non-final Kaggle GPU submit failed; "
+                            "carrying the submit contract failure into the next iteration."
+                        )
+                    else:
+                        run_payload["status"] = "submit_failed"
+                        (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+                        raise
                 if submission_result:
                     submit_phase_state = "submitted"
                     submitted = True
@@ -2422,7 +2437,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
             submit_allowed_by_gate = submit_enabled and allow_submit
             submit_phase_finished = (
-                (not submit_phase_required) or (not submit_allowed_by_gate) or (submission_result is not None)
+                (not submit_phase_required)
+                or (not submit_allowed_by_gate)
+                or (submission_result is not None)
+                or submit_failed_deferred
             )
 
             iteration_record_kwargs = {
@@ -9909,6 +9927,21 @@ def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
     return reason.startswith("submission_poll_status_")
 
 
+def _should_defer_submit_abort_to_next_iteration(
+    *,
+    compute: str,
+    run_dir: Path,
+    iteration: int,
+    max_iterations: int,
+) -> bool:
+    if compute != "kaggle_gpu":
+        return False
+    if iteration >= max_iterations:
+        return False
+    failure_context = _load_submit_failure_context(run_dir)
+    return bool(failure_context.get("active")) and bool(failure_context.get("repairable"))
+
+
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
     run_dir = config.paths.run_dir(run_id)
     failure_context = _load_submit_failure_context(run_dir)
@@ -10334,6 +10367,11 @@ def _canonical_metric_name_for_match(name: str | None) -> str:
         "brier": "brierscore",
         "brierloss": "brierscore",
         "brierscoreloss": "brierscore",
+        # UMUD uses a custom normalized MAE score, not generic MAE.
+        "normalizedmeanabsoluteerroracrosspadegflmmandmtmm": "umudscore",
+        "umudnormalizedmae": "umudscore",
+        "umudscore": "umudscore",
+        "umudscorenormalizedmeanabsoluteerroracrosspadegflmmandmtmm": "umudscore",
     }
     return alias_map.get(metric, metric)
 
