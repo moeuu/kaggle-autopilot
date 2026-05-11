@@ -40,6 +40,7 @@ from kagglebot.autopilot import (
     _load_competition_rule_constraints,
     _load_run_state,
     _load_submit_failure_context,
+    _load_submit_retry_artifacts,
     _maybe_restart_for_src_changes,
     _quality_reasons_allow_spare_submit,
     _resolve_iteration_submission_artifact,
@@ -66,6 +67,7 @@ from kagglebot.exceptions import (
     SubmissionValidationError,
     SubmitAbortedError,
 )
+from kagglebot.history import SubmissionLedger
 from kagglebot.kernel_runner import KernelRunResult
 from kagglebot.knowledge import resolve_problem_type_insights
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -761,6 +763,19 @@ def test_resolve_plan_extracts_daily_submission_limit_count(tmp_path: Path) -> N
     assert resolved["submission_limit_per_day"] == 1
 
 
+def test_resolve_plan_extracts_rolling_24h_submission_limit_count(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.rules_md_path.write_text(
+        "The submission limit is 2 submissions within 24 hours per team.\n"
+        "Each team will have 2 submission per 24h interval.\n",
+        encoding="utf-8",
+    )
+
+    resolved = _resolve_plan(PlanConfig(), config)
+    assert resolved["submission_limit_per_day"] == 2
+
+
 def test_count_submission_rows_on_utc_day_uses_kaggle_cli_dates() -> None:
     rows = [
         {"date": "2026-05-09 06:16:21.527000", "status": "COMPLETE"},
@@ -875,6 +890,20 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
             top1_score=0.80,
         )
         is True
+    )
+    assert (
+        _should_attempt_submit_for_readiness(
+            gate="readiness_or_final",
+            readiness_score=0.95,
+            readiness_target=0.90,
+            direction="maximize",
+            iteration=3,
+            max_iterations=3,
+            submission_limit_per_day=2,
+            successful_submissions=2,
+            top1_score=0.80,
+        )
+        is False
     )
     assert (
         _should_attempt_submit_for_readiness(
@@ -2049,7 +2078,10 @@ def test_attempt_submit_does_not_switch_to_notebook_on_generic_bad_request(
                 command=["kaggle", "competitions", "submit"],
                 exit_code=1,
                 output="400 Client Error: Bad Request",
-                stdout="400 Client Error: Bad Request for url: https://www.kaggle.com/api/v1/...",
+                stdout=(
+                    "400 Client Error: Bad Request for url: "
+                    "https://www.kaggle.com/api/v1/competitions/submissions/submit-notebook/demo"
+                ),
                 stderr="",
             )
         ),
@@ -2072,6 +2104,149 @@ def test_attempt_submit_does_not_switch_to_notebook_on_generic_bad_request(
             problem_types=[],
         )
     assert notebook_calls["count"] == 0
+    context = _load_submit_failure_context(run_dir)
+    assert context["reason"] == "ambiguous_notebook_bad_request"
+    assert context["repair_target"] == "manual_intervention"
+    assert context["repairable"] is False
+    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+
+
+def test_load_submit_failure_context_normalizes_stale_ambiguous_notebook_context(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, submit=True, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "submit_failure_context.json").write_text(
+        json.dumps(
+            {
+                "active": True,
+                "reason": "ambiguous_notebook_bad_request",
+                "error_kind": "unknown",
+                "repair_target": "submit_mode_or_kernel",
+                "repairable": True,
+                "stdout_tail": (
+                    "400 Client Error: Bad Request for url: "
+                    "https://www.kaggle.com/api/v1/competitions/submissions/submit-notebook/demo"
+                ),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    context = _load_submit_failure_context(run_dir)
+
+    assert context["repair_target"] == "manual_intervention"
+    assert context["repairable"] is False
+    assert "submit-notebook 400" in context["manual_next_step"]
+    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+
+
+def test_attempt_submit_treats_submission_limit_as_manual_blocker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path, submit=True, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
+        lambda self, path: path,  # noqa: ARG005
+    )
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr(
+        "kagglebot.autopilot._load_competition_rule_constraints",
+        lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
+    )
+    monkeypatch.setattr(
+        "kagglebot.submission_service.run_kaggle_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SubmissionCliError(
+                "Kaggle CLI submit failed.",
+                command=["kaggle", "competitions", "submit"],
+                exit_code=1,
+                output="400 Client Error: Bad Request: submission limit reached",
+                stdout="You have reached the maximum number of submissions for this competition.",
+                stderr="",
+            )
+        ),
+    )
+
+    with pytest.raises(SubmitAbortedError):
+        _attempt_submit(
+            config=config,
+            run_id=run_id,
+            submission_path=submission_path,
+            best_score=0.4,
+            problem_types=[],
+        )
+
+    context = _load_submit_failure_context(run_dir)
+    assert context["repair_target"] == "manual_intervention"
+    assert context["repairable"] is False
+    assert "submission limit" in context["manual_next_step"].lower()
+    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+
+
+def test_attempt_submit_skips_duplicate_sha_before_notebook_submit(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path, submit=True, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+    SubmissionLedger(config.paths.submission_ledger_path).record(
+        slug=config.slug,
+        message="previous message",
+        submission_path=submission_path,
+        run_id="prior-run",
+    )
+
+    monkeypatch.setattr(
+        "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
+        lambda self, path: path,  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.check_rules_accepted",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rules check should not run")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_submit_kernel",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("notebook kernel should not run")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kaggle_submit_kernel",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("notebook submit should not run")),
+    )
+
+    result = _attempt_submit(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        best_score=0.4,
+        problem_types=[],
+        submit_mode="notebook",
+    )
+
+    assert result is not None
+    assert result["skipped"] is True
+    assert result["reason"] == "duplicate_submission_sha_seen"
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "submit_attempts.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[-1]["action_taken"] == "skip"
+    assert rows[-1]["reason"] == "duplicate_submission_sha_seen"
 
 
 def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch, tmp_path: Path) -> None:
@@ -2198,7 +2373,10 @@ def test_submit_with_notebook_kernel_forces_internet_off(monkeypatch, tmp_path: 
     assert captured["run_submit_kernel"]["mode"] == "wrapper"
 
 
-def test_submit_with_notebook_kernel_retries_ambiguous_bad_request_once(monkeypatch, tmp_path: Path) -> None:
+def test_submit_with_notebook_kernel_does_not_retry_generic_submit_notebook_bad_request(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu")
     run_id = config.run_id or "run-1"
     submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
@@ -2243,18 +2421,16 @@ def test_submit_with_notebook_kernel_retries_ambiguous_bad_request_once(monkeypa
     monkeypatch.setattr("kagglebot.autopilot.run_kaggle_submit_kernel", fake_run_kaggle_submit_kernel)
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda seconds: sleep_calls.append(seconds))
 
-    result, submission_ref, artifact_path = _submit_with_notebook_kernel(
-        config=config,
-        run_id=run_id,
-        submission_path=submission_path,
-        message="test notebook retry",
-    )
+    with pytest.raises(SubmissionCliError):
+        _submit_with_notebook_kernel(
+            config=config,
+            run_id=run_id,
+            submission_path=submission_path,
+            message="test notebook retry",
+        )
 
-    assert result.returncode == 0
-    assert submission_ref == "kernel:user/demo-submit-kernel"
-    assert artifact_path is not None
-    assert submit_calls["count"] == 2
-    assert sleep_calls == [3.0]
+    assert submit_calls["count"] == 1
+    assert sleep_calls == []
 
 
 def test_submit_with_notebook_kernel_uses_inference_mode_when_requested(
@@ -2759,7 +2935,7 @@ def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: 
     def fake_train(*args, **kwargs):  # noqa: ARG001
         train_calls["count"] += 1
         output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        output_path.write_text(f"id,target\n1,{0.1 + train_calls['count'] * 0.001:.3f}\n2,0.2\n", encoding="utf-8")
         value = 0.4 - 0.01 * float(train_calls["count"] - 1)
         evaluation = EvaluationResult(
             score_source="holdout",
@@ -2821,7 +2997,7 @@ def test_autopilot_allows_non_improving_submit_on_final_iteration(monkeypatch, t
     def fake_train(*args, **kwargs):  # noqa: ARG001
         train_calls["count"] += 1
         output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        output_path.write_text(f"id,target\n1,{0.1 + train_calls['count'] * 0.001:.3f}\n2,0.2\n", encoding="utf-8")
         value = 0.4 if train_calls["count"] == 1 else 0.45
         evaluation = EvaluationResult(
             score_source="holdout",
@@ -2886,7 +3062,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     def fake_train(*args, **kwargs):  # noqa: ARG001
         train_calls["count"] += 1
         output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        output_path.write_text(f"id,target\n1,{0.1 + train_calls['count'] * 0.001:.3f}\n2,0.2\n", encoding="utf-8")
         values = {1: 0.30, 2: 0.31, 3: 0.32}
         evaluation = EvaluationResult(
             score_source="holdout",
@@ -2961,7 +3137,7 @@ def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatc
     def fake_train(*args, **kwargs):  # noqa: ARG001
         train_calls["count"] += 1
         output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        output_path.write_text(f"id,target\n1,{0.1 + train_calls['count'] * 0.001:.3f}\n2,0.2\n", encoding="utf-8")
         values = {1: 0.30, 2: 0.31, 3: 0.305}
         evaluation = EvaluationResult(
             score_source="holdout",
@@ -4955,6 +5131,72 @@ def test_metric_recheck_prefers_output_metrics_over_stale_iteration_metrics(monk
     assert evaluation.value == pytest.approx(0.92)
     assert isinstance(payload, dict)
     assert payload.get("metric") == "auc"
+    assert resolved_submission.exists()
+
+
+def test_metric_recheck_ignores_submit_only_output_metrics(monkeypatch, tmp_path: Path) -> None:
+    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+
+    config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = output_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    iter_metrics_path = iter_dir / "metrics.json"
+    iter_metrics_path.write_text(
+        json.dumps(
+            {
+                "score_source": "cv",
+                "metric": "rmse",
+                "direction": "minimize",
+                "offline_value": 0.321,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    output_metrics_path = output_dir / "metrics.json"
+    output_metrics_path.write_text(
+        json.dumps({"schema_version": 1, "kind": "submit_only"}, indent=2),
+        encoding="utf-8",
+    )
+    output_mtime = iter_metrics_path.stat().st_mtime + 10
+    os.utime(output_metrics_path, (output_mtime, output_mtime))
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel must not be called")),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel_local",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
+    )
+
+    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
+        config=config,
+        run_id="run-1",
+        iteration=1,
+        submission_path=submission_path,
+        iter_dir=iter_dir,
+        metrics_artifact_path=iter_metrics_path,
+        kernel_name=None,
+        enable_internet=False,
+        score_source="cv",
+        target_metric="rmse",
+        metric_direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        time_budget_min=10,
+    )
+
+    assert evaluation.metric == "rmse"
+    assert evaluation.value == pytest.approx(0.321)
+    assert isinstance(payload, dict)
+    assert payload.get("kind") != "submit_only"
     assert resolved_submission.exists()
 
 
@@ -7182,7 +7424,7 @@ def test_autopilot_forces_major_overhaul_on_online_mismatch(monkeypatch, tmp_pat
     def fake_train(*args, **kwargs):  # noqa: ARG001
         train_calls["count"] += 1
         output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.9\n2,0.1\n", encoding="utf-8")
+        output_path.write_text(f"id,target\n1,{0.9 + train_calls['count'] * 0.001:.3f}\n2,0.1\n", encoding="utf-8")
         values = {1: 0.9100, 2: 0.9150, 3: 0.9140}
         evaluation = EvaluationResult(
             score_source="cv",
@@ -7705,6 +7947,227 @@ def test_autopilot_resume_submit_only_from_legacy_output_artifacts(monkeypatch, 
     assert (config.paths.iter_dir("run-1", 1) / "metrics.json").exists()
 
 
+def test_load_submit_retry_artifacts_prefers_training_metrics_over_submit_only_output(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter_dir = paths.iter_dir("run-1", 1)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    submission_path = iter_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    metrics_path = iter_dir / "metrics.json"
+    _write_kernel_metrics(metrics_path, value=0.321)
+    output_metrics_path = iter_dir / "output" / "metrics.json"
+    output_metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    output_metrics_path.write_text(
+        json.dumps({"schema_version": 1, "kind": "submit_only"}, indent=2),
+        encoding="utf-8",
+    )
+    os.utime(output_metrics_path, (metrics_path.stat().st_mtime + 10, metrics_path.stat().st_mtime + 10))
+    (iter_dir / "iteration_state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "iteration": 1,
+                "iteration_complete": True,
+                "trained": True,
+                "submission_path": str(submission_path),
+                "metrics_path": str(metrics_path),
+                "submit_phase_required": True,
+                "submit_phase_finished": False,
+                "submit_allowed_by_gate": True,
+                "submitted": False,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    result = _load_submit_retry_artifacts(
+        run_dir=run_dir,
+        iter_dir=iter_dir,
+        iteration=1,
+        max_iterations=3,
+        metric_direction="minimize",
+        target_metric="rmse",
+        require_submit_phase=True,
+    )
+
+    assert result is not None
+    result_submission_path, result_metrics_path, evaluation = result
+    assert result_submission_path == submission_path
+    assert result_metrics_path == metrics_path
+    assert evaluation.value == pytest.approx(0.321)
+
+
+def test_load_submit_retry_artifacts_ignores_later_submit_only_metrics_for_legacy_latest(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter1_dir = paths.iter_dir("run-1", 1)
+    iter2_dir = paths.iter_dir("run-1", 2)
+    iter1_dir.mkdir(parents=True, exist_ok=True)
+    iter2_output_dir = iter2_dir / "output"
+    iter2_output_dir.mkdir(parents=True, exist_ok=True)
+
+    iter1_submission = iter1_dir / "submission.csv"
+    iter1_submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    iter1_metrics = iter1_dir / "metrics.json"
+    _write_kernel_metrics(iter1_metrics, value=0.456)
+    (iter2_output_dir / "submission.csv").write_text("id,target\n1,0.1\n", encoding="utf-8")
+    submit_only_metrics = iter2_output_dir / "metrics.json"
+    submit_only_metrics.write_text(
+        json.dumps({"schema_version": 1, "kind": "submit_only"}, indent=2),
+        encoding="utf-8",
+    )
+    os.utime(submit_only_metrics, (iter1_metrics.stat().st_mtime + 10, iter1_metrics.stat().st_mtime + 10))
+
+    result = _load_submit_retry_artifacts(
+        run_dir=run_dir,
+        iter_dir=iter1_dir,
+        iteration=1,
+        max_iterations=3,
+        metric_direction="minimize",
+        target_metric="rmse",
+        require_submit_phase=True,
+    )
+
+    assert result is not None
+    result_submission_path, result_metrics_path, evaluation = result
+    assert result_submission_path == iter1_submission
+    assert result_metrics_path == iter1_metrics
+    assert evaluation.value == pytest.approx(0.456)
+
+
+def test_load_submit_retry_artifacts_ignores_prior_success_for_latest_failed_submit(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter1_dir = paths.iter_dir("run-1", 1)
+    iter2_dir = paths.iter_dir("run-1", 2)
+    iter1_dir.mkdir(parents=True, exist_ok=True)
+    iter2_dir.mkdir(parents=True, exist_ok=True)
+    iter1_submission = iter1_dir / "submission.csv"
+    iter1_submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    _write_kernel_metrics(iter1_dir / "metrics.json", value=0.5)
+    iter2_submission = iter2_dir / "submission.csv"
+    iter2_submission.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    iter2_metrics = iter2_dir / "metrics.json"
+    _write_kernel_metrics(iter2_metrics, value=0.321)
+    (run_dir / "run_state.json").write_text(
+        json.dumps(
+            {
+                "submit_attempted": True,
+                "submit_ok": True,
+                "last_action": "abort",
+                "last_reason": "ambiguous_notebook_bad_request",
+                "last_submission_path": str(iter2_submission),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "submit_attempts.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "sub_path": str(iter1_submission),
+                        "action_taken": "submit",
+                        "reason": "submitted",
+                        "ok": True,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "sub_path": str(iter2_submission),
+                        "action_taken": "abort",
+                        "reason": "ambiguous_notebook_bad_request",
+                        "ok": False,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _load_submit_retry_artifacts(
+        run_dir=run_dir,
+        iter_dir=iter2_dir,
+        iteration=2,
+        max_iterations=3,
+        metric_direction="minimize",
+        target_metric="rmse",
+        require_submit_phase=True,
+    )
+
+    assert result is not None
+    result_submission_path, result_metrics_path, evaluation = result
+    assert result_submission_path == iter2_submission
+    assert result_metrics_path == iter2_metrics
+    assert evaluation.value == pytest.approx(0.321)
+
+
+def test_load_submit_retry_artifacts_treats_duplicate_skip_as_terminal(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter_dir = paths.iter_dir("run-1", 1)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    submission_path = iter_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    metrics_path = iter_dir / "metrics.json"
+    _write_kernel_metrics(metrics_path, value=0.321)
+    (iter_dir / "iteration_state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "iteration": 1,
+                "iteration_complete": True,
+                "trained": True,
+                "submission_path": str(submission_path),
+                "metrics_path": str(metrics_path),
+                "submit_phase_required": True,
+                "submit_phase_finished": False,
+                "submit_allowed_by_gate": True,
+                "submitted": False,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "submit_attempts.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "sub_path": str(submission_path),
+                "action_taken": "skip",
+                "reason": "duplicate_submission_sha_seen",
+                "ok": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _load_submit_retry_artifacts(
+        run_dir=run_dir,
+        iter_dir=iter_dir,
+        iteration=1,
+        max_iterations=3,
+        metric_direction="minimize",
+        target_metric="rmse",
+        require_submit_phase=True,
+    )
+
+    assert result is None
+
+
 def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     iter_dir = paths.iter_dir("run-1", 1)
@@ -7748,6 +8211,43 @@ def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: 
     )
 
     assert start_after == 2
+    assert best_score == pytest.approx(0.4321)
+    assert best_submission == submission_path
+
+
+def test_resume_iteration_state_accepts_legacy_duplicate_skip(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    iter_dir = paths.iter_dir("run-1", 1)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    submission_path = iter_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    _write_kernel_metrics(iter_dir / "metrics.json", value=0.4321)
+
+    run_dir = paths.run_dir("run-1")
+    (run_dir / "submit_attempts.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "sub_path": str(submission_path),
+                "action_taken": "skip",
+                "reason": "duplicate_submission_sha_seen",
+                "ok": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    start, best_score, best_submission = _resume_iteration_state(
+        paths=paths,
+        run_id="run-1",
+        metric_direction="minimize",
+        target_metric="rmse",
+        max_iterations=3,
+        require_submit_phase=True,
+    )
+
+    assert start == 2
     assert best_score == pytest.approx(0.4321)
     assert best_submission == submission_path
 
@@ -7822,6 +8322,43 @@ def test_resume_iteration_state_requires_submit_when_gate_allows(tmp_path: Path)
     assert start == 1
     assert best_score is None
     assert best_submission is None
+
+
+def test_resume_iteration_state_accepts_duplicate_submission_skip_marker(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    iter_dir = paths.iter_dir("run-1", 1)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    submission_path = iter_dir / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    _write_kernel_metrics(iter_dir / "metrics.json", value=0.351)
+    (iter_dir / "iteration_state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "iteration": 1,
+                "iteration_complete": True,
+                "submit_phase_finished": True,
+                "submit_allowed_by_gate": True,
+                "submitted": False,
+                "submit_phase_state": "duplicate_submission_sha_seen",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    start, best_score, best_submission = _resume_iteration_state(
+        paths=paths,
+        run_id="run-1",
+        metric_direction="minimize",
+        target_metric="rmse",
+        max_iterations=3,
+        require_submit_phase=True,
+    )
+
+    assert start == 2
+    assert best_score == pytest.approx(0.351)
+    assert best_submission == submission_path
 
 
 def test_write_iteration_state_marker_derives_submit_phase_finished(tmp_path: Path) -> None:

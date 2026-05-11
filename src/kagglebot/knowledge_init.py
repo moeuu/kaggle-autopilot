@@ -1070,7 +1070,11 @@ def build_plan_and_initial_prompt(
         "- Use web search to choose the strongest initial approach; prefer official docs and competition discussions.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV by default for stronger model ranking; use holdout only when CV is infeasible.",
-        "- Keep local_gpu kernels under 20h/1200min by default; for image/video/audio/text, use one strong full-training seed and at most 3 full-training folds, then use cached embeddings/TTA/lightweight heads for extra validation.",
+        (
+            "- Keep local_gpu kernels under 20h/1200min by default; for image/video/audio/text, use one "
+            "strong full-training seed and at most 3 full-training folds, then use cached "
+            "embeddings/TTA/lightweight heads for extra validation."
+        ),
         "- Actively use preinstalled dependencies before introducing new ones:",
         "  torch/timm/torchvision/opencv, xgboost/lightgbm/catboost, transformers/tabicl, sklearn.",
         "- If one backend import fails, disable only that path and keep other high-capacity backends active.",
@@ -1227,7 +1231,10 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 - Use one consistent evaluation path for training-time selection and final offline scoring.
   If you print `val_*` during training, it must be computed under the same split/rollout/aggregation
   assumptions as the final reported metric.
-- If the previous run failed because of timeout or local GPU budget, keep the highest-ceiling pipeline but reduce multiplicative runtime first: one full fine-tune seed, fewer full-training folds for heavy backbones, cached embeddings or lightweight heads for extra seeds, earlier stopping, and checkpoint reuse. Do not replace a working strong model with a weak baseline only to finish faster.
+- If the previous run failed because of timeout or local GPU budget, keep the highest-ceiling pipeline but
+  reduce multiplicative runtime first: one full fine-tune seed, fewer full-training folds for heavy backbones,
+  cached embeddings or lightweight heads for extra seeds, earlier stopping, and checkpoint reuse. Do not replace
+  a working strong model with a weak baseline only to finish faster.
 - Keep local_gpu kernels under 20h/1200min by default unless a stricter competition runtime cap applies.
 - Evaluate at least one simple baseline (mean/majority/persistence as appropriate) with the same
   validation protocol, and do not select/submit a learned pipeline that underperforms that baseline.

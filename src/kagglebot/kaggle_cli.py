@@ -7,12 +7,14 @@ from kagglebot.kaggle_api import (
     competitions_files,
     kernels_status,
 )
-from kagglebot.kaggle_api import kernels_push as _kernels_push
 from kagglebot.kaggle_api import (
     download_competition as _download_competition,
 )
 from kagglebot.kaggle_api import (
     kernels_output as _kernels_output,
+)
+from kagglebot.kaggle_api import (
+    kernels_push as _kernels_push,
 )
 from kagglebot.kaggle_api import (
     submit_competition as _submit_competition,

@@ -783,6 +783,7 @@ def _build_autopilot_config(
     knowledge_paths: KnowledgePaths,
     run_id: str | None,
 ) -> AutopilotConfig:
+    max_iterations = _watch_max_iterations_for_candidate(config=config, paths=paths)
     return AutopilotConfig(
         run_id=run_id,
         slug=candidate.slug,
@@ -804,7 +805,7 @@ def _build_autopilot_config(
         target_metric=None,
         target_score=None,
         target_direction=None,
-        max_iterations=config.max_iterations,
+        max_iterations=max_iterations,
         max_total_min=config.max_total_min,
         patience=config.patience,
         min_improvement=config.min_improvement,
@@ -815,6 +816,35 @@ def _build_autopilot_config(
         dry_run=config.dry_run,
         submit_policy=config.submit_policy,
     )
+
+
+def _watch_max_iterations_for_candidate(*, config: WatchConfig, paths: CompetitionPaths) -> int:
+    plan_max = _plan_max_iterations(paths.plan_path)
+    if plan_max is None:
+        return config.max_iterations
+    return min(config.max_iterations, plan_max)
+
+
+def _plan_max_iterations(plan_path: Path) -> int | None:
+    try:
+        payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("max_iterations")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        parsed = int(raw)
+    elif isinstance(raw, str):
+        try:
+            parsed = int(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _candidate_score(candidate: EnteredCompetition, *, history: SubmissionHistory | None = None) -> float:

@@ -23,6 +23,12 @@ def test_format_command_for_log_keeps_short_command_on_one_line() -> None:
     assert second == ""
 
 
+def test_codex_timeout_uses_environment_override(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_CODEX_TIMEOUT_SEC", "600")
+
+    assert codex_runner._codex_timeout_seconds() == 600.0  # noqa: SLF001
+
+
 def test_run_codex_retries_without_sandbox_on_bootstrap_failure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("KAGGLEBOT_AGENT_SANDBOX_MODE", "fallback")
     prompt_path = tmp_path / "prompt.md"

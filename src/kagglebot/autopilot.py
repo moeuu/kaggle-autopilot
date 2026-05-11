@@ -262,13 +262,13 @@ _SUBMIT_FILE_ERROR_MARKERS = (
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 _CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
 _NOTEBOOK_FALLBACK_HINTS = (
-    "submit-notebook",
-    "notebook",
-    "/api/v1/competitions/submissions/submit/",
-    "submission not allowed",
     "only accepts submissions from notebooks",
+    "must be made through notebooks",
     "code competition submissions require both the output file name and the version label",
+    "output file name and version label",
+    "output file name and the version label",
     "kernel must be specified as <owner>/<notebook>",
+    "kernel must be specified",
 )
 _COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
     "deep-past-initiative-machine-translation": {
@@ -1670,6 +1670,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 iteration=iteration,
                 max_iterations=max_iterations,
             )
+            extra_daily_submission_slot = False
+            if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
+                remaining_daily_slots = max(0, submission_limit_per_day - max(0, int(successful_submit_count)))
+                remaining_iterations = max(1, int(max_iterations) - int(iteration) + 1)
+                extra_daily_submission_slot = remaining_daily_slots > remaining_iterations
             forced_submit_reason: str | None = None
             if (
                 submit_enabled
@@ -1785,7 +1790,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     )
             if (
                 defer_submit_for_accuracy_frontier
-                and spare_daily_submission_slot
+                and extra_daily_submission_slot
                 and quality_allows_submit
                 and submit_improvement_allowed
             ):
@@ -1813,6 +1818,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if (not quality_allows_submit) and (not config.force_submit):
                 allow_submit = False
             submit_non_improving = submit_enabled and submit_non_improving
+            daily_submission_limit_reached = (
+                submit_enabled
+                and isinstance(submission_limit_per_day, int)
+                and submission_limit_per_day > 0
+                and max(0, int(successful_submit_count)) >= submission_limit_per_day
+            )
             submit_limited_holdback = False
             if (
                 submit_enabled
@@ -1843,12 +1854,24 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 defer_submit_for_accuracy_frontier = False
                 submit_limited_holdback = False
                 print("[yellow]submit override[/yellow]: forcing iter 1 submit to probe Kaggle submission contract.")
+            if daily_submission_limit_reached:
+                forced_submit_reason = None
+                allow_submit = False
+                submit_non_improving = False
+                defer_submit_for_accuracy_frontier = False
+                submit_limited_holdback = False
+                print(
+                    "[yellow]submit skipped[/yellow]: daily submission limit reached "
+                    f"({successful_submit_count}/{submission_limit_per_day} used in the current 24h window)."
+                )
             submit_phase_required = submit_enabled and not config.dry_run
             submit_allowed_by_gate = submit_enabled and allow_submit
             pre_submit_phase_state = "disabled"
             if submit_enabled:
                 pre_submit_phase_state = "pending_submit"
-            if force_initial_submit:
+            if daily_submission_limit_reached:
+                pre_submit_phase_state = "daily_submission_limit_reached"
+            elif force_initial_submit:
                 pre_submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
             elif submit_enabled and (not quality_allows_submit) and (not config.force_submit):
                 pre_submit_phase_state = "blocked_quality_guard"
@@ -1911,9 +1934,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 readiness_score=readiness_score,
             )
             submission_result: dict[str, object] | None = None
+            submission_skipped = False
             submit_failed_deferred = False
             online_score: float | None = None
-            if force_initial_submit:
+            if daily_submission_limit_reached:
+                submit_phase_state = "daily_submission_limit_reached"
+            elif force_initial_submit:
                 submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
             elif submit_non_improving:
                 submit_phase_state = "deferred_non_improving"
@@ -1947,112 +1973,116 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
                         raise
                 if submission_result:
-                    submit_phase_state = "submitted"
-                    submitted = True
-                    last_submission_result = submission_result
-                    outcome_payload = submission_result.get("outcome")
-                    if isinstance(outcome_payload, dict):
-                        online_score = _to_float(outcome_payload.get("score"))
-                        if online_score is not None:
-                            print(f"[cyan]submission score[/cyan]: {online_score:.6f}")
-                            if isinstance(top1_score, (int, float)):
-                                top1_tier_by_submission = _is_top1_tier(
-                                    float(online_score),
-                                    float(top1_score),
-                                    metric_direction,
-                                )
-                        rank_payload = _resolve_submission_rank_payload(
-                            slug=config.slug,
-                            context_dir=config.paths.context_dir,
-                            direction=metric_direction,
-                            outcome=outcome_payload,
-                            dry_run=config.dry_run,
-                        )
-                        if rank_payload:
-                            outcome_payload.update(rank_payload)
-                            submission_rank = _to_int(rank_payload.get("rank"))
-                            submission_total_teams = _to_int(rank_payload.get("total_teams"))
-                            submission_rank_percentile = _to_float(rank_payload.get("rank_percentile"))
-                            submission_rank_estimate = _to_int(rank_payload.get("estimated_rank"))
-                            submission_total_teams_estimate = _to_int(rank_payload.get("estimated_total_teams"))
-                            submission_rank_percentile_estimate = _to_float(
-                                rank_payload.get("estimated_rank_percentile")
+                    if bool(submission_result.get("skipped")):
+                        submission_skipped = True
+                        submit_phase_state = str(submission_result.get("reason") or "skipped")
+                    else:
+                        submit_phase_state = "submitted"
+                        submitted = True
+                        last_submission_result = submission_result
+                        outcome_payload = submission_result.get("outcome")
+                        if isinstance(outcome_payload, dict):
+                            online_score = _to_float(outcome_payload.get("score"))
+                            if online_score is not None:
+                                print(f"[cyan]submission score[/cyan]: {online_score:.6f}")
+                                if isinstance(top1_score, (int, float)):
+                                    top1_tier_by_submission = _is_top1_tier(
+                                        float(online_score),
+                                        float(top1_score),
+                                        metric_direction,
+                                    )
+                            rank_payload = _resolve_submission_rank_payload(
+                                slug=config.slug,
+                                context_dir=config.paths.context_dir,
+                                direction=metric_direction,
+                                outcome=outcome_payload,
+                                dry_run=config.dry_run,
                             )
-                            estimate_source_raw = rank_payload.get("rank_estimate_source")
-                            if isinstance(estimate_source_raw, str) and estimate_source_raw.strip():
-                                submission_rank_estimate_source = estimate_source_raw.strip()
-                            source_raw = rank_payload.get("rank_source")
-                            if source_raw is not None:
-                                submission_rank_source = str(source_raw)
-                            if (
-                                submission_rank is not None
-                                and submission_total_teams is not None
-                                and submission_total_teams > 0
-                            ):
-                                if submission_rank_percentile is None:
-                                    submission_rank_percentile = submission_rank / submission_total_teams
-                                percentile_text = (
-                                    f"{submission_rank_percentile * 100:.2f}%"
-                                    if submission_rank_percentile is not None
-                                    else "n/a"
+                            if rank_payload:
+                                outcome_payload.update(rank_payload)
+                                submission_rank = _to_int(rank_payload.get("rank"))
+                                submission_total_teams = _to_int(rank_payload.get("total_teams"))
+                                submission_rank_percentile = _to_float(rank_payload.get("rank_percentile"))
+                                submission_rank_estimate = _to_int(rank_payload.get("estimated_rank"))
+                                submission_total_teams_estimate = _to_int(rank_payload.get("estimated_total_teams"))
+                                submission_rank_percentile_estimate = _to_float(
+                                    rank_payload.get("estimated_rank_percentile")
                                 )
-                                source_text = f" source={submission_rank_source}" if submission_rank_source else ""
-                                print(
-                                    "[cyan]submission rank[/cyan]: "
-                                    f"{submission_rank}/{submission_total_teams} "
-                                    f"(percentile={percentile_text}){source_text}"
-                                )
-                                rank_forced_major_overhaul = _should_force_major_overhaul_by_rank(
-                                    rank=submission_rank,
-                                    total_teams=submission_total_teams,
-                                    max_percentile=rank_force_major_max_percentile,
-                                    min_teams=rank_force_major_min_teams,
-                                )
-                                if rank_forced_major_overhaul:
-                                    rank_force_reason = _build_rank_force_reason(
+                                estimate_source_raw = rank_payload.get("rank_estimate_source")
+                                if isinstance(estimate_source_raw, str) and estimate_source_raw.strip():
+                                    submission_rank_estimate_source = estimate_source_raw.strip()
+                                source_raw = rank_payload.get("rank_source")
+                                if source_raw is not None:
+                                    submission_rank_source = str(source_raw)
+                                if (
+                                    submission_rank is not None
+                                    and submission_total_teams is not None
+                                    and submission_total_teams > 0
+                                ):
+                                    if submission_rank_percentile is None:
+                                        submission_rank_percentile = submission_rank / submission_total_teams
+                                    percentile_text = (
+                                        f"{submission_rank_percentile * 100:.2f}%"
+                                        if submission_rank_percentile is not None
+                                        else "n/a"
+                                    )
+                                    source_text = f" source={submission_rank_source}" if submission_rank_source else ""
+                                    print(
+                                        "[cyan]submission rank[/cyan]: "
+                                        f"{submission_rank}/{submission_total_teams} "
+                                        f"(percentile={percentile_text}){source_text}"
+                                    )
+                                    rank_forced_major_overhaul = _should_force_major_overhaul_by_rank(
                                         rank=submission_rank,
                                         total_teams=submission_total_teams,
-                                        rank_percentile=submission_rank_percentile,
                                         max_percentile=rank_force_major_max_percentile,
                                         min_teams=rank_force_major_min_teams,
-                                        source=submission_rank_source,
                                     )
-                                    print(f"[yellow]rank guard[/yellow]: {rank_force_reason}")
-                            elif (
-                                submission_rank_estimate is not None
-                                and submission_total_teams_estimate is not None
-                                and submission_total_teams_estimate > 0
-                            ):
-                                if submission_rank_percentile_estimate is None:
-                                    submission_rank_percentile_estimate = (
-                                        submission_rank_estimate / submission_total_teams_estimate
+                                    if rank_forced_major_overhaul:
+                                        rank_force_reason = _build_rank_force_reason(
+                                            rank=submission_rank,
+                                            total_teams=submission_total_teams,
+                                            rank_percentile=submission_rank_percentile,
+                                            max_percentile=rank_force_major_max_percentile,
+                                            min_teams=rank_force_major_min_teams,
+                                            source=submission_rank_source,
+                                        )
+                                        print(f"[yellow]rank guard[/yellow]: {rank_force_reason}")
+                                elif (
+                                    submission_rank_estimate is not None
+                                    and submission_total_teams_estimate is not None
+                                    and submission_total_teams_estimate > 0
+                                ):
+                                    if submission_rank_percentile_estimate is None:
+                                        submission_rank_percentile_estimate = (
+                                            submission_rank_estimate / submission_total_teams_estimate
+                                        )
+                                    percentile_text = (
+                                        f"{submission_rank_percentile_estimate * 100:.2f}%"
+                                        if submission_rank_percentile_estimate is not None
+                                        else "n/a"
                                     )
-                                percentile_text = (
-                                    f"{submission_rank_percentile_estimate * 100:.2f}%"
-                                    if submission_rank_percentile_estimate is not None
-                                    else "n/a"
-                                )
-                                source_text = (
-                                    f" source={submission_rank_estimate_source}"
-                                    if submission_rank_estimate_source
-                                    else ""
-                                )
+                                    source_text = (
+                                        f" source={submission_rank_estimate_source}"
+                                        if submission_rank_estimate_source
+                                        else ""
+                                    )
+                                    print(
+                                        "[yellow]submission rank estimate[/yellow]: "
+                                        f"{submission_rank_estimate}/{submission_total_teams_estimate} "
+                                        f"(percentile={percentile_text}){source_text}"
+                                    )
+                        submitted_tracking_score, submitted_tracking_source = _submission_score_for_tracking(
+                            offline_score=decision_score,
+                            online_score=online_score,
+                        )
+                        if _update_best_score(best_submitted_score, submitted_tracking_score, metric_direction, 0.0):
+                            best_submitted_score = submitted_tracking_score
+                            if submitted_tracking_source != "offline":
                                 print(
-                                    "[yellow]submission rank estimate[/yellow]: "
-                                    f"{submission_rank_estimate}/{submission_total_teams_estimate} "
-                                    f"(percentile={percentile_text}){source_text}"
+                                    "[cyan]submit tracking[/cyan]: "
+                                    f"updated best submitted score from {submitted_tracking_source}."
                                 )
-                    submitted_tracking_score, submitted_tracking_source = _submission_score_for_tracking(
-                        offline_score=decision_score,
-                        online_score=online_score,
-                    )
-                    if _update_best_score(best_submitted_score, submitted_tracking_score, metric_direction, 0.0):
-                        best_submitted_score = submitted_tracking_score
-                        if submitted_tracking_source != "offline":
-                            print(
-                                "[cyan]submit tracking[/cyan]: "
-                                f"updated best submitted score from {submitted_tracking_source}."
-                            )
                 else:
                     submit_phase_state = "dry_run" if config.dry_run else "attempted_no_result"
             if target_rank_percentile is not None and deliverable_mode == "leaderboard":
@@ -2543,7 +2573,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submit_allowed_by_gate=submit_allowed_by_gate,
                 submit_phase_state=submit_phase_state,
                 forced_submit_reason=forced_submit_reason,
-                submitted=submission_result is not None,
+                submitted=submission_result is not None and not submission_skipped,
                 readiness_score=readiness_score,
             )
 
@@ -2734,24 +2764,32 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
                 raise
             if fallback_result:
-                submitted = True
-                last_submission_result = fallback_result
-                fallback_online_score: float | None = None
-                outcome_payload = fallback_result.get("outcome")
-                if isinstance(outcome_payload, dict):
-                    fallback_online_score = _to_float(outcome_payload.get("score"))
-                if best_submittable_score is not None:
-                    submitted_tracking_score, _submitted_tracking_source = _submission_score_for_tracking(
-                        offline_score=best_submittable_score,
-                        online_score=fallback_online_score,
+                if bool(fallback_result.get("skipped")):
+                    allow_fallback_submit = False
+                    print(
+                        "[yellow]submit skipped[/yellow]: "
+                        f"{fallback_result.get('reason') or 'duplicate submission skipped'}."
                     )
-                    if _update_best_score(
-                        best_submitted_score,
-                        submitted_tracking_score,
-                        metric_direction,
-                        0.0,
-                    ):
-                        best_submitted_score = submitted_tracking_score
+                    fallback_result = None
+                else:
+                    submitted = True
+                    last_submission_result = fallback_result
+                    fallback_online_score: float | None = None
+                    outcome_payload = fallback_result.get("outcome")
+                    if isinstance(outcome_payload, dict):
+                        fallback_online_score = _to_float(outcome_payload.get("score"))
+                    if best_submittable_score is not None:
+                        submitted_tracking_score, _submitted_tracking_source = _submission_score_for_tracking(
+                            offline_score=best_submittable_score,
+                            online_score=fallback_online_score,
+                        )
+                        if _update_best_score(
+                            best_submitted_score,
+                            submitted_tracking_score,
+                            metric_direction,
+                            0.0,
+                        ):
+                            best_submitted_score = submitted_tracking_score
         else:
             print(
                 "[yellow]submit skipped[/yellow]: fallback artifact is not better "
@@ -3035,16 +3073,43 @@ def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
 
 
 def _extract_submission_limit_per_day(lowered_rules_text: str) -> int | None:
-    """Extract an explicit `N submissions per day` value from rules text."""
+    """Extract an explicit daily or rolling-24h submission limit from rules text."""
     candidates: list[int] = []
 
     for match in re.finditer(r"\((\d+)\)\s+submissions?\s+per\s+day", lowered_rules_text):
         candidates.append(int(match.group(1)))
 
-    for match in re.finditer(r"\b(\d+)\s+submissions?\s+per\s+day\b", lowered_rules_text):
+    numeric_patterns = (
+        r"\b(\d+)\s+submissions?\s+per\s+day\b",
+        r"\b(\d+)\s+submissions?\s+within\s+24\s+hours?\b",
+        r"\b(\d+)\s+submissions?\s+per\s+24\s*h(?:ours?)?\s*(?:interval|window)?\b",
+        r"\b(\d+)\s+submissions?\s+per\s+24\s+hours?\s*(?:interval|window)?\b",
+    )
+    for pattern in numeric_patterns:
+        for match in re.finditer(pattern, lowered_rules_text):
+            candidates.append(int(match.group(1)))
+
+    word_patterns = (
+        r"\b([a-z]+)\s+submissions?\s+per\s+day\b",
+        r"\b([a-z]+)\s+submissions?\s+within\s+24\s+hours?\b",
+        r"\b([a-z]+)\s+submissions?\s+per\s+24\s*h(?:ours?)?\s*(?:interval|window)?\b",
+        r"\b([a-z]+)\s+submissions?\s+per\s+24\s+hours?\s*(?:interval|window)?\b",
+    )
+    for pattern in word_patterns:
+        for match in re.finditer(pattern, lowered_rules_text):
+            number_word = match.group(1)
+            if number_word in _NUMBER_WORD_TO_INT:
+                candidates.append(_NUMBER_WORD_TO_INT[number_word])
+
+    for match in re.finditer(
+        r"submission\s+limit\s+is\s+(\d+)\s+submissions?\s+within\s+24\s+hours?", lowered_rules_text
+    ):
         candidates.append(int(match.group(1)))
 
-    for match in re.finditer(r"\b([a-z]+)\s+submissions?\s+per\s+day\b", lowered_rules_text):
+    for match in re.finditer(
+        r"submission\s+limit\s+is\s+([a-z]+)\s+submissions?\s+within\s+24\s+hours?",
+        lowered_rules_text,
+    ):
         number_word = match.group(1)
         if number_word in _NUMBER_WORD_TO_INT:
             candidates.append(_NUMBER_WORD_TO_INT[number_word])
@@ -6186,6 +6251,10 @@ def _should_attempt_submit_for_readiness(
     met_target = readiness_score is not None and _meets_target(readiness_score, readiness_target, direction)
     top1_tier = readiness_score is not None and _is_top1_tier(readiness_score, top1_score, direction)
 
+    if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
+        if max(0, int(successful_submissions)) >= submission_limit_per_day:
+            return False
+
     if normalized in {"final_only", "at_final"}:
         return is_final_iteration
     if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
@@ -7582,20 +7651,72 @@ def _rerun_kernel_for_metric_recheck(
         )
 
     output_metrics_path = iter_dir / "output" / "metrics.json"
-    resolved_metrics_path = output_metrics_path if output_metrics_path.exists() else metrics_artifact_path
-    if resolved_metrics_path is None or (not resolved_metrics_path.exists()):
-        resolved_metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
-    if resolved_metrics_path is None:
+    metrics_candidates: list[Path] = []
+    seen_metric_candidates: set[str] = set()
+
+    def add_metrics_candidate(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in seen_metric_candidates:
+            return
+        seen_metric_candidates.add(key)
+        metrics_candidates.append(path)
+
+    add_metrics_candidate(metrics_artifact_path)
+    add_metrics_candidate(iter_dir / "metrics.json")
+    add_metrics_candidate(output_metrics_path)
+    add_metrics_candidate(_resolve_iteration_artifact(iter_dir, "metrics.json"))
+
+    loaded_candidates: list[tuple[Path, dict[str, object], EvaluationResult | None]] = []
+    for metrics_candidate in metrics_candidates:
+        if not metrics_candidate.exists():
+            continue
+        candidate_payload = _load_json_object(metrics_candidate)
+        if candidate_payload is None:
+            continue
+        if str(candidate_payload.get("kind") or "").strip().lower() == "submit_only":
+            continue
+        candidate_evaluation = _load_kernel_metrics(
+            metrics_candidate,
+            metric_direction,
+            target_metric,
+        )
+        loaded_candidates.append((metrics_candidate, candidate_payload, candidate_evaluation))
+
+    valid_candidates = [candidate for candidate in loaded_candidates if candidate[2] is not None]
+    selected_candidate: tuple[Path, dict[str, object], EvaluationResult | None] | None = None
+    if valid_candidates:
+        selected_candidate = valid_candidates[0]
+        output_candidate = next(
+            (candidate for candidate in valid_candidates if candidate[0] == output_metrics_path),
+            None,
+        )
+        if output_candidate is not None:
+            try:
+                output_mtime = output_metrics_path.stat().st_mtime
+                other_mtimes = [
+                    candidate[0].stat().st_mtime
+                    for candidate in valid_candidates
+                    if candidate[0] != output_metrics_path
+                ]
+            except OSError:
+                other_mtimes = []
+                output_mtime = 0.0
+            if not other_mtimes or output_mtime >= max(other_mtimes):
+                selected_candidate = output_candidate
+    elif loaded_candidates:
+        selected_candidate = loaded_candidates[0]
+
+    if selected_candidate is None:
         raise RuntimeError(
             "Metric recheck failed: metrics.json artifact is missing for same-iteration metric-only recheck."
         )
 
-    payload = _load_json_object(resolved_metrics_path)
-    evaluation = _load_kernel_metrics(
-        resolved_metrics_path,
-        metric_direction,
-        target_metric,
-    )
+    resolved_metrics_path, payload, evaluation = selected_candidate
     metric_mismatch = bool(
         target_metric and evaluation and evaluation.metric and not _metrics_equivalent(evaluation.metric, target_metric)
     )
@@ -8860,6 +8981,71 @@ def _attempt_submit(
             exit_code=SubmissionValidationError.exit_code,
         )
 
+    prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
+    if prepared_submission_sha and not allow_force:
+        duplicate_sources: list[str] = []
+        if _submit_attempt_sha_seen(run_dir=run_dir, submission_sha=prepared_submission_sha):
+            duplicate_sources.append("run_attempts")
+        if SubmissionLedger(config.paths.submission_ledger_path).is_duplicate(
+            slug=config.slug,
+            message=message,
+            submission_path=prepared_submission_path,
+        ):
+            duplicate_sources.append("submission_ledger")
+        if duplicate_sources:
+            reason = "duplicate_submission_sha_seen"
+            fingerprint = compute_error_fingerprint("", f"{reason}:{config.slug}:{prepared_submission_sha}")
+            print(
+                "[yellow]submit skipped[/yellow]: prepared submission SHA already seen "
+                f"({', '.join(duplicate_sources)}); no Kaggle submit attempted."
+            )
+            _append_submit_attempt(
+                run_dir=run_dir,
+                payload={
+                    "run_id": run_id,
+                    "sub_path": str(prepared_submission_path),
+                    "sub_sha256": prepared_submission_sha,
+                    "exit_code": None,
+                    "ok": False,
+                    "fingerprint": fingerprint,
+                    "error_kind": "none",
+                    "action_taken": "skip",
+                    "reason": reason,
+                    "duplicate_sources": duplicate_sources,
+                    "stdout_tail": "",
+                    "stderr_tail": "",
+                },
+            )
+            _save_run_state(
+                run_dir,
+                {
+                    "submit_attempted": True,
+                    "last_submit_fingerprint": fingerprint,
+                    "last_fingerprint": fingerprint,
+                    "last_submit_code_fingerprint": submit_code_fingerprint,
+                    "last_error_kind": "none",
+                    "last_action": "skip",
+                    "last_reason": reason,
+                    "last_submission_path": str(prepared_submission_path),
+                    "last_submission_sha256": prepared_submission_sha,
+                    "submit_attempts_count": int(_load_run_state(run_dir).get("submit_attempts_count", 0)) + 1,
+                },
+            )
+            _mark_submit_failure_context_resolved(
+                run_dir=run_dir,
+                resolution=reason,
+                submission_ref=str(prepared_submission_path),
+            )
+            return {
+                "message": message,
+                "submission_path": str(prepared_submission_path),
+                "submitted_at": submitted_at.isoformat(),
+                "iteration": _infer_iteration_from_submission_path(submission_path),
+                "skipped": True,
+                "reason": reason,
+                "duplicate_sources": duplicate_sources,
+            }
+
     try:
         rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)
     except KaggleCliError as exc:
@@ -9373,7 +9559,7 @@ def _should_retry_ambiguous_notebook_submit_error(*, reason: str, stdout: str, s
     if str(reason or "").strip().lower() != "ambiguous_notebook_bad_request":
         return False
     detail = f"{stdout}\n{stderr}".lower()
-    return "submit-notebook" in detail
+    return any(hint in detail for hint in _NOTEBOOK_FALLBACK_HINTS)
 
 
 def _infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:
@@ -9498,6 +9684,31 @@ def _append_submit_attempt(*, run_dir: Path, payload: dict[str, object]) -> None
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
+def _submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
+    normalized_sha = str(submission_sha or "").strip()
+    if not normalized_sha:
+        return False
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return False
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("sub_sha256") or "").strip() == normalized_sha:
+            return True
+    return False
+
+
 def _submit_failure_context_path(run_dir: Path) -> Path:
     return run_dir / _SUBMIT_FAILURE_CONTEXT_FILENAME
 
@@ -9510,13 +9721,43 @@ def _load_submit_failure_context(run_dir: Path) -> dict[str, object]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    return _normalize_loaded_submit_failure_context(payload)
 
 
 def _save_submit_failure_context(run_dir: Path, payload: dict[str, object]) -> None:
     path = _submit_failure_context_path(run_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _normalize_loaded_submit_failure_context(payload: dict[str, object]) -> dict[str, object]:
+    """Backfill manual blocker classification for contexts written by older runs."""
+    reason = str(payload.get("reason") or "").strip().lower()
+    detail = "\n".join(
+        str(payload.get(key) or "") for key in ("stdout_tail", "stderr_tail", "summary", "message") if payload.get(key)
+    ).lower()
+    manual_next_step = ""
+    if reason == "ambiguous_notebook_bad_request":
+        manual_next_step = (
+            "Kaggle returned a generic submit-notebook 400 without a clear notebook-only signal; "
+            "do not auto-repair or rerun the kernel for this submit error."
+        )
+    elif reason == "submission_limit" or any(
+        marker in detail
+        for marker in (
+            "submission limit",
+            "maximum number of submissions",
+            "max submissions",
+        )
+    ):
+        manual_next_step = "Wait for the Kaggle submission limit window to expire before retrying submit."
+    if manual_next_step:
+        payload["repair_target"] = _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
+        payload["repairable"] = False
+        payload["manual_next_step"] = manual_next_step
+    return payload
 
 
 def _submit_failure_manual_next_step(*, reason: str, detail: str) -> str:
@@ -9561,6 +9802,26 @@ def _classify_submit_failure_repair(
     normalized_reason = str(reason or "").strip().lower()
     normalized_kind = str(error_kind or "").strip().lower()
     normalized_detail = str(detail or "").strip()
+    if normalized_reason == "ambiguous_notebook_bad_request":
+        return (
+            _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
+            False,
+            "Kaggle returned a generic submit-notebook 400 without a clear notebook-only signal; "
+            "do not auto-repair or rerun the kernel for this submit error.",
+        )
+    if normalized_reason == "submission_limit" or any(
+        marker in normalized_detail.lower()
+        for marker in (
+            "submission limit",
+            "maximum number of submissions",
+            "max submissions",
+        )
+    ):
+        return (
+            _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
+            False,
+            "Wait for the Kaggle submission limit window to expire before retrying submit.",
+        )
     if normalized_reason in {"kaggle_credentials_missing", "rules_not_accepted", "local_submission_guardrail"}:
         return (
             _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
@@ -10136,9 +10397,15 @@ def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> boo
     run_dir = config.paths.run_dir(run_id)
     failure_context = _load_submit_failure_context(run_dir)
     if failure_context:
+        reason = str(failure_context.get("reason") or "unknown").strip().lower()
+        if reason == "ambiguous_notebook_bad_request":
+            print(
+                "[yellow]autofix skipped[/yellow]: submit abort is an ambiguous notebook 400; "
+                "not treating it as a kernel-repairable failure."
+            )
+            return False
         if bool(failure_context.get("repairable")):
             return True
-        reason = str(failure_context.get("reason") or "unknown").strip().lower()
         repair_target = str(failure_context.get("repair_target") or "unknown").strip().lower()
         manual_next_step = str(failure_context.get("manual_next_step") or "").strip()
         suffix = f" next_step={manual_next_step}" if manual_next_step else ""

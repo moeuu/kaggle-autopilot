@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from kagglebot.kernel_sources import KernelSourceConfig
 import json
 from pathlib import Path
 
 import pytest
 
+from kagglebot.kernel_sources import KernelSourceConfig
 from kagglebot.runners import kaggle_notebook
 from kagglebot.runners.kaggle_notebook import _parse_kernel_status, _wait_for_kernel, build_kernel_metadata
 

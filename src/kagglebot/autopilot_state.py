@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 _ITERATION_STATE_FILENAME = "iteration_state.json"
 _LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS = frozenset({"submit"})
+_TERMINAL_UNSUBMITTED_PHASE_STATES = frozenset({"duplicate_submission_sha_seen"})
 
 
 def _write_iteration_state_marker(
@@ -86,7 +87,9 @@ def _is_iteration_marker_complete(payload: dict[str, object], *, require_submit_
     if require_submit_phase and not bool(payload.get("submit_phase_finished")):
         return False
     if require_submit_phase and bool(payload.get("submit_allowed_by_gate")) and not bool(payload.get("submitted")):
-        return False
+        phase_state = str(payload.get("submit_phase_state") or "").strip().lower()
+        if phase_state not in _TERMINAL_UNSUBMITTED_PHASE_STATES:
+            return False
     return True
 
 
@@ -113,8 +116,7 @@ def _load_submit_phase_completed_iterations(
             continue
         if not isinstance(payload, dict):
             continue
-        action = str(payload.get("action_taken") or "").strip().lower()
-        if action not in _LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS:
+        if not _is_legacy_submit_attempt_complete(payload):
             continue
         iteration = _to_int(payload.get("iteration"))
         if iteration is None:
@@ -124,6 +126,59 @@ def _load_submit_phase_completed_iterations(
         if iteration is not None and iteration > 0:
             completed.add(iteration)
     return completed
+
+
+def _is_legacy_submit_attempt_complete(payload: dict[str, object]) -> bool:
+    action = str(payload.get("action_taken") or "").strip().lower()
+    if action in _LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS:
+        return True
+    if action != "skip":
+        return False
+    reason = str(payload.get("reason") or "").strip().lower()
+    return reason in _TERMINAL_UNSUBMITTED_PHASE_STATES
+
+
+def _infer_iteration_from_submit_attempt(payload: dict[str, object]) -> int | None:
+    iteration = _to_int(payload.get("iteration"))
+    if iteration is not None and iteration > 0:
+        return iteration
+    sub_path = str(payload.get("sub_path") or "").strip()
+    if not sub_path:
+        return None
+    try:
+        parts = Path(sub_path).parts
+    except (TypeError, ValueError):
+        return None
+    for part in parts:
+        if not part.startswith("iter-"):
+            continue
+        parsed = _to_int(part.split("-", 1)[1])
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _latest_submit_attempt_for_iteration(run_dir: Path, iteration: int) -> dict[str, object] | None:
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return None
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if _infer_iteration_from_submit_attempt(payload) == iteration:
+            return payload
+    return None
 
 
 def _load_submitted_iteration_tracking_score(
@@ -403,6 +458,37 @@ def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
     return _newest_existing_path(candidates)
 
 
+def _is_submit_only_metrics_payload(metrics_path: Path) -> bool:
+    payload = _load_json_object(metrics_path)
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("kind") or "").strip().lower() == "submit_only"
+
+
+def _submit_retry_metrics_candidates(iter_dir: Path, marker_payload: dict[str, object]) -> list[Path]:
+    candidates: list[Path] = []
+    marker_metrics_path = marker_payload.get("metrics_path")
+    if isinstance(marker_metrics_path, str) and marker_metrics_path.strip():
+        candidates.append(Path(marker_metrics_path))
+    candidates.append(iter_dir / "metrics.json")
+    resolved_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
+    if resolved_path is not None:
+        candidates.append(resolved_path)
+
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
 def _copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
     destination = iter_dir / source.name
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -448,6 +534,8 @@ def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: 
         metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
         if submission_path is None or metrics_path is None:
             continue
+        if _is_submit_only_metrics_payload(metrics_path):
+            continue
         if latest is None or iteration > latest:
             latest = iteration
     return latest
@@ -468,31 +556,42 @@ def _load_submit_retry_artifacts(
         return None
 
     marker_payload = _load_iteration_state_marker(iter_dir / _ITERATION_STATE_FILENAME)
+    latest_attempt = _latest_submit_attempt_for_iteration(run_dir, iteration)
+    latest_attempt_complete = latest_attempt is not None and _is_legacy_submit_attempt_complete(latest_attempt)
     marker_pending = (
         bool(marker_payload.get("trained"))
         and bool(marker_payload.get("submit_allowed_by_gate"))
         and (not bool(marker_payload.get("submit_phase_finished")))
+        and not latest_attempt_complete
     )
 
     legacy_pending = False
     if not marker_pending:
         latest_iter = _latest_iteration_with_training_artifacts(run_dir=run_dir, max_iterations=max_iterations)
-        run_state = _load_run_state(run_dir)
-        if bool(run_state.get("submit_attempted")) and not bool(run_state.get("submit_ok")):
-            legacy_pending = latest_iter == iteration
-        elif not marker_payload and latest_iter == iteration:
+        marker_has_submit_phase_fields = any(
+            key in marker_payload for key in ("submit_phase_finished", "submit_allowed_by_gate", "submitted")
+        )
+        if (
+            latest_iter == iteration
+            and not latest_attempt_complete
+            and (not marker_payload or not marker_has_submit_phase_fields)
+        ):
             legacy_pending = True
     if not (marker_pending or legacy_pending):
         return None
 
     submission_path = _resolve_iteration_submission_artifact(iter_dir)
-    metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
-    if submission_path is None or metrics_path is None:
+    if submission_path is None:
         return None
-    evaluation = load_kernel_metrics(metrics_path, metric_direction, target_metric)
-    if evaluation is None:
-        return None
-    return submission_path, metrics_path, evaluation
+    for metrics_path in _submit_retry_metrics_candidates(iter_dir, marker_payload):
+        if not metrics_path.exists():
+            continue
+        if _is_submit_only_metrics_payload(metrics_path):
+            continue
+        evaluation = load_kernel_metrics(metrics_path, metric_direction, target_metric)
+        if evaluation is not None:
+            return submission_path, metrics_path, evaluation
+    return None
 
 
 def _load_run_state(run_dir: Path) -> dict[str, object]:

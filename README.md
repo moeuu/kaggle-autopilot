@@ -265,4 +265,4 @@ uv run kagglebot knowledge search --tag tabular --tag binary --limit 5
 
 - **Non-interactive**: No prompts for input. All decisions via CLI flags or `plan.json`.
 - **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run.
-- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; exact same submission path is skipped unless forced.
+- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; duplicate submission SHA is skipped unless forced, and rolling 24h submission limits are honored when rules expose them.

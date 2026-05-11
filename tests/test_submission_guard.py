@@ -259,18 +259,12 @@ def test_validate_submission_does_not_infer_suffix_when_real_sample_ids_are_suff
 
     sample = tmp_path / "sample_submission.csv"
     sample.write_text(
-        "id,image_id,prediction_string\n"
-        "0,0,0.9 1 2 3 4\n"
-        "1,1, \n"
-        "2,2,0.8 5 6 7 8\n",
+        "id,image_id,prediction_string\n0,0,0.9 1 2 3 4\n1,1, \n2,2,0.8 5 6 7 8\n",
         encoding="utf-8",
     )
     submission = tmp_path / "submission.csv"
     submission.write_text(
-        "id,image_id,prediction_string\n"
-        "0,0,0.9 1 2 3 4\n"
-        "1,1, \n"
-        "2,2,0.8 5 6 7 8\n",
+        "id,image_id,prediction_string\n0,0,0.9 1 2 3 4\n1,1, \n2,2,0.8 5 6 7 8\n",
         encoding="utf-8",
     )
 

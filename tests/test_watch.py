@@ -606,6 +606,31 @@ def test_run_watch_once_passes_improved_submit_policy(monkeypatch, tmp_path: Pat
     assert captured == {"submit_policy": "improved", "submit": True, "force_submit": False}
 
 
+def test_run_watch_once_caps_iterations_to_plan_max(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "kagglebot.supervisor.list_entered_competitions",
+        lambda **kwargs: [_competition("demo")],
+    )
+
+    def fake_prepare(**kwargs) -> None:
+        paths = kwargs["paths"]
+        paths.base_dir.mkdir(parents=True, exist_ok=True)
+        paths.plan_path.write_text(json.dumps({"max_iterations": 3}), encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run_autopilot(config) -> None:
+        captured["max_iterations"] = config.max_iterations
+
+    monkeypatch.setattr("kagglebot.supervisor._prepare_competition", fake_prepare)
+    monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
+
+    result = run_watch_once(_config(tmp_path, max_iterations=5))
+
+    assert result.status == "finished"
+    assert captured == {"max_iterations": 3}
+
+
 def test_run_watch_once_resumes_active_run(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     run_id = "20260422T000000Z-abcd1234"

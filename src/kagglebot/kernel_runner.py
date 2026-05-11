@@ -405,7 +405,7 @@ def _run_local_kernel_once(
     line_callback: Callable[[str], None] | None,
     progress_tracker: _LocalKernelProgressTracker | None,
 ) -> _LocalKernelExecResult:
-    args = [sys.executable, str(kernel_path)]
+    args = [sys.executable, "-u", str(kernel_path)]
     start = time.monotonic()
     proc = subprocess.Popen(
         args,
@@ -722,6 +722,7 @@ def _apply_local_runtime_env_defaults(
     env.setdefault("KAGGLEBOT_TORCH_SHARING_STRATEGY", "file_system")
     env.setdefault("KAGGLEBOT_LOCAL_NOFILE", "4096")
     env.setdefault(_LOCAL_KERNEL_STALL_ENV, str(int(_LOCAL_KERNEL_DEFAULT_STALL_SEC)))
+    env.setdefault("PYTHONUNBUFFERED", "1")
     env["KAGGLEBOT_DO_TRAIN"] = "1"
     env["KAGGLEBOT_FORCE_TRAIN"] = "1"
     env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] = "1"
@@ -731,6 +732,7 @@ def _apply_local_runtime_env_defaults(
     notes.append(f"defaulting KAGGLEBOT_TORCH_SHARING_STRATEGY={env['KAGGLEBOT_TORCH_SHARING_STRATEGY']}")
     notes.append(f"defaulting KAGGLEBOT_LOCAL_NOFILE={env['KAGGLEBOT_LOCAL_NOFILE']}")
     notes.append(f"defaulting {_LOCAL_KERNEL_STALL_ENV}={env[_LOCAL_KERNEL_STALL_ENV]}")
+    notes.append(f"defaulting PYTHONUNBUFFERED={env['PYTHONUNBUFFERED']}")
 
     if not _module_available("xgboost"):
         env.setdefault("USE_XGB", "0")
@@ -843,12 +845,13 @@ from __future__ import annotations
 
 import base64
 import gzip
-import json
 import os
 from pathlib import Path
 
 # This kernel exists to satisfy notebook-only competitions: it emits a prepared
 # `submission.csv` artifact that is already validated locally by Kagglebot.
+# Training metrics.json is preserved by the runner; this submit-only wrapper
+# must not overwrite it with an unscored placeholder.
 #
 # NOTE: We still reference `/kaggle/input` to satisfy source validators and to
 # make debugging easier in the Kaggle runtime.
@@ -871,11 +874,7 @@ def main() -> None:
     except Exception as exc:
         raise RuntimeError("Failed to decode embedded submission payload.") from exc
     dst.write_bytes(payload)
-    metrics_path = Path("/kaggle/working/metrics.json")
-    metrics_payload = {\"schema_version\": 1, \"kind\": \"submit_only\"}
-    metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding=\"utf-8\")
     print(f\"Wrote {dst} (bytes={dst.stat().st_size})\")
-    print(f\"Wrote {metrics_path}\")
 
 
 if __name__ == \"__main__\":
@@ -1472,10 +1471,14 @@ def run_kernel_local(
 
     timeout_sec = None if timeout_minutes is None else max(60, int(timeout_minutes * 60))
     eta_total_sec, eta_samples = _estimate_local_kernel_duration_seconds(base_dir=base_dir, slug=slug)
+    started_at = time.time()
+    monotonic_start = time.monotonic()
     progress_tracker = _build_local_kernel_progress_tracker(
         base_dir=base_dir,
         slug=slug,
         watch_dirs=[output_dir, kernel_stage_dir / "outputs"],
+        started_at_wall=started_at,
+        started_at_monotonic=monotonic_start,
     )
     _print_local_kernel_progress(
         elapsed_sec=0.0,
@@ -1485,8 +1488,6 @@ def run_kernel_local(
         progress_tracker=progress_tracker,
         accelerator=accelerator,
     )
-    started_at = time.time()
-    monotonic_start = time.monotonic()
     env = os.environ.copy()
     env.setdefault("KAGGLEBOT_LOCAL_KERNEL", "1")
     env.setdefault("KAGGLEBOT_SLUG", slug)
@@ -1670,6 +1671,8 @@ def run_kernel_local(
         "submission_manifest.json",
         "metrics_summary.json",
         "cv_results.json",
+        "cv_summary.json",
+        "pipeline_diagnostics.json",
     ):
         optional_src = _resolve_local_kernel_artifact_file(
             kernel_dir=kernel_stage_dir,
@@ -2257,6 +2260,7 @@ class _LocalKernelProgressTracker:
     expected_seeds: list[int]
     watch_dirs: tuple[Path, ...] = field(default_factory=tuple)
     started_at_monotonic: float = field(default_factory=time.monotonic)
+    started_at_wall: float = field(default_factory=time.time)
     zero_based_folds: bool = False
     seen_triplets: set[tuple[str, int, int]] = field(default_factory=set)
     lines_seen: int = 0
@@ -2359,6 +2363,7 @@ class _LocalKernelProgressTracker:
         artifact_count, last_artifact_age_sec = _scan_watch_dirs_activity(
             watch_dirs=self.watch_dirs,
             now_wall=now_wall,
+            min_mtime=self.started_at_wall - 1.0,
         )
         return {
             "lines_seen": lines_seen,
@@ -2373,7 +2378,12 @@ class _LocalKernelProgressTracker:
         }
 
 
-def _scan_watch_dirs_activity(*, watch_dirs: tuple[Path, ...], now_wall: float) -> tuple[int, float | None]:
+def _scan_watch_dirs_activity(
+    *,
+    watch_dirs: tuple[Path, ...],
+    now_wall: float,
+    min_mtime: float | None = None,
+) -> tuple[int, float | None]:
     """Scan watched directories and return (artifact_count, age_of_latest_artifact_sec)."""
     artifact_count = 0
     latest_mtime: float | None = None
@@ -2387,11 +2397,13 @@ def _scan_watch_dirs_activity(*, watch_dirs: tuple[Path, ...], now_wall: float) 
         for path in paths:
             if not path.is_file():
                 continue
-            artifact_count += 1
             try:
                 mtime = float(path.stat().st_mtime)
             except OSError:
                 continue
+            if min_mtime is not None and mtime < min_mtime:
+                continue
+            artifact_count += 1
             if latest_mtime is None or mtime > latest_mtime:
                 latest_mtime = mtime
     if latest_mtime is None:
@@ -2404,6 +2416,8 @@ def _build_local_kernel_progress_tracker(
     base_dir: Path,
     slug: str,
     watch_dirs: list[Path] | None = None,
+    started_at_wall: float | None = None,
+    started_at_monotonic: float | None = None,
 ) -> _LocalKernelProgressTracker:
     """Build a local-kernel progress tracker from plan metadata and watch dirs."""
     expected_folds: int | None = None
@@ -2429,6 +2443,8 @@ def _build_local_kernel_progress_tracker(
         expected_folds=expected_folds,
         expected_seeds=expected_seeds,
         watch_dirs=watch_dir_tuple,
+        started_at_wall=time.time() if started_at_wall is None else started_at_wall,
+        started_at_monotonic=time.monotonic() if started_at_monotonic is None else started_at_monotonic,
     )
 
 
@@ -2801,12 +2817,18 @@ def _resolve_local_kernel_artifact_file(
 
 
 def _pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
-    existing = [path for path in paths if path.exists()]
-    if not existing:
+    fresh: list[tuple[float, Path]] = []
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < min_mtime:
+            continue
+        fresh.append((mtime, path))
+    if not fresh:
         return None
-    fresh = [path for path in existing if path.stat().st_mtime >= min_mtime]
-    pool = fresh or existing
-    return max(pool, key=lambda path: path.stat().st_mtime)
+    return max(fresh, key=lambda item: item[0])[1]
 
 
 def _copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
@@ -4943,7 +4965,9 @@ def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
             f"Kaggle kernel {kernel_id} is still {status} after the local wait budget; "
             "leaving the remote run active and refusing to push a duplicate version."
         )
-    _raise_kernel_timeout(kernel_id, last_status)
+    raise KernelTimeoutError(
+        f"Kaggle kernel {kernel_id} did not complete within the local wait budget; last status was {status}."
+    )
 
 
 def _wait_for_kernel_and_record_pending(

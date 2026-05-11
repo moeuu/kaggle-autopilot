@@ -15,6 +15,7 @@ from kagglebot.submission_format import (
 )
 
 _PLACEHOLDER_SAMPLE_MAX_ROWS = 10
+_IMAGE_TEST_ID_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
 _FILENAME_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?P<ext>[A-Za-z0-9]{2,8})\b")
 _COORD_COL_RE = re.compile(r"^(?:x|y|z)_\d+$", re.IGNORECASE)
@@ -104,7 +105,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
         and (id_col in sample.columns)
         and (not sample[id_col].duplicated().any())
     ):
-        test_ids = _maybe_load_test_ids(data_dir_path, id_col=id_col)
+        test_ids = discover_test_ids(data_dir_path, id_col=id_col)
         if test_ids is not None:
             sample_ids = sample[id_col].astype(str).tolist()
             if len(test_ids) >= max(len(sample_ids) * 3, len(sample_ids) + 10) and (
@@ -217,9 +218,17 @@ def _is_prefix(prefix: list[str], values: list[str]) -> bool:
     return all(a == b for a, b in zip(prefix, values, strict=False))
 
 
-def _maybe_load_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
+def discover_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
+    """Discover expected test ids from tabular test files or image test assets."""
     if not data_dir.exists():
         return None
+    tabular_ids = _maybe_load_tabular_test_ids(data_dir, id_col=id_col)
+    if tabular_ids is not None:
+        return tabular_ids
+    return _maybe_load_test_asset_ids(data_dir)
+
+
+def _maybe_load_tabular_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
     try:
         from kagglebot.solver.io import find_competition_files
     except Exception:
@@ -238,6 +247,25 @@ def _maybe_load_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
     if id_col not in test.columns:
         return None
     return [str(value) for value in test[id_col].tolist()]
+
+
+def _maybe_load_test_asset_ids(data_dir: Path) -> list[str] | None:
+    ids: set[str] = set()
+    for path in data_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in _IMAGE_TEST_ID_SUFFIXES:
+            continue
+        try:
+            parts = path.relative_to(data_dir).parts
+        except ValueError:
+            parts = path.parts
+        if not any("test" in part.lower() for part in parts):
+            continue
+        ids.add(path.name)
+    if not ids:
+        return None
+    return sorted(ids)
 
 
 def _maybe_load_evaluation_ids(data_dir: Path) -> list[str] | None:
@@ -462,7 +490,7 @@ def _default_delimiter_for_path(path: Path) -> str:
 
 def _sniff_delimiter(path: Path, *, default: str = ",", max_lines: int = 100) -> str:
     candidates: list[str] = []
-    for sep in (default, "\t", ","):
+    for sep in (default, "\t", ",", ";"):
         if sep and sep not in candidates:
             candidates.append(sep)
     counts = {sep: 0 for sep in candidates}

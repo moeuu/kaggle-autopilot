@@ -59,6 +59,8 @@ Per iteration, autopilot does:
 Submission behavior:
 - Default: submit every iteration
 - `submission_gate` is activated only when rules indicate submission-count limits
+- Duplicate submission SHA is skipped before file or notebook submit unless explicitly forced
+- Rolling 24h submission limits such as `2 submissions within 24 hours` are parsed as daily limits
 - Loop decision uses readiness score (SRS); submission score/rank are secondary guardrails
 - Repeated submit-error fingerprints are aborted safely
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility

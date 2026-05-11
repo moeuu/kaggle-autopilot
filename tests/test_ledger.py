@@ -19,10 +19,10 @@ def test_submission_ledger_duplicate_detection(tmp_path):
 
     ledger.record(slug="demo", message="first", submission_path=submission, run_id="run-1")
     assert ledger.is_duplicate(slug="demo", message="first", submission_path=submission) is True
-    assert ledger.is_duplicate(slug="demo", message="second", submission_path=submission) is False
+    assert ledger.is_duplicate(slug="demo", message="second", submission_path=submission) is True
 
     with pytest.raises(DuplicateSubmissionError, match="Duplicate submission"):
-        ensure_not_duplicate_submission(ledger, slug="demo", message="first", submission_path=str(submission))
+        ensure_not_duplicate_submission(ledger, slug="demo", message="second", submission_path=str(submission))
 
 
 def test_submission_ledger_records_offline_metadata_and_outcome(tmp_path):

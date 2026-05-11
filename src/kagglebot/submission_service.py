@@ -11,7 +11,7 @@ from pathlib import Path
 from kagglebot.exceptions import SubmissionValidationError
 from kagglebot.history import SubmissionLedger
 from kagglebot.submission.guard import run_kaggle_submit
-from kagglebot.submission.validate import infer_required_id_suffix, validate_submission
+from kagglebot.submission.validate import discover_test_ids, infer_required_id_suffix, validate_submission
 from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_BUNDLE,
     ARTIFACT_CLASS_MULTI_FILE_ZIP,
@@ -1099,34 +1099,24 @@ class SubmissionService:
         if sample[id_col].duplicated().any():
             return None
 
-        try:
-            from kagglebot.solver.io import find_competition_files
-        except Exception:
+        test_ids = discover_test_ids(self._config.data_dir, id_col=id_col)
+        if test_ids is None:
             return None
-        try:
-            train_path, test_path, _ = find_competition_files(self._config.data_dir)
-        except Exception:  # noqa: BLE001
-            return None
-        if not test_path.exists():
-            return None
-
-        try:
-            test_delim = self._sniff_delimiter(test_path)
-            test = pd.read_csv(test_path, sep=test_delim, usecols=[id_col], dtype={id_col: str})
-        except Exception:  # noqa: BLE001
-            return None
-        if id_col not in test.columns:
-            return None
-
-        test_ids = test[id_col].astype(str).tolist()
         sample_ids = sample[id_col].astype(str).tolist()
-        if len(test_ids) <= max(len(sample_ids) * 3, len(sample_ids) + 10):
+        if len(test_ids) < max(len(sample_ids) * 3, len(sample_ids) + 10):
             return None
-        if sample_ids and test_ids[: len(sample_ids)] != sample_ids:
+        if sample_ids and test_ids[: len(sample_ids)] != sample_ids and not set(sample_ids).issubset(set(test_ids)):
             return None
 
         defaults: dict[str, float] = {col: 0.0 for col in pred_cols}
-        if train_path.exists() and pred_cols:
+        train_path: Path | None = None
+        try:
+            from kagglebot.solver.io import find_competition_files
+
+            train_path, _, _ = find_competition_files(self._config.data_dir)
+        except Exception:  # noqa: BLE001
+            train_path = None
+        if train_path is not None and train_path.exists() and pred_cols:
             try:
                 train_delim = self._sniff_delimiter(train_path)
                 train = pd.read_csv(train_path, sep=train_delim, usecols=[c for c in pred_cols if c != id_col])
@@ -1186,7 +1176,7 @@ class SubmissionService:
     @staticmethod
     def _sniff_delimiter(path: Path, default: str = ",") -> str:
         candidates: list[str] = []
-        for sep in (default, "\t", ","):
+        for sep in (default, "\t", ",", ";"):
             if sep and sep not in candidates:
                 candidates.append(sep)
         counts = {sep: 0 for sep in candidates}

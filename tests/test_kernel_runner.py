@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kagglebot.exceptions import KernelFailedError, KernelStillRunningError
+from kagglebot.exceptions import KernelFailedError, KernelStillRunningError, KernelTimeoutError
 from kagglebot.kernel_runner import (
     _append_local_kernel_duration_history,
     _build_local_kernel_progress_tracker,
@@ -194,6 +194,9 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     assert "__SUBMISSION_GZIP_B64__" not in kernel_text
     assert "SUBMISSION_GZIP_B64 = " in kernel_text
     assert not (kernel_dir / "submission_source.csv").exists()
+    assert '"kind": "submit_only"' not in kernel_text
+    assert "metrics_path.write_text" not in kernel_text
+    assert "Training metrics.json is preserved" in kernel_text
 
     payload_match = re.search(r"SUBMISSION_GZIP_B64 = \"([A-Za-z0-9+/=]+)\"", kernel_text)
     assert payload_match is not None
@@ -476,7 +479,30 @@ def test_kernel_push_resumes_prior_running_kernel_without_new_push(
     assert output_calls == ["user/kernel-slug"]
 
 
+@pytest.mark.parametrize("status", ["KernelWorkerStatus.RUNNING", "KernelWorkerStatus.QUEUED"])
 def test_wait_for_kernel_timeout_marks_remote_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    from kagglebot import kernel_runner
+
+    times = iter([0.0, 0.0, 61.0, 62.0])
+    monkeypatch.setattr(kernel_runner.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_status",
+        lambda *args, **kwargs: f'user/kernel-slug has status "{status}"',
+    )
+    monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
+    monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
+    monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(KernelStillRunningError, match=f"still {status.lower()}"):
+        kernel_runner._wait_for_kernel("user/kernel-slug", "demo", 1, output_dir=tmp_path)  # noqa: SLF001
+
+
+def test_wait_for_kernel_timeout_on_unknown_status_raises_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -487,13 +513,13 @@ def test_wait_for_kernel_timeout_marks_remote_running(
     monkeypatch.setattr(
         kernel_runner,
         "kernels_status",
-        lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.RUNNING"',
+        lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.UNKNOWN"',
     )
     monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
     monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
     monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
 
-    with pytest.raises(KernelStillRunningError, match="still kernelworkerstatus.running"):
+    with pytest.raises(KernelTimeoutError, match="last status was kernelworkerstatus.unknown"):
         kernel_runner._wait_for_kernel("user/kernel-slug", "demo", 1, output_dir=tmp_path)  # noqa: SLF001
 
 
@@ -751,6 +777,7 @@ def test_run_local_kernel_once_does_not_wait_for_inherited_stdout_holders(tmp_pa
     elapsed = time.monotonic() - started
 
     assert result.command_result.returncode == 0
+    assert result.command_result.args[1] == "-u"
     assert "kernel parent exited" in result.command_result.stdout
     assert elapsed < 5
 
@@ -1312,6 +1339,121 @@ def test_run_kernel_local_fails_fast_when_local_kernel_stalls(
 
     stdout_log = tmp_path / "demo" / "runs" / "run-stall" / "iter-1" / "logs" / "local_kernel_stdout.log"
     assert stdout_log.exists()
+    assert "kernel start" in stdout_log.read_text(encoding="utf-8")
+
+
+def test_run_kernel_local_ignores_stale_output_artifacts_for_stall_watchdog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "import time",
+                "from pathlib import Path",
+                "time.sleep(0.5)",
+                "print('kernel start', flush=True)",
+                "out = Path('outputs')",
+                "out.mkdir(exist_ok=True)",
+                "out.joinpath('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                'metrics = \'{"metric":"rmse","offline_value":0.1}\'',
+                "out.joinpath('metrics.json').write_text(metrics, encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "demo" / "plan.json").write_text(
+        json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8"
+    )
+    stale_output_dir = tmp_path / "demo" / "runs" / "run-stale" / "iter-1" / "output"
+    stale_output_dir.mkdir(parents=True, exist_ok=True)
+    stale_files = [
+        stale_output_dir / "submission.csv",
+        stale_output_dir / "metrics.json",
+    ]
+    stale_files[0].write_text("id,target\n1,0.0\n", encoding="utf-8")
+    stale_files[1].write_text('{"metric":"rmse","offline_value":9.9}\n', encoding="utf-8")
+    stale_mtime = time.time() - 60.0
+    for stale_file in stale_files:
+        os.utime(stale_file, (stale_mtime, stale_mtime))
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "5")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-stale",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.submission_path is not None and result.submission_path.exists()
+    stdout_log = tmp_path / "demo" / "runs" / "run-stale" / "iter-1" / "logs" / "local_kernel_stdout.log"
+    assert "kernel start" in stdout_log.read_text(encoding="utf-8")
+
+
+def test_run_kernel_local_does_not_reuse_stale_output_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "print('kernel start', flush=True)",
+                "# submission.csv",
+                "# metrics.json",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "demo" / "plan.json").write_text(
+        json.dumps({"toggles": {"USE_MODEL": True}}, indent=2),
+        encoding="utf-8",
+    )
+    stale_output_dir = tmp_path / "demo" / "runs" / "run-stale" / "iter-1" / "output"
+    stale_output_dir.mkdir(parents=True, exist_ok=True)
+    stale_submission = stale_output_dir / "submission.csv"
+    stale_metrics = stale_output_dir / "metrics.json"
+    stale_submission.write_text("id,target\n1,0.0\n", encoding="utf-8")
+    stale_metrics.write_text('{"metric":"rmse","offline_value":9.9}\n', encoding="utf-8")
+    stale_mtime = time.time() - 60.0
+    os.utime(stale_submission, (stale_mtime, stale_mtime))
+    os.utime(stale_metrics, (stale_mtime, stale_mtime))
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "5")
+
+    with pytest.raises(KernelFailedError, match="submission output was not found"):
+        run_kernel_local(
+            slug="demo",
+            run_id="run-stale",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            holdout_frac=0.2,
+            cv_folds=3,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+    stdout_log = tmp_path / "demo" / "runs" / "run-stale" / "iter-1" / "logs" / "local_kernel_stdout.log"
     assert "kernel start" in stdout_log.read_text(encoding="utf-8")
 
 
@@ -2482,6 +2624,27 @@ def test_progress_tracker_reports_artifact_activity(tmp_path: Path) -> None:
     suffix = _format_local_kernel_activity_suffix(tracker)
     assert "artifacts=" in suffix
     assert "last_artifact=" in suffix
+
+
+def test_progress_tracker_ignores_stale_artifacts_then_counts_new_activity(tmp_path: Path) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir(parents=True, exist_ok=True)
+    stale_artifact = watch_dir / "submission.csv"
+    stale_artifact.write_text("id,target\n1,0.0\n", encoding="utf-8")
+    stale_mtime = time.time() - 60.0
+    os.utime(stale_artifact, (stale_mtime, stale_mtime))
+
+    tracker = _build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo", watch_dirs=[watch_dir])
+    stale_snapshot = tracker.snapshot()
+    assert stale_snapshot["artifact_count"] == 0
+    assert stale_snapshot["last_artifact_age_sec"] is None
+
+    fresh_artifact = watch_dir / "metrics.json"
+    fresh_artifact.write_text('{"ok":true}\n', encoding="utf-8")
+
+    fresh_snapshot = tracker.snapshot()
+    assert int(fresh_snapshot["artifact_count"]) == 1
+    assert isinstance(fresh_snapshot["last_artifact_age_sec"], (int, float))
 
 
 def test_format_local_gpu_activity_suffix_handles_missing_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> None:

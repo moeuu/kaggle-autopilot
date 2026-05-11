@@ -39,6 +39,7 @@ class SubmissionLedger:
 
     def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
         fingerprint = submission_fingerprint(slug, message, submission_path)
+        submission_sha = sha256_file(str(submission_path))
         if not self.ledger_path.exists():
             return False
         for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
@@ -46,6 +47,10 @@ class SubmissionLedger:
                 continue
             rec = json.loads(line)
             if rec.get("fingerprint") == fingerprint:
+                return True
+            if not self._is_submit_event(rec):
+                continue
+            if rec.get("slug") == slug and rec.get("sha256") == submission_sha:
                 return True
         return False
 

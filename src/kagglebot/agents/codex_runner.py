@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -19,6 +21,9 @@ from kagglebot.exec_utils import run_command
 _COMMAND_LOG_FIRST_WIDTH = 100
 _COMMAND_LOG_SECOND_WIDTH = 100
 _RUNNER_LABEL = IMPLEMENTATION_AGENT.log_alias
+_DEFAULT_CODEX_TIMEOUT_SEC = 2 * 60 * 60
+_PYTEST_CODEX_TIMEOUT_SEC = 30
+_CODEX_TIMEOUT_EXIT_CODE = 124
 
 
 @dataclass(frozen=True)
@@ -93,7 +98,12 @@ def run_codex(
     used_sandbox_fallback = False
     sandbox_failure_excerpt: str | None = None
     try:
-        stdout_text, stderr_text, returncode = _run_codex_process(args=args, prompt_text=prompt_text)
+        timeout = _codex_timeout_seconds()
+        stdout_text, stderr_text, returncode = _run_codex_process(
+            args=args,
+            prompt_text=prompt_text,
+            timeout=timeout,
+        )
         stdout_attempts.append(stdout_text)
         if stderr_text:
             stderr_attempts.append(stderr_text)
@@ -116,7 +126,11 @@ def run_codex(
                 sandbox_mode="danger-full-access",
                 dangerously_bypass=True,
             )
-            stdout_text, stderr_text, returncode = _run_codex_process(args=retry_args, prompt_text=prompt_text)
+            stdout_text, stderr_text, returncode = _run_codex_process(
+                args=retry_args,
+                prompt_text=prompt_text,
+                timeout=timeout,
+            )
             stdout_attempts.append(stdout_text)
             if stderr_text:
                 stderr_attempts.append(stderr_text)
@@ -171,26 +185,116 @@ def _build_shared_args(
     return args
 
 
-def _run_codex_process(*, args: list[str], prompt_text: str) -> tuple[str, str, int]:
+def _codex_timeout_seconds() -> float:
+    default = _PYTEST_CODEX_TIMEOUT_SEC if os.environ.get("PYTEST_CURRENT_TEST") else _DEFAULT_CODEX_TIMEOUT_SEC
+    raw = os.environ.get("KAGGLEBOT_CODEX_TIMEOUT_SEC")
+    if raw is None:
+        return float(default)
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return float(default)
+    return max(60.0, parsed)
+
+
+def _run_codex_process(*, args: list[str], prompt_text: str, timeout: float | None = None) -> tuple[str, str, int]:
     stdout_chunks: list[str] = []
     stderr_text = ""
+    timed_out = False
+    done_event = threading.Event()
     proc = subprocess.Popen(
         args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=os.name != "nt",
     )
+    timeout_thread: threading.Thread | None = None
+    if timeout is not None and timeout > 0:
+
+        def _timeout_watchdog() -> None:
+            nonlocal timed_out
+            if done_event.wait(timeout):
+                return
+            timed_out = True
+            _terminate_codex_process_tree(proc)
+
+        timeout_thread = threading.Thread(target=_timeout_watchdog, daemon=True)
+        timeout_thread.start()
     if proc.stdin is not None:
         proc.stdin.write(prompt_text)
         proc.stdin.close()
-    if proc.stdout is not None:
-        for line in proc.stdout:
-            stdout_chunks.append(line)
-            _emit_codex_event(line)
-    if proc.stderr is not None:
-        stderr_text = proc.stderr.read()
-    return "".join(stdout_chunks), stderr_text, proc.wait()
+    try:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                stdout_chunks.append(line)
+                _emit_codex_event(line)
+        if proc.stderr is not None:
+            stderr_text = proc.stderr.read()
+        returncode = proc.wait()
+    finally:
+        done_event.set()
+        if timeout_thread is not None:
+            timeout_thread.join(timeout=1.0)
+    if timed_out:
+        timeout_text = f"{_RUNNER_LABEL} timed out after {int(timeout or 0)}s; process tree was terminated."
+        stderr_text = "\n".join(part for part in (stderr_text, timeout_text) if part)
+        returncode = _CODEX_TIMEOUT_EXIT_CODE
+    return "".join(stdout_chunks), stderr_text, returncode
+
+
+def _terminate_codex_process_tree(proc: subprocess.Popen[str]) -> None:
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        try:
+            proc.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+        return
+
+    child_pids = _descendant_pids(pid)
+    for child_pid in reversed(child_pids):
+        _signal_pid(child_pid, signal.SIGTERM)
+    _signal_pid(pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    for child_pid in reversed(child_pids):
+        _signal_pid(child_pid, signal.SIGKILL)
+    _signal_pid(pid, signal.SIGKILL)
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    if result.returncode not in {0, 1}:
+        return []
+    descendants: list[int] = []
+    for line in result.stdout.splitlines():
+        try:
+            child_pid = int(line.strip())
+        except ValueError:
+            continue
+        descendants.extend(_descendant_pids(child_pid))
+        descendants.append(child_pid)
+    return descendants
+
+
+def _signal_pid(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.kill(pid, sig)
+    except (OSError, ProcessLookupError):
+        return
 
 
 def _read_last_message(path: Path) -> str:
