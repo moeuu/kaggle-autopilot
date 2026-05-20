@@ -124,6 +124,7 @@ watch --allow-slug SLUG
 watch --block-slug SLUG
 watch --self-improvement-interval-hours FLOAT
 watch --self-improvement-codex/--no-self-improvement-codex
+watch --self-improvement-publish/--no-self-improvement-publish
 ```
 
 `--submit-policy improved` disables the initial contract-probe submit and only submits when an artifact improves over
@@ -137,10 +138,14 @@ instead of being filtered out at selection time; complex simulation/reasoning/op
 training-time estimates so lightweight sidecars can still make capacity-aware choices.
 
 `watch` also runs a periodic self-improvement loop. The loop scans recent runs, submission outcomes, top1 gaps,
-diagnostics, and submit failures under `artifacts/`, writes `_self_improvement/latest.json` and `latest.md`, then
-calls Codex to implement one small structural repo improvement when the git worktree is clean. Use
-`--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to write reports without invoking
-Codex. Manual runs are available through `kagglebot self-improve`.
+diagnostics, and submit failures under `artifacts/`, writes `_self_improvement/latest.json`, `latest.md`,
+`strategy_context.md`, `experiment_backlog.json`, and normalized `outcomes.jsonl`, then calls Codex to implement one
+small structural repo improvement when the git worktree is clean. The generated strategy context is injected into
+future bootstrap/planning prompts and live `knowledge_hints.txt`; generated playbooks are written under
+`knowledge/playbooks/`. Use `--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to
+write reports without invoking Codex. `--self-improvement-publish` additionally verifies, commits, and pushes Codex
+repo changes after success; it is off by default and still requires global `--force`. Manual runs are available
+through `kagglebot self-improve [--publish]`.
 
 ## Artifacts
 
@@ -159,6 +164,10 @@ Key files:
 - `artifacts/<slug>/runs/<run-id>/iter-<k>/submission_manifest.json`
 - `artifacts/_self_improvement/latest.json`
 - `artifacts/_self_improvement/latest.md`
+- `artifacts/_self_improvement/strategy_context.md`
+- `artifacts/_self_improvement/experiment_backlog.json`
+- `artifacts/_self_improvement/outcomes.jsonl`
+- `knowledge/playbooks/*.md`
 - `knowledge/research/<problem_type>/<slug>/research_sources.jsonl` (authoritative persistence)
 - `knowledge/research/<problem_type>/<slug>/research_summary.md` (authoritative persistence)
 

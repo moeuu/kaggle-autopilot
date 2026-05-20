@@ -20,6 +20,12 @@ class SelfImprovementConfig:
     max_runs: int = 80
     min_interval_hours: float | None = 6.0
     invoke_codex: bool = True
+    publish_codex_changes: bool = False
+    publish_verify_commands: tuple[tuple[str, ...], ...] = (
+        ("uv", "run", "ruff", "format", "."),
+        ("uv", "run", "ruff", "check", "."),
+        ("uv", "run", "pytest", "-q"),
+    )
     force: bool = False
     dry_run: bool = False
 
@@ -40,6 +46,18 @@ class SelfImprovementConfig:
         return self.output_dir / "reports.jsonl"
 
     @property
+    def outcomes_jsonl_path(self) -> Path:
+        return self.output_dir / "outcomes.jsonl"
+
+    @property
+    def strategy_context_path(self) -> Path:
+        return self.output_dir / "strategy_context.md"
+
+    @property
+    def experiment_backlog_path(self) -> Path:
+        return self.output_dir / "experiment_backlog.json"
+
+    @property
     def codex_dir(self) -> Path:
         return self.output_dir / "codex"
 
@@ -53,11 +71,23 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
 
     runs = _collect_recent_runs(config.artifacts_dir, limit=max(1, config.max_runs))
     report = _build_report(artifacts_dir=config.artifacts_dir, runs=runs)
+    backlog = _build_experiment_backlog(report)
+    outcomes = _normalized_outcomes(runs)
+    report["strategy_context_path"] = str(config.strategy_context_path)
+    report["experiment_backlog_path"] = str(config.experiment_backlog_path)
+    report["playbook_paths"] = _write_playbooks(config.knowledge_paths, report)
     markdown = _render_markdown(report)
+    strategy_context = _render_strategy_context(report, backlog=backlog)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     config.latest_json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     config.latest_markdown_path.write_text(markdown, encoding="utf-8")
+    config.strategy_context_path.write_text(strategy_context, encoding="utf-8")
+    config.experiment_backlog_path.write_text(json.dumps(backlog, indent=2, sort_keys=True), encoding="utf-8")
+    config.outcomes_jsonl_path.write_text(
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in outcomes),
+        encoding="utf-8",
+    )
     codex_result = _maybe_run_codex_improvement(config=config, report=report)
     if codex_result is not None:
         report["codex_improvement"] = codex_result
@@ -69,10 +99,27 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
         "status": "written",
         "report_path": str(config.latest_json_path),
         "markdown_path": str(config.latest_markdown_path),
+        "strategy_context_path": str(config.strategy_context_path),
+        "experiment_backlog_path": str(config.experiment_backlog_path),
         "runs_analyzed": len(runs),
         "codex_improvement": codex_result,
         "top_actions": report.get("recommended_actions", [])[:3],
     }
+
+
+def load_self_improvement_context(artifacts_dir: Path, *, max_chars: int = 6000) -> str:
+    """Load the latest self-improvement directives for planner/improvement prompts."""
+    for path in (
+        artifacts_dir / "_self_improvement" / "strategy_context.md",
+        artifacts_dir / "_self_improvement" / "latest.md",
+    ):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text[-max_chars:]
+    return ""
 
 
 def _maybe_run_codex_improvement(
@@ -101,12 +148,14 @@ def _maybe_run_codex_improvement(
         model=IMPLEMENTATION_AGENT.model,
         reasoning_effort=IMPLEMENTATION_AGENT.reasoning_effort,
     )
+    publish_result = _maybe_publish_codex_changes(config=config, codex_returncode=result.returncode)
     return {
         "status": "completed" if result.returncode == 0 else "failed",
         "returncode": result.returncode,
         "prompt_path": str(prompt_path),
         "transcript_path": str(result.transcript_path),
         "last_message_path": str(result.last_message_path),
+        "publish": publish_result,
     }
 
 
@@ -127,7 +176,7 @@ Hard constraints:
   reusable runtime improvements over competition-specific hacks.
 - Preserve existing guardrails: validation, duplicate detection, rate limits, and human-readable submit messages.
 - Run focused tests plus `uv run ruff check .` when feasible.
-- Do not commit or push; the outer operator decides when to publish.
+- Do not commit or push from inside Codex; the outer self-improvement controller owns publish policy.
 
 Latest report files:
 - JSON: {config.latest_json_path}
@@ -143,12 +192,95 @@ summary in your final message.
 """
 
 
+def _maybe_publish_codex_changes(*, config: SelfImprovementConfig, codex_returncode: int) -> dict[str, object]:
+    if codex_returncode != 0:
+        return {"status": "skipped_codex_failed"}
+    if not config.publish_codex_changes:
+        return {"status": "disabled"}
+    if config.dry_run:
+        return {"status": "dry_run"}
+    workdir = config.knowledge_paths.workdir
+    if not _git_dirty(workdir):
+        return {"status": "skipped_no_changes"}
+
+    verification: list[dict[str, object]] = []
+    for command in config.publish_verify_commands:
+        result = run_command(list(command), cwd=workdir, stream_output=True)
+        verification.append(
+            {
+                "args": list(command),
+                "returncode": result.returncode,
+                "stdout_tail": result.stdout[-2000:],
+                "stderr_tail": result.stderr[-2000:],
+            }
+        )
+        if result.returncode != 0:
+            return {"status": "verification_failed", "verification": verification}
+
+    add_result = run_command(
+        [
+            "git",
+            "add",
+            "-A",
+            "--",
+            "src",
+            "tests",
+            "docs",
+            "README.md",
+            "STRATEGY.md",
+            "AGENTS.md",
+            "pyproject.toml",
+            "uv.lock",
+        ],
+        cwd=workdir,
+    )
+    if add_result.returncode != 0:
+        return {"status": "git_add_failed", "stderr": add_result.stderr, "verification": verification}
+    if not _git_staged_changes(workdir):
+        return {"status": "skipped_no_stageable_changes", "verification": verification}
+
+    commit_result = run_command(
+        ["git", "commit", "-m", "Self-improve autopilot from report"],
+        cwd=workdir,
+        stream_output=True,
+    )
+    if commit_result.returncode != 0:
+        return {
+            "status": "git_commit_failed",
+            "stderr": commit_result.stderr,
+            "stdout": commit_result.stdout,
+            "verification": verification,
+        }
+    push_result = run_command(["git", "push", "origin", "HEAD"], cwd=workdir, stream_output=True)
+    if push_result.returncode != 0:
+        return {
+            "status": "git_push_failed",
+            "stderr": push_result.stderr,
+            "stdout": push_result.stdout,
+            "verification": verification,
+        }
+    head_result = run_command(["git", "rev-parse", "HEAD"], cwd=workdir)
+    return {
+        "status": "pushed",
+        "commit": head_result.stdout.strip(),
+        "verification": verification,
+    }
+
+
 def _git_dirty(workdir: Path) -> bool:
     try:
         result = run_command(["git", "status", "--porcelain"], cwd=workdir)
     except (OSError, RuntimeError):
         return True
     return bool(result.stdout.strip() or result.stderr.strip() or result.returncode != 0)
+
+
+def _git_staged_changes(workdir: Path) -> bool:
+    try:
+        result = run_command(["git", "diff", "--cached", "--quiet"], cwd=workdir)
+    except (OSError, RuntimeError):
+        return False
+    return result.returncode == 1
 
 
 def _self_improvement_due(config: SelfImprovementConfig) -> bool:
@@ -306,6 +438,223 @@ def _build_report(*, artifacts_dir: Path, runs: list[dict[str, object]]) -> dict
         "recent_problem_runs": [_compact_run(run) for run in runs if _is_problem_run(run)][:20],
         "recommended_actions": actions,
     }
+
+
+def _normalized_outcomes(runs: list[dict[str, object]]) -> list[dict[str, object]]:
+    outcomes: list[dict[str, object]] = []
+    for run in runs:
+        outcomes.append(
+            {
+                "slug": run.get("slug"),
+                "run_id": run.get("run_id"),
+                "status": run.get("status"),
+                "metric": run.get("metric"),
+                "direction": run.get("direction"),
+                "best_offline": run.get("best_offline"),
+                "best_online": run.get("best_online"),
+                "top1_public_score": run.get("top1_public_score"),
+                "top1_gap": run.get("top1_gap"),
+                "cause_tags": run.get("cause_tags"),
+                "submission_outcome_count": run.get("submission_outcome_count"),
+                "submit_failure_count": run.get("submit_failure_count"),
+            }
+        )
+    return outcomes
+
+
+def _build_experiment_backlog(report: dict[str, object]) -> list[dict[str, object]]:
+    actions = report.get("recommended_actions")
+    if not isinstance(actions, list):
+        return []
+    backlog: list[dict[str, object]] = []
+    templates = {
+        "no_successful_submission": (
+            "Submission validation/submission-mode defects are blocking learning from the leaderboard.",
+            "Add focused validation or recovery that turns one failed submission class into an actionable retry.",
+            "A future run with this cause reaches at least one successful submission outcome.",
+        ),
+        "submit_failed": (
+            "Submit failures contain recoverable mode, path, or API classifications.",
+            "Improve failure classification and fallback selection from submit_attempts.jsonl and diagnostics.",
+            "Submit-failed runs produce a classified retry or a non-retryable reason with artifact links.",
+        ),
+        "no_iteration_metrics": (
+            "The runtime is losing metrics before the supervisor can make informed decisions.",
+            "Harden kernel/runtime exit handling so metrics.json and diagnostics.md are emitted on every path.",
+            "Every iter-* directory has metrics.json or an explicit failure_context artifact.",
+        ),
+        "online_far_from_top1": (
+            "The current search space is too narrow for competitions with a visible public top score gap.",
+            "Broaden the first-plan model family, ensemble, data-source, or public-LB proxy schedule.",
+            "Median top1_gap decreases across the next comparable runs.",
+        ),
+        "offline_online_mismatch": (
+            "Offline validation is not ranking submissions like the public leaderboard.",
+            "Add split/leakage diagnostics and force alternate validation when mismatch signals appear.",
+            "Future runs record lower offline-vs-online disagreement before late iterations.",
+        ),
+        "metric_or_validation_error": (
+            "Metric/schema ambiguity is creating invalid confidence in candidate submissions.",
+            "Strengthen metric contract parsing, sample-submission alignment, and early scoring checks.",
+            "Invalid metric/schema runs fail before training expensive candidates.",
+        ),
+        "resource_or_capacity": (
+            "Resource failures are consuming iterations before useful model evidence is generated.",
+            "Schedule cheap smoke tests and capacity-aware model choices before expensive training.",
+            "Runs with capacity signals emit a smaller retry plan instead of repeating the same failure.",
+        ),
+    }
+    for index, item in enumerate(actions[:8], start=1):
+        if not isinstance(item, dict):
+            continue
+        cause = str(item.get("cause") or "insufficient_signal")
+        hypothesis, experiment, success_metric = templates.get(
+            cause,
+            (
+                "The current evidence is not specific enough to justify a narrow fix.",
+                "Improve diagnostic collection before changing model-selection behavior.",
+                "Next reports include enough outcomes, metrics, and diagnostics to classify the failure.",
+            ),
+        )
+        backlog.append(
+            {
+                "id": f"si-{index:03d}-{cause.replace('_', '-')}",
+                "priority": index,
+                "cause": cause,
+                "count": item.get("count", 0),
+                "hypothesis": hypothesis,
+                "experiment": experiment,
+                "success_metric": success_metric,
+                "guardrail": "Do not submit, accept rules, join competitions, write secrets, or commit artifacts.",
+            }
+        )
+    return backlog
+
+
+def _write_playbooks(knowledge_paths: KnowledgePaths, report: dict[str, object]) -> list[str]:
+    playbooks_dir = knowledge_paths.knowledge_dir / "playbooks"
+    playbooks_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[str] = []
+    global_path = playbooks_dir / "global.md"
+    global_path.write_text(_render_global_playbook(report), encoding="utf-8")
+    paths.append(str(global_path))
+    cause_counts = report.get("cause_counts")
+    if isinstance(cause_counts, dict):
+        for cause in cause_counts:
+            cause_name = str(cause)
+            path = playbooks_dir / f"{cause_name}.md"
+            path.write_text(_render_cause_playbook(cause_name, report), encoding="utf-8")
+            paths.append(str(path))
+    return paths
+
+
+def _render_global_playbook(report: dict[str, object]) -> str:
+    lines = [
+        "# Kagglebot Global Playbook",
+        "",
+        "Use this playbook before planning or improving a competition run.",
+        "",
+        "## Current Priorities",
+    ]
+    actions = report.get("recommended_actions")
+    if isinstance(actions, list) and actions:
+        for item in actions:
+            if isinstance(item, dict):
+                lines.append(f"- {item.get('cause')}: {item.get('action')}")
+    else:
+        lines.append("- Collect more outcomes before changing strategy.")
+    lines.extend(
+        [
+            "",
+            "## Guardrails",
+            "- Keep submissions validated against sample_submission.csv.",
+            "- Do not automate joining competitions or accepting rules.",
+            "- Do not write secrets, datasets, or large artifacts to git.",
+            "- Prefer structural improvements over one-off competition hacks.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _render_cause_playbook(cause: str, report: dict[str, object]) -> str:
+    action = "Collect more diagnostic signal."
+    actions = report.get("recommended_actions")
+    if isinstance(actions, list):
+        for item in actions:
+            if isinstance(item, dict) and item.get("cause") == cause:
+                action = str(item.get("action") or action)
+                break
+    examples = []
+    problem_runs = report.get("recent_problem_runs")
+    if isinstance(problem_runs, list):
+        for run in problem_runs:
+            if isinstance(run, dict) and cause in _string_list(run.get("cause_tags")):
+                examples.append(f"- {run.get('slug')} {run.get('run_id')}: gap={run.get('top1_gap')}")
+    lines = [
+        f"# Playbook: {cause}",
+        "",
+        f"Recommended action: {action}",
+        "",
+        "## Signals",
+    ]
+    if examples:
+        lines.extend(examples[:10])
+    else:
+        lines.append("- No concrete recent examples in the latest report.")
+    lines.extend(
+        [
+            "",
+            "## Next Experiment",
+            "- Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.",
+            "- Add focused tests proving the behavior on synthetic artifacts.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _render_strategy_context(report: dict[str, object], *, backlog: list[dict[str, object]]) -> str:
+    lines = [
+        "# Kagglebot Self-Improvement Context",
+        "",
+        f"Generated at: {report.get('generated_at')}",
+        f"Runs analyzed: {report.get('run_count')}",
+        "",
+        "## Highest-Priority Actions",
+    ]
+    actions = report.get("recommended_actions")
+    if isinstance(actions, list) and actions:
+        for item in actions[:5]:
+            if isinstance(item, dict):
+                lines.append(f"- {item.get('cause')} ({item.get('count')}): {item.get('action')}")
+    else:
+        lines.append("- No actions available.")
+    lines.extend(["", "## Experiment Backlog"])
+    if backlog:
+        for item in backlog[:5]:
+            lines.append(f"- {item['id']}: {item['experiment']} Success: {item['success_metric']}")
+    else:
+        lines.append("- No backlog items available.")
+    lines.extend(["", "## Recent Problem Runs"])
+    problem_runs = report.get("recent_problem_runs")
+    if isinstance(problem_runs, list) and problem_runs:
+        for run in problem_runs[:8]:
+            if isinstance(run, dict):
+                lines.append(
+                    f"- {run.get('slug')} {run.get('run_id')}: "
+                    f"status={run.get('status')} top1_gap={run.get('top1_gap')} causes={run.get('cause_tags')}"
+                )
+    else:
+        lines.append("- No recent problem runs.")
+    lines.extend(
+        [
+            "",
+            "## How to Use This",
+            "- Let these priorities influence the initial plan, model-search breadth, validation, and retry logic.",
+            "- Prefer experiments that reduce repeated failure causes across competitions.",
+            "- Keep Kaggle side effects controlled by the normal autopilot submission guardrails.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _recommended_actions(causes: Counter[str]) -> list[dict[str, object]]:

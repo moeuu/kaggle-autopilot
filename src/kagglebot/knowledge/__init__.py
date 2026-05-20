@@ -979,6 +979,7 @@ def build_plan_and_initial_prompt(
     profile: dict[str, object],
     taxonomy: dict[str, object],
     similar_improvements: list[dict[str, object]],
+    self_improvement_context: str = "",
 ) -> str:
     tags = profile.get("tags", [])
     task = profile.get("task", "unknown")
@@ -1034,6 +1035,12 @@ def build_plan_and_initial_prompt(
             lines.append(f"- {comp_slug} ({overlap} tag overlap): {summary}")
     else:
         lines.append("No similar competitions found in knowledge base (this is the first run).")
+
+    lines.extend(["", "## System Self-Improvement Directives", ""])
+    if self_improvement_context.strip():
+        lines.append(self_improvement_context.strip())
+    else:
+        lines.append("No system self-improvement report is available yet.")
 
     lines += [
         "",

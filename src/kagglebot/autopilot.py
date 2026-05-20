@@ -3872,6 +3872,8 @@ def _expanded_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
 
 
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
+    from kagglebot.self_improvement import load_self_improvement_context
+
     profile = _load_dataset_profile(config.paths)
     raw_tags = profile.get("tags", []) if isinstance(profile, dict) else []
     tags = [str(tag).strip() for tag in raw_tags if isinstance(tag, str) and str(tag).strip()]
@@ -3899,6 +3901,13 @@ def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
                     lines.append(f"- {slug} ({overlap} tag overlap): {summary}")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"Knowledge lookup failed: {exc}")
+
+    lines.extend(["", "## System Self-Improvement Context"])
+    context = load_self_improvement_context(config.paths.artifacts_dir)
+    if context:
+        lines.append(context)
+    else:
+        lines.append("No self-improvement context available yet.")
 
     config.paths.context_dir.mkdir(parents=True, exist_ok=True)
     config.paths.knowledge_hints_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

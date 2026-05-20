@@ -32,6 +32,7 @@ from kagglebot.knowledge import (
     resolve_similar_improvements,
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.self_improvement import load_self_improvement_context
 from kagglebot.solver.io import ensure_sample_submission
 from kagglebot.submission_format import (
     extract_submission_section,
@@ -142,7 +143,8 @@ def bootstrap_competition(
         taxonomy=taxonomy,
         tags=profile.get("tags", []),
     )
-    _write_knowledge_hints(paths, similar)
+    self_improvement_context = load_self_improvement_context(paths.artifacts_dir)
+    _write_knowledge_hints(paths, similar, self_improvement_context=self_improvement_context)
     record_competition_profile(
         knowledge_paths=knowledge_paths,
         taxonomy=taxonomy,
@@ -158,6 +160,7 @@ def bootstrap_competition(
         profile=profile,
         taxonomy=taxonomy,
         similar_improvements=similar,
+        self_improvement_context=self_improvement_context,
     )
 
     return paths.meta_path
@@ -1559,6 +1562,7 @@ def _write_prompts(
     profile: dict[str, object],
     taxonomy: dict[str, object],
     similar_improvements: list[dict[str, object]],
+    self_improvement_context: str = "",
 ) -> None:
     initial_prompt = build_plan_and_initial_prompt(
         slug=slug,
@@ -1566,6 +1570,7 @@ def _write_prompts(
         profile=profile,
         taxonomy=taxonomy,
         similar_improvements=similar_improvements,
+        self_improvement_context=self_improvement_context,
     )
     improve_template = build_improve_template()
     kernel_fix_template = build_kernel_fix_template()
@@ -1732,7 +1737,12 @@ def _write_sample_head(sample_path: Path, head_path: Path, rows: int = 5) -> Non
     head_path.write_text(sample.head(rows).to_csv(index=False), encoding="utf-8")
 
 
-def _write_knowledge_hints(paths: CompetitionPaths, similar: list[dict[str, object]]) -> None:
+def _write_knowledge_hints(
+    paths: CompetitionPaths,
+    similar: list[dict[str, object]],
+    *,
+    self_improvement_context: str = "",
+) -> None:
     lines = ["# Knowledge Hints", ""]
     if not similar:
         lines.append("No similar competitions found in knowledge base.")
@@ -1744,6 +1754,11 @@ def _write_knowledge_hints(paths: CompetitionPaths, similar: list[dict[str, obje
             overlap = item.get("overlap", 0)
             summary = item.get("summary", "No summary recorded.")
             lines.append(f"- {slug} ({overlap} tag overlap): {summary}")
+    lines.extend(["", "## System Self-Improvement Context"])
+    if self_improvement_context.strip():
+        lines.append(self_improvement_context.strip())
+    else:
+        lines.append("No self-improvement context available yet.")
     paths.knowledge_hints_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

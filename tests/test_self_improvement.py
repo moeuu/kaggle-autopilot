@@ -4,8 +4,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from kagglebot.knowledge import build_plan_and_initial_prompt
 from kagglebot.paths import KnowledgePaths
-from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
+from kagglebot.self_improvement import (
+    SelfImprovementConfig,
+    load_self_improvement_context,
+    run_self_improvement_cycle,
+)
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -61,6 +66,11 @@ def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: P
     assert report["cause_counts"]["submit_failed"] == 1
     assert report["cause_counts"]["online_far_from_top1"] == 1
     assert report["largest_top1_gaps"][0]["top1_gap"] == 0.15000000000000002
+    assert (artifacts / "_self_improvement" / "strategy_context.md").exists()
+    assert (artifacts / "_self_improvement" / "experiment_backlog.json").exists()
+    assert (artifacts / "_self_improvement" / "outcomes.jsonl").exists()
+    assert (tmp_path / "knowledge" / "playbooks" / "global.md").exists()
+    assert "submit_failed" in load_self_improvement_context(artifacts)
 
 
 def test_self_improvement_calls_codex_when_enabled_and_clean(
@@ -97,6 +107,7 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
     assert result["status"] == "written"
     assert result["codex_improvement"]["status"] == "completed"
     assert "Kagglebot Self-Improvement Task" in str(calls["prompt"])
+    assert result["codex_improvement"]["publish"]["status"] == "disabled"
 
 
 def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path: Path) -> None:
@@ -116,3 +127,54 @@ def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path:
     )
 
     assert result["codex_improvement"]["status"] == "skipped_dirty_worktree"
+
+
+def test_self_improvement_passes_publish_policy_to_controller(monkeypatch, tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    _write_json(run_dir / "run.json", {"run_id": "run-1", "status": "completed", "config": {}})
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
+    published: dict[str, object] = {}
+
+    def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
+        return SimpleNamespace(
+            returncode=0,
+            transcript_path=output_dir / "codex_exec.jsonl",
+            last_message_path=output_dir / "codex_last_message.txt",
+        )
+
+    def fake_publish(*, config, codex_returncode):  # noqa: ANN001
+        published["enabled"] = config.publish_codex_changes
+        published["returncode"] = codex_returncode
+        return {"status": "pushed", "commit": "abc123"}
+
+    monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: False)
+    monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.self_improvement._maybe_publish_codex_changes", fake_publish)
+
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=True,
+            publish_codex_changes=True,
+            force=True,
+        )
+    )
+
+    assert result["codex_improvement"]["publish"]["status"] == "pushed"
+    assert published == {"enabled": True, "returncode": 0}
+
+
+def test_initial_prompt_includes_self_improvement_context() -> None:
+    prompt = build_plan_and_initial_prompt(
+        slug="demo",
+        rules_url="https://www.kaggle.com/c/demo/rules",
+        profile={"tags": ["tabular"], "task": "regression", "metric": "rmse"},
+        taxonomy={},
+        similar_improvements=[],
+        self_improvement_context="Force broader model-family search when top1_gap repeats.",
+    )
+
+    assert "## System Self-Improvement Directives" in prompt
+    assert "Force broader model-family search" in prompt

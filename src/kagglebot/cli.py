@@ -556,6 +556,11 @@ def watch(
         "--self-improvement-codex/--no-self-improvement-codex",
         help="Let periodic self-improvement call Codex when the git worktree is clean.",
     ),
+    self_improvement_publish: bool = typer.Option(
+        False,
+        "--self-improvement-publish/--no-self-improvement-publish",
+        help="After Codex self-improvement succeeds, verify, commit, and push repo code changes.",
+    ),
 ) -> None:
     cfg = ctx.obj
     normalized_submit_policy = submit_policy.strip().lower()
@@ -565,6 +570,8 @@ def watch(
         raise typer.BadParameter("Refusing to run watch with submissions enabled without --force.")
     if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+    if self_improvement_publish and not self_improvement_codex:
+        raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
 
     watch_config = WatchConfig(
         workdir=cfg.workdir,
@@ -595,6 +602,7 @@ def watch(
         force=cfg.force,
         self_improvement_interval_hours=_normalize_self_improvement_interval(self_improvement_interval_hours),
         self_improvement_codex=self_improvement_codex,
+        self_improvement_publish=self_improvement_publish,
     )
     if once:
         result = run_watch_once(watch_config)
@@ -671,6 +679,11 @@ def watch_kaggle_gpu_sidecar(
         "--self-improvement-codex/--no-self-improvement-codex",
         help="Let periodic self-improvement call Codex when the git worktree is clean.",
     ),
+    self_improvement_publish: bool = typer.Option(
+        False,
+        "--self-improvement-publish/--no-self-improvement-publish",
+        help="After Codex self-improvement succeeds, verify, commit, and push repo code changes.",
+    ),
 ) -> None:
     cfg = ctx.obj
     normalized_submit_policy = submit_policy.strip().lower()
@@ -680,6 +693,8 @@ def watch_kaggle_gpu_sidecar(
         raise typer.BadParameter("Refusing to run Kaggle GPU sidecar with submissions enabled without --force.")
     if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+    if self_improvement_publish and not self_improvement_codex:
+        raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
 
     watch_config = WatchConfig(
         workdir=cfg.workdir,
@@ -721,6 +736,7 @@ def watch_kaggle_gpu_sidecar(
         kaggle_gpu_quota_web_lookup=True,
         self_improvement_interval_hours=_normalize_self_improvement_interval(self_improvement_interval_hours),
         self_improvement_codex=self_improvement_codex,
+        self_improvement_publish=self_improvement_publish,
     )
     if once:
         result = run_watch_once(watch_config)
@@ -749,10 +765,17 @@ def self_improve(
         "--codex/--no-codex",
         help="Call Codex to implement one structural improvement after writing the report.",
     ),
+    publish: bool = typer.Option(
+        False,
+        "--publish/--no-publish",
+        help="After Codex succeeds, verify, commit, and push repo code changes.",
+    ),
 ) -> None:
     cfg = ctx.obj
     if codex and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+    if publish and not codex:
+        raise typer.BadParameter("--publish requires --codex.")
     result = run_self_improvement_cycle(
         SelfImprovementConfig(
             artifacts_dir=cfg.artifacts_dir,
@@ -760,6 +783,7 @@ def self_improve(
             max_runs=max_runs,
             min_interval_hours=_normalize_self_improvement_interval(interval_hours),
             invoke_codex=codex,
+            publish_codex_changes=publish,
             force=interval_hours <= 0,
             dry_run=cfg.dry_run,
         )

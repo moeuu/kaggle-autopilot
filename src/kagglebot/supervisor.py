@@ -93,6 +93,7 @@ class WatchConfig:
     kaggle_gpu_quota_web_lookup: bool = False
     self_improvement_interval_hours: float | None = 6.0
     self_improvement_codex: bool = True
+    self_improvement_publish: bool = False
 
     @property
     def root_watch_dir(self) -> Path:
@@ -325,6 +326,7 @@ def _maybe_run_self_improvement(config: WatchConfig, *, force: bool = False) -> 
                 knowledge_paths=KnowledgePaths(workdir=config.workdir),
                 min_interval_hours=interval,
                 invoke_codex=config.self_improvement_codex,
+                publish_codex_changes=config.self_improvement_publish,
                 force=force,
                 dry_run=config.dry_run,
             )
