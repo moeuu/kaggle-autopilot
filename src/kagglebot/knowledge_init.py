@@ -1293,6 +1293,12 @@ If the score did not improve (delta <= 0), treat it as `major_overhaul` even if 
 
 Before finalizing:
 
+**Agent runtime budget**:
+- Do not launch or monitor a full local GPU/autopilot run from inside the implementation agent.
+- Run only bounded validation: py_compile, fast-dev smoke, config checks, and unit tests.
+- If full training is needed, exit after reporting the exact command; the autopilot orchestrator will run it.
+- Do not tail files under `kernels/` or poll `nvidia-smi` after the fix is validated.
+
 1. **Run offline evaluation (supporting signal)**:
    - Run `kernel.py` via autopilot/train and use kernel metrics/logs for evaluation.
    - Keep one implementation path in `kernel.py` across local and kaggle execution.

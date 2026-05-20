@@ -62,6 +62,7 @@ from kagglebot.autopilot import (
 from kagglebot.eval import EvaluationReport
 from kagglebot.exceptions import (
     KaggleCliError,
+    KernelCapacityError,
     KernelFailedError,
     SubmissionCliError,
     SubmissionValidationError,
@@ -2371,6 +2372,152 @@ def test_submit_with_notebook_kernel_forces_internet_off(monkeypatch, tmp_path: 
 
     assert captured["run_submit_kernel"]["enable_internet"] is False
     assert captured["run_submit_kernel"]["mode"] == "wrapper"
+
+
+def test_submit_with_notebook_kernel_retries_cpu_after_gpu_capacity_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu", strict_accelerator=False)
+    run_id = config.run_id or "run-1"
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    accelerators: list[str] = []
+
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
+        accelerators.append(kwargs["accelerator"])
+        if kwargs["accelerator"] == "gpu":
+            raise KernelCapacityError(
+                "Kaggle GPU session limit reached.",
+                command=["kaggle", "kernels", "push"],
+                exit_code=15,
+                output="Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.",
+            )
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_submission = output_dir / "submission.csv"
+        out_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        return KernelRunResult(
+            kernel_id="user/demo-submit-kernel-cpu",
+            output_dir=output_dir,
+            submission_path=out_submission,
+            metrics_path=None,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kaggle_submit_kernel",
+        lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+    )
+
+    result, kernel_ref, artifact_path = _submit_with_notebook_kernel(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        message="test notebook cpu fallback",
+    )
+
+    assert result.returncode == 0
+    assert kernel_ref == "kernel:user/demo-submit-kernel-cpu"
+    assert artifact_path is not None
+    assert accelerators == ["gpu", "cpu"]
+
+
+def test_submit_with_notebook_kernel_retries_cpu_after_kernel_push_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu", strict_accelerator=False)
+    run_id = config.run_id or "run-1"
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    accelerators: list[str] = []
+
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003
+        accelerators.append(kwargs["accelerator"])
+        if kwargs["accelerator"] == "gpu":
+            raise KaggleCliError(
+                "Kaggle kernel push failed.",
+                command=["kaggle", "kernels", "push", "-p", "kernel"],
+                exit_code=4,
+                output="Kernel push error: Notebook not found",
+            )
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_submission = output_dir / "submission.csv"
+        out_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        return KernelRunResult(
+            kernel_id="user/demo-submit-kernel-cpu",
+            output_dir=output_dir,
+            submission_path=out_submission,
+            metrics_path=None,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kaggle_submit_kernel",
+        lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+    )
+
+    result, kernel_ref, artifact_path = _submit_with_notebook_kernel(
+        config=config,
+        run_id=run_id,
+        submission_path=submission_path,
+        message="test notebook cpu fallback",
+    )
+
+    assert result.returncode == 0
+    assert kernel_ref == "kernel:user/demo-submit-kernel-cpu"
+    assert artifact_path is not None
+    assert accelerators == ["gpu", "cpu"]
+
+
+def test_submit_with_notebook_kernel_preserves_kaggle_cli_error_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu")
+    run_id = config.run_id or "run-1"
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+    command = ["kaggle", "kernels", "push", "-p", "kernel"]
+    output = "Kernel push error: Notebook not found"
+
+    def fake_run_submit_kernel(**kwargs):  # noqa: ANN003, ARG001
+        raise KaggleCliError(
+            "Kaggle kernel push failed.",
+            command=command,
+            exit_code=4,
+            output=output,
+        )
+
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
+
+    with pytest.raises(SubmissionCliError) as exc_info:
+        _submit_with_notebook_kernel(
+            config=config,
+            run_id=run_id,
+            submission_path=submission_path,
+            message="test notebook push failure",
+        )
+
+    exc = exc_info.value
+    assert exc.command == command
+    assert exc.exit_code == 4
+    assert exc.output == output
+    assert exc.stderr == output
 
 
 def test_submit_with_notebook_kernel_does_not_retry_generic_submit_notebook_bad_request(

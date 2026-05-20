@@ -47,6 +47,9 @@ dependencies = [
     "kornia>=0.8.2",
     "iterative-stratification>=0.1.9",
     "sacrebleu>=2.6.0",
+    "soundfile>=0.13.1",
+    "onnxruntime>=1.26.0",
+    "pytabkit>=1.7.3",
 ]
 
 [project.scripts]

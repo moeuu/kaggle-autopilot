@@ -221,12 +221,14 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
     (source_kernel_dir / "kernel.py").write_text(
         "\n".join(
             [
+                "import os",
                 "from pathlib import Path",
                 "KERNEL_DIR = Path(__file__).resolve().parent",
                 "ARTIFACT_DIR = KERNEL_DIR.parent",
                 "ARTIFACT_ROOT = KERNEL_DIR.parent",
                 "DATA = Path('/kaggle/input/demo/test.csv')",
-                "LOCAL_OUTPUT_DIR = KERNEL_DIR / 'outputs'",
+                "LOCAL_OUTPUT_DIR = Path(os.environ.get('KAGGLEBOT_LOCAL_OUTPUT_DIR', str(KERNEL_DIR / 'outputs')))",
+                "KAGGLE_WORKING_DIR = Path('/kaggle/working')",
                 "LOCAL_OUT = KERNEL_DIR / 'outputs'",
                 "ARTIFACT_OUT = ARTIFACT_DIR.joinpath('outputs')",
                 "ROOT_OUT = ARTIFACT_ROOT / 'output'",
@@ -270,10 +272,8 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
     assert "KERNEL_DIR / 'outputs'" not in kernel_text
     assert "ARTIFACT_DIR.joinpath('outputs')" not in kernel_text
     assert "ARTIFACT_ROOT / 'output'" not in kernel_text
-    assert (
-        "LOCAL_OUTPUT_DIR = Path('/kaggle/working')" in kernel_text
-        or "LOCAL_OUTPUT_DIR = KAGGLE_WORKING_DIR" in kernel_text
-    )
+    assert "str(KAGGLE_WORKING_DIR)" not in kernel_text
+    assert "LOCAL_OUTPUT_DIR = KAGGLE_WORKING_DIR" not in kernel_text
     assert "Path('/kaggle/working')" in kernel_text
     assert not (kernel_dir / "output").exists()
 

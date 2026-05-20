@@ -9470,29 +9470,36 @@ def _submit_with_notebook_kernel(
     iter_dir = config.paths.iter_dir(run_id, iteration)
     kaggle_user = resolve_kaggle_username(config.kaggle_username)
     normalized_artifact_mode = str(artifact_mode or "wrapper").strip().lower()
+    submit_kernel_kwargs = {
+        "slug": config.slug,
+        "run_id": run_id,
+        "iteration": iteration,
+        "base_dir": config.paths.base_dir.parent,
+        "kaggle_username": kaggle_user,
+        "kernel_name": config.kernel_name,
+        "accelerator": config.accelerator,
+        "enable_internet": False,
+        "submission_path": submission_path,
+        "mode": normalized_artifact_mode,
+        "dry_run": config.dry_run,
+        "timeout_minutes": config.time_budget_min,
+    }
     try:
-        kernel_result = run_submit_kernel(
-            slug=config.slug,
-            run_id=run_id,
-            iteration=iteration,
-            base_dir=config.paths.base_dir.parent,
-            kaggle_username=kaggle_user,
-            kernel_name=config.kernel_name,
-            accelerator=config.accelerator,
-            enable_internet=False,
-            submission_path=submission_path,
-            mode=normalized_artifact_mode,
-            dry_run=config.dry_run,
-            timeout_minutes=config.time_budget_min,
-        )
+        kernel_result = run_submit_kernel(**submit_kernel_kwargs)
     except Exception as exc:  # noqa: BLE001
-        raise SubmissionCliError(
-            "Notebook submission fallback failed while running Kaggle kernel.",
-            command=[],
-            output=str(exc),
-            stdout="",
-            stderr=str(exc),
-        ) from exc
+        if _should_retry_submit_kernel_on_cpu(config=config, exc=exc):
+            print(
+                "[yellow]submit notebook[/yellow]: "
+                f"{_submit_kernel_cpu_retry_reason(exc)}; retrying submit kernel on CPU."
+            )
+            try:
+                kernel_result = run_submit_kernel(**{**submit_kernel_kwargs, "accelerator": "cpu"})
+            except Exception as retry_exc:  # noqa: BLE001
+                raise _notebook_kernel_submission_error(retry_exc) from retry_exc
+        elif isinstance(exc, KernelCapacityError):
+            raise
+        else:
+            raise _notebook_kernel_submission_error(exc) from exc
 
     submission_artifact_path: Path | None = None
     if kernel_result.submission_path:
@@ -9542,6 +9549,61 @@ def _submit_with_notebook_kernel(
         else:
             raise
     return submit_result, f"kernel:{kernel_ref}", submission_artifact_path
+
+
+def _should_retry_submit_kernel_on_cpu(*, config: AutopilotConfig, exc: Exception) -> bool:
+    if str(config.accelerator).strip().lower() != "gpu":
+        return False
+    if config.strict_accelerator:
+        return False
+    if isinstance(exc, KernelCapacityError):
+        return True
+    return isinstance(exc, KaggleCliError) and _is_submit_kernel_push_error(exc)
+
+
+def _is_submit_kernel_push_error(exc: KaggleCliError) -> bool:
+    text = "\n".join(
+        part
+        for part in (
+            str(exc),
+            getattr(exc, "output", "") or "",
+            getattr(exc, "stdout", "") or "",
+            getattr(exc, "stderr", "") or "",
+        )
+        if part
+    ).lower()
+    return (
+        "kernel push error:" in text
+        or "kaggle kernel push failed" in text
+        or "kernel not found after push" in text
+        or "notebook not found" in text
+    )
+
+
+def _submit_kernel_cpu_retry_reason(exc: Exception) -> str:
+    if isinstance(exc, KernelCapacityError):
+        return "Kaggle GPU capacity is unavailable"
+    return "Kaggle notebook push failed under GPU metadata"
+
+
+def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
+    if isinstance(exc, KaggleCliError):
+        output = exc.output or str(exc)
+        return SubmissionCliError(
+            "Notebook submission fallback failed while running Kaggle kernel.",
+            command=list(exc.command or []),
+            exit_code=exc.exit_code,
+            output=output,
+            stdout=exc.stdout,
+            stderr=exc.stderr or output,
+        )
+    return SubmissionCliError(
+        "Notebook submission fallback failed while running Kaggle kernel.",
+        command=[],
+        output=str(exc),
+        stdout="",
+        stderr=str(exc),
+    )
 
 
 def _should_use_notebook_submit_fallback(*, reason: str, stdout: str, stderr: str) -> bool:

@@ -3568,7 +3568,7 @@ def _sanitize_submit_inference_output_roots(kernel_dir: Path) -> None:
     if not kernel_path.exists():
         return
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    working_root = "KAGGLE_WORKING_DIR" if re.search(r"\bKAGGLE_WORKING_DIR\b", text) else "Path('/kaggle/working')"
+    working_root = "Path('/kaggle/working')"
     updated = text
     patterns = (
         re.compile(r"\b(?:KERNEL_DIR|ARTIFACT_DIR|ARTIFACT_ROOT)\s*/\s*(['\"])(?:output|outputs)\1"),

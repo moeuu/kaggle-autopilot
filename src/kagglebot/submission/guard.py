@@ -12,6 +12,14 @@ from kagglebot.exceptions import SubmissionCliError
 
 _PERMANENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
     (
+        "kernel_push_failed",
+        (
+            re.compile(r"kernel push error:", flags=re.IGNORECASE),
+            re.compile(r"kernel not found after push", flags=re.IGNORECASE),
+            re.compile(r"kaggle kernel push failed", flags=re.IGNORECASE),
+        ),
+    ),
+    (
         "notebook_only_submission_required",
         (
             re.compile(r"only accepts submissions from notebooks", flags=re.IGNORECASE),

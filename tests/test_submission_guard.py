@@ -376,6 +376,8 @@ def test_validate_submission_sniffs_tab_delimiter_and_flags_missing_header(tmp_p
         ("You must accept the rules before submitting", "permanent", "rules_not_accepted"),
         ("No Kaggle API credentials found", "permanent", "authentication"),
         ("Unauthorized (401)", "permanent", "authentication"),
+        ("Kernel push error: Notebook not found", "permanent", "kernel_push_failed"),
+        ("Kaggle kernel not found after push; aborting.", "permanent", "kernel_push_failed"),
         ("Competition is not accepting submissions", "permanent", "competition_unavailable"),
         ("Submission limit reached: maximum number of submissions", "permanent", "submission_limit"),
         ("ConnectionError: temporarily unavailable (503)", "transient", "network_or_timeout"),

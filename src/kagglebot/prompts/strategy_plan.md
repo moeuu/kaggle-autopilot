@@ -155,6 +155,12 @@ Provide a JSON object with these keys (do not wrap in markdown):
 - pipelines (array, length 2-4; each pipeline object MUST include: name, features, models, key_hyperparameters, runtime_memory, failure_modes, fallbacks)
   - `key_hyperparameters` must be the chosen runtime configuration for that shortlisted pipeline.
   - Do not put unresolved search grids or arrays in `key_hyperparameters`; each value must be a concrete scalar or nested object of concrete scalar values.
+- suites (array; required for high-accuracy tabular search; each suite object MUST include: name, train_mode, feature_recipe, lightweight, promotion_stage)
+  - Include exactly these canonical ablations when applicable:
+    - {"name":"competition_only","train_mode":"competition_only","feature_recipe":"full","lightweight":false,"promotion_stage":"full_eval"}
+    - {"name":"competition_plus_original","train_mode":"competition_plus_original","feature_recipe":"full","lightweight":false,"promotion_stage":"ablation_fast"}
+    - {"name":"orig_signal_only","train_mode":"competition_only","feature_recipe":"orig_signal_only","lightweight":true,"promotion_stage":"ablation_fast"}
+  - Do not use `suite_aware_ablations` instead of `suites`; the validator requires `suites`.
 - toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default)
 - evaluation_protocol (object; include `cv_type`, `n_folds`, `seeds`, and `primary_metric` based on the competition; use >=3 seeds for cheap/tabular evaluation, but only one full-training seed for heavy deep-learning runs)
 - stop_policy (object; include exact keys `max_iterations` and `error_fingerprint_abort`; `error_fingerprint_abort` may be bool or object)

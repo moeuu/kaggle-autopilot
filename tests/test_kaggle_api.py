@@ -77,6 +77,40 @@ def test_kernels_push_detects_capacity_limit_even_on_zero_exit(monkeypatch) -> N
         kaggle_api.kernels_push(Path("kernel"), slug="demo", dry_run=False)
 
 
+def test_kernels_push_detects_weekly_gpu_quota_even_on_zero_exit(monkeypatch) -> None:
+    def fake_run_command(args, *, dry_run=False, **kwargs):  # noqa: ARG001
+        return CommandResult(
+            args=args,
+            returncode=0,
+            stdout="Kernel push error: Maximum weekly GPU quota of 30.00 hours reached.",
+            stderr="",
+            duration_sec=0.1,
+        )
+
+    monkeypatch.setattr(kaggle_api, "run_command", fake_run_command)
+
+    with pytest.raises(KernelCapacityError, match="GPU session limit"):
+        kaggle_api.kernels_push(Path("kernel"), slug="demo", dry_run=False)
+
+
+def test_kernels_push_detects_non_capacity_push_error_even_on_zero_exit(monkeypatch) -> None:
+    def fake_run_command(args, *, dry_run=False, **kwargs):  # noqa: ARG001
+        return CommandResult(
+            args=args,
+            returncode=0,
+            stdout="Kernel push error: Notebook not found",
+            stderr="",
+            duration_sec=0.1,
+        )
+
+    monkeypatch.setattr(kaggle_api, "run_command", fake_run_command)
+
+    with pytest.raises(KaggleCliError, match="Kaggle kernel push failed") as exc_info:
+        kaggle_api.kernels_push(Path("kernel"), slug="demo", dry_run=False)
+
+    assert "Notebook not found" in exc_info.value.output
+
+
 def test_run_kaggle_applies_memory_limit_and_classifies_sigkill(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

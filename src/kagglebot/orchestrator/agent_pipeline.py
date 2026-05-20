@@ -54,6 +54,30 @@ _MEDAL_TARGET_PERCENTILES = {
     "silver": 0.05,
     "gold": 0.01,
 }
+_REQUIRED_SUITE_FIELDS = ("name", "train_mode", "feature_recipe", "lightweight", "promotion_stage")
+_HIGH_ACCURACY_TABULAR_REQUIRED_SUITES: tuple[dict[str, object], ...] = (
+    {
+        "name": "competition_only",
+        "train_mode": "competition_only",
+        "feature_recipe": "full",
+        "lightweight": False,
+        "promotion_stage": "full_eval",
+    },
+    {
+        "name": "competition_plus_original",
+        "train_mode": "competition_plus_original",
+        "feature_recipe": "full",
+        "lightweight": False,
+        "promotion_stage": "ablation_fast",
+    },
+    {
+        "name": "orig_signal_only",
+        "train_mode": "competition_only",
+        "feature_recipe": "orig_signal_only",
+        "lightweight": True,
+        "promotion_stage": "ablation_fast",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -323,6 +347,9 @@ def _run_strategy_plan(
         research_sources_text, research_sources_issue = _extract_research_sources_jsonl(response_text)
         research_summary_text, research_summary_issue = _extract_research_summary(response_text)
         plan_payload, plan_issue = _extract_plan_json(response_text)
+        profile = _load_dataset_profile_payload(paths)
+        if plan_payload is not None:
+            plan_payload = _repair_plan_payload_for_profile(plan_payload, profile)
         issues = _validate_strategy_output(
             strategy_text,
             instructions_text,
@@ -332,7 +359,7 @@ def _run_strategy_plan(
             research_sources_issue,
             research_summary_text,
             research_summary_issue,
-            profile=_load_dataset_profile_payload(paths),
+            profile=profile,
             require_sources=config.internet != "off",
         )
         if issues:
@@ -772,6 +799,118 @@ def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
 
     normalized["stop_policy"] = stop_policy
     return normalized
+
+
+def _suite_token(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def _required_high_accuracy_suites_by_name() -> dict[str, dict[str, object]]:
+    return {str(item["name"]): dict(item) for item in _HIGH_ACCURACY_TABULAR_REQUIRED_SUITES}
+
+
+def _canonical_required_suite_name(suite: dict[str, object]) -> str | None:
+    name = _suite_token(suite.get("name"))
+    train_mode = _suite_token(suite.get("train_mode"))
+    feature_recipe = _suite_token(suite.get("feature_recipe"))
+    if feature_recipe == "orig_signal_only" or name in {"orig_signal_only", "original_signal_only"}:
+        return "orig_signal_only"
+    if train_mode == "competition_plus_original" or name in {"competition_plus_original", "competition_plus_orig"}:
+        return "competition_plus_original"
+    if train_mode == "competition_only" or name in {"competition_only", "comp_only"}:
+        return "competition_only"
+    return None
+
+
+def _canonical_suite_name_from_alias_text(value: object) -> str | None:
+    token = _suite_token(value)
+    if not token:
+        return None
+    if token in {"orig_signal_only", "original_signal_only"} or ("orig" in token and "signal" in token):
+        return "orig_signal_only"
+    if token in {"competition_plus_original", "competition_plus_orig"} or (
+        "competition" in token and "original" in token
+    ):
+        return "competition_plus_original"
+    if token in {"competition_only", "comp_only"} or ("competition" in token and "only" in token):
+        return "competition_only"
+    return None
+
+
+def _complete_required_suite(suite: dict[str, object]) -> dict[str, object]:
+    required_name = _canonical_required_suite_name(suite)
+    if required_name is None:
+        return dict(suite)
+    defaults = _required_high_accuracy_suites_by_name()[required_name]
+    extras = {key: value for key, value in suite.items() if key not in _REQUIRED_SUITE_FIELDS}
+    return {**defaults, **extras}
+
+
+def _is_complete_suite(suite: dict[str, object]) -> bool:
+    return all(key in suite for key in _REQUIRED_SUITE_FIELDS)
+
+
+def _suite_alias_items(value: object) -> list[object]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return list(value.values())
+    return []
+
+
+def _repair_plan_payload_for_profile(
+    payload: dict[str, object],
+    profile: dict[str, object],
+) -> dict[str, object]:
+    normalized = _normalize_plan_payload(payload)
+    if not _is_high_accuracy_tabular_blend_target(profile):
+        return normalized
+
+    repaired = dict(normalized)
+    raw_candidates: list[tuple[object, bool]] = []
+    suites_raw = repaired.get("suites")
+    if isinstance(suites_raw, list):
+        raw_candidates.extend((item, True) for item in suites_raw)
+
+    alias_raw = repaired.pop("suite_aware_ablations", None)
+    raw_candidates.extend((item, False) for item in _suite_alias_items(alias_raw))
+
+    toggles_raw = repaired.get("toggles")
+    if isinstance(toggles_raw, dict):
+        toggles = dict(toggles_raw)
+        toggle_alias_raw = toggles.pop("suite_ablations", None)
+        raw_candidates.extend((item, False) for item in _suite_alias_items(toggle_alias_raw))
+        repaired["toggles"] = toggles
+
+    required_by_name = _required_high_accuracy_suites_by_name()
+    required_suites: dict[str, dict[str, object]] = {}
+    extra_suites: list[object] = []
+    for item, preserve_invalid in raw_candidates:
+        if isinstance(item, dict):
+            suite = _complete_required_suite(item)
+            required_name = _canonical_required_suite_name(suite)
+            if required_name is not None:
+                required_suites.setdefault(required_name, suite)
+            elif preserve_invalid or _is_complete_suite(suite):
+                extra_suites.append(suite)
+            continue
+
+        alias_name = _canonical_suite_name_from_alias_text(item)
+        if alias_name is not None:
+            required_suites.setdefault(alias_name, dict(required_by_name[alias_name]))
+        elif preserve_invalid:
+            extra_suites.append(item)
+
+    for suite in _HIGH_ACCURACY_TABULAR_REQUIRED_SUITES:
+        required_name = str(suite["name"])
+        required_suites.setdefault(required_name, dict(suite))
+
+    repaired["suites"] = [
+        required_suites[str(suite["name"])] for suite in _HIGH_ACCURACY_TABULAR_REQUIRED_SUITES
+    ] + extra_suites
+    return _normalize_plan_payload(repaired)
 
 
 def _pipeline_texts(pipeline: dict[str, object]) -> list[str]:

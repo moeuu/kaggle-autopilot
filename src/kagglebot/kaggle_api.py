@@ -1653,6 +1653,13 @@ def _run_kaggle(args: list[str], slug: str | None, *, dry_run: bool) -> str:
             exit_code=result.returncode,
             output=output,
         )
+    if _is_kernel_push_error(args, output):
+        raise KaggleCliError(
+            "Kaggle kernel push failed.",
+            args,
+            exit_code=result.returncode or 4,
+            output=output,
+        )
     if result.returncode != 0:
         if _is_network_error(output):
             raise KaggleNetworkError(
@@ -1734,4 +1741,14 @@ def _is_network_error(output: str) -> bool:
 
 def _is_kernel_capacity_limit(output: str) -> bool:
     text = output.lower()
-    return "maximum batch gpu session count" in text
+    if "maximum batch gpu session count" in text:
+        return True
+    if "maximum weekly gpu quota" in text:
+        return True
+    if "gpu quota" in text and any(token in text for token in ("reached", "exceeded", "exhausted")):
+        return True
+    return False
+
+
+def _is_kernel_push_error(args: list[str], output: str) -> bool:
+    return args[:3] == ["kaggle", "kernels", "push"] and "kernel push error:" in output.lower()
