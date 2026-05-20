@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from kagglebot.paths import KnowledgePaths
+from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    slug = "demo"
+    run_id = "run-1"
+    run_dir = artifacts / slug / "runs" / run_id
+    _write_json(
+        run_dir / "run.json",
+        {
+            "run_id": run_id,
+            "slug": slug,
+            "status": "submit_failed",
+            "config": {"target_direction": "maximize", "target_metric": "auc"},
+        },
+    )
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.7, "score_source": "cv"})
+    (run_dir / "submit_attempts.jsonl").write_text(
+        json.dumps({"action_taken": "failed", "reason": "submit error", "iteration": 1}) + "\n",
+        encoding="utf-8",
+    )
+    _write_json(artifacts / slug / "context" / "top1_public.json", {"score": 0.9})
+    ledger = artifacts / slug / "submissions" / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "event": "outcome",
+                "run_id": run_id,
+                "outcome": {"status": "complete", "score": 0.75},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=False,
+            force=True,
+        )
+    )
+
+    assert result["status"] == "written"
+    report = json.loads((artifacts / "_self_improvement" / "latest.json").read_text(encoding="utf-8"))
+    assert report["cause_counts"]["submit_failed"] == 1
+    assert report["cause_counts"]["online_far_from_top1"] == 1
+    assert report["largest_top1_gaps"][0]["top1_gap"] == 0.15000000000000002
+
+
+def test_self_improvement_calls_codex_when_enabled_and_clean(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    _write_json(run_dir / "run.json", {"run_id": "run-1", "status": "completed", "config": {}})
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
+    calls: dict[str, object] = {}
+
+    def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
+        calls["prompt"] = prompt_path.read_text(encoding="utf-8")
+        calls["output_dir"] = output_dir
+        return SimpleNamespace(
+            returncode=0,
+            transcript_path=output_dir / "codex_exec.jsonl",
+            last_message_path=output_dir / "codex_last_message.txt",
+        )
+
+    monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: False)
+    monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
+
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=True,
+            force=True,
+        )
+    )
+
+    assert result["status"] == "written"
+    assert result["codex_improvement"]["status"] == "completed"
+    assert "Kagglebot Self-Improvement Task" in str(calls["prompt"])
+
+
+def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    _write_json(run_dir / "run.json", {"run_id": "run-1", "status": "completed", "config": {}})
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
+    monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: True)
+
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=True,
+            force=True,
+        )
+    )
+
+    assert result["codex_improvement"]["status"] == "skipped_dirty_worktree"

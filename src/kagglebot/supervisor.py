@@ -28,6 +28,7 @@ from kagglebot.kaggle_api import (
     list_entered_competitions,
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
 
 _TERMINAL_RUN_STATUSES = {
@@ -90,6 +91,8 @@ class WatchConfig:
     lightweight_preferred_categories: tuple[str, ...] = ("gettingstarted", "playground")
     kaggle_gpu_min_available_minutes_for_new_competition: int | None = None
     kaggle_gpu_quota_web_lookup: bool = False
+    self_improvement_interval_hours: float | None = 6.0
+    self_improvement_codex: bool = True
 
     @property
     def root_watch_dir(self) -> Path:
@@ -169,8 +172,10 @@ def run_watch_forever(
         except Exception as exc:  # noqa: BLE001
             WatchLedger(config.ledger_path).append("failed", reason=type(exc).__name__, error=str(exc))
             print(f"[red]watch failed[/red]: {exc}")
+            _maybe_run_self_improvement(config)
             time.sleep(max(1, sleep_error_sec))
             continue
+        _maybe_run_self_improvement(config)
         if result.status in {"no_candidates", "dry_run", "no_capacity"}:
             time.sleep(max(1, sleep_empty_sec))
             continue
@@ -303,6 +308,34 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
     ledger.append("finished", slug=candidate.slug, run_id=run_id)
     _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "finished"})
     return WatchCycleResult(status="finished", slug=candidate.slug, run_id=run_id)
+
+
+def run_watch_self_improvement(config: WatchConfig, *, force: bool = False) -> dict[str, object]:
+    return _maybe_run_self_improvement(config, force=force) or {"status": "disabled"}
+
+
+def _maybe_run_self_improvement(config: WatchConfig, *, force: bool = False) -> dict[str, object] | None:
+    interval = config.self_improvement_interval_hours
+    if not force and (interval is None or interval <= 0):
+        return None
+    try:
+        result = run_self_improvement_cycle(
+            SelfImprovementConfig(
+                artifacts_dir=config.artifacts_dir,
+                knowledge_paths=KnowledgePaths(workdir=config.workdir),
+                min_interval_hours=interval,
+                invoke_codex=config.self_improvement_codex,
+                force=force,
+                dry_run=config.dry_run,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        result = {"status": "failed", "error": str(exc), "error_type": type(exc).__name__}
+    if result.get("status") == "written":
+        print(f"[cyan]self-improvement[/cyan]: {result.get('report_path')}")
+    elif result.get("status") == "failed":
+        print(f"[yellow]self-improvement failed[/yellow]: {result.get('error')}")
+    return result
 
 
 def _new_kaggle_gpu_competition_quota_block(

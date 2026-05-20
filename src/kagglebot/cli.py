@@ -24,9 +24,10 @@ from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
+from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
-from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once
+from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once, run_watch_self_improvement
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
 knowledge_app = typer.Typer(add_completion=False, help="Knowledge base commands.")
@@ -59,6 +60,12 @@ def _sidecar_min_gpu_quota_minutes(
             return None
         return int(min_gpu_quota_hours_for_new_comp * 60)
     return int(DEFAULT_KAGGLE_GPU_MIN_QUOTA_HOURS * 60)
+
+
+def _normalize_self_improvement_interval(value: float | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return float(value)
 
 
 def _preferred_artifacts_dir() -> Path:
@@ -538,6 +545,17 @@ def watch(
     allow_slug: list[str] | None = typer.Option(None, "--allow-slug", help="Only consider this slug; repeatable."),
     block_slug: list[str] | None = typer.Option(None, "--block-slug", help="Never consider this slug; repeatable."),
     strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
+    self_improvement_interval_hours: float = typer.Option(
+        6.0,
+        "--self-improvement-interval-hours",
+        min=0.0,
+        help="Run Codex self-improvement at most this often during watch. Use 0 to disable.",
+    ),
+    self_improvement_codex: bool = typer.Option(
+        True,
+        "--self-improvement-codex/--no-self-improvement-codex",
+        help="Let periodic self-improvement call Codex when the git worktree is clean.",
+    ),
 ) -> None:
     cfg = ctx.obj
     normalized_submit_policy = submit_policy.strip().lower()
@@ -545,6 +563,8 @@ def watch(
         raise typer.BadParameter("--submit-policy must be improved or none.", param_hint="--submit-policy")
     if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run watch with submissions enabled without --force.")
+    if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
+        raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
 
     watch_config = WatchConfig(
         workdir=cfg.workdir,
@@ -573,9 +593,12 @@ def watch(
         cooldown_hours=cooldown_hours,
         dry_run=cfg.dry_run,
         force=cfg.force,
+        self_improvement_interval_hours=_normalize_self_improvement_interval(self_improvement_interval_hours),
+        self_improvement_codex=self_improvement_codex,
     )
     if once:
         result = run_watch_once(watch_config)
+        run_watch_self_improvement(watch_config)
         print(f"[green]watch cycle[/green]: {result.status} slug={result.slug} run_id={result.run_id}")
         return
     run_watch_forever(
@@ -637,6 +660,17 @@ def watch_kaggle_gpu_sidecar(
     ),
     allow_slug: list[str] | None = typer.Option(None, "--allow-slug", help="Only consider this slug; repeatable."),
     block_slug: list[str] | None = typer.Option(None, "--block-slug", help="Never consider this slug; repeatable."),
+    self_improvement_interval_hours: float = typer.Option(
+        6.0,
+        "--self-improvement-interval-hours",
+        min=0.0,
+        help="Run Codex self-improvement at most this often during sidecar watch. Use 0 to disable.",
+    ),
+    self_improvement_codex: bool = typer.Option(
+        True,
+        "--self-improvement-codex/--no-self-improvement-codex",
+        help="Let periodic self-improvement call Codex when the git worktree is clean.",
+    ),
 ) -> None:
     cfg = ctx.obj
     normalized_submit_policy = submit_policy.strip().lower()
@@ -644,6 +678,8 @@ def watch_kaggle_gpu_sidecar(
         raise typer.BadParameter("--submit-policy must be improved or none.", param_hint="--submit-policy")
     if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run Kaggle GPU sidecar with submissions enabled without --force.")
+    if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
+        raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
 
     watch_config = WatchConfig(
         workdir=cfg.workdir,
@@ -683,9 +719,12 @@ def watch_kaggle_gpu_sidecar(
             max_iterations=max_iterations,
         ),
         kaggle_gpu_quota_web_lookup=True,
+        self_improvement_interval_hours=_normalize_self_improvement_interval(self_improvement_interval_hours),
+        self_improvement_codex=self_improvement_codex,
     )
     if once:
         result = run_watch_once(watch_config)
+        run_watch_self_improvement(watch_config)
         print(f"[green]kaggle gpu sidecar[/green]: {result.status} slug={result.slug} run_id={result.run_id}")
         return
     run_watch_forever(
@@ -693,6 +732,39 @@ def watch_kaggle_gpu_sidecar(
         sleep_empty_sec=interval_sec,
         sleep_error_sec=sleep_error_sec,
     )
+
+
+@app.command("self-improve")
+def self_improve(
+    ctx: typer.Context,
+    max_runs: int = typer.Option(80, "--max-runs", min=1, help="Recent run count to analyze."),
+    interval_hours: float = typer.Option(
+        0.0,
+        "--interval-hours",
+        min=0.0,
+        help="Skip if a newer report exists. Default 0 forces a manual run.",
+    ),
+    codex: bool = typer.Option(
+        True,
+        "--codex/--no-codex",
+        help="Call Codex to implement one structural improvement after writing the report.",
+    ),
+) -> None:
+    cfg = ctx.obj
+    if codex and not cfg.force and not cfg.dry_run:
+        raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=cfg.artifacts_dir,
+            knowledge_paths=KnowledgePaths(workdir=cfg.workdir),
+            max_runs=max_runs,
+            min_interval_hours=_normalize_self_improvement_interval(interval_hours),
+            invoke_codex=codex,
+            force=interval_hours <= 0,
+            dry_run=cfg.dry_run,
+        )
+    )
+    print(f"[green]self-improvement[/green]: {json.dumps(result, sort_keys=True)}")
 
 
 @app.command("discord-notifier")

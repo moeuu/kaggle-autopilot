@@ -122,6 +122,8 @@ watch --max-total-min INT      # default: no wall-clock limit
 watch --max-iterations INT     # default 12
 watch --allow-slug SLUG
 watch --block-slug SLUG
+watch --self-improvement-interval-hours FLOAT
+watch --self-improvement-codex/--no-self-improvement-codex
 ```
 
 `--submit-policy improved` disables the initial contract-probe submit and only submits when an artifact improves over
@@ -133,6 +135,12 @@ Because `watch` only reads Kaggle's entered-competition group, a passed new-entr
 competition; only a passed submission deadline does. Unfamiliar competition types are passed through to autopilot
 instead of being filtered out at selection time; complex simulation/reasoning/optimization tasks receive larger
 training-time estimates so lightweight sidecars can still make capacity-aware choices.
+
+`watch` also runs a periodic self-improvement loop. The loop scans recent runs, submission outcomes, top1 gaps,
+diagnostics, and submit failures under `artifacts/`, writes `_self_improvement/latest.json` and `latest.md`, then
+calls Codex to implement one small structural repo improvement when the git worktree is clean. Use
+`--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to write reports without invoking
+Codex. Manual runs are available through `kagglebot self-improve`.
 
 ## Artifacts
 
@@ -149,6 +157,8 @@ Key files:
 - `artifacts/<slug>/runs/<run-id>/iter-<k>/metrics.json`
 - `artifacts/<slug>/runs/<run-id>/iter-<k>/diagnostics.md`
 - `artifacts/<slug>/runs/<run-id>/iter-<k>/submission_manifest.json`
+- `artifacts/_self_improvement/latest.json`
+- `artifacts/_self_improvement/latest.md`
 - `knowledge/research/<problem_type>/<slug>/research_sources.jsonl` (authoritative persistence)
 - `knowledge/research/<problem_type>/<slug>/research_summary.md` (authoritative persistence)
 
