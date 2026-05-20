@@ -917,8 +917,10 @@ def _candidate_eligibility(*, config: WatchConfig, candidate: EnteredCompetition
     # `watch` only consumes Kaggle's group=entered list. A passed new-entrant
     # deadline blocks new teams from joining; it does not make an already-entered
     # team ineligible to train or submit before the competition deadline.
-    if not _is_repo_supported_candidate(candidate):
-        return "unsupported_by_repo"
+    # Do not hard-skip unfamiliar task families here. Autopilot's planner can
+    # inspect rules/data and either build a kernel/writeup path or fail with a
+    # concrete actionable reason; watch selection should only enforce hard
+    # submission eligibility.
     return None
 
 
@@ -949,13 +951,18 @@ def _estimate_training_minutes(candidate: EnteredCompetition) -> int | None:
     metric = candidate.evaluation_metric.lower()
     category = candidate.category.strip().lower()
 
-    if any(marker in text for marker in ("reasoning", "simulation", "optimization", "orbit", "wars", "golf")):
-        return None
+    complex_training = any(
+        marker in text for marker in ("reasoning", "simulation", "optimization", "orbit", "wars", "golf")
+    )
 
-    minutes = 90
-    if any(marker in metric for marker in ("auc", "accuracy", "log loss", "rmse", "rmsle", "mse", "mae", "f1")):
+    minutes = 360 if complex_training else 90
+    if not complex_training and any(
+        marker in metric for marker in ("auc", "accuracy", "log loss", "rmse", "rmsle", "mse", "mae", "f1")
+    ):
         minutes = 45
-    if any(marker in text for marker in ("tabular", "stock", "returns", "classification", "regression", "prediction")):
+    if not complex_training and any(
+        marker in text for marker in ("tabular", "stock", "returns", "classification", "regression", "prediction")
+    ):
         minutes = min(minutes, 60)
     if any(marker in text for marker in ("image", "detection", "segmentation", "ultrasound", "mri", "xray")):
         minutes = max(minutes, 180)
@@ -963,9 +970,9 @@ def _estimate_training_minutes(candidate: EnteredCompetition) -> int | None:
         minutes = max(minutes, 180)
     if any(marker in text for marker in ("rna", "structure", "translation", "nlp", "text")):
         minutes = max(minutes, 240)
-    if category == "gettingstarted":
+    if not complex_training and category == "gettingstarted":
         minutes = min(minutes, 45)
-    if category == "playground":
+    if not complex_training and category == "playground":
         minutes = min(minutes, 75)
     if candidate.is_kernels_submissions_only:
         minutes += 30
@@ -1010,105 +1017,6 @@ def _is_medal_candidate(candidate: EnteredCompetition) -> bool:
     if candidate.team_count is not None and candidate.team_count < 50:
         return False
     return True
-
-
-def _is_repo_supported_candidate(candidate: EnteredCompetition) -> bool:
-    text = " ".join(
-        [
-            candidate.slug,
-            candidate.title,
-            candidate.category,
-            candidate.evaluation_metric,
-        ]
-    ).lower()
-    unsupported_markers = (
-        "simulation",
-        "lux ai",
-        "halite",
-        "fifa",
-        "connectx",
-        "santa",
-        "optimization",
-        "reasoning",
-        "nemotron",
-        "orbit",
-        "wars",
-        "golf",
-        "code competition",
-        "llm prompt recovery",
-        "llm classification finetuning",
-    )
-    if any(marker in text for marker in unsupported_markers):
-        return False
-    supported_metric_markers = (
-        "auc",
-        "accuracy",
-        "log loss",
-        "rmse",
-        "rmsle",
-        "mae",
-        "map",
-        "f1",
-        "dice",
-        "iou",
-        "score",
-        "correlation",
-        "categorization",
-        "bleu",
-        "rouge",
-        "edit",
-        "levenshtein",
-        "wer",
-        "ndcg",
-        "map@",
-        "mean average precision",
-        "intersection over union",
-    )
-    metric = candidate.evaluation_metric.lower()
-    if metric and any(marker in metric for marker in supported_metric_markers):
-        return True
-    if metric:
-        return True
-    supported_task_markers = (
-        "classification",
-        "classify",
-        "regression",
-        "prediction",
-        "predict",
-        "feature engineering",
-        "forecast",
-        "forecasting",
-        "tabular",
-        "stock",
-        "returns",
-        "image",
-        "detection",
-        "segmentation",
-        "ultrasound",
-        "mammography",
-        "ecg",
-        "xray",
-        "mri",
-        "rna",
-        "structure",
-        "translation",
-        "language",
-        "nlp",
-        "text",
-        "retrieval",
-        "recommendation",
-        "ranking",
-        "ocr",
-        "handwritten",
-        "document",
-        "report",
-        "triage",
-        "biomass",
-        "flood",
-        "agriculture",
-        "protein",
-    )
-    return any(marker in text for marker in supported_task_markers)
 
 
 def _reward_amount_usd(reward: str) -> float | None:

@@ -12,6 +12,7 @@ from kagglebot.kaggle_api import EnteredCompetition
 from kagglebot.supervisor import (
     WatchConfig,
     WatchLedger,
+    _estimate_training_minutes,
     _parse_kaggle_gpu_quota_text,
     _read_kaggle_gpu_quota_file,
     run_watch_once,
@@ -245,6 +246,52 @@ def test_select_next_competition_keeps_known_task_when_metric_is_missing(
     selected = select_next_competition(_config(tmp_path))
 
     assert [item.slug for item in selected] == ["triagegeist"]
+
+
+def test_select_next_competition_keeps_unfamiliar_entered_competition_types(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    candidates = [
+        _competition(
+            "arc-prize-2026-arc-agi-2",
+            title="ARC Prize 2026 - ARC-AGI-2",
+            category="Featured",
+            evaluation_metric="Abstraction and Reasoning Challenge",
+            deadline=now + timedelta(days=120),
+        ),
+        _competition(
+            "orbit-wars",
+            title="Orbit Wars",
+            category="Featured",
+            evaluation_metric="orbit_wars",
+            deadline=now + timedelta(days=30),
+        ),
+        _competition(
+            "pierce-the-veil",
+            title="Pierce the VEIL: Hack It and Crack It Simulation",
+            category="Community",
+            evaluation_metric="",
+            deadline=now + timedelta(days=7),
+        ),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+
+    selected = select_next_competition(_config(tmp_path))
+
+    assert {item.slug for item in selected} == {item.slug for item in candidates}
+
+
+def test_estimate_training_minutes_is_finite_for_complex_competitions() -> None:
+    candidate = _competition(
+        "nvidia-nemotron-model-reasoning-challenge",
+        title="NVIDIA Nemotron Model Reasoning Challenge",
+        category="Featured",
+        evaluation_metric="NVIDIA Nemotron Metric",
+    )
+
+    assert _estimate_training_minutes(candidate) == 360
 
 
 def test_select_next_competition_prioritizes_medal_prize_and_near_deadline(
