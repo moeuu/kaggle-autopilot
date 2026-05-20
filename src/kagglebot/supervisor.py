@@ -914,9 +914,9 @@ def _candidate_eligibility(*, config: WatchConfig, candidate: EnteredCompetition
     deadline = _aware_datetime(candidate.deadline)
     if deadline is not None and deadline <= now:
         return "late_submit"
-    new_entrant_deadline = _aware_datetime(candidate.new_entrant_deadline)
-    if new_entrant_deadline is not None and new_entrant_deadline <= now:
-        return "new_entrant_deadline_passed"
+    # `watch` only consumes Kaggle's group=entered list. A passed new-entrant
+    # deadline blocks new teams from joining; it does not make an already-entered
+    # team ineligible to train or submit before the competition deadline.
     if not _is_repo_supported_candidate(candidate):
         return "unsupported_by_repo"
     return None
@@ -1054,9 +1054,20 @@ def _is_repo_supported_candidate(candidate: EnteredCompetition) -> bool:
         "score",
         "correlation",
         "categorization",
+        "bleu",
+        "rouge",
+        "edit",
+        "levenshtein",
+        "wer",
+        "ndcg",
+        "map@",
+        "mean average precision",
+        "intersection over union",
     )
     metric = candidate.evaluation_metric.lower()
     if metric and any(marker in metric for marker in supported_metric_markers):
+        return True
+    if metric:
         return True
     supported_task_markers = (
         "classification",
@@ -1064,7 +1075,9 @@ def _is_repo_supported_candidate(candidate: EnteredCompetition) -> bool:
         "regression",
         "prediction",
         "predict",
+        "feature engineering",
         "forecast",
+        "forecasting",
         "tabular",
         "stock",
         "returns",
@@ -1072,9 +1085,28 @@ def _is_repo_supported_candidate(candidate: EnteredCompetition) -> bool:
         "detection",
         "segmentation",
         "ultrasound",
+        "mammography",
+        "ecg",
+        "xray",
+        "mri",
         "rna",
         "structure",
         "translation",
+        "language",
+        "nlp",
+        "text",
+        "retrieval",
+        "recommendation",
+        "ranking",
+        "ocr",
+        "handwritten",
+        "document",
+        "report",
+        "triage",
+        "biomass",
+        "flood",
+        "agriculture",
+        "protein",
     )
     return any(marker in text for marker in supported_task_markers)
 

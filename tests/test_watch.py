@@ -22,6 +22,7 @@ from kagglebot.supervisor import (
 def _competition(
     slug: str,
     *,
+    title: str | None = None,
     category: str = "Playground",
     reward: str = "",
     submissions_disabled: bool = False,
@@ -32,7 +33,7 @@ def _competition(
 ) -> EnteredCompetition:
     return EnteredCompetition(
         slug=slug,
-        title=slug,
+        title=title or slug,
         url=f"https://www.kaggle.com/competitions/{slug}",
         category=category,
         reward=reward,
@@ -188,6 +189,62 @@ def test_select_next_competition_excludes_late_submit_competitions(monkeypatch, 
     selected = select_next_competition(_config(tmp_path))
 
     assert [item.slug for item in selected] == ["open-prize"]
+
+
+def test_select_next_competition_allows_entered_after_new_entrant_deadline(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    candidates = [
+        _competition(
+            "already-entered",
+            deadline=now + timedelta(days=14),
+            new_entrant_deadline=now - timedelta(days=1),
+        ),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+
+    selected = select_next_competition(_config(tmp_path))
+
+    assert [item.slug for item in selected] == ["already-entered"]
+
+
+def test_select_next_competition_keeps_entered_competition_with_unknown_metric(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        _competition(
+            "custom-leaderboard-task",
+            title="Custom leaderboard task",
+            evaluation_metric="Competition custom score",
+        ),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+
+    selected = select_next_competition(_config(tmp_path))
+
+    assert [item.slug for item in selected] == ["custom-leaderboard-task"]
+
+
+def test_select_next_competition_keeps_known_task_when_metric_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        _competition(
+            "triagegeist",
+            title="Triagegeist",
+            category="Community",
+            evaluation_metric="",
+        ),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+
+    selected = select_next_competition(_config(tmp_path))
+
+    assert [item.slug for item in selected] == ["triagegeist"]
 
 
 def test_select_next_competition_prioritizes_medal_prize_and_near_deadline(

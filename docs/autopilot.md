@@ -129,6 +129,9 @@ a previously submitted checkpoint. Use `--submit-policy none` for artifact gener
 
 Selection priority favors entered competitions with monetary prizes, competitions with no local submission history, and
 submitted competitions with poor current rank percentile where there is more leaderboard headroom.
+Because `watch` only reads Kaggle's entered-competition group, a passed new-entrant deadline does not exclude a
+competition; only a passed submission deadline does. Candidates with a leaderboard metric are kept unless they match
+known unsupported interactive/simulation/optimization patterns.
 
 ## Artifacts
 
