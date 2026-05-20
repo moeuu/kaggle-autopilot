@@ -643,16 +643,16 @@ def test_resolve_plan_uses_inference_artifact_mode_for_code_competition(tmp_path
     assert resolved["notebook_submit_artifact_mode"] == "inference"
 
 
-def test_resolve_plan_defaults_to_bronze_target_for_leaderboard(tmp_path: Path) -> None:
+def test_resolve_plan_defaults_to_winner_target_for_leaderboard(tmp_path: Path) -> None:
     config = _make_config(tmp_path, compute="local_gpu")
     _write_dataset_profile(config.paths, task="classification", modality="tabular")
 
     resolved = _resolve_plan(PlanConfig(), config)
 
     assert resolved["deliverable_mode"] == "leaderboard"
-    assert resolved["target_medal"] == "bronze"
-    assert resolved["target_rank_percentile"] == pytest.approx(0.10)
-    assert resolved["rank_force_major_max_percentile"] == pytest.approx(0.10)
+    assert resolved["target_medal"] == "winner"
+    assert resolved["target_rank_percentile"] == pytest.approx(0.001)
+    assert resolved["rank_force_major_max_percentile"] == pytest.approx(0.001)
 
 
 def test_resolve_plan_infers_writeup_mode_from_rules(tmp_path: Path) -> None:

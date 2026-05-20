@@ -195,7 +195,7 @@ def test_write_plan_payload_scalarizes_pipeline_key_hyperparameters(tmp_path: Pa
     assert persisted["pipelines"][1]["key_hyperparameters"] == {"depth": 6}
 
 
-def test_write_plan_payload_sets_default_bronze_target_for_leaderboard(tmp_path: Path) -> None:
+def test_write_plan_payload_sets_default_winner_target_for_leaderboard(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     paths.dataset_profile_path.write_text(
@@ -213,8 +213,8 @@ def test_write_plan_payload_sets_default_bronze_target_for_leaderboard(tmp_path:
     _write_plan_payload(paths, _base_payload())
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
-    assert persisted["target_medal"] == "bronze"
-    assert persisted["target_rank_percentile"] == 0.1
+    assert persisted["target_medal"] == "winner"
+    assert persisted["target_rank_percentile"] == 0.001
 
 
 def test_validate_plan_payload_requires_multi_family_blend_for_high_accuracy_tabular() -> None:

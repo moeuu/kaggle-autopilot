@@ -67,7 +67,7 @@ Longer schedules must stay inside the runtime budget; spend compute on the stron
 If the gap to top1 is large, recommend a major model upgrade (architecture or feature strategy).
 If near top1, recommend targeted tuning/ablations.
 If the dataset is tabular binary with large row count and meaningful categorical structure, do NOT collapse into single-family tuning:
-- set `target_medal` to at least `bronze` and `target_rank_percentile` to `0.10` unless a stronger objective is justified
+- set `target_medal` to `winner` and `target_rank_percentile` to `0.001` unless competition rules or runtime limits force a safer objective
 - shortlist CatBoost raw categorical, XGBoost with leak-safe target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant
 - include at least one OOF blend candidate (weighted/rank/logit blend)
 Always require a train-fit -> test-apply pipeline for all feature statistics/encoders/bins.
@@ -141,8 +141,8 @@ When similar choices exist, prefer solutions that leverage already-installed dep
 Provide a JSON object with these keys (do not wrap in markdown):
 - target_metric (string, from rules)
 - target_direction ("minimize" or "maximize")
-- target_medal (string|null; prefer bronze/silver/gold for leaderboard competitions)
-- target_rank_percentile (number|null; e.g. bronze=0.10)
+- target_medal (string|null; prefer winner/bronze/silver/gold for leaderboard competitions)
+- target_rank_percentile (number|null; e.g. winner=0.001)
 - target_score (number; use top1 public score as a realistic target)
 - score_source ("cv" preferred for accuracy-first search; use holdout only when CV is infeasible)
 - holdout_frac (number, e.g. 0.2)

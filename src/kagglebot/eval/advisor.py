@@ -38,8 +38,9 @@ SUPPORTED_SUBMISSION_GATES = {
     "readiness_or_final",
     "target_or_final",
 }
-SUPPORTED_MEDAL_TARGETS = {"bronze", "silver", "gold"}
+SUPPORTED_MEDAL_TARGETS = {"winner", "bronze", "silver", "gold"}
 _MEDAL_TARGET_PERCENTILES = {
+    "winner": 0.001,
     "bronze": 0.10,
     "silver": 0.05,
     "gold": 0.01,
@@ -218,7 +219,7 @@ class EvaluationAdvisor:
         }
         deliverable_mode = infer_deliverable_mode(context_text)
         submit_mode = infer_submit_mode(context_text)
-        target_medal = "bronze" if deliverable_mode == "leaderboard" else None
+        target_medal = "winner" if deliverable_mode == "leaderboard" else None
         target_rank_percentile = _MEDAL_TARGET_PERCENTILES.get(target_medal) if target_medal else None
         spec = {
             "deliverable_mode": deliverable_mode,
@@ -362,7 +363,7 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
     submit_mode = normalize_submit_mode(spec_raw.get("submit_mode"), default="file")
     target_medal = _normalize_target_medal(spec_raw.get("target_medal"))
     if spec_raw.get("target_medal") is not None and target_medal is None:
-        issues.append("evaluation_spec.target_medal must be one of: bronze, silver, gold")
+        issues.append("evaluation_spec.target_medal must be one of: winner, bronze, silver, gold")
     target_rank_percentile, target_rank_percentile_issue = _normalize_target_rank_percentile(
         spec_raw.get("target_rank_percentile"),
         medal=target_medal,
@@ -685,7 +686,7 @@ def _advisor_response_schema_text() -> str:
         "evaluation_spec": {
             "deliverable_mode": "leaderboard|writeup",
             "submit_mode": "file|notebook",
-            "target_medal": "bronze|silver|gold|null",
+            "target_medal": "winner|bronze|silver|gold|null",
             "target_rank_percentile": "0<float<=1|null",
             "metric_name": (
                 "one of [auc, logloss, brier_score, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, spearman]"

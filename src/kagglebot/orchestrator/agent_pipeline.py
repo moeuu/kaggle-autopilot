@@ -48,8 +48,9 @@ _ACCURACY_FIRST_MIN_CV_FOLDS = 5
 _ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
 _HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text", "rna_structure"})
 _HEAVY_MAX_FULL_TRAIN_FOLDS = 3
-_DEFAULT_TARGET_MEDAL = "bronze"
+_DEFAULT_TARGET_MEDAL = "winner"
 _MEDAL_TARGET_PERCENTILES = {
+    "winner": 0.001,
     "bronze": 0.10,
     "silver": 0.05,
     "gold": 0.01,
@@ -1666,8 +1667,8 @@ def _build_strategy_prompt(
         prompt += (
             "\n\n[HIGH_ACCURACY_TABULAR_POLICY]\n"
             "This is a large tabular binary problem with meaningful categorical structure.\n"
-            "Set `target_medal` to at least bronze and `target_rank_percentile` to 0.10 "
-            "unless stronger evidence supports a harder goal.\n"
+            "Set `target_medal` to `winner` and `target_rank_percentile` to 0.001 "
+            "unless competition rules or runtime limits force a safer goal.\n"
             "The shortlist MUST include CatBoost raw categorical, XGBoost with leak-safe "
             "target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant.\n"
             "The plan MUST also include at least one OOF blend candidate "

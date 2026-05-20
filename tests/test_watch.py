@@ -847,7 +847,7 @@ def test_watch_cli_dry_run_once(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert captured == {"submit_policy": "improved", "compute": "local_gpu", "max_iterations": 5}
+    assert captured == {"submit_policy": "improved", "compute": "local_gpu", "max_iterations": 12}
 
 
 def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp_path: Path) -> None:

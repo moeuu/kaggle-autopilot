@@ -522,7 +522,7 @@ def watch(
     score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
     holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
     cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
-    max_iterations: int = typer.Option(5, "--max-iterations", min=1, help="Max autopilot iterations per competition."),
+    max_iterations: int = typer.Option(12, "--max-iterations", min=1, help="Max autopilot iterations per competition."),
     max_total_min: int | None = typer.Option(
         None,
         "--max-total-min",

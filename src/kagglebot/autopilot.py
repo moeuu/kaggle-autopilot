@@ -288,8 +288,9 @@ _HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
 _EVAL_REPEAT_SEED_OFFSET = 1009
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
-_DEFAULT_TARGET_MEDAL = "bronze"
+_DEFAULT_TARGET_MEDAL = "winner"
 _MEDAL_TARGET_PERCENTILES = {
+    "winner": 0.001,
     "bronze": 0.10,
     "silver": 0.05,
     "gold": 0.01,
@@ -3648,7 +3649,7 @@ def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
         time_budget_min=resolved.get("time_budget_min"),  # type: ignore[arg-type]
         kernel_name=resolved.get("kernel_name"),  # type: ignore[arg-type]
         internet=str(resolved.get("internet") or "on"),
-        max_iterations=int(resolved.get("max_iterations") or 3),
+        max_iterations=int(resolved.get("max_iterations") or _DEFAULT_MAX_ITERATIONS),
         max_total_min=resolved.get("max_total_min"),  # type: ignore[arg-type]
         patience=int(resolved.get("patience") or 2),
         min_improvement=float(resolved.get("min_improvement") or 0.0),

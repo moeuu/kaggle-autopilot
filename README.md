@@ -31,7 +31,7 @@ This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
 2. **Plan**: Codex (gpt-5.3-codex, extra high) summarizes context, GPT (gpt-5.2, extra high) runs research + frozen plan, Codex (gpt-5.3-codex, extra high) implements it
 3. **Initial model**: Agent implements an initial solution in `artifacts/<slug>/kernel/kernel.py` (all compute modes)
-4. **Iterate**: Train → evaluate → diagnose → improve (default 3 iterations; override with `--max-iterations`)
+4. **Iterate**: Train → evaluate → diagnose → improve (default 12 iterations; override with `--max-iterations`)
 5. **Submit + Decide**: Submit each iteration, wait for Kaggle score, then decide continue/stop
 6. **Log**: Print Top1 public score and agent prompt/response to the terminal
 
@@ -153,7 +153,7 @@ Optional environment knobs:
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
 - ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, legacy `csv` aliases remain accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission
 - ✅ **Explicit submit mode**: `submit_mode` is tracked separately as `file|notebook`, so notebook-only leaderboard competitions no longer get conflated with writeup competitions
-- ✅ **Medal-aware iteration policy**: leaderboard runs default to a bronze target (`target_medal=bronze`, `target_rank_percentile=0.10`) so `minor_tuning` is suppressed until the run reaches the target rank band
+- ✅ **Winner-mode iteration policy**: leaderboard runs default to a near-first-place target (`target_medal=winner`, `target_rank_percentile=0.001`) so `minor_tuning` is suppressed until the run reaches the target rank band
 - ✅ **High-accuracy tabular planning guardrails**: large tabular binary problems with meaningful categoricals must keep multi-family search active (CatBoost + XGBoost + LightGBM/second variant + OOF blend candidate)
 - ✅ **Reference input recovery**: required reference notebooks now emit `context/reference_inputs_manifest.json`, and `--download` stages referenced datasets/competitions into `context/reference_inputs/` for kernels that depend on external/original data
 - ✅ **Competition-scoped policy overrides**: optional `artifacts/<slug>/context/competition_policy.json` can tighten notebook selection, reference-input recovery, repair signals, and fallback evaluation without changing defaults for other competitions

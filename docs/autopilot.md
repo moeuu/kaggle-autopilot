@@ -66,7 +66,7 @@ Submission behavior:
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - heuristic `writeup` inference is conservative and ignores negative mentions such as `not a judged/writeup competition`
-- leaderboard runs default to `target_medal=bronze` and `target_rank_percentile=0.10`; until that band is reached, autopilot will not collapse into `minor_tuning`
+- leaderboard runs default to `target_medal=winner` and `target_rank_percentile=0.001`; until that near-first-place band is reached, autopilot will not collapse into `minor_tuning`
 - for large tabular binary datasets with meaningful categoricals, planning quality gates require multi-family search plus at least one OOF blend candidate
 - required reference notebooks emit `context/reference_inputs_manifest.json`; with `--download`, referenced datasets/competitions are staged under `context/reference_inputs/`
 - if pseudo-labeling fully fails or an external/original-data feature path collapses to constants, the next iteration gets explicit repair targets instead of silently accepting the degraded path
@@ -74,7 +74,7 @@ Submission behavior:
 
 ## Important Defaults
 
-- `--max-iterations`: default runtime behavior is 3 unless overridden by CLI
+- `--max-iterations`: default runtime behavior is 12 unless overridden by CLI
 - `--internet`: default `on` for autopilot, but forced to `off` when captured competition rules ban notebook internet access
 - Submission in autopilot is enabled by default
 - Data bootstrap checks existing competition files and skips re-download when local file count/size already matches

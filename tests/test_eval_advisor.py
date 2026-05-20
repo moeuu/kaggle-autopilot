@@ -202,7 +202,7 @@ def test_evaluation_advisor_fallback_applies_competition_policy_overrides(tmp_pa
     assert spec["seeds"] == [42, 2025]
     assert spec["repeats"] == 2
     assert spec["ci_method"] == "bootstrap"
-    assert spec["target_rank_percentile"] == 0.08
+    assert spec["target_rank_percentile"] == 0.001
 
 
 def test_evaluation_advisor_fallback_infers_writeup_mode_from_context(tmp_path: Path) -> None:
@@ -264,8 +264,8 @@ def test_evaluation_advisor_fallback_keeps_csv_mode_when_writeup_terms_are_negat
     assert source == "fallback"
     assert spec["deliverable_mode"] == "leaderboard"
     assert spec["submit_mode"] == "file"
-    assert spec["target_medal"] == "bronze"
-    assert spec["target_rank_percentile"] == 0.1
+    assert spec["target_medal"] == "winner"
+    assert spec["target_rank_percentile"] == 0.001
 
 
 def test_evaluation_advisor_fallback_infers_notebook_submit_mode_from_context(tmp_path: Path) -> None:
