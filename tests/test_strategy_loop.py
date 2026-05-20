@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.slow
+
 from kagglebot.orchestrator.agent_pipeline import (
     _STRATEGY_PROMPT_MAX_CHARS,
     AgentPipelineConfig,

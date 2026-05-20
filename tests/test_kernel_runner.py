@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from kagglebot.exceptions import KernelFailedError, KernelStillRunningError, KernelTimeoutError
 from kagglebot.kernel_runner import (
     _append_local_kernel_duration_history,

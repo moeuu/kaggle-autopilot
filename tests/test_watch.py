@@ -4,7 +4,10 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
+
+pytestmark = pytest.mark.slow
 
 from kagglebot.cli import app
 from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError

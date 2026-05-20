@@ -82,8 +82,9 @@ typeCheckingMode = "basic"
 exclude = ["src/kagglebot/knowledge/__init__.py"]
 
 [tool.pytest.ini_options]
-addopts = "-p no:launch_testing -p no:launch_ros -m 'not competition_artifact'"
+addopts = "-p no:launch_testing -p no:launch_ros -m 'not competition_artifact and not slow'"
 markers = [
     "competition_artifact: tests generated competition artifact kernels/runtimes (opt-in)",
     "integration: requires Kaggle CLI + credentials (opt-in)",
+    "slow: broad orchestration or runner suites; run with -m 'slow and not competition_artifact'",
 ]

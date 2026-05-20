@@ -235,7 +235,14 @@ Submission artifacts are no longer assumed to be `submission.csv` only. For non-
 ## Testing
 
 ```bash
+# Fast default: excludes broad orchestration/runner suites and competition artifacts.
 uv run pytest -q
+
+# Full mocked suite, including slow orchestration tests.
+uv run pytest -q -m "not competition_artifact"
+
+# Only the slow suite.
+uv run pytest -q -m "slow and not competition_artifact"
 ```
 
 ## Example Workflow

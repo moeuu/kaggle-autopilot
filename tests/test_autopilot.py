@@ -12,6 +12,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from kagglebot.autopilot import (
     _DEFAULT_MAX_ITERATIONS,
     AutopilotConfig,

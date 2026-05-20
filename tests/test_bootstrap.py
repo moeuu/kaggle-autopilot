@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+pytestmark = pytest.mark.slow
+
 from kagglebot.bootstrap import (
     _cache_sample_submission,
     _mirror_sample_submission_to_data,

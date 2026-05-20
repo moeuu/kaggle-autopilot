@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from kagglebot import kaggle_api
 from kagglebot.exceptions import KaggleCliError, KaggleCliResourceError, KernelCapacityError, RulesNotAcceptedError
 from kagglebot.exec_utils import CommandResult
