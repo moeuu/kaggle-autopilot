@@ -139,8 +139,10 @@ training-time estimates so lightweight sidecars can still make capacity-aware ch
 
 `watch` also runs a periodic self-improvement loop. The loop scans recent runs, submission outcomes, top1 gaps,
 diagnostics, and submit failures under `artifacts/`, writes `_self_improvement/latest.json`, `latest.md`,
-`strategy_context.md`, `experiment_backlog.json`, and normalized `outcomes.jsonl`, then calls Codex to implement one
-small structural repo improvement when the git worktree is clean. The generated strategy context is injected into
+`strategy_context.md`, `experiment_backlog.json`, and normalized `outcomes.jsonl`, then calls Codex to implement the
+best top1-oriented repo improvement when the git worktree is clean. That improvement may include architectural changes
+to planner, runner, evaluation, strategy, knowledge, model-search, or self-improvement boundaries when the report shows
+the current architecture is blocking leaderboard progress. The generated strategy context is injected into
 future bootstrap/planning prompts and live `knowledge_hints.txt`; generated playbooks are written under
 `knowledge/playbooks/`. Use `--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to
 write reports without invoking Codex. `--self-improvement-publish` additionally verifies, commits, and pushes Codex

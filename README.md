@@ -159,7 +159,7 @@ Optional environment knobs:
 - ✅ **Competition-scoped policy overrides**: optional `artifacts/<slug>/context/competition_policy.json` can tighten notebook selection, reference-input recovery, repair signals, and fallback evaluation without changing defaults for other competitions
   - Policy files can also declare generic `required_capabilities` and `execution_hints`, so competition-specific win conditions stay in artifacts while `src/` only gains reusable orchestration/runtime features
 - ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration is forced away from same-family-only tuning toward broader model-family diversification and blending
-- ✅ **Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, and submit outcomes, writes `_self_improvement/latest.*`, `strategy_context.md`, experiment backlog, and playbooks, injects that context into future planning, and can call Codex to make one small structural improvement when the git worktree is clean
+- ✅ **Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, and submit outcomes, writes `_self_improvement/latest.*`, `strategy_context.md`, experiment backlog, and playbooks, injects that context into future planning, and can call Codex to make structural or architectural improvements when the git worktree is clean
 
 ## Top1 Public Leaderboard (Reference)
 

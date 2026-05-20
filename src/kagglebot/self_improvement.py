@@ -20,6 +20,7 @@ class SelfImprovementConfig:
     max_runs: int = 80
     min_interval_hours: float | None = 6.0
     invoke_codex: bool = True
+    allow_architectural_changes: bool = True
     publish_codex_changes: bool = False
     publish_verify_commands: tuple[tuple[str, ...], ...] = (
         ("uv", "run", "ruff", "format", "."),
@@ -162,33 +163,48 @@ def _maybe_run_codex_improvement(
 def _build_codex_prompt(*, config: SelfImprovementConfig, report: dict[str, object]) -> str:
     actions = report.get("recommended_actions")
     actions_text = json.dumps(actions if isinstance(actions, list) else [], indent=2, sort_keys=True)
+    architecture_policy = (
+        "- Architectural changes are allowed when they are the best route to top1 performance. You may refactor "
+        "or redesign planner, runner, evaluation, strategy, knowledge, model-search, or self-improvement flows if "
+        "the report shows the current architecture is the bottleneck.\n"
+        "- For any architectural change, include a migration/compatibility path, focused tests for the changed "
+        "contract, and a short design note in docs or code comments where the new boundary is not obvious."
+        if config.allow_architectural_changes
+        else "- Keep changes narrowly scoped unless the operator explicitly enables architectural changes."
+    )
     return f"""# Kagglebot Self-Improvement Task
 
 You are the implementation agent for this repository.
 
-Goal: improve Kagglebot's ability to win future Kaggle competitions by addressing the highest-signal
-root cause from the latest self-improvement report.
+Goal: improve Kagglebot's ability to reach first-place Kaggle leaderboard performance by addressing the
+highest-signal root cause from the latest self-improvement report.
 
 Hard constraints:
 - Do not submit to Kaggle, accept rules, join competitions, or call external side-effect APIs.
 - Do not write secrets, credentials, datasets, or large artifacts.
-- Make a small, testable repo change. Prefer orchestration, diagnostics, validation, strategy prompts, or
-  reusable runtime improvements over competition-specific hacks.
 - Preserve existing guardrails: validation, duplicate detection, rate limits, and human-readable submit messages.
 - Run focused tests plus `uv run ruff check .` when feasible.
 - Do not commit or push from inside Codex; the outer self-improvement controller owns publish policy.
 
+Change scope policy:
+{architecture_policy}
+- Prefer reusable top1-oriented capability improvements over competition-specific hacks.
+- It is acceptable for the best change to span multiple modules when a local patch would only hide the failure mode.
+- Keep the change reviewable: state the contract being changed, update tests/docs, and avoid unrelated churn.
+
 Latest report files:
 - JSON: {config.latest_json_path}
 - Markdown: {config.latest_markdown_path}
+- Strategy context: {config.strategy_context_path}
+- Experiment backlog: {config.experiment_backlog_path}
 
 Recommended actions:
 ```json
 {actions_text}
 ```
 
-Read the report, inspect the relevant code/tests, implement the single best structural improvement, and leave a concise
-summary in your final message.
+Read the report and backlog, inspect the relevant code/tests, implement the best top1-oriented improvement at the
+right architectural level, and leave a concise summary in your final message.
 """
 
 
@@ -525,6 +541,10 @@ def _build_experiment_backlog(report: dict[str, object]) -> list[dict[str, objec
                 "hypothesis": hypothesis,
                 "experiment": experiment,
                 "success_metric": success_metric,
+                "architecture_scope": (
+                    "Architectural changes are allowed when they remove a repeated top1 blocker; keep a "
+                    "compatibility path and tests for changed contracts."
+                ),
                 "guardrail": "Do not submit, accept rules, join competitions, write secrets, or commit artifacts.",
             }
         )
@@ -570,7 +590,8 @@ def _render_global_playbook(report: dict[str, object]) -> str:
             "- Keep submissions validated against sample_submission.csv.",
             "- Do not automate joining competitions or accepting rules.",
             "- Do not write secrets, datasets, or large artifacts to git.",
-            "- Prefer structural improvements over one-off competition hacks.",
+            "- Prefer structural or architectural improvements over one-off competition hacks.",
+            "- Refactor core boundaries when repeated top1 blockers show the current architecture is the bottleneck.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -606,6 +627,7 @@ def _render_cause_playbook(cause: str, report: dict[str, object]) -> str:
             "",
             "## Next Experiment",
             "- Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.",
+            "- If a local fix would only mask the issue, change the responsible architecture boundary instead.",
             "- Add focused tests proving the behavior on synthetic artifacts.",
         ]
     )
@@ -651,6 +673,7 @@ def _render_strategy_context(report: dict[str, object], *, backlog: list[dict[st
             "## How to Use This",
             "- Let these priorities influence the initial plan, model-search breadth, validation, and retry logic.",
             "- Prefer experiments that reduce repeated failure causes across competitions.",
+            "- Architectural refactors are in scope when they are the cleanest path to remove a repeated top1 blocker.",
             "- Keep Kaggle side effects controlled by the normal autopilot submission guardrails.",
         ]
     )

@@ -71,6 +71,8 @@ def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: P
     assert (artifacts / "_self_improvement" / "outcomes.jsonl").exists()
     assert (tmp_path / "knowledge" / "playbooks" / "global.md").exists()
     assert "submit_failed" in load_self_improvement_context(artifacts)
+    backlog = json.loads((artifacts / "_self_improvement" / "experiment_backlog.json").read_text(encoding="utf-8"))
+    assert "Architectural changes are allowed" in backlog[0]["architecture_scope"]
 
 
 def test_self_improvement_calls_codex_when_enabled_and_clean(
@@ -107,6 +109,8 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
     assert result["status"] == "written"
     assert result["codex_improvement"]["status"] == "completed"
     assert "Kagglebot Self-Improvement Task" in str(calls["prompt"])
+    assert "Architectural changes are allowed" in str(calls["prompt"])
+    assert "first-place Kaggle leaderboard performance" in str(calls["prompt"])
     assert result["codex_improvement"]["publish"]["status"] == "disabled"
 
 
