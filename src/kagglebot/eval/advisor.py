@@ -10,6 +10,13 @@ from kagglebot.agents.strategy_runner import StrategyResult, run_strategy
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.eval.core import MetricRegistry
 from kagglebot.exec_utils import run_command
+from kagglebot.medals import (
+    MEDAL_TARGET_PERCENTILES,
+    TARGET_MEDAL_ERROR,
+    TARGET_MEDAL_SCHEMA,
+    normalize_target_medal,
+    validate_target_rank_percentile,
+)
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.writeup import (
@@ -37,13 +44,6 @@ SUPPORTED_SUBMISSION_GATES = {
     "on_target_only",
     "readiness_or_final",
     "target_or_final",
-}
-SUPPORTED_MEDAL_TARGETS = {"winner", "bronze", "silver", "gold"}
-_MEDAL_TARGET_PERCENTILES = {
-    "winner": 0.001,
-    "bronze": 0.10,
-    "silver": 0.05,
-    "gold": 0.01,
 }
 
 
@@ -220,7 +220,7 @@ class EvaluationAdvisor:
         deliverable_mode = infer_deliverable_mode(context_text)
         submit_mode = infer_submit_mode(context_text)
         target_medal = "winner" if deliverable_mode == "leaderboard" else None
-        target_rank_percentile = _MEDAL_TARGET_PERCENTILES.get(target_medal) if target_medal else None
+        target_rank_percentile = MEDAL_TARGET_PERCENTILES.get(target_medal) if target_medal else None
         spec = {
             "deliverable_mode": deliverable_mode,
             "submit_mode": submit_mode,
@@ -363,7 +363,7 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
     submit_mode = normalize_submit_mode(spec_raw.get("submit_mode"), default="file")
     target_medal = _normalize_target_medal(spec_raw.get("target_medal"))
     if spec_raw.get("target_medal") is not None and target_medal is None:
-        issues.append("evaluation_spec.target_medal must be one of: winner, bronze, silver, gold")
+        issues.append(TARGET_MEDAL_ERROR)
     target_rank_percentile, target_rank_percentile_issue = _normalize_target_rank_percentile(
         spec_raw.get("target_rank_percentile"),
         medal=target_medal,
@@ -466,10 +466,7 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
 
 
 def _normalize_target_medal(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    return normalized if normalized in SUPPORTED_MEDAL_TARGETS else None
+    return normalize_target_medal(value)
 
 
 def _normalize_target_rank_percentile(
@@ -477,23 +474,7 @@ def _normalize_target_rank_percentile(
     *,
     medal: str | None,
 ) -> tuple[float | None, str | None]:
-    parsed: float | None = None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        parsed = float(value)
-    elif isinstance(value, str):
-        text = value.strip()
-        if text:
-            try:
-                parsed = float(text)
-            except ValueError:
-                return None, "evaluation_spec.target_rank_percentile must be a number in (0, 1]"
-    if parsed is not None:
-        if 0.0 < parsed <= 1.0:
-            return parsed, None
-        return None, "evaluation_spec.target_rank_percentile must be in (0, 1]"
-    if medal is not None:
-        return _MEDAL_TARGET_PERCENTILES.get(medal), None
-    return None, None
+    return validate_target_rank_percentile(value, medal=medal)
 
 
 def _validate_readiness_rule(value: object) -> tuple[dict[str, object] | None, list[str]]:
@@ -686,7 +667,7 @@ def _advisor_response_schema_text() -> str:
         "evaluation_spec": {
             "deliverable_mode": "leaderboard|writeup",
             "submit_mode": "file|notebook",
-            "target_medal": "winner|bronze|silver|gold|null",
+            "target_medal": TARGET_MEDAL_SCHEMA,
             "target_rank_percentile": "0<float<=1|null",
             "metric_name": (
                 "one of [auc, logloss, brier_score, accuracy, f1, rmse, mae, rmsle, mape, smape, pearson, spearman]"

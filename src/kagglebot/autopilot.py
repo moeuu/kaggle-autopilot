@@ -126,6 +126,12 @@ from kagglebot.knowledge import (
     resolve_problem_type_insights,
     resolve_similar_improvements,
 )
+from kagglebot.medals import (
+    DEFAULT_TARGET_MEDAL,
+    MEDAL_TARGET_PERCENTILES,
+    normalize_target_medal,
+    normalize_target_rank_percentile,
+)
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
     WriteGuardPolicy,
@@ -288,13 +294,8 @@ _HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
 _EVAL_REPEAT_SEED_OFFSET = 1009
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
-_DEFAULT_TARGET_MEDAL = "winner"
-_MEDAL_TARGET_PERCENTILES = {
-    "winner": 0.001,
-    "bronze": 0.10,
-    "silver": 0.05,
-    "gold": 0.01,
-}
+_DEFAULT_TARGET_MEDAL = DEFAULT_TARGET_MEDAL
+_MEDAL_TARGET_PERCENTILES = MEDAL_TARGET_PERCENTILES
 _DEFAULT_LIMITED_SUBMISSION_GATE = "readiness_or_final"
 _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
@@ -3815,11 +3816,7 @@ def _normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
 
 
 def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in _MEDAL_TARGET_PERCENTILES:
-            return normalized
-    return default
+    return normalize_target_medal(value, default=default)
 
 
 def _normalize_target_rank_percentile(
@@ -3828,25 +3825,7 @@ def _normalize_target_rank_percentile(
     medal: str | None = None,
     fallback: float | None = None,
 ) -> float | None:
-    parsed: float | None = None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        parsed = float(value)
-    elif isinstance(value, str):
-        text = value.strip()
-        if text:
-            try:
-                parsed = float(text)
-            except ValueError:
-                parsed = None
-    if parsed is not None and 0.0 < parsed <= 1.0:
-        return parsed
-    if medal is not None:
-        medal_target = _MEDAL_TARGET_PERCENTILES.get(medal)
-        if medal_target is not None:
-            return medal_target
-    if fallback is not None and 0.0 < float(fallback) <= 1.0:
-        return float(fallback)
-    return None
+    return normalize_target_rank_percentile(value, medal=medal, fallback=fallback)
 
 
 def _improvement_mode_rank(mode: str) -> int:

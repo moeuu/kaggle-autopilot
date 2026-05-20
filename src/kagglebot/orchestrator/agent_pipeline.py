@@ -29,6 +29,12 @@ from kagglebot.knowledge import (
     resolve_research_paths_for_slug,
 )
 from kagglebot.logging_utils import truncate_lines
+from kagglebot.medals import (
+    DEFAULT_TARGET_MEDAL,
+    MEDAL_TARGET_PERCENTILES,
+    normalize_target_medal,
+    normalize_target_rank_percentile,
+)
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
@@ -48,13 +54,8 @@ _ACCURACY_FIRST_MIN_CV_FOLDS = 5
 _ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
 _HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text", "rna_structure"})
 _HEAVY_MAX_FULL_TRAIN_FOLDS = 3
-_DEFAULT_TARGET_MEDAL = "winner"
-_MEDAL_TARGET_PERCENTILES = {
-    "winner": 0.001,
-    "bronze": 0.10,
-    "silver": 0.05,
-    "gold": 0.01,
-}
+_DEFAULT_TARGET_MEDAL = DEFAULT_TARGET_MEDAL
+_MEDAL_TARGET_PERCENTILES = MEDAL_TARGET_PERCENTILES
 _REQUIRED_SUITE_FIELDS = ("name", "train_mode", "feature_recipe", "lightweight", "promotion_stage")
 _HIGH_ACCURACY_TABULAR_REQUIRED_SUITES: tuple[dict[str, object], ...] = (
     {
@@ -1392,11 +1393,7 @@ def _extract_top_class_ratio(profile: dict[str, object]) -> float | None:
 
 
 def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in _MEDAL_TARGET_PERCENTILES:
-            return normalized
-    return default
+    return normalize_target_medal(value, default=default)
 
 
 def _normalize_target_rank_percentile(
@@ -1405,25 +1402,7 @@ def _normalize_target_rank_percentile(
     medal: str | None = None,
     fallback: float | None = None,
 ) -> float | None:
-    parsed: float | None = None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        parsed = float(value)
-    elif isinstance(value, str):
-        text = value.strip()
-        if text:
-            try:
-                parsed = float(text)
-            except ValueError:
-                parsed = None
-    if parsed is not None and 0.0 < parsed <= 1.0:
-        return parsed
-    if medal is not None:
-        medal_target = _MEDAL_TARGET_PERCENTILES.get(medal)
-        if medal_target is not None:
-            return medal_target
-    if fallback is not None and 0.0 < float(fallback) <= 1.0:
-        return float(fallback)
-    return None
+    return normalize_target_rank_percentile(value, medal=medal, fallback=fallback)
 
 
 def _is_high_accuracy_tabular_blend_target(profile: dict[str, object]) -> bool:
