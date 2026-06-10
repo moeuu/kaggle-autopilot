@@ -7,20 +7,21 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-pytestmark = pytest.mark.slow
-
 from kagglebot.cli import app
 from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError
 from kagglebot.kaggle_api import EnteredCompetition
 from kagglebot.supervisor import (
     WatchConfig,
     WatchLedger,
+    _build_autopilot_config,
     _estimate_training_minutes,
     _parse_kaggle_gpu_quota_text,
     _read_kaggle_gpu_quota_file,
     run_watch_once,
     select_next_competition,
 )
+
+pytestmark = pytest.mark.slow
 
 
 def _competition(
@@ -101,6 +102,30 @@ def test_select_next_competition_filters_disabled_and_blocked(monkeypatch, tmp_p
     assert [item.slug for item in selected] == ["eligible"]
 
 
+def test_watch_autopilot_config_defaults_to_exhaustive_top1(tmp_path: Path) -> None:
+    config = _config(tmp_path, time_budget_min=1200)
+    paths = config.artifacts_dir / "demo"
+    from kagglebot.paths import CompetitionPaths, KnowledgePaths
+
+    autopilot_config = _build_autopilot_config(
+        config=config,
+        candidate=_competition("demo"),
+        paths=CompetitionPaths(slug="demo", artifacts_dir=config.artifacts_dir),
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+        run_id="run-1",
+    )
+
+    assert paths.name == "demo"
+    assert autopilot_config.campaign_mode == "top1"
+    assert autopilot_config.top1_exhaustive is True
+    assert autopilot_config.method_scout == "refresh"
+    assert autopilot_config.research_scout == "refresh"
+    assert autopilot_config.portfolio_execution == "budgeted"
+    assert autopilot_config.validation_lab == "force"
+    assert autopilot_config.candidate_budget_min == 1200
+    assert autopilot_config.max_candidates_per_iteration == 3
+
+
 def test_select_next_competition_honors_allowlist(monkeypatch, tmp_path: Path) -> None:
     candidates = [_competition("first"), _competition("second")]
     monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
@@ -168,6 +193,28 @@ def test_select_next_competition_prioritizes_never_submitted_before_money_prizes
     selected = select_next_competition(config)
 
     assert [item.slug for item in selected][:2] == ["no-prize-never-submitted", "prize-submitted"]
+
+
+def test_select_next_competition_prioritizes_never_autopiloted_before_previous_runs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        _competition("prize-started", reward="$100,000", category="Featured"),
+        _competition("never-started", reward="", category="Playground"),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+    config = _config(tmp_path)
+    run_dir = config.artifacts_dir / "prize-started" / "runs" / "20260422T000000Z-started"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "20260422T000000Z-started", "status": "completed"}),
+        encoding="utf-8",
+    )
+
+    selected = select_next_competition(config)
+
+    assert [item.slug for item in selected][:2] == ["never-started", "prize-started"]
 
 
 def test_select_next_competition_parses_kaggle_usd_reward_text(monkeypatch, tmp_path: Path) -> None:
@@ -753,6 +800,50 @@ def test_run_watch_once_resumes_active_run(monkeypatch, tmp_path: Path) -> None:
     assert captured["run_id"] is None
 
 
+def test_run_watch_once_clears_stale_active_run(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "kagglebot.supervisor.list_entered_competitions",
+        lambda **kwargs: [_competition("fresh")],
+    )
+    monkeypatch.setattr("kagglebot.supervisor._prepare_competition", lambda **kwargs: None)
+    config = _config(tmp_path)
+    stale_run_id = "20260422T000000Z-abcd1234"
+    run_dir = config.artifacts_dir / "demo" / "runs" / stale_run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({"status": "running"}), encoding="utf-8")
+    config.state_path.parent.mkdir(parents=True)
+    config.state_path.write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": stale_run_id,
+                "last_status": "running",
+                "updated_at": (datetime.now(UTC) - timedelta(hours=48)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_autopilot(config) -> None:
+        captured["slug"] = config.slug
+        captured["run_id"] = config.run_id
+
+    monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
+
+    result = run_watch_once(config)
+
+    assert result.status == "finished"
+    assert result.slug == "fresh"
+    assert captured["slug"] == "fresh"
+    assert captured["run_id"] is not None
+    records = WatchLedger(config.ledger_path).records()
+    assert any(record.get("event") == "stale_active_cleared" for record in records)
+
+
 def test_run_watch_once_failure_is_recorded_and_next_cycle_selects_new_competition(
     monkeypatch,
     tmp_path: Path,
@@ -850,7 +941,7 @@ def test_watch_cli_dry_run_once(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert captured == {"submit_policy": "improved", "compute": "local_gpu", "max_iterations": 12}
+    assert captured == {"submit_policy": "improved", "compute": "local_gpu", "max_iterations": 5}
 
 
 def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp_path: Path) -> None:

@@ -12,9 +12,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.slow
-
-from kagglebot.exceptions import KernelFailedError, KernelStillRunningError, KernelTimeoutError
+from kagglebot.exceptions import KernelCapacityError, KernelFailedError, KernelStillRunningError, KernelTimeoutError
 from kagglebot.kernel_runner import (
     _append_local_kernel_duration_history,
     _build_local_kernel_progress_tracker,
@@ -43,6 +41,8 @@ from kagglebot.kernel_runner import (
     run_submit_kernel,
     sanitize_kernel_slug,
 )
+
+pytestmark = pytest.mark.slow
 
 
 def test_sanitize_kernel_slug() -> None:
@@ -209,6 +209,8 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert payload["competition_sources"] == ["demo"]
     assert payload["code_file"] == "kernel.py"
+    assert payload["enable_gpu"] is False
+    assert payload["enable_tpu"] is False
 
 
 def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tmp_path: Path) -> None:
@@ -278,6 +280,41 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
     assert "LOCAL_OUTPUT_DIR = KAGGLE_WORKING_DIR" not in kernel_text
     assert "Path('/kaggle/working')" in kernel_text
     assert not (kernel_dir / "output").exists()
+    payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert payload["enable_gpu"] is False
+    assert payload["enable_tpu"] is False
+
+
+def test_run_submit_kernel_allows_submit_accelerator_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    monkeypatch.setenv("KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR", "gpu")
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    run_submit_kernel(
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="cpu",
+        enable_internet=False,
+        submission_path=submission_path,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    payload = json.loads(
+        (tmp_path / "demo" / "kernels" / "run-1" / "submit-iter-1" / "kernel-metadata.json").read_text(encoding="utf-8")
+    )
+    assert payload["enable_gpu"] is True
+    assert payload["enable_tpu"] is False
 
 
 @pytest.mark.parametrize(
@@ -481,6 +518,48 @@ def test_kernel_push_resumes_prior_running_kernel_without_new_push(
     assert output_calls == ["user/kernel-slug"]
 
 
+def test_submit_kernel_resume_supersedes_stale_queued_kernel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1"
+    output_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "output"
+    logs_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    push_log = logs_dir / "kernel_push-01.txt"
+    push_log.write_text("Kernel version 1 successfully pushed.\n", encoding="utf-8")
+    os.utime(push_log, (100.0, 100.0))
+    monkeypatch.setenv("KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC", "30")
+    monkeypatch.setattr(kernel_runner.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(kernel_runner.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_status",
+        lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.QUEUED"',
+    )
+
+    preparation = kernel_runner.KernelPreparation(
+        kernel_dir=kernel_dir,
+        output_dir=output_dir,
+        logs_dir=logs_dir,
+        kernel_slug="kernel-slug",
+        kernel_id="user/kernel-slug",
+        supersede_stale_queued=True,
+    )
+
+    assert (
+        kernel_runner._resume_prior_kernel_if_active(  # noqa: SLF001
+            preparation=preparation,
+            kernel_id="user/kernel-slug",
+            slug="demo",
+            timeout_minutes=1,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("status", ["KernelWorkerStatus.RUNNING", "KernelWorkerStatus.QUEUED"])
 def test_wait_for_kernel_timeout_marks_remote_running(
     tmp_path: Path,
@@ -502,6 +581,30 @@ def test_wait_for_kernel_timeout_marks_remote_running(
 
     with pytest.raises(KernelStillRunningError, match=f"still {status.lower()}"):
         kernel_runner._wait_for_kernel("user/kernel-slug", "demo", 1, output_dir=tmp_path)  # noqa: SLF001
+
+
+def test_wait_for_kernel_queued_timeout_raises_capacity_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    monkeypatch.setenv("KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC", "30")
+    monkeypatch.setattr(kernel_runner.time, "monotonic", lambda: 31.0)
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_status",
+        lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.QUEUED"',
+    )
+
+    with pytest.raises(KernelCapacityError, match="stayed queued"):
+        kernel_runner._wait_for_kernel(  # noqa: SLF001
+            "user/kernel-slug",
+            "demo",
+            None,
+            output_dir=tmp_path,
+            initial_queued_since=0.0,
+        )
 
 
 def test_wait_for_kernel_timeout_on_unknown_status_raises_timeout(
@@ -823,6 +926,40 @@ def test_run_local_kernel_once_suppresses_known_warning_noise(tmp_path: Path) ->
     assert "training fold=1" in result.command_result.stdout
     assert "PerformanceWarning" not in result.command_result.stdout
     assert "BrierScore is/are not implemented for GPU" not in result.command_result.stdout
+
+
+def test_run_local_kernel_once_counts_partial_stdout_as_activity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "1")
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(
+        (
+            "import sys\n"
+            "import time\n"
+            "for _ in range(8):\n"
+            "    sys.stdout.write('.')\n"
+            "    sys.stdout.flush()\n"
+            "    time.sleep(0.25)\n"
+            "print('done', flush=True)\n"
+        ),
+        encoding="utf-8",
+    )
+    tracker = _build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo", watch_dirs=[])
+
+    result = _run_local_kernel_once(
+        kernel_path=kernel_path,
+        kernel_stage_dir=tmp_path,
+        current_env=os.environ.copy(),
+        timeout_sec=5,
+        line_callback=tracker.observe_line,
+        progress_tracker=tracker,
+    )
+
+    assert result.command_result.returncode == 0
+    assert result.killed_for_stall is False
+    assert "done" in result.command_result.stdout
 
 
 def test_find_output_file_picks_newest_match(tmp_path: Path) -> None:
@@ -2106,6 +2243,97 @@ def test_run_kernel_local_finds_artifacts_in_parent_outputs(tmp_path: Path) -> N
     )
 
     expected_output_dir = tmp_path / "demo" / "runs" / "run-5b" / "iter-1" / "output"
+    assert result.submission_path == expected_output_dir / "submission.csv"
+    assert result.metrics_path == expected_output_dir / "metrics.json"
+    assert result.submission_path.exists()
+    assert result.metrics_path.exists()
+
+
+def test_run_kernel_local_exports_output_dir_env(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "out_dir = Path(os.environ['KAGGLEBOT_OUTPUT_DIR'])",
+                "out_dir.mkdir(parents=True, exist_ok=True)",
+                "sub = out_dir / 'submission.csv'",
+                "met = out_dir / 'metrics.json'",
+                "sub.write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                'met.write_text(\'{"metric":"rmse","offline_value":0.1}\', encoding=\'utf-8\')',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-env-output",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    expected_output_dir = tmp_path / "demo" / "runs" / "run-env-output" / "iter-1" / "output"
+    assert result.submission_path == expected_output_dir / "submission.csv"
+    assert result.metrics_path == expected_output_dir / "metrics.json"
+    assert result.submission_path.exists()
+    assert result.metrics_path.exists()
+
+
+def test_run_kernel_local_finds_artifacts_in_legacy_kernel_output(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "out_dir = Path(__file__).resolve().parent.parents[2] / 'kernel_output'",
+                "out_dir.mkdir(parents=True, exist_ok=True)",
+                "sub = out_dir / 'submission.csv'",
+                "met = out_dir / 'metrics.json'",
+                "sub.write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                'met.write_text(\'{"metric":"rmse","offline_value":0.1}\', encoding=\'utf-8\')',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-legacy-output",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    expected_output_dir = tmp_path / "demo" / "runs" / "run-legacy-output" / "iter-1" / "output"
     assert result.submission_path == expected_output_dir / "submission.csv"
     assert result.metrics_path == expected_output_dir / "metrics.json"
     assert result.submission_path.exists()

@@ -111,11 +111,80 @@ def test_write_plan_payload_disables_fast_dev_toggle(tmp_path: Path) -> None:
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
     assert persisted["toggles"]["FAST_DEV"] is False
     assert persisted["score_source"] == "cv"
-    assert persisted["max_iterations"] == 12
+    assert persisted["max_iterations"] == 5
     assert persisted["patience"] == 4
     assert persisted["eval_seeds"] == [42, 2024, 777]
     assert persisted["evaluation_protocol"]["seeds"] == [42, 2024, 777]
-    assert persisted["stop_policy"]["max_iterations"] == 12
+    assert persisted["stop_policy"]["max_iterations"] == 5
+
+
+def test_write_plan_payload_caps_long_heavy_runs_to_three_iterations(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"task": "ocr", "modality": "image", "train_rows": 5000}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+
+    payload = _base_payload()
+    payload["time_budget_min"] = None
+    payload["max_iterations"] = 5
+    payload["stop_policy"] = {"max_iterations": 5, "error_fingerprint_abort": True}
+    _write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["max_iterations"] == 3
+    assert persisted["stop_policy"]["max_iterations"] == 3
+
+
+def test_write_plan_payload_forces_training_and_validation(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"task": "classification", "modality": "text", "train_rows": 5000}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+
+    payload = _base_payload()
+    payload["toggles"].update(
+        {
+            "ENABLE_TRAINING": False,
+            "ENABLE_REFERENCE_TRAINING": False,
+            "RUN_VALIDATION_GENERATION": False,
+            "DISABLE_VALIDATION": True,
+            "PACKAGING_ONLY": True,
+            "ALLOW_IDENTITY_ADAPTER": True,
+        }
+    )
+    payload["runtime_budget"] = {
+        "enable_reference_training": False,
+        "run_validation_generation": False,
+        "validation_generation_max_samples_rtx3060": 0,
+        "max_val_samples": 0,
+        "adapter_packaging_only": True,
+        "allow_unscored_submission": True,
+    }
+
+    _write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    toggles = persisted["toggles"]
+    assert toggles["ENABLE_TRAINING"] is True
+    assert toggles["ENABLE_REFERENCE_TRAINING"] is True
+    assert toggles["RUN_VALIDATION_GENERATION"] is True
+    assert toggles["DISABLE_VALIDATION"] is False
+    assert toggles["PACKAGING_ONLY"] is False
+    assert toggles["ALLOW_IDENTITY_ADAPTER"] is False
+
+    runtime = persisted["runtime_budget"]
+    assert runtime["enable_reference_training"] is True
+    assert runtime["run_validation_generation"] is True
+    assert runtime["validation_generation_max_samples_rtx3060"] >= 64
+    assert runtime["max_val_samples"] >= 128
+    assert runtime["adapter_packaging_only"] is False
+    assert runtime["allow_unscored_submission"] is False
 
 
 def test_write_plan_payload_forces_cv_for_non_generalizable_score_source(tmp_path: Path) -> None:

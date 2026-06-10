@@ -162,6 +162,45 @@ def test_validate_submission_handles_tabbed_csv_with_commas(tmp_path: Path) -> N
     validate_submission(str(sample_path), str(submission_path))
 
 
+def test_validate_submission_keeps_header_delimiter_when_values_contain_semicolons(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+
+    sample_path.write_text(
+        "query_id,predicted_citations\ntest_001,0.0\ntest_002,0.0\n",
+        encoding="utf-8",
+    )
+    submission_path.write_text(
+        "query_id,predicted_citations\n"
+        "test_001,Art. 1 OR;Art. 2 ZGB;Art. 3 BV\n"
+        "test_002,Art. 4 OR;Art. 5 ZGB;Art. 6 BV\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_allows_citation_text_when_sample_has_numeric_placeholders(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    format_path = tmp_path / "submission_format.md"
+
+    format_path.write_text(
+        "## Submission Format\n\nUse semicolon-separated citations in `predicted_citations`; empty string allowed.\n",
+        encoding="utf-8",
+    )
+    sample_path.write_text(
+        "query_id,predicted_citations\ntest_001,0.0\ntest_002,0.0\n",
+        encoding="utf-8",
+    )
+    submission_path.write_text(
+        "query_id,predicted_citations\ntest_001,Art. 1 OR;Art. 2 ZGB\ntest_002,\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(sample_path), str(submission_path))
+
+
 def test_validate_submission_ignores_noisy_format_hint(tmp_path: Path) -> None:
     sample_path = tmp_path / "sample_submission.csv"
     submission_path = tmp_path / "submission.csv"
@@ -177,6 +216,17 @@ def test_validate_submission_ignores_noisy_format_hint(tmp_path: Path) -> None:
     submission_path.write_text("PassengerId,Survived\n1,0\n", encoding="utf-8")
 
     validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_rejects_markdown_sample_without_columns(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+
+    sample_path.write_text("# Sample submission\n\nDownload the real sample from Kaggle.\n", encoding="utf-8")
+    submission_path.write_text("id,target\n1,0.5\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no usable columns"):
+        validate_submission(str(sample_path), str(submission_path))
 
 
 def test_submission_rate_limit(tmp_path):
@@ -228,6 +278,27 @@ def test_submission_rate_limit_default_cooldown_is_five_minutes(tmp_path):
 
     with pytest.raises(SubmissionRateLimitError, match="cooldown"):
         ensure_submission_rate_limit(ledger)
+
+
+def test_submission_rate_limit_allows_env_cooldown_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN", "0")
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
+    now = datetime.now(UTC)
+    entries = [
+        {
+            "ts": (now - timedelta(minutes=1)).isoformat(),
+            "sha256": "a",
+            "fingerprint": "f1",
+            "slug": "demo",
+            "submission_path": "sub.csv",
+            "message": "m1",
+            "run_id": "r1",
+        }
+    ]
+    ledger.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.ledger_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    ensure_submission_rate_limit(ledger)
 
 
 def test_submission_rate_limit_ignores_outcome_events(tmp_path):

@@ -13,6 +13,8 @@ from uuid import uuid4
 
 from rich import print
 
+from kagglebot.kaggle_api import leaderboard_rank_for_score
+
 SOURCE = "kaggle-autopilot"
 DEFAULT_ACCOUNT = "lab_rdp"
 STATE_FILENAME = "discord_notifier_state.json"
@@ -222,12 +224,14 @@ def build_autopilot_status_payload(
     slug = _clean_str(watch_state.get("active_slug"))
     run_id = _clean_str(watch_state.get("active_run_id"))
     host = socket.gethostname()
+    account = _env_first("KAGGLEBOT_DISCORD_EVENT_ACCOUNT") or DEFAULT_ACCOUNT
     if not slug or not run_id:
         return {
             "message": f"Kaggle autopilot is idle on {compute}.",
             "host": host,
             "compute": compute,
             "state_scope": state_scope,
+            "discord_update_key": _discord_update_key(account=account, state_scope=state_scope),
             "status": _clean_str(watch_state.get("last_status")) or "idle",
             "phase": "idle",
             "artifact_root": str(artifacts_dir),
@@ -235,7 +239,6 @@ def build_autopilot_status_payload(
         }
 
     run_dir = artifacts_dir / slug / "runs" / run_id
-    account = _env_first("KAGGLEBOT_DISCORD_EVENT_ACCOUNT") or DEFAULT_ACCOUNT
     run_json = _read_json_object(run_dir / "run.json")
     run_config = run_json.get("config") if isinstance(run_json.get("config"), dict) else {}
     assert isinstance(run_config, dict)
@@ -281,7 +284,7 @@ def build_autopilot_status_payload(
         "competition": slug,
         "slug": slug,
         "run_id": run_id,
-        "discord_update_key": _discord_update_key(account=account, state_scope=state_scope, slug=slug),
+        "discord_update_key": _discord_update_key(account=account, state_scope=state_scope),
         "status": status,
         "phase": phase,
         "artifact_root": str(artifacts_dir / slug),
@@ -364,7 +367,8 @@ def _event_type_for_snapshot(snapshot: dict[str, object]) -> str:
         return "autopilot.finished"
     if phase == "idle":
         return "autopilot.status"
-    if snapshot.get("latest_completed_iteration") == snapshot.get("current_iteration"):
+    current_iteration = snapshot.get("current_iteration")
+    if current_iteration is not None and snapshot.get("latest_completed_iteration") == current_iteration:
         return "autopilot.iteration_completed"
     return "autopilot.status"
 
@@ -408,10 +412,9 @@ def _compute_for_scope(state_scope: str) -> str:
     return "local_gpu" if state_scope in {"", "local", "local_gpu"} else state_scope
 
 
-def _discord_update_key(*, account: str, state_scope: str, slug: str) -> str:
-    if state_scope in {"", "local_gpu"}:
-        return f"kaggle-autopilot:{account}:{slug}"
-    return f"kaggle-autopilot:{account}:{state_scope}:{slug}"
+def _discord_update_key(*, account: str, state_scope: str) -> str:
+    normalized_scope = state_scope or "local_gpu"
+    return f"kaggle-autopilot:{account}:{normalized_scope}"
 
 
 def _dedupe_key(*, snapshot: dict[str, object], event_type: str, now: datetime) -> str:
@@ -587,6 +590,12 @@ def _submission_score_summary(
                 "source": "submission_public_score",
             }
             candidate.update(_submission_rank_fields(outcome))
+            _refresh_cached_rank_estimate(
+                candidate,
+                artifacts_dir=artifacts_dir,
+                slug=slug,
+                direction=direction,
+            )
             candidates.append(candidate)
 
     for iteration, path in iter_dirs:
@@ -601,9 +610,12 @@ def _submission_score_summary(
             "source": "submission_public_score",
         }
         candidate.update(_submission_rank_fields(metrics))
-        rank_guard = metrics.get("rank_guard")
-        if isinstance(rank_guard, dict):
-            candidate.update(_submission_rank_fields(rank_guard))
+        _refresh_cached_rank_estimate(
+            candidate,
+            artifacts_dir=artifacts_dir,
+            slug=slug,
+            direction=direction,
+        )
         candidates.append(candidate)
 
     if not candidates:
@@ -639,6 +651,39 @@ def _submission_score_summary(
     _add_submission_rank_summary(summary, "latest", latest)
     _add_submission_rank_summary(summary, "best", best)
     return summary
+
+
+def _refresh_cached_rank_estimate(
+    candidate: dict[str, object],
+    *,
+    artifacts_dir: Path,
+    slug: str,
+    direction: str | None,
+) -> None:
+    score = _float_or_none(candidate.get("score"))
+    normalized_direction = (direction or "").strip().lower()
+    if score is None or normalized_direction not in {"maximize", "minimize"}:
+        return
+    try:
+        estimate = leaderboard_rank_for_score(
+            slug,
+            artifacts_dir / slug / "context",
+            score=score,
+            direction=normalized_direction,
+            dry_run=True,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    estimated_rank = _int_or_none(estimate.get("rank"))
+    estimated_total = _int_or_none(estimate.get("total_teams"))
+    if estimated_rank is None or estimated_total is None:
+        return
+    candidate["estimated_rank"] = estimated_rank
+    candidate["estimated_total_teams"] = estimated_total
+    percentile = _float_or_none(estimate.get("rank_percentile"))
+    if percentile is not None:
+        candidate["estimated_rank_percentile"] = percentile
+    candidate["rank_estimate_source"] = "cached_leaderboard_score_estimate"
 
 
 def _add_submission_rank_summary(summary: dict[str, object], prefix: str, candidate: dict[str, object]) -> None:

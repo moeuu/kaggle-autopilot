@@ -19,6 +19,7 @@ from kagglebot.discord_notifications import run_discord_notifier_forever, run_di
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.exec_utils import run_command
+from kagglebot.hardware import resolve_hardware_profile
 from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
@@ -186,6 +187,11 @@ def train(
     internet: str = typer.Option("off", "--internet", help="Kernel internet: auto|off|on."),
     time_budget_min: int | None = typer.Option(None, "--time-budget-min", help="Time budget in minutes."),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
+    hardware_profile: str | None = typer.Option(
+        "auto",
+        "--hardware-profile",
+        help="Runtime profile for kernel env: auto, rtx3060, rtx5090, kaggle_p100, etc.",
+    ),
     strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
 ) -> None:
     cfg = ctx.obj
@@ -203,6 +209,10 @@ def train(
     )
 
     resolved_accelerator = _resolve_accelerator(compute.value, accelerator)
+    try:
+        resolve_hardware_profile(hardware_profile, compute=compute.value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--hardware-profile") from exc
     resolved_time_budget = time_budget_min if time_budget_min is not None else 60
     resolved_seed = seed if seed is not None else 42
     metric = _default_metric(paths)
@@ -234,6 +244,7 @@ def train(
                 seed=resolved_seed,
                 dry_run=cfg.dry_run,
                 timeout_minutes=resolved_time_budget,
+                hardware_profile=hardware_profile,
             )
         except RulesNotAcceptedError:
             _print_rules(slug)
@@ -263,6 +274,7 @@ def train(
             dry_run=cfg.dry_run,
             timeout_minutes=resolved_time_budget,
             strict_accelerator=strict_accelerator,
+            hardware_profile=hardware_profile,
         )
         if kernel_result.submission_path:
             submission_path = _store_submission_artifact(
@@ -377,6 +389,62 @@ def autopilot(
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
     message: str | None = typer.Option(None, "-m", "--message", help="Submission message override."),
+    campaign_mode: str = typer.Option(
+        "top1",
+        "--campaign-mode",
+        help="Campaign behavior for leaderboard competitions: top1 or baseline.",
+    ),
+    method_scout: str = typer.Option(
+        "auto",
+        "--method-scout",
+        help="Competition-specific method discovery: auto, off, refresh.",
+    ),
+    research_scout: str = typer.Option(
+        "auto",
+        "--research-scout",
+        help="Research/source registry ingestion: auto, off, refresh.",
+    ),
+    method_scout_max_sources: int = typer.Option(
+        12,
+        "--method-scout-max-sources",
+        help="Maximum research sources/query seeds to use when building method registry.",
+    ),
+    portfolio_execution: str = typer.Option(
+        "serial",
+        "--portfolio-execution",
+        help="Top1 portfolio execution mode: off, serial, parallel, or budgeted.",
+    ),
+    validation_lab: str = typer.Option(
+        "auto",
+        "--validation-lab",
+        help="Validation redesign lab: auto, off, or force.",
+    ),
+    candidate_budget_min: int | None = typer.Option(
+        None,
+        "--candidate-budget",
+        "--candidate-budget-min",
+        help="Per-candidate budget hint in minutes for budgeted portfolio execution.",
+    ),
+    max_candidates_per_iteration: int | None = typer.Option(
+        None,
+        "--max-candidates-per-iteration",
+        help="Maximum portfolio candidates to run per iteration when supported.",
+    ),
+    top1_exhaustive: bool = typer.Option(
+        False,
+        "--top1-exhaustive/--no-top1-exhaustive",
+        help="Enable exhaustive top1 campaign artifacts and safe search defaults.",
+    ),
+    top1_submit_policy: str = typer.Option(
+        "value_only",
+        "--top1-submit-policy",
+        help="Top1 portfolio submit ranking policy: value_only, calibration, or final_lock.",
+    ),
+    hardware_profile: str | None = typer.Option(
+        "auto",
+        "--hardware-profile",
+        help="Runtime planning profile: auto, rtx3060, rtx5090, kaggle_p100, kaggle_t4x2, etc.",
+    ),
     strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
     auto_eval_spec: bool = typer.Option(
         True,
@@ -461,6 +529,72 @@ def autopilot(
                 param_hint="--score-source",
             )
         score_source = normalized_score_source
+    normalized_campaign_mode = campaign_mode.strip().lower()
+    if normalized_campaign_mode not in {"top1", "baseline"}:
+        raise typer.BadParameter(
+            "Invalid --campaign-mode. Allowed values: top1, baseline.",
+            param_hint="--campaign-mode",
+        )
+    normalized_method_scout = method_scout.strip().lower()
+    if normalized_method_scout not in {"auto", "off", "refresh"}:
+        raise typer.BadParameter(
+            "Invalid --method-scout. Allowed values: auto, off, refresh.",
+            param_hint="--method-scout",
+        )
+    normalized_research_scout = research_scout.strip().lower()
+    if normalized_research_scout not in {"auto", "off", "refresh"}:
+        raise typer.BadParameter(
+            "Invalid --research-scout. Allowed values: auto, off, refresh.",
+            param_hint="--research-scout",
+        )
+    if method_scout_max_sources <= 0:
+        raise typer.BadParameter(
+            "--method-scout-max-sources must be positive.",
+            param_hint="--method-scout-max-sources",
+        )
+    normalized_portfolio_execution = portfolio_execution.strip().lower()
+    if normalized_portfolio_execution not in {"off", "serial", "parallel", "budgeted"}:
+        raise typer.BadParameter(
+            "Invalid --portfolio-execution. Allowed values: off, serial, parallel, budgeted.",
+            param_hint="--portfolio-execution",
+        )
+    normalized_validation_lab = validation_lab.strip().lower()
+    if normalized_validation_lab not in {"auto", "off", "force"}:
+        raise typer.BadParameter(
+            "Invalid --validation-lab. Allowed values: auto, off, force.",
+            param_hint="--validation-lab",
+        )
+    if candidate_budget_min is not None and candidate_budget_min <= 0:
+        raise typer.BadParameter("--candidate-budget must be positive.", param_hint="--candidate-budget")
+    if max_candidates_per_iteration is not None and max_candidates_per_iteration <= 0:
+        raise typer.BadParameter(
+            "--max-candidates-per-iteration must be positive.",
+            param_hint="--max-candidates-per-iteration",
+        )
+    normalized_top1_submit_policy = top1_submit_policy.strip().lower()
+    if normalized_top1_submit_policy not in {"value_only", "calibration", "final_lock"}:
+        raise typer.BadParameter(
+            "Invalid --top1-submit-policy. Allowed values: value_only, calibration, final_lock.",
+            param_hint="--top1-submit-policy",
+        )
+    if top1_exhaustive:
+        normalized_campaign_mode = "top1"
+        if normalized_method_scout == "auto":
+            normalized_method_scout = "refresh"
+        if normalized_research_scout == "auto":
+            normalized_research_scout = "refresh"
+        if normalized_portfolio_execution == "serial":
+            normalized_portfolio_execution = "budgeted"
+        if normalized_validation_lab == "auto":
+            normalized_validation_lab = "force"
+        if candidate_budget_min is None:
+            candidate_budget_min = 60
+        if max_candidates_per_iteration is None:
+            max_candidates_per_iteration = 3
+    try:
+        resolve_hardware_profile(hardware_profile, compute=compute.value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--hardware-profile") from exc
 
     run_id = None if resume_run else new_run_id()
     config = AutopilotConfig(
@@ -493,6 +627,17 @@ def autopilot(
         message=message,
         verify_cmd=verify_cmd,
         dry_run=cfg.dry_run,
+        campaign_mode=normalized_campaign_mode,
+        method_scout=normalized_method_scout,
+        research_scout=normalized_research_scout,
+        method_scout_max_sources=method_scout_max_sources,
+        portfolio_execution=normalized_portfolio_execution,
+        validation_lab=normalized_validation_lab,
+        candidate_budget_min=candidate_budget_min,
+        max_candidates_per_iteration=max_candidates_per_iteration,
+        top1_exhaustive=top1_exhaustive,
+        top1_submit_policy=normalized_top1_submit_policy,
+        hardware_profile=hardware_profile,
     )
     try:
         run_autopilot(config)
@@ -514,15 +659,15 @@ def watch(
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
     internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
     time_budget_min: int | None = typer.Option(
-        1200,
+        None,
         "--time-budget-min",
-        help="Per-kernel time budget in minutes. Defaults to 1200 for local GPU watch.",
+        help="Per-kernel time budget in minutes. Omit for unlimited local GPU runtime.",
     ),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
     holdout_frac: float | None = typer.Option(None, "--holdout-frac", help="Holdout fraction."),
     cv_folds: int | None = typer.Option(None, "--cv-folds", help="CV folds."),
-    max_iterations: int = typer.Option(12, "--max-iterations", min=1, help="Max autopilot iterations per competition."),
+    max_iterations: int = typer.Option(5, "--max-iterations", min=1, help="Max autopilot iterations per competition."),
     max_total_min: int | None = typer.Option(
         None,
         "--max-total-min",
@@ -561,6 +706,21 @@ def watch(
         "--self-improvement-publish/--no-self-improvement-publish",
         help="After Codex self-improvement succeeds, verify, commit, and push repo code changes.",
     ),
+    top1_exhaustive: bool = typer.Option(
+        True,
+        "--top1-exhaustive/--no-top1-exhaustive",
+        help="Run watched competitions with exhaustive top1 campaign artifacts.",
+    ),
+    top1_submit_policy: str = typer.Option(
+        "value_only",
+        "--top1-submit-policy",
+        help="Top1 portfolio submit ranking policy: value_only, calibration, or final_lock.",
+    ),
+    hardware_profile: str | None = typer.Option(
+        "auto",
+        "--hardware-profile",
+        help="Runtime planning profile: auto, rtx3060, rtx5090, kaggle_p100, kaggle_t4x2, etc.",
+    ),
 ) -> None:
     cfg = ctx.obj
     normalized_submit_policy = submit_policy.strip().lower()
@@ -572,6 +732,16 @@ def watch(
         raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
     if self_improvement_publish and not self_improvement_codex:
         raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
+    normalized_top1_submit_policy = top1_submit_policy.strip().lower()
+    if normalized_top1_submit_policy not in {"value_only", "calibration", "final_lock"}:
+        raise typer.BadParameter(
+            "Invalid --top1-submit-policy. Allowed values: value_only, calibration, final_lock.",
+            param_hint="--top1-submit-policy",
+        )
+    try:
+        resolve_hardware_profile(hardware_profile, compute=compute.value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--hardware-profile") from exc
 
     watch_config = WatchConfig(
         workdir=cfg.workdir,
@@ -603,6 +773,9 @@ def watch(
         self_improvement_interval_hours=_normalize_self_improvement_interval(self_improvement_interval_hours),
         self_improvement_codex=self_improvement_codex,
         self_improvement_publish=self_improvement_publish,
+        top1_exhaustive=top1_exhaustive,
+        top1_submit_policy=normalized_top1_submit_policy,
+        hardware_profile=hardware_profile,
     )
     if once:
         result = run_watch_once(watch_config)
@@ -684,6 +857,11 @@ def watch_kaggle_gpu_sidecar(
         "--self-improvement-publish/--no-self-improvement-publish",
         help="After Codex self-improvement succeeds, verify, commit, and push repo code changes.",
     ),
+    hardware_profile: str | None = typer.Option(
+        "kaggle_p100",
+        "--hardware-profile",
+        help="Runtime planning profile: kaggle_p100, kaggle_t4, kaggle_t4x2, rtx3060, rtx5090, etc.",
+    ),
 ) -> None:
     cfg = ctx.obj
     normalized_submit_policy = submit_policy.strip().lower()
@@ -695,6 +873,10 @@ def watch_kaggle_gpu_sidecar(
         raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
     if self_improvement_publish and not self_improvement_codex:
         raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
+    try:
+        resolve_hardware_profile(hardware_profile, compute=Compute.kaggle_gpu.value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--hardware-profile") from exc
 
     watch_config = WatchConfig(
         workdir=cfg.workdir,
@@ -737,6 +919,7 @@ def watch_kaggle_gpu_sidecar(
         self_improvement_interval_hours=_normalize_self_improvement_interval(self_improvement_interval_hours),
         self_improvement_codex=self_improvement_codex,
         self_improvement_publish=self_improvement_publish,
+        hardware_profile=hardware_profile,
     )
     if once:
         result = run_watch_once(watch_config)

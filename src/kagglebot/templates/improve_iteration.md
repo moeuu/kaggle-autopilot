@@ -141,6 +141,18 @@ High-accuracy tabular override:
 - Require CatBoost raw categorical, XGBoost with leak-safe target/stat encodings, and LightGBM or a second CatBoost/XGBoost variant.
 - If 2 or more model pipelines are available, produce at least one OOF blend candidate (weighted/rank/logit blend).
 
+Top1 campaign portfolio override:
+- If `current_metrics_json.campaign.reference_reproduction_report.blocks_novelty` is true, reproduce or diagnose the required reference baseline before proposing novel model changes.
+- If improvement_mode is `validation_redesign`, create group/time/leak-safe/proxy validation candidates first and justify the active validation profile using historical public outcomes.
+- Persist OOF/test predictions and candidate metadata so `candidate_registry.json`, `portfolio_plan.json`, and `blend_report.json` can rank low-correlation candidates and allocate submissions by information value.
+
+Candidate selection guard:
+- Do not select the final submission by CV alone when multiple candidates exist.
+- Log every candidate's primary CV score, holdout/validation score, and submission/test prediction distribution.
+- If CV improves but holdout/validation or previous public outcomes regress, treat it as validation mismatch first and redesign validation before model-only tuning.
+- Reject candidates whose holdout/validation score is materially worse than another available candidate or whose test prediction distribution collapses to implausibly sparse/constant outputs.
+- Prefer a slightly lower CV candidate with stronger competition-faithful validation and stable prediction distribution over a higher-CV candidate that only fits the train-distribution split.
+
 Implementation scope policy:
 - Always apply changes to `artifacts/<slug>/kernel/kernel.py`.
 - Keep `local_gpu` and `kaggle_gpu` algorithmically identical; only execution location differs.

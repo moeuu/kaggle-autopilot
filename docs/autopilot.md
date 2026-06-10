@@ -42,6 +42,14 @@ Autopilot planning is fixed to:
 The GPT stage now produces and the pipeline persists:
 - `artifacts/<slug>/context/research_sources.jsonl`
 - `artifacts/<slug>/context/research_summary.md`
+- `artifacts/<slug>/context/method_scout_queries.json`
+- `artifacts/<slug>/context/source_registry.json`
+- `artifacts/<slug>/context/method_registry.json`
+- `artifacts/<slug>/context/validation_registry.json`
+- `artifacts/<slug>/context/validation_lab_report.json`
+- `artifacts/<slug>/context/win_contract.json`
+- `artifacts/<slug>/context/private_robustness_report.json`
+- `artifacts/<slug>/context/top1_exhaustion_report.json`
 - `knowledge/research/<problem_type>/<slug>/research_sources.jsonl` (persistent copy)
 - `knowledge/research/<problem_type>/<slug>/research_summary.md` (persistent copy)
 - `artifacts/<slug>/plan.json`
@@ -58,9 +66,20 @@ Per iteration, autopilot does:
 
 Submission behavior:
 - Default: submit every iteration
+- Leaderboard CLI runs default to `--campaign-mode top1`; use `--campaign-mode baseline` for the older lightweight loop
+- Top1 campaign mode writes `context/campaign_state.json`, `context/candidate_registry.json`, `context/reference_reproduction_report.json`, and `context/experiment_graph.json`, tracks historical best public score, top1 gap, validation trust, candidate metadata, and remaining daily slots
+- `--portfolio-execution off|serial|parallel|budgeted` controls the top1 candidate DAG. The default is `serial`; `budgeted` runs the highest evidence-value ready node first and records candidate budget hints.
+- Portfolio execution writes a graph execution report and per-candidate manifests/metrics so independent candidates can fail or complete without collapsing the whole iteration.
+- `--method-scout auto|off|refresh` controls competition-specific method discovery. In top1 mode it defaults to `auto`, generates modality/metric/domain-specific research queries, ranks methods from research sources, and blocks unsafe or infeasible methods before prompt injection
+- `--research-scout auto|off|refresh` writes attributed source evidence and planned retrieval queries to `source_registry.json`; `--validation-lab auto|off|force` calibrates split profiles and records adoption evidence in `validation_lab_report.json`
+- `--top1-exhaustive` applies safe exhaustive defaults (`method/research refresh`, `validation-lab force`, `portfolio budgeted`) and records win contract, private robustness, portfolio optimizer, and exhaustion reports.
+- `--top1-submit-policy value_only|calibration|final_lock` controls portfolio-level submit ranking without bypassing campaign baseline, duplicate, rate-limit, or rules guardrails.
+- In top1 campaign mode, candidates below the historical/champion baseline are treated as regressions and are not submitted unless explicitly selected as calibration candidates or `--force-submit` is used
 - `submission_gate` is activated only when rules indicate submission-count limits
+- The first leaderboard iteration is submitted to establish an online checkpoint when submit is enabled, even with `submit_policy=improved`
+- When daily/rolling submission slots remain for all remaining iterations, spare-slot policy can submit non-improving or soft quality-guarded candidates while still respecting hard safety guards
 - Duplicate submission SHA is skipped before file or notebook submit unless explicitly forced
-- Rolling 24h submission limits such as `2 submissions within 24 hours` are parsed as daily limits
+- Markdown rule text such as `five (5) Submissions per day` and rolling 24h limits such as `2 submissions within 24 hours` are parsed as daily limits
 - Loop decision uses readiness score (SRS); submission score/rank are secondary guardrails
 - Repeated submit-error fingerprints are aborted safely
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
@@ -70,7 +89,8 @@ Submission behavior:
 - for large tabular binary datasets with meaningful categoricals, planning quality gates require multi-family search plus at least one OOF blend candidate
 - required reference notebooks emit `context/reference_inputs_manifest.json`; with `--download`, referenced datasets/competitions are staged under `context/reference_inputs/`
 - if pseudo-labeling fully fails or an external/original-data feature path collapses to constants, the next iteration gets explicit repair targets instead of silently accepting the degraded path
-- if CV improves but public LB regresses, autopilot treats that as a major online-mismatch signal and forces broader family/blend exploration next iteration
+- if CV improves but public LB regresses, autopilot treats that as a validation mismatch first and forces validation redesign with group/time/leak/proxy split candidates before model-only changes
+- when kernels report multiple candidate pipelines, autopilot blocks CV-only winners whose holdout/validation score is materially worse than another candidate, especially if their test/submission prediction distribution collapses to sparse or constant-like outputs
 
 ## Important Defaults
 
@@ -98,6 +118,7 @@ Submission behavior:
 ```text
 --compute local_gpu|kaggle_gpu|kaggle_tpu   (required)
 --accelerator auto|gpu|tpu
+--hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2
 --score-source auto|holdout|cv|test
 --holdout-frac FLOAT
 --cv-folds INT
@@ -113,13 +134,19 @@ Submission behavior:
 --resume-latest
 ```
 
+`--hardware-profile` is passed into strategy prompts and staged kernel environments. For `local_gpu`,
+`--hardware-profile rtx3060` means RTX3060-class accuracy-first planning: keep high-ceiling OCR/VLM/transformer paths
+enabled where feasible, then scale batch size, chunks, precision, folds/seeds, or candidate ordering to fit 12GB VRAM.
+Switch to `--hardware-profile rtx5090` when the same `kernel.py` should scale up on a larger GPU via
+`plan.json`/environment knobs.
+
 ## Watch Flags
 
 ```text
 watch --once
 watch --submit-policy improved|none
 watch --max-total-min INT      # default: no wall-clock limit
-watch --max-iterations INT     # default 12
+watch --max-iterations INT     # default 5; long heavy local_gpu runs may be capped to 3
 watch --allow-slug SLUG
 watch --block-slug SLUG
 watch --self-improvement-interval-hours FLOAT
@@ -130,8 +157,9 @@ watch --self-improvement-publish/--no-self-improvement-publish
 `--submit-policy improved` disables the initial contract-probe submit and only submits when an artifact improves over
 a previously submitted checkpoint. Use `--submit-policy none` for artifact generation without live submissions.
 
-Selection priority favors entered competitions with monetary prizes, competitions with no local submission history, and
-submitted competitions with poor current rank percentile where there is more leaderboard headroom.
+Selection priority first favors entered competitions with no local autopilot run history, then competitions with no local
+submission history, monetary prizes, and submitted competitions with poor current rank percentile where there is more
+leaderboard headroom.
 Because `watch` only reads Kaggle's entered-competition group, a passed new-entrant deadline does not exclude a
 competition; only a passed submission deadline does. Unfamiliar competition types are passed through to autopilot
 instead of being filtered out at selection time; complex simulation/reasoning/optimization tasks receive larger
@@ -157,6 +185,24 @@ Key files:
 - `artifacts/<slug>/context/research_sources.jsonl`
 - `artifacts/<slug>/context/research_summary.md`
 - `artifacts/<slug>/context/research_storage.json`
+- `artifacts/<slug>/context/method_scout_queries.json`
+- `artifacts/<slug>/context/source_registry.json`
+- `artifacts/<slug>/context/method_registry.json`
+- `artifacts/<slug>/context/validation_registry.json`
+- `artifacts/<slug>/context/validation_lab_report.json`
+- `artifacts/<slug>/context/win_contract.json`
+- `artifacts/<slug>/context/private_robustness_report.json`
+- `artifacts/<slug>/context/top1_exhaustion_report.json`
+- `artifacts/<slug>/context/reference_reproduction_report.json`
+- `artifacts/<slug>/context/experiment_graph.json`
+- `artifacts/<slug>/context/campaign_outcomes.jsonl`
+- `artifacts/<slug>/runs/<run-id>/iter-*/portfolio_plan.json`
+- `artifacts/<slug>/runs/<run-id>/iter-*/blend_report.json`
+- `artifacts/<slug>/runs/<run-id>/iter-*/allocator_decision.json`
+- `artifacts/<slug>/runs/<run-id>/iter-*/portfolio_optimizer_report.json`
+- `artifacts/<slug>/runs/<run-id>/iter-*/graph_execution_report.json`
+- `artifacts/<slug>/runs/<run-id>/candidates/<candidate-id>/candidate_manifest.json`
+- `artifacts/<slug>/runs/<run-id>/candidates/<candidate-id>/metrics.json`
 - `artifacts/<slug>/context/agent/brief_for_strategy.md`
 - `artifacts/<slug>/context/agent/strategy_plan.md`
 - `artifacts/<slug>/context/agent/codex_instructions.md`

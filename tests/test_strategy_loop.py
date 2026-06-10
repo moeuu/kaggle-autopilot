@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.slow
-
 from kagglebot.orchestrator.agent_pipeline import (
     _STRATEGY_PROMPT_MAX_CHARS,
     AgentPipelineConfig,
@@ -16,6 +14,8 @@ from kagglebot.orchestrator.agent_pipeline import (
     run_agent_pipeline,
 )
 from kagglebot.paths import CompetitionPaths
+
+pytestmark = pytest.mark.slow
 
 
 class DummyCodexResult:

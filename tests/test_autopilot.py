@@ -12,8 +12,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-pytestmark = pytest.mark.slow
-
 from kagglebot.autopilot import (
     _DEFAULT_MAX_ITERATIONS,
     AutopilotConfig,
@@ -28,6 +26,7 @@ from kagglebot.autopilot import (
     _count_submission_rows_in_recent_window,
     _count_submission_rows_on_utc_day,
     _detect_online_mismatch_signal,
+    _detect_online_regression_vs_submission_history,
     _error_strategy_skip_reason,
     _extract_competition_faithfulness,
     _extract_missing_ensemble_signal,
@@ -35,15 +34,18 @@ from kagglebot.autopilot import (
     _extract_original_data_unused_signal,
     _extract_pseudo_label_failure_signal,
     _extract_same_family_plateau_signal,
+    _format_previous_submission_history_for_prompt,
     _has_spare_daily_submission_slot,
     _infer_kernel_submit_version_label,
     _is_agent_capacity_failure,
     _is_submit_abort_autofixable,
     _load_competition_rule_constraints,
+    _load_previous_submission_history,
     _load_run_state,
     _load_submit_failure_context,
     _load_submit_retry_artifacts,
     _maybe_restart_for_src_changes,
+    _quality_reasons_allow_initial_submit_probe,
     _quality_reasons_allow_spare_submit,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
@@ -78,6 +80,8 @@ from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.submission.guard import compute_error_fingerprint
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
 from kagglebot.types import PlanConfig
+
+pytestmark = pytest.mark.slow
 
 
 @dataclass(frozen=True)
@@ -204,7 +208,7 @@ def test_submission_message_default_is_compact(tmp_path: Path) -> None:
     assert "deep-past-initiative-machine-translation" not in message
 
 
-def test_autopilot_forces_iter1_submit_even_when_quality_and_readiness_gates_block(monkeypatch, tmp_path: Path) -> None:
+def test_autopilot_does_not_force_iter1_submit_when_quality_gate_blocks(monkeypatch, tmp_path: Path) -> None:
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="rmse",
@@ -267,13 +271,91 @@ def test_autopilot_forces_iter1_submit_even_when_quality_and_readiness_gates_blo
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
 
+    assert submit_calls["count"] == 0
+    iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
+    marker = json.loads((iter_dir / "iteration_state.json").read_text(encoding="utf-8"))
+    assert marker["submit_allowed_by_gate"] is False
+    assert marker["submit_phase_state"] == "blocked_quality_guard"
+    assert marker["forced_submit_reason"] == ""
+    metrics = json.loads((iter_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["forced_submit_reason"] == ""
+
+
+def test_autopilot_forces_iter1_submit_through_soft_detected_baseline_guard(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _write_plan(
+        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+        max_iterations=1,
+        submission_gate="always",
+    )
+
+    def fake_run_kernel_local(**kwargs):  # noqa: ANN003
+        output_dir = kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / "iter-1" / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        submission_path = output_dir / "submission.csv"
+        metrics_path = output_dir / "metrics.json"
+        submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": "rmse",
+                    "direction": "minimize",
+                    "offline_value": 0.9,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return KernelRunResult(
+            kernel_id=f"local/{kwargs['slug']}",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    submit_calls = {"count": 0}
+
+    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+        submit_calls["count"] += 1
+        return {
+            "message": "demo",
+            "submission_path": str(submission_path),
+            "submitted_at": "2026-03-18T00:00:00+00:00",
+            "iteration": 1,
+            "outcome": {"status": "complete", "score": None},
+        }
+
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
+    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
+    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
+    monkeypatch.setattr(
+        "kagglebot.autopilot._build_kernel_quality_guard",
+        lambda **kwargs: {
+            "allow_submit": False,
+            "block_submit": True,
+            "reasons": ["selected_worse_than_detected_baseline"],
+        },
+    )
+    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: False)
+
+    config = _make_config(tmp_path, submit=True, max_iterations=1)
+    run_autopilot(config)
+
     assert submit_calls["count"] == 1
     iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
     marker = json.loads((iter_dir / "iteration_state.json").read_text(encoding="utf-8"))
     assert marker["submit_allowed_by_gate"] is True
+    assert marker["submit_phase_state"] == "submitted"
     assert marker["forced_submit_reason"] == "initial_submit_contract_probe"
-    metrics = json.loads((iter_dir / "metrics.json").read_text(encoding="utf-8"))
-    assert metrics["forced_submit_reason"] == "initial_submit_contract_probe"
 
 
 def test_infer_kernel_submit_version_label_from_push_logs(tmp_path: Path) -> None:
@@ -461,6 +543,30 @@ def test_resolve_plan_uses_plan_max_iterations_when_cli_unspecified(tmp_path: Pa
     resolved = _resolve_plan(plan, config)
 
     assert resolved["max_iterations"] == 9
+
+
+def test_resolve_plan_caps_long_heavy_local_gpu_iterations(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, compute="local_gpu", max_iterations=5, time_budget_min=None)
+    _write_dataset_profile(config.paths, task="ocr", modality="image")
+
+    resolved = _resolve_plan(PlanConfig(max_iterations=5), config)
+
+    assert resolved["max_iterations"] == 3
+    assert resolved["time_budget_min"] is None
+
+
+def test_resolve_plan_applies_explicit_local_gpu_time_budget_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN", "120")
+    config = _make_config(tmp_path, compute="local_gpu", max_iterations=5, time_budget_min=999)
+    _write_dataset_profile(config.paths, task="ocr", modality="image")
+
+    resolved = _resolve_plan(PlanConfig(max_iterations=5), config)
+
+    assert resolved["max_iterations"] == 5
+    assert resolved["time_budget_min"] == 120
 
 
 def test_resolve_plan_falls_back_to_default_max_iterations_when_plan_invalid(tmp_path: Path) -> None:
@@ -754,6 +860,26 @@ def test_resolve_plan_enables_submission_gate_when_limit_detected(tmp_path: Path
     assert defaulted["submission_gate"] == "readiness_or_final"
 
 
+def test_resolve_plan_treats_unrestricted_attempt_rules_as_no_daily_limit(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.rules_md_path.write_text(
+        "SUBMISSION LIMITS\n"
+        "Participants may submit without restriction as to the number of attempts, "
+        "subject to the technical limits of the Kaggle platform.\n",
+        encoding="utf-8",
+    )
+
+    resolved = _resolve_plan(
+        PlanConfig(submit_policy="improved", submission_gate="readiness_or_final"),
+        config,
+    )
+
+    assert resolved["submission_limit_per_day"] is None
+    assert resolved["submit_policy"] == "always"
+    assert resolved["submission_gate"] == "always"
+
+
 def test_resolve_plan_extracts_daily_submission_limit_count(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.paths.context_dir.mkdir(parents=True, exist_ok=True)
@@ -764,6 +890,18 @@ def test_resolve_plan_extracts_daily_submission_limit_count(tmp_path: Path) -> N
 
     resolved = _resolve_plan(PlanConfig(), config)
     assert resolved["submission_limit_per_day"] == 1
+
+
+def test_resolve_plan_extracts_markdown_word_parenthetical_daily_submission_limit(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.rules_md_path.write_text(
+        "a. You may submit a maximum of **five (5)** Submissions per day.\n",
+        encoding="utf-8",
+    )
+
+    resolved = _resolve_plan(PlanConfig(), config)
+    assert resolved["submission_limit_per_day"] == 5
 
 
 def test_resolve_plan_extracts_rolling_24h_submission_limit_count(tmp_path: Path) -> None:
@@ -824,7 +962,15 @@ def test_quality_reasons_allow_spare_submit_only_for_soft_blocks() -> None:
     assert not _quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline", "untrusted_score_source"])
 
 
-def test_should_force_initial_submit_allows_improved_policy_unless_single_daily_submission() -> None:
+def test_quality_reasons_allow_initial_submit_probe_only_for_detected_baseline_soft_block() -> None:
+    assert _quality_reasons_allow_initial_submit_probe(["selected_worse_than_detected_baseline"])
+    assert not _quality_reasons_allow_initial_submit_probe(["below_code_reference_baseline"])
+    assert not _quality_reasons_allow_initial_submit_probe(
+        ["selected_worse_than_detected_baseline", "untrusted_score_source"]
+    )
+
+
+def test_should_force_initial_submit_ignores_improved_policy_and_single_daily_submission() -> None:
     assert _should_force_initial_submit(
         deliverable_mode="leaderboard",
         iteration=1,
@@ -841,7 +987,15 @@ def test_should_force_initial_submit_allows_improved_policy_unless_single_daily_
         submit_policy="improved",
         submission_limit_per_day=2,
     )
-    assert not _should_force_initial_submit(
+    assert _should_force_initial_submit(
+        deliverable_mode="leaderboard",
+        iteration=1,
+        submit_enabled=True,
+        dry_run=False,
+        submit_policy="auto",
+        submission_limit_per_day=2,
+    )
+    assert _should_force_initial_submit(
         deliverable_mode="leaderboard",
         iteration=1,
         submit_enabled=True,
@@ -3071,6 +3225,7 @@ def test_attempt_submit_aborts_when_polling_raises_error(monkeypatch, tmp_path: 
 
 
 def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN", "0")
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="rmse",
@@ -3133,6 +3288,7 @@ def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: 
 
 
 def test_autopilot_allows_non_improving_submit_on_final_iteration(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN", "0")
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="rmse",
@@ -3196,6 +3352,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN", "0")
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_plan(
         paths,
@@ -3273,6 +3430,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
 
 
 def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN", "0")
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="rmse",
@@ -4506,6 +4664,55 @@ def test_kernel_quality_guard_blocks_on_severe_validation_mismatch(tmp_path: Pat
         force_submit=False,
     )
     assert final_guard["allow_submit"] is True
+
+
+def test_kernel_quality_guard_blocks_cv_selected_pipeline_with_worse_holdout_candidate() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="macro_f1",
+        direction="maximize",
+        value=0.0752,
+        std=0.01,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.07, 0.08],
+    )
+    payload = {
+        "chosen_pipeline": "cv_only_sparse",
+        "pipelines": [
+            {
+                "name": "public_like_reference",
+                "cv_score": 0.0497,
+                "holdout_score": 0.0384,
+                "prediction_count_summary": {"test": {"mean": 10.0}},
+            },
+            {
+                "name": "cv_only_sparse",
+                "cv_score": 0.0752,
+                "holdout_score": 0.0200,
+                "prediction_count_summary": {"test": {"mean": 2.0}},
+            },
+        ],
+    }
+    guard = _build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload=payload,
+        evaluation_report=None,
+        evaluation_contract=None,
+        logs_dir=None,
+        direction="maximize",
+        iteration=3,
+        max_iterations=5,
+        force_submit=False,
+    )
+    assert guard["allow_submit"] is False
+    reasons = guard.get("reasons")
+    assert isinstance(reasons, list)
+    assert "selected_pipeline_validation_mismatch" in reasons
+    assert "prediction_distribution_collapse_vs_candidates" in reasons
+    mismatch = guard.get("candidate_selection_mismatch")
+    assert isinstance(mismatch, dict)
+    assert mismatch["best_secondary_candidate"] == "public_like_reference"
 
 
 def test_kernel_quality_guard_surfaces_subgroup_collapse() -> None:
@@ -6151,6 +6358,75 @@ def test_extract_iteration_policy_signals_detect_orig_proba_and_pseudo_label_fai
     assert "same-family plateau" in str(same_family["note"])
 
 
+def test_load_previous_submission_history_uses_best_public_score(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="rogii-demo", artifacts_dir=tmp_path / "artifacts")
+
+    def fake_submissions(slug: str, *, dry_run: bool) -> list[dict[str, str]]:
+        assert slug == "rogii-demo"
+        assert dry_run is False
+        return [
+            {
+                "description": "kb run i=2 offline=10.7205",
+                "publicScore": "10.308",
+                "status": "complete",
+                "date": "2026-05-22 09:24:24",
+            },
+            {
+                "description": "kb previous i=5 offline=10.4211",
+                "publicScore": "9.600",
+                "status": "complete",
+                "date": "2026-05-17 03:08:20",
+            },
+            {
+                "description": "kb previous i=1 offline=10.6129",
+                "publicScore": "11.504",
+                "status": "complete",
+                "date": "2026-05-17 02:08:20",
+            },
+        ]
+
+    monkeypatch.setattr("kagglebot.autopilot.list_competition_submissions", fake_submissions)
+
+    history = _load_previous_submission_history(
+        slug="rogii-demo",
+        paths=paths,
+        direction="minimize",
+        dry_run=False,
+    )
+
+    assert history["best_score"] == pytest.approx(9.600)
+    assert history["latest_score"] == pytest.approx(10.308)
+    assert history["scored_count"] == 3
+    assert "previous i=5" in str(history["best"])
+    saved = json.loads((paths.context_dir / "submission_history.json").read_text(encoding="utf-8"))
+    assert saved["best_score"] == pytest.approx(9.600)
+
+
+def test_online_regression_signal_uses_historical_submission_baseline() -> None:
+    history = {
+        "direction": "minimize",
+        "best_score": 9.600,
+        "best": {"description": "kb previous i=5 offline=10.4211", "score": 9.600},
+        "recent": [{"submitted_at": "2026-05-22T09:24:24+00:00", "score": 10.308}],
+    }
+
+    signal = _detect_online_regression_vs_submission_history(
+        previous_best_online=10.271,
+        current_online=10.308,
+        direction="minimize",
+        history=history,
+    )
+
+    assert signal is not None
+    assert signal["previous_best_online"] == pytest.approx(9.600)
+    assert "historical_best=9.600000" in str(signal["note"])
+    assert "materially different" in str(signal["note"])
+
+    prompt = _format_previous_submission_history_for_prompt(history)
+    assert "Best historical public score: 9.600000" in prompt
+    assert "Do not call a new iteration improved" in prompt
+
+
 def test_run_improvement_appends_code_reference_gate_when_underperforming(monkeypatch, tmp_path: Path) -> None:
     from kagglebot.autopilot import _run_improvement
 
@@ -7557,6 +7833,7 @@ def test_autopilot_forces_major_overhaul_when_below_code_reference(monkeypatch, 
 
 
 def test_autopilot_forces_major_overhaul_on_online_mismatch(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN", "0")
     forced_modes: list[tuple[int, str | None, str | None, list[str]]] = []
     train_calls = {"count": 0}
 

@@ -25,6 +25,17 @@ def test_submission_ledger_duplicate_detection(tmp_path):
         ensure_not_duplicate_submission(ledger, slug="demo", message="second", submission_path=str(submission))
 
 
+def test_submission_ledger_ignores_malformed_lines(tmp_path):
+    submission = tmp_path / "submission.csv"
+    submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
+    ledger.ledger_path.write_text("{not json\n\n[]\n", encoding="utf-8")
+
+    assert ledger.is_duplicate(slug="demo", message="first", submission_path=submission) is False
+    assert ledger.last_submission_time() is None
+    assert ledger.recent_submission_count(hours=24) == 0
+
+
 def test_submission_ledger_records_offline_metadata_and_outcome(tmp_path):
     submission = tmp_path / "submission.csv"
     submission.write_text("id,target\n1,0.1\n", encoding="utf-8")

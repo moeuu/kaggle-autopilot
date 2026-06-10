@@ -18,6 +18,8 @@ SECRET_PATTERNS = [
     r"\b(?:access|refresh|auth|bearer)?_?token\b\s*[:=]\s*['\"][^'\"]{8,}",
 ]
 
+_KERNEL_SECRET_SCAN_SUFFIXES = {".json", ".py", ".ipynb", ".md", ".txt", ".yaml", ".yml"}
+
 FORBIDDEN_EVALUATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\bKAGGLEBOT_ORACLE_MODE\b", re.IGNORECASE),
@@ -54,7 +56,9 @@ def validate_slug(slug: str) -> str:
 def ensure_safe_extract_path(dest_dir: Path, member: zipfile.ZipInfo) -> Path:
     dest_dir = dest_dir.resolve()
     candidate = (dest_dir / member.filename).resolve()
-    if not str(candidate).startswith(str(dest_dir)):
+    try:
+        candidate.relative_to(dest_dir)
+    except ValueError:
         raise ValueError(f"Unsafe path detected in zip: {member.filename}")
     return candidate
 
@@ -104,6 +108,13 @@ def validate_kernel_package(package_dir: Path) -> None:
         path = package_dir / candidate
         if path.exists():
             content.append(path.read_text(encoding="utf-8", errors="ignore"))
+    for path in package_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in _KERNEL_SECRET_SCAN_SUFFIXES:
+            continue
+        try:
+            content.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
     matches = []
     for text in content:
         matches.extend(scan_text_for_secrets(text))

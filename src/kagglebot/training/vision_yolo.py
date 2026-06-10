@@ -54,17 +54,22 @@ def train_val_split(
 
     if frame.empty:
         return [], []
+    if len(frame) < 2:
+        return frame["filename"].tolist(), []
 
     val_count = max(1, int(round(len(frame) * val_frac)))
     if val_count >= len(frame):
-        val_count = max(1, len(frame) // 5)
+        val_count = len(frame) - 1
 
-    can_stratify = y.nunique() >= 2 and y.value_counts().min() >= 2 and val_count >= y.nunique()
+    train_count = len(frame) - val_count
+    can_stratify = (
+        y.nunique() >= 2 and y.value_counts().min() >= 2 and val_count >= y.nunique() and train_count >= y.nunique()
+    )
     stratify = y if can_stratify else None
 
     train_part, val_part = train_test_split(
         frame,
-        test_size=val_frac,
+        test_size=val_count,
         random_state=seed,
         shuffle=True,
         stratify=stratify,

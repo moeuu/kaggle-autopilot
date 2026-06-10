@@ -75,6 +75,47 @@ def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: P
     assert "Architectural changes are allowed" in backlog[0]["architecture_scope"]
 
 
+def test_self_improvement_includes_campaign_method_outcomes(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    slug = "demo"
+    run_id = "run-1"
+    run_dir = artifacts / slug / "runs" / run_id
+    _write_json(
+        run_dir / "run.json",
+        {"run_id": run_id, "status": "completed", "config": {"target_direction": "maximize"}},
+    )
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.8})
+    context_dir = artifacts / slug / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "campaign_outcomes.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "method_id": "tabular-gbdt-portfolio",
+                "validation_profile_id": "group_or_proxy_cv",
+                "candidate_category": "strong_single",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=False,
+            force=True,
+        )
+    )
+
+    report = json.loads((artifacts / "_self_improvement" / "latest.json").read_text(encoding="utf-8"))
+    assert report["campaign_method_counts"]["tabular-gbdt-portfolio"] == 1
+    assert report["campaign_validation_profile_counts"]["group_or_proxy_cv"] == 1
+    context = (artifacts / "_self_improvement" / "strategy_context.md").read_text(encoding="utf-8")
+    assert "Campaign Method Outcomes" in context
+
+
 def test_self_improvement_calls_codex_when_enabled_and_clean(
     monkeypatch,
     tmp_path: Path,

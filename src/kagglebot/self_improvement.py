@@ -348,6 +348,7 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
     best_offline = _best_iteration_value(iterations=iterations, direction=direction)
     top1_score = _to_float(_read_json_object(paths.top1_public_path).get("score"))
     outcomes = _load_submission_outcomes(paths.submission_ledger_path, run_id=run_id)
+    campaign_outcomes = _load_campaign_outcomes(paths.context_dir / "campaign_outcomes.jsonl", run_id=run_id)
     best_online = _best_online_score(outcomes=outcomes, direction=direction)
     top1_gap = _score_gap(best_score=best_online, top1_score=top1_score, direction=direction)
     submit_failures = _load_submit_failures(run_dir / "submit_attempts.jsonl")
@@ -377,6 +378,8 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
         "top1_public_score": top1_score,
         "top1_gap": top1_gap,
         "submission_outcome_count": len(outcomes),
+        "campaign_outcome_count": len(campaign_outcomes),
+        "campaign_outcomes": campaign_outcomes[-20:],
         "submit_failure_count": len(submit_failures),
         "cause_tags": cause_tags,
         "diagnostics_excerpt": latest_diagnostics,
@@ -416,6 +419,15 @@ def _load_submission_outcomes(path: Path, *, run_id: str) -> list[dict[str, obje
     return outcomes
 
 
+def _load_campaign_outcomes(path: Path, *, run_id: str) -> list[dict[str, object]]:
+    outcomes: list[dict[str, object]] = []
+    for record in _read_jsonl(path):
+        if str(record.get("run_id") or "") != run_id:
+            continue
+        outcomes.append(record)
+    return outcomes
+
+
 def _load_submit_failures(path: Path) -> list[dict[str, object]]:
     failures: list[dict[str, object]] = []
     for record in _read_jsonl(path):
@@ -428,6 +440,18 @@ def _load_submit_failures(path: Path) -> list[dict[str, object]]:
 
 def _build_report(*, artifacts_dir: Path, runs: list[dict[str, object]]) -> dict[str, object]:
     cause_counter = Counter(tag for run in runs for tag in _string_list(run.get("cause_tags")))
+    method_counter = Counter(
+        str(outcome.get("method_id"))
+        for run in runs
+        for outcome in _dict_list(run.get("campaign_outcomes"))
+        if outcome.get("method_id")
+    )
+    validation_counter = Counter(
+        str(outcome.get("validation_profile_id"))
+        for run in runs
+        for outcome in _dict_list(run.get("campaign_outcomes"))
+        if outcome.get("validation_profile_id")
+    )
     status_counter = Counter(str(run.get("status") or "unknown") for run in runs)
     top1_gap_runs = [
         run for run in runs if isinstance(run.get("top1_gap"), (int, float)) and math.isfinite(float(run["top1_gap"]))
@@ -440,6 +464,8 @@ def _build_report(*, artifacts_dir: Path, runs: list[dict[str, object]]) -> dict
         "run_count": len(runs),
         "status_counts": dict(status_counter.most_common()),
         "cause_counts": dict(cause_counter.most_common()),
+        "campaign_method_counts": dict(method_counter.most_common(20)),
+        "campaign_validation_profile_counts": dict(validation_counter.most_common(20)),
         "largest_top1_gaps": [
             {
                 "slug": run.get("slug"),
@@ -473,6 +499,8 @@ def _normalized_outcomes(runs: list[dict[str, object]]) -> list[dict[str, object
                 "cause_tags": run.get("cause_tags"),
                 "submission_outcome_count": run.get("submission_outcome_count"),
                 "submit_failure_count": run.get("submit_failure_count"),
+                "campaign_outcome_count": run.get("campaign_outcome_count"),
+                "campaign_outcomes": run.get("campaign_outcomes"),
             }
         )
     return outcomes
@@ -656,6 +684,16 @@ def _render_strategy_context(report: dict[str, object], *, backlog: list[dict[st
             lines.append(f"- {item['id']}: {item['experiment']} Success: {item['success_metric']}")
     else:
         lines.append("- No backlog items available.")
+    method_counts = report.get("campaign_method_counts")
+    if isinstance(method_counts, dict) and method_counts:
+        lines.extend(["", "## Campaign Method Outcomes"])
+        for method_id, count in list(method_counts.items())[:8]:
+            lines.append(f"- {method_id}: {count}")
+    validation_counts = report.get("campaign_validation_profile_counts")
+    if isinstance(validation_counts, dict) and validation_counts:
+        lines.extend(["", "## Validation Profile Outcomes"])
+        for profile_id, count in list(validation_counts.items())[:8]:
+            lines.append(f"- {profile_id}: {count}")
     lines.extend(["", "## Recent Problem Runs"])
     problem_runs = report.get("recent_problem_runs")
     if isinstance(problem_runs, list) and problem_runs:
@@ -893,6 +931,12 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item)]
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _iteration_sort_key(path: Path) -> int:

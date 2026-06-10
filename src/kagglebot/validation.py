@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +31,8 @@ def validate_submission(sample_path: str, submission_path: str) -> None:
     sub = _read_submission_table(Path(submission_path), format_hint=format_hint, expected_columns=expected_columns)
 
     # 1) Columns must match (including order).
+    if not expected_columns:
+        raise ValueError("Sample submission file has no usable columns.")
     if expected_columns != list(sub.columns):
         raise ValueError(
             "Submission columns do not match the sample submission file.\n"
@@ -346,6 +349,16 @@ def ensure_submission_rate_limit(
     max_submissions_per_day: int = 5,
     min_hours_between: float = 5.0 / 60.0,
 ) -> None:
+    max_submissions_per_day = _rate_limit_int_env(
+        "KAGGLEBOT_SUBMISSION_MAX_PER_DAY",
+        default=max_submissions_per_day,
+        min_value=1,
+    )
+    min_hours_between = _rate_limit_float_env(
+        "KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN",
+        default=min_hours_between,
+        min_value=0.0,
+    )
     now = datetime.now(UTC)
     last_ts = ledger.last_submission_time()
     recent = ledger.recent_submission_count(hours=24)
@@ -356,3 +369,25 @@ def ensure_submission_rate_limit(
         elapsed = (now - last_ts).total_seconds() / 3600.0
         if elapsed < min_hours_between:
             raise SubmissionRateLimitError("Submission rate limit exceeded (cooldown).")
+
+
+def _rate_limit_int_env(name: str, *, default: int, min_value: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, value)
+
+
+def _rate_limit_float_env(name: str, *, default: float, min_value: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(min_value, value)

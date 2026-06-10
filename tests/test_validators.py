@@ -34,6 +34,17 @@ def test_safe_extract_zip_blocks_traversal(tmp_path: Path) -> None:
         safe_extract_zip(zip_path, tmp_path)
 
 
+def test_safe_extract_zip_blocks_prefix_sibling_escape(tmp_path: Path) -> None:
+    dest = tmp_path / "data"
+    dest.mkdir()
+    zip_path = tmp_path / "evil-prefix.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("../data_evil.txt", "nope")
+
+    with pytest.raises(ValueError, match="Unsafe path"):
+        safe_extract_zip(zip_path, dest)
+
+
 def test_validate_kernel_package_secret_scan(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("KAGGLE_KEY = 'abc'\n", encoding="utf-8")
     (tmp_path / "kernel-metadata.json").write_text("{}", encoding="utf-8")
@@ -44,5 +55,15 @@ def test_validate_kernel_package_secret_scan(tmp_path: Path) -> None:
 def test_validate_kernel_package_scans_kernel(tmp_path: Path) -> None:
     (tmp_path / "kernel.py").write_text("KAGGLE_KEY = 'abc'\n", encoding="utf-8")
     (tmp_path / "kernel-metadata.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="Secret pattern detected"):
+        validate_kernel_package(tmp_path)
+
+
+def test_validate_kernel_package_scans_auxiliary_sources(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "helpers").mkdir()
+    (tmp_path / "helpers" / "creds.py").write_text("api_key = '1234567890abcdef'\n", encoding="utf-8")
+    (tmp_path / "kernel-metadata.json").write_text("{}", encoding="utf-8")
+
     with pytest.raises(ValueError, match="Secret pattern detected"):
         validate_kernel_package(tmp_path)

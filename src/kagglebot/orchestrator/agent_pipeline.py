@@ -17,6 +17,7 @@ from kagglebot.agents.identity import (
 )
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exceptions import KaggleBotError
+from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.knowledge import (
     derive_problem_types,
     format_error_fix_insights,
@@ -35,6 +36,7 @@ from kagglebot.medals import (
     normalize_target_medal,
     normalize_target_rank_percentile,
 )
+from kagglebot.method_scout import render_method_registry_for_prompt, run_method_scout
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
@@ -48,7 +50,9 @@ from kagglebot.writeup import (
 
 _PLANNING_CODEX_MODEL = IMPLEMENTATION_AGENT.model
 _PLANNING_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
-_ACCURACY_FIRST_MIN_MAX_ITERATIONS = 12
+_ACCURACY_FIRST_DEFAULT_MAX_ITERATIONS = 5
+_LONG_ACCURACY_FIRST_MAX_ITERATIONS = 3
+_LONG_ACCURACY_FIRST_TIME_BUDGET_MIN = 12 * 60
 _ACCURACY_FIRST_MIN_PATIENCE = 4
 _ACCURACY_FIRST_MIN_CV_FOLDS = 5
 _ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
@@ -92,6 +96,10 @@ class AgentPipelineConfig:
     run_id: str
     dry_run: bool
     repo_root: Path
+    method_scout: str = "auto"
+    method_scout_max_sources: int = 12
+    hardware_profile: str | None = "auto"
+    time_budget_min: int | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +260,18 @@ def _run_strategy_plan(
     template = _load_template("strategy_plan.md")
     brief_content = _read_text(brief_path)
     knowledge_text = _load_problem_type_knowledge_text(paths=paths, repo_root=config.repo_root)
+    profile = _load_dataset_profile_payload(paths)
+    problem_types = derive_problem_types(profile)
+    if config.method_scout != "off":
+        run_method_scout(
+            paths=paths,
+            slug=config.slug,
+            problem_types=problem_types,
+            dataset_profile=profile,
+            metric=str(profile.get("target_metric") or ""),
+            mode=config.method_scout,
+            max_sources=config.method_scout_max_sources,
+        )
     compact_mode = False
     prompt_text = _build_strategy_prompt(
         template=template,
@@ -265,6 +285,7 @@ def _run_strategy_plan(
         knowledge_text,
         compact=compact_mode,
     )
+    prompt_text = _append_method_registry_with_budget(prompt_text, paths=paths, compact=compact_mode)
     if len(prompt_text) > _STRATEGY_PROMPT_MAX_CHARS:
         compact_mode = True
         print("[yellow]note[/yellow]: GPT prompt too large; using compact context to avoid length limits.")
@@ -280,6 +301,7 @@ def _run_strategy_plan(
             knowledge_text,
             compact=compact_mode,
         )
+        prompt_text = _append_method_registry_with_budget(prompt_text, paths=paths, compact=compact_mode)
 
     attempt = 0
     plan_payload: dict[str, object] | None = None
@@ -312,6 +334,7 @@ def _run_strategy_plan(
                     knowledge_text,
                     compact=compact_mode,
                 )
+                prompt_text = _append_method_registry_with_budget(prompt_text, paths=paths, compact=compact_mode)
                 continue
             if _should_use_fallback_strategy(response_text, result.stderr):
                 error_text = (result.stderr or response_text).strip()
@@ -332,6 +355,8 @@ def _run_strategy_plan(
                 return _write_strategy_outputs(
                     paths=paths,
                     knowledge_paths=KnowledgePaths(workdir=config.repo_root),
+                    method_scout_mode=config.method_scout,
+                    method_scout_max_sources=config.method_scout_max_sources,
                     strategy_text=strategy_text,
                     instructions_text=instructions_text,
                     transcript_text=transcript,
@@ -385,6 +410,7 @@ def _run_strategy_plan(
                 knowledge_text,
                 compact=compact_mode,
             )
+            prompt_text = _append_method_registry_with_budget(prompt_text, paths=paths, compact=compact_mode)
             if len(prompt_text) > _STRATEGY_PROMPT_MAX_CHARS and not compact_mode:
                 compact_mode = True
                 prompt_text = _apply_quality_gate(
@@ -400,12 +426,15 @@ def _run_strategy_plan(
                     knowledge_text,
                     compact=compact_mode,
                 )
+                prompt_text = _append_method_registry_with_budget(prompt_text, paths=paths, compact=compact_mode)
             continue
         break
 
     return _write_strategy_outputs(
         paths=paths,
         knowledge_paths=KnowledgePaths(workdir=config.repo_root),
+        method_scout_mode=config.method_scout,
+        method_scout_max_sources=config.method_scout_max_sources,
         strategy_text=strategy_text,
         instructions_text=instructions_text,
         transcript_text=response_text,
@@ -468,6 +497,20 @@ def _run_codex_kernel_implementation(
             "blocked_modules": blocked_text,
         },
     )
+    if paths.method_registry_path.exists():
+        try:
+            registry = json.loads(paths.method_registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            registry = {}
+        if isinstance(registry, dict):
+            method_text = render_method_registry_for_prompt(registry, max_methods=8)
+            if method_text.strip():
+                prompt_text += (
+                    "\n\n## Competition-Specific Method Scout\n"
+                    f"{method_text}\n"
+                    "Use these method candidates as the competition-specific shortlist. "
+                    "Do not implement blocked methods; use fallbacks for unavailable optional dependencies.\n"
+                )
     if infer_deliverable_mode_from_paths(paths) == "writeup":
         requirements = summarize_writeup_requirements(paths)
         prompt_text += (
@@ -1137,12 +1180,18 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
     guarded: dict[str, object] = dict(payload)
 
     raw_toggles = guarded.get("toggles")
-    toggles: dict[str, object] | None = dict(raw_toggles) if isinstance(raw_toggles, dict) else None
+    toggles: dict[str, object] | None = dict(raw_toggles) if isinstance(raw_toggles, dict) else {}
     if toggles is not None:
         guarded["toggles"] = toggles
         if isinstance(toggles.get("FAST_DEV"), bool) and bool(toggles.get("FAST_DEV")):
             toggles["FAST_DEV"] = False
             print("[yellow]plan guardrail[/yellow]: forcing FAST_DEV=False for production-quality evaluation.")
+        _force_training_and_validation_toggles(toggles)
+
+    raw_runtime_budget = guarded.get("runtime_budget")
+    runtime_budget: dict[str, object] = dict(raw_runtime_budget) if isinstance(raw_runtime_budget, dict) else {}
+    guarded["runtime_budget"] = runtime_budget
+    _force_training_and_validation_runtime(runtime_budget)
 
     raw_eval_protocol = guarded.get("evaluation_protocol")
     evaluation_protocol: dict[str, object] | None = (
@@ -1240,13 +1289,21 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
         if evaluation_protocol is not None:
             evaluation_protocol["seeds"] = list(selected_seeds)
 
+    time_budget_min = _as_positive_int(guarded.get("time_budget_min"))
+    long_heavy_run = heavy_deep_learning and (
+        time_budget_min is None or time_budget_min >= _LONG_ACCURACY_FIRST_TIME_BUDGET_MIN
+    )
+    target_max_iterations = (
+        _LONG_ACCURACY_FIRST_MAX_ITERATIONS if long_heavy_run else _ACCURACY_FIRST_DEFAULT_MAX_ITERATIONS
+    )
     max_iterations = _as_positive_int(guarded.get("max_iterations"))
-    if max_iterations is None or max_iterations < _ACCURACY_FIRST_MIN_MAX_ITERATIONS:
-        guarded["max_iterations"] = _ACCURACY_FIRST_MIN_MAX_ITERATIONS
-        max_iterations = _ACCURACY_FIRST_MIN_MAX_ITERATIONS
+    if max_iterations != target_max_iterations:
+        guarded["max_iterations"] = target_max_iterations
+        max_iterations = target_max_iterations
         print(
             "[yellow]plan guardrail[/yellow]: "
-            f"forcing max_iterations>={_ACCURACY_FIRST_MIN_MAX_ITERATIONS} for deeper search."
+            f"forcing max_iterations={target_max_iterations} "
+            "for the selected runtime profile."
         )
 
     patience = _as_positive_int(guarded.get("patience"))
@@ -1258,7 +1315,7 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
     stop_policy = dict(raw_stop_policy) if isinstance(raw_stop_policy, dict) else {}
     guarded["stop_policy"] = stop_policy
     stop_max_iterations = _as_positive_int(stop_policy.get("max_iterations"))
-    if stop_max_iterations is None or stop_max_iterations < max_iterations:
+    if stop_max_iterations != max_iterations:
         stop_policy["max_iterations"] = max_iterations
         print("[yellow]plan guardrail[/yellow]: aligning stop_policy.max_iterations with top-level max_iterations.")
 
@@ -1316,6 +1373,85 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
             )
 
     return guarded
+
+
+def _force_training_and_validation_toggles(toggles: dict[str, object]) -> None:
+    true_keys = {
+        "ENABLE_TRAINING",
+        "ENABLE_FULL_TRAINING",
+        "ENABLE_REFERENCE_TRAINING",
+        "RUN_VALIDATION_GENERATION",
+        "ENABLE_VALIDATION_GENERATION",
+        "RUN_VALIDATION",
+        "ENABLE_VALIDATION",
+        "SAVE_OOF",
+        "SAVE_VALIDATION_PREDICTIONS",
+    }
+    false_keys = {
+        "FAST_DEV",
+        "SKIP_TRAINING",
+        "DISABLE_TRAINING",
+        "TRAINING_DISABLED",
+        "SKIP_VALIDATION",
+        "DISABLE_VALIDATION",
+        "VALIDATION_DISABLED",
+        "PACKAGING_ONLY",
+        "ADAPTER_PACKAGING_ONLY",
+        "ALLOW_IDENTITY_ADAPTER",
+        "ALLOW_DEBUG_NOOP_ADAPTER",
+        "ALLOW_NOOP_FALLBACK",
+        "ALLOW_UNSCORED_SUBMISSION",
+    }
+    for key in true_keys:
+        if toggles.get(key) is not True:
+            toggles[key] = True
+            print(f"[yellow]plan guardrail[/yellow]: forcing {key}=True.")
+    for key in false_keys:
+        if toggles.get(key) is not False:
+            toggles[key] = False
+            print(f"[yellow]plan guardrail[/yellow]: forcing {key}=False.")
+
+
+def _force_training_and_validation_runtime(runtime_budget: dict[str, object]) -> None:
+    minimum_ints = {
+        "full_training_seeds": 1,
+        "full_training_folds": 1,
+        "validation_generation_max_samples": 64,
+        "validation_generation_max_samples_rtx3060": 64,
+        "validation_generation_max_samples_large_gpu": 256,
+        "max_val_samples": 128,
+        "max_validation_samples": 128,
+        "num_steps_smoke": 10,
+    }
+    for key, minimum in minimum_ints.items():
+        current = _as_positive_int(runtime_budget.get(key))
+        if current is None or current < minimum:
+            runtime_budget[key] = minimum
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}>={minimum}.")
+    forced_true = {
+        "enable_reference_training",
+        "enable_training",
+        "run_validation_generation",
+        "enable_validation_generation",
+        "run_validation",
+        "enable_validation",
+    }
+    for key in forced_true:
+        if runtime_budget.get(key) is not True:
+            runtime_budget[key] = True
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}=true.")
+    forced_false = {
+        "packaging_only",
+        "adapter_packaging_only",
+        "allow_identity_adapter",
+        "allow_debug_noop_adapter",
+        "allow_noop_fallback",
+        "allow_unscored_submission",
+    }
+    for key in forced_false:
+        if runtime_budget.get(key) is not False:
+            runtime_budget[key] = False
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}=false.")
 
 
 def _as_positive_int(value: object) -> int | None:
@@ -1473,6 +1609,8 @@ def _write_strategy_outputs(
     *,
     paths: CompetitionPaths,
     knowledge_paths: KnowledgePaths,
+    method_scout_mode: str = "auto",
+    method_scout_max_sources: int = 12,
     strategy_text: str,
     instructions_text: str,
     transcript_text: str,
@@ -1498,6 +1636,18 @@ def _write_strategy_outputs(
         )
         info_path = paths.context_dir / "research_storage.json"
         info_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+    profile = _load_dataset_profile_payload(paths)
+    if method_scout_mode != "off" and research_sources_text.strip():
+        method_registry = run_method_scout(
+            paths=paths,
+            slug=paths.slug,
+            problem_types=derive_problem_types(profile),
+            dataset_profile=profile,
+            metric=str((plan_payload or {}).get("target_metric") or profile.get("target_metric") or ""),
+            mode="refresh",
+            max_sources=method_scout_max_sources,
+        )
+        _print_block("method scout registry", render_method_registry_for_prompt(method_registry, max_methods=8))
 
     transcript_path = paths.context_agent_dir / "strategy_transcript.txt"
     transcript_path.write_text(transcript_text, encoding="utf-8")
@@ -1616,6 +1766,12 @@ def _build_strategy_prompt(
         discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 3500)
         brief_content = _truncate(brief_content, 5000)
 
+    hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
+    hardware_constraints = render_hardware_constraints(
+        hardware_profile,
+        compute=config.compute,
+        time_budget_min=config.time_budget_min,
+    )
     prompt = _render_template(
         template,
         {
@@ -1623,6 +1779,8 @@ def _build_strategy_prompt(
             "compute": config.compute,
             "accelerator": config.accelerator,
             "internet": config.internet,
+            "hardware_profile": hardware_profile.label,
+            "hardware_constraints": hardware_constraints,
             "rules_url": _read_text(paths.rules_url_path).strip() or config.competition_url or "",
             "interpretation": brief_content,
             "dataset_profile": dataset_profile,
@@ -1708,6 +1866,30 @@ def _append_problem_type_knowledge_with_budget(prompt_text: str, knowledge_text:
     if not trimmed:
         return prompt_text
     return f"{prompt_text}{prefix}{trimmed}\n"
+
+
+def _append_method_registry_with_budget(prompt_text: str, *, paths: CompetitionPaths, compact: bool) -> str:
+    if not paths.method_registry_path.exists():
+        return prompt_text
+    try:
+        registry = json.loads(paths.method_registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return prompt_text
+    if not isinstance(registry, dict):
+        return prompt_text
+    clean = render_method_registry_for_prompt(registry, max_methods=5 if compact else 8).strip()
+    if not clean:
+        return prompt_text
+    section = f"\n\n## Competition-Specific Method Scout\n{clean}\n"
+    if len(prompt_text) + len(section) <= _STRATEGY_PROMPT_MAX_CHARS or not compact:
+        return prompt_text + section
+    remaining = _STRATEGY_PROMPT_MAX_CHARS - len(prompt_text) - len("\n\n## Competition-Specific Method Scout\n") - 1
+    if remaining <= 0:
+        return prompt_text
+    trimmed = _truncate_exact(clean, remaining)
+    if not trimmed:
+        return prompt_text
+    return f"{prompt_text}\n\n## Competition-Specific Method Scout\n{trimmed}\n"
 
 
 def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Path, limit: int = 5) -> str:
@@ -1912,6 +2094,12 @@ def _build_fallback_strategy(
     dataset_profile = _summarize_dataset_profile(_read_text(paths.dataset_profile_path))
     submission_format = _summarize_submission_format(_read_text(paths.submission_format_md_path))
     sample_submission_head = _truncate(_read_sample_submission_head(paths), 400)
+    hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
+    hardware_constraints = render_hardware_constraints(
+        hardware_profile,
+        compute=config.compute,
+        time_budget_min=config.time_budget_min,
+    )
 
     strategy_lines = [
         "# Fallback Strategy (GPT unavailable)",
@@ -1951,8 +2139,12 @@ def _build_fallback_strategy(
         "## Train",
         "Use a holdout/CV split with a fixed seed and log parameters. Prefer high-capacity models when compute allows.",
         "",
+        "## Hardware",
+        hardware_constraints,
+        "",
         "## Evaluation",
-        "Compute an offline metric when possible; otherwise emit a numeric placeholder to keep the pipeline moving.",
+        "Train at least one real candidate and compute competition-faithful validation from train data. "
+        "Do not emit placeholder, proxy, packaging-only, or unscored metrics.",
         "",
         "## Risk",
         "Fallback may underperform; prioritize correctness of submission format and stable execution.",
@@ -1971,6 +2163,16 @@ def _build_fallback_strategy(
     ]
     strategy_text = "\n".join(strategy_lines).strip()
     plan_payload = _build_fallback_plan_payload(paths)
+    plan_payload["hardware_profile"] = hardware_profile.key
+    runtime_budget = plan_payload.setdefault("runtime_budget", {})
+    if isinstance(runtime_budget, dict):
+        runtime_budget.setdefault("hardware_profile", hardware_profile.key)
+        runtime_budget.setdefault("gpu_vram_gb", hardware_profile.vram_gb)
+        runtime_budget.setdefault("gpu_count", hardware_profile.gpu_count)
+        runtime_budget.setdefault(
+            "max_runtime_min",
+            config.time_budget_min if config.time_budget_min is not None else hardware_profile.time_budget_min,
+        )
     research_sources = [
         {
             "url": rules_url,
@@ -2087,7 +2289,7 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
         "holdout_frac": 0.2,
         "cv_folds": 7,
         "seed": 42,
-        "max_iterations": 12,
+        "max_iterations": 5,
         "patience": 6,
         "min_improvement": 0.0,
         "pipelines": [
@@ -2156,7 +2358,7 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
             "primary_metric": metric,
         },
         "stop_policy": {
-            "max_iterations": 12,
+            "max_iterations": 5,
             "error_fingerprint_abort": True,
         },
     }

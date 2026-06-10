@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from re import Pattern
 
 from kagglebot.exceptions import SubmissionCliError
+
+_DEFAULT_SUBMIT_TIMEOUT_SEC = 300.0
 
 _PERMANENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
     (
@@ -155,6 +158,7 @@ def run_kaggle_submit(
             check=False,
             capture_output=True,
             text=True,
+            timeout=_submit_timeout_seconds(),
         )
     except FileNotFoundError as exc:
         raise SubmissionCliError(
@@ -165,6 +169,8 @@ def run_kaggle_submit(
             stdout="",
             stderr=str(exc),
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _timeout_error(args=args, exc=exc, label="Kaggle CLI submit") from exc
     duration = time.monotonic() - start
 
     stdout_text = completed.stdout or ""
@@ -231,6 +237,7 @@ def run_kaggle_submit_kernel(
             check=False,
             capture_output=True,
             text=True,
+            timeout=_submit_timeout_seconds(),
         )
     except FileNotFoundError as exc:
         raise SubmissionCliError(
@@ -241,6 +248,8 @@ def run_kaggle_submit_kernel(
             stdout="",
             stderr=str(exc),
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _timeout_error(args=args, exc=exc, label="Kaggle CLI notebook submit") from exc
     duration = time.monotonic() - start
 
     stdout_text = completed.stdout or ""
@@ -263,6 +272,40 @@ def run_kaggle_submit_kernel(
         command=args,
         duration_sec=duration,
     )
+
+
+def _submit_timeout_seconds() -> float:
+    raw = os.getenv("KAGGLEBOT_SUBMIT_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return _DEFAULT_SUBMIT_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_SUBMIT_TIMEOUT_SEC
+    return max(1.0, value)
+
+
+def _timeout_error(*, args: list[str], exc: subprocess.TimeoutExpired, label: str) -> SubmissionCliError:
+    timeout = float(exc.timeout or 0.0)
+    stdout = _coerce_timeout_output(exc.stdout)
+    stderr = _coerce_timeout_output(exc.stderr)
+    message = f"{label} timed out after {timeout:.1f}s."
+    return SubmissionCliError(
+        message,
+        command=args,
+        exit_code=124,
+        output=_tail_text("\n".join(part for part in (message, stdout, stderr) if part)),
+        stdout=_tail_text(stdout),
+        stderr=_tail_text(stderr),
+    )
+
+
+def _coerce_timeout_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _tail_text(text: str, *, max_lines: int = 200, max_chars: int = 6000) -> str:

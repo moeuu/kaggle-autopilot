@@ -533,7 +533,7 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     missingness_by_column = {col: float(val) for col, val in train.isna().mean().items()}
     dtype_by_column = {col: str(dtype) for col, dtype in train.dtypes.items()}
     cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
-    high_cardinality = [c for c in cat_cols if train[c].nunique(dropna=True) > 50]
+    high_cardinality = [c for c in cat_cols if _safe_nunique(train[c]) > 50]
 
     modality = _infer_modality(data_dir, train)
     task_tag = _task_tag(task, train[target_col])
@@ -595,6 +595,20 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         }
     )
     return _apply_dataset_profile_override(data_dir, profile)
+
+
+def _safe_nunique(series: pd.Series) -> int:
+    try:
+        return int(series.nunique(dropna=True))
+    except TypeError:
+        normalized = series.dropna().map(_profile_hashable_value)
+        return int(normalized.nunique(dropna=True))
+
+
+def _profile_hashable_value(value: object) -> object:
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, sort_keys=True, ensure_ascii=True)
+    return value
 
 
 def _build_rna_structure_profile(task) -> dict[str, object]:
@@ -946,7 +960,7 @@ def _task_tag(task: str, target: pd.Series) -> str:
         return "multitask"
     if task == "regression":
         return "regression"
-    unique = target.nunique(dropna=True)
+    unique = _safe_nunique(target)
     return "binary" if unique <= 2 else "multiclass"
 
 
@@ -1064,7 +1078,7 @@ def build_plan_and_initial_prompt(
         '  "target_medal": "winner",',
         '  "target_rank_percentile": 0.001,',
         '  "internet": "on",',
-        '  "max_iterations": 12,',
+        '  "max_iterations": 5,',
         '  "submit_policy": "always"',
         "}",
         "```",
@@ -1125,7 +1139,7 @@ def build_plan_and_initial_prompt(
         "uv run pytest -q",
         "```",
         "",
-        "The autopilot will iterate up to max_iterations (default 12),",
+        "The autopilot will iterate up to max_iterations (default 5),",
         "submit according to submission gate policy, and use readiness score as the primary loop decision signal.",
     ]
     return "\n".join(lines) + "\n"
@@ -1147,7 +1161,7 @@ def build_improve_template() -> str:
 **Competition**: `{slug}`
 **Iteration**: {iteration}
 **Goal**: Improve loop-decision score (readiness primary; submission/rank as guardrails) toward top1-tier
-or best possible within the max_iterations budget (default 12)
+or best possible within the max_iterations budget (default 5)
 **Compute**: {compute} ({accelerator})
 **Top1 gap**: {top1_gap}
 **Delta vs previous best**: {delta_offline}

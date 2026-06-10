@@ -316,4 +316,7 @@ def test_write_plan_preserves_extended_strategy_fields(tmp_path: Path) -> None:
     payload = json.loads(paths.plan_path.read_text(encoding="utf-8"))
     assert payload["target_score"] == 0.92
     assert payload["pipelines"] == [{"name": "p1"}]
-    assert payload["toggles"] == {"USE_MODEL": True}
+    assert payload["toggles"]["USE_MODEL"] is True
+    assert payload["toggles"]["ENABLE_TRAINING"] is True
+    assert payload["toggles"]["RUN_VALIDATION_GENERATION"] is True
+    assert payload["toggles"]["PACKAGING_ONLY"] is False

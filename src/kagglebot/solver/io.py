@@ -69,7 +69,7 @@ def _select_sample_submission_path(files: Sequence[Path]) -> Path | None:
     return max(ranked, key=_sample_candidate_key)
 
 
-def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, str]:
+def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, int, int, str]:
     """Return ranking key for sample-submission candidates."""
     name_score = _sample_name_score(path)
     stage_score = _sample_stage_score(path)

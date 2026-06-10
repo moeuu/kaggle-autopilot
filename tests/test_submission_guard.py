@@ -350,6 +350,87 @@ def test_validate_submission_prefers_real_submission_section_over_rules_heading(
     validate_submission(str(submission), str(sample))
 
 
+def test_validate_submission_allows_documented_targets_with_leading_anchor_for_placeholder_sample(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "overview.md").write_text(
+        "## Submission Format\n\n"
+        "Participants should submit their files in CSV format. "
+        "Each submission must include the columns KEEP, ASSOCIATION, and DIFF.\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "Condition": ["Epistaxis", "Intracranial Pressure"],
+            "KEEP": ["R04", "H47"],
+            "ASSOCIATION": ["Not Applicable", "G93"],
+            "DIFF": ["Not Applicable", "I10"],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_allows_cohortx_targets_with_pmcids_anchor_for_placeholder_sample(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "submission_format.md").write_text(
+        "## Submission\n\n"
+        "For each row, use the pmcids value and populate the following fields:\n\n"
+        "- `conditions` – a list of diseases\n"
+        "- `study_type` – a string describing the study type\n"
+        "- `sex` – a string indicating the sex of participants\n"
+        "- `minimum_age` – a string representing the minimum age\n"
+        "- `maximum_age` – a string representing the maximum age\n"
+        "- `eligibility_criteria` – a text field containing the eligibility criteria\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "pmcids": ["11452962", "11731389"],
+            "conditions": ["Neurodevelopment", "Lymphoma"],
+            "study_type": ["INTERVENTIONAL", "INTERVENTIONAL"],
+            "sex": ["ALL", "ALL"],
+            "minimum_age": ["2 Years", "18 Years"],
+            "maximum_age": ["12 Years", "85 Years"],
+            "eligibility_criteria": ["Eligible children", "Eligible adults"],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_rejects_placeholder_wrapper_when_context_requires_wide_targets(
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    (context_dir / "overview.md").write_text(
+        "## Submission Format\n\nEach submission must include the columns KEEP, ASSOCIATION, and DIFF.\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": [0], "prediction": ["R04 | Not Applicable | Not Applicable"]}).to_csv(
+        submission,
+        index=False,
+    )
+
+    with pytest.raises(SubmissionValidationError, match="expected \\(submission_format/overview hint\\)"):
+        validate_submission(str(submission), str(sample))
+
+
 def test_validate_submission_sniffs_tab_delimiter_and_flags_missing_header(tmp_path: Path) -> None:
     sample = tmp_path / "sample_submission.csv"
     submission = tmp_path / "submission.csv"
@@ -435,7 +516,10 @@ def test_normalize_and_fingerprint_are_stable() -> None:
 
 
 def test_run_kaggle_submit_captures_stdout_stderr(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
     def fake_subprocess_run(*args, **kwargs):  # noqa: ARG001
+        captured.update(kwargs)
         return subprocess.CompletedProcess(
             args=["kaggle", "competitions", "submit"],
             returncode=0,
@@ -451,6 +535,7 @@ def test_run_kaggle_submit_captures_stdout_stderr(monkeypatch) -> None:
     assert result.command[:3] == ["kaggle", "competitions", "submit"]
     assert "-q" in result.command
     assert result.duration_sec >= 0.0
+    assert captured["timeout"] == 300.0
 
 
 def test_run_kaggle_submit_failure_includes_tails_and_returncode(monkeypatch) -> None:
@@ -475,6 +560,25 @@ def test_run_kaggle_submit_failure_includes_tails_and_returncode(monkeypatch) ->
     assert len(err.stdout) <= 6000
     assert "stderr line 299" in err.stderr
     assert "stderr line 0" not in err.stderr
+
+
+def test_run_kaggle_submit_timeout_raises_cli_error(monkeypatch) -> None:
+    def fake_subprocess_run(*args, **kwargs):  # noqa: ARG001
+        raise subprocess.TimeoutExpired(
+            cmd=["kaggle", "competitions", "submit"],
+            timeout=1.5,
+            output="partial stdout",
+            stderr="partial stderr",
+        )
+
+    monkeypatch.setattr("kagglebot.submission.guard.subprocess.run", fake_subprocess_run)
+    with pytest.raises(SubmissionCliError) as exc:
+        run_kaggle_submit(slug="demo", submission_file=Path("submission.csv"), message="m")
+
+    assert exc.value.exit_code == 124
+    assert "timed out after 1.5s" in str(exc.value)
+    assert "partial stdout" in exc.value.stdout
+    assert "partial stderr" in exc.value.stderr
 
 
 def test_run_kaggle_submit_kernel_uses_kernel_flag(monkeypatch) -> None:

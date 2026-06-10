@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -74,6 +74,18 @@ from kagglebot.autopilot_state import (
 from kagglebot.autopilot_state import (
     _resume_iteration_state as _state_resume_iteration_state,
 )
+from kagglebot.campaign import (
+    TOP1_TARGET_RANK_PERCENTILE,
+    allocate_submission,
+    build_campaign_candidate,
+    campaign_state_path,
+    candidate_registry_path,
+    format_campaign_submission_message,
+    list_candidates,
+    normalize_campaign_mode,
+    update_campaign_state,
+    upsert_candidate,
+)
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.eval import (
     DriftChecker,
@@ -97,6 +109,14 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.exec_utils import run_command
+from kagglebot.experiment_executor import execute_experiment_graph
+from kagglebot.experiment_graph import (
+    append_campaign_outcome,
+    build_experiment_graph,
+    normalize_portfolio_execution,
+    write_allocator_decision,
+)
+from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.kaggle_api import (
@@ -132,9 +152,17 @@ from kagglebot.medals import (
     normalize_target_medal,
     normalize_target_rank_percentile,
 )
+from kagglebot.method_scout import (
+    method_registry_path,
+    normalize_method_scout_mode,
+    normalize_research_scout_mode,
+    render_method_registry_for_prompt,
+    run_method_scout,
+)
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
     WriteGuardPolicy,
+    _apply_plan_guardrails,
     _backup_guarded_files,
     _diff_snapshots,
     _enforce_allowlist_changes,
@@ -142,6 +170,8 @@ from kagglebot.orchestrator.agent_pipeline import (
     _snapshot_tree,
     run_agent_pipeline,
 )
+from kagglebot.runners.base import RunContext
+from kagglebot.runners.local_kernel import LocalKernelRunner
 from kagglebot.solver.io import load_competition_data
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
 from kagglebot.submission.guard import (
@@ -152,7 +182,22 @@ from kagglebot.submission.guard import (
 )
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
+from kagglebot.top1_campaign import (
+    build_blend_report,
+    build_candidate_portfolio_plan,
+    build_reference_reproduction_report,
+    private_robustness_score,
+    select_method_id_for_category,
+)
+from kagglebot.top1_exhaustive import (
+    build_portfolio_optimizer_report,
+    build_private_robustness_report,
+    build_top1_exhaustion_report,
+    build_win_contract,
+    normalize_top1_submit_policy,
+)
 from kagglebot.types import PlanConfig
+from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
 from kagglebot.validators import ensure_kernel_sources_valid
 from kagglebot.writeup import (
     build_writeup_bundle,
@@ -209,6 +254,17 @@ class AutopilotConfig:
     verify_cmd: str
     dry_run: bool
     submit_policy: str | None = None
+    campaign_mode: str | None = "baseline"
+    method_scout: str | None = "auto"
+    research_scout: str | None = "auto"
+    method_scout_max_sources: int = 12
+    portfolio_execution: str | None = "serial"
+    validation_lab: str | None = "auto"
+    candidate_budget_min: int | None = None
+    max_candidates_per_iteration: int | None = None
+    top1_exhaustive: bool = False
+    top1_submit_policy: str | None = "value_only"
+    hardware_profile: str | None = "auto"
 
 
 MAX_KERNEL_FIX_ATTEMPTS: int | None = 8
@@ -286,9 +342,9 @@ _COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
 }
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
 _DEFAULT_EVAL_REPEATS = 2
-_DEFAULT_MAX_ITERATIONS = 12
-_DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN = 1200
-_MAX_LOCAL_GPU_TIME_BUDGET_MIN = 23 * 60
+_DEFAULT_MAX_ITERATIONS = 5
+_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN = 12 * 60
+_LONG_LOCAL_GPU_MAX_ITERATIONS = 3
 _HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text"})
 _HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
 _EVAL_REPEAT_SEED_OFFSET = 1009
@@ -311,6 +367,10 @@ _QUALITY_GUARD_SUBGROUP_RATIO = 2.5
 _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = 0.05
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = 0.0
 _QUALITY_GUARD_CODE_REF_ABS_MARGIN = 0.02
+_QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN = 0.20
+_QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = 0.01
+_QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
+_QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
 _HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
 _SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = frozenset(
     {
@@ -397,6 +457,12 @@ _INTERNET_DISABLED_RULE_PATTERNS = (
     r"internet\s+must\s+be\s+(?:disabled|off)",
     r"no\s+internet\s+access",
     r"enable[_\s-]?internet\s*[:=]\s*false",
+)
+_UNRESTRICTED_SUBMISSION_ATTEMPT_PATTERNS = (
+    r"submit\s+without\s+restriction\s+as\s+to\s+the\s+number\s+of\s+attempts",
+    r"submissions?\s+(?:are\s+)?unlimited",
+    r"unlimited\s+submissions?",
+    r"no\s+limit\s+on\s+(?:the\s+number\s+of\s+)?submissions?",
 )
 
 
@@ -790,6 +856,17 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     resolved["target_direction"] = metric_direction
     deliverable_mode = normalize_deliverable_mode(resolved.get("deliverable_mode"), default="leaderboard")
     resolved["deliverable_mode"] = deliverable_mode
+    campaign_mode = normalize_campaign_mode(config.campaign_mode, deliverable_mode=deliverable_mode)
+    portfolio_execution = normalize_portfolio_execution(config.portfolio_execution)
+    validation_lab_mode = normalize_validation_lab_mode(config.validation_lab)
+    research_scout_mode = normalize_research_scout_mode(config.research_scout)
+    top1_submit_policy = normalize_top1_submit_policy(config.top1_submit_policy)
+    resolved["campaign_mode"] = campaign_mode
+    resolved["portfolio_execution"] = portfolio_execution
+    resolved["validation_lab"] = validation_lab_mode
+    resolved["research_scout"] = research_scout_mode
+    resolved["top1_exhaustive"] = bool(config.top1_exhaustive)
+    resolved["top1_submit_policy"] = top1_submit_policy
     submit_mode = normalize_submit_mode(resolved.get("submit_mode"), default="file")
     resolved["submit_mode"] = submit_mode
     writeup_mode = deliverable_mode == "writeup"
@@ -892,6 +969,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         medal=target_medal,
         fallback=None,
     )
+    if campaign_mode == "top1" and target_rank_percentile is None:
+        target_rank_percentile = TOP1_TARGET_RANK_PERCENTILE
+        resolved["target_rank_percentile"] = target_rank_percentile
     drift_check_enabled = bool(resolved.get("drift_check", False))
     drift_weight = float(resolved.get("drift_weight") or 1.0)
     stop_min_delta = float(resolved.get("stop_min_delta") or 0.0)
@@ -935,6 +1015,96 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         direction=metric_direction,
         max_iterations=max_iterations,
     )
+    previous_submission_history = _load_previous_submission_history(
+        slug=config.slug,
+        paths=config.paths,
+        direction=metric_direction,
+        dry_run=config.dry_run,
+    )
+    historical_best_submission_score = _to_float(previous_submission_history.get("best_score"))
+    if historical_best_submission_score is not None:
+        if _update_best_score(best_submitted_score, historical_best_submission_score, metric_direction, 0.0):
+            best_submitted_score = historical_best_submission_score
+        if _update_best_score(best_online_submission_score, historical_best_submission_score, metric_direction, 0.0):
+            best_online_submission_score = historical_best_submission_score
+        print(
+            "[cyan]submission history[/cyan]: "
+            f"best public score={historical_best_submission_score:.6f} "
+            f"source={previous_submission_history.get('source') or 'unknown'}"
+        )
+    campaign_state: dict[str, object] = {}
+    campaign_state_file = campaign_state_path(config.paths.context_dir)
+    campaign_registry_file = candidate_registry_path(config.paths.context_dir)
+    if campaign_mode == "top1":
+        campaign_state = update_campaign_state(
+            state_path=campaign_state_file,
+            registry_path=campaign_registry_file,
+            slug=config.slug,
+            run_id=run_id,
+            mode=campaign_mode,
+            direction=metric_direction,
+            top1_info=top1_info if isinstance(top1_info, dict) else {},
+            submission_history=previous_submission_history,
+        )
+        print(f"[cyan]campaign[/cyan]: top1 mode active; state={campaign_state_file}")
+    effective_method_scout = _effective_method_scout_mode(config=config, campaign_mode=campaign_mode)
+    method_registry: dict[str, object] = {}
+    source_registry: dict[str, object] = {}
+    validation_lab_report: dict[str, object] | None = None
+    win_contract: dict[str, object] | None = None
+    if effective_method_scout != "off":
+        method_registry = run_method_scout(
+            paths=config.paths,
+            slug=config.slug,
+            problem_types=problem_types,
+            dataset_profile=dataset_profile,
+            metric=target_metric,
+            campaign_state=campaign_state,
+            mode=effective_method_scout,
+            research_mode=research_scout_mode,
+            max_sources=int(config.method_scout_max_sources or 12),
+        )
+        source_registry = _load_json_object(config.paths.source_registry_path) or {}
+        if campaign_mode == "top1":
+            campaign_state = update_campaign_state(
+                state_path=campaign_state_file,
+                registry_path=campaign_registry_file,
+                slug=config.slug,
+                run_id=run_id,
+                mode=campaign_mode,
+                direction=metric_direction,
+                top1_info=top1_info if isinstance(top1_info, dict) else {},
+                submission_history=previous_submission_history,
+                method_registry=method_registry,
+            )
+            validation_registry = _load_json_object(config.paths.validation_registry_path) or {}
+            validation_lab_report = run_validation_lab(
+                context_dir=config.paths.context_dir,
+                validation_registry=validation_registry,
+                candidate_registry_path=campaign_registry_file,
+                campaign_state=campaign_state,
+                mode=validation_lab_mode,
+            )
+            if isinstance(validation_lab_report.get("registry"), dict):
+                method_registry["active_validation_profile"] = validation_lab_report["registry"].get("active_profile")
+        print(f"[cyan]method scout[/cyan]: {config.paths.method_registry_path}")
+    elif campaign_mode == "top1":
+        method_registry = _load_json_object(config.paths.method_registry_path) or {}
+        source_registry = _load_json_object(config.paths.source_registry_path) or {}
+    if campaign_mode == "top1":
+        validation_registry_for_contract = _load_json_object(config.paths.validation_registry_path) or {}
+        win_contract = build_win_contract(
+            context_dir=config.paths.context_dir,
+            slug=config.slug,
+            direction=metric_direction,
+            campaign_state=campaign_state,
+            top1_info=top1_info if isinstance(top1_info, dict) else {},
+            submission_history=previous_submission_history,
+            method_registry=method_registry,
+            source_registry=source_registry,
+            validation_registry=validation_registry_for_contract,
+            submission_limit_per_day=submission_limit_per_day,
+        )
     resumed_best_readiness = _resume_best_readiness_score(
         run_dir=config.paths.run_dir(run_id),
         direction=metric_direction,
@@ -1051,6 +1221,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             seed=seed,
                             dry_run=config.dry_run,
                             timeout_minutes=time_budget_min,
+                            hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
                             submission_path = _copy_submission_artifact_to_iteration_dir(
@@ -1226,6 +1397,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             dry_run=config.dry_run,
                             timeout_minutes=time_budget_min,
                             strict_accelerator=config.strict_accelerator,
+                            hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
                             submission_path = _copy_submission_artifact_to_iteration_dir(
@@ -1440,6 +1612,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             dry_run=config.dry_run,
                             timeout_minutes=time_budget_min,
                             strict_accelerator=config.strict_accelerator,
+                            hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
                             submission_path = _copy_submission_artifact_to_iteration_dir(
@@ -1677,6 +1850,188 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 remaining_daily_slots = max(0, submission_limit_per_day - max(0, int(successful_submit_count)))
                 remaining_iterations = max(1, int(max_iterations) - int(iteration) + 1)
                 extra_daily_submission_slot = remaining_daily_slots > remaining_iterations
+            else:
+                remaining_daily_slots = None
+            campaign_candidate = None
+            campaign_allocation = None
+            reference_reproduction_report: dict[str, object] | None = None
+            portfolio_plan: dict[str, object] | None = None
+            blend_report: dict[str, object] | None = None
+            experiment_graph: dict[str, object] | None = None
+            allocator_decision: dict[str, object] | None = None
+            graph_execution_report: dict[str, object] | None = None
+            validation_lab_report: dict[str, object] | None = None
+            private_robustness_report: dict[str, object] | None = None
+            portfolio_optimizer_report: dict[str, object] | None = None
+            top1_exhaustion_report: dict[str, object] | None = None
+            if campaign_mode == "top1":
+                campaign_category = _infer_campaign_candidate_category(
+                    iteration=iteration,
+                    kernel_metrics_payload=kernel_metrics_payload,
+                    quality_reasons=quality_reasons,
+                )
+                candidate_offline_std = _finite_float_or_none(evaluation.std)
+                campaign_candidate = build_campaign_candidate(
+                    run_id=run_id,
+                    iteration=iteration,
+                    direction=metric_direction,
+                    category=campaign_category,
+                    offline_score=decision_score,
+                    offline_std=candidate_offline_std,
+                    score_source=decision_source,
+                    submission_path=submission_path,
+                    metrics_path=metrics_path,
+                    oof_path=_extract_campaign_artifact_path(kernel_metrics_payload, "oof"),
+                    prediction_path=_extract_campaign_artifact_path(kernel_metrics_payload, "prediction"),
+                    model_family=_infer_campaign_model_family(model_summary, kernel_metrics_payload),
+                    feature_set=_infer_campaign_feature_set(model_summary, kernel_metrics_payload),
+                    method_id=_extract_campaign_method_id(kernel_metrics_payload)
+                    or select_method_id_for_category(method_registry, campaign_category),
+                    validation_profile_id=_extract_campaign_validation_profile_id(kernel_metrics_payload)
+                    or str(method_registry.get("active_validation_profile") or "default_cv"),
+                    fold_scores=_extract_campaign_fold_scores(kernel_metrics_payload),
+                    prediction_correlation=_extract_campaign_prediction_correlation(kernel_metrics_payload),
+                    metadata={
+                        "metric": evaluation.metric,
+                        "readiness_score": readiness_score,
+                        "quality_reasons": quality_reasons,
+                    },
+                )
+                campaign_candidate = replace(
+                    campaign_candidate,
+                    private_robustness_score=private_robustness_score(
+                        campaign_candidate,
+                        campaign_state=campaign_state,
+                    ),
+                )
+                upsert_candidate(campaign_registry_file, campaign_candidate)
+                campaign_state = update_campaign_state(
+                    state_path=campaign_state_file,
+                    registry_path=campaign_registry_file,
+                    slug=config.slug,
+                    run_id=run_id,
+                    mode=campaign_mode,
+                    direction=metric_direction,
+                    top1_info=top1_info if isinstance(top1_info, dict) else {},
+                    submission_history=previous_submission_history,
+                    remaining_daily_slots=remaining_daily_slots,
+                    method_registry=method_registry,
+                )
+                reference_reproduction_report = build_reference_reproduction_report(
+                    context_dir=config.paths.context_dir,
+                    campaign_state=campaign_state,
+                    method_registry=method_registry,
+                    direction=metric_direction,
+                    current_candidate=campaign_candidate,
+                    code_reference_score=code_reference_comparison_score,
+                    code_reference_source=code_reference_source,
+                )
+                validation_registry = _load_json_object(config.paths.validation_registry_path) or {}
+                validation_lab_report = run_validation_lab(
+                    context_dir=config.paths.context_dir,
+                    validation_registry=validation_registry,
+                    candidate_registry_path=campaign_registry_file,
+                    campaign_state=campaign_state,
+                    mode=validation_lab_mode,
+                )
+                validation_registry = (
+                    validation_lab_report.get("registry")
+                    if isinstance(validation_lab_report.get("registry"), dict)
+                    else validation_registry
+                )
+                if isinstance(validation_registry, dict):
+                    campaign_state["active_validation_profile"] = validation_registry.get("active_profile")
+                portfolio_plan = build_candidate_portfolio_plan(
+                    iter_dir=iter_dir,
+                    registry_path=campaign_registry_file,
+                    method_registry=method_registry,
+                    validation_registry=validation_registry,
+                    campaign_state=campaign_state,
+                    run_id=run_id,
+                    iteration=iteration,
+                    direction=metric_direction,
+                )
+                blend_report = build_blend_report(
+                    iter_dir=iter_dir,
+                    registry_path=campaign_registry_file,
+                    campaign_state=campaign_state,
+                    validation_registry=validation_registry,
+                    direction=metric_direction,
+                )
+                experiment_graph = build_experiment_graph(
+                    context_dir=config.paths.context_dir,
+                    iter_dir=iter_dir,
+                    run_id=run_id,
+                    iteration=iteration,
+                    portfolio_execution=portfolio_execution,
+                    portfolio_plan=portfolio_plan,
+                    reference_report=reference_reproduction_report,
+                    blend_report=blend_report,
+                    validation_registry=validation_registry,
+                    method_registry=method_registry,
+                    campaign_state=campaign_state,
+                )
+                if portfolio_execution != "off":
+                    graph_execution = execute_experiment_graph(
+                        graph=experiment_graph,
+                        context=RunContext(
+                            competition=config.competition_url or config.slug,
+                            slug=config.slug,
+                            run_id=run_id,
+                            paths=config.paths,
+                            workdir=config.paths.repo_root,
+                            dry_run=config.dry_run,
+                            force=False,
+                            force_submit=config.force_submit,
+                            message=config.message or f"kagglebot campaign {run_id}",
+                            time_budget_minutes=int(config.time_budget_min or 60),
+                            cv_folds=max(2, int(cv_folds)),
+                            model_names=None,
+                            use_stacking=False,
+                            compute=config.compute,
+                            accelerator=accelerator_used,
+                            enable_internet=str(config.internet or "off").lower() == "on",
+                            kaggle_username=config.kaggle_username,
+                            strict_accelerator=config.strict_accelerator,
+                            candidate_budget_minutes=config.candidate_budget_min,
+                            max_candidates_per_iteration=config.max_candidates_per_iteration,
+                        ),
+                        runner=LocalKernelRunner(),
+                        iter_dir=iter_dir,
+                    )
+                    graph_execution_report = graph_execution.to_payload()
+                    experiment_graph = _load_json_object(iter_dir / "experiment_graph.json") or experiment_graph
+                private_robustness_report = build_private_robustness_report(
+                    context_dir=config.paths.context_dir,
+                    registry_path=campaign_registry_file,
+                    campaign_state=campaign_state,
+                    validation_lab_report=validation_lab_report,
+                    direction=metric_direction,
+                )
+                portfolio_optimizer_report = build_portfolio_optimizer_report(
+                    iter_dir=iter_dir,
+                    registry_path=campaign_registry_file,
+                    campaign_state=campaign_state,
+                    validation_registry=validation_registry,
+                    private_robustness_report=private_robustness_report,
+                    remaining_daily_slots=remaining_daily_slots,
+                    submit_policy=top1_submit_policy,
+                    direction=metric_direction,
+                )
+                source_registry = _load_json_object(config.paths.source_registry_path) or source_registry
+                top1_exhaustion_report = build_top1_exhaustion_report(
+                    context_dir=config.paths.context_dir,
+                    run_id=run_id,
+                    iteration=iteration,
+                    campaign_state=campaign_state,
+                    win_contract=win_contract,
+                    method_registry=method_registry,
+                    source_registry=source_registry,
+                    validation_lab_report=validation_lab_report,
+                    private_robustness_report=private_robustness_report,
+                    portfolio_optimizer_report=portfolio_optimizer_report,
+                    experiment_graph=experiment_graph,
+                )
             forced_submit_reason: str | None = None
             if (
                 submit_enabled
@@ -1729,11 +2084,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submit_non_improving = False
             defer_submit_for_accuracy_frontier = False
             if submit_improved_only and not config.force_submit and best_submitted_score is None:
-                if submit_enabled and spare_daily_submission_slot and quality_allows_submit:
+                if (
+                    submit_enabled
+                    and quality_allows_submit
+                    and (spare_daily_submission_slot or submission_limit_per_day is None)
+                ):
                     forced_submit_reason = forced_submit_reason or _SPARE_DAILY_SUBMIT_REASON
+                    slot_reason = (
+                        "spare daily submission slots remain"
+                        if spare_daily_submission_slot
+                        else "no numeric daily submission limit is known"
+                    )
                     print(
-                        "[yellow]submit override[/yellow]: spare daily submission slots remain; "
-                        "allowing submit without a prior submitted checkpoint."
+                        f"[yellow]submit override[/yellow]: {slot_reason}; allowing submit without a prior "
+                        "submitted checkpoint."
                     )
                 else:
                     submit_improvement_allowed = False
@@ -1849,6 +2213,22 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
                             "is active because daily limit is lower than max iterations."
                         )
+            if force_initial_submit and not quality_allows_submit and not config.force_submit:
+                if _quality_reasons_allow_initial_submit_probe(quality_reasons):
+                    quality_allows_submit = True
+                    print(
+                        "[yellow]submit override[/yellow]: iter 1 only failed a soft baseline guard; "
+                        "submitting the trained/validated artifact to probe the Kaggle contract."
+                    )
+                else:
+                    force_initial_submit = False
+                    forced_submit_reason = None
+                    allow_submit = False
+                    print(
+                        "[yellow]submit override skipped[/yellow]: "
+                        "iter 1 artifact failed training/validation quality guard; "
+                        "not probing with an untrusted output."
+                    )
             if force_initial_submit:
                 forced_submit_reason = _FORCED_INITIAL_SUBMIT_REASON
                 allow_submit = True
@@ -1856,6 +2236,38 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 defer_submit_for_accuracy_frontier = False
                 submit_limited_holdback = False
                 print("[yellow]submit override[/yellow]: forcing iter 1 submit to probe Kaggle submission contract.")
+            if campaign_mode == "top1" and campaign_candidate is not None:
+                campaign_allocation = allocate_submission(
+                    candidate=campaign_candidate,
+                    campaign_state=campaign_state,
+                    remaining_daily_slots=remaining_daily_slots,
+                    novelty=0.6 if campaign_candidate.category in {"blend", "validation_variant"} else 0.4,
+                    calibration_exception=campaign_candidate.category == "calibration",
+                    force=config.force_submit or force_initial_submit,
+                )
+                if not campaign_allocation.allow_submit and not config.force_submit:
+                    allow_submit = False
+                    submit_non_improving = False
+                    defer_submit_for_accuracy_frontier = False
+                    submit_limited_holdback = False
+                    print(f"[yellow]campaign submit deferred[/yellow]: {campaign_allocation.reason}.")
+                allocator_decision = write_allocator_decision(
+                    iter_dir=iter_dir,
+                    candidate=campaign_candidate,
+                    allocation=campaign_allocation,
+                    campaign_state=campaign_state,
+                    experiment_graph=experiment_graph,
+                )
+                append_campaign_outcome(
+                    context_dir=config.paths.context_dir,
+                    run_id=run_id,
+                    iteration=iteration,
+                    phase="pre_submit",
+                    candidate=campaign_candidate,
+                    allocation=campaign_allocation,
+                    campaign_state=campaign_state,
+                    experiment_graph=experiment_graph,
+                )
             if daily_submission_limit_reached:
                 forced_submit_reason = None
                 allow_submit = False
@@ -1919,6 +2331,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             pre_submit_metrics_payload["checkpoint_phase"] = "pre_submit"
             pre_submit_metrics_payload["quality_guard"] = quality_guard
             pre_submit_metrics_payload["forced_submit_reason"] = forced_submit_reason or ""
+            if campaign_mode == "top1":
+                pre_submit_metrics_payload["campaign"] = {
+                    "state_path": str(campaign_state_file),
+                    "registry_path": str(campaign_registry_file),
+                    "state": campaign_state,
+                    "candidate": campaign_candidate.to_payload() if campaign_candidate is not None else None,
+                    "allocation": campaign_allocation.to_payload() if campaign_allocation is not None else None,
+                    "reference_reproduction_report": reference_reproduction_report,
+                    "portfolio_plan": portfolio_plan,
+                    "blend_report": blend_report,
+                    "validation_lab_report": validation_lab_report,
+                    "win_contract": win_contract,
+                    "private_robustness_report": private_robustness_report,
+                    "portfolio_optimizer_report": portfolio_optimizer_report,
+                    "top1_exhaustion_report": top1_exhaustion_report,
+                    "experiment_graph": experiment_graph,
+                    "allocator_decision": allocator_decision,
+                    "graph_execution_report": graph_execution_report,
+                }
             metrics_path.write_text(json.dumps(pre_submit_metrics_payload, indent=2), encoding="utf-8")
             _write_iteration_state_marker(
                 iter_dir=iter_dir,
@@ -1950,7 +2381,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             elif submit_limited_holdback:
                 submit_phase_state = "deferred_for_final_slot"
             else:
-                submit_phase_state = "disabled"
+                submit_phase_state = pre_submit_phase_state if submit_enabled else "disabled"
             if submit_enabled and allow_submit and submission_phase is not None:
                 try:
                     submission_result = submission_phase.attempt(
@@ -2236,6 +2667,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             metrics_payload["forced_submit_reason"] = forced_submit_reason or ""
             if isinstance(online_score, (int, float)):
                 metrics_payload["submission_score"] = float(online_score)
+            if campaign_mode == "top1":
+                metrics_payload["campaign"] = {
+                    "state_path": str(campaign_state_file),
+                    "registry_path": str(campaign_registry_file),
+                    "state": campaign_state,
+                    "candidate": campaign_candidate.to_payload() if campaign_candidate is not None else None,
+                    "allocation": campaign_allocation.to_payload() if campaign_allocation is not None else None,
+                    "reference_reproduction_report": reference_reproduction_report,
+                    "portfolio_plan": portfolio_plan,
+                    "blend_report": blend_report,
+                    "validation_lab_report": validation_lab_report,
+                    "win_contract": win_contract,
+                    "private_robustness_report": private_robustness_report,
+                    "portfolio_optimizer_report": portfolio_optimizer_report,
+                    "top1_exhaustion_report": top1_exhaustion_report,
+                    "experiment_graph": experiment_graph,
+                    "allocator_decision": allocator_decision,
+                    "graph_execution_report": graph_execution_report,
+                }
             if best_score_guard is not None:
                 metrics_payload["best_score_guard"] = best_score_guard
             metrics_payload["quality_guard"] = quality_guard
@@ -2307,6 +2757,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 current_online=online_score,
                 direction=metric_direction,
             )
+            online_history_regression_signal = _detect_online_regression_vs_submission_history(
+                previous_best_online=best_online_submission_score,
+                current_online=online_score,
+                direction=metric_direction,
+                history=previous_submission_history,
+            )
             if isinstance(online_score, (int, float)) and _update_best_score(
                 best_online_submission_score,
                 float(online_score),
@@ -2314,10 +2770,45 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 0.0,
             ):
                 best_online_submission_score = float(online_score)
+            if campaign_mode == "top1" and campaign_candidate is not None:
+                if submission_result is not None and not submission_skipped:
+                    campaign_candidate = replace(
+                        campaign_candidate,
+                        submitted=True,
+                        public_score=float(online_score) if isinstance(online_score, (int, float)) else None,
+                    )
+                    upsert_candidate(campaign_registry_file, campaign_candidate)
+                campaign_state = update_campaign_state(
+                    state_path=campaign_state_file,
+                    registry_path=campaign_registry_file,
+                    slug=config.slug,
+                    run_id=run_id,
+                    mode=campaign_mode,
+                    direction=metric_direction,
+                    top1_info=top1_info if isinstance(top1_info, dict) else {},
+                    submission_history=previous_submission_history,
+                    latest_public_score=online_score,
+                    remaining_daily_slots=remaining_daily_slots,
+                    method_registry=method_registry,
+                )
+                campaign_outcome_phase = (
+                    "post_submit" if submission_result is not None and not submission_skipped else "post_iteration"
+                )
+                append_campaign_outcome(
+                    context_dir=config.paths.context_dir,
+                    run_id=run_id,
+                    iteration=iteration,
+                    phase=campaign_outcome_phase,
+                    candidate=campaign_candidate,
+                    allocation=campaign_allocation,
+                    campaign_state=campaign_state,
+                    experiment_graph=experiment_graph,
+                )
 
             extra_policy_notes: list[str] = []
             minimum_improvement_mode_next = medal_minimum_improvement_mode
             minimum_improvement_reason_next = medal_policy_reason
+            forced_validation_redesign_reason: str | None = None
             loop_signal_errors: list[dict[str, object]] = []
             loop_signal_problems: list[dict[str, object]] = []
             if orig_proba_signal is not None:
@@ -2444,12 +2935,19 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             if online_mismatch_signal is not None:
                 extra_policy_notes.append(str(online_mismatch_signal["note"]))
-                force_major_overhaul_next = True
-                forced_major_overhaul_reason = (
-                    f"{forced_major_overhaul_reason} {online_mismatch_signal['note']}".strip()
-                    if forced_major_overhaul_reason
-                    else str(online_mismatch_signal["note"])
-                )
+                if campaign_mode == "top1" and _campaign_prefers_validation_redesign(campaign_state, method_registry):
+                    minimum_improvement_mode_next = _upgrade_improvement_mode(
+                        minimum_improvement_mode_next or "minor_tuning",
+                        "validation_redesign",
+                    )
+                    forced_validation_redesign_reason = str(online_mismatch_signal["note"])
+                else:
+                    force_major_overhaul_next = True
+                    forced_major_overhaul_reason = (
+                        f"{forced_major_overhaul_reason} {online_mismatch_signal['note']}".strip()
+                        if forced_major_overhaul_reason
+                        else str(online_mismatch_signal["note"])
+                    )
                 loop_signal_problems.append(
                     {
                         "iteration": iteration,
@@ -2457,6 +2955,33 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "how_improved": (
                             "Ban same-family-only tuning after an online mismatch and require model-family "
                             "diversification plus OOF blending."
+                        ),
+                        "delta_offline": None,
+                        "outcome_bucket": "low",
+                    }
+                )
+            if online_history_regression_signal is not None:
+                extra_policy_notes.append(str(online_history_regression_signal["note"]))
+                if campaign_mode == "top1" and _campaign_prefers_validation_redesign(campaign_state, method_registry):
+                    minimum_improvement_mode_next = _upgrade_improvement_mode(
+                        minimum_improvement_mode_next or "minor_tuning",
+                        "validation_redesign",
+                    )
+                    forced_validation_redesign_reason = str(online_history_regression_signal["note"])
+                else:
+                    force_major_overhaul_next = True
+                    forced_major_overhaul_reason = (
+                        f"{forced_major_overhaul_reason} {online_history_regression_signal['note']}".strip()
+                        if forced_major_overhaul_reason
+                        else str(online_history_regression_signal["note"])
+                    )
+                loop_signal_problems.append(
+                    {
+                        "iteration": iteration,
+                        "why_poor": forced_major_overhaul_reason or str(online_history_regression_signal["note"]),
+                        "how_improved": (
+                            "Use the best historical public-score submission as the baseline and require a different "
+                            "model/feature/blend path before submitting another regressed artifact."
                         ),
                         "delta_offline": None,
                         "outcome_bucket": "low",
@@ -2471,12 +2996,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "same_family_plateau": same_family_plateau_signal,
                     "subgroup_collapse": subgroup_collapse_signal,
                     "online_mismatch": online_mismatch_signal,
+                    "online_history_regression": online_history_regression_signal,
                 }
+            metrics_payload["previous_submission_history"] = previous_submission_history
             metrics_payload["next_iteration_policy"] = {
                 "minimum_improvement_mode": minimum_improvement_mode_next,
                 "minimum_improvement_reason": minimum_improvement_reason_next,
-                "forced_improvement_mode": "major_overhaul" if force_major_overhaul_next else None,
-                "forced_improvement_reason": forced_major_overhaul_reason,
+                "forced_improvement_mode": (
+                    "validation_redesign"
+                    if forced_validation_redesign_reason and not force_major_overhaul_next
+                    else "major_overhaul"
+                    if force_major_overhaul_next
+                    else None
+                ),
+                "forced_improvement_reason": forced_major_overhaul_reason or forced_validation_redesign_reason,
                 "extra_policy_notes": extra_policy_notes,
             }
             metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
@@ -2691,12 +3224,19 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 minimum_improvement_reason=minimum_improvement_reason_next,
                 target_medal=target_medal,
                 target_rank_percentile=target_rank_percentile,
-                forced_improvement_mode="major_overhaul" if force_major_overhaul_next else None,
-                forced_improvement_reason=forced_major_overhaul_reason,
+                forced_improvement_mode=(
+                    "validation_redesign"
+                    if forced_validation_redesign_reason and not force_major_overhaul_next
+                    else "major_overhaul"
+                    if force_major_overhaul_next
+                    else None
+                ),
+                forced_improvement_reason=forced_major_overhaul_reason or forced_validation_redesign_reason,
                 extra_policy_notes=extra_policy_notes,
                 enforce_code_reference_implementation=code_reference_forced_reproduction,
                 code_reference_enforcement_reason=code_reference_force_reason,
                 best_score_so_far=best_score,
+                previous_submission_history=previous_submission_history,
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
@@ -3050,7 +3590,7 @@ def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
                 existing = loaded
         except json.JSONDecodeError:
             existing = {}
-    payload = {**existing, **plan.to_dict()}
+    payload = _apply_plan_guardrails(paths, {**existing, **plan.to_dict()})
     paths.plan_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -3077,40 +3617,44 @@ def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
 def _extract_submission_limit_per_day(lowered_rules_text: str) -> int | None:
     """Extract an explicit daily or rolling-24h submission limit from rules text."""
     candidates: list[int] = []
+    normalized_rules_text = re.sub(r"[*_`]+", " ", lowered_rules_text)
+    normalized_rules_text = re.sub(r"\s+", " ", normalized_rules_text)
 
-    for match in re.finditer(r"\((\d+)\)\s+submissions?\s+per\s+day", lowered_rules_text):
+    for match in re.finditer(r"\((\d+)\)\W+submissions?\s+per\s+day", normalized_rules_text):
         candidates.append(int(match.group(1)))
 
     numeric_patterns = (
         r"\b(\d+)\s+submissions?\s+per\s+day\b",
+        r"\bmaximum\s+of\s+(\d+)\s+submissions?\s+per\s+day\b",
         r"\b(\d+)\s+submissions?\s+within\s+24\s+hours?\b",
         r"\b(\d+)\s+submissions?\s+per\s+24\s*h(?:ours?)?\s*(?:interval|window)?\b",
         r"\b(\d+)\s+submissions?\s+per\s+24\s+hours?\s*(?:interval|window)?\b",
     )
     for pattern in numeric_patterns:
-        for match in re.finditer(pattern, lowered_rules_text):
+        for match in re.finditer(pattern, normalized_rules_text):
             candidates.append(int(match.group(1)))
 
     word_patterns = (
-        r"\b([a-z]+)\s+submissions?\s+per\s+day\b",
+        r"\b([a-z]+)(?:\s+\(\d+\))?\s+submissions?\s+per\s+day\b",
+        r"\bmaximum\s+of\s+([a-z]+)(?:\s+\(\d+\))?\s+submissions?\s+per\s+day\b",
         r"\b([a-z]+)\s+submissions?\s+within\s+24\s+hours?\b",
         r"\b([a-z]+)\s+submissions?\s+per\s+24\s*h(?:ours?)?\s*(?:interval|window)?\b",
         r"\b([a-z]+)\s+submissions?\s+per\s+24\s+hours?\s*(?:interval|window)?\b",
     )
     for pattern in word_patterns:
-        for match in re.finditer(pattern, lowered_rules_text):
+        for match in re.finditer(pattern, normalized_rules_text):
             number_word = match.group(1)
             if number_word in _NUMBER_WORD_TO_INT:
                 candidates.append(_NUMBER_WORD_TO_INT[number_word])
 
     for match in re.finditer(
-        r"submission\s+limit\s+is\s+(\d+)\s+submissions?\s+within\s+24\s+hours?", lowered_rules_text
+        r"submission\s+limit\s+is\s+(\d+)\s+submissions?\s+within\s+24\s+hours?", normalized_rules_text
     ):
         candidates.append(int(match.group(1)))
 
     for match in re.finditer(
         r"submission\s+limit\s+is\s+([a-z]+)\s+submissions?\s+within\s+24\s+hours?",
-        lowered_rules_text,
+        normalized_rules_text,
     ):
         number_word = match.group(1)
         if number_word in _NUMBER_WORD_TO_INT:
@@ -3139,7 +3683,10 @@ def _load_competition_rule_constraints(paths: CompetitionPaths) -> _CompetitionR
     notebook_submissions_only = _matches_any_rule_pattern(lowered, _NOTEBOOK_SUBMISSION_ONLY_RULE_PATTERNS)
     internet_must_be_off = _matches_any_rule_pattern(lowered, _INTERNET_DISABLED_RULE_PATTERNS)
     submission_limit_per_day = _extract_submission_limit_per_day(lowered)
-    submission_limit_detected = bool(
+    unrestricted_submission_attempts = submission_limit_per_day is None and _matches_any_rule_pattern(
+        lowered, _UNRESTRICTED_SUBMISSION_ATTEMPT_PATTERNS
+    )
+    submission_limit_detected = (not unrestricted_submission_attempts) and bool(
         re.search(r"maximum\s+number\s+of\s+submissions", lowered)
         or re.search(r"submission\s+limit", lowered)
         or re.search(r"\bmax(?:imum)?\s+submissions?\b", lowered)
@@ -3192,15 +3739,17 @@ def _is_heavy_deep_learning_modality(modality: object) -> bool:
     return str(modality or "").strip().lower() in _HEAVY_DEEP_LEARNING_MODALITIES
 
 
-def _default_local_gpu_time_budget_min() -> int:
+def _local_gpu_time_budget_limit_min() -> int | None:
     raw = os.environ.get("KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN")
     if raw is None or not raw.strip():
-        return _DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN
+        return None
     try:
         parsed = int(float(raw.strip()))
     except ValueError:
-        return _DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN
-    return max(60, min(parsed, _MAX_LOCAL_GPU_TIME_BUDGET_MIN))
+        return None
+    if parsed <= 0:
+        return None
+    return max(60, parsed)
 
 
 def _resolve_notebook_submit_artifact_mode(*, paths: CompetitionPaths, submit_mode: str) -> str:
@@ -3470,13 +4019,13 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             )
             time_budget_min = runtime_limit_min
     if _is_local_gpu_compute(config.compute):
-        local_budget_min = _default_local_gpu_time_budget_min()
+        local_budget_min = _local_gpu_time_budget_limit_min()
         current_limit = int(time_budget_min) if isinstance(time_budget_min, (int, float)) else None
-        if current_limit is None or current_limit > local_budget_min:
+        if local_budget_min is not None and (current_limit is None or current_limit > local_budget_min):
             print(
-                "[yellow]note[/yellow]: local_gpu per-kernel budget cap active; "
+                "[yellow]note[/yellow]: local_gpu per-kernel budget limit active; "
                 f"forcing time_budget_min={local_budget_min}. "
-                "Set KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN to override within the 23h hard cap."
+                "Unset KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN or set it to 0 for unlimited local runtime."
             )
             time_budget_min = local_budget_min
     if config.max_iterations is None:
@@ -3492,6 +4041,17 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
                 )
     else:
         max_iterations = max(1, int(config.max_iterations))
+    if (
+        heavy_local_gpu
+        and (time_budget_min is None or time_budget_min >= _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN)
+        and max_iterations > _LONG_LOCAL_GPU_MAX_ITERATIONS
+    ):
+        print(
+            "[yellow]note[/yellow]: heavy long-running local_gpu plan detected; "
+            f"capping max_iterations from {max_iterations} to {_LONG_LOCAL_GPU_MAX_ITERATIONS} "
+            "so accuracy-first iterations can run deeper."
+        )
+        max_iterations = _LONG_LOCAL_GPU_MAX_ITERATIONS
     max_total_min = choose(config.max_total_min, plan.max_total_min, None)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
@@ -3699,6 +4259,16 @@ def _build_run_payload(
             "notebook_submit_artifact_mode": resolved.get("notebook_submit_artifact_mode"),
             "target_medal": resolved.get("target_medal"),
             "target_rank_percentile": resolved.get("target_rank_percentile"),
+            "campaign_mode": resolved.get("campaign_mode"),
+            "method_scout": config.method_scout,
+            "research_scout": resolved.get("research_scout"),
+            "method_scout_max_sources": config.method_scout_max_sources,
+            "validation_lab": resolved.get("validation_lab"),
+            "portfolio_execution": resolved.get("portfolio_execution"),
+            "candidate_budget_min": config.candidate_budget_min,
+            "max_candidates_per_iteration": config.max_candidates_per_iteration,
+            "top1_exhaustive": resolved.get("top1_exhaustive"),
+            "top1_submit_policy": resolved.get("top1_submit_policy"),
             "kaggle_username": config.kaggle_username,
             "kernel_name": resolved.get("kernel_name"),
             "internet": resolved.get("internet"),
@@ -3829,7 +4399,7 @@ def _normalize_target_rank_percentile(
 
 
 def _improvement_mode_rank(mode: str) -> int:
-    return {"minor_tuning": 0, "moderate_update": 1, "major_overhaul": 2}.get(mode, 0)
+    return {"minor_tuning": 0, "moderate_update": 1, "major_overhaul": 2, "validation_redesign": 3}.get(mode, 0)
 
 
 def _upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> str:
@@ -4239,6 +4809,7 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         "gpt_planning",
         detail=planning_flow_summary(),
     )
+    planning_campaign_mode = normalize_campaign_mode(config.campaign_mode, deliverable_mode="leaderboard")
     pipeline_config = AgentPipelineConfig(
         slug=config.slug,
         competition_url=config.competition_url,
@@ -4248,6 +4819,10 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         run_id=run_id,
         dry_run=config.dry_run,
         repo_root=config.paths.repo_root,
+        method_scout=_effective_method_scout_mode(config=config, campaign_mode=planning_campaign_mode),
+        method_scout_max_sources=int(config.method_scout_max_sources or 12),
+        hardware_profile=config.hardware_profile,
+        time_budget_min=config.time_budget_min,
     )
     run_agent_pipeline(paths=config.paths, config=pipeline_config)
     _update_watch_phase(config, run_id, "verifying", detail="Verifying the generated plan and kernel scaffold.")
@@ -4280,6 +4855,13 @@ def _print_agent_response(response_path: Path, response_text: str) -> None:
     print(f"[cyan]{IMPLEMENTATION_AGENT.log_alias} response[/cyan]: {response_path}")
     builtins.print(response_text)
     builtins.print("")
+
+
+def _effective_method_scout_mode(*, config: AutopilotConfig, campaign_mode: str) -> str:
+    requested = normalize_method_scout_mode(config.method_scout)
+    if campaign_mode != "top1" and requested == "auto":
+        return "off"
+    return requested
 
 
 def _tail_for_prompt(text: str, *, max_chars: int = 6000) -> str:
@@ -4353,6 +4935,15 @@ def _load_json_object(path: Path) -> dict[str, object] | None:
     return payload
 
 
+def _finite_float_or_none(value: object) -> float | None:
+    parsed = _to_float(value)
+    if parsed is None:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return float(parsed)
+
+
 def _evaluation_from_kernel_metrics_payload(
     payload: dict[str, object],
     *,
@@ -4378,7 +4969,7 @@ def _evaluation_from_kernel_metrics_payload(
         std = payload.get("std")
     if std is None:
         std = payload.get("selected_cv_std")
-    std_value = float(std) if isinstance(std, (int, float)) else None
+    std_value = _finite_float_or_none(std)
 
     fold_scores_raw = payload.get("fold_scores")
     fold_scores: list[float] | None = None
@@ -5471,6 +6062,210 @@ def _detect_external_test_label_transfer_signal(payload: dict[str, object] | Non
     }
 
 
+def _pipeline_name_from_payload(pipeline: dict[str, object]) -> str | None:
+    for key in ("name", "pipeline", "pipeline_name", "method", "model_name"):
+        value = pipeline.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _extract_selected_pipeline_name(payload: dict[str, object]) -> str | None:
+    selected = payload.get("selected")
+    if isinstance(selected, dict):
+        name = _pipeline_name_from_payload(selected)
+        if name:
+            return name
+    for key in (
+        "chosen_pipeline",
+        "selected_pipeline",
+        "selected_method",
+        "final_pipeline",
+        "final_method",
+        "best_pipeline",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _extract_pipeline_candidates(payload: dict[str, object]) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for key in ("pipelines", "candidates", "leaderboard", "models"):
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                candidates.append(item)
+    return candidates
+
+
+def _pipeline_float(pipeline: dict[str, object], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        parsed = _to_float(pipeline.get(key))
+        if parsed is not None and math.isfinite(parsed):
+            return float(parsed)
+    return None
+
+
+def _find_selected_pipeline(
+    *,
+    payload: dict[str, object],
+    candidates: list[dict[str, object]],
+) -> dict[str, object] | None:
+    selected_name = _extract_selected_pipeline_name(payload)
+    if selected_name:
+        selected_norm = selected_name.strip().lower()
+        for candidate in candidates:
+            name = _pipeline_name_from_payload(candidate)
+            if name and name.strip().lower() == selected_norm:
+                return candidate
+    selected = payload.get("selected")
+    if isinstance(selected, dict):
+        return selected
+    return None
+
+
+def _detect_candidate_selection_mismatch(
+    *,
+    payload: dict[str, object] | None,
+    direction: str,
+) -> dict[str, object] | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    candidates = _extract_pipeline_candidates(payload)
+    if len(candidates) < 2:
+        return None
+    selected = _find_selected_pipeline(payload=payload, candidates=candidates)
+    if selected is None:
+        return None
+
+    secondary_keys = (
+        "holdout_score",
+        "holdout_value",
+        "holdout_f1",
+        "val_score",
+        "validation_score",
+        "val_f1",
+        "secondary_score",
+    )
+    selected_secondary = _pipeline_float(selected, secondary_keys)
+    if selected_secondary is None:
+        return None
+
+    scored_candidates = [
+        (candidate, score)
+        for candidate in candidates
+        if (score := _pipeline_float(candidate, secondary_keys)) is not None
+    ]
+    if len(scored_candidates) < 2:
+        return None
+    best_candidate, best_secondary = (
+        min(scored_candidates, key=lambda item: item[1])
+        if direction == "minimize"
+        else max(scored_candidates, key=lambda item: item[1])
+    )
+    if best_candidate is selected:
+        return None
+    if not _is_significantly_worse(
+        current=float(selected_secondary),
+        reference=float(best_secondary),
+        direction=direction,
+        rel_margin=_QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN,
+        abs_margin=_QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN,
+    ):
+        return None
+
+    selected_primary = _pipeline_float(
+        selected,
+        (
+            "cv_score",
+            "offline_value",
+            "value",
+            "score",
+            "oof_score",
+            "oof_f1",
+            "mean_cv",
+        ),
+    )
+    best_primary = _pipeline_float(
+        best_candidate,
+        (
+            "cv_score",
+            "offline_value",
+            "value",
+            "score",
+            "oof_score",
+            "oof_f1",
+            "mean_cv",
+        ),
+    )
+    return {
+        "selected": _pipeline_name_from_payload(selected) or _extract_selected_pipeline_name(payload) or "unknown",
+        "selected_secondary_score": float(selected_secondary),
+        "selected_primary_score": selected_primary,
+        "best_secondary_candidate": _pipeline_name_from_payload(best_candidate) or "unknown",
+        "best_secondary_score": float(best_secondary),
+        "best_secondary_primary_score": best_primary,
+        "direction": direction,
+        "candidate_count": len(scored_candidates),
+    }
+
+
+def _prediction_count_mean(pipeline: dict[str, object]) -> float | None:
+    summary = pipeline.get("prediction_count_summary")
+    if not isinstance(summary, dict):
+        return None
+    for split in ("test", "submission", "val", "holdout"):
+        split_summary = summary.get(split)
+        if isinstance(split_summary, dict):
+            parsed = _to_float(split_summary.get("mean"))
+            if parsed is not None and math.isfinite(parsed):
+                return float(parsed)
+    parsed = _to_float(summary.get("mean"))
+    if parsed is not None and math.isfinite(parsed):
+        return float(parsed)
+    return None
+
+
+def _detect_prediction_distribution_collapse(payload: dict[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    candidates = _extract_pipeline_candidates(payload)
+    if len(candidates) < 2:
+        return None
+    selected = _find_selected_pipeline(payload=payload, candidates=candidates)
+    if selected is None:
+        return None
+    selected_mean = _prediction_count_mean(selected)
+    if selected_mean is None:
+        return None
+    candidate_means = [
+        (_pipeline_name_from_payload(candidate) or "unknown", mean)
+        for candidate in candidates
+        if (mean := _prediction_count_mean(candidate)) is not None
+    ]
+    if len(candidate_means) < 2:
+        return None
+    max_name, max_mean = max(candidate_means, key=lambda item: item[1])
+    if max_mean < 3.0:
+        return None
+    if (
+        selected_mean <= max_mean * _QUALITY_GUARD_PREDICTION_COUNT_RATIO
+        and (max_mean - selected_mean) >= _QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN
+    ):
+        return {
+            "selected": _pipeline_name_from_payload(selected) or _extract_selected_pipeline_name(payload) or "unknown",
+            "selected_test_prediction_mean": float(selected_mean),
+            "largest_mean_candidate": max_name,
+            "largest_test_prediction_mean": float(max_mean),
+            "candidate_count": len(candidate_means),
+        }
+    return None
+
+
 def _build_kernel_quality_guard(
     *,
     evaluation: EvaluationResult,
@@ -5521,6 +6316,33 @@ def _build_kernel_quality_guard(
             f"method={external_label_transfer.get('final_selected_method') or 'unknown'}"
         )
         block_submit = True
+
+    candidate_selection_mismatch = _detect_candidate_selection_mismatch(payload=payload, direction=direction)
+    if candidate_selection_mismatch is not None:
+        reasons.append("selected_pipeline_validation_mismatch")
+        warnings.append(
+            "candidate_selection_mismatch="
+            f"selected={candidate_selection_mismatch.get('selected')},"
+            f"selected_secondary={candidate_selection_mismatch.get('selected_secondary_score')},"
+            f"best_secondary_candidate={candidate_selection_mismatch.get('best_secondary_candidate')},"
+            f"best_secondary={candidate_selection_mismatch.get('best_secondary_score')}"
+        )
+        if not force_submit:
+            block_submit = True
+
+    prediction_distribution_collapse = _detect_prediction_distribution_collapse(payload)
+    if prediction_distribution_collapse is not None:
+        warnings.append(
+            "prediction_distribution_collapse="
+            f"selected={prediction_distribution_collapse.get('selected')},"
+            f"selected_mean={prediction_distribution_collapse.get('selected_test_prediction_mean')},"
+            f"largest_mean_candidate={prediction_distribution_collapse.get('largest_mean_candidate')},"
+            f"largest_mean={prediction_distribution_collapse.get('largest_test_prediction_mean')}"
+        )
+        if candidate_selection_mismatch is not None:
+            reasons.append("prediction_distribution_collapse_vs_candidates")
+            if not force_submit:
+                block_submit = True
 
     competition_faithfulness = _extract_competition_faithfulness(
         evaluation=evaluation,
@@ -5678,6 +6500,8 @@ def _build_kernel_quality_guard(
         },
         "subgroup_collapse": subgroup_collapse_signal,
         "external_label_transfer": external_label_transfer,
+        "candidate_selection_mismatch": candidate_selection_mismatch,
+        "prediction_distribution_collapse": prediction_distribution_collapse,
         "code_reference": {
             "score": code_reference_score,
             "comparison_score": code_reference_comparison_score,
@@ -6200,6 +7024,12 @@ def _quality_reasons_allow_spare_submit(reasons: list[str]) -> bool:
     return all(reason in _SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS for reason in reasons)
 
 
+def _quality_reasons_allow_initial_submit_probe(reasons: list[str]) -> bool:
+    if not reasons:
+        return False
+    return all(reason == "selected_worse_than_detected_baseline" for reason in reasons)
+
+
 def _non_final_submission_checkpoints(*, max_iterations: int, non_final_slots: int) -> set[int]:
     """Spread non-final submit slots across the loop to avoid early budget burn."""
     if max_iterations <= 1 or non_final_slots <= 0:
@@ -6622,6 +7452,7 @@ def _run_improvement(
     enforce_code_reference_implementation: bool = False,
     code_reference_enforcement_reason: str | None = None,
     best_score_so_far: float | None = None,
+    previous_submission_history: dict[str, object] | None = None,
 ) -> None:
     prompt_template = render_prompt_identity(config.paths.codex_improve_template.read_text(encoding="utf-8"))
     agent_dir = iter_dir / "agent"
@@ -6723,13 +7554,25 @@ def _run_improvement(
         base_prompt_text += (
             "\n\nForced improvement mode policy is active.\n"
             f"Reason: {forced_improvement_reason}\n"
-            "Do not propose minor_tuning; make a major_overhaul plan.\n"
+            "Do not propose minor_tuning; follow the forced improvement mode.\n"
         )
+        if forced_improvement_mode == "validation_redesign":
+            base_prompt_text += (
+                "Mode is validation_redesign: first build and compare group/time/leak/proxy split candidates, "
+                "calibrate against previous public outcomes, and only then rank new model-family changes.\n"
+            )
     elif minimum_improvement_reason:
         base_prompt_text += (
             "\n\nMinimum improvement mode policy is active.\n"
             f"Reason: {minimum_improvement_reason}\n"
             "Do not propose minor_tuning while this policy remains active.\n"
+        )
+    if improvement_mode == "validation_redesign":
+        base_prompt_text += (
+            "\n\nValidation redesign campaign policy:\n"
+            "- Treat online regression or low offline-online correlation as a split problem first.\n"
+            "- Create validation_variant candidates for group, time, leak-safe, and proxy/adversarial splits.\n"
+            "- Do not submit another model-only candidate until the active validation profile is justified.\n"
         )
     if target_rank_percentile is not None:
         medal_label = target_medal or "rank"
@@ -6832,6 +7675,12 @@ def _run_improvement(
             "- If suspiciously high CV is detected, keep leak fixes but preserve competitive model strength "
             "instead of defaulting to a weak baseline.\n"
         )
+    history_prompt = _format_previous_submission_history_for_prompt(previous_submission_history)
+    if history_prompt:
+        base_prompt_text += "\n\nPrevious Kaggle Submission Results:\n" + history_prompt + "\n"
+    method_prompt = _format_method_registry_for_prompt(config.paths)
+    if method_prompt:
+        base_prompt_text += "\n\nCompetition-Specific Method Scout:\n" + method_prompt + "\n"
     if extra_policy_notes:
         note_lines = []
         for note in extra_policy_notes:
@@ -6930,6 +7779,7 @@ def _run_improvement(
         )
     base_prompt_text += "\n\n" + "\n".join(code_reference_gate_lines) + "\n"
     problem_type_knowledge = _load_problem_type_knowledge_text(config)
+    hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
     strategy_prompt = _build_improvement_strategy_prompt(
         slug=config.slug,
         run_id=run_id,
@@ -6944,6 +7794,11 @@ def _run_improvement(
         top1_gap=top1_gap,
         delta_offline=delta_offline,
         improvement_mode=improvement_mode,
+        hardware_constraints=render_hardware_constraints(
+            hardware_profile,
+            compute=config.compute,
+            time_budget_min=config.time_budget_min,
+        ),
         codex_prompt=base_prompt_text,
         problem_type_knowledge=problem_type_knowledge,
     )
@@ -7130,6 +7985,7 @@ def _build_improvement_strategy_prompt(
     top1_gap: float | None,
     delta_offline: float | None,
     improvement_mode: str,
+    hardware_constraints: str,
     codex_prompt: str,
     problem_type_knowledge: str,
 ) -> str:
@@ -7150,6 +8006,9 @@ Top1 source: {top1_source}
 Top1 gap: {"unavailable" if top1_gap is None else f"{top1_gap:.6f}"}
 Delta vs previous best: {"unavailable" if delta_offline is None else f"{delta_offline:.6f}"}
 Improvement mode: {improvement_mode}
+
+Hardware execution budget:
+{hardware_constraints}
 
 ## Existing {IMPLEMENTATION_AGENT.display_name} Improvement Prompt Draft
 
@@ -7397,6 +8256,11 @@ def _run_kernel_fix(
             attempt=attempt,
             compute=config.compute,
             accelerator=config.accelerator,
+            hardware_constraints=render_hardware_constraints(
+                resolve_hardware_profile(config.hardware_profile, compute=config.compute),
+                compute=config.compute,
+                time_budget_min=config.time_budget_min,
+            ),
             error_text=error_message,
             codex_prompt=prompt_text,
         )
@@ -7966,6 +8830,11 @@ an ad-hoc repaired copy behind.
         attempt=attempt,
         compute=config.compute,
         accelerator=config.accelerator,
+        hardware_constraints=render_hardware_constraints(
+            resolve_hardware_profile(config.hardware_profile, compute=config.compute),
+            compute=config.compute,
+            time_budget_min=config.time_budget_min,
+        ),
         error_text=error_text,
         codex_prompt=prompt_text,
     )
@@ -8187,6 +9056,7 @@ def _build_error_strategy_prompt(
     attempt: int,
     compute: str,
     accelerator: str,
+    hardware_constraints: str,
     error_text: str,
     codex_prompt: str,
 ) -> str:
@@ -8202,6 +9072,8 @@ Competition: {slug}
 Run ID: {run_id}
 Attempt: {attempt}
 Compute: {compute} ({accelerator})
+Hardware execution budget:
+{hardware_constraints}
 
 ## Error
 
@@ -8945,7 +9817,7 @@ def _attempt_submit(
             submission_ledger_path=config.paths.submission_ledger_path,
             dry_run=config.dry_run,
             force_submit=config.force_submit,
-            bypass_rate_limit=True,
+            bypass_rate_limit=False,
         )
     )
     print(f"[cyan]submit[/cyan]: {config.slug}")
@@ -9573,6 +10445,120 @@ def _submit_kernel_cpu_retry_reason(exc: Exception) -> str:
     if isinstance(exc, KernelCapacityError):
         return "Kaggle GPU capacity is unavailable"
     return "Kaggle notebook push failed under GPU metadata"
+
+
+def _infer_campaign_candidate_category(
+    *,
+    iteration: int,
+    kernel_metrics_payload: dict[str, object] | None,
+    quality_reasons: list[str],
+) -> str:
+    payload = kernel_metrics_payload or {}
+    for key in ("candidate_category", "campaign_category", "strategy_category"):
+        value = str(payload.get(key) or "").strip().lower()
+        if value:
+            return value
+    if "validation" in " ".join(quality_reasons).lower():
+        return "validation_variant"
+    if bool(payload.get("blend")) or bool(payload.get("ensemble")):
+        return "blend"
+    if iteration == 1:
+        return "reference_reproduction"
+    return "strong_single"
+
+
+def _infer_campaign_model_family(
+    model_summary: dict[str, object],
+    kernel_metrics_payload: dict[str, object] | None,
+) -> str | None:
+    for source in (model_summary, kernel_metrics_payload or {}):
+        for key in ("model_family", "family", "model_type", "model_name"):
+            value = source.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def _infer_campaign_feature_set(
+    model_summary: dict[str, object],
+    kernel_metrics_payload: dict[str, object] | None,
+) -> str | None:
+    for source in (model_summary, kernel_metrics_payload or {}):
+        for key in ("feature_set", "features", "feature_version"):
+            value = source.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def _extract_campaign_fold_scores(kernel_metrics_payload: dict[str, object] | None) -> list[float]:
+    payload = kernel_metrics_payload or {}
+    for key in ("fold_scores", "cv_scores", "scores_by_fold"):
+        raw = payload.get(key)
+        if not isinstance(raw, list):
+            continue
+        scores = [_to_float(item) for item in raw]
+        return [float(score) for score in scores if score is not None]
+    return []
+
+
+def _extract_campaign_prediction_correlation(kernel_metrics_payload: dict[str, object] | None) -> dict[str, float]:
+    payload = kernel_metrics_payload or {}
+    raw = payload.get("prediction_correlation")
+    if not isinstance(raw, dict):
+        raw = payload.get("prediction_correlations")
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[str, float] = {}
+    for key, value in raw.items():
+        numeric = _to_float(value)
+        if numeric is not None:
+            parsed[str(key)] = float(numeric)
+    return parsed
+
+
+def _extract_campaign_artifact_path(kernel_metrics_payload: dict[str, object] | None, kind: str) -> Path | None:
+    payload = kernel_metrics_payload or {}
+    if kind == "oof":
+        keys = ("oof_path", "oof_predictions_path", "oof_predictions")
+    else:
+        keys = ("prediction_path", "test_prediction_path", "test_predictions_path", "test_predictions")
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return Path(text)
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, dict):
+        nested = artifacts.get(kind) or artifacts.get(f"{kind}_path")
+        if nested is not None and str(nested).strip():
+            return Path(str(nested).strip())
+    return None
+
+
+def _extract_campaign_method_id(kernel_metrics_payload: dict[str, object] | None) -> str | None:
+    payload = kernel_metrics_payload or {}
+    for key in ("method_id", "active_method_id", "campaign_method_id"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _extract_campaign_validation_profile_id(kernel_metrics_payload: dict[str, object] | None) -> str | None:
+    payload = kernel_metrics_payload or {}
+    for key in ("validation_profile_id", "active_validation_profile", "split_profile_id"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    readiness = payload.get("readiness")
+    if isinstance(readiness, dict):
+        value = readiness.get("validation_profile_id") or readiness.get("split_strategy")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
@@ -10413,9 +11399,7 @@ def _should_force_initial_submit(
     submit_policy: str | None = None,
     submission_limit_per_day: int | None = None,
 ) -> bool:
-    _ = submit_policy
-    if submission_limit_per_day == 1:
-        return False
+    _ = submit_policy, submission_limit_per_day
     return submit_enabled and (not dry_run) and deliverable_mode == "leaderboard" and iteration == 1
 
 
@@ -10552,6 +11536,251 @@ def _wait_for_submission_outcome(
         message=message,
         submitted_at=submitted_at,
     )
+
+
+def _load_previous_submission_history(
+    *,
+    slug: str,
+    paths: CompetitionPaths,
+    direction: str,
+    dry_run: bool,
+) -> dict[str, object]:
+    history_path = paths.context_dir / "submission_history.json"
+    if dry_run and history_path.exists():
+        cached = _load_json_object(history_path)
+        if cached is not None:
+            cached["source"] = str(cached.get("source") or "cache")
+            cached["cache_path"] = str(history_path)
+            return cached
+    if dry_run:
+        return {
+            "source": "dry_run",
+            "fetched_at": datetime.now(UTC).isoformat(),
+            "direction": direction,
+            "count": 0,
+            "scored_count": 0,
+            "best_score": None,
+            "best": None,
+            "latest_score": None,
+            "latest": None,
+            "recent": [],
+            "cache_path": str(history_path),
+        }
+
+    try:
+        rows = list_competition_submissions(slug, dry_run=False)
+    except Exception as exc:  # noqa: BLE001
+        cached = _load_json_object(history_path) if history_path.exists() else None
+        if cached is not None:
+            cached["source"] = str(cached.get("source") or "cache")
+            cached["fetch_error"] = f"{type(exc).__name__}: {exc}"
+            cached["cache_path"] = str(history_path)
+            print(
+                "[yellow]submission history[/yellow]: "
+                f"failed to refresh Kaggle submissions; using cached {history_path}"
+            )
+            return cached
+        print(f"[yellow]submission history[/yellow]: failed to fetch Kaggle submissions: {exc}")
+        return {
+            "source": "fetch_error",
+            "fetch_error": f"{type(exc).__name__}: {exc}",
+            "fetched_at": datetime.now(UTC).isoformat(),
+            "direction": direction,
+            "count": 0,
+            "scored_count": 0,
+            "best_score": None,
+            "best": None,
+            "latest_score": None,
+            "latest": None,
+            "recent": [],
+            "cache_path": str(history_path),
+        }
+
+    payload = _build_previous_submission_history_payload(
+        rows=rows,
+        direction=direction,
+        source="kaggle competitions submissions --csv",
+    )
+    payload["cache_path"] = str(history_path)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    return payload
+
+
+def _build_previous_submission_history_payload(
+    *,
+    rows: list[dict[str, str]],
+    direction: str,
+    source: str,
+) -> dict[str, object]:
+    entries = [_submission_history_entry(row) for row in rows]
+    entries = [entry for entry in entries if entry is not None]
+
+    scored_entries = [entry for entry in entries if _to_float(entry.get("score")) is not None]
+    best_entry: dict[str, object] | None = None
+    for entry in scored_entries:
+        score = _to_float(entry.get("score"))
+        best_score = _to_float(best_entry.get("score")) if best_entry is not None else None
+        if score is not None and _update_best_score(best_score, score, direction, 0.0):
+            best_entry = entry
+
+    def sort_key(entry: dict[str, object]) -> tuple[int, str]:
+        submitted_at = str(entry.get("submitted_at") or "")
+        return (1 if submitted_at else 0, submitted_at)
+
+    recent_scored = sorted(scored_entries, key=sort_key, reverse=True)
+    latest_entry = recent_scored[0] if recent_scored else (entries[0] if entries else None)
+
+    return {
+        "source": source,
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "direction": direction,
+        "count": len(rows),
+        "scored_count": len(scored_entries),
+        "best_score": _to_float(best_entry.get("score")) if best_entry is not None else None,
+        "best": best_entry,
+        "latest_score": _to_float(latest_entry.get("score")) if latest_entry is not None else None,
+        "latest": latest_entry,
+        "recent": recent_scored[:10],
+    }
+
+
+def _submission_history_entry(row: dict[str, str]) -> dict[str, object] | None:
+    if not row:
+        return None
+    score = SubmissionOutcomeService._extract_submission_score(row)
+    status = SubmissionOutcomeService._extract_submission_status(row)
+    submitted_at = SubmissionOutcomeService._parse_submission_row_time(row)
+    rank, total_teams = SubmissionOutcomeService._extract_submission_rank(row)
+    description = None
+    for key in ("description", "message", "comments", "comment"):
+        value = SubmissionOutcomeService._get_row_value_ci(row, key)
+        if value and value.strip():
+            description = value.strip()
+            break
+    label = None
+    for key in ("fileName", "file_name", "ref", "name", "title"):
+        value = SubmissionOutcomeService._get_row_value_ci(row, key)
+        if value and value.strip():
+            label = value.strip()
+            break
+
+    entry: dict[str, object] = {
+        "score": score,
+        "status": status,
+    }
+    if submitted_at is not None:
+        entry["submitted_at"] = submitted_at.isoformat()
+    if description:
+        entry["description"] = description
+    if label:
+        entry["label"] = label
+    if rank is not None:
+        entry["rank"] = rank
+    if total_teams is not None:
+        entry["total_teams"] = total_teams
+    if rank is not None and total_teams is not None and total_teams > 0:
+        entry["rank_percentile"] = rank / total_teams
+    return entry
+
+
+def _detect_online_regression_vs_submission_history(
+    *,
+    previous_best_online: float | None,
+    current_online: float | None,
+    direction: str,
+    history: dict[str, object] | None,
+) -> dict[str, object] | None:
+    historical_best = _to_float((history or {}).get("best_score"))
+    baseline = historical_best if historical_best is not None else previous_best_online
+    current = _to_float(current_online)
+    if baseline is None or current is None:
+        return None
+    if _update_best_score(baseline, current, direction, 0.0):
+        return None
+    best_entry = (history or {}).get("best")
+    return {
+        "previous_best_online": baseline,
+        "current_online": current,
+        "direction": direction,
+        "best": best_entry if isinstance(best_entry, dict) else None,
+        "note": (
+            "Current public leaderboard score is worse than the best historical Kaggle submission "
+            f"(current={current:.6f}, historical_best={baseline:.6f}, direction={direction}). "
+            "Treat the historical submission as the public baseline and require a materially different "
+            "model/feature/blend strategy before the next submission."
+        ),
+    }
+
+
+def _format_previous_submission_history_for_prompt(history: dict[str, object] | None) -> str:
+    if not history:
+        return ""
+    best_score = _to_float(history.get("best_score"))
+    recent = history.get("recent")
+    if best_score is None and not isinstance(recent, list):
+        return ""
+    lines = [
+        "- Always use these Kaggle public submission results as the online baseline for this competition.",
+    ]
+    if best_score is not None:
+        direction = history.get("direction") or "auto"
+        lines.append(f"- Best historical public score: {best_score:.6f} (direction={direction}).")
+        lines.append("- Do not call a new iteration improved unless its public score beats this historical baseline.")
+    best = history.get("best")
+    if isinstance(best, dict):
+        best_desc = str(best.get("description") or best.get("label") or "").strip()
+        if best_desc:
+            lines.append(f"- Best submission: {best_desc}")
+    if isinstance(recent, list) and recent:
+        lines.append("- Recent scored submissions:")
+        for item in recent[:5]:
+            if not isinstance(item, dict):
+                continue
+            score = _to_float(item.get("score"))
+            if score is None:
+                continue
+            submitted = str(item.get("submitted_at") or "unknown_time")
+            desc = str(item.get("description") or item.get("label") or "").strip()
+            suffix = f" {desc}" if desc else ""
+            lines.append(f"  - {submitted}: public={score:.6f}{suffix}")
+    lines.append(
+        "- If the latest public score is worse than the historical best, change the approach instead of "
+        "continuing same-family tuning."
+    )
+    return "\n".join(lines)
+
+
+def _format_method_registry_for_prompt(paths: CompetitionPaths) -> str:
+    registry_path = method_registry_path(paths.context_dir)
+    if not registry_path.exists():
+        return ""
+    try:
+        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return render_method_registry_for_prompt(payload, max_methods=8)
+
+
+def _campaign_prefers_validation_redesign(
+    campaign_state: dict[str, object],
+    method_registry: dict[str, object] | None,
+) -> bool:
+    if isinstance(method_registry, dict) and bool(method_registry.get("validation_priority")):
+        return True
+    corr = _to_float(campaign_state.get("offline_online_correlation"))
+    if corr is not None and corr < 0.25:
+        return True
+    latest = _to_float(campaign_state.get("latest_submission_score"))
+    champion = _to_float(campaign_state.get("champion_score") or campaign_state.get("historical_best_score"))
+    if latest is None or champion is None:
+        return False
+    direction = str(campaign_state.get("direction") or "minimize").strip().lower()
+    if direction == "maximize":
+        return latest < champion
+    return latest > champion
 
 
 def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:
@@ -10848,13 +12077,55 @@ def _submission_message(
     *,
     submission_path: Path | None = None,
 ) -> str:
-    if config.message:
-        return config.message
     iteration = _infer_iteration_from_submission_path(submission_path) if submission_path is not None else None
     iteration_suffix = f" i={iteration}" if isinstance(iteration, int) else ""
-    if best_score is None:
-        return f"kb {run_id}{iteration_suffix}"
-    return f"kb {run_id}{iteration_suffix} offline={best_score:.4f}"
+    if config.message:
+        base_message = config.message
+    elif best_score is None:
+        base_message = f"kb {run_id}{iteration_suffix}"
+    else:
+        base_message = f"kb {run_id}{iteration_suffix} offline={best_score:.4f}"
+    if normalize_campaign_mode(config.campaign_mode, deliverable_mode="leaderboard") != "top1":
+        return base_message
+    campaign_candidate = _find_campaign_candidate_for_submission(
+        context_dir=config.paths.context_dir,
+        submission_path=submission_path,
+        run_id=run_id,
+        iteration=iteration,
+    )
+    if campaign_candidate is None:
+        return base_message
+    campaign_state = _load_json_object(campaign_state_path(config.paths.context_dir))
+    if not isinstance(campaign_state, dict):
+        campaign_state = {}
+    direction = str(campaign_state.get("direction") or config.target_direction or "minimize")
+    return format_campaign_submission_message(
+        base_message=base_message,
+        campaign_state=campaign_state,
+        candidate=campaign_candidate,
+        offline_score=best_score,
+        direction=direction,
+    )
+
+
+def _find_campaign_candidate_for_submission(
+    *,
+    context_dir: Path,
+    submission_path: Path | None,
+    run_id: str,
+    iteration: int | None,
+):
+    candidates = list_candidates(candidate_registry_path(context_dir))
+    if submission_path is not None:
+        resolved_submission = str(submission_path)
+        for candidate in candidates:
+            if candidate.submission_path == resolved_submission:
+                return candidate
+    if iteration is not None:
+        for candidate in candidates:
+            if candidate.run_id == run_id and candidate.iteration == iteration:
+                return candidate
+    return None
 
 
 def _normalize_metric_name(name: str | None) -> str:

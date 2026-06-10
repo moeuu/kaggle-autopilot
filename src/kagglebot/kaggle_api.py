@@ -1491,19 +1491,14 @@ def _load_leaderboard_rows(
         )
 
     csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
-    if csv_path is None:
-        zip_paths = list(leaderboard_dir.glob("*.zip"))
-        for zip_path in zip_paths:
-            safe_extract_zip(zip_path, leaderboard_dir)
-        csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
-    if dry_run:
-        return [], csv_path, None
+    _extract_newer_leaderboard_zips(leaderboard_dir, csv_path)
+    csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     if csv_path is None or not csv_path.exists():
         return [], csv_path, "No leaderboard CSV file was found after download/extract."
     if csv_path.stat().st_size == 0:
         return [], csv_path, "Leaderboard CSV is empty."
 
-    with csv_path.open("r", encoding="utf-8") as handle:
+    with csv_path.open("r", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
             return [], csv_path, "Leaderboard CSV is missing a header row."
@@ -1511,6 +1506,15 @@ def _load_leaderboard_rows(
     if not rows:
         return [], csv_path, "Leaderboard CSV has a header but no score rows."
     return rows, csv_path, None
+
+
+def _extract_newer_leaderboard_zips(leaderboard_dir: Path, csv_path: Path | None) -> None:
+    csv_mtime = csv_path.stat().st_mtime if csv_path is not None and csv_path.exists() else None
+    zip_paths = sorted(leaderboard_dir.glob("*.zip"), key=lambda path: path.stat().st_mtime)
+    for zip_path in zip_paths:
+        if csv_mtime is not None and zip_path.stat().st_mtime <= csv_mtime:
+            continue
+        safe_extract_zip(zip_path, leaderboard_dir)
 
 
 def _find_leaderboard_csv(output_dir: Path, slug: str) -> Path | None:

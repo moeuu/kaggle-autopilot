@@ -37,15 +37,25 @@ class SubmissionLedger:
         event = record.get("event")
         return event in (None, "submit")
 
-    def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
-        fingerprint = submission_fingerprint(slug, message, submission_path)
-        submission_sha = sha256_file(str(submission_path))
+    def _iter_records(self) -> list[dict[str, object]]:
         if not self.ledger_path.exists():
-            return False
+            return []
+        records: list[dict[str, object]] = []
         for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            rec = json.loads(line)
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                records.append(payload)
+        return records
+
+    def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
+        fingerprint = submission_fingerprint(slug, message, submission_path)
+        submission_sha = sha256_file(str(submission_path))
+        for rec in self._iter_records():
             if rec.get("fingerprint") == fingerprint:
                 return True
             if not self._is_submit_event(rec):
@@ -127,13 +137,8 @@ class SubmissionLedger:
             handle.write(json.dumps(record) + "\n")
 
     def last_submission_time(self) -> datetime | None:
-        if not self.ledger_path.exists():
-            return None
         last_ts = None
-        for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rec = json.loads(line)
+        for rec in self._iter_records():
             if not self._is_submit_event(rec):
                 continue
             ts_str = rec.get("ts")
@@ -150,15 +155,10 @@ class SubmissionLedger:
         return last_ts
 
     def recent_submission_count(self, *, hours: float) -> int:
-        if not self.ledger_path.exists():
-            return 0
         now = datetime.now(UTC)
         cutoff = now - timedelta(hours=hours)
         count = 0
-        for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rec = json.loads(line)
+        for rec in self._iter_records():
             if not self._is_submit_event(rec):
                 continue
             ts_str = rec.get("ts")

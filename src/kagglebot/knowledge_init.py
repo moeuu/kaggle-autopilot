@@ -1054,9 +1054,9 @@ def build_plan_and_initial_prompt(
         '  "holdout_frac": 0.2,',
         '  "cv_folds": 5,',
         '  "seed": 42,',
-        '  "time_budget_min": 1200,',
+        '  "time_budget_min": null,',
         '  "internet": "on",',
-        '  "max_iterations": 12,',
+        '  "max_iterations": 5,',
         '  "submit_policy": "always"',
         "}",
         "```",
@@ -1071,7 +1071,7 @@ def build_plan_and_initial_prompt(
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
         "- Prefer CV by default for stronger model ranking; use holdout only when CV is infeasible.",
         (
-            "- Keep local_gpu kernels under 20h/1200min by default; for image/video/audio/text, use one "
+            "- local_gpu has no default wall-clock limit; for image/video/audio/text, use one "
             "strong full-training seed and at most 3 full-training folds, then use cached "
             "embeddings/TTA/lightweight heads for extra validation."
         ),
@@ -1120,7 +1120,7 @@ def build_plan_and_initial_prompt(
         "uv run pytest -q",
         "```",
         "",
-        "The autopilot will iterate up to max_iterations (default 12),",
+        "The autopilot will iterate up to max_iterations (default 5),",
         "submit according to submission gate policy, and use readiness score as the primary loop decision signal.",
     ]
     return "\n".join(lines) + "\n"
@@ -1142,7 +1142,7 @@ def build_improve_template() -> str:
 **Competition**: `{slug}`
 **Iteration**: {iteration}
 **Goal**: Improve loop-decision score (readiness primary; submission/rank as guardrails) toward top1-tier
-or best possible within the max_iterations budget (default 12)
+or best possible within the max_iterations budget (default 5)
 **Compute**: {compute} ({accelerator})
 **Top1 gap**: {top1_gap}
 **Delta vs previous best**: {delta_offline}
@@ -1235,7 +1235,7 @@ Before changing the model, read overview.md/data.md and respect any constraints 
   reduce multiplicative runtime first: one full fine-tune seed, fewer full-training folds for heavy backbones,
   cached embeddings or lightweight heads for extra seeds, earlier stopping, and checkpoint reuse. Do not replace
   a working strong model with a weak baseline only to finish faster.
-- Keep local_gpu kernels under 20h/1200min by default unless a stricter competition runtime cap applies.
+- local_gpu has no default wall-clock limit unless a stricter competition runtime cap applies.
 - Evaluate at least one simple baseline (mean/majority/persistence as appropriate) with the same
   validation protocol, and do not select/submit a learned pipeline that underperforms that baseline.
 - If `code_reference_status` is `underperforming_code_reference`, you MUST inspect `{code_md}` and `{code_index}`

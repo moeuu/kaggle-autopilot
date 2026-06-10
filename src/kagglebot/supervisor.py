@@ -45,10 +45,12 @@ _REWARD_AMOUNT_RE = re.compile(
 )
 _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS = 24.0
 _DEFAULT_RESOURCE_BLOCK_TTL_HOURS = 168.0
+_DEFAULT_ACTIVE_RUN_STALE_HOURS = 24.0
 
 
 @dataclass(frozen=True)
 class SubmissionHistory:
+    autopilot_started: bool
     submitted: bool
     rank_percentile: float | None
     rank: int | None
@@ -94,6 +96,9 @@ class WatchConfig:
     self_improvement_interval_hours: float | None = 6.0
     self_improvement_codex: bool = True
     self_improvement_publish: bool = False
+    top1_exhaustive: bool = True
+    top1_submit_policy: str = "value_only"
+    hardware_profile: str | None = "auto"
 
     @property
     def root_watch_dir(self) -> Path:
@@ -190,12 +195,25 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
     active_slug = str(state.get("active_slug") or "").strip()
     active_run_id = str(state.get("active_run_id") or "").strip()
 
-    if active_slug and active_run_id and _run_can_resume(config, active_slug, active_run_id):
+    if active_slug and active_run_id and _run_can_resume(config, active_slug, active_run_id, state=state):
         candidate = _candidate_from_slug(active_slug)
         run_id = active_run_id
         resume = True
         ledger.append("selected", slug=active_slug, run_id=run_id, reason="resume_active")
     else:
+        if active_slug and active_run_id and _active_state_is_stale(state):
+            ledger.append("stale_active_cleared", slug=active_slug, run_id=active_run_id, reason="stale_watch_state")
+            _write_state(
+                config.state_path,
+                {
+                    "active_slug": None,
+                    "active_run_id": None,
+                    "last_status": "failed",
+                    "phase": "stale_active_cleared",
+                    "stale_slug": active_slug,
+                    "stale_run_id": active_run_id,
+                },
+            )
         quota_block = _new_kaggle_gpu_competition_quota_block(config=config, ledger=ledger)
         if quota_block is not None:
             state = {
@@ -714,7 +732,7 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
     resource_blocked = _resource_blocked_slugs(records)
     active = _active_slugs(config)
     candidates = list_entered_competitions(page_limit=config.page_limit, dry_run=config.dry_run)
-    filtered: list[tuple[bool, float, int, EnteredCompetition]] = []
+    filtered: list[tuple[bool, bool, float, int, EnteredCompetition]] = []
     for index, candidate in enumerate(candidates):
         slug = candidate.slug.lower()
         if slug in active:
@@ -756,6 +774,7 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
             reward=candidate.reward,
             deadline=_aware_datetime(candidate.deadline).isoformat() if _aware_datetime(candidate.deadline) else None,
             medal_candidate=_is_medal_candidate(candidate),
+            autopilot_started=history.autopilot_started,
             submitted=history.submitted,
             rank_percentile=history.rank_percentile,
             rank=history.rank,
@@ -768,9 +787,9 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
             if config.lightweight_only
             else _candidate_score(candidate, history=history)
         )
-        filtered.append((history.submitted, score, index, candidate))
-    filtered.sort(key=lambda item: (item[0], -item[1], item[2], item[3].slug))
-    return [candidate for _submitted, _score, _index, candidate in filtered]
+        filtered.append((history.autopilot_started, history.submitted, score, index, candidate))
+    filtered.sort(key=lambda item: (item[0], item[1], -item[2], item[3], item[4].slug))
+    return [candidate for _started, _submitted, _score, _index, candidate in filtered]
 
 
 def _prepare_competition(
@@ -836,6 +855,17 @@ def _build_autopilot_config(
         verify_cmd=config.verify_cmd,
         dry_run=config.dry_run,
         submit_policy=config.submit_policy,
+        campaign_mode="top1",
+        method_scout="refresh" if config.top1_exhaustive else "auto",
+        research_scout="refresh" if config.top1_exhaustive else "auto",
+        method_scout_max_sources=12,
+        portfolio_execution="budgeted" if config.top1_exhaustive else "serial",
+        validation_lab="force" if config.top1_exhaustive else "auto",
+        candidate_budget_min=config.time_budget_min if config.top1_exhaustive else None,
+        max_candidates_per_iteration=3 if config.top1_exhaustive else None,
+        top1_exhaustive=config.top1_exhaustive,
+        top1_submit_policy=config.top1_submit_policy,
+        hardware_profile=config.hardware_profile,
     )
 
 
@@ -1070,9 +1100,11 @@ def _reward_amount_usd(reward: str) -> float | None:
 
 
 def _load_submission_history(*, config: WatchConfig, slug: str) -> SubmissionHistory:
+    autopilot_started = _has_autopilot_history(config=config, slug=slug)
     ledger_path = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).submission_ledger_path
     if not ledger_path.exists():
         return SubmissionHistory(
+            autopilot_started=autopilot_started,
             submitted=False,
             rank_percentile=None,
             rank=None,
@@ -1118,6 +1150,7 @@ def _load_submission_history(*, config: WatchConfig, slug: str) -> SubmissionHis
             best_total = total
             best_score = score
     return SubmissionHistory(
+        autopilot_started=autopilot_started,
         submitted=submitted,
         rank_percentile=best_percentile,
         rank=best_rank,
@@ -1156,12 +1189,27 @@ def _enrich_submission_history_from_leaderboard(
     if rank_percentile is None:
         return history
     return SubmissionHistory(
+        autopilot_started=history.autopilot_started,
         submitted=history.submitted,
         rank_percentile=rank_percentile,
         rank=rank,
         total_teams=total_teams,
         outcome_score=history.outcome_score,
     )
+
+
+def _has_autopilot_history(*, config: WatchConfig, slug: str) -> bool:
+    runs_dir = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).runs_dir
+    if not runs_dir.exists():
+        return False
+    for child in runs_dir.iterdir():
+        if not child.is_dir():
+            continue
+        if (child / "run.json").exists() or (child / "run_state.json").exists():
+            return True
+        if any(child.glob("iter-*")):
+            return True
+    return False
 
 
 def _load_metric_direction(paths: CompetitionPaths) -> str | None:
@@ -1285,12 +1333,14 @@ def _active_slugs(config: WatchConfig) -> set[str]:
         state = _load_state(path)
         slug = str(state.get("active_slug") or "").strip().lower()
         run_id = str(state.get("active_run_id") or "").strip()
-        if slug and run_id and _run_can_resume(config, slug, run_id):
+        if slug and run_id and _run_can_resume(config, slug, run_id, state=state):
             active.add(slug)
     return active
 
 
-def _run_can_resume(config: WatchConfig, slug: str, run_id: str) -> bool:
+def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[str, object] | None = None) -> bool:
+    if state is not None and _active_state_is_stale(state):
+        return False
     run_dir = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).run_dir(run_id)
     if not run_dir.exists():
         return False
@@ -1303,6 +1353,30 @@ def _run_can_resume(config: WatchConfig, slug: str, run_id: str) -> bool:
         return True
     status = str(payload.get("status") or "").strip().lower()
     return status not in _TERMINAL_RUN_STATUSES
+
+
+def _active_state_is_stale(state: dict[str, object]) -> bool:
+    slug = str(state.get("active_slug") or "").strip()
+    run_id = str(state.get("active_run_id") or "").strip()
+    if not slug or not run_id:
+        return False
+    timestamp = _parse_ts(state.get("updated_at")) or _parse_ts(state.get("started_at"))
+    if timestamp is None:
+        return False
+    max_age_hours = _active_run_stale_hours()
+    if max_age_hours <= 0:
+        return False
+    return timestamp + timedelta(hours=max_age_hours) <= datetime.now(UTC)
+
+
+def _active_run_stale_hours() -> float:
+    raw = os.environ.get("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS")
+    if raw is None or not raw.strip():
+        return _DEFAULT_ACTIVE_RUN_STALE_HOURS
+    try:
+        return max(0.0, float(raw.strip()))
+    except ValueError:
+        return _DEFAULT_ACTIVE_RUN_STALE_HOURS
 
 
 def _safe_state_scope(value: str) -> str:
@@ -1341,6 +1415,8 @@ def _load_state(path: Path) -> dict[str, object]:
 
 def _write_state(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
+    payload.setdefault("updated_at", datetime.now(UTC).isoformat())
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 

@@ -73,6 +73,16 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
         submission = pd.read_csv(submission_csv, sep=submission_delim)
 
     actual_columns = list(submission.columns)
+    if hint_columns and expected_columns == hint_columns:
+        expected_with_anchor = _maybe_expected_columns_with_actual_anchor(
+            actual_columns=actual_columns,
+            hint_columns=hint_columns,
+        )
+        if expected_with_anchor is not None:
+            expected_columns = expected_with_anchor
+            expected_source = f"{expected_source} plus leading anchor column"
+            id_col = expected_columns[0]
+
     if expected_columns != actual_columns:
         problems.append(
             "columns mismatch (order-sensitive):\n"
@@ -189,7 +199,10 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
         sample_col = sample[col] if (col in sample.columns and sample_has_data_rows) else pd.Series(dtype=object)
         submission_col = submission[col]
-        if _sample_column_is_numeric(sample_col):
+        if _sample_column_is_numeric(sample_col) and not _prediction_column_allows_text_values(
+            column=col,
+            sample_csv=sample_csv,
+        ):
             numeric = pd.to_numeric(submission_col, errors="coerce")
             nan_count = int(numeric.isna().sum())
             if nan_count > 0:
@@ -208,6 +221,22 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
     if problems:
         raise SubmissionValidationError(_format_validation_message(problems))
+
+
+def _prediction_column_allows_text_values(*, column: str, sample_csv: Path) -> bool:
+    lowered_column = column.strip().lower()
+    if any(token in lowered_column for token in ("citation", "citations", "answer", "answers")):
+        return True
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "data.md", "overview.md"):
+            path = context_dir / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+            text_markers = ("semicolon-separated", "citations", "empty string")
+            if lowered_column in text and any(token in text for token in text_markers):
+                return True
+    return False
 
 
 def _is_prefix(prefix: list[str], values: list[str]) -> bool:
@@ -430,12 +459,11 @@ def _should_prefer_hint_columns(
         return False
     if not columns_look_plausible(sample_columns):
         return True
-    # Be conservative: Kaggle's evaluation is anchored to the actual sample_submission header,
-    # even when the file is header-only. Only override with context hints when we believe the
-    # sample was synthesized by kagglebot (and therefore potentially wrong/incomplete).
-    if not _is_synthesized_sample_submission(sample_csv):
+    if not _sample_header_looks_placeholder(sample_columns):
         return False
-    return _sample_header_looks_placeholder(sample_columns)
+    if _hint_columns_strong_enough_to_override_placeholder(hint_columns):
+        return True
+    return _is_synthesized_sample_submission(sample_csv)
 
 
 def _is_synthesized_sample_submission(path: Path) -> bool:
@@ -466,6 +494,42 @@ def _sample_header_looks_placeholder(columns: list[str]) -> bool:
     return bool(id_like and target_like)
 
 
+def _hint_columns_strong_enough_to_override_placeholder(columns: list[str]) -> bool:
+    if not columns_look_plausible(columns):
+        return False
+    normalized = [str(col).strip().lower() for col in columns if str(col).strip()]
+    if _sample_header_looks_placeholder(columns):
+        return False
+    documentation_table_headers = {
+        ("column", "meaning"),
+        ("column", "description"),
+        ("column", "type"),
+        ("field", "description"),
+        ("name", "description"),
+    }
+    if tuple(normalized) in documentation_table_headers:
+        return False
+    generic_terms = {"column", "columns", "field", "name", "meaning", "description", "type", "format", "required"}
+    return not all(col in generic_terms for col in normalized)
+
+
+def _maybe_expected_columns_with_actual_anchor(
+    *,
+    actual_columns: list[str],
+    hint_columns: list[str],
+) -> list[str] | None:
+    if len(actual_columns) != len(hint_columns) + 1:
+        return None
+    actual_targets = actual_columns[1:]
+    if _normalized_columns(actual_targets) != _normalized_columns(hint_columns):
+        return None
+    return list(actual_columns)
+
+
+def _normalized_columns(columns: list[str]) -> list[str]:
+    return [str(col).strip().lower() for col in columns]
+
+
 def _has_data_rows(path: Path) -> bool:
     non_empty = 0
     try:
@@ -494,6 +558,7 @@ def _sniff_delimiter(path: Path, *, default: str = ",", max_lines: int = 100) ->
         if sep and sep not in candidates:
             candidates.append(sep)
     counts = {sep: 0 for sep in candidates}
+    first_counts: dict[str, int] | None = None
     lines_seen = 0
     try:
         with path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -503,12 +568,20 @@ def _sniff_delimiter(path: Path, *, default: str = ",", max_lines: int = 100) ->
                 lines_seen += 1
                 for sep in candidates:
                     counts[sep] += line.count(sep)
+                if first_counts is None:
+                    first_counts = {sep: line.count(sep) for sep in candidates}
                 if lines_seen >= max_lines:
                     break
     except OSError:
         return default
     if lines_seen == 0:
         return default
+    if first_counts is not None:
+        if first_counts.get(default, 0) > 0:
+            return default
+        first_best = max(candidates, key=lambda sep: first_counts[sep])
+        if first_counts[first_best] > 0:
+            return first_best
     best = max(candidates, key=lambda sep: counts[sep])
     if counts[best] == 0:
         return default

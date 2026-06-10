@@ -45,6 +45,9 @@ Implementation contract for `kernel.py`:
   - `N_FOLDS`, `SEEDS`, `FAST_DEV`
   - plan-driven pipeline toggles (do not hardcode a single model family)
   - `GPU_DEVICE`
+- Training and validation are mandatory for every iteration. Ignore or override plan/env settings
+  that disable training, disable validation, request packaging-only/noop/identity fallback, or
+  produce unscored/proxy/public-anchor metrics.
 - Unified execution contract:
   - The exact same `kernel.py` must run on `local_gpu` and `kaggle_gpu`
   - Only execution location/runtime differs; algorithm path must be shared
@@ -69,11 +72,19 @@ Implementation contract for `kernel.py`:
   - Print per-pipeline CV summary for the plan primary metric
   - Use the same metric implementation/path for epoch model-selection and final offline scoring
     (do not optimize on a proxy metric that differs from final reported score)
+  - `metrics.json` must describe a real trained candidate with a competition-faithful CV/holdout
+    score from train data. Do not write placeholder, proxy, public-anchor, packaging-only, or
+    unscored scores as the primary score.
+  - When multiple candidates exist, log each candidate's CV score, holdout/validation score,
+    and test/submission prediction distribution. Do not choose the final submission by CV alone
+    if another candidate has materially better holdout/validation or the best-CV candidate has
+    collapsed/suspicious predictions.
 - Ensemble:
   - Implement only ensemble methods listed in plan.json
   - If plan.json contains 2 or more model pipelines, build at least one explicit blend candidate from OOF predictions
     (for example weighted mean, rank blend, or logit blend) unless the plan explicitly forbids ensembling
-  - Choose final method by plan primary metric (tie-breaker: simpler/faster)
+  - Choose final method by competition-faithful validation first, then plan primary metric
+    (tie-breaker: simpler/faster)
   - Include at least one simple baseline evaluated on the same folds/windows; never choose a final
     pipeline that is worse than the baseline on the primary offline metric
 - Submission:

@@ -196,6 +196,61 @@ def test_build_autopilot_status_payload_includes_submission_scores(tmp_path: Pat
     assert payload["best_submission_rank_percentile"] == 0.12
 
 
+def test_build_autopilot_status_payload_recomputes_stale_rank_guard_estimate(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    leaderboard_dir = artifacts / "demo" / "context" / "leaderboard"
+    (artifacts / "_watch").mkdir(parents=True)
+    leaderboard_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (artifacts / "_watch" / "state.json").write_text(
+        json.dumps({"active_slug": "demo", "active_run_id": "run-1", "last_status": "running"}),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "slug": "demo",
+                "status": "running",
+                "config": {"max_iterations": 3, "target_metric": "rmse", "target_direction": "minimize"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    iter1 = run_dir / "iter-1"
+    iter1.mkdir()
+    (iter1 / "metrics.json").write_text(
+        json.dumps(
+            {
+                "metric": "rmse",
+                "offline_value": 0.3,
+                "submission_score": 0.25,
+                "rank_guard": {
+                    "estimated_rank": 1,
+                    "estimated_total_teams": 1,
+                    "rank_estimate_source": "stale_fixture",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (leaderboard_dir / "demo-publicleaderboard.csv").write_text(
+        "Rank,Score\n1,0.100\n2,0.200\n3,0.300\n",
+        encoding="utf-8",
+    )
+
+    payload = build_autopilot_status_payload(
+        artifacts_dir=artifacts,
+        now=datetime(2026, 4, 23, tzinfo=UTC),
+    )
+
+    assert "latest_submission_rank" not in payload
+    assert payload["latest_submission_estimated_rank"] == 3
+    assert payload["latest_submission_estimated_total_teams"] == 3
+    assert payload["latest_submission_rank_estimate_source"] == "cached_leaderboard_score_estimate"
+
+
 def test_build_autopilot_status_payload_prefers_explicit_watch_phase(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     run_dir = artifacts / "demo" / "runs" / "run-1"
@@ -257,6 +312,41 @@ def test_run_discord_notifier_once_suppresses_unchanged_idle_snapshot_even_after
         now=first + timedelta(minutes=31),
     )
     assert len(notifier.events) == 1
+    assert notifier.events[0]["payload"]["discord_update_key"] == "kaggle-autopilot:lab_rdp:local_gpu"
+
+
+def test_discord_update_key_is_stable_between_idle_and_active_competition(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    watch_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    state_path = watch_dir / "state.json"
+    state_path.write_text(json.dumps({"last_status": "idle"}), encoding="utf-8")
+
+    idle_payload = build_autopilot_status_payload(
+        artifacts_dir=artifacts,
+        watch_state_path=state_path,
+        now=datetime(2026, 4, 23, tzinfo=UTC),
+    )
+
+    state_path.write_text(
+        json.dumps({"active_slug": "demo", "active_run_id": "run-1", "last_status": "running"}),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "run-1", "slug": "demo", "status": "running", "config": {"max_iterations": 3}}),
+        encoding="utf-8",
+    )
+    active_payload = build_autopilot_status_payload(
+        artifacts_dir=artifacts,
+        watch_state_path=state_path,
+        now=datetime(2026, 4, 23, tzinfo=UTC),
+    )
+
+    assert idle_payload["phase"] == "idle"
+    assert active_payload["competition"] == "demo"
+    assert idle_payload["discord_update_key"] == active_payload["discord_update_key"]
 
 
 def test_run_discord_notifier_once_reemits_active_snapshot_after_heartbeat(tmp_path: Path) -> None:
@@ -321,6 +411,38 @@ def test_run_discord_notifier_once_marks_new_active_run_as_started(tmp_path: Pat
     assert notifier.events[0]["event_type"] == "autopilot.started"
 
 
+def test_run_discord_notifier_once_does_not_mark_planning_as_iteration_completed(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    (artifacts / "_watch").mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (artifacts / "_watch" / "state.json").write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": "run-1",
+                "last_status": "running",
+                "phase": "gpt_planning",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "run-1", "slug": "demo", "status": "running", "config": {"max_iterations": 3}}),
+        encoding="utf-8",
+    )
+    notifier = RecordingNotifier()
+
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
+    )
+
+    assert notifier.events[0]["event_type"] == "autopilot.started"
+
+
 def test_run_discord_notifier_once_reports_kaggle_gpu_sidecar_scope(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     main_run_dir = artifacts / "main-demo" / "runs" / "run-main"
@@ -356,4 +478,4 @@ def test_run_discord_notifier_once_reports_kaggle_gpu_sidecar_scope(tmp_path: Pa
     side_payload = next(payload for payload in payloads if payload["competition"] == "side-demo")
     assert side_payload["compute"] == "kaggle_gpu"
     assert side_payload["state_scope"] == "kaggle_gpu"
-    assert side_payload["discord_update_key"] == "kaggle-autopilot:lab_rdp:kaggle_gpu:side-demo"
+    assert side_payload["discord_update_key"] == "kaggle-autopilot:lab_rdp:kaggle_gpu"

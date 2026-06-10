@@ -34,8 +34,16 @@ _BULLET_COLUMN_RE = re.compile(
     r"^\s*(?:[-*]|\d+[.)])\s*`(?P<name>[^`]+)`\s*(?::|-|–|—)\s*",
 )
 _BOLD_BULLET_COLUMN_RE = re.compile(
-    r"^\s*(?:[-*]|\d+[.)])\s*\\*\\*(?P<name>[^*]+)\\*\\*\s*(?::|-|–|—)\s*",
+    r"^\s*(?:[-*]|\d+[.)])\s*\*\*(?P<name>[^*]+)\*\*\s*(?::|-|–|—)\s*",
 )
+_PROSE_COLUMN_TOKEN = r"`?[A-Za-z_][A-Za-z0-9_./:-]*`?"
+_PROSE_COLUMN_LIST_RE = re.compile(
+    rf"\bcolumns?\s+(?P<columns>{_PROSE_COLUMN_TOKEN}"
+    rf"(?:\s*,\s*(?:and\s+)?{_PROSE_COLUMN_TOKEN}|\s+and\s+{_PROSE_COLUMN_TOKEN}|"
+    rf"\s*&\s*{_PROSE_COLUMN_TOKEN})+)",
+    re.I,
+)
+_PROSE_COLUMN_TOKEN_RE = re.compile(_PROSE_COLUMN_TOKEN)
 _KNOWN_SUBMISSION_SUFFIXES = (".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".zip")
 _SUBMISSION_EXTENSION_RE = re.compile(r"(?<![A-Za-z0-9_])\.(csv|tsv|txt|parquet|jsonl|json|zip)\b", re.I)
 _SUBMISSION_CODE_FENCE_LANG_RE = re.compile(r"^\s*```(?P<lang>[A-Za-z0-9_+-]+)\s*$")
@@ -143,10 +151,11 @@ def _extract_section(
 
 
 def parse_submission_format(markdown: str) -> SubmissionFormatHint:
-    columns, delimiter = _parse_columns_from_markdown(markdown)
-    expected_suffixes = _parse_expected_suffixes_from_markdown(markdown)
+    submission_markdown = extract_submission_section(markdown) or markdown
+    columns, delimiter = _parse_columns_from_markdown(submission_markdown)
+    expected_suffixes = _parse_expected_suffixes_from_markdown(submission_markdown)
     artifact_class, artifact_container = _infer_artifact_shape(
-        markdown=markdown,
+        markdown=submission_markdown,
         columns=columns,
         expected_suffixes=expected_suffixes,
     )
@@ -196,6 +205,9 @@ def _parse_columns_from_markdown(markdown: str) -> tuple[list[str] | None, str |
     bullet_columns = _parse_bullet_column_definitions(lines)
     if bullet_columns:
         return bullet_columns, None
+    prose_columns = _parse_prose_column_list(lines)
+    if prose_columns:
+        return prose_columns, None
     for line in lines:
         cols, delim = _parse_columns_from_line(line)
         if cols:
@@ -253,6 +265,33 @@ def _parse_bullet_column_definitions(lines: list[str]) -> list[str] | None:
     if len(columns) >= 2 and columns_look_plausible(columns):
         return columns
     return None
+
+
+def _parse_prose_column_list(lines: list[str]) -> list[str] | None:
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or "column" not in line.lower():
+            continue
+        for match in _PROSE_COLUMN_LIST_RE.finditer(line):
+            columns = _clean_prose_columns(match.group("columns"))
+            if columns and columns_look_plausible(columns):
+                return columns
+    return None
+
+
+def _clean_prose_columns(text: str) -> list[str] | None:
+    columns: list[str] = []
+    for match in _PROSE_COLUMN_TOKEN_RE.finditer(text):
+        token = match.group(0).strip().strip("`").strip().strip(".,;:")
+        if not token:
+            continue
+        if token.lower() in {"and", "or"}:
+            continue
+        if token not in columns:
+            columns.append(token)
+    if len(columns) < 2:
+        return None
+    return columns
 
 
 def _parse_columns_from_line(line: str) -> tuple[list[str] | None, str | None]:

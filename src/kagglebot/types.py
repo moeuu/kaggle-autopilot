@@ -44,7 +44,7 @@ class PlanConfig:
     time_budget_min: int | None = None
     kernel_name: str | None = None
     internet: str = "on"
-    max_iterations: int = 12
+    max_iterations: int = 5
     max_total_min: int | None = None
     patience: int = 2
     min_improvement: float = 0.0
@@ -86,7 +86,7 @@ class PlanConfig:
             time_budget_min=payload.get("time_budget_min"),
             kernel_name=payload.get("kernel_name"),
             internet=payload.get("internet") or "on",
-            max_iterations=payload.get("max_iterations") or 12,
+            max_iterations=payload.get("max_iterations") or 5,
             max_total_min=payload.get("max_total_min"),
             patience=payload.get("patience") or 2,
             min_improvement=payload.get("min_improvement") or 0.0,

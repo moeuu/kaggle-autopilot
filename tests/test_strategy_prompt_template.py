@@ -121,6 +121,45 @@ def test_strategy_prompt_includes_code_models_discussion_context(tmp_path: Path)
     assert "discussion snapshot token" in prompt
 
 
+def test_strategy_prompt_includes_selected_hardware_profile(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.rules_url_path.write_text("https://www.kaggle.com/competitions/demo/rules\n", encoding="utf-8")
+    paths.dataset_profile_path.write_text('{"task": "text"}', encoding="utf-8")
+    paths.submission_format_md_path.write_text("submission format text", encoding="utf-8")
+    paths.sample_submission_head_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    paths.code_md_path.write_text("code snapshot token", encoding="utf-8")
+    paths.models_md_path.write_text("models snapshot token", encoding="utf-8")
+    paths.discussion_md_path.write_text("discussion snapshot token", encoding="utf-8")
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url="https://www.kaggle.com/competitions/demo",
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="on",
+        run_id="run-1",
+        dry_run=True,
+        repo_root=tmp_path,
+        hardware_profile="rtx3060",
+        time_budget_min=1200,
+    )
+    template = (Path(agent_pipeline.__file__).resolve().parents[1] / "prompts" / "strategy_plan.md").read_text(
+        encoding="utf-8"
+    )
+    prompt = agent_pipeline._build_strategy_prompt(  # noqa: SLF001
+        template=template,
+        config=config,
+        paths=paths,
+        brief_content="brief",
+        compact=False,
+    )
+
+    assert "NVIDIA GeForce RTX 3060 12GB" in prompt
+    assert "RTX3060-class accuracy-first rule" in prompt
+    assert "rtx5090" in prompt.lower()
+
+
 def test_strategy_prompt_appends_high_accuracy_tabular_policy(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

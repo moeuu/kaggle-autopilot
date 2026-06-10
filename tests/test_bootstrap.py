@@ -6,8 +6,6 @@ import json
 
 import pytest
 
-pytestmark = pytest.mark.slow
-
 from kagglebot.bootstrap import (
     _cache_sample_submission,
     _mirror_sample_submission_to_data,
@@ -16,6 +14,8 @@ from kagglebot.bootstrap import (
 )
 from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+
+pytestmark = pytest.mark.slow
 
 
 def test_rules_file_written_to_markdown(tmp_path) -> None:

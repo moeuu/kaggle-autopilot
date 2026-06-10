@@ -62,6 +62,44 @@ def test_parse_submission_format_reads_bullet_column_definitions() -> None:
     assert hint.artifact_class == "tabular"
 
 
+def test_parse_submission_format_reads_bold_bullet_column_definitions() -> None:
+    markdown = (
+        "## Submission Format\n\n"
+        "A CSV file with the following columns:\n"
+        "- **Id**: The filename\n"
+        "- **Category**: The predicted class\n"
+    )
+    hint = parse_submission_format(markdown)
+    assert hint.columns == ["Id", "Category"]
+    assert hint.artifact_class == "tabular"
+
+
+def test_parse_submission_format_reads_required_columns_from_prose() -> None:
+    markdown = (
+        "## Submission Format\n\n"
+        "Participants should submit their files in CSV format. "
+        "Each submission must include the columns KEEP, ASSOCIATION, and DIFF. "
+        "Use `; ` to separate multiple codes.\n"
+    )
+    hint = parse_submission_format(markdown)
+    assert hint.columns == ["KEEP", "ASSOCIATION", "DIFF"]
+    assert hint.artifact_class == "tabular"
+
+
+def test_parse_submission_format_prefers_submission_section_over_explanatory_table() -> None:
+    markdown = (
+        "## Description\n\n"
+        "| Column | Meaning |\n"
+        "| --- | --- |\n"
+        "| KEEP | Primary codes |\n"
+        "| ASSOCIATION | Related codes |\n\n"
+        "## Submission Format\n\n"
+        "Each submission must include the columns KEEP, ASSOCIATION, and DIFF.\n"
+    )
+    hint = parse_submission_format(markdown)
+    assert hint.columns == ["KEEP", "ASSOCIATION", "DIFF"]
+
+
 def test_parse_submission_format_treats_weights_and_inference_script_as_bundle() -> None:
     markdown = (
         "## Submission Format\n\n"

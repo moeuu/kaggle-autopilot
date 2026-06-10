@@ -1243,7 +1243,7 @@ class SubmissionService:
         return sorted(candidates, key=self._sample_candidate_key, reverse=True)
 
     @staticmethod
-    def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, str]:
+    def _sample_candidate_key(path: Path) -> tuple[int, int, int, int, int, int, str]:
         """Return ranking key for sample-submission CSV candidates."""
         name_score = SubmissionService._sample_name_score(path)
         stage_score = SubmissionService._sample_stage_score(path)

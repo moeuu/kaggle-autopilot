@@ -25,12 +25,14 @@ from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
     KaggleCliError,
     KaggleNetworkError,
+    KernelCapacityError,
     KernelFailedError,
     KernelStillRunningError,
     KernelTimeoutError,
     RulesNotAcceptedError,
 )
 from kagglebot.exec_utils import CommandResult
+from kagglebot.hardware import hardware_env, resolve_hardware_profile
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -73,6 +75,9 @@ _LOCAL_KERNEL_DEFAULT_STALL_SEC = 900.0
 _LOCAL_KERNEL_MEMORY_CAP_RATIO = 0.80
 _LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
+_REMOTE_KERNEL_QUEUED_TIMEOUT_ENV = "KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC"
+_REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC = 1800.0
+_SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
 _ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
 _ZERO_OVERLAP_DRIFT_MIN_ABS_CORR = 0.08
 _ZERO_OVERLAP_DRIFT_MIN_ZERO_OVERLAP_RATIO = 0.50
@@ -443,11 +448,35 @@ def _run_local_kernel_once(
                 "Local kernel exceeded host memory guard "
                 f"({rss_bytes // (1024 * 1024)} MiB RSS > {memory_cap_bytes // (1024 * 1024)} MiB cap)."
             )
-            _terminate_local_kernel_process(proc)
+            _terminate_local_kernel_process_group(proc)
             break
 
     memory_thread = threading.Thread(target=_watch_memory, daemon=True, name="kb-local-kernel-memory-watchdog")
     memory_thread.start()
+    stall_stop = threading.Event()
+
+    def _watch_stall() -> None:
+        if progress_tracker is None or stall_timeout_sec is None:
+            return
+        poll_interval = min(30.0, max(1.0, stall_timeout_sec / 10.0))
+        while not stall_stop.wait(poll_interval):
+            if proc.poll() is not None:
+                break
+            if bool(stall_state["killed_for_stall"]):
+                break
+            stall_message = _detect_local_kernel_stall(
+                progress_tracker=progress_tracker,
+                stall_timeout_sec=stall_timeout_sec,
+            )
+            if stall_message is None:
+                continue
+            stall_state["killed_for_stall"] = True
+            stall_state["stall_kill_message"] = stall_message
+            _terminate_local_kernel_process_group(proc)
+            break
+
+    stall_thread = threading.Thread(target=_watch_stall, daemon=True, name="kb-local-kernel-stall-watchdog")
+    stall_thread.start()
 
     stdout_chunks: list[str] = []
     proc_stdout = proc.stdout
@@ -494,7 +523,7 @@ def _run_local_kernel_once(
             while True:
                 now = time.monotonic()
                 if deadline is not None and now >= deadline:
-                    _terminate_local_kernel_process(proc)
+                    _terminate_local_kernel_process_group(proc)
                     raise subprocess.TimeoutExpired(args, timeout_sec)
 
                 wait_timeout = _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC
@@ -519,6 +548,8 @@ def _run_local_kernel_once(
                             break
                         saw_data = True
                         last_data_at = time.monotonic()
+                        if progress_tracker is not None:
+                            progress_tracker.observe_output_activity()
                         _emit_text(decoder.decode(chunk), final=False)
                     if proc_stdout is None:
                         break
@@ -562,6 +593,8 @@ def _run_local_kernel_once(
                 proc_stdout.close()
             except OSError:
                 pass
+        stall_stop.set()
+        stall_thread.join(timeout=1.0)
         memory_stop.set()
         memory_thread.join(timeout=1.0)
         memory_state["peak_rss_bytes"] = max(
@@ -788,6 +821,7 @@ class KernelPreparation:
     kernel_slug: str
     kernel_id: str
     runtime_bootstrap_mode: str = "force_train"
+    supersede_stale_queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -807,6 +841,7 @@ class KernelBuildConfig:
     cv_folds: int
     seed: int
     dry_run: bool
+    hardware_profile: str | None = "auto"
 
 
 @dataclass(frozen=True)
@@ -822,6 +857,7 @@ class KernelSubmitBuildConfig:
     submission_path: Path
     mode: str
     dry_run: bool
+    hardware_profile: str | None = "auto"
 
 
 def _resolve_submit_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
@@ -838,6 +874,19 @@ def _resolve_submit_kernel_slug(kernel_name: str | None, slug: str, run_id: str,
         iteration=iteration,
         fallback_prefix="kagglebot-submit",
     )
+
+
+def _resolve_submit_kernel_accelerator(requested: str) -> str:
+    override = os.getenv(_SUBMIT_KERNEL_ACCELERATOR_ENV)
+    value = str(override if override is not None else "cpu").strip().lower()
+    if value in {"none", "no", "false", "0"}:
+        return "cpu"
+    if value in {"cpu", "gpu", "tpu"}:
+        return value
+    if override is not None:
+        raise ValueError(f"{_SUBMIT_KERNEL_ACCELERATOR_ENV} must be one of cpu, gpu, or tpu; got {override!r}.")
+    requested_value = str(requested or "cpu").strip().lower()
+    return requested_value if requested_value in {"cpu", "gpu", "tpu"} else "cpu"
 
 
 _SUBMISSION_KERNEL_TEMPLATE = """\
@@ -929,6 +978,11 @@ class KernelPackageBuilder:
         )
         _ensure_kernel_import_path(kernel_dir)
         _inject_competition_slug_env(kernel_dir, config.slug)
+        _inject_hardware_profile_env(
+            kernel_dir,
+            config.hardware_profile,
+            compute="kaggle_gpu" if config.accelerator == "gpu" else "kaggle_tpu",
+        )
         _inline_kernel_modules(kernel_dir)
         _inject_data_dir_resolver(kernel_dir)
         _inject_pipeline_cfg_fallback(kernel_dir)
@@ -1034,13 +1088,14 @@ class KernelSubmitPackageBuilder:
             _ensure_kernel_import_path(kernel_dir)
             _inject_competition_slug_env(kernel_dir, config.slug)
             ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
+        submit_accelerator = _resolve_submit_kernel_accelerator(config.accelerator)
         _write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
             title=kernel_slug,
             code_file="kernel.py",
             kernel_type="script",
-            accelerator=config.accelerator,
+            accelerator=submit_accelerator,
             enable_internet=config.enable_internet,
             competition_slug=config.slug,
             source_config=source_config,
@@ -1053,6 +1108,7 @@ class KernelSubmitPackageBuilder:
             kernel_slug=kernel_slug,
             kernel_id=kernel_id,
             runtime_bootstrap_mode="submit_inference" if submit_mode == "inference" else "none",
+            supersede_stale_queued=True,
         )
 
 
@@ -1273,6 +1329,7 @@ def run_kernel(
     seed: int,
     dry_run: bool,
     timeout_minutes: int | None,
+    hardware_profile: str | None = "auto",
 ) -> KernelRunResult:
     build_config = KernelBuildConfig(
         slug=slug,
@@ -1290,6 +1347,7 @@ def run_kernel(
         cv_folds=cv_folds,
         seed=seed,
         dry_run=dry_run,
+        hardware_profile=hardware_profile,
     )
     preparation = KernelPackageBuilder().prepare(build_config)
 
@@ -1384,6 +1442,7 @@ def run_kernel_local(
     dry_run: bool,
     timeout_minutes: int | None,
     strict_accelerator: bool = False,
+    hardware_profile: str | None = "auto",
 ) -> KernelRunResult:
     del metric, direction, holdout_frac, cv_folds, seed
 
@@ -1428,6 +1487,7 @@ def run_kernel_local(
     # Mirror packaging shims so local and kaggle kernel behavior are aligned.
     _ensure_kernel_import_path(kernel_stage_dir)
     _inject_competition_slug_env(kernel_stage_dir, slug)
+    _inject_hardware_profile_env(kernel_stage_dir, hardware_profile, compute="local_gpu")
     _inline_kernel_modules(kernel_stage_dir)
     _inject_data_dir_resolver(kernel_stage_dir)
     _inject_pipeline_cfg_fallback(kernel_stage_dir)
@@ -1476,7 +1536,7 @@ def run_kernel_local(
     progress_tracker = _build_local_kernel_progress_tracker(
         base_dir=base_dir,
         slug=slug,
-        watch_dirs=[output_dir, kernel_stage_dir / "outputs"],
+        watch_dirs=[output_dir, kernel_stage_dir / "outputs", base_dir / slug / "kernel_output"],
         started_at_wall=started_at,
         started_at_monotonic=monotonic_start,
     )
@@ -1489,12 +1549,15 @@ def run_kernel_local(
         accelerator=accelerator,
     )
     env = os.environ.copy()
+    env["KAGGLEBOT_OUTPUT_DIR"] = str(output_dir)
     env.setdefault("KAGGLEBOT_LOCAL_KERNEL", "1")
     env.setdefault("KAGGLEBOT_SLUG", slug)
     env.setdefault("KAGGLEBOT_COMPETITION_SLUG", slug)
     env.setdefault("KAGGLEBOT_RUN_ID", run_id)
     env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
     env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
+    for key, value in hardware_env(resolve_hardware_profile(hardware_profile, compute="local_gpu")).items():
+        env.setdefault(key, value)
     for key, value in local_aux_env.items():
         env[key] = value
     for key, value in local_model_env.items():
@@ -2272,6 +2335,11 @@ class _LocalKernelProgressTracker:
     completed_pipelines: set[str] = field(default_factory=set)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
+    def observe_output_activity(self) -> None:
+        """Record raw stdout activity even when progress text has no newline yet."""
+        with self._lock:
+            self.last_output_monotonic = time.monotonic()
+
     def observe_line(self, line: str) -> None:
         now = time.monotonic()
         with self._lock:
@@ -2762,6 +2830,9 @@ def _resolve_local_kernel_artifacts(
 ) -> tuple[Path | None, Path | None]:
     candidates: list[Path] = [
         output_dir,
+        # Legacy generated kernels may write to the slug-level kernel_output
+        # directory instead of the per-run output dir.
+        kernel_dir.parents[2] / "kernel_output",
         # Many kernels treat the parent of the staged copy (run_dir) as the
         # "challenge dir" and write artifacts under run_dir/outputs.
         kernel_dir.parent / "outputs",
@@ -2797,6 +2868,9 @@ def _resolve_local_kernel_artifact_file(
 ) -> Path | None:
     candidates: list[Path] = [
         output_dir,
+        # Legacy generated kernels may write to the slug-level kernel_output
+        # directory instead of the per-run output dir.
+        kernel_dir.parents[2] / "kernel_output",
         # Many kernels treat the parent of the staged copy (run_dir) as the
         # "challenge dir" and write artifacts under run_dir/outputs.
         kernel_dir.parent / "outputs",
@@ -3191,6 +3265,7 @@ _KERNEL_BOOTSTRAP_END = "del _os, _sys, _KROOT, _KWORK"
 _KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
 _KERNEL_PIPELINE_CFG_MARKER = "# kagglebot:pipeline_cfg_fallback"
 _KERNEL_COMPETITION_SLUG_MARKER = "# kagglebot:competition_slug"
+_KERNEL_HARDWARE_PROFILE_MARKER = "# kagglebot:hardware_profile"
 _DATA_DIR_JOIN_RE = re.compile(r"(\bdata_dir\s*/\s*)(['\"])([^'\"]+)\2")
 _DATA_DIR_REQUIRED_RE = re.compile(r"all\(\(cand\s*/\s*name\)\.exists\(\)\s*for\s*name\s*in\s*required\)")
 _DATA_DIR_LOCATE_FALLBACK_MARKER = "# kagglebot:data-dir-fallback-scan"
@@ -3328,6 +3403,34 @@ def _inject_competition_slug_env(kernel_dir: Path, competition_slug: str) -> Non
         "del _kb_os",
         "",
     ]
+    lines = text.splitlines()
+    insert_at = _find_bootstrap_block_end(lines)
+    if insert_at is None:
+        insert_at = _find_bootstrap_insertion_index(lines)
+    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
+    updated = "\n".join(lines)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def _inject_hardware_profile_env(kernel_dir: Path, hardware_profile: str | None, *, compute: str) -> None:
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if _KERNEL_HARDWARE_PROFILE_MARKER in text:
+        return
+
+    profile = resolve_hardware_profile(hardware_profile, compute=compute)
+    env_payload = hardware_env(profile)
+    resolver_block = [
+        _KERNEL_HARDWARE_PROFILE_MARKER,
+        "import os as _kb_os",
+    ]
+    for key, value in sorted(env_payload.items()):
+        resolver_block.append(f"_kb_os.environ.setdefault({json.dumps(key)}, {json.dumps(value)})")
+    resolver_block.extend(["del _kb_os", ""])
     lines = text.splitlines()
     insert_at = _find_bootstrap_block_end(lines)
     if insert_at is None:
@@ -4949,6 +5052,10 @@ def _is_kernel_status_running(status: str) -> bool:
     return "running" in lowered or "queued" in lowered
 
 
+def _is_kernel_status_queued(status: str) -> bool:
+    return "queued" in status.lower()
+
+
 def _is_kernel_status_complete(status: str) -> bool:
     return "complete" in status.lower()
 
@@ -4970,15 +5077,71 @@ def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
     )
 
 
+def _remote_kernel_queued_timeout_sec() -> float | None:
+    raw = os.getenv(_REMOTE_KERNEL_QUEUED_TIMEOUT_ENV)
+    if raw is None or raw.strip() == "":
+        return _REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC
+    try:
+        value = float(raw)
+    except ValueError:
+        return _REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC
+    if value <= 0:
+        return None
+    return value
+
+
+def _raise_kernel_queued_timeout(kernel_id: str, elapsed_sec: float, timeout_sec: float) -> None:
+    raise KernelCapacityError(
+        f"Kaggle kernel {kernel_id} stayed queued for {int(elapsed_sec)}s "
+        f"(queue timeout {int(timeout_sec)}s). Kaggle workers are not starting this run.",
+        output=f"KernelWorkerStatus.QUEUED elapsed={int(elapsed_sec)} timeout={int(timeout_sec)}",
+    )
+
+
+def _last_kernel_push_wall_time(logs_dir: Path) -> float | None:
+    latest: float | None = None
+    for path in logs_dir.glob("kernel_push-*.txt"):
+        try:
+            timestamp = path.stat().st_mtime
+        except OSError:
+            continue
+        if latest is None or timestamp > latest:
+            latest = timestamp
+    return latest
+
+
+def _queued_since_from_push_logs(logs_dir: Path) -> float | None:
+    pushed_at = _last_kernel_push_wall_time(logs_dir)
+    if pushed_at is None:
+        return None
+    elapsed = max(0.0, time.time() - pushed_at)
+    return time.monotonic() - elapsed
+
+
+def _is_remote_kernel_queue_stale(queued_since: float | None, now: float | None = None) -> bool:
+    timeout_sec = _remote_kernel_queued_timeout_sec()
+    if queued_since is None or timeout_sec is None:
+        return False
+    current = time.monotonic() if now is None else now
+    return current - queued_since >= timeout_sec
+
+
 def _wait_for_kernel_and_record_pending(
     *,
     preparation: KernelPreparation,
     kernel_id: str,
     slug: str,
     timeout_minutes: int | None,
+    initial_queued_since: float | None = None,
 ) -> None:
     try:
-        _wait_for_kernel(kernel_id, slug, timeout_minutes, output_dir=preparation.output_dir)
+        _wait_for_kernel(
+            kernel_id,
+            slug,
+            timeout_minutes,
+            output_dir=preparation.output_dir,
+            initial_queued_since=initial_queued_since,
+        )
     except KernelStillRunningError:
         _write_pending_remote_kernel(preparation.logs_dir, kernel_id=kernel_id, kernel_slug=preparation.kernel_slug)
         raise
@@ -5009,6 +5172,18 @@ def _resume_prior_kernel_if_active(
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel status is {status}; pushing a new version")
         return None
 
+    initial_queued_since = (
+        _queued_since_from_push_logs(preparation.logs_dir) if _is_kernel_status_queued(status) else None
+    )
+    if (
+        _is_kernel_status_queued(status)
+        and preparation.supersede_stale_queued
+        and _is_remote_kernel_queue_stale(initial_queued_since)
+    ):
+        _clear_pending_remote_kernel(preparation.logs_dir)
+        print(f"[yellow]kernel resume[/yellow]: prior remote kernel is stale queued ({status}); pushing a new version")
+        return None
+
     _clear_stale_kernel_output(preparation.output_dir)
     print(f"[yellow]kernel resume[/yellow]: waiting for existing remote kernel {kernel_id} ({status})")
     if _is_kernel_status_running(status):
@@ -5017,6 +5192,7 @@ def _resume_prior_kernel_if_active(
             kernel_id=kernel_id,
             slug=slug,
             timeout_minutes=timeout_minutes,
+            initial_queued_since=initial_queued_since,
         )
     _clear_pending_remote_kernel(preparation.logs_dir)
     print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
@@ -5024,7 +5200,14 @@ def _resume_prior_kernel_if_active(
     return kernel_id
 
 
-def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, output_dir: Path) -> None:
+def _wait_for_kernel(
+    kernel_id: str,
+    slug: str,
+    timeout_minutes: int | None,
+    *,
+    output_dir: Path,
+    initial_queued_since: float | None = None,
+) -> None:
     deadline = None
     if timeout_minutes is not None:
         deadline = time.monotonic() + max(timeout_minutes, 1) * 60
@@ -5033,6 +5216,8 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
     last_log_fetch = 0.0
     log_state = _KernelLogState()
     status_errors = 0
+    queued_since = initial_queued_since
+    queued_timeout_sec = _remote_kernel_queued_timeout_sec()
     while True:
         try:
             output = kernels_status(kernel_id, slug=slug, dry_run=False)
@@ -5076,6 +5261,13 @@ def _wait_for_kernel(kernel_id: str, slug: str, timeout_minutes: int | None, *, 
             print(f"[cyan]kernel status[/cyan]: {status}")
             last_status = status
         now = time.monotonic()
+        if _is_kernel_status_queued(status):
+            if queued_since is None:
+                queued_since = now
+            if queued_timeout_sec is not None and now - queued_since >= queued_timeout_sec:
+                _raise_kernel_queued_timeout(kernel_id, now - queued_since, queued_timeout_sec)
+        else:
+            queued_since = None
         if now - last_log_fetch >= LOG_POLL_INTERVAL:
             _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
             had_logs = _print_kernel_logs(output_dir, log_state)

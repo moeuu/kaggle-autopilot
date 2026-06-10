@@ -9,13 +9,17 @@ Competition: {{slug}}
 Compute: {{compute}}
 Accelerator: {{accelerator}}
 Internet: {{internet}}
+Hardware profile: {{hardware_profile}}
 Rules URL: {{rules_url}}
 
 Execution rule:
 - Use a single authoritative implementation in `artifacts/<slug>/kernel/kernel.py`.
 - `local_gpu` and `kaggle_gpu` must share the same algorithm/pipeline; only execution location differs.
-- A `local_gpu` iteration must fit under 24 hours; target `time_budget_min <= 1200` unless competition rules impose a lower limit.
+- A `local_gpu` iteration has no default wall-clock limit; set `time_budget_min` only when competition rules or an explicit operator budget impose a lower limit.
 - For image/video/audio/text tasks, do not multiply full fine-tuning by 3 seeds x 5 folds. Use one strong full-training seed and at most 3 full-training folds, then preserve accuracy with pretrained backbones, cached embeddings, TTA, OOF blending, or lightweight heads for extra seeds.
+
+Hardware execution budget:
+{{hardware_constraints}}
 
 {{implementation_agent_name}} interpretation (summary of overview/data/rules + dataset profile):
 <<<
@@ -56,6 +60,9 @@ Use the code snapshot's notebook scores as ranking evidence when selecting candi
 Treat the notebook listed under `Required Reference Notebook (Execution baseline)` in the code snapshot as a mandatory reference baseline (or kernel base).
 If the raw top-ranked notebook is marked as leak-like/placeholder, use it only as a warning signal and do not copy leak logic.
 Use discussion thread insights for failure modes, leakage warnings, and strong baselines.
+Use the method scout context when present: prefer competition-specific and modality-specific papers, official repositories,
+Kaggle notebooks/discussions, and similar-competition writeups over generic method lists. Treat blocked method candidates
+as unsafe or infeasible and do not implement them.
 
 Return output with exact delimiters. Do NOT include chain-of-thought; provide concise, actionable steps only.
 Avoid baseline-only solutions. Propose a high-capacity, competition-appropriate approach.
@@ -93,6 +100,9 @@ Identify the competition and dataset schema from local context, then run LIVE we
 Do not limit search scope to Kaggle/GitHub/arXiv only.
 Use Kaggle discussions/notebooks, GitHub repos, and arXiv as required starting points, then broaden to any other credible websites that can improve solution quality (official docs, benchmark writeups, engineering blogs, conference pages, paper indexes, etc.).
 Prioritize primary sources and reproducible techniques, but search broadly across the web to maximize discovery of strong methods.
+Generate search queries from this competition's modality, metric, domain terms, dataset profile, and public-score failure
+signals. Do not only reuse a fixed tabular list such as TabPFN/TabM; those are fallback seeds when the competition-specific
+search produces no stronger evidence.
 Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings and include:
 - Problem framing + task/metric
 - Data & submission format interpretation
@@ -101,6 +111,7 @@ Provide a strong, detailed plan aimed at top-tier accuracy. Use clear headings a
 - Training & evaluation plan (competition-appropriate CV/holdout + seeds + primary metric)
 - Forbidden shortcuts: explicitly state that `score_source` must be `cv` or `holdout` (never `oracle`, `lb_proxy`, or test-label proxy)
 - Compute/GPU plan + time budget (include how to scale training time/epochs/iterations)
+- Hardware scaling plan: make RTX3060-class local_gpu accuracy-first, not accuracy-sacrificing. Keep the strongest feasible model families enabled by default, then describe exactly which plan.json/env knobs scale batch size, chunks, precision, folds/seeds, candidate count, and image size for RTX5090-class GPUs without changing kernel.py
 - Feature engineering protocol: explicitly state how train statistics are fit and then applied to test
 - Modality plan: explain how kernel.py handles tabular + non-tabular tasks (image/video/text/audio) via routing/custom_main
 - Pretrained assets plan: when transfer learning is recommended, specify how to download/cache checkpoints safely
@@ -148,8 +159,10 @@ Provide a JSON object with these keys (do not wrap in markdown):
 - holdout_frac (number, e.g. 0.2)
 - cv_folds (int, prefer 5-10 for tabular; for image/video/audio/text use <=3 full-training folds plus cached/TTA/lightweight validation)
 - seed (int)
-- time_budget_min (int|null; for local_gpu prefer <=1200)
-- max_iterations (int, prefer >=12 for hard competitions)
+- time_budget_min (int|null; for local_gpu prefer null/unlimited unless rules impose a limit)
+- hardware_profile (string; use the selected profile key such as "rtx3060" or "rtx5090")
+- runtime_budget (object; include hardware_profile, gpu_vram_gb, gpu_count, max_runtime_min, and concrete caps such as max_rerank_candidates, embedding_batch_size, full_training_seeds, full_training_folds when applicable)
+- max_iterations (int, default 5 when real training/validation is required; use 3 for long-running heavy local_gpu plans)
 - patience (int, prefer >=4 so promising runs are not cut early)
 - min_improvement (number)
 - pipelines (array, length 2-4; each pipeline object MUST include: name, features, models, key_hyperparameters, runtime_memory, failure_modes, fallbacks)
@@ -161,7 +174,7 @@ Provide a JSON object with these keys (do not wrap in markdown):
     - {"name":"competition_plus_original","train_mode":"competition_plus_original","feature_recipe":"full","lightweight":false,"promotion_stage":"ablation_fast"}
     - {"name":"orig_signal_only","train_mode":"competition_only","feature_recipe":"orig_signal_only","lightweight":true,"promotion_stage":"ablation_fast"}
   - Do not use `suite_aware_ablations` instead of `suites`; the validator requires `suites`.
-- toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default)
+- toggles (object; include generic pipeline/feature/runtime toggles and FAST_DEV default; training and validation must be enabled, and packaging-only/noop/identity/unscored fallback modes must be disabled)
 - evaluation_protocol (object; include `cv_type`, `n_folds`, `seeds`, and `primary_metric` based on the competition; use >=3 seeds for cheap/tabular evaluation, but only one full-training seed for heavy deep-learning runs)
 - stop_policy (object; include exact keys `max_iterations` and `error_fingerprint_abort`; `error_fingerprint_abort` may be bool or object)
 
@@ -180,6 +193,7 @@ Require the implementation to include:
 - Per-model OOF/test predictions saved as `.npy` under both `/kaggle/working` and local output dir
 - Ensemble selection only if shortlisted in plan (e.g., stacking/blending/rank-mean)
 - Final method chosen by plan primary metric (tie-breaker: simpler/faster)
+- Every iteration must train at least one real candidate and compute a competition-faithful validation score from train data. Do not report placeholder, proxy, public-anchor, packaging-only, or unscored metrics as the iteration score.
 - Keep the full kernel within the local GPU budget; do not implement a full-training seed x fold x model-family Cartesian product when cached embeddings, staged ablations, TTA, or lightweight heads can preserve score signal faster.
 - Never include oracle overrides (`build_oracle_game_map`, `apply_oracle_override`, `KAGGLEBOT_ORACLE_MODE`) or leaderboard-proxy score reporting
 - Submission validation (columns, rows, no NaN/inf, clipped if needed)

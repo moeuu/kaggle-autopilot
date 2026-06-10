@@ -6,6 +6,7 @@ This document explains the current submission policy in autopilot.
 
 Autopilot uses readiness score (SRS) as the primary loop decision.
 By default it submits every iteration.
+`--submit-policy improved` disables the initial contract-probe submit and waits for an improvement over a submitted checkpoint.
 `submission_gate` is only used when rules indicate submission-count limits.
 
 Decision rule:
@@ -26,6 +27,8 @@ Before submission, autopilot applies:
 - rules acceptance check
 - file format validation against `sample_submission.csv` (with `submission_format.md` / `overview.md` fallback hints when sample is placeholder/header-only)
 - duplicate submission hash check
+- local submission cooldown/rate limit (`KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN`, default 5 minutes)
+- bounded Kaggle submit CLI timeout (`KAGGLEBOT_SUBMIT_TIMEOUT_SEC`, default 300s)
 - repeated error fingerprint abort on submit failures
 
 ## Current CLI

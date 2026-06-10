@@ -31,7 +31,7 @@ This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
 2. **Plan**: Codex (gpt-5.3-codex, extra high) summarizes context, GPT (gpt-5.2, extra high) runs research + frozen plan, Codex (gpt-5.3-codex, extra high) implements it
 3. **Initial model**: Agent implements an initial solution in `artifacts/<slug>/kernel/kernel.py` (all compute modes)
-4. **Iterate**: Train → evaluate → diagnose → improve (default 12 iterations; override with `--max-iterations`)
+4. **Iterate**: Train → evaluate → diagnose → improve (default 5 iterations; long heavy local GPU runs are capped to 3)
 5. **Submit + Decide**: Submit each iteration, wait for Kaggle score, then decide continue/stop
 6. **Log**: Print Top1 public score and agent prompt/response to the terminal
 
@@ -44,7 +44,7 @@ Schema/method flexibility:
 - Model family selection is plugin-like with optional families (XGBoost/LightGBM if installed)
 
 **Safe defaults**:
-- Default max iterations: 3 (`--max-iterations` to override)
+- Default max iterations: 5; long-running heavy `local_gpu` plans are automatically capped to 3
 - No training time limit (accuracy-first)
 - Internet ON by default, but autopilot forces `--internet off` when captured rules say notebook internet is disabled
 - Each iteration submits and waits for Kaggle score before stop/continue decision
@@ -110,6 +110,12 @@ Autopilot creates `artifacts/<slug>/plan.json` with agent-defined targets:
 
 Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 
+Use `--hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2` to control planning and runtime scale knobs.
+`auto` detects the local NVIDIA GPU when possible. The default local target is RTX3060-class accuracy-first execution:
+strategies should keep the strongest feasible model families enabled, then scale batch size, chunks, precision,
+folds/seeds, or candidate ordering to fit a single 12GB GPU. Stronger GPUs such as RTX5090 should scale through
+`plan.json`/environment knobs without rewriting `kernel.py`.
+
 Optional environment knobs:
 - `KAGGLEBOT_MODEL_CANDIDATES="catboost,xgboost,lightgbm,torch,extra_trees"` to prioritize/limit model families
 - Submission sample stage selection (for competitions that publish Stage 1/2 sample files):
@@ -146,7 +152,8 @@ Optional environment knobs:
 - ✅ **24h watch mode stays scoped to entered competitions**: `watch` never accepts rules or joins competitions automatically
 - ✅ **Strict local validation before submit**: Column order, row count, ID integrity, numeric prediction checks
 - ✅ **Duplicate prevention**: SHA256 hash check against `submissions/ledger.jsonl`
-- ✅ **Rate limiting**: 5-min cooldown between submissions
+- ✅ **Rate limiting**: 5-min cooldown between submissions plus a bounded Kaggle submit CLI timeout
+- ✅ **Notebook-submit queue guard**: submit-only Kaggle kernels default to CPU metadata to avoid scarce GPU queues; set `KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR=gpu|tpu` to override. `KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC` bounds how long a remote kernel may remain `QUEUED` (default 1800s, `0` disables).
 - ✅ **No infinite submit loop**: Same submit-error fingerprint aborts the run immediately
 - ✅ **Controlled retries**: Transient submit errors retry up to 3 times with backoff; permanent errors abort immediately
 - ✅ **No rule automation**: Must accept rules manually in browser
@@ -154,16 +161,24 @@ Optional environment knobs:
 - ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, legacy `csv` aliases remain accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission
 - ✅ **Explicit submit mode**: `submit_mode` is tracked separately as `file|notebook`, so notebook-only leaderboard competitions no longer get conflated with writeup competitions
 - ✅ **Winner-mode iteration policy**: leaderboard runs default to a near-first-place target (`target_medal=winner`, `target_rank_percentile=0.001`) so `minor_tuning` is suppressed until the run reaches the target rank band
+- ✅ **Top1 campaign state**: autopilot CLI defaults to `--campaign-mode top1`, writes `context/campaign_state.json`, `context/candidate_registry.json`, `context/reference_reproduction_report.json`, `context/experiment_graph.json`, and iteration portfolio/blend/allocator reports; submissions that regress against the historical/champion public baseline are blocked unless they are calibration probes or explicitly forced
+- ✅ **Experiment graph execution**: `--portfolio-execution off|serial|parallel|budgeted` turns the top1 portfolio into dependency-aware candidate nodes and writes per-candidate manifests, metrics, diagnostics, and `graph_execution_report.json`
+- ✅ **Competition-specific method scout**: `--method-scout auto|off|refresh` builds `method_scout_queries.json`, `method_registry.json`, and `validation_registry.json` from the competition modality, metric, research sources, Kaggle context, and public-regression signals
+- ✅ **Research source registry and Validation Lab**: `--research-scout auto|off|refresh` writes attributed source evidence to `source_registry.json`; `--validation-lab auto|off|force` calibrates split profiles and records `validation_lab_report.json`
+- ✅ **Exhaustive top1 artifacts**: `--top1-exhaustive` enables safe exhaustive defaults and writes `win_contract.json`, `private_robustness_report.json`, `portfolio_optimizer_report.json`, and `top1_exhaustion_report.json` so the run records explored win paths, submit value, and remaining blockers
 - ✅ **High-accuracy tabular planning guardrails**: large tabular binary problems with meaningful categoricals must keep multi-family search active (CatBoost + XGBoost + LightGBM/second variant + OOF blend candidate)
 - ✅ **Reference input recovery**: required reference notebooks now emit `context/reference_inputs_manifest.json`, and `--download` stages referenced datasets/competitions into `context/reference_inputs/` for kernels that depend on external/original data
 - ✅ **Competition-scoped policy overrides**: optional `artifacts/<slug>/context/competition_policy.json` can tighten notebook selection, reference-input recovery, repair signals, and fallback evaluation without changing defaults for other competitions
   - Policy files can also declare generic `required_capabilities` and `execution_hints`, so competition-specific win conditions stay in artifacts while `src/` only gains reusable orchestration/runtime features
-- ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration is forced away from same-family-only tuning toward broader model-family diversification and blending
+- ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration prioritizes validation redesign with group/time/leak/proxy split candidates before spending submissions on model-only changes
+- ✅ **Candidate-selection guardrails**: when kernels report multiple candidates, autopilot blocks submissions where the selected pipeline wins only on CV while another candidate has materially better holdout/validation, especially when prediction distribution collapses to sparse or constant-like outputs
 - ✅ **Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, and submit outcomes, writes `_self_improvement/latest.*`, `strategy_context.md`, experiment backlog, and playbooks, injects that context into future planning, and can call Codex to make structural or architectural improvements when the git worktree is clean
 
 ## Top1 Public Leaderboard (Reference)
 
 The public leaderboard leader's score is fetched and stored in `context/top1_public.json`.
+Top1 campaign mode also stores the current campaign baseline, top1 gap, candidate IDs, and validation correlation in
+`context/campaign_state.json`, with per-candidate metadata in `context/candidate_registry.json`.
 Autopilot uses this as a reference signal (for diagnostics and rank-based major-overhaul guardrails), while primary loop control uses readiness score (SRS).
 
 ## Artifacts Layout
@@ -177,6 +192,17 @@ artifacts/<slug>/
     research_sources.jsonl       # Strategy web-research log (working copy)
     research_summary.md          # Ranked research shortlist (working copy)
     research_storage.json        # Mapping to persisted knowledge paths
+    method_scout_queries.json    # Competition-specific method discovery queries
+    source_registry.json         # Attributed research/notebook/repo/discussion sources and planned retrieval queries
+    method_registry.json         # Ranked/blocked method candidates for portfolio planning
+    validation_registry.json     # Split redesign candidates and validation priority
+    validation_lab_report.json   # Validation profile evidence and active split calibration
+    win_contract.json            # Top1 score, validation, method, and submission done-definition contract
+    private_robustness_report.json # Candidate public-overfit, correlation, and baseline-regression risks
+    top1_exhaustion_report.json  # Remaining legal/executable top1 work and exhaustion status
+    reference_reproduction_report.json # Mandatory reference baseline gate and attribution
+    experiment_graph.json        # Candidate DAG and portfolio execution state
+    campaign_outcomes.jsonl      # Method/profile/category outcome journal for self-improvement
     sample_submission.csv        # Required submission format
     sample_submission_head.csv   # Head of sample submission
     top1_public.json             # Leaderboard leader snapshot
@@ -273,4 +299,4 @@ uv run kagglebot knowledge search --tag tabular --tag binary --limit 5
 
 - **Non-interactive**: No prompts for input. All decisions via CLI flags or `plan.json`.
 - **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run.
-- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; duplicate submission SHA is skipped unless forced, and rolling 24h submission limits are honored when rules expose them.
+- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; duplicate submission SHA is skipped unless forced, initial leaderboard checkpoints are submitted when submit is enabled, and daily/rolling 24h submission limits are honored when rules expose them.

@@ -69,6 +69,7 @@ Update `{plan_path}` with the following fields:
   - Direction-aware: minimize means higher value is more lenient, maximize means lower value
 - **score_source**: Use `cv` by default for robust model ranking; use `holdout` only when CV is infeasible
 - **submit_policy**: Keep as `always` unless rules clearly limit submission counts
+- **candidate selection guard**: If multiple pipelines are evaluated, do not select the final submission by CV alone. Log every candidate's primary CV score, holdout/validation score, and submission/test prediction distribution. Prefer the candidate with the best competition-faithful validation signal when CV and holdout disagree; reject candidates whose holdout/validation score is materially worse than another candidate or whose test prediction distribution collapses to an implausibly sparse/constant output.
 
 ### Step 2: Implement Strong Initial Solution
 
@@ -244,6 +245,8 @@ submission.to_csv("{submission_path}", index=False)
 - [ ] Initial model runs end-to-end without errors
 - [ ] submission.csv format matches sample_submission.csv exactly (columns, rows, types)
 - [ ] Offline evaluation produces a numeric score in metrics.json
+- [ ] The primary score comes from a real trained candidate and train-data CV/holdout validation; no placeholder, proxy, public-anchor, packaging-only, identity/noop, or unscored metrics
+- [ ] If multiple candidates exist, final selection is justified by CV + holdout/validation + prediction distribution, not by CV alone
 - [ ] GPU/TPU utilization >80% (GPU) or >70% (TPU MXU) during training
 - [ ] Implementation is in `artifacts/{slug}/kernel/kernel.py` (not src local trainer code)
 - [ ] Tests pass: `uv run pytest -q`

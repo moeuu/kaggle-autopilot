@@ -131,6 +131,10 @@ class CompetitionPaths:
         return self.context_dir / "dataset_profile.json"
 
     @property
+    def analysis_path(self) -> Path:
+        return self.context_dir / "analysis.json"
+
+    @property
     def sample_submission_path(self) -> Path:
         return self.context_dir / "sample_submission.csv"
 
@@ -141,6 +145,42 @@ class CompetitionPaths:
     @property
     def top1_public_path(self) -> Path:
         return self.context_dir / "top1_public.json"
+
+    @property
+    def method_registry_path(self) -> Path:
+        return self.context_dir / "method_registry.json"
+
+    @property
+    def method_scout_queries_path(self) -> Path:
+        return self.context_dir / "method_scout_queries.json"
+
+    @property
+    def source_registry_path(self) -> Path:
+        return self.context_dir / "source_registry.json"
+
+    @property
+    def validation_registry_path(self) -> Path:
+        return self.context_dir / "validation_registry.json"
+
+    @property
+    def validation_lab_report_path(self) -> Path:
+        return self.context_dir / "validation_lab_report.json"
+
+    @property
+    def win_contract_path(self) -> Path:
+        return self.context_dir / "win_contract.json"
+
+    @property
+    def private_robustness_report_path(self) -> Path:
+        return self.context_dir / "private_robustness_report.json"
+
+    @property
+    def top1_exhaustion_report_path(self) -> Path:
+        return self.context_dir / "top1_exhaustion_report.json"
+
+    @property
+    def experiment_graph_path(self) -> Path:
+        return self.context_dir / "experiment_graph.json"
 
     @property
     def prompts_dir(self) -> Path:
@@ -181,6 +221,10 @@ class CompetitionPaths:
     @property
     def data_dir(self) -> Path:
         return self.base_dir / "data"
+
+    @property
+    def data_raw(self) -> Path:
+        return self.data_dir
 
     def run_dir(self, run_id: str) -> Path:
         return self.runs_dir / run_id
