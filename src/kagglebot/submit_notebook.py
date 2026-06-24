@@ -276,6 +276,31 @@ def decide_submit_kernel_cpu_fallback(
     )
 
 
+def decide_submit_kernel_cpu_fallback_for_exception(
+    *,
+    accelerator: str,
+    strict_accelerator: bool,
+    exc: BaseException,
+    is_capacity_error: Callable[[BaseException], bool],
+    is_push_error: Callable[[BaseException], bool],
+) -> NotebookSubmitCpuFallbackDecision:
+    return decide_submit_kernel_cpu_fallback(
+        accelerator=accelerator,
+        strict_accelerator=strict_accelerator,
+        is_capacity_error=is_capacity_error(exc),
+        is_push_error=is_push_error(exc),
+    )
+
+
+def is_submit_kernel_push_error(exc: BaseException) -> bool:
+    return is_submit_kernel_push_error_text(
+        message=str(exc),
+        output=str(getattr(exc, "output", "") or ""),
+        stdout=str(getattr(exc, "stdout", "") or ""),
+        stderr=str(getattr(exc, "stderr", "") or ""),
+    )
+
+
 def is_submit_kernel_push_error_text(
     *,
     message: str = "",

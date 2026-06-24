@@ -9832,29 +9832,28 @@ def _decide_submit_kernel_cpu_fallback(
     config: AutopilotConfig,
     exc: Exception,
 ) -> _submit_notebook.NotebookSubmitCpuFallbackDecision:
-    return _submit_notebook.decide_submit_kernel_cpu_fallback(
+    return _submit_notebook.decide_submit_kernel_cpu_fallback_for_exception(
         accelerator=config.accelerator,
         strict_accelerator=config.strict_accelerator,
-        is_capacity_error=isinstance(exc, KernelCapacityError),
-        is_push_error=isinstance(exc, KaggleCliError) and _is_submit_kernel_push_error(exc),
+        exc=exc,
+        is_capacity_error=lambda candidate: isinstance(candidate, KernelCapacityError),
+        is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
+        and _submit_notebook.is_submit_kernel_push_error(candidate),
     )
 
 
 def _is_submit_kernel_push_error(exc: KaggleCliError) -> bool:
-    return _submit_notebook.is_submit_kernel_push_error_text(
-        message=str(exc),
-        output=getattr(exc, "output", "") or "",
-        stdout=getattr(exc, "stdout", "") or "",
-        stderr=getattr(exc, "stderr", "") or "",
-    )
+    return _submit_notebook.is_submit_kernel_push_error(exc)
 
 
 def _submit_kernel_cpu_retry_reason(exc: Exception) -> str:
-    return _submit_notebook.decide_submit_kernel_cpu_fallback(
+    return _submit_notebook.decide_submit_kernel_cpu_fallback_for_exception(
         accelerator="gpu",
         strict_accelerator=False,
-        is_capacity_error=isinstance(exc, KernelCapacityError),
-        is_push_error=isinstance(exc, KaggleCliError) and _is_submit_kernel_push_error(exc),
+        exc=exc,
+        is_capacity_error=lambda candidate: isinstance(candidate, KernelCapacityError),
+        is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
+        and _submit_notebook.is_submit_kernel_push_error(candidate),
     ).reason
 
 

@@ -10,6 +10,8 @@ from kagglebot.submit_notebook import (
     decide_ambiguous_notebook_submit_retry,
     decide_notebook_submit_artifact_mode,
     decide_submit_kernel_cpu_fallback,
+    decide_submit_kernel_cpu_fallback_for_exception,
+    is_submit_kernel_push_error,
     is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
     run_kaggle_submit_kernel_with_retry,
@@ -371,6 +373,21 @@ def test_decide_submit_kernel_cpu_fallback_allows_gpu_push_error() -> None:
     assert decision.reason == "Kaggle notebook push failed under GPU metadata"
 
 
+def test_decide_submit_kernel_cpu_fallback_for_exception_uses_predicates() -> None:
+    exc = SubmitKernelError("capacity")
+
+    decision = decide_submit_kernel_cpu_fallback_for_exception(
+        accelerator="gpu",
+        strict_accelerator=False,
+        exc=exc,
+        is_capacity_error=lambda candidate: candidate is exc,
+        is_push_error=lambda candidate: False,
+    )
+
+    assert decision.retry_on_cpu is True
+    assert decision.reason == "Kaggle GPU capacity is unavailable"
+
+
 def test_decide_submit_kernel_cpu_fallback_rejects_strict_or_non_gpu() -> None:
     strict = decide_submit_kernel_cpu_fallback(
         accelerator="gpu",
@@ -394,6 +411,12 @@ def test_is_submit_kernel_push_error_text_detects_known_markers() -> None:
     assert is_submit_kernel_push_error_text(output="Kernel push error: Notebook not found") is True
     assert is_submit_kernel_push_error_text(stderr="kernel not found after push") is True
     assert is_submit_kernel_push_error_text(stdout="Kaggle kernel push failed") is True
+
+
+def test_is_submit_kernel_push_error_reads_exception_fields() -> None:
+    exc = SubmitCliStubError(output="Kernel push error: Notebook not found")
+
+    assert is_submit_kernel_push_error(exc) is True
 
 
 def test_is_submit_kernel_push_error_text_rejects_generic_errors() -> None:
