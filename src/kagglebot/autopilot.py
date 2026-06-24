@@ -28,6 +28,7 @@ from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import score_sources as _score_sources
 from kagglebot import submission_policy as _submission_policy
+from kagglebot import submit_autofix as _submit_autofix
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot.agents.codex_runner import run_codex
@@ -283,6 +284,8 @@ _resolve_submit_autofix_submission_artifact_from_state = (
     _submit_failure_context.resolve_submit_autofix_submission_artifact
 )
 _submit_file_fix_contract_satisfied_from_state = _submit_failure_context.submit_file_fix_contract_satisfied
+_prepare_submit_file_autofix_result = _submit_autofix.prepare_submit_file_autofix
+_submit_file_fix_required_for_attempt = _submit_autofix.submit_file_fix_required_for_attempt
 
 
 def _classify_submit_failure_repair(
@@ -8185,19 +8188,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     if submit_autofix:
         submit_context = _build_submit_autofix_context(run_dir)
         latest_submit_attempt = _load_latest_submit_attempt(run_dir)
-        latest_submit_detail = "\n".join(
-            part
-            for part in (
-                str(latest_submit_attempt.get("stdout_tail") or ""),
-                str(latest_submit_attempt.get("stderr_tail") or ""),
-            )
-            if part
-        )
-        submit_file_fix_required = _submit_error_requires_file_fix(
-            reason=latest_submit_attempt.get("reason"),
-            error_kind=latest_submit_attempt.get("error_kind"),
-            detail=latest_submit_detail,
-        )
+        submit_file_fix_required = _submit_file_fix_required_for_attempt(latest_submit_attempt)
         if submit_file_fix_required:
             submit_file_fix_baseline_path = _resolve_submit_autofix_submission_artifact(
                 config=config,
@@ -10351,20 +10342,6 @@ def _prepare_submit_file_autofix(
     run_dir: Path,
 ) -> tuple[Path | None, str]:
     latest = _load_latest_submit_attempt(run_dir)
-    detail = "\n".join(
-        part for part in (str(latest.get("stdout_tail") or ""), str(latest.get("stderr_tail") or "")) if part
-    )
-    if not _submit_error_requires_file_fix(
-        reason=latest.get("reason"),
-        error_kind=latest.get("error_kind"),
-        detail=detail,
-    ):
-        return None, ""
-
-    source = _resolve_submit_autofix_submission_artifact(config=config, run_id=run_id, run_dir=run_dir)
-    if source is None:
-        return None, "submit autofix could not locate the submission artifact to repair."
-
     service = SubmissionService(
         SubmissionConfig(
             slug=config.slug,
@@ -10377,30 +10354,19 @@ def _prepare_submit_file_autofix(
         )
     )
 
-    try:
-        fixed = service.validate_and_prepare_submission(source)
-    except SubmissionValidationError as exc:
-        return None, f"submit autofix could not deterministically repair submission file: {exc}"
+    def resolve_source() -> Path | None:
+        return _resolve_submit_autofix_submission_artifact(config=config, run_id=run_id, run_dir=run_dir)
 
-    if not fixed.exists():
-        return None, "submit autofix prepared a submission path but the fixed artifact does not exist."
+    def save_repaired_path(fixed: Path) -> None:
+        _save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
 
-    _save_run_state(
-        run_dir,
-        {
-            "submit_autofix_submission_path": str(fixed),
-        },
+    preparation = _prepare_submit_file_autofix_result(
+        latest_submit_attempt=latest,
+        resolve_source=resolve_source,
+        validate_and_prepare=service.validate_and_prepare_submission,
+        save_repaired_path=save_repaired_path,
     )
-    if fixed == source:
-        return fixed, (
-            "submit autofix inspected the Kaggle-rejected submission artifact, "
-            "but no deterministic file rewrite was available; source generation still needs a fix."
-        )
-    return fixed, (
-        "submit autofix created a repaired submission artifact from the Kaggle-rejected file.\n"
-        f"- original_submission_path: {source}\n"
-        f"- fixed_submission_path: {fixed}"
-    )
+    return preparation.path, preparation.summary
 
 
 def _submit_file_fix_contract_satisfied(
