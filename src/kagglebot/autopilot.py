@@ -9309,7 +9309,7 @@ def _attempt_submit(
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
     duplicate_sources: list[str] = []
     if prepared_submission_sha and not allow_force:
-        if _submit_attempt_sha_seen(run_dir=run_dir, submission_sha=prepared_submission_sha):
+        if _submit_attempts.submit_attempt_sha_seen(run_dir=run_dir, submission_sha=prepared_submission_sha):
             duplicate_sources.append("run_attempts")
         if SubmissionLedger(config.paths.submission_ledger_path).is_duplicate(
             slug=config.slug,
@@ -9342,7 +9342,7 @@ def _attempt_submit(
             stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
             duplicate_sources=duplicate_sources,
         )
-        _append_submit_attempt(run_dir=run_dir, payload=skip_payloads.attempt_payload)
+        _submit_attempts.append_submit_attempt(run_dir=run_dir, payload=skip_payloads.attempt_payload)
         _save_run_state(run_dir, skip_payloads.run_state_update)
         _mark_submit_failure_context_resolved(
             run_dir=run_dir,
@@ -9436,7 +9436,7 @@ def _attempt_submit(
             print(same_path_decision.message)
         elif same_path_decision.action == "skip":
             print(same_path_decision.message)
-            _append_submit_attempt(
+            _submit_attempts.append_submit_attempt(
                 run_dir=run_dir,
                 payload=_submit_attempts.build_submit_skip_attempt_payload(
                     run_id=run_id,
@@ -9564,7 +9564,7 @@ def _attempt_submit(
                 )
             seen_fingerprints.add(fingerprint)
             if error_action.action == "retry":
-                _append_submit_attempt(
+                _submit_attempts.append_submit_attempt(
                     run_dir=run_dir,
                     payload=_submit_attempts.build_submit_retry_attempt_payload(
                         run_id=run_id,
@@ -9653,7 +9653,7 @@ def _attempt_submit(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-    _append_submit_attempt(
+    _submit_attempts.append_submit_attempt(
         run_dir=run_dir,
         payload=submit_success_payloads.attempt_payload,
     )
@@ -10073,7 +10073,7 @@ def _abort_submit_for_run(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-    _append_submit_attempt(run_dir=run_dir, payload=abort_payloads.attempt_payload)
+    _submit_attempts.append_submit_attempt(run_dir=run_dir, payload=abort_payloads.attempt_payload)
     _save_run_state(run_dir, abort_payloads.run_state_update)
     _save_submit_failure_context(
         run_dir,
@@ -10106,42 +10106,6 @@ def _abort_submit_for_run(
     )
     print(f"[red]submit aborted[/red]: {message}")
     raise SubmitAbortedError(message)
-
-
-def _append_submit_attempt(*, run_dir: Path, payload: dict[str, object]) -> None:
-    record = {
-        "ts": datetime.now(UTC).isoformat(),
-        **payload,
-    }
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    attempts_path.parent.mkdir(parents=True, exist_ok=True)
-    with attempts_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-
-
-def _submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
-    normalized_sha = str(submission_sha or "").strip()
-    if not normalized_sha:
-        return False
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return False
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("sub_sha256") or "").strip() == normalized_sha:
-            return True
-    return False
 
 
 def _build_submit_failure_context_payload(

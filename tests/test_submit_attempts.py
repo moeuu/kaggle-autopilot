@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from kagglebot.submit_attempts import (
+    append_submit_attempt,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
     build_submit_knowledge_payload,
@@ -11,6 +14,7 @@ from kagglebot.submit_attempts import (
     build_submit_skip_record_payloads,
     build_submit_success_record_payloads,
     decide_submit_outcome_recording,
+    submit_attempt_sha_seen,
 )
 
 
@@ -68,6 +72,38 @@ def test_build_submit_attempt_payload_includes_optional_fields() -> None:
     assert payload["code_fingerprint"] == "code-fp"
     assert payload["duplicate_sources"] == ["run_attempts"]
     assert payload["sub_sha256"] is None
+
+
+def test_append_submit_attempt_writes_jsonl_record(tmp_path) -> None:
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"run_id": "run-1", "sub_sha256": "sha", "ok": False},
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+
+    attempts_path = tmp_path / "submit_attempts.jsonl"
+    rows = [json.loads(line) for line in attempts_path.read_text(encoding="utf-8").splitlines()]
+
+    assert rows == [{"ts": "2026-06-25T00:00:00+00:00", "run_id": "run-1", "sub_sha256": "sha", "ok": False}]
+
+
+def test_submit_attempt_sha_seen_ignores_invalid_rows(tmp_path) -> None:
+    (tmp_path / "submit_attempts.jsonl").write_text(
+        "\n".join(
+            [
+                "",
+                "not-json",
+                json.dumps(["not", "a", "dict"]),
+                json.dumps({"sub_sha256": "other"}),
+                json.dumps({"sub_sha256": "sha"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert submit_attempt_sha_seen(run_dir=tmp_path, submission_sha="sha")
+    assert not submit_attempt_sha_seen(run_dir=tmp_path, submission_sha="missing")
+    assert not submit_attempt_sha_seen(run_dir=tmp_path, submission_sha="")
 
 
 def test_build_submit_run_state_update_sets_common_last_submit_fields() -> None:

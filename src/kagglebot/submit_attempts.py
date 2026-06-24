@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,42 @@ class SubmitAbortRecordPayloads:
 class SubmitSkipRecordPayloads:
     attempt_payload: dict[str, object]
     run_state_update: dict[str, object]
+
+
+def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso: str | None = None) -> None:
+    record = {
+        "ts": now_iso or datetime.now(UTC).isoformat(),
+        **payload,
+    }
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    attempts_path.parent.mkdir(parents=True, exist_ok=True)
+    with attempts_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
+    normalized_sha = str(submission_sha or "").strip()
+    if not normalized_sha:
+        return False
+    attempts_path = run_dir / "submit_attempts.jsonl"
+    if not attempts_path.exists():
+        return False
+    try:
+        lines = attempts_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("sub_sha256") or "").strip() == normalized_sha:
+            return True
+    return False
 
 
 def build_submit_attempt_payload(
