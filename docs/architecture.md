@@ -81,10 +81,11 @@ and validation callbacks while the module owns the repair-required check and res
 Submit code fingerprinting, same-error-fingerprint retry allowance, duplicate-submission skip decisions, and
 same-submission-path retry/skip decisions live in `src/kagglebot/submit_retry_policy.py`; the loop supplies paths,
 hashing, and state persistence callbacks.
-Submit attempt payload and submit run-state update creation live in `src/kagglebot/submit_attempts.py`, keeping the JSONL
-record shape, state update fields, submit knowledge-record message/fix summaries, and submit result payloads centralized
-while the loop remains responsible for persistence. Submit success outcome display and ledger-recording decisions also
-live there.
+Submit attempt payloads, submit run-state updates, submit knowledge-record message/fix summaries, submit result payloads,
+and submit success outcome display/ledger-recording decisions live in `src/kagglebot/submit_attempts.py`. The same module
+now owns `submit_attempts.jsonl` append, duplicate SHA lookup, and tolerant row readers used by resume state and
+self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules centralized instead of
+duplicated across the loop, state helpers, and improvement analysis.
 Notebook submit artifact-mode normalization, tiny public sample hidden-test guards, submit-kernel run kwargs construction,
 kernel output artifact/reference handling, output file selection, Kaggle submit-kernel kwargs construction, ambiguous
 submit retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
@@ -167,17 +168,20 @@ Recommended extraction order:
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.
-4. Submit state persistence: submit attempt, submit run-state, submit failure-context, and submit knowledge-record payload
-   creation are now centralized; duplicate-submit skip decisions and submit result payload construction are extracted.
+4. Submit state persistence: submit attempt JSONL writing/reading, duplicate SHA lookup, submit attempt/run-state payloads,
+   submit failure-context payloads, submit knowledge-record payloads, and submit result payload construction are now
+   centralized. Duplicate-submit skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, tiny public sample guards, notebook submit
    kernel-run kwargs construction, notebook submit result artifact/reference handling, and notebook submit exception/retry
    orchestration are extracted. Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, and
-   file-submit-to-notebook fallback decisions are now in `submit_stage.py`. Next, continue moving `_attempt_submit`'s
-   submit-attempt side effects into that typed submit-stage service.
+   file-submit-to-notebook fallback decisions are now in `submit_stage.py`. Next, move the remaining `_attempt_submit`
+   side-effect orchestration into a typed service that coordinates the existing `submit_attempts`, `submit_stage`,
+   `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 
-Each extraction should preserve the existing private compatibility names in `autopilot.py` until downstream tests and
-extensions have moved to the new public module.
+Each extraction should preserve private compatibility names only where downstream tests/extensions still import them.
+New code should call the smaller public modules directly, and obsolete private wrappers in `autopilot.py` should be
+removed once repo-wide references are gone.
