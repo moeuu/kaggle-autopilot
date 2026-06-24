@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
     build_submit_stage_success_record,
     classify_submit_stage_error,
@@ -9,7 +10,10 @@ from kagglebot.submit_stage import (
     decide_notebook_fallback_after_file_submit_error,
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
+    find_campaign_candidate_for_submission,
+    infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
+    resolve_submission_message,
     run_submit_stage_attempt,
 )
 
@@ -84,6 +88,90 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
     assert normalize_submission_outcome_status("SubmissionStatus.COMPLETE") == "complete"
     assert normalize_submission_outcome_status("") == "unknown"
+
+
+def test_infer_iteration_from_submission_path_reads_iter_parent() -> None:
+    assert infer_iteration_from_submission_path(Path("runs/run-1/iter-3/submission.csv")) == 3
+    assert infer_iteration_from_submission_path(Path("submission.csv")) is None
+
+
+def test_resolve_submission_message_builds_compact_default(tmp_path: Path) -> None:
+    message = resolve_submission_message(
+        context_dir=tmp_path / "context",
+        run_id="run-1",
+        best_score=0.123456,
+        explicit_message=None,
+        submission_path=Path("runs/run-1/iter-2/submission.csv"),
+        campaign_mode="baseline",
+        target_direction="minimize",
+    )
+
+    assert message == "kb run-1 i=2 offline=0.1235"
+
+
+def test_resolve_submission_message_includes_campaign_candidate(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    submission_path = tmp_path / "runs" / "run-1" / "iter-2" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    upsert_candidate(
+        candidate_registry_path(context_dir),
+        CampaignCandidate(
+            candidate_id="run-1-i002-strong_single",
+            category="strong_single",
+            run_id="run-1",
+            iteration=2,
+            direction="minimize",
+            submission_path=str(submission_path),
+        ),
+    )
+    campaign_state_path(context_dir).write_text(
+        '{"campaign_id":"campaign-1","direction":"minimize","historical_best_score":0.2}\n',
+        encoding="utf-8",
+    )
+
+    message = resolve_submission_message(
+        context_dir=context_dir,
+        run_id="run-1",
+        best_score=0.15,
+        explicit_message=None,
+        submission_path=submission_path,
+        campaign_mode="top1",
+        target_direction="minimize",
+    )
+
+    assert "campaign=campaign-1" in message
+    assert "candidate=run-1-i002-strong_single" in message
+    assert "baseline_delta=+0.050000" in message
+
+
+def test_find_campaign_candidate_for_submission_prefers_submission_path(tmp_path: Path) -> None:
+    selected_path = tmp_path / "iter-1" / "submission.csv"
+    other = CampaignCandidate(
+        candidate_id="other",
+        category="strong_single",
+        run_id="run-1",
+        iteration=1,
+        direction="minimize",
+    )
+    selected = CampaignCandidate(
+        candidate_id="selected",
+        category="strong_single",
+        run_id="run-2",
+        iteration=2,
+        direction="minimize",
+        submission_path=str(selected_path),
+    )
+
+    assert (
+        find_campaign_candidate_for_submission(
+            candidates=[other, selected],
+            submission_path=selected_path,
+            run_id="run-1",
+            iteration=1,
+        )
+        == selected
+    )
 
 
 def test_decide_submission_outcome_abort_handles_error_status() -> None:

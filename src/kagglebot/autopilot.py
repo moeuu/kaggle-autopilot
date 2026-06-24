@@ -91,7 +91,6 @@ from kagglebot.campaign import (
     build_campaign_candidate,
     campaign_state_path,
     candidate_registry_path,
-    format_campaign_submission_message,
     list_candidates,
     normalize_campaign_mode,
     update_campaign_state,
@@ -10841,34 +10840,14 @@ def _submission_message(
     *,
     submission_path: Path | None = None,
 ) -> str:
-    iteration = _infer_iteration_from_submission_path(submission_path) if submission_path is not None else None
-    iteration_suffix = f" i={iteration}" if isinstance(iteration, int) else ""
-    if config.message:
-        base_message = config.message
-    elif best_score is None:
-        base_message = f"kb {run_id}{iteration_suffix}"
-    else:
-        base_message = f"kb {run_id}{iteration_suffix} offline={best_score:.4f}"
-    if normalize_campaign_mode(config.campaign_mode, deliverable_mode="leaderboard") != "top1":
-        return base_message
-    campaign_candidate = _find_campaign_candidate_for_submission(
+    return _submit_stage.resolve_submission_message(
         context_dir=config.paths.context_dir,
-        submission_path=submission_path,
         run_id=run_id,
-        iteration=iteration,
-    )
-    if campaign_candidate is None:
-        return base_message
-    campaign_state = _load_json_object(campaign_state_path(config.paths.context_dir))
-    if not isinstance(campaign_state, dict):
-        campaign_state = {}
-    direction = str(campaign_state.get("direction") or config.target_direction or "minimize")
-    return format_campaign_submission_message(
-        base_message=base_message,
-        campaign_state=campaign_state,
-        candidate=campaign_candidate,
-        offline_score=best_score,
-        direction=direction,
+        best_score=best_score,
+        explicit_message=config.message,
+        submission_path=submission_path,
+        campaign_mode=config.campaign_mode,
+        target_direction=config.target_direction,
     )
 
 
@@ -10879,17 +10858,12 @@ def _find_campaign_candidate_for_submission(
     run_id: str,
     iteration: int | None,
 ):
-    candidates = list_candidates(candidate_registry_path(context_dir))
-    if submission_path is not None:
-        resolved_submission = str(submission_path)
-        for candidate in candidates:
-            if candidate.submission_path == resolved_submission:
-                return candidate
-    if iteration is not None:
-        for candidate in candidates:
-            if candidate.run_id == run_id and candidate.iteration == iteration:
-                return candidate
-    return None
+    return _submit_stage.find_campaign_candidate_for_submission(
+        candidates=list_candidates(candidate_registry_path(context_dir)),
+        submission_path=submission_path,
+        run_id=run_id,
+        iteration=iteration,
+    )
 
 
 def _normalize_metric_name(name: str | None) -> str:
