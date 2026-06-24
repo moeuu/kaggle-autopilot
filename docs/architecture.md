@@ -184,6 +184,9 @@ Recommended extraction order:
    `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
+6. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
+   should avoid ad hoc `json.dumps(...).write_text(...)` for artifact files unless they need non-object JSON, JSONL, or
+   generated kernel code that runs outside the package.
 
 Each extraction should preserve private compatibility names only where downstream tests/extensions still import them.
 New code should call the smaller public modules directly, and obsolete private wrappers in `autopilot.py` should be

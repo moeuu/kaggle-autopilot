@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +9,7 @@ import pandas as pd
 from kagglebot.analyzer.schema import infer_schema, load_schema_frames
 from kagglebot.analyzer.strategy import build_strategy
 from kagglebot.analyzer.types import CompetitionMetadata
+from kagglebot.json_utils import write_json_object
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.io import find_competition_files
 
@@ -83,10 +83,9 @@ def analyze_competition(
     )
 
     analysis_path = paths.analysis_path
-    analysis_path.parent.mkdir(parents=True, exist_ok=True)
     payload = metadata.to_dict()
     payload["generated_at"] = datetime.now(UTC).isoformat()
-    analysis_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_object(analysis_path, payload)
 
     return AnalysisResult(metadata=metadata, analysis_path=analysis_path)
 
