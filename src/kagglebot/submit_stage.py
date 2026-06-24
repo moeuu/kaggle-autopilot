@@ -187,6 +187,25 @@ def resolve_submission_rank_payload(
     return payload
 
 
+def format_rank_force_reason(
+    *,
+    rank: int,
+    total_teams: int,
+    rank_percentile: float | None,
+    max_percentile: float,
+    min_teams: int,
+    source: str | None,
+) -> str:
+    resolved_percentile = (rank / total_teams) if rank_percentile is None and total_teams > 0 else rank_percentile
+    percentile_text = f"{(resolved_percentile or 0.0) * 100:.2f}%" if resolved_percentile is not None else "n/a"
+    source_text = f" source={source}" if source else ""
+    return (
+        "Leaderboard rank indicates large headroom for improvement: "
+        f"{rank}/{total_teams} (percentile={percentile_text}, threshold={max_percentile * 100:.2f}%, "
+        f"min_teams={min_teams}).{source_text}"
+    )
+
+
 def _meets_target(value: float, target: float, direction: str) -> bool:
     return value <= target if str(direction).lower() == "minimize" else value >= target
 

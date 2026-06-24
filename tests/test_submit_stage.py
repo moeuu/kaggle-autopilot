@@ -12,6 +12,7 @@ from kagglebot.submit_stage import (
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
     find_campaign_candidate_for_submission,
+    format_rank_force_reason,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
     resolve_submission_message,
@@ -167,6 +168,22 @@ def test_resolve_submission_rank_payload_estimates_when_rank_missing() -> None:
             "dry_run": True,
         }
     ]
+
+
+def test_format_rank_force_reason_includes_percentile_threshold_and_source() -> None:
+    reason = format_rank_force_reason(
+        rank=120,
+        total_teams=1000,
+        rank_percentile=None,
+        max_percentile=0.01,
+        min_teams=200,
+        source="submission_row",
+    )
+
+    assert reason == (
+        "Leaderboard rank indicates large headroom for improvement: "
+        "120/1000 (percentile=12.00%, threshold=1.00%, min_teams=200). source=submission_row"
+    )
 
 
 def test_resolve_submission_message_builds_compact_default(tmp_path: Path) -> None:

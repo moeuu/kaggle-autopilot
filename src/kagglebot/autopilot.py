@@ -10639,13 +10639,13 @@ def _build_rank_force_reason(
     min_teams: int,
     source: str | None,
 ) -> str:
-    resolved_percentile = (rank / total_teams) if rank_percentile is None and total_teams > 0 else rank_percentile
-    percentile_text = f"{(resolved_percentile or 0.0) * 100:.2f}%" if resolved_percentile is not None else "n/a"
-    source_text = f" source={source}" if source else ""
-    return (
-        "Leaderboard rank indicates large headroom for improvement: "
-        f"{rank}/{total_teams} (percentile={percentile_text}, threshold={max_percentile * 100:.2f}%, "
-        f"min_teams={min_teams}).{source_text}"
+    return _submit_stage.format_rank_force_reason(
+        rank=rank,
+        total_teams=total_teams,
+        rank_percentile=rank_percentile,
+        max_percentile=max_percentile,
+        min_teams=min_teams,
+        source=source,
     )
 
 
