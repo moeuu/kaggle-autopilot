@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -8,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from kagglebot.hashing import sha256_file
+from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.scalar_utils import finite_float as _to_float
 from kagglebot.scalar_utils import optional_int as _to_int
 from kagglebot.scalar_utils import optional_str as _optional_str
@@ -139,9 +139,7 @@ def candidate_registry_path(context_dir: Path) -> Path:
 
 
 def load_candidate_registry(path: Path) -> dict[str, object]:
-    payload = _load_json(path)
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = load_json_object_or_empty(path)
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         candidates = []
@@ -176,8 +174,7 @@ def upsert_candidate(path: Path, candidate: CampaignCandidate) -> dict[str, obje
         "updated_at": datetime.now(UTC).isoformat(),
         "candidates": sorted(by_id.values(), key=lambda item: str(item.get("candidate_id") or "")),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(path, payload)
     return payload
 
 
@@ -248,9 +245,7 @@ def update_campaign_state(
     remaining_daily_slots: int | None = None,
     method_registry: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    previous = _load_json(state_path)
-    if not isinstance(previous, dict):
-        previous = {}
+    previous = load_json_object_or_empty(state_path)
     candidates = list_candidates(registry_path)
     historical_best = _to_float((submission_history or {}).get("best_score"))
     top1_score = _to_float((top1_info or {}).get("score"))
@@ -291,8 +286,7 @@ def update_campaign_state(
         "submission_history": submission_history or {},
         "updated_at": datetime.now(UTC).isoformat(),
     }
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(state_path, payload)
     return payload
 
 
@@ -519,15 +513,6 @@ def _infer_information_value(*, candidate: CampaignCandidate, novelty: float, va
     if validation_trust < 0.4 and candidate.category not in {"validation_variant", "calibration"}:
         value -= 0.2
     return max(0.0, min(1.0, value))
-
-
-def _load_json(path: Path) -> object:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
 
 
 def _normalize_direction(value: object) -> str:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +12,7 @@ from kagglebot.campaign import (
     classify_against_campaign_baseline,
     list_candidates,
 )
+from kagglebot.json_utils import write_json_object
 
 WIN_CONTRACT_FILENAME = "win_contract.json"
 PRIVATE_ROBUSTNESS_REPORT_FILENAME = "private_robustness_report.json"
@@ -111,7 +111,7 @@ def build_win_contract(
             "top1 exhaustion report records remaining gaps and blockers",
         ],
     }
-    _write_json(win_contract_path(context_dir), payload)
+    write_json_object(win_contract_path(context_dir), payload)
     return payload
 
 
@@ -144,7 +144,7 @@ def build_private_robustness_report(
             "baseline_regression_count": sum(1 for row in rows if "below_campaign_baseline" in row["risk_flags"]),
         },
     }
-    _write_json(private_robustness_report_path(context_dir), payload)
+    write_json_object(private_robustness_report_path(context_dir), payload)
     return payload
 
 
@@ -218,7 +218,7 @@ def build_portfolio_optimizer_report(
         "decision": "submit_selected_candidate" if selected else "no_positive_value_submission",
         "ranked_candidates": ranked[:50],
     }
-    _write_json(portfolio_optimizer_report_path(iter_dir), payload)
+    write_json_object(portfolio_optimizer_report_path(iter_dir), payload)
     return payload
 
 
@@ -278,7 +278,7 @@ def build_top1_exhaustion_report(
         "win_contract_summary": (win_contract or {}).get("win_score_contract"),
         "private_robustness_summary": (private_robustness_report or {}).get("risk_summary"),
     }
-    _write_json(top1_exhaustion_report_path(context_dir), payload)
+    write_json_object(top1_exhaustion_report_path(context_dir), payload)
     _write_markdown(top1_exhaustion_report_path(context_dir).with_suffix(".md"), payload)
     return payload
 
@@ -446,11 +446,6 @@ def _remaining_work(
     if not work:
         work.append("No positive-value legal submission remains under current evidence and budget.")
     return work
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
 def _write_markdown(path: Path, payload: dict[str, object]) -> None:
