@@ -95,6 +95,9 @@ from kagglebot.campaign import (
     upsert_candidate,
 )
 from kagglebot.competition_policy import load_competition_policy
+from kagglebot.env_utils import env_flag as _env_flag
+from kagglebot.env_utils import env_int as _env_int
+from kagglebot.env_utils import env_truthy as _env_truthy
 from kagglebot.eval import (
     DriftChecker,
     EvaluationReport,
@@ -10046,34 +10049,6 @@ def _compute_submit_backoff(attempt: int) -> float:
     base = _SUBMIT_BACKOFF_BASE_SEC * (2 ** max(0, attempt - 1))
     jitter = random.uniform(0.0, 1.0)
     return base + jitter
-
-
-def _env_flag(name: str, *, default: bool) -> bool:
-    """Parse a boolean environment flag with an explicit default fallback."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _env_int(name: str, *, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return max(0, int(raw.strip()))
-    except ValueError:
-        return default
-
-
-def _env_truthy(name: str) -> bool:
-    value = os.environ.get(name, "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
