@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.submission.guard import normalize_error_text
 from kagglebot.submit_failure_policy import (
     SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT,
@@ -41,21 +41,14 @@ def submit_failure_context_path(run_dir: Path) -> Path:
 
 def load_submit_failure_context(run_dir: Path) -> dict[str, object]:
     path = submit_failure_context_path(run_dir)
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
+    payload = load_json_object(path)
+    if payload is None:
         return {}
     return normalize_loaded_submit_failure_context(payload)
 
 
 def save_submit_failure_context(run_dir: Path, payload: dict[str, object]) -> None:
-    path = submit_failure_context_path(run_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_object(submit_failure_context_path(run_dir), payload)
 
 
 def mark_submit_failure_context_resolved(
