@@ -93,9 +93,9 @@ Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and 
 permissive artifact reads.
 Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful submit result normalization,
 submit-error classification normalization, submit-error retry/abort decisions, submission outcome abort/classification
-decisions, rank payload/guard-reason normalization, and campaign-aware submission message/score tracking resolution live
-in `src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit` into typed file-submit/notebook-submit stage
-services.
+decisions, rank payload/guard/display normalization, and campaign-aware submission message/score tracking resolution
+live in `src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit` into typed
+file-submit/notebook-submit stage services.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
@@ -177,7 +177,7 @@ Recommended extraction order:
    kernel-run kwargs construction, notebook submit result artifact/reference handling, and notebook submit exception/retry
    orchestration are extracted. Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, submission
-   outcome abort/classification decisions, rank payload/guard-reason normalization, campaign-aware submission message
+   outcome abort/classification decisions, rank payload/guard/display normalization, campaign-aware submission message
    resolution, submission iteration inference, tracking score selection, and file-submit-to-notebook fallback decisions
    are now in `submit_stage.py`. Next, move the remaining `_attempt_submit` side-effect orchestration into a typed
    service that coordinates the existing `submit_attempts`, `submit_stage`, `submit_notebook`, and

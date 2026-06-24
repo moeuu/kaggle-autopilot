@@ -13,6 +13,7 @@ from kagglebot.submit_stage import (
     decide_submit_stage_error_action,
     find_campaign_candidate_for_submission,
     format_rank_force_reason,
+    format_submission_rank_message,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
     resolve_submission_message,
@@ -183,6 +184,27 @@ def test_format_rank_force_reason_includes_percentile_threshold_and_source() -> 
     assert reason == (
         "Leaderboard rank indicates large headroom for improvement: "
         "120/1000 (percentile=12.00%, threshold=1.00%, min_teams=200). source=submission_row"
+    )
+
+
+def test_format_submission_rank_message_formats_observed_and_estimated_rank() -> None:
+    observed = format_submission_rank_message(
+        rank=12,
+        total_teams=100,
+        rank_percentile=None,
+        source="submission_row",
+    )
+    estimated = format_submission_rank_message(
+        rank=20,
+        total_teams=200,
+        rank_percentile=0.1,
+        source="leaderboard_score_estimate",
+        estimated=True,
+    )
+
+    assert observed == "[cyan]submission rank[/cyan]: 12/100 (percentile=12.00%) source=submission_row"
+    assert estimated == (
+        "[yellow]submission rank estimate[/yellow]: 20/200 (percentile=10.00%) source=leaderboard_score_estimate"
     )
 
 

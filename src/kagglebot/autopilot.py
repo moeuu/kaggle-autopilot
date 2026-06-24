@@ -2446,16 +2446,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 ):
                                     if submission_rank_percentile is None:
                                         submission_rank_percentile = submission_rank / submission_total_teams
-                                    percentile_text = (
-                                        f"{submission_rank_percentile * 100:.2f}%"
-                                        if submission_rank_percentile is not None
-                                        else "n/a"
-                                    )
-                                    source_text = f" source={submission_rank_source}" if submission_rank_source else ""
                                     print(
-                                        "[cyan]submission rank[/cyan]: "
-                                        f"{submission_rank}/{submission_total_teams} "
-                                        f"(percentile={percentile_text}){source_text}"
+                                        _submit_stage.format_submission_rank_message(
+                                            rank=submission_rank,
+                                            total_teams=submission_total_teams,
+                                            rank_percentile=submission_rank_percentile,
+                                            source=submission_rank_source,
+                                        )
                                     )
                                     rank_forced_major_overhaul = _should_force_major_overhaul_by_rank(
                                         rank=submission_rank,
@@ -2482,20 +2479,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                         submission_rank_percentile_estimate = (
                                             submission_rank_estimate / submission_total_teams_estimate
                                         )
-                                    percentile_text = (
-                                        f"{submission_rank_percentile_estimate * 100:.2f}%"
-                                        if submission_rank_percentile_estimate is not None
-                                        else "n/a"
-                                    )
-                                    source_text = (
-                                        f" source={submission_rank_estimate_source}"
-                                        if submission_rank_estimate_source
-                                        else ""
-                                    )
                                     print(
-                                        "[yellow]submission rank estimate[/yellow]: "
-                                        f"{submission_rank_estimate}/{submission_total_teams_estimate} "
-                                        f"(percentile={percentile_text}){source_text}"
+                                        _submit_stage.format_submission_rank_message(
+                                            rank=submission_rank_estimate,
+                                            total_teams=submission_total_teams_estimate,
+                                            rank_percentile=submission_rank_percentile_estimate,
+                                            source=submission_rank_estimate_source,
+                                            estimated=True,
+                                        )
                                     )
                         submitted_tracking_score, submitted_tracking_source = _submission_score_for_tracking(
                             offline_score=decision_score,
