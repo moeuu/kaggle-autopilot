@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
+from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 if TYPE_CHECKING:
@@ -68,15 +69,7 @@ def _write_iteration_state_marker(
 
 
 def _load_iteration_state_marker(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if isinstance(payload, dict):
-        return payload
-    return {}
+    return _load_json_object(path) or {}
 
 
 def _is_iteration_marker_complete(payload: dict[str, object], *, require_submit_phase: bool) -> bool:
@@ -729,13 +722,3 @@ def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
         if isinstance(payload, dict):
             return payload
     return {}
-
-
-def _load_json_object(path: Path) -> dict[str, object] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None

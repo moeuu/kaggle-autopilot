@@ -68,8 +68,8 @@ Submit-gate normalization, target/top1 checks, quality reason soft overrides, da
 Explicit submit decision objects such as `QualitySubmitOverrideDecision`, `InitialSubmitProbeDecision`, and
 `LimitedSubmissionHoldbackDecision` now carry soft override/probe/holdback results back to the loop instead of spreading
 that state across several booleans.
-Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy modules do not reimplement permissive
-artifact reads.
+Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
+permissive artifact reads.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
