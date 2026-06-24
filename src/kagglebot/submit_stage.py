@@ -131,8 +131,95 @@ def classify_submission_outcome(
     return "low"
 
 
+def resolve_submission_rank_payload(
+    *,
+    slug: str,
+    context_dir: Path,
+    direction: str,
+    outcome: dict[str, object],
+    dry_run: bool,
+    leaderboard_rank_for_score: Callable[..., dict[str, object]],
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    rank = _to_int(outcome.get("rank"))
+    total_teams = _to_int(outcome.get("total_teams"))
+    rank_percentile = _to_float(outcome.get("rank_percentile"))
+    rank_source = outcome.get("rank_source")
+
+    if rank is not None:
+        payload["rank"] = rank
+    if total_teams is not None:
+        payload["total_teams"] = total_teams
+    if rank_percentile is not None:
+        payload["rank_percentile"] = rank_percentile
+    if isinstance(rank_source, str) and rank_source.strip():
+        payload["rank_source"] = rank_source.strip()
+
+    if rank is None or total_teams is None:
+        score = _to_float(outcome.get("score"))
+        if score is not None:
+            try:
+                estimate = leaderboard_rank_for_score(
+                    slug=slug,
+                    output_dir=context_dir,
+                    score=score,
+                    direction=direction,
+                    dry_run=dry_run,
+                )
+            except Exception:  # noqa: BLE001
+                estimate = {}
+            est_rank = _to_int(estimate.get("rank"))
+            est_total = _to_int(estimate.get("total_teams"))
+            est_percentile = _to_float(estimate.get("rank_percentile"))
+            if est_rank is not None:
+                payload["estimated_rank"] = est_rank
+            if est_total is not None:
+                payload["estimated_total_teams"] = est_total
+            if est_percentile is not None:
+                payload["estimated_rank_percentile"] = est_percentile
+            if est_rank is not None and isinstance(estimate.get("source"), str):
+                payload["rank_estimate_source"] = "leaderboard_score_estimate"
+
+    resolved_rank = _to_int(payload.get("rank"))
+    resolved_total = _to_int(payload.get("total_teams"))
+    if resolved_rank is not None and resolved_total is not None and resolved_total > 0:
+        payload.setdefault("rank_percentile", resolved_rank / resolved_total)
+    return payload
+
+
 def _meets_target(value: float, target: float, direction: str) -> bool:
     return value <= target if str(direction).lower() == "minimize" else value >= target
+
+
+def _to_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _to_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return None
+        return int(parsed) if math.isfinite(parsed) and parsed.is_integer() else None
+    return None
 
 
 def find_campaign_candidate_for_submission(

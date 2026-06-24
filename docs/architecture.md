@@ -93,8 +93,9 @@ Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and 
 permissive artifact reads.
 Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful submit result normalization,
 submit-error classification normalization, submit-error retry/abort decisions, submission outcome abort/classification
-decisions, and campaign-aware submission message/score tracking resolution live in `src/kagglebot/submit_stage.py`,
-starting the split of `_attempt_submit` into typed file-submit/notebook-submit stage services.
+decisions, rank payload normalization, and campaign-aware submission message/score tracking resolution live in
+`src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit` into typed file-submit/notebook-submit stage
+services.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
@@ -176,11 +177,11 @@ Recommended extraction order:
    kernel-run kwargs construction, notebook submit result artifact/reference handling, and notebook submit exception/retry
    orchestration are extracted. Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, submission
-   outcome abort/classification decisions, campaign-aware submission message resolution, submission iteration inference,
-   tracking score selection, and file-submit-to-notebook fallback decisions are now in `submit_stage.py`. Next, move the
-   remaining `_attempt_submit` side-effect orchestration into a typed service that coordinates the existing
-   `submit_attempts`, `submit_stage`, `submit_notebook`, and `submit_failure_context` modules rather than adding more
-   private wrappers in `autopilot.py`.
+   outcome abort/classification decisions, rank payload normalization, campaign-aware submission message resolution,
+   submission iteration inference, tracking score selection, and file-submit-to-notebook fallback decisions are now in
+   `submit_stage.py`. Next, move the remaining `_attempt_submit` side-effect orchestration into a typed service that
+   coordinates the existing `submit_attempts`, `submit_stage`, `submit_notebook`, and `submit_failure_context` modules
+   rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

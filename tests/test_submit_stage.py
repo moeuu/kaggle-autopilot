@@ -15,6 +15,7 @@ from kagglebot.submit_stage import (
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
     resolve_submission_message,
+    resolve_submission_rank_payload,
     run_submit_stage_attempt,
     submission_score_for_tracking,
 )
@@ -115,6 +116,57 @@ def test_classify_submission_outcome_treats_top1_near_miss_as_good() -> None:
     assert classify_submission_outcome(score=1.2, direction="minimize", target_score=None, top1_score=1.0) == "low"
     assert classify_submission_outcome(score=0.91, direction="maximize", target_score=None, top1_score=1.0) == "good"
     assert classify_submission_outcome(score=0.8, direction="maximize", target_score=None, top1_score=1.0) == "low"
+
+
+def test_resolve_submission_rank_payload_keeps_reported_rank() -> None:
+    payload = resolve_submission_rank_payload(
+        slug="demo",
+        context_dir=Path("context"),
+        direction="minimize",
+        outcome={"rank": "2", "total_teams": "10", "rank_source": "submission_row"},
+        dry_run=False,
+        leaderboard_rank_for_score=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not estimate")),
+    )
+
+    assert payload == {
+        "rank": 2,
+        "total_teams": 10,
+        "rank_source": "submission_row",
+        "rank_percentile": 0.2,
+    }
+
+
+def test_resolve_submission_rank_payload_estimates_when_rank_missing() -> None:
+    calls: list[dict[str, object]] = []
+
+    def estimate(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"rank": 4, "total_teams": 20, "rank_percentile": 0.2, "source": "leaderboard"}
+
+    payload = resolve_submission_rank_payload(
+        slug="demo",
+        context_dir=Path("context"),
+        direction="maximize",
+        outcome={"score": "0.75"},
+        dry_run=True,
+        leaderboard_rank_for_score=estimate,
+    )
+
+    assert payload == {
+        "estimated_rank": 4,
+        "estimated_total_teams": 20,
+        "estimated_rank_percentile": 0.2,
+        "rank_estimate_source": "leaderboard_score_estimate",
+    }
+    assert calls == [
+        {
+            "slug": "demo",
+            "output_dir": Path("context"),
+            "score": 0.75,
+            "direction": "maximize",
+            "dry_run": True,
+        }
+    ]
 
 
 def test_resolve_submission_message_builds_compact_default(tmp_path: Path) -> None:
