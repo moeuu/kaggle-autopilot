@@ -77,6 +77,8 @@ autofix artifact resolution live in `src/kagglebot/submit_failure_context.py`, k
 of the main loop.
 Deterministic submit file repair preparation lives in `src/kagglebot/submit_autofix.py`; the loop supplies persistence
 and validation callbacks while the module owns the repair-required check and result summary.
+Submit code fingerprinting and same-error-fingerprint retry allowance decisions live in
+`src/kagglebot/submit_retry_policy.py`; the loop supplies paths, hashing, and state persistence callbacks.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 
@@ -150,8 +152,8 @@ Recommended extraction order:
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
-   context formatting, artifact resolution, and deterministic file repair preparation are now extracted; next, move
-   same-fingerprint retry allowance and submit code fingerprinting behind a small adapter.
+   context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
+   submit code fingerprinting are now extracted; next, move same-submission-path retry decisions behind a small adapter.
 4. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

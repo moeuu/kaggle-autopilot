@@ -31,6 +31,7 @@ from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_autofix as _submit_autofix
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
+from kagglebot import submit_retry_policy as _submit_retry_policy
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
@@ -10404,31 +10405,11 @@ def _sha256_or_none(path: Path | None) -> str | None:
 
 
 def _compute_submit_code_fingerprint(config: AutopilotConfig) -> str:
-    """Compute a stable fingerprint of submit-relevant local code."""
-    hasher = hashlib.sha256()
-    root_specs = (
-        ("src", Path(__file__).resolve().parent),
-        ("kernel", config.paths.kernel_source_dir),
+    return _submit_retry_policy.compute_submit_code_fingerprint(
+        src_root=Path(__file__).resolve().parent,
+        kernel_source_dir=config.paths.kernel_source_dir,
+        sha256_or_none=_sha256_or_none,
     )
-    for label, root in root_specs:
-        if not root.exists() or not root.is_dir():
-            hasher.update(f"{label}:<missing>\n".encode())
-            continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
-            if "__pycache__" in path.parts:
-                continue
-            if path.suffix.lower() in {".pyc", ".pyo"}:
-                continue
-            try:
-                rel = path.relative_to(root).as_posix()
-            except ValueError:
-                rel = path.name
-            hasher.update(f"{label}:{rel}\n".encode())
-            hasher.update((_sha256_or_none(path) or "missing").encode())
-            hasher.update(b"\n")
-    return hasher.hexdigest()
 
 
 def _consume_same_submit_fingerprint_retry_allowance(
@@ -10438,48 +10419,12 @@ def _consume_same_submit_fingerprint_retry_allowance(
     fingerprint: str,
     code_fingerprint: str,
 ) -> bool:
-    """Allow one repeated-fingerprint retry after code changes since last submit error."""
-    last_code_fingerprint = str(run_state.get("last_submit_code_fingerprint") or "").strip()
-    prior_error_fingerprint = str(
-        run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or ""
-    ).strip()
-    if not code_fingerprint:
-        return False
-
-    consumed_code_fingerprint = str(run_state.get("same_fp_allowance_code_fingerprint") or "").strip()
-    consumed_error_fingerprint = str(run_state.get("same_fp_allowance_error_fingerprint") or "").strip()
-    if consumed_code_fingerprint == code_fingerprint and consumed_error_fingerprint == fingerprint:
-        return False
-
-    # Backward compatibility for runs recorded before code_fingerprint tracking existed.
-    # In that case we cannot compare "before vs after" code reliably, so allow exactly once.
-    if not last_code_fingerprint:
-        if not prior_error_fingerprint or prior_error_fingerprint != fingerprint:
-            return False
-        run_state["same_fp_allowance_code_fingerprint"] = code_fingerprint
-        run_state["same_fp_allowance_error_fingerprint"] = fingerprint
-        _save_run_state(
-            run_dir,
-            {
-                "same_fp_allowance_code_fingerprint": code_fingerprint,
-                "same_fp_allowance_error_fingerprint": fingerprint,
-            },
-        )
-        return True
-
-    if code_fingerprint == last_code_fingerprint:
-        return False
-
-    run_state["same_fp_allowance_code_fingerprint"] = code_fingerprint
-    run_state["same_fp_allowance_error_fingerprint"] = fingerprint
-    _save_run_state(
-        run_dir,
-        {
-            "same_fp_allowance_code_fingerprint": code_fingerprint,
-            "same_fp_allowance_error_fingerprint": fingerprint,
-        },
+    return _submit_retry_policy.consume_same_submit_fingerprint_retry_allowance(
+        run_state=run_state,
+        fingerprint=fingerprint,
+        code_fingerprint=code_fingerprint,
+        save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
-    return True
 
 
 def _compute_submit_backoff(attempt: int) -> float:
