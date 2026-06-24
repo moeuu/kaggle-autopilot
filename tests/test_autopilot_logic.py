@@ -11,14 +11,13 @@ import pytest
 from kagglebot.autopilot import (
     _effective_best_score_for_progress,
     _infer_column_mapping,
-    _is_top1_tier,
-    _meets_target,
     _should_force_major_overhaul_by_rank,
     _TrainingLiveStdout,
     _update_best_score,
     _write_plan,
 )
 from kagglebot.paths import CompetitionPaths
+from kagglebot.submission_policy import is_top1_tier, meets_target
 from kagglebot.types import PlanConfig
 
 
@@ -27,39 +26,39 @@ class TestMeetsTarget:
 
     def test_minimize_target_met(self) -> None:
         """For minimize metrics, value <= target should return True."""
-        assert _meets_target(value=0.4, target=0.5, direction="minimize") is True
-        assert _meets_target(value=0.5, target=0.5, direction="minimize") is True  # Equal counts as met
+        assert meets_target(value=0.4, target=0.5, direction="minimize") is True
+        assert meets_target(value=0.5, target=0.5, direction="minimize") is True  # Equal counts as met
 
     def test_minimize_target_not_met(self) -> None:
         """For minimize metrics, value > target should return False."""
-        assert _meets_target(value=0.6, target=0.5, direction="minimize") is False
-        assert _meets_target(value=1.0, target=0.5, direction="minimize") is False
+        assert meets_target(value=0.6, target=0.5, direction="minimize") is False
+        assert meets_target(value=1.0, target=0.5, direction="minimize") is False
 
     def test_maximize_target_met(self) -> None:
         """For maximize metrics, value >= target should return True."""
-        assert _meets_target(value=0.9, target=0.8, direction="maximize") is True
-        assert _meets_target(value=0.8, target=0.8, direction="maximize") is True  # Equal counts as met
+        assert meets_target(value=0.9, target=0.8, direction="maximize") is True
+        assert meets_target(value=0.8, target=0.8, direction="maximize") is True  # Equal counts as met
 
     def test_maximize_target_not_met(self) -> None:
         """For maximize metrics, value < target should return False."""
-        assert _meets_target(value=0.7, target=0.8, direction="maximize") is False
-        assert _meets_target(value=0.5, target=0.8, direction="maximize") is False
+        assert meets_target(value=0.7, target=0.8, direction="maximize") is False
+        assert meets_target(value=0.5, target=0.8, direction="maximize") is False
 
     def test_edge_cases(self) -> None:
         """Test edge cases like very small/large values."""
         # Very small improvements should still count
-        assert _meets_target(value=0.50001, target=0.5, direction="minimize") is False
-        assert _meets_target(value=0.49999, target=0.5, direction="minimize") is True
-        assert _meets_target(value=0.80001, target=0.8, direction="maximize") is True
-        assert _meets_target(value=0.79999, target=0.8, direction="maximize") is False
+        assert meets_target(value=0.50001, target=0.5, direction="minimize") is False
+        assert meets_target(value=0.49999, target=0.5, direction="minimize") is True
+        assert meets_target(value=0.80001, target=0.8, direction="maximize") is True
+        assert meets_target(value=0.79999, target=0.8, direction="maximize") is False
 
         # Negative values
-        assert _meets_target(value=-0.1, target=0.0, direction="minimize") is True
-        assert _meets_target(value=-0.1, target=-0.2, direction="maximize") is True
+        assert meets_target(value=-0.1, target=0.0, direction="minimize") is True
+        assert meets_target(value=-0.1, target=-0.2, direction="maximize") is True
 
         # Very large values
-        assert _meets_target(value=1e6, target=1e5, direction="minimize") is False
-        assert _meets_target(value=1e6, target=1e5, direction="maximize") is True
+        assert meets_target(value=1e6, target=1e5, direction="minimize") is False
+        assert meets_target(value=1e6, target=1e5, direction="maximize") is True
 
 
 class TestUpdateBestScore:
@@ -204,15 +203,15 @@ class TestTop1Tier:
     """Test the top1-tier heuristic."""
 
     def test_top1_none(self) -> None:
-        assert _is_top1_tier(0.5, None, "minimize") is False
+        assert is_top1_tier(0.5, None, "minimize") is False
 
     def test_top1_minimize(self) -> None:
-        assert _is_top1_tier(0.4, 0.5, "minimize") is True
-        assert _is_top1_tier(0.6, 0.5, "minimize") is False
+        assert is_top1_tier(0.4, 0.5, "minimize") is True
+        assert is_top1_tier(0.6, 0.5, "minimize") is False
 
     def test_top1_maximize(self) -> None:
-        assert _is_top1_tier(0.9, 0.8, "maximize") is True
-        assert _is_top1_tier(0.7, 0.8, "maximize") is False
+        assert is_top1_tier(0.9, 0.8, "maximize") is True
+        assert is_top1_tier(0.7, 0.8, "maximize") is False
 
 
 class TestRankDrivenMajorOverhaul:

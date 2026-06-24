@@ -36,7 +36,6 @@ from kagglebot.autopilot import (
     _extract_pseudo_label_failure_signal,
     _extract_same_family_plateau_signal,
     _format_previous_submission_history_for_prompt,
-    _has_spare_daily_submission_slot,
     _infer_kernel_submit_version_label,
     _is_agent_capacity_failure,
     _is_submit_abort_autofixable,
@@ -46,16 +45,13 @@ from kagglebot.autopilot import (
     _load_submit_retry_artifacts,
     _maybe_restart_for_src_changes,
     _quality_reasons_allow_initial_submit_probe,
-    _quality_reasons_allow_spare_submit,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
     _resume_iteration_state,
     _resume_iteration_state_compat,
     _run_autofix,
     _run_kernel_fix,
-    _should_attempt_submit_for_readiness,
     _should_defer_submit_abort_to_next_iteration,
-    _should_force_initial_submit,
     _should_skip_planning,
     _submit_with_notebook_kernel,
     _write_iteration_state_marker,
@@ -78,6 +74,12 @@ from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.submission.guard import compute_error_fingerprint
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
+from kagglebot.submission_policy import (
+    has_spare_daily_submission_slot,
+    quality_reasons_allow_spare_submit,
+    should_attempt_submit_for_readiness,
+    should_force_initial_submit,
+)
 from kagglebot.submit_stage import resolve_submission_message, resolve_submission_rank_payload
 from kagglebot.types import PlanConfig
 
@@ -269,7 +271,7 @@ def test_autopilot_does_not_force_iter1_submit_when_quality_gate_blocks(monkeypa
         "kagglebot.autopilot._build_kernel_quality_guard",
         lambda **kwargs: {"allow_submit": False, "block_submit": True, "reasons": ["below_code_reference_baseline"]},
     )
-    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: False)
+    monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: False)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -348,7 +350,7 @@ def test_autopilot_forces_iter1_submit_through_soft_detected_baseline_guard(
             "reasons": ["selected_worse_than_detected_baseline"],
         },
     )
-    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: False)
+    monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: False)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -979,13 +981,13 @@ def test_count_submission_rows_in_recent_window_covers_rolling_daily_limits() ->
 
 
 def test_has_spare_daily_submission_slot_requires_slots_for_remaining_iterations() -> None:
-    assert _has_spare_daily_submission_slot(
+    assert has_spare_daily_submission_slot(
         submission_limit_per_day=5,
         submissions_used_today=2,
         iteration=3,
         max_iterations=5,
     )
-    assert not _has_spare_daily_submission_slot(
+    assert not has_spare_daily_submission_slot(
         submission_limit_per_day=5,
         submissions_used_today=3,
         iteration=3,
@@ -994,12 +996,12 @@ def test_has_spare_daily_submission_slot_requires_slots_for_remaining_iterations
 
 
 def test_quality_reasons_allow_spare_submit_only_for_soft_blocks() -> None:
-    assert _quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline"])
-    assert _quality_reasons_allow_spare_submit(
+    assert quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline"])
+    assert quality_reasons_allow_spare_submit(
         ["selected_worse_than_detected_baseline", "below_code_reference_baseline"]
     )
-    assert not _quality_reasons_allow_spare_submit(["external_test_label_transfer_detected"])
-    assert not _quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline", "untrusted_score_source"])
+    assert not quality_reasons_allow_spare_submit(["external_test_label_transfer_detected"])
+    assert not quality_reasons_allow_spare_submit(["selected_worse_than_detected_baseline", "untrusted_score_source"])
 
 
 def test_quality_reasons_allow_initial_submit_probe_only_for_detected_baseline_soft_block() -> None:
@@ -1011,7 +1013,7 @@ def test_quality_reasons_allow_initial_submit_probe_only_for_detected_baseline_s
 
 
 def test_should_force_initial_submit_ignores_improved_policy_and_single_daily_submission() -> None:
-    assert _should_force_initial_submit(
+    assert should_force_initial_submit(
         deliverable_mode="leaderboard",
         iteration=1,
         submit_enabled=True,
@@ -1019,7 +1021,7 @@ def test_should_force_initial_submit_ignores_improved_policy_and_single_daily_su
         submit_policy="improved",
         submission_limit_per_day=None,
     )
-    assert _should_force_initial_submit(
+    assert should_force_initial_submit(
         deliverable_mode="leaderboard",
         iteration=1,
         submit_enabled=True,
@@ -1027,7 +1029,7 @@ def test_should_force_initial_submit_ignores_improved_policy_and_single_daily_su
         submit_policy="improved",
         submission_limit_per_day=2,
     )
-    assert _should_force_initial_submit(
+    assert should_force_initial_submit(
         deliverable_mode="leaderboard",
         iteration=1,
         submit_enabled=True,
@@ -1035,7 +1037,7 @@ def test_should_force_initial_submit_ignores_improved_policy_and_single_daily_su
         submit_policy="auto",
         submission_limit_per_day=2,
     )
-    assert _should_force_initial_submit(
+    assert should_force_initial_submit(
         deliverable_mode="leaderboard",
         iteration=1,
         submit_enabled=True,
@@ -1047,7 +1049,7 @@ def test_should_force_initial_submit_ignores_improved_policy_and_single_daily_su
 
 def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> None:
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="readiness_or_final",
             readiness_score=0.10,
             readiness_target=0.90,
@@ -1061,7 +1063,7 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
         is True
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="readiness_or_final",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1075,7 +1077,7 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
         is False
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="readiness_or_final",
             readiness_score=0.85,
             readiness_target=0.90,
@@ -1089,7 +1091,7 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
         is True
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="readiness_or_final",
             readiness_score=0.95,
             readiness_target=0.90,
@@ -1103,7 +1105,7 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
         is False
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="readiness_or_final",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1121,7 +1123,7 @@ def test_should_attempt_submit_with_limit_uses_reserved_final_slot_policy() -> N
 def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions() -> None:
     # Daily cap 5 with 10 iterations -> reserve 1 slot for final, spread 4 non-final checkpoints.
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="always",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1135,7 +1137,7 @@ def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions(
         is False
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="always",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1149,7 +1151,7 @@ def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions(
         is True
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="always",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1163,7 +1165,7 @@ def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions(
         is True
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="always",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1177,7 +1179,7 @@ def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions(
         is False
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="always",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -1191,7 +1193,7 @@ def test_should_attempt_submit_with_limit_strictly_spaces_non_final_submissions(
         is True
     )
     assert (
-        _should_attempt_submit_for_readiness(
+        should_attempt_submit_for_readiness(
             gate="always",
             readiness_score=0.20,
             readiness_target=0.90,
@@ -3366,7 +3368,7 @@ def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: 
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
+    monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
 
     config = _make_config(tmp_path, submit=True, max_iterations=2, force_submit=False)
     run_autopilot(config)
@@ -3429,7 +3431,7 @@ def test_autopilot_allows_non_improving_submit_on_final_iteration(monkeypatch, t
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
+    monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
 
     config = _make_config(tmp_path, submit=True, max_iterations=2, force_submit=False)
     run_autopilot(config)
@@ -3578,7 +3580,7 @@ def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatc
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: outcomes.pop(0))
     monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
-    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
+    monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
 
     config = _make_config(tmp_path, submit=True, max_iterations=3, force_submit=False)
     run_autopilot(config)
@@ -7226,7 +7228,7 @@ def test_autopilot_skips_fallback_submit_after_untrusted_final_iteration(
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._should_force_initial_submit", lambda **kwargs: False)
+    monkeypatch.setattr("kagglebot.submission_policy.should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
         "kagglebot.competition_rules.load_competition_rule_constraints",
@@ -7317,7 +7319,7 @@ def test_autopilot_skips_fallback_submit_when_higher_potential_candidate_exists(
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._should_force_initial_submit", lambda **kwargs: False)
+    monkeypatch.setattr("kagglebot.submission_policy.should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
         "kagglebot.competition_rules.load_competition_rule_constraints",
@@ -7975,7 +7977,7 @@ def test_autopilot_forces_major_overhaul_on_online_mismatch(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
+    monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
     monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.93})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)

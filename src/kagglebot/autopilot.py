@@ -222,17 +222,7 @@ _infer_split_strategy_from_hint_text = _plan_policy.infer_split_strategy_from_hi
 _extract_plan_split_strategy_hints = _plan_policy.extract_plan_split_strategy_hints
 _profile_has_temporal_signal = _plan_policy.profile_has_temporal_signal
 _resolve_split_strategy_from_hints = _plan_policy.resolve_split_strategy_from_artifacts
-_meets_target = _submission_policy.meets_target
-_is_top1_tier = _submission_policy.is_top1_tier
-_has_spare_daily_submission_slot = _submission_policy.has_spare_daily_submission_slot
-_non_final_submission_checkpoints = _submission_policy.non_final_submission_checkpoints
-_should_attempt_submit_for_readiness = _submission_policy.should_attempt_submit_for_readiness
-_submission_gate_for_policy = _submission_policy.submission_gate_for_policy
-_normalized_submit_policy = _submission_policy.normalized_submit_policy
-_normalized_submission_gate = _submission_policy.normalized_submission_gate
-_should_force_initial_submit = _submission_policy.should_force_initial_submit
 _SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = _submission_policy.SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS
-_quality_reasons_allow_spare_submit = _submission_policy.quality_reasons_allow_spare_submit
 _quality_reasons_allow_initial_submit_probe = _submission_policy.quality_reasons_allow_initial_submit_probe
 _decide_quality_submit_override = _submission_policy.decide_quality_submit_override
 _decide_initial_submit_probe = _submission_policy.decide_initial_submit_probe
@@ -1800,7 +1790,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     quality_force_reason = (
                         "Offline score is materially below code reference baseline detected by quality guard."
                     )
-            force_initial_submit = _should_force_initial_submit(
+            force_initial_submit = _submission_policy.should_force_initial_submit(
                 deliverable_mode=deliverable_mode,
                 iteration=iteration,
                 submit_enabled=submit_enabled,
@@ -1815,7 +1805,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submission_limit_per_day=submission_limit_per_day,
                 dry_run=config.dry_run,
             )
-            spare_daily_submission_slot = _has_spare_daily_submission_slot(
+            spare_daily_submission_slot = _submission_policy.has_spare_daily_submission_slot(
                 submission_limit_per_day=submission_limit_per_day,
                 submissions_used_today=successful_submit_count,
                 iteration=iteration,
@@ -2138,7 +2128,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "[yellow]submit override[/yellow]: spare daily submission slots remain; "
                     "not preserving a higher-potential candidate for later."
                 )
-            allow_submit = _should_attempt_submit_for_readiness(
+            allow_submit = _submission_policy.should_attempt_submit_for_readiness(
                 gate=submission_gate,
                 readiness_score=decision_score,
                 readiness_target=target_score,
@@ -2289,7 +2279,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 iteration=iteration,
                 evaluation=evaluation,
                 target_score=target_score,
-                met_target=_meets_target(decision_score, target_score, metric_direction),
+                met_target=_submission_policy.meets_target(decision_score, target_score, metric_direction),
                 top1_info=top1_info if isinstance(top1_info, dict) else {},
                 compute=config.compute,
                 accelerator=accelerator_used,
@@ -2396,7 +2386,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             if online_score is not None:
                                 print(f"[cyan]submission score[/cyan]: {online_score:.6f}")
                                 if isinstance(top1_score, (int, float)):
-                                    top1_tier_by_submission = _is_top1_tier(
+                                    top1_tier_by_submission = _submission_policy.is_top1_tier(
                                         float(online_score),
                                         float(top1_score),
                                         metric_direction,
@@ -2505,9 +2495,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     )
                     if medal_policy_reason:
                         print(f"[yellow]medal policy[/yellow]: {medal_policy_reason}")
-            met_target = _meets_target(decision_score, target_score, metric_direction)
-            top1_tier = _is_top1_tier(decision_score, top1_score, metric_direction)
-            top1_tier_by_readiness = _is_top1_tier(readiness_score, top1_score, metric_direction)
+            met_target = _submission_policy.meets_target(decision_score, target_score, metric_direction)
+            top1_tier = _submission_policy.is_top1_tier(decision_score, top1_score, metric_direction)
+            top1_tier_by_readiness = _submission_policy.is_top1_tier(readiness_score, top1_score, metric_direction)
             delta_srs_vs_prev: float | None = None
             noise_threshold = 0.5 * max(float(report.std), 0.0)
             if previous_readiness_score is not None:
@@ -3768,15 +3758,20 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     requested_submit_policy = str(choose(config.submit_policy, plan.submit_policy, "always") or "always")
     requested_submission_gate_raw = choose(None, plan.submission_gate, spec_submission_gate)
     requested_submission_gate = str(requested_submission_gate_raw or "").strip().lower() or None
-    forced_submit_policy = _normalized_submit_policy(config.submit_policy) if config.submit_policy else None
+    forced_submit_policy = (
+        _submission_policy.normalized_submit_policy(config.submit_policy) if config.submit_policy else None
+    )
     if forced_submit_policy == "improved":
         submit_policy = "improved"
         submission_gate = "always"
     elif constraints.submission_limit_detected:
-        submit_policy = _normalized_submit_policy(requested_submit_policy)
-        default_gate = _submission_gate_for_policy(submit_policy)
+        submit_policy = _submission_policy.normalized_submit_policy(requested_submit_policy)
+        default_gate = _submission_policy.submission_gate_for_policy(submit_policy)
         if requested_submission_gate is not None:
-            submission_gate = _normalized_submission_gate(requested_submission_gate, default=default_gate)
+            submission_gate = _submission_policy.normalized_submission_gate(
+                requested_submission_gate,
+                default=default_gate,
+            )
         else:
             submission_gate = default_gate
         if submission_gate == "always" and requested_submission_gate is None and submit_policy == "always":
@@ -3789,13 +3784,13 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     else:
         submit_policy = "always"
         submission_gate = "always"
-        if _normalized_submit_policy(requested_submit_policy) != "always":
+        if _submission_policy.normalized_submit_policy(requested_submit_policy) != "always":
             print(
                 "[yellow]note[/yellow]: no submission limit detected; "
                 f"ignoring submit_policy='{requested_submit_policy}'."
             )
         normalized_requested_gate = (
-            _normalized_submission_gate(requested_submission_gate, default="always")
+            _submission_policy.normalized_submission_gate(requested_submission_gate, default="always")
             if requested_submission_gate
             else "always"
         )
@@ -6626,7 +6621,11 @@ def _build_diagnostics(
     decision_score = evaluation.value if loop_decision_score is None else loop_decision_score
     delta_to_target = target_score - decision_score if direction == "minimize" else decision_score - target_score
     best_line = best_score if best_score is not None else decision_score
-    trend = "improving" if best_score is None or _meets_target(decision_score, best_line, direction) else "stalled"
+    trend = (
+        "improving"
+        if best_score is None or _submission_policy.meets_target(decision_score, best_line, direction)
+        else "stalled"
+    )
     top1_delta = None
     if top1_score is not None:
         top1_delta = top1_score - decision_score if direction == "minimize" else decision_score - top1_score
