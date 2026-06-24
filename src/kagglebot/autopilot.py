@@ -272,7 +272,6 @@ _submit_failure_manual_next_step = _submit_failure_policy.submit_failure_manual_
 _submit_error_targets_submit_mode = _submit_failure_policy.submit_error_targets_submit_mode
 _classify_submit_failure_repair_decision = _submit_failure_policy.classify_submit_failure_repair
 _submit_error_text_indicates_file_issue = _submit_failure_policy.submit_error_text_indicates_file_issue
-_submit_error_requires_file_fix = _submit_failure_policy.submit_error_requires_file_fix
 _SUBMIT_FAILURE_CONTEXT_FILENAME = _submit_failure_context.SUBMIT_FAILURE_CONTEXT_FILENAME
 _submit_failure_context_path = _submit_failure_context.submit_failure_context_path
 _load_submit_failure_context = _submit_failure_context.load_submit_failure_context
@@ -287,6 +286,7 @@ _should_force_resubmit_after_submit_abort_from_state = _submit_failure_context.s
 _should_defer_submit_abort_to_next_iteration_from_state = (
     _submit_failure_context.should_defer_submit_abort_to_next_iteration
 )
+_build_submit_failure_improvement_context_from_state = _submit_failure_context.build_submit_failure_improvement_context
 _decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
 _resolve_submit_autofix_submission_artifact_from_state = (
     _submit_failure_context.resolve_submit_autofix_submission_artifact
@@ -10703,58 +10703,10 @@ def _campaign_prefers_validation_redesign(
 
 
 def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:
-    failure_context = _load_submit_failure_context(run_dir)
-    if not failure_context or not bool(failure_context.get("active")) or not bool(failure_context.get("repairable")):
-        return [], None
-
-    reason = str(failure_context.get("reason") or "").strip().lower()
-    error_kind = str(failure_context.get("error_kind") or "").strip().lower()
-    latest_attempt = _load_latest_submit_attempt(run_dir)
-    detail = "\n".join(
-        part
-        for part in (
-            str(latest_attempt.get("stdout_tail") or ""),
-            str(latest_attempt.get("stderr_tail") or ""),
-            str(failure_context.get("summary") or ""),
-        )
-        if part
-    ).strip()
-    if not _submit_error_requires_file_fix(reason=reason, error_kind=error_kind, detail=detail):
-        return [], None
-
-    repair_target = str(failure_context.get("repair_target") or "").strip().lower() or "submission_artifact"
-    artifact_path = str(
-        failure_context.get("submission_artifact_path") or failure_context.get("submission_ref") or ""
-    ).strip()
-    detail_text = normalize_error_text(detail or str(failure_context.get("message") or ""), max_chars=1200)
-    notes = [
-        "This run must fix the submission contract before further model changes.",
-        f"expected_repair_target={repair_target}",
-    ]
-    if artifact_path:
-        notes.append(f"failed_submission_artifact={artifact_path}")
-    if detail_text:
-        notes.append(f"kaggle_submission_error={detail_text}")
-    artifact_mode = str(failure_context.get("artifact_mode") or "").strip().lower()
-    if artifact_mode:
-        notes.append(f"notebook_submit_artifact_mode={artifact_mode}")
-    notes.extend(
-        [
-            "If the error is competition-specific, edit only authoritative `kernel.py`.",
-            "Do not leave iter2 with the same Kaggle row/column/evaluation exception.",
-            "Prioritize source generation fixes over one-off repaired artifact workarounds "
-            "when the same format error recurs.",
-        ]
+    return _build_submit_failure_improvement_context_from_state(
+        failure_context=_load_submit_failure_context(run_dir),
+        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
-    if artifact_mode == "inference":
-        notes.extend(
-            [
-                "This competition is notebook-only and scored on hidden/full test in Kaggle runtime.",
-                "Do not rely on an embedded local submission artifact for submit.",
-                "Kernel must write `/kaggle/working/submission.csv` during notebook execution.",
-            ]
-        )
-    return notes, "Previous iteration failed Kaggle submission contract; repair submit format before further tuning."
 
 
 def _normalize_submission_outcome_status(value: object) -> str:

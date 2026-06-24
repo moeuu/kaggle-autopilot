@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.submit_failure_context import (
     build_submit_failure_context_payload,
+    build_submit_failure_improvement_context,
     decide_stale_submit_autofix_artifact,
     decide_submit_abort_autofixability,
     decide_submit_autofix_input_submission,
@@ -294,6 +295,53 @@ def test_should_defer_submit_abort_to_next_iteration_requires_kaggle_gpu_repaira
         iteration=1,
         max_iterations=3,
     )
+
+
+def test_build_submit_failure_improvement_context_for_file_issue() -> None:
+    notes, reason = build_submit_failure_improvement_context(
+        failure_context={
+            "active": True,
+            "repairable": True,
+            "repair_target": "submission_artifact",
+            "reason": "submission_poll_status_error",
+            "error_kind": "validation",
+            "submission_artifact_path": "/tmp/submission.csv",
+            "summary": "Kaggle reported a submission row-count mismatch.",
+        },
+        latest_submit_attempt={
+            "stderr_tail": "Evaluation Exception: Submission must have 132133 rows",
+            "reason": "submission_poll_status_error",
+            "error_kind": "validation",
+        },
+    )
+
+    assert reason is not None
+    assert "repair submit format" in reason.lower()
+    assert "failed_submission_artifact=/tmp/submission.csv" in notes
+    assert any("Submission must have 132133 rows" in note for note in notes)
+    assert any("authoritative `kernel.py`" in note for note in notes)
+
+
+def test_build_submit_failure_improvement_context_ignores_manual_or_non_file_issue() -> None:
+    manual_notes, manual_reason = build_submit_failure_improvement_context(
+        failure_context={"active": True, "repairable": False, "reason": "rules_not_accepted"},
+        latest_submit_attempt={},
+    )
+    non_file_notes, non_file_reason = build_submit_failure_improvement_context(
+        failure_context={
+            "active": True,
+            "repairable": True,
+            "reason": "kaggle_credentials_missing",
+            "error_kind": "permanent",
+            "summary": "Credentials are missing.",
+        },
+        latest_submit_attempt={},
+    )
+
+    assert manual_notes == []
+    assert manual_reason is None
+    assert non_file_notes == []
+    assert non_file_reason is None
 
 
 def test_resolve_submit_autofix_submission_artifact_prefers_repaired_path(tmp_path: Path) -> None:
