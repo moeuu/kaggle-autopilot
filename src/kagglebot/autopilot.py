@@ -28,6 +28,7 @@ from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import score_sources as _score_sources
 from kagglebot import submission_policy as _submission_policy
+from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
@@ -252,6 +253,33 @@ _parse_kaggle_submission_timestamp = _submission_policy.parse_kaggle_submission_
 _submission_row_timestamp = _submission_policy.submission_row_timestamp
 _count_submission_rows_on_utc_day = _submission_policy.count_submission_rows_on_utc_day
 _count_submission_rows_in_recent_window = _submission_policy.count_submission_rows_in_recent_window
+_SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT = (
+    _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+)
+_SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE
+_SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM
+_SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
+_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN
+_SUBMIT_FILE_ERROR_MARKERS = _submit_failure_policy.SUBMIT_FILE_ERROR_MARKERS
+_NOTEBOOK_FALLBACK_HINTS = _submit_failure_policy.NOTEBOOK_FALLBACK_HINTS
+_should_use_notebook_submit_fallback = _submit_failure_policy.should_use_notebook_submit_fallback
+_should_retry_ambiguous_notebook_submit_error = _submit_failure_policy.should_retry_ambiguous_notebook_submit_error
+_normalize_loaded_submit_failure_context = _submit_failure_policy.normalize_loaded_submit_failure_context
+_submit_failure_manual_next_step = _submit_failure_policy.submit_failure_manual_next_step
+_submit_error_targets_submit_mode = _submit_failure_policy.submit_error_targets_submit_mode
+_classify_submit_failure_repair_decision = _submit_failure_policy.classify_submit_failure_repair
+_submit_error_text_indicates_file_issue = _submit_failure_policy.submit_error_text_indicates_file_issue
+_submit_error_requires_file_fix = _submit_failure_policy.submit_error_requires_file_fix
+
+
+def _classify_submit_failure_repair(
+    *,
+    reason: object,
+    error_kind: object,
+    detail: str,
+) -> tuple[str, bool, str]:
+    decision = _classify_submit_failure_repair_decision(reason=reason, error_kind=error_kind, detail=detail)
+    return decision.repair_target, decision.repairable, decision.manual_next_step
 
 
 # Backward-compatible symbol for tests/extensions.
@@ -351,33 +379,8 @@ _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
 _SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
-_SUBMIT_FILE_ERROR_MARKERS = (
-    "submission file",
-    "submission.csv",
-    "columns mismatch",
-    "row count mismatch",
-    "must have ",
-    "id column missing",
-    "missing a header row",
-    "header does not resemble",
-    "id values appear to require",
-    "submission payload mismatch",
-    "submission must have",
-    "prediction column contains nan",
-    "file format mismatch",
-    "file must be named",
-)
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 _CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
-_NOTEBOOK_FALLBACK_HINTS = (
-    "only accepts submissions from notebooks",
-    "must be made through notebooks",
-    "code competition submissions require both the output file name and the version label",
-    "output file name and version label",
-    "output file name and the version label",
-    "kernel must be specified as <owner>/<notebook>",
-    "kernel must be specified",
-)
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
 _DEFAULT_EVAL_REPEATS = 2
 _DEFAULT_MAX_ITERATIONS = 5
@@ -448,11 +451,6 @@ _HIGH_CAPACITY_MARKERS = (
 _EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
 _BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
 _CODE_REFERENCE_IMPL_MARKER_PREFIX = "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED:"
-_SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT = "submission_artifact"
-_SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = "submit_mode_or_kernel"
-_SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = "platform_or_polling"
-_SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = "manual_intervention"
-_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -10047,24 +10045,6 @@ def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
     )
 
 
-def _should_use_notebook_submit_fallback(*, reason: str, stdout: str, stderr: str) -> bool:
-    """Return True only when submit errors clearly indicate notebook-only submission."""
-    normalized_reason = str(reason or "").strip().lower()
-    if normalized_reason == "notebook_only_submission_required":
-        return True
-    if normalized_reason not in {"bad_request", "unclassified_submit_error", "unknown"}:
-        return False
-    detail = f"{stdout}\n{stderr}".lower()
-    return any(hint in detail for hint in _NOTEBOOK_FALLBACK_HINTS)
-
-
-def _should_retry_ambiguous_notebook_submit_error(*, reason: str, stdout: str, stderr: str) -> bool:
-    if str(reason or "").strip().lower() != "ambiguous_notebook_bad_request":
-        return False
-    detail = f"{stdout}\n{stderr}".lower()
-    return any(hint in detail for hint in _NOTEBOOK_FALLBACK_HINTS)
-
-
 def _infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:
     """Read pushed kernel version from kernel push logs for notebook submit."""
     if logs_dir is None or not logs_dir.exists():
@@ -10235,121 +10215,6 @@ def _save_submit_failure_context(run_dir: Path, payload: dict[str, object]) -> N
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _normalize_loaded_submit_failure_context(payload: dict[str, object]) -> dict[str, object]:
-    """Backfill manual blocker classification for contexts written by older runs."""
-    reason = str(payload.get("reason") or "").strip().lower()
-    detail = "\n".join(
-        str(payload.get(key) or "") for key in ("stdout_tail", "stderr_tail", "summary", "message") if payload.get(key)
-    ).lower()
-    manual_next_step = ""
-    if reason == "ambiguous_notebook_bad_request":
-        manual_next_step = (
-            "Kaggle returned a generic submit-notebook 400 without a clear notebook-only signal; "
-            "do not auto-repair or rerun the kernel for this submit error."
-        )
-    elif reason == "submission_limit" or any(
-        marker in detail
-        for marker in (
-            "submission limit",
-            "maximum number of submissions",
-            "max submissions",
-        )
-    ):
-        manual_next_step = "Wait for the Kaggle submission limit window to expire before retrying submit."
-    if manual_next_step:
-        payload["repair_target"] = _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
-        payload["repairable"] = False
-        payload["manual_next_step"] = manual_next_step
-    return payload
-
-
-def _submit_failure_manual_next_step(*, reason: str, detail: str) -> str:
-    normalized_reason = str(reason or "").strip().lower()
-    lowered_detail = str(detail or "").strip().lower()
-    if normalized_reason == "kaggle_credentials_missing":
-        return "Configure ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY before retrying submit."
-    if normalized_reason == "rules_not_accepted":
-        return "Accept the competition rules in the Kaggle browser UI, then retry submit."
-    if normalized_reason == "local_submission_guardrail":
-        if "duplicate" in lowered_detail:
-            return "Change the submission predictions before retrying, or use --force-submit only when intentional."
-        if "cooldown" in lowered_detail or "rate limit" in lowered_detail:
-            return "Wait for the submission cooldown/rate-limit window to expire before retrying."
-        return "Resolve the local submission guardrail before retrying submit."
-    return "Resolve the manual submit blocker, then retry submit."
-
-
-def _submit_error_targets_submit_mode(*, reason: str, detail: str) -> bool:
-    normalized_reason = str(reason or "").strip().lower()
-    lowered_detail = str(detail or "").strip().lower()
-    if normalized_reason == "notebook_only_submission_required":
-        return True
-    mode_markers = (
-        "notebook",
-        "kernel",
-        "internet access",
-        "enable_internet",
-        "competition does not allow internet",
-        "submission not allowed",
-        "output file name and the version label",
-    )
-    return any(marker in lowered_detail for marker in mode_markers)
-
-
-def _classify_submit_failure_repair(
-    *,
-    reason: object,
-    error_kind: object,
-    detail: str,
-) -> tuple[str, bool, str]:
-    normalized_reason = str(reason or "").strip().lower()
-    normalized_kind = str(error_kind or "").strip().lower()
-    normalized_detail = str(detail or "").strip()
-    if normalized_reason == "ambiguous_notebook_bad_request":
-        return (
-            _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
-            False,
-            "Kaggle returned a generic submit-notebook 400 without a clear notebook-only signal; "
-            "do not auto-repair or rerun the kernel for this submit error.",
-        )
-    if normalized_reason == "submission_limit" or any(
-        marker in normalized_detail.lower()
-        for marker in (
-            "submission limit",
-            "maximum number of submissions",
-            "max submissions",
-        )
-    ):
-        return (
-            _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
-            False,
-            "Wait for the Kaggle submission limit window to expire before retrying submit.",
-        )
-    if normalized_reason in {"kaggle_credentials_missing", "rules_not_accepted", "local_submission_guardrail"}:
-        return (
-            _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
-            False,
-            _submit_failure_manual_next_step(reason=normalized_reason, detail=normalized_detail),
-        )
-    if _submit_error_requires_file_fix(
-        reason=normalized_reason,
-        error_kind=normalized_kind,
-        detail=normalized_detail,
-    ):
-        return (_SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT, True, "")
-    if _submit_error_targets_submit_mode(reason=normalized_reason, detail=normalized_detail):
-        return (_SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE, True, "")
-    if normalized_reason in {
-        "submission_polling_error",
-        "submission_polling_timeout",
-        "submission_polling_invalid_payload",
-    } or normalized_reason.startswith("submission_poll_status_"):
-        return (_SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM, True, "")
-    if normalized_kind in {"transient", "unknown"}:
-        return (_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN, True, "")
-    return (_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN, True, "")
-
-
 def _build_submit_failure_context_payload(
     *,
     run_dir: Path,
@@ -10366,7 +10231,7 @@ def _build_submit_failure_context_payload(
     exit_code: int | None,
 ) -> dict[str, object]:
     detail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
-    repair_target, repairable, manual_next_step = _classify_submit_failure_repair(
+    repair_decision = _classify_submit_failure_repair_decision(
         reason=reason,
         error_kind=error_kind,
         detail=detail,
@@ -10381,9 +10246,9 @@ def _build_submit_failure_context_payload(
         "reason": reason,
         "fingerprint": fingerprint,
         "code_fingerprint": code_fingerprint,
-        "repair_target": repair_target,
-        "repairable": repairable,
-        "manual_next_step": manual_next_step,
+        "repair_target": repair_decision.repair_target,
+        "repairable": repair_decision.repairable,
+        "manual_next_step": repair_decision.manual_next_step,
         "message": message,
         "summary": summary,
         "submit_mode": "notebook" if submission_ref.startswith("kernel:") else "file",
@@ -10443,25 +10308,6 @@ def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path
     failure_context["stale_repaired_artifact_cleared_at"] = datetime.now(UTC).isoformat()
     failure_context["superseded_by_submission_path"] = str(submission_path)
     _save_submit_failure_context(run_dir, failure_context)
-
-
-def _submit_error_text_indicates_file_issue(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    return any(marker in lowered for marker in _SUBMIT_FILE_ERROR_MARKERS)
-
-
-def _submit_error_requires_file_fix(*, reason: object, error_kind: object, detail: str) -> bool:
-    normalized_reason = str(reason or "").strip().lower()
-    normalized_kind = str(error_kind or "").strip().lower()
-    if normalized_reason == "local_submission_validation_failed":
-        return True
-    if normalized_reason.startswith("submission_poll_status_") and _submit_error_text_indicates_file_issue(detail):
-        return True
-    if normalized_kind == "validation" and _submit_error_text_indicates_file_issue(detail):
-        return True
-    return False
 
 
 def _path_from_submit_reference(value: object) -> Path | None:

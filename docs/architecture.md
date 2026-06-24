@@ -68,6 +68,10 @@ Submit-gate normalization, target/top1 checks, quality reason soft overrides, da
 Explicit submit decision objects such as `QualitySubmitOverrideDecision`, `InitialSubmitProbeDecision`, and
 `LimitedSubmissionHoldbackDecision` now carry soft override/probe/holdback results back to the loop instead of spreading
 that state across several booleans.
+Submit failure classification, notebook-submit fallback detection, and repair-target selection live in
+`src/kagglebot/submit_failure_policy.py`. The loop still owns persistence, ledgers, and knowledge recording, but it no
+longer owns the pure decision table for whether a failed submit should repair the artifact, submit mode/kernel, platform
+polling path, or wait for manual intervention.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 
@@ -140,8 +144,8 @@ Recommended extraction order:
    normalization, and competition-specific overrides are already out of the main loop.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object.
-3. Kernel repair/autofix policy: isolate submit-error classification and repair-target selection from the loop so notebook
-   submit failures, artifact format failures, and platform failures can be tested without running an autopilot session.
+3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification is
+   now extracted; next, move repair artifact resolution and submit autofix context construction behind a small adapter.
 4. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 
