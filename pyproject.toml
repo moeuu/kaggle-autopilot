@@ -60,6 +60,7 @@ dependencies = [
     "onnx-tool>=1.0.1",
     "openpyxl>=3.1.5",
     "nltk>=3.9.4",
+    "sentencepiece>=0.2.1",
 ]
 
 [project.scripts]

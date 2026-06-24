@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import kagglebot.supervisor as supervisor
 from kagglebot.cli import app
 from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError
 from kagglebot.kaggle_api import EnteredCompetition
@@ -561,6 +562,25 @@ def test_run_watch_once_marks_kaggle_gpu_capacity_as_no_capacity(monkeypatch, tm
 
     assert result.status == "no_capacity"
     assert result.slug == "demo"
+
+
+def test_run_watch_once_skips_when_watch_resource_is_locked(monkeypatch, tmp_path: Path) -> None:
+    def fake_flock(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        raise BlockingIOError()
+
+    def fail_list_entered_competitions(**kwargs) -> list[EnteredCompetition]:  # noqa: ANN003
+        raise AssertionError("locked watcher must not select another competition")
+
+    monkeypatch.setattr(supervisor.fcntl, "flock", fake_flock)
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", fail_list_entered_competitions)
+
+    config = _config(tmp_path, compute="local_gpu", hardware_profile="rtx3060")
+    result = run_watch_once(config)
+
+    assert result.status == "locked"
+    assert result.reason == "watch_resource_locked"
+    records = WatchLedger(config.ledger_path).records()
+    assert any(record.get("event") == "locked" for record in records)
 
 
 def test_parse_kaggle_gpu_quota_text_available_of_total() -> None:

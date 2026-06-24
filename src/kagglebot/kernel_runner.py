@@ -5579,13 +5579,21 @@ def _find_output_file(output_dir: Path, filename: str) -> Path | None:
 
 def _find_submission_by_extension(output_dir: Path) -> Path | None:
     suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".zip"}
+    compound_names = {"submission.tar.gz", "submission.tgz"}
     candidates: list[Path] = []
+    for name in sorted(compound_names):
+        candidate = output_dir / name
+        if candidate.is_file():
+            candidates.append(candidate)
     for suffix in sorted(suffixes):
         candidate = output_dir / f"submission{suffix}"
         if candidate.is_file():
             candidates.append(candidate)
     for path in output_dir.rglob("submission.*"):
         if not path.is_file():
+            continue
+        if path.name.lower() in compound_names:
+            candidates.append(path)
             continue
         if path.suffix.lower() not in suffixes:
             continue

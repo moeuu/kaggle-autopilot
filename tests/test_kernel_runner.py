@@ -805,6 +805,22 @@ def test_find_submission_file_supports_zip_submission(tmp_path: Path) -> None:
     assert find_submission_file(output_dir) == submission
 
 
+@pytest.mark.parametrize("name", ["submission.tar.gz", "submission.tgz"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_find_submission_file_supports_compound_code_submission_archives(
+    tmp_path: Path,
+    name: str,
+    nested: bool,
+) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    artifact_dir = output_dir / "nested" if nested else output_dir
+    artifact_dir.mkdir(exist_ok=True)
+    submission = artifact_dir / name
+    submission.write_bytes(b"\x1f\x8b")
+    assert find_submission_file(output_dir) == submission
+
+
 def test_find_submission_file_supports_submission_manifest(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()

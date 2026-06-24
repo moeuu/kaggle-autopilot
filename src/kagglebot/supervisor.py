@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
 import re
@@ -7,6 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import unquote
 
 from rich import print
@@ -166,6 +169,69 @@ class WatchLedger:
         return records
 
 
+def _try_acquire_watch_resource_lock(config: WatchConfig, ledger: WatchLedger) -> TextIO | None:
+    lock_path = _watch_resource_lock_path(config)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno not in {errno.EACCES, errno.EAGAIN} and not isinstance(exc, BlockingIOError):
+            raise
+        ledger.append(
+            "locked",
+            reason="watch_resource_locked",
+            compute=config.compute,
+            hardware_profile=config.hardware_profile,
+            lock_path=str(lock_path),
+        )
+        return None
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "compute": config.compute,
+                "hardware_profile": config.hardware_profile,
+                "state_scope": config.state_scope,
+                "acquired_at": datetime.now(UTC).isoformat(),
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    handle.flush()
+    return handle
+
+
+def _release_watch_resource_lock(handle: TextIO) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _watch_resource_lock_path(config: WatchConfig) -> Path:
+    lock_name = _watch_resource_lock_name(config)
+    return config.root_watch_dir / "locks" / f"{lock_name}.lock"
+
+
+def _watch_resource_lock_name(config: WatchConfig) -> str:
+    compute = _safe_state_scope(config.compute or "default").lower() or "default"
+    if compute == "local_gpu":
+        return compute
+    scope = _safe_state_scope(config.state_scope).lower()
+    if scope:
+        return f"{compute}-{scope}"
+    profile = _safe_state_scope(str(config.hardware_profile or "")).lower()
+    if profile and profile != "auto":
+        return f"{compute}-{profile}"
+    return compute
+
+
 def run_watch_forever(
     config: WatchConfig,
     *,
@@ -182,7 +248,7 @@ def run_watch_forever(
             time.sleep(max(1, sleep_error_sec))
             continue
         _maybe_run_self_improvement(config)
-        if result.status in {"no_candidates", "dry_run", "no_capacity"}:
+        if result.status in {"no_candidates", "dry_run", "no_capacity", "locked"}:
             time.sleep(max(1, sleep_empty_sec))
             continue
         if result.status in {"failed", "skipped"}:
@@ -191,6 +257,18 @@ def run_watch_forever(
 
 def run_watch_once(config: WatchConfig) -> WatchCycleResult:
     ledger = WatchLedger(config.ledger_path)
+    lock_handle = _try_acquire_watch_resource_lock(config, ledger)
+    if lock_handle is None:
+        reason = "watch_resource_locked"
+        print(f"[yellow]watch[/yellow]: {config.compute} resource is already in use; skipping this cycle")
+        return WatchCycleResult(status="locked", slug=None, run_id=None, reason=reason)
+    try:
+        return _run_watch_once_unlocked(config, ledger)
+    finally:
+        _release_watch_resource_lock(lock_handle)
+
+
+def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchCycleResult:
     state = _load_state(config.state_path)
     active_slug = str(state.get("active_slug") or "").strip()
     active_run_id = str(state.get("active_run_id") or "").strip()
