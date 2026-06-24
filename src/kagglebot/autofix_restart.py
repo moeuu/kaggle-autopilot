@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
+
+from kagglebot.json_utils import load_json_object, write_json_object
 
 RESTART_STATE_FILENAME = "autofix_restart.json"
 NO_RESTART_ENV = "KAGGLEBOT_NO_RESTART"
@@ -42,7 +43,7 @@ def maybe_restart_for_src_changes(
     state["count"] = sum(counts_by_stage.values())
     state["last_stage"] = stage
     state["last_stage_family"] = stage_family
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    write_json_object(state_path, state)
     print(
         f"[yellow]autofix[/yellow]: src changes detected in {stage}; "
         "current process may be stale, restarting to reload code"
@@ -61,13 +62,7 @@ def restart_stage_family(stage: str) -> str:
 
 
 def _load_restart_state(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return load_json_object(path) or {}
 
 
 def _restart_counts_by_stage(state: dict[str, object]) -> dict[str, int]:
