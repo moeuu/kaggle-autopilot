@@ -7,6 +7,7 @@ from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.writeup import (
     build_writeup_bundle,
+    infer_code_competition_from_paths,
     infer_deliverable_mode,
     infer_deliverable_mode_from_paths,
     infer_submit_mode_from_paths,
@@ -57,6 +58,17 @@ def test_infer_submit_mode_from_paths_detects_notebook_only_rules(tmp_path: Path
     assert infer_submit_mode_from_paths(paths) == "notebook"
 
 
+def test_infer_code_competition_from_paths_ignores_invalid_evaluation_spec(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.joinpath("evaluation_spec.json").write_text("{", encoding="utf-8")
+    paths.data_dir.joinpath("test.csv").write_text("id\n1\n", encoding="utf-8")
+    paths.data_dir.joinpath("sample_submission.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+
+    assert infer_code_competition_from_paths(paths) is False
+
+
 def test_build_writeup_bundle_creates_report_and_metadata(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
@@ -84,8 +96,12 @@ def test_build_writeup_bundle_creates_report_and_metadata(tmp_path: Path) -> Non
 
     report_path = Path(str(bundle["report_path"]))
     metadata_path = Path(str(bundle["report_path"])).parent / "writeup_metadata.json"
+    evidence_path = Path(str(bundle["evidence_path"]))
     assert report_path.exists()
     assert metadata_path.exists()
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["status"] == "manual_finalization_required"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["proxy_metric"] == "accuracy"
+    assert evidence["proxy_value"] == 0.91
     assert "Clinical Relevance" in report_path.read_text(encoding="utf-8")

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from kagglebot.json_utils import load_json_object, write_json_object
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths
@@ -229,11 +230,8 @@ def _looks_like_notebook_hidden_test_contract(paths: CompetitionPaths) -> bool:
 
 
 def _evaluation_spec_submit_mode_is_notebook(paths: CompetitionPaths) -> bool:
-    try:
-        payload = json.loads((paths.context_dir / "evaluation_spec.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(payload, dict):
+    payload = load_json_object(paths.context_dir / "evaluation_spec.json")
+    if payload is None:
         return False
     return normalize_submit_mode(payload.get("submit_mode"), default="") == "notebook"
 
@@ -392,7 +390,7 @@ def build_writeup_bundle(
             "deliverable_mode": resolved.get("deliverable_mode"),
         },
     }
-    evidence_path.write_text(json.dumps(evidence_payload, indent=2), encoding="utf-8")
+    write_json_object(evidence_path, evidence_payload)
 
     metadata = {
         "deliverable_mode": "writeup",
@@ -405,5 +403,5 @@ def build_writeup_bundle(
         "rubric_sections": section_titles,
         "requirements_summary": requirements_summary.splitlines() if requirements_summary else [],
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    write_json_object(metadata_path, metadata)
     return metadata
