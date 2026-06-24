@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.competition_policy import load_competition_policy
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import download_competition, download_dataset, kernels_pull
 from kagglebot.paths import CompetitionPaths
 from kagglebot.validators import safe_extract_zip
@@ -41,15 +42,11 @@ def stage_reference_notebook_inputs(
         "reference_notebooks": [],
     }
     if not index_path.exists():
-        paths.reference_inputs_manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
+        write_json_object(paths.reference_inputs_manifest_path, manifest_payload)
         return
-    try:
-        index_payload = json.loads(index_path.read_text(encoding="utf-8", errors="ignore"))
-    except json.JSONDecodeError:
-        paths.reference_inputs_manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
-        return
-    if not isinstance(index_payload, dict):
-        paths.reference_inputs_manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
+    index_payload = load_json_object(index_path, errors="ignore")
+    if index_payload is None:
+        write_json_object(paths.reference_inputs_manifest_path, manifest_payload)
         return
 
     notebooks = index_payload.get("notebooks")
@@ -126,7 +123,7 @@ def stage_reference_notebook_inputs(
         for ref in competition_policy.reference_inputs.required_datasets
         if ("dataset", ref) not in discovered_required_sources
     ]
-    paths.reference_inputs_manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
+    write_json_object(paths.reference_inputs_manifest_path, manifest_payload)
 
 
 def _safe_kernel_dir_name(kernel_id: str) -> str:
@@ -156,11 +153,8 @@ def _load_notebook_metadata(directory: Path) -> dict[str, object]:
         if path in seen or not path.exists() or not path.is_file():
             continue
         seen.add(path)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
+        payload = load_json_object(path, errors="ignore")
+        if payload is not None:
             return payload
     return {}
 

@@ -779,6 +779,24 @@ def test_stage_reference_inputs_policy_records_required_datasets_and_ensemble_re
     assert manifest["policy_tags"] == ["recoverable_original_dataset"]
 
 
+def test_stage_reference_inputs_writes_default_manifest_for_invalid_index(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.code_notebooks_index_path.write_text("{", encoding="utf-8")
+
+    stage_reference_notebook_inputs(
+        paths=paths,
+        slug="demo",
+        download=False,
+        quiet=True,
+        dry_run=False,
+    )
+
+    manifest = json.loads(paths.reference_inputs_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["reference_notebooks"] == []
+    assert manifest["missing_required_sources"] == []
+
+
 def test_stage_reference_inputs_policy_proactively_downloads_required_datasets(tmp_path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

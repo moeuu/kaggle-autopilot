@@ -24,6 +24,14 @@ def test_load_json_object_rejects_missing_invalid_or_non_object_payload(tmp_path
     assert load_json_object(array_payload) is None
 
 
+def test_load_json_object_supports_read_errors_policy(tmp_path) -> None:
+    payload = tmp_path / "payload.json"
+    payload.write_bytes(b'{"ok": true}\xff')
+
+    assert load_json_object(payload) is None
+    assert load_json_object(payload, errors="ignore") == {"ok": True}
+
+
 def test_load_json_object_or_empty_returns_empty_dict_for_missing_or_invalid_payload(tmp_path) -> None:
     assert load_json_object_or_empty(tmp_path / "missing.json") == {}
 

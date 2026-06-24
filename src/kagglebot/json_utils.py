@@ -4,20 +4,20 @@ import json
 from pathlib import Path
 
 
-def load_json_object(path: Path) -> dict[str, object] | None:
+def load_json_object(path: Path, *, errors: str = "strict") -> dict[str, object] | None:
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(path.read_text(encoding="utf-8", errors=errors))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if isinstance(payload, dict):
         return payload
     return None
 
 
-def load_json_object_or_empty(path: Path) -> dict[str, object]:
-    return load_json_object(path) or {}
+def load_json_object_or_empty(path: Path, *, errors: str = "strict") -> dict[str, object]:
+    return load_json_object(path, errors=errors) or {}
 
 
 def write_json_object(
