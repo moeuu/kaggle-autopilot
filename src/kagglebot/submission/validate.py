@@ -72,6 +72,9 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
     except Exception:  # noqa: BLE001
         submission = pd.read_csv(submission_csv, sep=submission_delim)
 
+    if len(submission) == 0:
+        problems.append("submission has no data rows")
+
     actual_columns = list(submission.columns)
     if hint_columns and expected_columns == hint_columns:
         expected_with_anchor = _maybe_expected_columns_with_actual_anchor(

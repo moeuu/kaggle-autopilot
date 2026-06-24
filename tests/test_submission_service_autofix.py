@@ -181,6 +181,28 @@ def test_validate_and_prepare_autofixes_header_only_sample_by_renaming_columns(t
     assert df["prediction"].tolist() == ["A", "B"]
 
 
+def test_validate_and_prepare_rejects_header_only_submission(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    sample_path.write_text("id,prediction\n", encoding="utf-8")
+
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,prediction\n", encoding="utf-8")
+
+    service = SubmissionService(
+        SubmissionConfig(
+            slug="demo",
+            data_dir=tmp_path / "data",
+            sample_submission_path=sample_path,
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            dry_run=True,
+            force_submit=True,
+        )
+    )
+
+    with pytest.raises(SubmissionValidationError, match="submission has no data rows"):
+        service.validate_and_prepare_submission(submission_path)
+
+
 def test_validate_and_prepare_autofixes_missing_required_id_suffix(tmp_path: Path) -> None:
     context_dir = tmp_path / "context"
     data_dir = tmp_path / "data"
