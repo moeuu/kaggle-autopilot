@@ -894,6 +894,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import io
 import os
 from pathlib import Path
 
@@ -915,13 +916,160 @@ def _resolve_kernel_dir() -> Path:
         return Path(os.getcwd()).resolve()
 
 
+def _candidate_sample_paths() -> list[Path]:
+    root = Path(os.environ.get("KAGGLEBOT_INPUT_ROOT", KAGGLE_INPUT_ROOT))
+    slug = os.environ.get("KAGGLEBOT_COMPETITION_SLUG") or os.environ.get("KAGGLEBOT_SLUG") or ""
+    slug_variants = [slug, slug.replace("-", "_")] if slug else []
+    candidates: list[Path] = []
+    for item in slug_variants:
+        if not item:
+            continue
+        candidates.extend(
+            [
+                root / item / "sample_submission.csv",
+                root / "competitions" / item / "sample_submission.csv",
+            ]
+        )
+    candidates.append(root / "sample_submission.csv")
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            ordered.append(candidate)
+            seen.add(candidate)
+    if root.exists():
+        for candidate in sorted(root.rglob("sample_submission.csv")):
+            if candidate.is_file() and candidate not in seen:
+                ordered.append(candidate)
+                seen.add(candidate)
+    return ordered
+
+
+def _find_sample_submission() -> Path | None:
+    for candidate in _candidate_sample_paths():
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _read_embedded_submission(payload: bytes):
+    import pandas as pd
+
+    return pd.read_csv(io.BytesIO(payload))
+
+
+def _numeric_frame(frame):
+    import pandas as pd
+
+    converted = pd.DataFrame(index=frame.index)
+    for column in frame.columns:
+        converted[column] = pd.to_numeric(frame[column], errors="coerce")
+    return converted
+
+
+def _looks_like_probability_matrix(values) -> bool:
+    if values.empty:
+        return False
+    row_sums = values.sum(axis=1)
+    finite = row_sums.notna() & (row_sums > 0)
+    if not finite.any():
+        return False
+    return bool((row_sums[finite] - 1.0).abs().median() <= 1e-4)
+
+
+def _normalize_probability_rows(values):
+    clipped = values.clip(lower=1e-12)
+    row_sums = clipped.sum(axis=1).replace(0, 1.0)
+    return clipped.div(row_sums, axis=0)
+
+
+def _aligned_submission_bytes(payload: bytes) -> bytes:
+    sample_path = _find_sample_submission()
+    if sample_path is None:
+        return payload
+    try:
+        import pandas as pd
+
+        sample = pd.read_csv(sample_path)
+        submission = _read_embedded_submission(payload)
+    except Exception as exc:
+        print(f"Runtime sample alignment skipped: {exc}")
+        return payload
+
+    if sample.empty or len(sample.columns) < 2:
+        return payload
+
+    sample_cols = [str(col) for col in sample.columns]
+    submission.columns = [str(col) for col in submission.columns]
+    id_col = sample_cols[0]
+    target_cols = [col for col in sample_cols if col != id_col]
+    if id_col not in submission.columns:
+        if len(submission) == len(sample) and all(col in submission.columns for col in target_cols):
+            out = sample.copy()
+            out[target_cols] = submission[target_cols].to_numpy()
+            return out.to_csv(index=False).encode("utf-8")
+        return payload
+
+    out = sample.copy()
+    common_targets = [col for col in target_cols if col in submission.columns]
+    if not common_targets:
+        return payload
+
+    submission_ids = submission[id_col].astype(str)
+    sample_ids = sample[id_col].astype(str)
+    sub_targets = submission[common_targets].copy()
+    numeric_targets = _numeric_frame(sub_targets)
+    all_numeric = bool(numeric_targets.notna().any().all())
+    probability_matrix = all_numeric and len(common_targets) > 1 and _looks_like_probability_matrix(numeric_targets)
+
+    if all_numeric:
+        fallback = numeric_targets.mean(axis=0).fillna(0.0)
+        if probability_matrix:
+            total = float(fallback.sum())
+            fallback = (fallback.clip(lower=1e-12) / total) if total > 0 else fallback + (1.0 / len(fallback))
+        lookup_values = _normalize_probability_rows(numeric_targets) if probability_matrix else numeric_targets
+        lookup = {
+            key: lookup_values.iloc[idx]
+            for idx, key in enumerate(submission_ids)
+            if idx < len(lookup_values) and lookup_values.iloc[idx].notna().all()
+        }
+        aligned_rows = [lookup.get(key, fallback) for key in sample_ids]
+        aligned = pd.DataFrame(aligned_rows, columns=common_targets).reset_index(drop=True)
+        for col in common_targets:
+            out[col] = aligned[col].astype(float).to_numpy()
+    else:
+        fallback_values = {}
+        for col in common_targets:
+            non_null = submission[col].dropna()
+            if len(non_null):
+                fallback_values[col] = non_null.iloc[0]
+            else:
+                sample_non_null = sample[col].dropna() if col in sample.columns else []
+                fallback_values[col] = sample_non_null.iloc[0] if len(sample_non_null) else ""
+        lookup = {
+            key: submission.loc[idx, common_targets]
+            for idx, key in enumerate(submission_ids)
+            if idx < len(submission)
+        }
+        aligned_rows = [lookup.get(key, fallback_values) for key in sample_ids]
+        aligned = pd.DataFrame(aligned_rows, columns=common_targets).reset_index(drop=True)
+        for col in common_targets:
+            out[col] = aligned[col].to_numpy()
+
+    missing_targets = [col for col in target_cols if col not in common_targets]
+    if missing_targets:
+        print(f"Runtime sample alignment kept sample defaults for missing target columns: {missing_targets}")
+    return out[sample_cols].to_csv(index=False).encode("utf-8")
+
+
 def main() -> None:
-    dst = Path("/kaggle/working/submission.csv")
+    dst = Path(os.environ.get("KAGGLEBOT_WORKING_DIR", "/kaggle/working")) / "submission.csv"
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         payload = gzip.decompress(base64.b64decode(SUBMISSION_GZIP_B64.encode("ascii")))
     except Exception as exc:
         raise RuntimeError("Failed to decode embedded submission payload.") from exc
+    payload = _aligned_submission_bytes(payload)
     dst.write_bytes(payload)
     print(f\"Wrote {dst} (bytes={dst.stat().st_size})\")
 
