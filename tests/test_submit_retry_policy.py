@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
+from kagglebot.hashing import sha256_file_or_none
 from kagglebot.submit_retry_policy import (
     compute_submit_code_fingerprint,
     consume_same_submit_fingerprint_retry_allowance,
     decide_duplicate_submission_action,
     decide_same_submission_path_action,
 )
-
-
-def _sha256_or_none(path: Path | None) -> str | None:
-    if path is None or not path.exists():
-        return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_compute_submit_code_fingerprint_includes_src_and_kernel_files(tmp_path: Path) -> None:
@@ -28,13 +22,13 @@ def test_compute_submit_code_fingerprint_includes_src_and_kernel_files(tmp_path:
     original = compute_submit_code_fingerprint(
         src_root=src_root,
         kernel_source_dir=kernel_root,
-        sha256_or_none=_sha256_or_none,
+        sha256_or_none=sha256_file_or_none,
     )
     (kernel_root / "kernel.py").write_text("print('changed')\n", encoding="utf-8")
     changed = compute_submit_code_fingerprint(
         src_root=src_root,
         kernel_source_dir=kernel_root,
-        sha256_or_none=_sha256_or_none,
+        sha256_or_none=sha256_file_or_none,
     )
 
     assert len(original) == 64
@@ -52,14 +46,14 @@ def test_compute_submit_code_fingerprint_ignores_python_cache_files(tmp_path: Pa
     original = compute_submit_code_fingerprint(
         src_root=src_root,
         kernel_source_dir=kernel_root,
-        sha256_or_none=_sha256_or_none,
+        sha256_or_none=sha256_file_or_none,
     )
     (cache_dir / "module.cpython-312.pyc").write_bytes(b"cache")
     (src_root / "ignored.pyc").write_bytes(b"cache")
     changed = compute_submit_code_fingerprint(
         src_root=src_root,
         kernel_source_dir=kernel_root,
-        sha256_or_none=_sha256_or_none,
+        sha256_or_none=sha256_file_or_none,
     )
 
     assert changed == original

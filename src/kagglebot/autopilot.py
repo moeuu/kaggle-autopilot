@@ -128,7 +128,7 @@ from kagglebot.experiment_graph import (
     write_allocator_decision,
 )
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
-from kagglebot.hashing import sha256_file
+from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.kaggle_api import (
@@ -10008,18 +10008,6 @@ def _build_submit_autofix_context(run_dir: Path) -> str:
         run_state=_load_run_state(run_dir),
         latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
-
-
-def _sha256_or_none(path: Path | None) -> str | None:
-    """Return SHA256 for an existing file path, otherwise None."""
-    if path is None:
-        return None
-    if not path.exists():
-        return None
-    try:
-        return sha256_file(str(path))
-    except OSError:
-        return None
 
 
 def _compute_submit_code_fingerprint(config: AutopilotConfig) -> str:

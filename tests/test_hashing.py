@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from kagglebot.hashing import sha256_file
+from kagglebot.hashing import sha256_file, sha256_file_or_none
 
 
 def test_sha256_file():
@@ -37,3 +37,12 @@ def test_sha256_file_large():
         assert result == sha256_file(temp_path)  # Consistent
     finally:
         Path(temp_path).unlink()
+
+
+def test_sha256_file_or_none_handles_missing_and_existing_paths(tmp_path: Path):
+    path = tmp_path / "payload.txt"
+    path.write_text("abc", encoding="utf-8")
+
+    assert sha256_file_or_none(path) == sha256_file(str(path))
+    assert sha256_file_or_none(tmp_path / "missing.txt") is None
+    assert sha256_file_or_none(None) is None
