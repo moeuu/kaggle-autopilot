@@ -32,6 +32,7 @@ from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_autofix as _submit_autofix
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
+from kagglebot import submit_notebook as _submit_notebook
 from kagglebot import submit_retry_policy as _submit_retry_policy
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
@@ -9780,7 +9781,7 @@ def _submit_with_notebook_kernel(
     iteration = _infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = config.paths.iter_dir(run_id, iteration)
     kaggle_user = resolve_kaggle_username(config.kaggle_username)
-    normalized_artifact_mode = str(artifact_mode or "wrapper").strip().lower()
+    normalized_artifact_mode = _submit_notebook.normalize_notebook_submit_artifact_mode(artifact_mode)
     submit_kernel_kwargs = {
         "slug": config.slug,
         "run_id": run_id,
@@ -9818,22 +9819,19 @@ def _submit_with_notebook_kernel(
             source=kernel_result.submission_path,
             iter_dir=iter_dir,
         )
-    kernel_ref = kernel_result.kernel_id
-    output_file = (
-        (submission_artifact_path or kernel_result.submission_path).name
-        if (submission_artifact_path or kernel_result.submission_path)
-        else "submission.csv"
+    submit_reference = _submit_notebook.build_notebook_submit_reference(
+        kernel_id=kernel_result.kernel_id,
+        submission_artifact_path=submission_artifact_path,
+        kernel_submission_path=kernel_result.submission_path,
+        version_label=_infer_kernel_submit_version_label(iter_dir / "logs"),
     )
-    version = _infer_kernel_submit_version_label(iter_dir / "logs") or "1"
-    print(f"[cyan]submit notebook[/cyan]: {kernel_ref}")
-    submit_kwargs = {
-        "slug": config.slug,
-        "kernel": kernel_ref,
-        "message": message,
-        "output_file": output_file,
-        "version": version,
-        "dry_run": config.dry_run,
-    }
+    print(f"[cyan]submit notebook[/cyan]: {submit_reference.kernel_ref}")
+    submit_kwargs = _submit_notebook.build_kaggle_submit_kernel_kwargs(
+        slug=config.slug,
+        reference=submit_reference,
+        message=message,
+        dry_run=config.dry_run,
+    )
     try:
         submit_result = run_kaggle_submit_kernel(**submit_kwargs)
     except SubmissionCliError as exc:
@@ -9859,7 +9857,7 @@ def _submit_with_notebook_kernel(
             submit_result = run_kaggle_submit_kernel(**submit_kwargs)
         else:
             raise
-    return submit_result, f"kernel:{kernel_ref}", submission_artifact_path
+    return submit_result, submit_reference.submission_ref, submission_artifact_path
 
 
 def _should_retry_submit_kernel_on_cpu(*, config: AutopilotConfig, exc: Exception) -> bool:
