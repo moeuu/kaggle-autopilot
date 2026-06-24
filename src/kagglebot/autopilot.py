@@ -91,7 +91,6 @@ from kagglebot.campaign import (
     build_campaign_candidate,
     campaign_state_path,
     candidate_registry_path,
-    list_candidates,
     normalize_campaign_mode,
     update_campaign_state,
     upsert_candidate,
@@ -10775,21 +10774,6 @@ def _submission_message(
         submission_path=submission_path,
         campaign_mode=config.campaign_mode,
         target_direction=config.target_direction,
-    )
-
-
-def _find_campaign_candidate_for_submission(
-    *,
-    context_dir: Path,
-    submission_path: Path | None,
-    run_id: str,
-    iteration: int | None,
-):
-    return _submit_stage.find_campaign_candidate_for_submission(
-        candidates=list_candidates(candidate_registry_path(context_dir)),
-        submission_path=submission_path,
-        run_id=run_id,
-        iteration=iteration,
     )
 
 
