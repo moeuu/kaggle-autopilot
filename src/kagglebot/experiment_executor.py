@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kagglebot.experiment_graph import EXPERIMENT_GRAPH_FILENAME, normalize_portfolio_execution
 from kagglebot.runners.base import CandidateRunResult, CandidateRunSpec, RunContext, Runner
+from kagglebot.scalar_utils import optional_str as _optional_str
 
 GRAPH_EXECUTION_REPORT_FILENAME = "graph_execution_report.json"
 
@@ -211,13 +212,6 @@ def _candidate_spec_from_node(node: dict[str, object]) -> CandidateRunSpec | Non
         metric_contract=metadata.get("metric_contract") if isinstance(metadata.get("metric_contract"), dict) else {},
         dependency_check=metadata.get("dependency_check") if isinstance(metadata.get("dependency_check"), dict) else {},
     )
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _node_priority(node: dict[str, object]) -> float:

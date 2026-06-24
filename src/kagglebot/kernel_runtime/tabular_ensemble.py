@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -54,6 +55,8 @@ CPU_FALLBACK_N_ESTIMATORS = int(os.getenv("KAGGLEBOT_XGB_CPU_FALLBACK_ESTIMATORS
 FAST_DEV_N_ESTIMATORS = int(os.getenv("KAGGLEBOT_FAST_DEV_XGB_ESTIMATORS", "150"))
 DEFAULT_CB_ITERATIONS = int(os.getenv("KAGGLEBOT_CB_ITERATIONS", "8000"))
 DEFAULT_LGBM_ESTIMATORS = int(os.getenv("KAGGLEBOT_LGBM_ESTIMATORS", "12000"))
+_FOLD_NUMBER_RE = re.compile(r"(\d+)")
+_ARTIFACT_STEM_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 @dataclass
@@ -424,11 +427,102 @@ def validate_submission(
     return submission
 
 
+def safe_artifact_stem(value: str) -> str:
+    stem = _ARTIFACT_STEM_RE.sub("_", str(value).strip()).strip("._-")
+    return stem or "candidate"
+
+
+def _fold_sort_key(item: tuple[str, np.ndarray]) -> tuple[int, str]:
+    match = _FOLD_NUMBER_RE.search(item[0])
+    if match is None:
+        return (10**9, item[0])
+    return (int(match.group(1)), item[0])
+
+
+def _fold_number_from_key(fold_key: str, fallback: int) -> int:
+    match = _FOLD_NUMBER_RE.search(fold_key)
+    if match is None:
+        return fallback
+    return int(match.group(1))
+
+
+def write_fold_intermediate_artifacts(
+    *,
+    output_dirs: list[Path],
+    result: PipelineResult,
+    sample_submission: pd.DataFrame,
+    test_df: pd.DataFrame,
+    id_col: str,
+    target_col: str,
+) -> list[dict[str, Any]]:
+    """Persist fold-level predictions plus a valid fold submission when possible."""
+
+    records: list[dict[str, Any]] = []
+    candidate_stem = safe_artifact_stem(result.name)
+    for fallback_idx, (fold_key, test_preds) in enumerate(
+        sorted(result.test_predictions_by_fold.items(), key=_fold_sort_key),
+        start=1,
+    ):
+        fold_number = _fold_number_from_key(fold_key, fallback_idx)
+        artifact_stem = f"{candidate_stem}_fold{fold_number}"
+        test_arr = np.asarray(test_preds, dtype=np.float64)
+        oof_arr = result.oof_predictions_by_fold.get(fold_key)
+        valid_idx = result.valid_indices_by_fold.get(fold_key)
+        record: dict[str, Any] = {
+            "candidate": result.name,
+            "fold": fold_number,
+            "fold_key": fold_key,
+            "test_predictions_path": f"test_preds_{artifact_stem}.npy",
+            "oof_predictions_path": f"oof_preds_{artifact_stem}.npy" if oof_arr is not None else None,
+            "metadata_path": f"preds_{artifact_stem}_metadata.json",
+            "candidate_path": f"candidate_{artifact_stem}.json",
+            "submission_path": f"submission_{artifact_stem}.csv",
+            "status": "pending",
+        }
+        metadata = {
+            "candidate": result.name,
+            "fold": fold_number,
+            "fold_key": fold_key,
+            "cv_score": float(result.cv_score),
+            "test_prediction_count": int(test_arr.shape[0]),
+            "expected_test_rows": int(len(test_df)),
+            "valid_indices": np.asarray(valid_idx).tolist() if valid_idx is not None else None,
+            "metadata": result.metadata,
+        }
+        if test_arr.shape[0] == len(test_df):
+            try:
+                submission = validate_submission(
+                    sample_submission=sample_submission,
+                    test_df=test_df,
+                    id_col=id_col,
+                    target_col=target_col,
+                    preds=test_arr,
+                )
+            except AssertionError as exc:
+                record["status"] = "invalid_submission"
+                record["reason"] = str(exc)
+            else:
+                mirror_df(str(record["submission_path"]), submission, output_dirs)
+                record["status"] = "available"
+        else:
+            record["status"] = "skipped_submission"
+            record["reason"] = f"fold test predictions have {test_arr.shape[0]} rows; expected {len(test_df)}"
+
+        mirror_npy(str(record["test_predictions_path"]), test_arr, output_dirs)
+        if oof_arr is not None:
+            mirror_npy(str(record["oof_predictions_path"]), np.asarray(oof_arr, dtype=np.float64), output_dirs)
+        mirror_json(str(record["metadata_path"]), metadata, output_dirs)
+        mirror_json(str(record["candidate_path"]), {**record, "metadata": metadata}, output_dirs)
+        records.append(record)
+    return records
+
+
 def write_submission_manifest(
     *,
     output_dirs: list[Path],
     final_result: PipelineResult,
     summary: dict[str, Any],
+    fold_artifacts: list[dict[str, Any]] | None = None,
 ) -> None:
     for output_dir in output_dirs:
         submission_path = output_dir / "submission.csv"
@@ -447,5 +541,6 @@ def write_submission_manifest(
             "cv_results_path": "cv_results.json",
             "sha256": submission_sha,
             "prediction_range": summary.get("prediction_range"),
+            "fold_artifacts": fold_artifacts or summary.get("fold_artifacts", []),
         }
         write_json(output_dir / "submission_manifest.json", payload)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -11,6 +13,8 @@ from kagglebot.kernel_runtime.tabular_ensemble import (
     resolve_component_models,
     train_catboost_model,
     train_xgb_model,
+    write_fold_intermediate_artifacts,
+    write_submission_manifest,
 )
 
 
@@ -58,6 +62,49 @@ def test_build_prediction_correlation_summary_uses_single_models_only() -> None:
     assert summary["mean_abs_corr"] is not None
     assert summary["max_abs_corr"] is not None
     assert summary["min_abs_corr"] is not None
+
+
+def test_write_fold_intermediate_artifacts_writes_valid_submission_and_manifest(tmp_path) -> None:
+    sample = pd.DataFrame({"id": [10, 20], "target": [0.0, 0.0]})
+    test = pd.DataFrame({"id": [10, 20], "feature": [1.0, 2.0]})
+    result = PipelineResult(
+        name="model/a",
+        oof_preds=np.array([0.2, 0.8], dtype=np.float64),
+        test_preds=np.array([0.25, 0.75], dtype=np.float64),
+        cv_score=0.91,
+        fold_scores=[],
+        feature_manifest={},
+        metadata={"kind": "single"},
+        test_predictions_by_fold={"fold_1": np.array([0.25, 0.75], dtype=np.float64)},
+        oof_predictions_by_fold={"fold_1": np.array([0.2], dtype=np.float64)},
+        valid_indices_by_fold={"fold_1": np.array([0])},
+    )
+
+    records = write_fold_intermediate_artifacts(
+        output_dirs=[tmp_path],
+        result=result,
+        sample_submission=sample,
+        test_df=test,
+        id_col="id",
+        target_col="target",
+    )
+    write_submission_manifest(
+        output_dirs=[tmp_path],
+        final_result=result,
+        summary={"prediction_range": [0.25, 0.75]},
+        fold_artifacts=records,
+    )
+
+    assert records[0]["status"] == "available"
+    submission = pd.read_csv(tmp_path / "submission_model_a_fold1.csv")
+    assert list(submission.columns) == ["id", "target"]
+    assert submission["id"].tolist() == [10, 20]
+    assert np.allclose(submission["target"], [0.25, 0.75])
+    assert (tmp_path / "test_preds_model_a_fold1.npy").exists()
+    assert (tmp_path / "oof_preds_model_a_fold1.npy").exists()
+    assert (tmp_path / "candidate_model_a_fold1.json").exists()
+    manifest = json.loads((tmp_path / "submission_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["fold_artifacts"][0]["submission_path"] == "submission_model_a_fold1.csv"
 
 
 def test_train_xgb_model_forwards_sample_weight(monkeypatch) -> None:

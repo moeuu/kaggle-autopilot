@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from kagglebot.campaign import CampaignCandidate, SubmissionAllocation
+from kagglebot.scalar_utils import optional_str as _optional_str
 
 EXPERIMENT_GRAPH_FILENAME = "experiment_graph.json"
 ALLOCATOR_DECISION_FILENAME = "allocator_decision.json"
@@ -409,13 +410,6 @@ def _method_adapters(method_registry: dict[str, object]) -> dict[str, dict[str, 
                 enriched["dependency_check"] = dependency_check
             adapters[method_id] = enriched
     return adapters
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _to_float(value: object) -> float | None:
