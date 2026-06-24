@@ -7,7 +7,9 @@ from kagglebot.submit_stage import (
     classify_submit_stage_error,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
+    decide_submission_outcome_abort,
     decide_submit_stage_error_action,
+    normalize_submission_outcome_status,
     run_submit_stage_attempt,
 )
 
@@ -77,6 +79,51 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
         "[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit",
         "[yellow]submit mode[/yellow]: using notebook submit",
     )
+
+
+def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
+    assert normalize_submission_outcome_status("SubmissionStatus.COMPLETE") == "complete"
+    assert normalize_submission_outcome_status("") == "unknown"
+
+
+def test_decide_submission_outcome_abort_handles_error_status() -> None:
+    decision = decide_submission_outcome_abort(
+        outcome_status="error",
+        outcome_score=None,
+        deliverable_mode="leaderboard",
+        raw_detail="bad submission",
+    )
+
+    assert decision.should_abort is True
+    assert decision.error_kind == "validation"
+    assert decision.reason == "submission_poll_status_error"
+    assert "error status 'error'" in decision.message
+    assert decision.detail == "bad submission"
+
+
+def test_decide_submission_outcome_abort_handles_scoreless_leaderboard_complete() -> None:
+    decision = decide_submission_outcome_abort(
+        outcome_status="complete",
+        outcome_score=None,
+        deliverable_mode="leaderboard",
+        raw_detail="Kaggle reported: complete without score",
+    )
+
+    assert decision.should_abort is True
+    assert decision.reason == "submission_poll_status_complete_no_score"
+    assert "no score" in decision.message
+    assert "scoring error inferred" in decision.detail.lower()
+
+
+def test_decide_submission_outcome_abort_allows_scoreless_writeup_complete() -> None:
+    decision = decide_submission_outcome_abort(
+        outcome_status="complete",
+        outcome_score=None,
+        deliverable_mode="writeup",
+        raw_detail="",
+    )
+
+    assert decision.should_abort is False
 
 
 def test_run_submit_stage_attempt_uses_file_submit_result_path(tmp_path: Path) -> None:

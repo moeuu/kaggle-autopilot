@@ -56,6 +56,30 @@ class SubmitStageSuccessRecord:
     stderr: str
 
 
+@dataclass(frozen=True)
+class SubmitOutcomeAbortDecision:
+    should_abort: bool
+    error_kind: str = ""
+    reason: str = ""
+    message: str = ""
+    detail: str = ""
+
+
+FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
+SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES = {"complete", "completed"}
+
+
+def normalize_submission_outcome_status(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "unknown"
+    if "." in raw:
+        prefix, _, suffix = raw.rpartition(".")
+        if suffix and "status" in prefix:
+            return suffix.strip()
+    return raw
+
+
 def decide_initial_submit_stage_mode(
     *,
     requested_notebook_submit: bool,
@@ -83,6 +107,56 @@ def decide_initial_submit_stage_mode(
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
     )
+
+
+def decide_submission_outcome_abort(
+    *,
+    outcome_status: str,
+    outcome_score: object,
+    deliverable_mode: str,
+    raw_detail: str,
+) -> SubmitOutcomeAbortDecision:
+    if outcome_status in FAILED_SUBMISSION_OUTCOME_STATUSES:
+        return SubmitOutcomeAbortDecision(
+            should_abort=True,
+            error_kind="validation",
+            reason=f"submission_poll_status_{outcome_status}",
+            message=(
+                f"Submission finished with error status '{outcome_status}' during polling; "
+                "aborting submit stage for this run."
+            ),
+            detail=raw_detail or outcome_status,
+        )
+
+    if (
+        outcome_status in SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
+        and outcome_score is None
+        and str(deliverable_mode or "").strip().lower() == "leaderboard"
+    ):
+        detail = raw_detail
+        if not detail:
+            detail = (
+                "Kaggle submission completed without a public/private score. "
+                "For leaderboard submissions this usually indicates a scoring error, "
+                "such as an invalid notebook-generated submission file."
+            )
+        elif "submission file" not in detail.lower() and "scoring error" not in detail.lower():
+            detail = (
+                detail + "\nKaggle scoring error inferred: leaderboard submission file completed "
+                "without a public/private score."
+            )
+        return SubmitOutcomeAbortDecision(
+            should_abort=True,
+            error_kind="validation",
+            reason=f"submission_poll_status_{outcome_status}_no_score",
+            message=(
+                f"Submission finished with status '{outcome_status}' but no score; "
+                "treating as scoring failure for this leaderboard run."
+            ),
+            detail=detail,
+        )
+
+    return SubmitOutcomeAbortDecision(should_abort=False)
 
 
 def build_submit_stage_success_record(

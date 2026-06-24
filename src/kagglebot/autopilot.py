@@ -392,8 +392,6 @@ _MAX_METRIC_FIX_CODEX_PASSES = 4
 _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
-_FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
-_SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES = {"complete", "completed"}
 _FORCED_INITIAL_SUBMIT_STATE = "forced_initial_submit"
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
 _SPARE_DAILY_SUBMIT_REASON = "spare_daily_submission_slot"
@@ -9621,35 +9619,9 @@ def _attempt_submit(
     if isinstance(outcome, dict):
         outcome_status = _normalize_submission_outcome_status(outcome.get("status"))
         outcome["status"] = outcome_status
-        if outcome_status in _FAILED_SUBMISSION_OUTCOME_STATUSES:
-            raw_detail = _build_kaggle_submit_error_detail(
-                slug=config.slug,
-                message=message,
-                submitted_at=submitted_at,
-                outcome=outcome,
-            )
-            return _abort_submit_for_run(
-                config=config,
-                run_id=run_id,
-                problem_types=problem_types,
-                submission_ref=submission_ref,
-                submission_artifact_path=submission_for_submit_path,
-                artifact_mode=submission_artifact_mode,
-                code_fingerprint=submit_code_fingerprint,
-                fingerprint=compute_error_fingerprint("", raw_detail or outcome_status),
-                error_kind="validation",
-                reason=f"submission_poll_status_{outcome_status}",
-                message=(
-                    f"Submission finished with error status '{outcome_status}' during polling; "
-                    "aborting submit stage for this run."
-                ),
-                stdout_tail="",
-                stderr_tail=raw_detail or outcome_status,
-                exit_code=None,
-                submit_attempt_recorder=submit_attempt_recorder,
-            )
-        if (
-            outcome_status in _SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
+        raw_detail = ""
+        if outcome_status in _submit_stage.FAILED_SUBMISSION_OUTCOME_STATUSES or (
+            outcome_status in _submit_stage.SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
             and outcome.get("score") is None
             and infer_deliverable_mode_from_paths(config.paths, default="leaderboard") == "leaderboard"
         ):
@@ -9659,17 +9631,13 @@ def _attempt_submit(
                 submitted_at=submitted_at,
                 outcome=outcome,
             )
-            if not raw_detail:
-                raw_detail = (
-                    "Kaggle submission completed without a public/private score. "
-                    "For leaderboard submissions this usually indicates a scoring error, "
-                    "such as an invalid notebook-generated submission file."
-                )
-            elif "submission file" not in raw_detail.lower() and "scoring error" not in raw_detail.lower():
-                raw_detail = (
-                    raw_detail + "\nKaggle scoring error inferred: leaderboard submission file completed "
-                    "without a public/private score."
-                )
+        outcome_abort_decision = _submit_stage.decide_submission_outcome_abort(
+            outcome_status=outcome_status,
+            outcome_score=outcome.get("score"),
+            deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
+            raw_detail=raw_detail,
+        )
+        if outcome_abort_decision.should_abort:
             return _abort_submit_for_run(
                 config=config,
                 run_id=run_id,
@@ -9678,15 +9646,12 @@ def _attempt_submit(
                 submission_artifact_path=submission_for_submit_path,
                 artifact_mode=submission_artifact_mode,
                 code_fingerprint=submit_code_fingerprint,
-                fingerprint=compute_error_fingerprint("", raw_detail),
-                error_kind="validation",
-                reason=f"submission_poll_status_{outcome_status}_no_score",
-                message=(
-                    f"Submission finished with status '{outcome_status}' but no score; "
-                    "treating as scoring failure for this leaderboard run."
-                ),
+                fingerprint=compute_error_fingerprint("", outcome_abort_decision.detail),
+                error_kind=outcome_abort_decision.error_kind,
+                reason=outcome_abort_decision.reason,
+                message=outcome_abort_decision.message,
                 stdout_tail="",
-                stderr_tail=raw_detail,
+                stderr_tail=outcome_abort_decision.detail,
                 exit_code=None,
                 submit_attempt_recorder=submit_attempt_recorder,
             )
@@ -10645,14 +10610,7 @@ def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[st
 
 
 def _normalize_submission_outcome_status(value: object) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return "unknown"
-    if "." in raw:
-        prefix, _, suffix = raw.rpartition(".")
-        if suffix and "status" in prefix:
-            return suffix.strip()
-    return raw
+    return _submit_stage.normalize_submission_outcome_status(value)
 
 
 def _resolve_submission_rank_payload(
