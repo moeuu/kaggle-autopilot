@@ -4,6 +4,7 @@ import re
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
+from kagglebot.writeup import normalize_deliverable_mode, normalize_submit_mode
 
 SPLIT_STRATEGY_PRIORITY = {
     "kfold": 0,
@@ -216,6 +217,32 @@ def normalize_eval_seeds(
     if normalized:
         return normalized
     return list(default_seeds)
+
+
+def resolve_deliverable_mode(
+    *,
+    plan_value: object,
+    spec_value: object,
+    inferred_value: object,
+    default: str = "leaderboard",
+) -> str:
+    plan_mode = normalize_deliverable_mode(plan_value, default="")
+    spec_mode = normalize_deliverable_mode(spec_value, default="")
+    inferred_mode = normalize_deliverable_mode(inferred_value, default="")
+    return spec_mode or inferred_mode or plan_mode or default
+
+
+def resolve_submit_mode(
+    *,
+    plan_value: object,
+    spec_value: object,
+    inferred_value: object,
+    default: str = "file",
+) -> str:
+    plan_mode = normalize_submit_mode(plan_value, default="")
+    spec_mode = normalize_submit_mode(spec_value, default="")
+    inferred_mode = normalize_submit_mode(inferred_value, default="")
+    return spec_mode or inferred_mode or plan_mode or default
 
 
 def normalize_eval_repeats(value: object, *, fallback: int | None = None, default_repeats: int) -> int:

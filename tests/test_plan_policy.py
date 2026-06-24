@@ -15,7 +15,9 @@ from kagglebot.plan_policy import (
     normalize_rank_force_min_teams,
     normalize_rank_force_percentile,
     normalize_split_strategy_name,
+    resolve_deliverable_mode,
     resolve_split_strategy_from_artifacts,
+    resolve_submit_mode,
     upgrade_improvement_mode,
 )
 
@@ -93,6 +95,25 @@ def test_normalize_eval_seeds_deduplicates_and_uses_defaults() -> None:
     assert normalize_eval_seeds([1, "x", 1, 2], default_seeds=defaults) == [1, 2]
     assert normalize_eval_seeds(None, fallback=[3, 3], default_seeds=defaults) == [3]
     assert normalize_eval_seeds(None, default_seeds=defaults) == [42, 2024, 777]
+
+
+def test_resolve_deliverable_mode_prefers_spec_then_inferred_then_plan() -> None:
+    assert (
+        resolve_deliverable_mode(plan_value="leaderboard", spec_value="writeup", inferred_value="leaderboard")
+        == "writeup"
+    )
+    assert (
+        resolve_deliverable_mode(plan_value="writeup", spec_value=None, inferred_value="leaderboard") == "leaderboard"
+    )
+    assert resolve_deliverable_mode(plan_value="writeup", spec_value=None, inferred_value=None) == "writeup"
+    assert resolve_deliverable_mode(plan_value=None, spec_value=None, inferred_value=None) == "leaderboard"
+
+
+def test_resolve_submit_mode_prefers_spec_then_inferred_then_plan() -> None:
+    assert resolve_submit_mode(plan_value="file", spec_value="notebook", inferred_value="file") == "notebook"
+    assert resolve_submit_mode(plan_value="file", spec_value=None, inferred_value="notebook") == "notebook"
+    assert resolve_submit_mode(plan_value="notebook", spec_value=None, inferred_value=None) == "notebook"
+    assert resolve_submit_mode(plan_value=None, spec_value=None, inferred_value=None) == "file"
 
 
 def test_normalize_eval_repeats_clamps_range() -> None:

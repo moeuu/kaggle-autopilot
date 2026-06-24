@@ -3557,28 +3557,16 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
         default=_DEFAULT_STRICT_COMPETITION_METRIC,
     )
-    plan_deliverable_mode = normalize_deliverable_mode(getattr(plan, "deliverable_mode", None), default="")
-    spec_deliverable_mode = normalize_deliverable_mode(eval_spec.get("deliverable_mode"), default="")
-    inferred_deliverable_mode = infer_deliverable_mode_from_paths(config.paths, default="")
-    if spec_deliverable_mode:
-        deliverable_mode = spec_deliverable_mode
-    elif inferred_deliverable_mode:
-        deliverable_mode = inferred_deliverable_mode
-    elif plan_deliverable_mode:
-        deliverable_mode = plan_deliverable_mode
-    else:
-        deliverable_mode = "leaderboard"
-    plan_submit_mode = normalize_submit_mode(getattr(plan, "submit_mode", None), default="")
-    spec_submit_mode = normalize_submit_mode(eval_spec.get("submit_mode"), default="")
-    inferred_submit_mode = infer_submit_mode_from_paths(config.paths, default="")
-    if spec_submit_mode:
-        submit_mode = spec_submit_mode
-    elif inferred_submit_mode:
-        submit_mode = inferred_submit_mode
-    elif plan_submit_mode:
-        submit_mode = plan_submit_mode
-    else:
-        submit_mode = "file"
+    deliverable_mode = _plan_policy.resolve_deliverable_mode(
+        plan_value=getattr(plan, "deliverable_mode", None),
+        spec_value=eval_spec.get("deliverable_mode"),
+        inferred_value=infer_deliverable_mode_from_paths(config.paths, default=""),
+    )
+    submit_mode = _plan_policy.resolve_submit_mode(
+        plan_value=getattr(plan, "submit_mode", None),
+        spec_value=eval_spec.get("submit_mode"),
+        inferred_value=infer_submit_mode_from_paths(config.paths, default=""),
+    )
     plan_target_medal = _normalize_target_medal(getattr(plan, "target_medal", None), default=None)
     spec_target_medal = _normalize_target_medal(eval_spec.get("target_medal"), default=None)
     default_target_medal = _DEFAULT_TARGET_MEDAL if deliverable_mode == "leaderboard" else None
