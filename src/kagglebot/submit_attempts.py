@@ -95,3 +95,31 @@ def build_submit_knowledge_payload(
         error_message=f"submit_error kind={error_kind} reason={reason} fingerprint={fingerprint}",
         fix_summary=f"submit_action={action_taken}; detail={normalized_detail}",
     )
+
+
+def build_submit_result_payload(
+    *,
+    message: str,
+    submission_ref: str,
+    submitted_at_iso: str,
+    iteration: int | None,
+    outcome: object | None = None,
+    skipped: bool = False,
+    reason: str | None = None,
+    duplicate_sources: list[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "message": message,
+        "submission_path": submission_ref,
+        "submitted_at": submitted_at_iso,
+        "iteration": iteration,
+    }
+    if skipped:
+        payload["skipped"] = True
+    if reason:
+        payload["reason"] = reason
+    if duplicate_sources is not None:
+        payload["duplicate_sources"] = list(duplicate_sources)
+    if not skipped:
+        payload["outcome"] = outcome
+    return payload

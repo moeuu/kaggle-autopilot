@@ -82,8 +82,8 @@ Submit code fingerprinting, same-error-fingerprint retry allowance, duplicate-su
 same-submission-path retry/skip decisions live in `src/kagglebot/submit_retry_policy.py`; the loop supplies paths,
 hashing, and state persistence callbacks.
 Submit attempt payload and submit run-state update creation live in `src/kagglebot/submit_attempts.py`, keeping the JSONL
-record shape, state update fields, and submit knowledge-record message/fix summaries centralized while the loop remains
-responsible for persistence.
+record shape, state update fields, submit knowledge-record message/fix summaries, and submit result payloads centralized
+while the loop remains responsible for persistence.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 
@@ -160,8 +160,8 @@ Recommended extraction order:
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.
 4. Submit state persistence: submit attempt, submit run-state, submit failure-context, and submit knowledge-record payload
-   creation are now centralized; duplicate-submit skip decisions are extracted. Next, move submit success result payload
-   construction behind a small adapter.
+   creation are now centralized; duplicate-submit skip decisions and submit result payload construction are extracted.
+   Next, move submit success outcome/ledger recording decisions behind a small adapter.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

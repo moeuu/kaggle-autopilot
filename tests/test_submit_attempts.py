@@ -3,6 +3,7 @@ from __future__ import annotations
 from kagglebot.submit_attempts import (
     build_submit_attempt_payload,
     build_submit_knowledge_payload,
+    build_submit_result_payload,
     build_submit_run_state_update,
 )
 
@@ -134,3 +135,43 @@ def test_build_submit_knowledge_payload_preserves_explicit_iteration() -> None:
     )
 
     assert payload.iteration == 3
+
+
+def test_build_submit_result_payload_for_success_includes_outcome() -> None:
+    payload = build_submit_result_payload(
+        message="submit message",
+        submission_ref="submission.csv",
+        submitted_at_iso="2026-06-25T00:00:00+00:00",
+        iteration=2,
+        outcome={"status": "complete", "score": 0.42},
+    )
+
+    assert payload == {
+        "message": "submit message",
+        "submission_path": "submission.csv",
+        "submitted_at": "2026-06-25T00:00:00+00:00",
+        "iteration": 2,
+        "outcome": {"status": "complete", "score": 0.42},
+    }
+
+
+def test_build_submit_result_payload_for_duplicate_skip_omits_outcome() -> None:
+    payload = build_submit_result_payload(
+        message="submit message",
+        submission_ref="submission.csv",
+        submitted_at_iso="2026-06-25T00:00:00+00:00",
+        iteration=2,
+        skipped=True,
+        reason="duplicate_submission_sha_seen",
+        duplicate_sources=["run_attempts"],
+    )
+
+    assert payload == {
+        "message": "submit message",
+        "submission_path": "submission.csv",
+        "submitted_at": "2026-06-25T00:00:00+00:00",
+        "iteration": 2,
+        "skipped": True,
+        "reason": "duplicate_submission_sha_seen",
+        "duplicate_sources": ["run_attempts"],
+    }

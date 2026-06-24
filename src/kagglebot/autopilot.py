@@ -9329,15 +9329,15 @@ def _attempt_submit(
             resolution=reason,
             submission_ref=str(prepared_submission_path),
         )
-        return {
-            "message": message,
-            "submission_path": str(prepared_submission_path),
-            "submitted_at": submitted_at.isoformat(),
-            "iteration": _infer_iteration_from_submission_path(submission_path),
-            "skipped": True,
-            "reason": reason,
-            "duplicate_sources": duplicate_sources,
-        }
+        return _build_submit_result_payload(
+            message=message,
+            submission_ref=str(prepared_submission_path),
+            submitted_at_iso=submitted_at.isoformat(),
+            iteration=_infer_iteration_from_submission_path(submission_path),
+            skipped=True,
+            reason=reason,
+            duplicate_sources=duplicate_sources,
+        )
 
     try:
         rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)
@@ -9761,13 +9761,13 @@ def _attempt_submit(
             outcome=dict(outcome),
         )
     _mark_submit_failure_context_resolved(run_dir=run_dir, resolution="submitted", submission_ref=submission_ref)
-    return {
-        "message": message,
-        "submission_path": submission_ref,
-        "submitted_at": submitted_at.isoformat(),
-        "iteration": _infer_iteration_from_submission_path(submission_path),
-        "outcome": outcome,
-    }
+    return _build_submit_result_payload(
+        message=message,
+        submission_ref=submission_ref,
+        submitted_at_iso=submitted_at.isoformat(),
+        iteration=_infer_iteration_from_submission_path(submission_path),
+        outcome=outcome,
+    )
 
 
 def _submit_with_notebook_kernel(
@@ -10230,6 +10230,29 @@ def _build_submit_knowledge_payload(
         fingerprint=fingerprint,
         details=details,
         normalize_detail=normalize_error_text,
+    )
+
+
+def _build_submit_result_payload(
+    *,
+    message: str,
+    submission_ref: str,
+    submitted_at_iso: str,
+    iteration: int | None,
+    outcome: object | None = None,
+    skipped: bool = False,
+    reason: str | None = None,
+    duplicate_sources: list[str] | None = None,
+) -> dict[str, object]:
+    return _submit_attempts.build_submit_result_payload(
+        message=message,
+        submission_ref=submission_ref,
+        submitted_at_iso=submitted_at_iso,
+        iteration=iteration,
+        outcome=outcome,
+        skipped=skipped,
+        reason=reason,
+        duplicate_sources=duplicate_sources,
     )
 
 
