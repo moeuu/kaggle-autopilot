@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kagglebot.submit_stage import (
+    build_submit_stage_success_record,
     classify_submit_stage_error,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
@@ -14,6 +15,23 @@ from kagglebot.submit_stage import (
 class FileSubmitResult:
     def __init__(self, submission_path: Path) -> None:
         self.submission_path = submission_path
+
+
+class SubmitResultStub:
+    def __init__(
+        self,
+        *,
+        stdout: object = "",
+        stderr: object = "",
+        exit_code: int | None = None,
+        returncode: int | None = None,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        if exit_code is not None:
+            self.exit_code = exit_code
+        if returncode is not None:
+            self.returncode = returncode
 
 
 def test_decide_initial_submit_stage_mode_keeps_file_submit() -> None:
@@ -90,6 +108,30 @@ def test_run_submit_stage_attempt_uses_notebook_submit_tuple(tmp_path: Path) -> 
     assert result.submission_result == "notebook-result"
     assert result.submission_reference == "kernel:user/demo"
     assert result.submission_artifact_path == notebook_artifact
+
+
+def test_build_submit_stage_success_record_prefers_exit_code() -> None:
+    record = build_submit_stage_success_record(
+        submission_result=SubmitResultStub(stdout="ok", stderr="warn", exit_code=7, returncode=0),
+        compute_error_fingerprint=lambda stdout, stderr: f"{stdout}:{stderr}",
+    )
+
+    assert record.exit_code == 7
+    assert record.fingerprint == "ok:warn"
+    assert record.stdout == "ok"
+    assert record.stderr == "warn"
+
+
+def test_build_submit_stage_success_record_uses_returncode_fallback() -> None:
+    record = build_submit_stage_success_record(
+        submission_result=SubmitResultStub(stdout=None, stderr=None, returncode=0),
+        compute_error_fingerprint=lambda stdout, stderr: f"{stdout}:{stderr}",
+    )
+
+    assert record.exit_code == 0
+    assert record.fingerprint == ":"
+    assert record.stdout == ""
+    assert record.stderr == ""
 
 
 def test_classify_submit_stage_error_uses_output_fallback() -> None:

@@ -48,6 +48,14 @@ class SubmitStageAttemptResult:
     submission_artifact_path: Path | None
 
 
+@dataclass(frozen=True)
+class SubmitStageSuccessRecord:
+    exit_code: int | None
+    fingerprint: str
+    stdout: str
+    stderr: str
+
+
 def decide_initial_submit_stage_mode(
     *,
     requested_notebook_submit: bool,
@@ -74,6 +82,21 @@ def decide_initial_submit_stage_mode(
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
+    )
+
+
+def build_submit_stage_success_record(
+    *,
+    submission_result: object,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitStageSuccessRecord:
+    stdout = str(getattr(submission_result, "stdout", "") or "")
+    stderr = str(getattr(submission_result, "stderr", "") or "")
+    return SubmitStageSuccessRecord(
+        exit_code=getattr(submission_result, "exit_code", getattr(submission_result, "returncode", None)),
+        fingerprint=compute_error_fingerprint(stdout, stderr),
+        stdout=stdout,
+        stderr=stderr,
     )
 
 

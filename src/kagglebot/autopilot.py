@@ -9655,29 +9655,31 @@ def _attempt_submit(
         raise SubmitAbortedError("Submit failed before producing a submission result.")
     submission_ref = submission_reference
     submission_for_submit_path = submission_artifact_path
-    submit_exit_code = getattr(submission_result, "exit_code", getattr(submission_result, "returncode", None))
-    fingerprint = compute_error_fingerprint(submission_result.stdout, submission_result.stderr)
+    submit_success_record = _submit_stage.build_submit_stage_success_record(
+        submission_result=submission_result,
+        compute_error_fingerprint=compute_error_fingerprint,
+    )
     _append_submit_attempt(
         run_dir=run_dir,
         payload=_build_submit_attempt_payload(
             run_id=run_id,
             submission_ref=submission_ref,
             submission_sha256=_sha256_or_none(submission_for_submit_path),
-            exit_code=submit_exit_code,
+            exit_code=submit_success_record.exit_code,
             ok=True,
-            fingerprint=fingerprint,
+            fingerprint=submit_success_record.fingerprint,
             error_kind="none",
             action_taken="submit",
             reason="submitted",
-            stdout=submission_result.stdout,
-            stderr=submission_result.stderr,
+            stdout=submit_success_record.stdout,
+            stderr=submit_success_record.stderr,
         ),
     )
     _save_run_state(
         run_dir,
         _build_submit_run_state_update(
             prior_state=_load_run_state(run_dir),
-            fingerprint=fingerprint,
+            fingerprint=submit_success_record.fingerprint,
             code_fingerprint=submit_code_fingerprint,
             error_kind="none",
             action_taken="submit",
