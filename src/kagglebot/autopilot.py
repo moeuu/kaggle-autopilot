@@ -9349,7 +9349,7 @@ def _attempt_submit(
             resolution=reason,
             submission_ref=str(prepared_submission_path),
         )
-        return _build_submit_result_payload(
+        return _submit_attempts.build_submit_result_payload(
             message=message,
             submission_ref=str(prepared_submission_path),
             submitted_at_iso=submitted_at.isoformat(),
@@ -9755,7 +9755,7 @@ def _attempt_submit(
                 exit_code=None,
             )
 
-    outcome_recording = _decide_submit_outcome_recording(
+    outcome_recording = _submit_attempts.decide_submit_outcome_recording(
         outcome=outcome,
         submission_artifact_exists=bool(submission_for_submit_path is not None and submission_for_submit_path.exists()),
     )
@@ -9769,7 +9769,7 @@ def _attempt_submit(
             outcome=outcome_recording.ledger_outcome,
         )
     _mark_submit_failure_context_resolved(run_dir=run_dir, resolution="submitted", submission_ref=submission_ref)
-    return _build_submit_result_payload(
+    return _submit_attempts.build_submit_result_payload(
         message=message,
         submission_ref=submission_ref,
         submitted_at_iso=submitted_at.isoformat(),
@@ -10117,60 +10117,6 @@ def _append_submit_attempt(*, run_dir: Path, payload: dict[str, object]) -> None
     attempts_path.parent.mkdir(parents=True, exist_ok=True)
     with attempts_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-
-
-def _build_submit_knowledge_payload(
-    *,
-    iteration: int | None,
-    error_kind: str,
-    reason: str,
-    action_taken: str,
-    fingerprint: str,
-    details: str,
-) -> _submit_attempts.SubmitKnowledgePayload:
-    return _submit_attempts.build_submit_knowledge_payload(
-        iteration=iteration,
-        error_kind=error_kind,
-        reason=reason,
-        action_taken=action_taken,
-        fingerprint=fingerprint,
-        details=details,
-        normalize_detail=normalize_error_text,
-    )
-
-
-def _build_submit_result_payload(
-    *,
-    message: str,
-    submission_ref: str,
-    submitted_at_iso: str,
-    iteration: int | None,
-    outcome: object | None = None,
-    skipped: bool = False,
-    reason: str | None = None,
-    duplicate_sources: list[str] | None = None,
-) -> dict[str, object]:
-    return _submit_attempts.build_submit_result_payload(
-        message=message,
-        submission_ref=submission_ref,
-        submitted_at_iso=submitted_at_iso,
-        iteration=iteration,
-        outcome=outcome,
-        skipped=skipped,
-        reason=reason,
-        duplicate_sources=duplicate_sources,
-    )
-
-
-def _decide_submit_outcome_recording(
-    *,
-    outcome: object,
-    submission_artifact_exists: bool,
-) -> _submit_attempts.SubmitOutcomeRecordingDecision:
-    return _submit_attempts.decide_submit_outcome_recording(
-        outcome=outcome,
-        submission_artifact_exists=submission_artifact_exists,
-    )
 
 
 def _submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
@@ -10528,13 +10474,14 @@ def _record_submit_reason_knowledge(
     fingerprint: str,
     details: str,
 ) -> None:
-    payload = _build_submit_knowledge_payload(
+    payload = _submit_attempts.build_submit_knowledge_payload(
         iteration=_infer_iteration_from_submission_path(submission_path),
         error_kind=error_kind,
         reason=reason,
         action_taken=action_taken,
         fingerprint=fingerprint,
         details=details,
+        normalize_detail=normalize_error_text,
     )
     try:
         record_error_fix_insight(
