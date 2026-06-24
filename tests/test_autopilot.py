@@ -50,7 +50,6 @@ from kagglebot.autopilot import (
     _quality_reasons_allow_spare_submit,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
-    _resolve_submission_rank_payload,
     _resume_iteration_state,
     _resume_iteration_state_compat,
     _run_autofix,
@@ -59,7 +58,6 @@ from kagglebot.autopilot import (
     _should_defer_submit_abort_to_next_iteration,
     _should_force_initial_submit,
     _should_skip_planning,
-    _submission_message,
     _submit_with_notebook_kernel,
     _write_iteration_state_marker,
     run_autopilot,
@@ -80,6 +78,7 @@ from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.submission.guard import compute_error_fingerprint
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
+from kagglebot.submit_stage import resolve_submission_message, resolve_submission_rank_payload
 from kagglebot.types import PlanConfig
 
 pytestmark = pytest.mark.slow
@@ -199,11 +198,14 @@ def test_should_skip_planning_requires_kernel_py(tmp_path: Path) -> None:
 
 def test_submission_message_default_is_compact(tmp_path: Path) -> None:
     config = _make_config(tmp_path, slug="deep-past-initiative-machine-translation", message=None)
-    message = _submission_message(
-        config,
-        "20260223T161151Z-596afe59",
-        17.273744466930147,
+    message = resolve_submission_message(
+        context_dir=config.paths.context_dir,
+        run_id="20260223T161151Z-596afe59",
+        best_score=17.273744466930147,
+        explicit_message=config.message,
         submission_path=Path("iter-1/submission.csv"),
+        campaign_mode=config.campaign_mode,
+        target_direction=config.target_direction,
     )
     assert message.startswith("kb 20260223T161151Z-596afe59 i=1 offline=17.2737")
     assert "deep-past-initiative-machine-translation" not in message
@@ -3508,7 +3510,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     monkeypatch.setattr("kagglebot.autopilot._submission_count_for_daily_limit", lambda **kwargs: 1)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._resolve_submission_rank_payload", lambda **kwargs: {})
+    monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
 
     config = _make_config(
         tmp_path, paths=paths, submit=True, max_iterations=3, force_submit=False, submit_policy="improved"
@@ -3575,7 +3577,7 @@ def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatc
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: outcomes.pop(0))
-    monkeypatch.setattr("kagglebot.autopilot._resolve_submission_rank_payload", lambda **kwargs: {})
+    monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
 
     config = _make_config(tmp_path, submit=True, max_iterations=3, force_submit=False)
@@ -7575,22 +7577,19 @@ def test_resume_iteration_state_compat_retries_without_load_kernel_metrics(monke
     assert callable(captured["infer_iteration_from_submission_path"])
 
 
-def test_resolve_submission_rank_payload_keeps_estimate_separate(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "kagglebot.autopilot.leaderboard_rank_for_score",
-        lambda **kwargs: {
-            "rank": 19,
-            "total_teams": 151,
-            "rank_percentile": 19 / 151,
-            "source": "kaggle competitions leaderboard --download",
-        },
-    )
-    payload = _resolve_submission_rank_payload(
+def test_resolve_submission_rank_payload_keeps_estimate_separate(tmp_path: Path) -> None:
+    payload = resolve_submission_rank_payload(
         slug="demo",
         context_dir=tmp_path,
         direction="maximize",
         outcome={"status": "complete", "score": 0.307},
         dry_run=False,
+        leaderboard_rank_for_score=lambda **kwargs: {
+            "rank": 19,
+            "total_teams": 151,
+            "rank_percentile": 19 / 151,
+            "source": "kaggle competitions leaderboard --download",
+        },
     )
     assert "rank" not in payload
     assert "total_teams" not in payload
@@ -7977,7 +7976,7 @@ def test_autopilot_forces_major_overhaul_on_online_mismatch(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._should_attempt_submit_for_readiness", lambda **kwargs: True)
-    monkeypatch.setattr("kagglebot.autopilot._resolve_submission_rank_payload", lambda **kwargs: {})
+    monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.93})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(

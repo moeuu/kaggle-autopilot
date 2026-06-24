@@ -2415,12 +2415,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                         float(top1_score),
                                         metric_direction,
                                     )
-                            rank_payload = _resolve_submission_rank_payload(
+                            rank_payload = _submit_stage.resolve_submission_rank_payload(
                                 slug=config.slug,
                                 context_dir=config.paths.context_dir,
                                 direction=metric_direction,
                                 outcome=outcome_payload,
                                 dry_run=config.dry_run,
+                                leaderboard_rank_for_score=leaderboard_rank_for_score,
                             )
                             if rank_payload:
                                 outcome_payload.update(rank_payload)
@@ -9193,7 +9194,15 @@ def _attempt_submit(
     if autofix_input_decision.message:
         print(autofix_input_decision.message)
 
-    message = _submission_message(config, run_id, best_score, submission_path=input_submission_path)
+    message = _submit_stage.resolve_submission_message(
+        context_dir=config.paths.context_dir,
+        run_id=run_id,
+        best_score=best_score,
+        explicit_message=config.message,
+        submission_path=input_submission_path,
+        campaign_mode=config.campaign_mode,
+        target_direction=config.target_direction,
+    )
     submission_service = SubmissionService(
         SubmissionConfig(
             slug=config.slug,
@@ -10602,24 +10611,6 @@ def _normalize_submission_outcome_status(value: object) -> str:
     return _submit_stage.normalize_submission_outcome_status(value)
 
 
-def _resolve_submission_rank_payload(
-    *,
-    slug: str,
-    context_dir: Path,
-    direction: str,
-    outcome: dict[str, object],
-    dry_run: bool,
-) -> dict[str, object]:
-    return _submit_stage.resolve_submission_rank_payload(
-        slug=slug,
-        context_dir=context_dir,
-        direction=direction,
-        outcome=outcome,
-        dry_run=dry_run,
-        leaderboard_rank_for_score=leaderboard_rank_for_score,
-    )
-
-
 def _build_rank_force_reason(
     *,
     rank: int,
@@ -10756,24 +10747,6 @@ def _classify_submission_outcome(
         direction=direction,
         target_score=target_score,
         top1_score=top1_score,
-    )
-
-
-def _submission_message(
-    config: AutopilotConfig,
-    run_id: str,
-    best_score: float | None,
-    *,
-    submission_path: Path | None = None,
-) -> str:
-    return _submit_stage.resolve_submission_message(
-        context_dir=config.paths.context_dir,
-        run_id=run_id,
-        best_score=best_score,
-        explicit_message=config.message,
-        submission_path=submission_path,
-        campaign_mode=config.campaign_mode,
-        target_direction=config.target_direction,
     )
 
 
