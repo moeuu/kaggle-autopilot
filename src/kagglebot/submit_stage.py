@@ -30,6 +30,16 @@ class SubmitStageErrorClassification:
     retry_after_seconds: float
 
 
+@dataclass(frozen=True)
+class SubmitStageErrorActionDecision:
+    action: str
+    error_kind: str
+    reason: str
+    wait_seconds: float = 0.0
+    abort_message: str = ""
+    messages: tuple[str, ...] = ()
+
+
 def decide_initial_submit_stage_mode(
     *,
     requested_notebook_submit: bool,
@@ -55,6 +65,64 @@ def decide_initial_submit_stage_mode(
         notebook_submit_required=notebook_submit_required,
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
+        messages=tuple(messages),
+    )
+
+
+def decide_submit_stage_error_action(
+    *,
+    fingerprint_seen: bool,
+    same_fingerprint_retry_allowed: bool,
+    classification_kind: str,
+    classification_reason: str,
+    attempt: int,
+    max_attempts: int,
+    retry_after_seconds: float,
+    backoff_seconds: float,
+) -> SubmitStageErrorActionDecision:
+    if fingerprint_seen and not same_fingerprint_retry_allowed:
+        return SubmitStageErrorActionDecision(
+            action="abort",
+            error_kind=classification_kind,
+            reason="same_error_fingerprint_recurred",
+            abort_message="Same submit error fingerprint recurred; aborting this run to prevent infinite loop.",
+        )
+
+    messages: list[str] = []
+    if fingerprint_seen and same_fingerprint_retry_allowed:
+        messages.append(
+            "[yellow]submit retry[/yellow]: same fingerprint matched previous failures, "
+            "but code changed since last submit error; allowing one retry."
+        )
+
+    if classification_kind == "transient" and attempt < max_attempts:
+        wait_seconds = max(backoff_seconds, retry_after_seconds)
+        messages.append(
+            "[yellow]submit retry[/yellow]: transient submit error "
+            f"(reason={classification_reason}, attempt={attempt}/{max_attempts}, wait={wait_seconds:.1f}s)"
+        )
+        return SubmitStageErrorActionDecision(
+            action="retry",
+            error_kind="transient",
+            reason=classification_reason,
+            wait_seconds=wait_seconds,
+            messages=tuple(messages),
+        )
+
+    abort_message = (
+        "Submit failed and is not retryable in this run."
+        if classification_kind != "transient"
+        else "Transient submit error exceeded retry budget; aborting this run."
+    )
+    messages.append(
+        "[red]submit aborted[/red]: "
+        f"{classification_kind} submit error (reason={classification_reason}); no further retries in this run."
+    )
+    return SubmitStageErrorActionDecision(
+        action="abort",
+        error_kind=classification_kind,
+        reason=classification_reason,
+        abort_message=abort_message,
         messages=tuple(messages),
     )
 

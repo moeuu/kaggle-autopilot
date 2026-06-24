@@ -4,6 +4,7 @@ from kagglebot.submit_stage import (
     classify_submit_stage_error,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
+    decide_submit_stage_error_action,
 )
 
 
@@ -93,6 +94,63 @@ def test_classify_submit_stage_error_defaults_unknown_kind_and_reason() -> None:
     assert classification.kind == "unknown"
     assert classification.reason == "unclassified_submit_error"
     assert classification.retry_after_seconds == 0.0
+
+
+def test_decide_submit_stage_error_action_aborts_repeated_fingerprint() -> None:
+    decision = decide_submit_stage_error_action(
+        fingerprint_seen=True,
+        same_fingerprint_retry_allowed=False,
+        classification_kind="transient",
+        classification_reason="network_or_timeout",
+        attempt=1,
+        max_attempts=3,
+        retry_after_seconds=0.0,
+        backoff_seconds=2.0,
+    )
+
+    assert decision.action == "abort"
+    assert decision.error_kind == "transient"
+    assert decision.reason == "same_error_fingerprint_recurred"
+    assert "Same submit error fingerprint recurred" in decision.abort_message
+    assert decision.messages == ()
+
+
+def test_decide_submit_stage_error_action_retries_transient_with_allowance_message() -> None:
+    decision = decide_submit_stage_error_action(
+        fingerprint_seen=True,
+        same_fingerprint_retry_allowed=True,
+        classification_kind="transient",
+        classification_reason="network_or_timeout",
+        attempt=1,
+        max_attempts=3,
+        retry_after_seconds=5.0,
+        backoff_seconds=2.0,
+    )
+
+    assert decision.action == "retry"
+    assert decision.error_kind == "transient"
+    assert decision.reason == "network_or_timeout"
+    assert decision.wait_seconds == 5.0
+    assert "same fingerprint matched previous failures" in decision.messages[0]
+    assert "transient submit error" in decision.messages[1]
+
+
+def test_decide_submit_stage_error_action_aborts_after_retry_budget() -> None:
+    decision = decide_submit_stage_error_action(
+        fingerprint_seen=False,
+        same_fingerprint_retry_allowed=False,
+        classification_kind="transient",
+        classification_reason="network_or_timeout",
+        attempt=3,
+        max_attempts=3,
+        retry_after_seconds=0.0,
+        backoff_seconds=8.0,
+    )
+
+    assert decision.action == "abort"
+    assert decision.reason == "network_or_timeout"
+    assert decision.abort_message == "Transient submit error exceeded retry budget; aborting this run."
+    assert "no further retries" in decision.messages[0]
 
 
 def test_decide_notebook_fallback_after_file_submit_error_retries_as_notebook() -> None:

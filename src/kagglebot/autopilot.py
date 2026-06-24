@@ -9542,41 +9542,46 @@ def _attempt_submit(
                     print(artifact_mode_decision.message)
                 continue
             fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
-            if fingerprint in seen_fingerprints:
-                if _consume_same_submit_fingerprint_retry_allowance(
+            fingerprint_seen = fingerprint in seen_fingerprints
+            same_fingerprint_retry_allowed = False
+            if fingerprint_seen:
+                same_fingerprint_retry_allowed = _consume_same_submit_fingerprint_retry_allowance(
                     run_dir=run_dir,
                     run_state=run_state,
                     fingerprint=fingerprint,
                     code_fingerprint=submit_code_fingerprint,
-                ):
-                    print(
-                        "[yellow]submit retry[/yellow]: same fingerprint matched previous failures, "
-                        "but code changed since last submit error; allowing one retry."
-                    )
-                else:
-                    return _abort_submit_for_run(
-                        config=config,
-                        run_id=run_id,
-                        problem_types=problem_types,
-                        submission_ref=submission_reference,
-                        submission_artifact_path=submission_artifact_path,
-                        artifact_mode=submission_artifact_mode,
-                        code_fingerprint=submit_code_fingerprint,
-                        fingerprint=fingerprint,
-                        error_kind=classification_kind,
-                        reason="same_error_fingerprint_recurred",
-                        message="Same submit error fingerprint recurred; aborting this run to prevent infinite loop.",
-                        stdout_tail=exc.stdout,
-                        stderr_tail=classification_stderr,
-                        exit_code=exc.exit_code,
-                    )
-            seen_fingerprints.add(fingerprint)
-            if classification_kind == "transient" and attempt < max_attempts:
-                wait_seconds = max(_compute_submit_backoff(attempt), submit_error_classification.retry_after_seconds)
-                print(
-                    "[yellow]submit retry[/yellow]: transient submit error "
-                    f"(reason={classification_reason}, attempt={attempt}/{max_attempts}, wait={wait_seconds:.1f}s)"
                 )
+            error_action = _submit_stage.decide_submit_stage_error_action(
+                fingerprint_seen=fingerprint_seen,
+                same_fingerprint_retry_allowed=same_fingerprint_retry_allowed,
+                classification_kind=classification_kind,
+                classification_reason=classification_reason,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                retry_after_seconds=submit_error_classification.retry_after_seconds,
+                backoff_seconds=_compute_submit_backoff(attempt),
+            )
+            for action_message in error_action.messages:
+                print(action_message)
+            if error_action.action == "abort":
+                return _abort_submit_for_run(
+                    config=config,
+                    run_id=run_id,
+                    problem_types=problem_types,
+                    submission_ref=submission_reference,
+                    submission_artifact_path=submission_artifact_path,
+                    artifact_mode=submission_artifact_mode,
+                    code_fingerprint=submit_code_fingerprint,
+                    fingerprint=fingerprint,
+                    error_kind=error_action.error_kind,
+                    reason=error_action.reason,
+                    message=error_action.abort_message,
+                    stdout_tail=exc.stdout,
+                    stderr_tail=classification_stderr,
+                    exit_code=exc.exit_code,
+                )
+            seen_fingerprints.add(fingerprint)
+            if error_action.action == "retry":
                 _append_submit_attempt(
                     run_dir=run_dir,
                     payload=_build_submit_attempt_payload(
@@ -9588,7 +9593,7 @@ def _attempt_submit(
                         fingerprint=fingerprint,
                         error_kind="transient",
                         action_taken="retry",
-                        reason=classification_reason,
+                        reason=error_action.reason,
                         stdout=exc.stdout,
                         stderr=classification_stderr,
                     ),
@@ -9599,37 +9604,13 @@ def _attempt_submit(
                     problem_types=problem_types,
                     submission_path=submission_artifact_path or prepared_submission_path,
                     error_kind="transient",
-                    reason=classification_reason,
+                    reason=error_action.reason,
                     action_taken="retry",
                     fingerprint=fingerprint,
-                    details=f"attempt={attempt}; wait={wait_seconds:.1f}s",
+                    details=f"attempt={attempt}; wait={error_action.wait_seconds:.1f}s",
                 )
-                time.sleep(wait_seconds)
+                time.sleep(error_action.wait_seconds)
                 continue
-            print(
-                "[red]submit aborted[/red]: "
-                f"{classification_kind} submit error (reason={classification_reason}); no further retries in this run."
-            )
-            return _abort_submit_for_run(
-                config=config,
-                run_id=run_id,
-                problem_types=problem_types,
-                submission_ref=submission_reference,
-                submission_artifact_path=submission_artifact_path,
-                artifact_mode=submission_artifact_mode,
-                code_fingerprint=submit_code_fingerprint,
-                fingerprint=fingerprint,
-                error_kind=classification_kind,
-                reason=classification_reason,
-                message=(
-                    "Submit failed and is not retryable in this run."
-                    if classification_kind != "transient"
-                    else "Transient submit error exceeded retry budget; aborting this run."
-                ),
-                stdout_tail=exc.stdout,
-                stderr_tail=classification_stderr,
-                exit_code=exc.exit_code,
-            )
         except (DuplicateSubmissionError, SubmissionRateLimitError) as exc:
             fingerprint = compute_error_fingerprint("", str(exc))
             return _abort_submit_for_run(
