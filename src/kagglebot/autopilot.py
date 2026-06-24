@@ -2287,7 +2287,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if submit_limited_holdback:
                 pre_submit_phase_state = "deferred_for_final_slot"
             pre_submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate)
-            _print_iteration_submit_status(
+            submit_status_message = _submit_stage.format_iteration_submit_status_message(
                 iteration=iteration,
                 max_iterations=max_iterations,
                 submit_enabled=submit_enabled,
@@ -2298,6 +2298,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 if isinstance(quality_guard.get("competition_faithfulness"), dict)
                 else None,
             )
+            if submit_status_message:
+                print(submit_status_message)
             pre_submit_metrics_payload = _build_metrics_payload(
                 run_id=run_id,
                 iteration=iteration,
@@ -2461,7 +2463,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                         min_teams=rank_force_major_min_teams,
                                     )
                                     if rank_forced_major_overhaul:
-                                        rank_force_reason = _build_rank_force_reason(
+                                        rank_force_reason = _submit_stage.format_rank_force_reason(
                                             rank=submission_rank,
                                             total_teams=submission_total_teams,
                                             rank_percentile=submission_rank_percentile,
@@ -2488,9 +2490,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                             estimated=True,
                                         )
                                     )
-                        submitted_tracking_score, submitted_tracking_source = _submission_score_for_tracking(
-                            offline_score=decision_score,
-                            online_score=online_score,
+                        submitted_tracking_score, submitted_tracking_source = (
+                            _submit_stage.submission_score_for_tracking(
+                                offline_score=decision_score,
+                                online_score=online_score,
+                            )
                         )
                         if _update_best_score(best_submitted_score, submitted_tracking_score, metric_direction, 0.0):
                             best_submitted_score = submitted_tracking_score
@@ -3268,7 +3272,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
                 allow_fallback_submit = True
         if allow_fallback_submit:
-            fallback_iteration = _infer_iteration_from_submission_path(best_submittable_submission)
+            fallback_iteration = _submit_stage.infer_iteration_from_submission_path(best_submittable_submission)
             score_text = (
                 f" score={best_submittable_score:.6f}" if isinstance(best_submittable_score, (int, float)) else ""
             )
@@ -3304,9 +3308,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     if isinstance(outcome_payload, dict):
                         fallback_online_score = _to_float(outcome_payload.get("score"))
                     if best_submittable_score is not None:
-                        submitted_tracking_score, _submitted_tracking_source = _submission_score_for_tracking(
-                            offline_score=best_submittable_score,
-                            online_score=fallback_online_score,
+                        submitted_tracking_score, _submitted_tracking_source = (
+                            _submit_stage.submission_score_for_tracking(
+                                offline_score=best_submittable_score,
+                                online_score=fallback_online_score,
+                            )
                         )
                         if _update_best_score(
                             best_submitted_score,
@@ -9076,7 +9082,7 @@ def _resume_iteration_state(
         max_iterations=max_iterations,
         require_submit_phase=require_submit_phase,
         load_kernel_metrics=_load_kernel_metrics,
-        infer_iteration_from_submission_path=_infer_iteration_from_submission_path,
+        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
     )
 
 
@@ -9283,7 +9289,7 @@ def _attempt_submit(
             message=message,
             submission_ref=str(prepared_submission_path),
             submitted_at_iso=submitted_at.isoformat(),
-            iteration=_infer_iteration_from_submission_path(submission_path),
+            iteration=_submit_stage.infer_iteration_from_submission_path(submission_path),
             skipped=True,
             reason=reason,
             duplicate_sources=duplicate_sources,
@@ -9615,7 +9621,7 @@ def _attempt_submit(
         )
 
     if isinstance(outcome, dict):
-        outcome_status = _normalize_submission_outcome_status(outcome.get("status"))
+        outcome_status = _submit_stage.normalize_submission_outcome_status(outcome.get("status"))
         outcome["status"] = outcome_status
         raw_detail = ""
         if outcome_status in _submit_stage.FAILED_SUBMISSION_OUTCOME_STATUSES or (
@@ -9672,7 +9678,7 @@ def _attempt_submit(
         message=message,
         submission_ref=submission_ref,
         submitted_at_iso=submitted_at.isoformat(),
-        iteration=_infer_iteration_from_submission_path(submission_path),
+        iteration=_submit_stage.infer_iteration_from_submission_path(submission_path),
         outcome=outcome,
     )
 
@@ -9686,7 +9692,7 @@ def _submit_with_notebook_kernel(
     artifact_mode: str = "wrapper",
 ):
     """Execute a Kaggle notebook kernel and submit via kernel reference."""
-    iteration = _infer_iteration_from_submission_path(submission_path) or 1
+    iteration = _submit_stage.infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = config.paths.iter_dir(run_id, iteration)
     kaggle_user = resolve_kaggle_username(config.kaggle_username)
     submit_kernel_kwargs = _submit_notebook.build_submit_kernel_run_kwargs(
@@ -10295,7 +10301,7 @@ def _record_submit_reason_knowledge(
     details: str,
 ) -> None:
     payload = _submit_attempts.build_submit_knowledge_payload(
-        iteration=_infer_iteration_from_submission_path(submission_path),
+        iteration=_submit_stage.infer_iteration_from_submission_path(submission_path),
         error_kind=error_kind,
         reason=reason,
         action_taken=action_taken,
@@ -10607,56 +10613,6 @@ def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[st
     )
 
 
-def _normalize_submission_outcome_status(value: object) -> str:
-    return _submit_stage.normalize_submission_outcome_status(value)
-
-
-def _build_rank_force_reason(
-    *,
-    rank: int,
-    total_teams: int,
-    rank_percentile: float | None,
-    max_percentile: float,
-    min_teams: int,
-    source: str | None,
-) -> str:
-    return _submit_stage.format_rank_force_reason(
-        rank=rank,
-        total_teams=total_teams,
-        rank_percentile=rank_percentile,
-        max_percentile=max_percentile,
-        min_teams=min_teams,
-        source=source,
-    )
-
-
-def _infer_iteration_from_submission_path(path: Path) -> int | None:
-    return _submit_stage.infer_iteration_from_submission_path(path)
-
-
-def _print_iteration_submit_status(
-    *,
-    iteration: int,
-    max_iterations: int,
-    submit_enabled: bool,
-    submit_allowed_by_gate: bool,
-    submit_phase_state: str,
-    quality_reasons: list[str],
-    competition_faithfulness: dict[str, object] | None = None,
-) -> None:
-    message = _submit_stage.format_iteration_submit_status_message(
-        iteration=iteration,
-        max_iterations=max_iterations,
-        submit_enabled=submit_enabled,
-        submit_allowed_by_gate=submit_allowed_by_gate,
-        submit_phase_state=submit_phase_state,
-        quality_reasons=quality_reasons,
-        competition_faithfulness=competition_faithfulness,
-    )
-    if message:
-        print(message)
-
-
 def _record_submission_knowledge(
     *,
     config: AutopilotConfig,
@@ -10677,7 +10633,7 @@ def _record_submission_knowledge(
     online_score = _to_float(outcome_payload.get("score"))
     if online_score is None:
         return
-    outcome_bucket = _classify_submission_outcome(
+    outcome_bucket = _submit_stage.classify_submission_outcome(
         score=online_score,
         direction=metric_direction,
         target_score=target_score,
@@ -10733,21 +10689,6 @@ def _record_submission_knowledge(
             outcome_bucket=outcome_bucket,
             submission_score=online_score,
         )
-
-
-def _classify_submission_outcome(
-    *,
-    score: float,
-    direction: str,
-    target_score: float | None,
-    top1_score: float | None,
-) -> str:
-    return _submit_stage.classify_submission_outcome(
-        score=score,
-        direction=direction,
-        target_score=target_score,
-        top1_score=top1_score,
-    )
 
 
 def _normalize_metric_name(name: str | None) -> str:
@@ -11010,11 +10951,6 @@ def _effective_best_score_for_progress(
             "margin": float(margin),
         }
     return prev_best, None
-
-
-def _submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
-    """Select the score used by submit-improvement gating."""
-    return _submit_stage.submission_score_for_tracking(offline_score=offline_score, online_score=online_score)
 
 
 def _extract_score_from_text(text: str) -> float | None:
