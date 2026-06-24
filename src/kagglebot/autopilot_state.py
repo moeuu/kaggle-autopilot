@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 import shutil
 from datetime import UTC, datetime
@@ -12,6 +11,7 @@ from rich import print
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
 from kagglebot.json_utils import load_json_object as _load_json_object
+from kagglebot.json_utils import write_json_object
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ def _write_iteration_state_marker(
         "completed_at": datetime.now(UTC).isoformat(),
     }
     path = iter_dir / _ITERATION_STATE_FILENAME
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_object(path, payload)
 
 
 def _load_iteration_state_marker(path: Path) -> dict[str, object]:
@@ -561,14 +561,11 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
     if not state_path.exists():
         attempted = _has_submit_attempt_records(run_dir)
         return {"submit_attempted": attempted, "submit_ok": False}
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _load_json_object(state_path) or {}
     if not payload.get("submit_attempted"):
         payload["submit_attempted"] = _has_submit_attempt_records(run_dir)
+    if "submit_ok" not in payload:
+        payload["submit_ok"] = False
     if "last_submit_fingerprint" not in payload and payload.get("last_fingerprint"):
         payload["last_submit_fingerprint"] = payload.get("last_fingerprint")
     if "last_fingerprint" not in payload and payload.get("last_submit_fingerprint"):
@@ -586,7 +583,7 @@ def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
     state["submit_ok"] = bool(state.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
     state["updated_at"] = datetime.now(UTC).isoformat()
     state_path = run_dir / "run_state.json"
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    write_json_object(state_path, state)
 
 
 def _has_submit_attempt_records(run_dir: Path) -> bool:
