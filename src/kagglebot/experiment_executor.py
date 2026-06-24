@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.experiment_graph import EXPERIMENT_GRAPH_FILENAME, normalize_portfolio_execution
+from kagglebot.json_utils import write_json_object
 from kagglebot.runners.base import CandidateRunResult, CandidateRunSpec, RunContext, Runner
 from kagglebot.scalar_utils import optional_str as _optional_str
 
@@ -113,11 +113,8 @@ def execute_experiment_graph(
     ]
     iter_dir.mkdir(parents=True, exist_ok=True)
     context.paths.context_dir.mkdir(parents=True, exist_ok=True)
-    graph_path.write_text(json.dumps(updated_graph, indent=2, ensure_ascii=True), encoding="utf-8")
-    context.paths.experiment_graph_path.write_text(
-        json.dumps(updated_graph, indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
+    write_json_object(graph_path, updated_graph)
+    write_json_object(context.paths.experiment_graph_path, updated_graph)
 
     status = "completed" if completed and not failed else "failed" if failed else "skipped"
     exec_result = GraphExecutionResult(
@@ -164,8 +161,7 @@ def _write_report(
             for item in run_results
         ],
     }
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(report_path, payload)
 
 
 def _typed_nodes(graph: dict[str, object]) -> list[dict[str, object]]:

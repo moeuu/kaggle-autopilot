@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import math
 from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, list_candidates
+from kagglebot.json_utils import write_json_object
 from kagglebot.scalar_utils import non_nan_float as _to_float
 
 VALIDATION_LAB_REPORT_FILENAME = "validation_lab_report.json"
@@ -191,17 +191,11 @@ def _report(
 
 
 def _write_report(context_dir: Path, payload: dict[str, object]) -> None:
-    context_dir.mkdir(parents=True, exist_ok=True)
-    validation_lab_report_path(context_dir).write_text(
-        json.dumps(payload, indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
+    write_json_object(validation_lab_report_path(context_dir), payload)
 
 
 def _write_registry_if_changed(context_dir: Path, registry: dict[str, object]) -> None:
-    path = context_dir / "validation_registry.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(registry, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(context_dir / "validation_registry.json", registry)
 
 
 def _active_profile(registry: dict[str, object]) -> str:

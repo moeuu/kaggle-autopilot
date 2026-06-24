@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +12,7 @@ from kagglebot.campaign import (
     recommend_blend_pairs,
     score_gap,
 )
+from kagglebot.json_utils import write_json_object
 from kagglebot.scalar_utils import finite_float as _to_float
 
 REFERENCE_REPRODUCTION_REPORT_FILENAME = "reference_reproduction_report.json"
@@ -91,8 +91,7 @@ def build_reference_reproduction_report(
         "required_actions": _reference_required_actions(status=status, gate_reason=gate_reason),
     }
     path = reference_reproduction_report_path(context_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(path, payload)
     return payload
 
 
@@ -159,8 +158,7 @@ def build_candidate_portfolio_plan(
         "next_action": _portfolio_next_action(planned, validation_registry or {}),
     }
     path = iter_dir / PORTFOLIO_PLAN_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(path, payload)
     return payload
 
 
@@ -198,8 +196,7 @@ def build_blend_report(
         "next_action": next_action,
     }
     path = iter_dir / BLEND_REPORT_FILENAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(path, payload)
     return payload
 
 

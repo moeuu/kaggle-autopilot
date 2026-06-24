@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.paths import CompetitionPaths
 from kagglebot.scalar_utils import non_nan_float as _to_float
 
@@ -191,19 +192,10 @@ def run_method_scout(
         "methods": [method.to_payload() for method in methods],
     }
     paths.context_dir.mkdir(parents=True, exist_ok=True)
-    method_scout_queries_path(paths.context_dir).write_text(
-        json.dumps({"version": 1, "slug": slug, "queries": queries}, indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
-    source_registry_path(paths.context_dir).write_text(
-        json.dumps(source_registry, indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
-    validation_registry_path(paths.context_dir).write_text(
-        json.dumps(validation_registry, indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
-    registry_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(method_scout_queries_path(paths.context_dir), {"version": 1, "slug": slug, "queries": queries})
+    write_json_object(source_registry_path(paths.context_dir), source_registry)
+    write_json_object(validation_registry_path(paths.context_dir), validation_registry)
+    write_json_object(registry_path, payload)
     return payload
 
 
@@ -667,14 +659,10 @@ def render_method_registry_for_prompt(registry: dict[str, object], *, max_method
 
 
 def _load_existing_registry(path: Path, *, slug: str, mode: str) -> dict[str, object]:
-    if path.exists():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        if isinstance(payload, dict):
-            payload["mode"] = mode
-            return payload
+    payload = load_json_object(path)
+    if payload is not None:
+        payload["mode"] = mode
+        return payload
     return {"version": 1, "slug": slug, "mode": mode, "methods": [], "active_method_ids": [], "blocked_method_ids": []}
 
 
