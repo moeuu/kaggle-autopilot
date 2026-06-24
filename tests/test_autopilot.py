@@ -22,7 +22,6 @@ from kagglebot.autopilot import (
     _build_kernel_quality_guard,
     _build_submit_autofix_context,
     _build_submit_failure_improvement_context,
-    _callable_accepts_keyword_argument,
     _decide_notebook_submit_artifact_mode_for_submission,
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
@@ -44,7 +43,6 @@ from kagglebot.autopilot import (
     _resolve_iteration_submission_artifact,
     _resolve_plan,
     _resume_iteration_state,
-    _resume_iteration_state_compat,
     _run_autofix,
     _run_kernel_fix,
     _should_defer_submit_abort_to_next_iteration,
@@ -251,7 +249,9 @@ def test_autopilot_does_not_force_iter1_submit_when_quality_gate_blocks(monkeypa
 
     submit_calls = {"count": 0}
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         submit_calls["count"] += 1
         return {
             "message": "demo",
@@ -326,7 +326,9 @@ def test_autopilot_forces_iter1_submit_through_soft_detected_baseline_guard(
 
     submit_calls = {"count": 0}
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         submit_calls["count"] += 1
         return {
             "message": "demo",
@@ -7213,7 +7215,9 @@ def test_autopilot_skips_fallback_submit_after_untrusted_final_iteration(
 
     submit_calls = {"count": 0}
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         submit_calls["count"] += 1
         return {
             "message": "demo",
@@ -7304,7 +7308,9 @@ def test_autopilot_skips_fallback_submit_when_higher_potential_candidate_exists(
 
     submit_calls = {"count": 0}
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         submit_calls["count"] += 1
         return {
             "message": "demo",
@@ -7389,7 +7395,9 @@ def test_autopilot_top1_stop_requires_submission_score(monkeypatch, tmp_path: Pa
             accelerator="cpu",
         )
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         calls["submit"] += 1
         score = submission_scores[min(calls["submit"] - 1, len(submission_scores) - 1)]
         rank = 10 if calls["submit"] == 1 else 1
@@ -7423,160 +7431,52 @@ def test_autopilot_top1_stop_requires_submission_score(monkeypatch, tmp_path: Pa
     assert (config.paths.iter_dir("run-1", 3) / "metrics.json").exists() is False
 
 
-def test_submission_phase_attempt_supports_legacy_submit_double(monkeypatch, tmp_path: Path) -> None:
+def test_submission_phase_attempt_passes_current_submit_contract(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
-        captured["run_id"] = run_id
-        captured["submission_path"] = submission_path
-        captured["best_score"] = best_score
-        captured["problem_types"] = problem_types
-        return {"status": "ok"}
-
-    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
-
-    config = _make_config(tmp_path)
-    phase = SubmissionPhase(config=config, run_id="run-1", problem_types=["regression"], submit_mode="notebook")
-    submission_path = config.paths.submissions_dir / "submission.csv"
-    submission_path.parent.mkdir(parents=True, exist_ok=True)
-    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
-
-    result = phase.attempt(submission_path=submission_path, best_score=0.4)
-
-    assert result == {"status": "ok"}
-    assert captured == {
-        "run_id": "run-1",
-        "submission_path": submission_path,
-        "best_score": 0.4,
-        "problem_types": ["regression"],
-    }
-
-
-def test_submission_phase_attempt_retries_legacy_submit_double_after_keyword_mismatch(
-    monkeypatch, tmp_path: Path
-) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
-        captured["run_id"] = run_id
-        captured["submission_path"] = submission_path
-        captured["best_score"] = best_score
-        captured["problem_types"] = problem_types
-        return {"status": "ok"}
-
-    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
-
-    config = _make_config(tmp_path)
-    phase = SubmissionPhase(config=config, run_id="run-1", problem_types=["regression"], submit_mode="notebook")
-    submission_path = config.paths.submissions_dir / "submission.csv"
-    submission_path.parent.mkdir(parents=True, exist_ok=True)
-    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
-
-    result = phase.attempt(submission_path=submission_path, best_score=0.4)
-
-    assert result == {"status": "ok"}
-    assert captured == {
-        "run_id": "run-1",
-        "submission_path": submission_path,
-        "best_score": 0.4,
-        "problem_types": ["regression"],
-    }
-
-
-def test_submission_phase_attempt_does_not_depend_on_signature_probe(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-
-    class LegacySubmitDouble:
-        @property
-        def __signature__(self) -> object:
-            raise AssertionError("signature probe should not run")
-
-        def __call__(self, *, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
-            captured["run_id"] = run_id
-            captured["submission_path"] = submission_path
-            captured["best_score"] = best_score
-            captured["problem_types"] = problem_types
-            return {"status": "ok"}
-
-    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", LegacySubmitDouble())
-
-    config = _make_config(tmp_path)
-    phase = SubmissionPhase(config=config, run_id="run-1", problem_types=["regression"], submit_mode="notebook")
-    submission_path = config.paths.submissions_dir / "submission.csv"
-    submission_path.parent.mkdir(parents=True, exist_ok=True)
-    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
-
-    result = phase.attempt(submission_path=submission_path, best_score=0.4)
-
-    assert result == {"status": "ok"}
-    assert captured == {
-        "run_id": "run-1",
-        "submission_path": submission_path,
-        "best_score": 0.4,
-        "problem_types": ["regression"],
-    }
-
-
-def test_callable_accepts_keyword_argument_uses_code_object_not_signature() -> None:
-    class LegacySubmitDouble:
-        @property
-        def __signature__(self) -> object:
-            raise AssertionError("signature probe should not run")
-
-        def __call__(self, *, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG002
-            return None
-
-    assert _callable_accepts_keyword_argument(LegacySubmitDouble(), "submit_mode") is False
-
-
-def test_resume_iteration_state_compat_retries_without_load_kernel_metrics(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-
-    def legacy_resume_iteration_state(
+    def fake_attempt_submit(
         *,
-        paths,
+        config,
         run_id,
-        metric_direction,
-        target_metric,
-        max_iterations,
-        require_submit_phase=False,
-        infer_iteration_from_submission_path,
-    ):
-        captured.update(
-            {
-                "paths": paths,
-                "run_id": run_id,
-                "metric_direction": metric_direction,
-                "target_metric": target_metric,
-                "max_iterations": max_iterations,
-                "require_submit_phase": require_submit_phase,
-                "infer_iteration_from_submission_path": infer_iteration_from_submission_path,
-            }
-        )
-        return 2, 0.42, tmp_path / "submission.csv"
+        submission_path,
+        best_score,
+        problem_types,
+        submit_mode,
+        notebook_submit_artifact_mode,
+    ):  # noqa: ARG001
+        captured["run_id"] = run_id
+        captured["submission_path"] = submission_path
+        captured["best_score"] = best_score
+        captured["problem_types"] = problem_types
+        captured["submit_mode"] = submit_mode
+        captured["notebook_submit_artifact_mode"] = notebook_submit_artifact_mode
+        return {"status": "ok"}
 
-    monkeypatch.setattr("kagglebot.autopilot._resume_iteration_state", legacy_resume_iteration_state)
+    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
 
-    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
-    result = _resume_iteration_state_compat(
-        paths=paths,
+    config = _make_config(tmp_path)
+    phase = SubmissionPhase(
+        config=config,
         run_id="run-1",
-        metric_direction="maximize",
-        target_metric="auc",
-        max_iterations=3,
-        require_submit_phase=True,
-        load_kernel_metrics=lambda *args, **kwargs: None,
-        infer_iteration_from_submission_path=lambda path: 1,
+        problem_types=["regression"],
+        submit_mode="notebook",
+        notebook_submit_artifact_mode="inference",
     )
+    submission_path = config.paths.submissions_dir / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
 
-    assert result == (2, 0.42, tmp_path / "submission.csv")
-    assert captured["paths"] == paths
-    assert captured["run_id"] == "run-1"
-    assert captured["metric_direction"] == "maximize"
-    assert captured["target_metric"] == "auc"
-    assert captured["max_iterations"] == 3
-    assert captured["require_submit_phase"] is True
-    assert callable(captured["infer_iteration_from_submission_path"])
+    result = phase.attempt(submission_path=submission_path, best_score=0.4)
+
+    assert result == {"status": "ok"}
+    assert captured == {
+        "run_id": "run-1",
+        "submission_path": submission_path,
+        "best_score": 0.4,
+        "problem_types": ["regression"],
+        "submit_mode": "notebook",
+        "notebook_submit_artifact_mode": "inference",
+    }
 
 
 def test_resolve_submission_rank_payload_keeps_estimate_separate(tmp_path: Path) -> None:
@@ -7629,7 +7529,9 @@ def test_autopilot_does_not_stop_on_estimated_rank_one(monkeypatch, tmp_path: Pa
             accelerator="cpu",
         )
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         return {
             "message": "demo",
             "submission_path": str(submission_path),
@@ -7693,7 +7595,9 @@ def test_autopilot_submit_mode_ignores_no_improve_stop_policy(monkeypatch, tmp_p
             accelerator="cpu",
         )
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         return {
             "message": "demo",
             "submission_path": str(submission_path),
@@ -8057,93 +7961,9 @@ def test_autopilot_forces_major_overhaul_when_submission_rank_is_poor(monkeypatc
             accelerator="cuda",
         )
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types, submit_mode):  # noqa: ARG001
-        return {
-            "message": "demo",
-            "submission_path": str(submission_path),
-            "submitted_at": "2026-02-16T00:00:00+00:00",
-            "iteration": 1,
-            "outcome": {
-                "status": "complete",
-                "score": 0.9532,
-                "rank": 1300,
-                "total_teams": 2700,
-                "rank_source": "submission_row",
-            },
-        }
-
-    def fake_improvement(**kwargs):
-        forced_modes.append(
-            (
-                int(kwargs["iteration"]),
-                kwargs.get("forced_improvement_mode"),
-                kwargs.get("forced_improvement_reason"),
-            )
-        )
-
-    monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train)
-    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
-    monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
-
-    config = _make_config(tmp_path, submit=True, max_iterations=2)
-    run_autopilot(config)
-
-    assert len(forced_modes) == 1
-    assert forced_modes[0][1] == "major_overhaul"
-    assert forced_modes[0][2] and "1300/2700" in forced_modes[0][2]
-
-
-def test_autopilot_forces_major_overhaul_when_submission_rank_is_poor_with_legacy_submit_double(
-    monkeypatch, tmp_path: Path
-) -> None:
-    forced_modes: list[tuple[int, str | None, str | None]] = []
-
-    _write_plan(
-        CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
-        target_metric="AUC-ROC",
-        target_score=0.965,
-        target_direction="maximize",
-        submission_gate="always",
-    )
-
-    def fake_train(*args, **kwargs):  # noqa: ARG001
-        output_path = kwargs["output_path"]
-        output_path.write_text("id,target\n1,0.9\n2,0.8\n", encoding="utf-8")
-        source = str(kwargs.get("score_source") or "holdout")
-        if source == "cv":
-            evaluation = EvaluationResult(
-                score_source="cv",
-                metric="AUC-ROC",
-                direction="maximize",
-                value=0.9550,
-                std=0.0010,
-                train_score=None,
-                val_score=0.9550,
-                fold_scores=[0.9540, 0.9548, 0.9550, 0.9552, 0.9560],
-            )
-        else:
-            evaluation = EvaluationResult(
-                score_source=source,
-                metric="AUC-ROC",
-                direction="maximize",
-                value=0.9551,
-                std=0.0,
-                train_score=None,
-                val_score=0.9551,
-                fold_scores=[0.9551],
-            )
-        return TrainingOutcome(
-            submission_path=output_path,
-            evaluation=evaluation,
-            model_name="catboost",
-            model_summary={},
-            accelerator="cuda",
-        )
-
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         return {
             "message": "demo",
             "submission_path": str(submission_path),
@@ -8436,7 +8256,9 @@ def test_autopilot_resume_submit_only_from_legacy_output_artifacts(monkeypatch, 
             accelerator="cpu",
         )
 
-    def fake_attempt_submit(*, config, run_id, submission_path, best_score, problem_types):  # noqa: ARG001
+    def fake_attempt_submit(
+        *, config, run_id, submission_path, best_score, problem_types, submit_mode, notebook_submit_artifact_mode
+    ):  # noqa: ARG001
         submit_calls["count"] += 1
         return {
             "message": "demo",

@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import builtins
 import csv
-import functools
 import hashlib
 import json
 import math
@@ -580,92 +579,15 @@ class SubmissionPhase:
     notebook_submit_artifact_mode: str = "wrapper"
 
     def attempt(self, *, submission_path: Path, best_score: float | None) -> dict[str, object] | None:
-        kwargs: dict[str, object] = {
-            "config": self.config,
-            "run_id": self.run_id,
-            "submission_path": submission_path,
-            "best_score": best_score,
-            "problem_types": self.problem_types,
-            "submit_mode": self.submit_mode,
-            "notebook_submit_artifact_mode": self.notebook_submit_artifact_mode,
-        }
-        if _callable_accepts_keyword_argument(_attempt_submit, "submit_mode") is False:
-            kwargs.pop("submit_mode", None)
-        if _callable_accepts_keyword_argument(_attempt_submit, "notebook_submit_artifact_mode") is False:
-            kwargs.pop("notebook_submit_artifact_mode", None)
-        try:
-            return _attempt_submit(
-                **kwargs,
-            )
-        except TypeError as exc:
-            for key in ("submit_mode", "notebook_submit_artifact_mode"):
-                if key in kwargs and _is_unexpected_keyword_type_error(exc, key):
-                    kwargs.pop(key, None)
-                    return _attempt_submit(
-                        **kwargs,
-                    )
-            return _attempt_submit(
-                **kwargs,
-            )
-
-
-def _resume_iteration_state_compat(**kwargs) -> tuple[int, float | None, Path | None]:
-    if _callable_accepts_keyword_argument(_resume_iteration_state, "load_kernel_metrics") is False:
-        kwargs.pop("load_kernel_metrics", None)
-    if _callable_accepts_keyword_argument(_resume_iteration_state, "infer_iteration_from_submission_path") is False:
-        kwargs.pop("infer_iteration_from_submission_path", None)
-    try:
-        return _resume_iteration_state(**kwargs)
-    except TypeError as exc:
-        if "load_kernel_metrics" in kwargs and _is_unexpected_keyword_type_error(exc, "load_kernel_metrics"):
-            kwargs.pop("load_kernel_metrics", None)
-            return _resume_iteration_state(**kwargs)
-        if "infer_iteration_from_submission_path" in kwargs and _is_unexpected_keyword_type_error(
-            exc, "infer_iteration_from_submission_path"
-        ):
-            kwargs.pop("infer_iteration_from_submission_path", None)
-            return _resume_iteration_state(**kwargs)
-        raise
-
-
-def _callable_accepts_keyword_argument(func: object, keyword: str) -> bool | None:
-    target = _unwrap_callable_code_target(func)
-    code = getattr(target, "__code__", None)
-    if code is None and hasattr(target, "__call__"):
-        target = _unwrap_callable_code_target(getattr(target, "__call__"))
-        code = getattr(target, "__code__", None)
-    if code is None:
-        return None
-    if code.co_flags & 0x08:
-        return True
-    total_args = getattr(code, "co_posonlyargcount", 0) + code.co_argcount + code.co_kwonlyargcount
-    return keyword in code.co_varnames[:total_args]
-
-
-def _unwrap_callable_code_target(func: object) -> object:
-    target = func
-    seen: set[int] = set()
-    while id(target) not in seen:
-        seen.add(id(target))
-        if isinstance(target, functools.partial):
-            target = target.func
-            continue
-        wrapped = getattr(target, "__wrapped__", None)
-        if wrapped is None:
-            break
-        target = wrapped
-    return target
-
-
-def _is_unexpected_keyword_type_error(exc: TypeError, keyword: str) -> bool:
-    message = str(exc).lower()
-    normalized_keyword = keyword.lower()
-    keyword_mismatch_markers = (
-        "unexpected keyword argument",
-        "unexpected keyword arguments",
-        "positional-only arguments passed as keyword arguments",
-    )
-    return normalized_keyword in message and any(marker in message for marker in keyword_mismatch_markers)
+        return _attempt_submit(
+            config=self.config,
+            run_id=self.run_id,
+            submission_path=submission_path,
+            best_score=best_score,
+            problem_types=self.problem_types,
+            submit_mode=self.submit_mode,
+            notebook_submit_artifact_mode=self.notebook_submit_artifact_mode,
+        )
 
 
 def _update_watch_phase(
@@ -915,7 +837,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         run_dir=config.paths.run_dir(run_id),
         max_iterations=max_iterations,
     )
-    start_iteration, best_score, best_submission = _resume_iteration_state_compat(
+    start_iteration, best_score, best_submission = _resume_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
