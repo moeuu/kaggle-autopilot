@@ -6,6 +6,7 @@ from pathlib import Path
 from kagglebot.submit_retry_policy import (
     compute_submit_code_fingerprint,
     consume_same_submit_fingerprint_retry_allowance,
+    decide_same_submission_path_action,
 )
 
 
@@ -138,3 +139,100 @@ def test_consume_same_submit_fingerprint_retry_allowance_allows_legacy_state_onc
 
     assert allowed is True
     assert saved
+
+
+def test_decide_same_submission_path_action_proceeds_when_path_differs(tmp_path: Path) -> None:
+    decision = decide_same_submission_path_action(
+        run_state={"last_submission_path": str(tmp_path / "old.csv")},
+        latest_submit_attempt={},
+        prepared_submission_path=tmp_path / "new.csv",
+        current_submission_sha="sha",
+        submit_code_fingerprint="code",
+        allow_force=False,
+        notebook_submit_required=False,
+    )
+
+    assert decision.action == "proceed"
+
+
+def test_decide_same_submission_path_action_retries_bad_request_for_notebook_fallback(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    decision = decide_same_submission_path_action(
+        run_state={
+            "last_submission_path": str(submission_path),
+            "last_reason": "bad_request",
+            "last_submit_fingerprint": "fp",
+        },
+        latest_submit_attempt={},
+        prepared_submission_path=submission_path,
+        current_submission_sha="sha",
+        submit_code_fingerprint="code",
+        allow_force=False,
+        notebook_submit_required=False,
+    )
+
+    assert decision.action == "retry"
+    assert decision.reason == "previous_submit_failure_allows_notebook_fallback"
+    assert "bad_request" in decision.message
+
+
+def test_decide_same_submission_path_action_retries_when_contents_changed(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    decision = decide_same_submission_path_action(
+        run_state={
+            "last_submission_path": str(submission_path),
+            "last_reason": "submission_poll_status_error",
+            "last_submit_code_fingerprint": "code",
+        },
+        latest_submit_attempt={"sub_sha256": "old-sha"},
+        prepared_submission_path=submission_path,
+        current_submission_sha="new-sha",
+        submit_code_fingerprint="code",
+        allow_force=False,
+        notebook_submit_required=False,
+    )
+
+    assert decision.action == "retry"
+    assert decision.reason == "submission_contents_changed"
+
+
+def test_decide_same_submission_path_action_retries_when_submit_code_changed(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    decision = decide_same_submission_path_action(
+        run_state={
+            "last_submission_path": str(submission_path),
+            "last_reason": "submission_poll_status_error",
+            "last_submit_code_fingerprint": "old-code",
+        },
+        latest_submit_attempt={"sub_sha256": "same-sha"},
+        prepared_submission_path=submission_path,
+        current_submission_sha="same-sha",
+        submit_code_fingerprint="new-code",
+        allow_force=False,
+        notebook_submit_required=False,
+    )
+
+    assert decision.action == "retry"
+    assert decision.reason == "submit_code_changed"
+
+
+def test_decide_same_submission_path_action_skips_when_same_artifact_already_attempted(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    decision = decide_same_submission_path_action(
+        run_state={
+            "last_submission_path": str(submission_path),
+            "last_reason": "submission_poll_status_error",
+            "last_submit_code_fingerprint": "same-code",
+            "last_submit_fingerprint": "known-fp",
+        },
+        latest_submit_attempt={"sub_sha256": "same-sha"},
+        prepared_submission_path=submission_path,
+        current_submission_sha="same-sha",
+        submit_code_fingerprint="same-code",
+        allow_force=False,
+        notebook_submit_required=False,
+    )
+
+    assert decision.action == "skip"
+    assert decision.reason == "same_submission_path_reused_in_run"
+    assert decision.fingerprint == "known-fp"

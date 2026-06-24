@@ -9384,53 +9384,36 @@ def _attempt_submit(
         print("[yellow]submit mode[/yellow]: using notebook submit")
 
     if not notebook_submit_required:
-        last_submission_path = str(run_state.get("last_submission_path") or "").strip()
-        last_submission_sha = str(latest_submit_attempt.get("sub_sha256") or "").strip()
-        last_reason = str(run_state.get("last_reason") or "").strip().lower()
-        last_code_fingerprint = str(run_state.get("last_submit_code_fingerprint") or "").strip()
-        allow_same_path_retry_reasons = {
-            "bad_request",
-            "notebook_only_submission_required",
-            "unclassified_submit_error",
-        }
-        if last_submission_path and Path(last_submission_path) == prepared_submission_path and not allow_force:
-            current_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
-            if last_reason in allow_same_path_retry_reasons:
-                print(
-                    "[yellow]submit retry[/yellow]: previous submit failed with "
-                    f"reason={last_reason}; retrying same artifact to allow notebook fallback."
-                )
-            elif last_submission_sha and current_submission_sha and last_submission_sha != current_submission_sha:
-                print(
-                    "[yellow]submit retry[/yellow]: same artifact path but submission file contents changed; "
-                    "retrying repaired artifact."
-                )
-            elif last_code_fingerprint and last_code_fingerprint != submit_code_fingerprint:
-                print(
-                    "[yellow]submit retry[/yellow]: same artifact path but submit code changed; retrying in this run."
-                )
-            else:
-                print("[yellow]submit skipped[/yellow]: same submission file already attempted in this run")
-                known_fingerprint = str(
-                    run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or ""
-                )
-                _append_submit_attempt(
-                    run_dir=run_dir,
-                    payload={
-                        "run_id": run_id,
-                        "sub_path": str(prepared_submission_path),
-                        "sub_sha256": _sha256_or_none(prepared_submission_path),
-                        "exit_code": None,
-                        "ok": False,
-                        "fingerprint": known_fingerprint,
-                        "error_kind": "unknown",
-                        "action_taken": "skip",
-                        "reason": "same_submission_path_reused_in_run",
-                        "stdout_tail": "",
-                        "stderr_tail": "",
-                    },
-                )
-                return None
+        same_path_decision = _submit_retry_policy.decide_same_submission_path_action(
+            run_state=run_state,
+            latest_submit_attempt=latest_submit_attempt,
+            prepared_submission_path=prepared_submission_path,
+            current_submission_sha=str(_sha256_or_none(prepared_submission_path) or "").strip(),
+            submit_code_fingerprint=submit_code_fingerprint,
+            allow_force=allow_force,
+            notebook_submit_required=notebook_submit_required,
+        )
+        if same_path_decision.action == "retry":
+            print(same_path_decision.message)
+        elif same_path_decision.action == "skip":
+            print(same_path_decision.message)
+            _append_submit_attempt(
+                run_dir=run_dir,
+                payload={
+                    "run_id": run_id,
+                    "sub_path": str(prepared_submission_path),
+                    "sub_sha256": _sha256_or_none(prepared_submission_path),
+                    "exit_code": None,
+                    "ok": False,
+                    "fingerprint": same_path_decision.fingerprint,
+                    "error_kind": "unknown",
+                    "action_taken": "skip",
+                    "reason": same_path_decision.reason,
+                    "stdout_tail": "",
+                    "stderr_tail": "",
+                },
+            )
+            return None
 
     seen_fingerprints = set(_load_submit_fingerprints(run_dir))
     state_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "").strip()
