@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from kagglebot.competition_submission_formats import (
     CompetitionListing,
+    CrawlRecord,
     crawl_competition_submission_format,
+    crawl_submission_formats,
     discover_competitions,
     extract_competition_slugs_from_html,
     find_submission_text_block,
@@ -241,6 +244,68 @@ def test_infer_submission_mode_prefers_code_competition_flag() -> None:
     assert infer_submission_mode(listing, "Submit your notebook output to Kaggle.", []) == (
         "code_competition_runtime_submission"
     )
+
+
+def test_crawl_submission_formats_writes_summary_json(monkeypatch, tmp_path) -> None:
+    listing = CompetitionListing(
+        slug="demo",
+        title="Demo",
+        url="https://www.kaggle.com/competitions/demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="Accuracy",
+        team_count=10,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    record = CrawlRecord(
+        slug="demo",
+        title="Demo",
+        competition_type="Featured",
+        submission_mode="direct_file_upload",
+        required_artifact=".csv file",
+        artifact_class="tabular",
+        artifact_container=None,
+        raw_format_text="Submission File Format: csv",
+        detected_extensions=[".csv"],
+        detected_columns=["id", "target"],
+        delimiter=",",
+        is_code_competition=False,
+        evidence_url="https://www.kaggle.com/competitions/demo/overview",
+        evidence_html_snippet="",
+        extraction_confidence="high",
+        reward="",
+        evaluation_metric="Accuracy",
+        team_count=10,
+        max_daily_submissions=5,
+        discovery_source="test",
+        crawled_at="2026-01-01T00:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "kagglebot.competition_submission_formats.discover_competitions",
+        lambda **_kwargs: [listing],
+    )
+    monkeypatch.setattr(
+        "kagglebot.competition_submission_formats.crawl_competition_submission_format",
+        lambda **_kwargs: record,
+    )
+
+    summary = crawl_submission_formats(
+        output_dir=tmp_path,
+        fetcher=_FakeFetcher({}),  # type: ignore[arg-type]
+        max_competitions=1,
+        resume=False,
+    )
+
+    saved = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    assert saved == summary
+    assert saved["competition_count"] == 1
+    assert saved["submission_modes"] == {"direct_file_upload": 1}
+    assert saved["artifact_classes"] == {"tabular": 1}
+    assert saved["extensions"] == {".csv": 1}
 
 
 def test_discover_competitions_merges_landing_and_api_results(monkeypatch) -> None:

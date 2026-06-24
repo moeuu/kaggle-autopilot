@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import write_json_object
 from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_BUNDLE,
     ARTIFACT_CLASS_MULTI_FILE_ZIP,
@@ -259,7 +260,7 @@ def crawl_submission_formats(
     write_jsonl(output_dir / "discovered_competitions.jsonl", [asdict(item) for item in listings])
     write_csv(output_dir / "normalized_submission_formats.csv", records)
     summary = build_summary(records)
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=True), encoding="utf-8")
+    write_json_object(output_dir / "summary.json", summary)
     return summary
 
 
