@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from kagglebot.json_utils import load_json_object
 
 SUBMISSION_MANIFEST_FILENAME = "submission_manifest.json"
 ARTIFACT_CLASS_TABULAR = "tabular"
@@ -33,11 +34,7 @@ def normalize_artifact_class(value: object, *, default: str = ARTIFACT_CLASS_UNK
 def load_submission_manifest(path: Path) -> dict[str, object] | None:
     if not path.exists() or not path.is_file():
         return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
+    return load_json_object(path)
 
 
 def find_submission_manifest(root: Path) -> Path | None:
