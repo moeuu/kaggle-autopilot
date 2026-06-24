@@ -5,7 +5,10 @@ from kagglebot.submit_attempts import (
     build_submit_attempt_payload,
     build_submit_knowledge_payload,
     build_submit_result_payload,
+    build_submit_retry_attempt_payload,
     build_submit_run_state_update,
+    build_submit_skip_attempt_payload,
+    build_submit_skip_record_payloads,
     build_submit_success_record_payloads,
     decide_submit_outcome_recording,
 )
@@ -195,6 +198,105 @@ def test_build_submit_abort_record_payloads_combines_attempt_and_run_state() -> 
         "last_reason": "local_submission_validation_failed",
         "last_submission_path": "submission.csv",
         "submit_attempts_count": 6,
+    }
+
+
+def test_build_submit_skip_attempt_payload_sets_skip_contract() -> None:
+    payload = build_submit_skip_attempt_payload(
+        run_id="run-1",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+        fingerprint="fp",
+        error_kind="unknown",
+        reason="same_submission_path",
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+    )
+
+    assert payload == {
+        "run_id": "run-1",
+        "sub_path": "submission.csv",
+        "sub_sha256": "sha",
+        "exit_code": None,
+        "ok": False,
+        "fingerprint": "fp",
+        "error_kind": "unknown",
+        "action_taken": "skip",
+        "reason": "same_submission_path",
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+
+def test_build_submit_skip_record_payloads_combines_attempt_and_run_state() -> None:
+    payloads = build_submit_skip_record_payloads(
+        run_id="run-1",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+        fingerprint="fp",
+        code_fingerprint="code-fp",
+        error_kind="none",
+        reason="duplicate_submission_sha_seen",
+        prior_state={"submit_attempts_count": 7},
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+        duplicate_sources=["run_attempts"],
+    )
+
+    assert payloads.attempt_payload == {
+        "run_id": "run-1",
+        "sub_path": "submission.csv",
+        "sub_sha256": "sha",
+        "exit_code": None,
+        "ok": False,
+        "fingerprint": "fp",
+        "error_kind": "none",
+        "action_taken": "skip",
+        "reason": "duplicate_submission_sha_seen",
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "duplicate_sources": ["run_attempts"],
+    }
+    assert payloads.run_state_update == {
+        "submit_attempted": True,
+        "last_submit_fingerprint": "fp",
+        "last_fingerprint": "fp",
+        "last_submit_code_fingerprint": "code-fp",
+        "last_error_kind": "none",
+        "last_action": "skip",
+        "last_reason": "duplicate_submission_sha_seen",
+        "last_submission_path": "submission.csv",
+        "submit_attempts_count": 8,
+        "last_submission_sha256": "sha",
+    }
+
+
+def test_build_submit_retry_attempt_payload_sets_retry_contract() -> None:
+    payload = build_submit_retry_attempt_payload(
+        run_id="run-1",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+        exit_code=1,
+        fingerprint="fp",
+        reason="network_or_timeout",
+        stdout="abcdef",
+        stderr="uvwxyz",
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+    )
+
+    assert payload == {
+        "run_id": "run-1",
+        "sub_path": "submission.csv",
+        "sub_sha256": "sha",
+        "exit_code": 1,
+        "ok": False,
+        "fingerprint": "fp",
+        "error_kind": "transient",
+        "action_taken": "retry",
+        "reason": "network_or_timeout",
+        "stdout_tail": "def",
+        "stderr_tail": "wxyz",
     }
 
 

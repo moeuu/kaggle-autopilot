@@ -9329,36 +9329,21 @@ def _attempt_submit(
         reason = duplicate_decision.reason
         fingerprint = duplicate_decision.fingerprint
         duplicate_sources = duplicate_decision.duplicate_sources
-        _append_submit_attempt(
-            run_dir=run_dir,
-            payload=_build_submit_attempt_payload(
-                run_id=run_id,
-                submission_ref=str(prepared_submission_path),
-                submission_sha256=prepared_submission_sha,
-                exit_code=None,
-                ok=False,
-                fingerprint=fingerprint,
-                error_kind="none",
-                action_taken="skip",
-                reason=reason,
-                stdout="",
-                stderr="",
-                extra={"duplicate_sources": duplicate_sources},
-            ),
+        skip_payloads = _submit_attempts.build_submit_skip_record_payloads(
+            run_id=run_id,
+            submission_ref=str(prepared_submission_path),
+            submission_sha256=prepared_submission_sha,
+            fingerprint=fingerprint,
+            code_fingerprint=submit_code_fingerprint,
+            error_kind="none",
+            reason=reason,
+            prior_state=_load_run_state(run_dir),
+            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+            duplicate_sources=duplicate_sources,
         )
-        _save_run_state(
-            run_dir,
-            _build_submit_run_state_update(
-                prior_state=_load_run_state(run_dir),
-                fingerprint=fingerprint,
-                code_fingerprint=submit_code_fingerprint,
-                error_kind="none",
-                action_taken="skip",
-                reason=reason,
-                submission_ref=str(prepared_submission_path),
-                submission_sha256=prepared_submission_sha,
-            ),
-        )
+        _append_submit_attempt(run_dir=run_dir, payload=skip_payloads.attempt_payload)
+        _save_run_state(run_dir, skip_payloads.run_state_update)
         _mark_submit_failure_context_resolved(
             run_dir=run_dir,
             resolution=reason,
@@ -9453,18 +9438,15 @@ def _attempt_submit(
             print(same_path_decision.message)
             _append_submit_attempt(
                 run_dir=run_dir,
-                payload=_build_submit_attempt_payload(
+                payload=_submit_attempts.build_submit_skip_attempt_payload(
                     run_id=run_id,
                     submission_ref=str(prepared_submission_path),
                     submission_sha256=_sha256_or_none(prepared_submission_path),
-                    exit_code=None,
-                    ok=False,
                     fingerprint=same_path_decision.fingerprint,
                     error_kind="unknown",
-                    action_taken="skip",
                     reason=same_path_decision.reason,
-                    stdout="",
-                    stderr="",
+                    stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+                    stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
                 ),
             )
             return None
@@ -9584,18 +9566,17 @@ def _attempt_submit(
             if error_action.action == "retry":
                 _append_submit_attempt(
                     run_dir=run_dir,
-                    payload=_build_submit_attempt_payload(
+                    payload=_submit_attempts.build_submit_retry_attempt_payload(
                         run_id=run_id,
                         submission_ref=submission_reference,
                         submission_sha256=_sha256_or_none(submission_artifact_path),
                         exit_code=exc.exit_code,
-                        ok=False,
                         fingerprint=fingerprint,
-                        error_kind="transient",
-                        action_taken="retry",
                         reason=error_action.reason,
                         stdout=exc.stdout,
                         stderr=classification_stderr,
+                        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+                        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
                     ),
                 )
                 _record_submit_reason_knowledge(
@@ -10136,66 +10117,6 @@ def _append_submit_attempt(*, run_dir: Path, payload: dict[str, object]) -> None
     attempts_path.parent.mkdir(parents=True, exist_ok=True)
     with attempts_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-
-
-def _build_submit_attempt_payload(
-    *,
-    run_id: str,
-    submission_ref: str,
-    submission_sha256: str | None,
-    exit_code: int | None,
-    ok: bool,
-    fingerprint: str,
-    error_kind: str,
-    action_taken: str,
-    reason: str,
-    stdout: str,
-    stderr: str,
-    code_fingerprint: str | None = None,
-    extra: dict[str, object] | None = None,
-) -> dict[str, object]:
-    return _submit_attempts.build_submit_attempt_payload(
-        run_id=run_id,
-        submission_ref=submission_ref,
-        submission_sha256=submission_sha256,
-        exit_code=exit_code,
-        ok=ok,
-        fingerprint=fingerprint,
-        error_kind=error_kind,
-        action_taken=action_taken,
-        reason=reason,
-        stdout=stdout,
-        stderr=stderr,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        code_fingerprint=code_fingerprint,
-        extra=extra,
-    )
-
-
-def _build_submit_run_state_update(
-    *,
-    prior_state: dict[str, object],
-    fingerprint: str,
-    code_fingerprint: str,
-    error_kind: str,
-    action_taken: str,
-    reason: str,
-    submission_ref: str,
-    submit_ok: bool | None = None,
-    submission_sha256: str | None = None,
-) -> dict[str, object]:
-    return _submit_attempts.build_submit_run_state_update(
-        prior_state=prior_state,
-        fingerprint=fingerprint,
-        code_fingerprint=code_fingerprint,
-        error_kind=error_kind,
-        action_taken=action_taken,
-        reason=reason,
-        submission_ref=submission_ref,
-        submit_ok=submit_ok,
-        submission_sha256=submission_sha256,
-    )
 
 
 def _build_submit_knowledge_payload(

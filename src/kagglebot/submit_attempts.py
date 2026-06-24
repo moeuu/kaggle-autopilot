@@ -29,6 +29,12 @@ class SubmitAbortRecordPayloads:
     run_state_update: dict[str, object]
 
 
+@dataclass(frozen=True)
+class SubmitSkipRecordPayloads:
+    attempt_payload: dict[str, object]
+    run_state_update: dict[str, object]
+
+
 def build_submit_attempt_payload(
     *,
     run_id: str,
@@ -184,6 +190,106 @@ def build_submit_abort_record_payloads(
             submission_ref=submission_ref,
             submit_ok=prior_submit_ok,
         ),
+    )
+
+
+def build_submit_skip_attempt_payload(
+    *,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    duplicate_sources: list[str] | None = None,
+) -> dict[str, object]:
+    extra = {"duplicate_sources": list(duplicate_sources)} if duplicate_sources is not None else None
+    return build_submit_attempt_payload(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=submission_sha256,
+        exit_code=None,
+        ok=False,
+        fingerprint=fingerprint,
+        error_kind=error_kind,
+        action_taken="skip",
+        reason=reason,
+        stdout="",
+        stderr="",
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        extra=extra,
+    )
+
+
+def build_submit_skip_record_payloads(
+    *,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    fingerprint: str,
+    code_fingerprint: str,
+    error_kind: str,
+    reason: str,
+    prior_state: dict[str, object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    duplicate_sources: list[str] | None = None,
+) -> SubmitSkipRecordPayloads:
+    return SubmitSkipRecordPayloads(
+        attempt_payload=build_submit_skip_attempt_payload(
+            run_id=run_id,
+            submission_ref=submission_ref,
+            submission_sha256=submission_sha256,
+            fingerprint=fingerprint,
+            error_kind=error_kind,
+            reason=reason,
+            stdout_tail_chars=stdout_tail_chars,
+            stderr_tail_chars=stderr_tail_chars,
+            duplicate_sources=duplicate_sources,
+        ),
+        run_state_update=build_submit_run_state_update(
+            prior_state=prior_state,
+            fingerprint=fingerprint,
+            code_fingerprint=code_fingerprint,
+            error_kind=error_kind,
+            action_taken="skip",
+            reason=reason,
+            submission_ref=submission_ref,
+            submission_sha256=submission_sha256,
+        ),
+    )
+
+
+def build_submit_retry_attempt_payload(
+    *,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    exit_code: int | None,
+    fingerprint: str,
+    reason: str,
+    stdout: str,
+    stderr: str,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+) -> dict[str, object]:
+    return build_submit_attempt_payload(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=submission_sha256,
+        exit_code=exit_code,
+        ok=False,
+        fingerprint=fingerprint,
+        error_kind="transient",
+        action_taken="retry",
+        reason=reason,
+        stdout=stdout,
+        stderr=stderr,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
     )
 
 
