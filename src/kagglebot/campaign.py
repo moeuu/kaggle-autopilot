@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Literal
 
 from kagglebot.hashing import sha256_file
+from kagglebot.scalar_utils import finite_float as _to_float
+from kagglebot.scalar_utils import optional_int as _to_int
+from kagglebot.scalar_utils import optional_str as _optional_str
 
 CampaignMode = Literal["baseline", "top1"]
 
@@ -530,30 +533,6 @@ def _load_json(path: Path) -> object:
 def _normalize_direction(value: object) -> str:
     normalized = str(value or "").strip().lower()
     return "maximize" if normalized == "maximize" else "minimize"
-
-
-def _to_float(value: object) -> float | None:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(parsed):
-        return None
-    return parsed
-
-
-def _to_int(value: object) -> int | None:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _float_mapping(value: object) -> dict[str, float]:

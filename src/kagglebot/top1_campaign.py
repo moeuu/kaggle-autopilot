@@ -13,6 +13,7 @@ from kagglebot.campaign import (
     recommend_blend_pairs,
     score_gap,
 )
+from kagglebot.scalar_utils import finite_float as _to_float
 
 REFERENCE_REPRODUCTION_REPORT_FILENAME = "reference_reproduction_report.json"
 PORTFOLIO_PLAN_FILENAME = "portfolio_plan.json"
@@ -323,13 +324,3 @@ def _validation_trust(campaign_state: dict[str, object]) -> float:
     if corr is None:
         return 0.5
     return max(0.0, min(1.0, (corr + 1.0) / 2.0))
-
-
-def _to_float(value: object) -> float | None:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(parsed):
-        return None
-    return parsed
