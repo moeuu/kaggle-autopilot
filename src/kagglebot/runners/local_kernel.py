@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
+from kagglebot.json_utils import write_json_object
 from kagglebot.kernel_runner import run_kernel_local
 from kagglebot.runners.base import CandidateRunResult, CandidateRunSpec, RunContext, RunResult
 
@@ -48,7 +48,7 @@ class LocalKernelRunner:
             "metrics_path": str(result.metrics_path) if result.metrics_path else None,
             "generated_at": datetime.now(UTC).isoformat(),
         }
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        write_json_object(summary_path, summary)
         return RunResult(
             run_id=context.run_id,
             runner=self.name,
@@ -92,27 +92,22 @@ class LocalKernelRunner:
             "status": status,
             "generated_at": datetime.now(UTC).isoformat(),
         }
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        metrics_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "candidate_id": spec.candidate_id,
-                    "node_id": spec.node_id,
-                    "status": status,
-                    "score_source": "not_evaluated",
-                    "adapter": spec.adapter,
-                    "method_id": spec.method_id,
-                    "validation_profile_id": spec.validation_profile_id,
-                    "dependency_check": dependency_report,
-                    "produced_outputs": produced_outputs,
-                    "evidence": _candidate_evidence(spec=spec, status=status, dependency_report=dependency_report),
-                    "generated_at": datetime.now(UTC).isoformat(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        write_json_object(manifest_path, manifest)
+        metrics = {
+            "schema_version": 1,
+            "candidate_id": spec.candidate_id,
+            "node_id": spec.node_id,
+            "status": status,
+            "score_source": "not_evaluated",
+            "adapter": spec.adapter,
+            "method_id": spec.method_id,
+            "validation_profile_id": spec.validation_profile_id,
+            "dependency_check": dependency_report,
+            "produced_outputs": produced_outputs,
+            "evidence": _candidate_evidence(spec=spec, status=status, dependency_report=dependency_report),
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+        write_json_object(metrics_path, metrics)
         diagnostics_path.write_text(
             "\n".join(
                 [
@@ -186,21 +181,16 @@ def _materialize_candidate_outputs(
     adapter_report_path = (
         context.paths.run_dir(context.run_id) / "candidates" / spec.candidate_id / "adapter_report.json"
     )
-    adapter_report_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "candidate_id": spec.candidate_id,
-                "adapter": spec.adapter,
-                "category": spec.category,
-                "validation_profile_id": spec.validation_profile_id,
-                "artifact_note": "Lightweight local candidate artifact generated for portfolio evidence.",
-                "generated_at": datetime.now(UTC).isoformat(),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    adapter_report = {
+        "schema_version": 1,
+        "candidate_id": spec.candidate_id,
+        "adapter": spec.adapter,
+        "category": spec.category,
+        "validation_profile_id": spec.validation_profile_id,
+        "artifact_note": "Lightweight local candidate artifact generated for portfolio evidence.",
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+    write_json_object(adapter_report_path, adapter_report)
     outputs["adapter_report"] = str(adapter_report_path)
     return outputs
 
