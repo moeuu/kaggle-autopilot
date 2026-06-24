@@ -6,6 +6,7 @@ from pathlib import Path
 from kagglebot.submit_failure_context import (
     build_submit_failure_context_payload,
     decide_stale_submit_autofix_artifact,
+    decide_submit_autofix_input_submission,
     format_submit_autofix_context,
     load_submit_failure_context,
     mark_submit_failure_context_resolved,
@@ -146,6 +147,57 @@ def test_decide_stale_submit_autofix_artifact_keeps_same_failed_artifact(tmp_pat
         )
         is None
     )
+
+
+def test_decide_submit_autofix_input_submission_prefers_matching_repaired_artifact(tmp_path: Path) -> None:
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    repaired.parent.mkdir(parents=True)
+    repaired.write_text("id,target\n1,0.2\n", encoding="utf-8")
+
+    decision = decide_submit_autofix_input_submission(
+        run_state={"submit_autofix_submission_path": str(repaired)},
+        latest_submit_attempt={},
+        failure_context={"repair_target": "submission_artifact", "submission_artifact_path": str(original)},
+        submission_path=original,
+    )
+
+    assert decision.input_submission_path == repaired
+    assert str(repaired) in decision.message
+
+
+def test_decide_submit_autofix_input_submission_honors_legacy_file_fix_attempt(tmp_path: Path) -> None:
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    repaired.parent.mkdir(parents=True)
+    repaired.write_text("id,target\n1,0.2\n", encoding="utf-8")
+
+    decision = decide_submit_autofix_input_submission(
+        run_state={"submit_autofix_submission_path": str(repaired), "last_error_kind": "validation"},
+        latest_submit_attempt={"stderr_tail": "Submission validation failed: row count mismatch"},
+        failure_context={},
+        submission_path=original,
+    )
+
+    assert decision.input_submission_path == repaired
+
+
+def test_decide_submit_autofix_input_submission_ignores_repair_for_different_failed_artifact(tmp_path: Path) -> None:
+    original = tmp_path / "iter-1" / "submission.csv"
+    other_failed = tmp_path / "iter-0" / "submission.csv"
+    repaired = tmp_path / "iter-0" / "output" / "submission-fixed.csv"
+    repaired.parent.mkdir(parents=True)
+    repaired.write_text("id,target\n1,0.2\n", encoding="utf-8")
+
+    decision = decide_submit_autofix_input_submission(
+        run_state={"submit_autofix_submission_path": str(repaired)},
+        latest_submit_attempt={},
+        failure_context={"repair_target": "submission_artifact", "submission_artifact_path": str(other_failed)},
+        submission_path=original,
+    )
+
+    assert decision.input_submission_path == original
+    assert decision.message == ""
 
 
 def test_resolve_submit_autofix_submission_artifact_prefers_repaired_path(tmp_path: Path) -> None:

@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.submission.guard import normalize_error_text
-from kagglebot.submit_failure_policy import SubmitFailureRepairDecision, normalize_loaded_submit_failure_context
+from kagglebot.submit_failure_policy import (
+    SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT,
+    SubmitFailureRepairDecision,
+    normalize_loaded_submit_failure_context,
+    submit_error_requires_file_fix,
+)
 
 SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
 
@@ -16,6 +21,12 @@ SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
 class StaleSubmitAutofixDecision:
     clear_repaired_path: bool
     failure_context_updates: dict[str, object]
+
+
+@dataclass(frozen=True)
+class SubmitAutofixInputDecision:
+    input_submission_path: Path
+    message: str
 
 
 def submit_failure_context_path(run_dir: Path) -> Path:
@@ -148,6 +159,51 @@ def decide_stale_submit_autofix_artifact(
             "stale_repaired_artifact_cleared_at": now_iso,
             "superseded_by_submission_path": str(submission_path),
         },
+    )
+
+
+def decide_submit_autofix_input_submission(
+    *,
+    run_state: dict[str, object],
+    latest_submit_attempt: dict[str, object],
+    failure_context: dict[str, object],
+    submission_path: Path,
+) -> SubmitAutofixInputDecision:
+    repaired_path = path_from_submit_reference(run_state.get("submit_autofix_submission_path"))
+    if repaired_path is None or not repaired_path.exists():
+        return SubmitAutofixInputDecision(input_submission_path=submission_path, message="")
+
+    repair_target = str(failure_context.get("repair_target") or "").strip().lower()
+    failed_submission_artifact = path_from_submit_reference(
+        failure_context.get("submission_artifact_path") or failure_context.get("submission_ref")
+    )
+    retry_detail = "\n".join(
+        part
+        for part in (
+            str(latest_submit_attempt.get("stdout_tail") or ""),
+            str(latest_submit_attempt.get("stderr_tail") or ""),
+        )
+        if part
+    )
+    should_use_repaired = (
+        repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+        and (failed_submission_artifact is None or failed_submission_artifact == submission_path)
+    ) or (
+        not repair_target
+        and submit_error_requires_file_fix(
+            reason=run_state.get("last_reason") or latest_submit_attempt.get("reason"),
+            error_kind=run_state.get("last_error_kind") or latest_submit_attempt.get("error_kind"),
+            detail=retry_detail,
+        )
+    )
+    if not should_use_repaired:
+        return SubmitAutofixInputDecision(input_submission_path=submission_path, message="")
+
+    return SubmitAutofixInputDecision(
+        input_submission_path=repaired_path,
+        message=(
+            f"[yellow]submit retry[/yellow]: using repaired submission artifact from submit autofix: {repaired_path}"
+        ),
     )
 
 

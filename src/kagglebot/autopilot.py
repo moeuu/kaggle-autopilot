@@ -259,9 +259,6 @@ _parse_kaggle_submission_timestamp = _submission_policy.parse_kaggle_submission_
 _submission_row_timestamp = _submission_policy.submission_row_timestamp
 _count_submission_rows_on_utc_day = _submission_policy.count_submission_rows_on_utc_day
 _count_submission_rows_in_recent_window = _submission_policy.count_submission_rows_in_recent_window
-_SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT = (
-    _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
-)
 _SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE
 _SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM
 _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
@@ -284,6 +281,7 @@ _mark_submit_failure_context_resolved = _submit_failure_context.mark_submit_fail
 _build_submit_failure_context_payload_from_state = _submit_failure_context.build_submit_failure_context_payload
 _path_from_submit_reference = _submit_failure_context.path_from_submit_reference
 _format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
+_decide_submit_autofix_input_submission = _submit_failure_context.decide_submit_autofix_input_submission
 _decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
 _resolve_submit_autofix_submission_artifact_from_state = (
     _submit_failure_context.resolve_submit_autofix_submission_artifact
@@ -9238,43 +9236,15 @@ def _attempt_submit(
     latest_submit_attempt = _load_latest_submit_attempt(run_dir)
     submit_code_fingerprint = _compute_submit_code_fingerprint(config)
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
-    submit_retry_detail = "\n".join(
-        part
-        for part in (
-            str(latest_submit_attempt.get("stdout_tail") or ""),
-            str(latest_submit_attempt.get("stderr_tail") or ""),
-        )
-        if part
+    autofix_input_decision = _decide_submit_autofix_input_submission(
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        failure_context=submit_failure_context,
+        submission_path=submission_path,
     )
-    repaired_submission_path = _path_from_submit_reference(run_state.get("submit_autofix_submission_path"))
-    input_submission_path = submission_path
-    repair_target = str(submit_failure_context.get("repair_target") or "").strip().lower()
-    failed_submission_artifact = _path_from_submit_reference(
-        submit_failure_context.get("submission_artifact_path") or submit_failure_context.get("submission_ref")
-    )
-    if (
-        repaired_submission_path is not None
-        and repaired_submission_path.exists()
-        and (
-            (
-                repair_target == _SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
-                and (failed_submission_artifact is None or failed_submission_artifact == submission_path)
-            )
-            or (
-                not repair_target
-                and _submit_error_requires_file_fix(
-                    reason=run_state.get("last_reason") or latest_submit_attempt.get("reason"),
-                    error_kind=run_state.get("last_error_kind") or latest_submit_attempt.get("error_kind"),
-                    detail=submit_retry_detail,
-                )
-            )
-        )
-    ):
-        input_submission_path = repaired_submission_path
-        print(
-            "[yellow]submit retry[/yellow]: "
-            f"using repaired submission artifact from submit autofix: {input_submission_path}"
-        )
+    input_submission_path = autofix_input_decision.input_submission_path
+    if autofix_input_decision.message:
+        print(autofix_input_decision.message)
 
     message = _submission_message(config, run_id, best_score, submission_path=input_submission_path)
     submission_service = SubmissionService(
