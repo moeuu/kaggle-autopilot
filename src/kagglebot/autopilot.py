@@ -9228,6 +9228,10 @@ def _attempt_submit(
     if not config.submit or config.dry_run:
         return None
     run_dir = config.paths.run_dir(run_id)
+    submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
+        run_dir=run_dir,
+        save_run_state=lambda updates: _save_run_state(run_dir, updates),
+    )
     _clear_stale_submit_autofix_artifact(run_dir=run_dir, submission_path=submission_path)
     run_state = _load_run_state(run_dir)
     submit_failure_context = _load_submit_failure_context(run_dir)
@@ -9342,11 +9346,9 @@ def _attempt_submit(
             stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
             duplicate_sources=duplicate_sources,
         )
-        _submit_attempts.record_submit_attempt_state(
-            run_dir=run_dir,
+        submit_attempt_recorder.record_state(
             attempt_payload=skip_payloads.attempt_payload,
             run_state_update=skip_payloads.run_state_update,
-            save_run_state=lambda updates: _save_run_state(run_dir, updates),
         )
         _mark_submit_failure_context_resolved(
             run_dir=run_dir,
@@ -9657,11 +9659,9 @@ def _attempt_submit(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-    _submit_attempts.record_submit_attempt_state(
-        run_dir=run_dir,
+    submit_attempt_recorder.record_state(
         attempt_payload=submit_success_payloads.attempt_payload,
         run_state_update=submit_success_payloads.run_state_update,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
     print("[green]submission recorded[/green]")
     try:
@@ -10052,6 +10052,10 @@ def _abort_submit_for_run(
     exit_code: int | None,
 ) -> None:
     run_dir = config.paths.run_dir(run_id)
+    submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
+        run_dir=run_dir,
+        save_run_state=lambda updates: _save_run_state(run_dir, updates),
+    )
     submission_ref_text = str(submission_ref)
     artifact_path: Path | None
     if submission_artifact_path is not None:
@@ -10078,11 +10082,9 @@ def _abort_submit_for_run(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-    _submit_attempts.record_submit_attempt_state(
-        run_dir=run_dir,
+    submit_attempt_recorder.record_state(
         attempt_payload=abort_payloads.attempt_payload,
         run_state_update=abort_payloads.run_state_update,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
     _save_submit_failure_context(
         run_dir,

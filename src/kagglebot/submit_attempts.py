@@ -38,6 +38,19 @@ class SubmitSkipRecordPayloads:
     run_state_update: dict[str, object]
 
 
+@dataclass(frozen=True)
+class SubmitAttemptRecorder:
+    run_dir: Path
+    save_run_state: Callable[[dict[str, object]], None]
+
+    def append(self, payload: dict[str, object]) -> None:
+        append_submit_attempt(run_dir=self.run_dir, payload=payload)
+
+    def record_state(self, *, attempt_payload: dict[str, object], run_state_update: dict[str, object]) -> None:
+        self.append(attempt_payload)
+        self.save_run_state(run_state_update)
+
+
 def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso: str | None = None) -> None:
     record = {
         "ts": now_iso or datetime.now(UTC).isoformat(),
@@ -56,8 +69,10 @@ def record_submit_attempt_state(
     run_state_update: dict[str, object],
     save_run_state: Callable[[dict[str, object]], None],
 ) -> None:
-    append_submit_attempt(run_dir=run_dir, payload=attempt_payload)
-    save_run_state(run_state_update)
+    SubmitAttemptRecorder(run_dir=run_dir, save_run_state=save_run_state).record_state(
+        attempt_payload=attempt_payload,
+        run_state_update=run_state_update,
+    )
 
 
 def load_submit_attempt_rows(run_dir: Path) -> list[dict[str, object]]:

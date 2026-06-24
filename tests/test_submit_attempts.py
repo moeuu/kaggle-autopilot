@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from kagglebot.submit_attempts import (
+    SubmitAttemptRecorder,
     append_submit_attempt,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
@@ -20,7 +21,6 @@ from kagglebot.submit_attempts import (
     load_latest_submit_attempt,
     load_submit_attempt_rows,
     load_submit_fingerprints,
-    record_submit_attempt_state,
     submit_attempt_sha_seen,
 )
 
@@ -94,14 +94,16 @@ def test_append_submit_attempt_writes_jsonl_record(tmp_path) -> None:
     assert rows == [{"ts": "2026-06-25T00:00:00+00:00", "run_id": "run-1", "sub_sha256": "sha", "ok": False}]
 
 
-def test_record_submit_attempt_state_appends_attempt_and_saves_state(tmp_path) -> None:
+def test_submit_attempt_recorder_appends_attempt_and_saves_state(tmp_path) -> None:
     saved_updates: list[dict[str, object]] = []
 
-    record_submit_attempt_state(
+    recorder = SubmitAttemptRecorder(
         run_dir=tmp_path,
+        save_run_state=saved_updates.append,
+    )
+    recorder.record_state(
         attempt_payload={"run_id": "run-1", "ok": True},
         run_state_update={"submit_attempted": True, "submit_ok": True},
-        save_run_state=saved_updates.append,
     )
 
     rows = load_submit_attempt_rows(tmp_path)
