@@ -14,6 +14,8 @@ from kagglebot.submit_failure_context import (
     path_from_submit_reference,
     resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
+    should_defer_submit_abort_to_next_iteration,
+    should_force_resubmit_after_submit_abort,
     submit_failure_context_path,
     submit_file_fix_contract_satisfied,
 )
@@ -255,6 +257,43 @@ def test_decide_submit_abort_autofixability_uses_legacy_run_state() -> None:
     assert repeated.autofixable is True
     assert permanent.autofixable is False
     assert "not safely auto-fixable" in permanent.message
+
+
+def test_should_force_resubmit_after_submit_abort_only_for_polling_or_scoring_failures() -> None:
+    assert should_force_resubmit_after_submit_abort({"last_reason": "submission_polling_error"})
+    assert should_force_resubmit_after_submit_abort({"last_reason": "submission_poll_status_error"})
+    assert should_force_resubmit_after_submit_abort({"last_reason": "submission_poll_status_complete_no_score"})
+    assert not should_force_resubmit_after_submit_abort({"last_reason": "rules_not_accepted"})
+    assert not should_force_resubmit_after_submit_abort({})
+
+
+def test_should_defer_submit_abort_to_next_iteration_requires_kaggle_gpu_repairable_nonfinal() -> None:
+    repairable_context = {"active": True, "repairable": True}
+
+    assert should_defer_submit_abort_to_next_iteration(
+        compute="kaggle_gpu",
+        failure_context=repairable_context,
+        iteration=1,
+        max_iterations=3,
+    )
+    assert not should_defer_submit_abort_to_next_iteration(
+        compute="local_gpu",
+        failure_context=repairable_context,
+        iteration=1,
+        max_iterations=3,
+    )
+    assert not should_defer_submit_abort_to_next_iteration(
+        compute="kaggle_gpu",
+        failure_context=repairable_context,
+        iteration=3,
+        max_iterations=3,
+    )
+    assert not should_defer_submit_abort_to_next_iteration(
+        compute="kaggle_gpu",
+        failure_context={"active": True, "repairable": False},
+        iteration=1,
+        max_iterations=3,
+    )
 
 
 def test_resolve_submit_autofix_submission_artifact_prefers_repaired_path(tmp_path: Path) -> None:

@@ -283,6 +283,10 @@ _path_from_submit_reference = _submit_failure_context.path_from_submit_reference
 _format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
 _decide_submit_autofix_input_submission = _submit_failure_context.decide_submit_autofix_input_submission
 _decide_submit_abort_autofixability = _submit_failure_context.decide_submit_abort_autofixability
+_should_force_resubmit_after_submit_abort_from_state = _submit_failure_context.should_force_resubmit_after_submit_abort
+_should_defer_submit_abort_to_next_iteration_from_state = (
+    _submit_failure_context.should_defer_submit_abort_to_next_iteration
+)
 _decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
 _resolve_submit_autofix_submission_artifact_from_state = (
     _submit_failure_context.resolve_submit_autofix_submission_artifact
@@ -10342,13 +10346,7 @@ def _env_truthy(name: str) -> bool:
 
 
 def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
-    state = _load_run_state(run_dir)
-    reason = str(state.get("last_reason") or "").strip().lower()
-    if not reason:
-        return False
-    if reason in {"submission_polling_error", "submission_polling_timeout", "submission_polling_invalid_payload"}:
-        return True
-    return reason.startswith("submission_poll_status_")
+    return _should_force_resubmit_after_submit_abort_from_state(_load_run_state(run_dir))
 
 
 def _should_defer_submit_abort_to_next_iteration(
@@ -10358,12 +10356,12 @@ def _should_defer_submit_abort_to_next_iteration(
     iteration: int,
     max_iterations: int,
 ) -> bool:
-    if compute != "kaggle_gpu":
-        return False
-    if iteration >= max_iterations:
-        return False
-    failure_context = _load_submit_failure_context(run_dir)
-    return bool(failure_context.get("active")) and bool(failure_context.get("repairable"))
+    return _should_defer_submit_abort_to_next_iteration_from_state(
+        compute=compute,
+        failure_context=_load_submit_failure_context(run_dir),
+        iteration=iteration,
+        max_iterations=max_iterations,
+    )
 
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:

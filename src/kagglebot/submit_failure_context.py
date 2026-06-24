@@ -256,6 +256,29 @@ def decide_submit_abort_autofixability(
     )
 
 
+def should_force_resubmit_after_submit_abort(run_state: dict[str, object]) -> bool:
+    reason = str(run_state.get("last_reason") or "").strip().lower()
+    if not reason:
+        return False
+    if reason in {"submission_polling_error", "submission_polling_timeout", "submission_polling_invalid_payload"}:
+        return True
+    return reason.startswith("submission_poll_status_")
+
+
+def should_defer_submit_abort_to_next_iteration(
+    *,
+    compute: str,
+    failure_context: dict[str, object],
+    iteration: int,
+    max_iterations: int,
+) -> bool:
+    if compute != "kaggle_gpu":
+        return False
+    if iteration >= max_iterations:
+        return False
+    return bool(failure_context.get("active")) and bool(failure_context.get("repairable"))
+
+
 def resolve_submit_autofix_submission_artifact(
     *,
     run_state: dict[str, object],
