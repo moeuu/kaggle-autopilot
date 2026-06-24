@@ -6,6 +6,7 @@ from kagglebot.submit_notebook import (
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_reference,
     decide_ambiguous_notebook_submit_retry,
+    decide_submit_kernel_cpu_fallback,
     normalize_notebook_submit_artifact_mode,
 )
 
@@ -103,3 +104,47 @@ def test_decide_ambiguous_notebook_submit_retry_rejects_generic_error() -> None:
     assert decision.wait_seconds == 0.0
     assert decision.message == ""
     assert decision.stderr == "generic bad request"
+
+
+def test_decide_submit_kernel_cpu_fallback_allows_gpu_capacity_error() -> None:
+    decision = decide_submit_kernel_cpu_fallback(
+        accelerator="gpu",
+        strict_accelerator=False,
+        is_capacity_error=True,
+        is_push_error=False,
+    )
+
+    assert decision.retry_on_cpu is True
+    assert decision.reason == "Kaggle GPU capacity is unavailable"
+    assert "retrying submit kernel on CPU" in decision.message
+
+
+def test_decide_submit_kernel_cpu_fallback_allows_gpu_push_error() -> None:
+    decision = decide_submit_kernel_cpu_fallback(
+        accelerator="gpu",
+        strict_accelerator=False,
+        is_capacity_error=False,
+        is_push_error=True,
+    )
+
+    assert decision.retry_on_cpu is True
+    assert decision.reason == "Kaggle notebook push failed under GPU metadata"
+
+
+def test_decide_submit_kernel_cpu_fallback_rejects_strict_or_non_gpu() -> None:
+    strict = decide_submit_kernel_cpu_fallback(
+        accelerator="gpu",
+        strict_accelerator=True,
+        is_capacity_error=True,
+        is_push_error=True,
+    )
+    cpu = decide_submit_kernel_cpu_fallback(
+        accelerator="cpu",
+        strict_accelerator=False,
+        is_capacity_error=True,
+        is_push_error=True,
+    )
+
+    assert strict.retry_on_cpu is False
+    assert strict.message == ""
+    assert cpu.retry_on_cpu is False

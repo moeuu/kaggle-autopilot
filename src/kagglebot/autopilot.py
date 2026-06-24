@@ -9799,11 +9799,9 @@ def _submit_with_notebook_kernel(
     try:
         kernel_result = run_submit_kernel(**submit_kernel_kwargs)
     except Exception as exc:  # noqa: BLE001
-        if _should_retry_submit_kernel_on_cpu(config=config, exc=exc):
-            print(
-                "[yellow]submit notebook[/yellow]: "
-                f"{_submit_kernel_cpu_retry_reason(exc)}; retrying submit kernel on CPU."
-            )
+        cpu_fallback_decision = _decide_submit_kernel_cpu_fallback(config=config, exc=exc)
+        if cpu_fallback_decision.retry_on_cpu:
+            print(cpu_fallback_decision.message)
             try:
                 kernel_result = run_submit_kernel(**{**submit_kernel_kwargs, "accelerator": "cpu"})
             except Exception as retry_exc:  # noqa: BLE001
@@ -9853,13 +9851,20 @@ def _submit_with_notebook_kernel(
 
 
 def _should_retry_submit_kernel_on_cpu(*, config: AutopilotConfig, exc: Exception) -> bool:
-    if str(config.accelerator).strip().lower() != "gpu":
-        return False
-    if config.strict_accelerator:
-        return False
-    if isinstance(exc, KernelCapacityError):
-        return True
-    return isinstance(exc, KaggleCliError) and _is_submit_kernel_push_error(exc)
+    return _decide_submit_kernel_cpu_fallback(config=config, exc=exc).retry_on_cpu
+
+
+def _decide_submit_kernel_cpu_fallback(
+    *,
+    config: AutopilotConfig,
+    exc: Exception,
+) -> _submit_notebook.NotebookSubmitCpuFallbackDecision:
+    return _submit_notebook.decide_submit_kernel_cpu_fallback(
+        accelerator=config.accelerator,
+        strict_accelerator=config.strict_accelerator,
+        is_capacity_error=isinstance(exc, KernelCapacityError),
+        is_push_error=isinstance(exc, KaggleCliError) and _is_submit_kernel_push_error(exc),
+    )
 
 
 def _is_submit_kernel_push_error(exc: KaggleCliError) -> bool:
@@ -9882,9 +9887,12 @@ def _is_submit_kernel_push_error(exc: KaggleCliError) -> bool:
 
 
 def _submit_kernel_cpu_retry_reason(exc: Exception) -> str:
-    if isinstance(exc, KernelCapacityError):
-        return "Kaggle GPU capacity is unavailable"
-    return "Kaggle notebook push failed under GPU metadata"
+    return _submit_notebook.decide_submit_kernel_cpu_fallback(
+        accelerator="gpu",
+        strict_accelerator=False,
+        is_capacity_error=isinstance(exc, KernelCapacityError),
+        is_push_error=isinstance(exc, KaggleCliError) and _is_submit_kernel_push_error(exc),
+    ).reason
 
 
 def _infer_campaign_candidate_category(

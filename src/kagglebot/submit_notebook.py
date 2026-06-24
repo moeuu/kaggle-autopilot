@@ -22,6 +22,13 @@ class NotebookSubmitRetryDecision:
     message: str
 
 
+@dataclass(frozen=True)
+class NotebookSubmitCpuFallbackDecision:
+    retry_on_cpu: bool
+    reason: str
+    message: str
+
+
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:
     return str(value or "wrapper").strip().lower() or "wrapper"
 
@@ -92,3 +99,31 @@ def decide_ambiguous_notebook_submit_retry(
         wait_seconds=wait_seconds,
         message=message,
     )
+
+
+def decide_submit_kernel_cpu_fallback(
+    *,
+    accelerator: str,
+    strict_accelerator: bool,
+    is_capacity_error: bool,
+    is_push_error: bool,
+) -> NotebookSubmitCpuFallbackDecision:
+    if str(accelerator).strip().lower() != "gpu":
+        return _no_cpu_fallback()
+    if strict_accelerator:
+        return _no_cpu_fallback()
+    if is_capacity_error:
+        reason = "Kaggle GPU capacity is unavailable"
+    elif is_push_error:
+        reason = "Kaggle notebook push failed under GPU metadata"
+    else:
+        return _no_cpu_fallback()
+    return NotebookSubmitCpuFallbackDecision(
+        retry_on_cpu=True,
+        reason=reason,
+        message=f"[yellow]submit notebook[/yellow]: {reason}; retrying submit kernel on CPU.",
+    )
+
+
+def _no_cpu_fallback() -> NotebookSubmitCpuFallbackDecision:
+    return NotebookSubmitCpuFallbackDecision(retry_on_cpu=False, reason="", message="")
