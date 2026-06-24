@@ -9501,16 +9501,16 @@ def _attempt_submit(
                 submission_reference = str(submission_result.submission_path)
                 submission_artifact_path = submission_result.submission_path
         except SubmissionCliError as exc:
-            classification_stderr = exc.stderr or ""
-            classification = classify_submit_error(exc.stdout, classification_stderr, exc.exit_code)
-            if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and (
-                exc.output
-            ):
-                fallback_stderr = "\n".join(part for part in [classification_stderr, exc.output] if part)
-                classification = classify_submit_error(exc.stdout, fallback_stderr, exc.exit_code)
-                classification_stderr = fallback_stderr
-            classification_kind = str(classification.get("kind") or "unknown")
-            classification_reason = str(classification.get("reason") or "unclassified_submit_error")
+            submit_error_classification = _submit_stage.classify_submit_stage_error(
+                stdout=exc.stdout,
+                stderr=exc.stderr or "",
+                output=exc.output or "",
+                exit_code=exc.exit_code,
+                classify_submit_error=classify_submit_error,
+            )
+            classification_stderr = submit_error_classification.stderr
+            classification_kind = submit_error_classification.kind
+            classification_reason = submit_error_classification.reason
             notebook_fallback_decision = _submit_stage.decide_notebook_fallback_after_file_submit_error(
                 notebook_submit_required=notebook_submit_required,
                 notebook_fallback_activated=notebook_fallback_activated,
@@ -9571,10 +9571,8 @@ def _attempt_submit(
                         exit_code=exc.exit_code,
                     )
             seen_fingerprints.add(fingerprint)
-            retry_after = classification.get("retry_after_seconds")
-            retry_after_value = float(retry_after) if isinstance(retry_after, (int, float)) else 0.0
             if classification_kind == "transient" and attempt < max_attempts:
-                wait_seconds = max(_compute_submit_backoff(attempt), retry_after_value)
+                wait_seconds = max(_compute_submit_backoff(attempt), submit_error_classification.retry_after_seconds)
                 print(
                     "[yellow]submit retry[/yellow]: transient submit error "
                     f"(reason={classification_reason}, attempt={attempt}/{max_attempts}, wait={wait_seconds:.1f}s)"

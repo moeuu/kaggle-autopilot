@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from kagglebot.submit_stage import (
+    classify_submit_stage_error,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
 )
@@ -49,6 +50,49 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
         "[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit",
         "[yellow]submit mode[/yellow]: using notebook submit",
     )
+
+
+def test_classify_submit_stage_error_uses_output_fallback() -> None:
+    calls: list[str] = []
+
+    def classify(stdout: str, stderr: str, exit_code: int | None) -> dict[str, object]:  # noqa: ARG001
+        calls.append(stderr)
+        if "kernel must be specified" in stderr:
+            return {
+                "kind": "permanent",
+                "reason": "ambiguous_notebook_bad_request",
+                "retry_after_seconds": 4,
+            }
+        return {"reason": "unclassified_submit_error"}
+
+    classification = classify_submit_stage_error(
+        stdout="",
+        stderr="",
+        output="400 Client Error\nkernel must be specified",
+        exit_code=1,
+        classify_submit_error=classify,
+    )
+
+    assert classification.stderr == "400 Client Error\nkernel must be specified"
+    assert classification.kind == "permanent"
+    assert classification.reason == "ambiguous_notebook_bad_request"
+    assert classification.retry_after_seconds == 4.0
+    assert calls == ["", "400 Client Error\nkernel must be specified"]
+
+
+def test_classify_submit_stage_error_defaults_unknown_kind_and_reason() -> None:
+    classification = classify_submit_stage_error(
+        stdout="",
+        stderr="generic",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {},
+    )
+
+    assert classification.stderr == "generic"
+    assert classification.kind == "unknown"
+    assert classification.reason == "unclassified_submit_error"
+    assert classification.retry_after_seconds == 0.0
 
 
 def test_decide_notebook_fallback_after_file_submit_error_retries_as_notebook() -> None:

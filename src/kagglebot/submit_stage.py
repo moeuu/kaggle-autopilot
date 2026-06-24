@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -18,6 +19,15 @@ class SubmitStageNotebookFallbackDecision:
     notebook_fallback_activated: bool
     submission_artifact_mode: str
     messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SubmitStageErrorClassification:
+    classification: dict[str, object]
+    stderr: str
+    kind: str
+    reason: str
+    retry_after_seconds: float
 
 
 def decide_initial_submit_stage_mode(
@@ -46,6 +56,29 @@ def decide_initial_submit_stage_mode(
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
+    )
+
+
+def classify_submit_stage_error(
+    *,
+    stdout: str,
+    stderr: str,
+    output: str,
+    exit_code: int | None,
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
+) -> SubmitStageErrorClassification:
+    classification_stderr = stderr or ""
+    classification = classify_submit_error(stdout, classification_stderr, exit_code)
+    if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and output:
+        classification_stderr = "\n".join(part for part in [classification_stderr, output] if part)
+        classification = classify_submit_error(stdout, classification_stderr, exit_code)
+    retry_after = classification.get("retry_after_seconds")
+    return SubmitStageErrorClassification(
+        classification=classification,
+        stderr=classification_stderr,
+        kind=str(classification.get("kind") or "unknown"),
+        reason=str(classification.get("reason") or "unclassified_submit_error"),
+        retry_after_seconds=float(retry_after) if isinstance(retry_after, (int, float)) else 0.0,
     )
 
 
