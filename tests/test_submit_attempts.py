@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from kagglebot.submit_attempts import build_submit_attempt_payload, build_submit_run_state_update
+from kagglebot.submit_attempts import (
+    build_submit_attempt_payload,
+    build_submit_knowledge_payload,
+    build_submit_run_state_update,
+)
 
 
 def test_build_submit_attempt_payload_sets_required_fields_and_tails() -> None:
@@ -100,3 +104,33 @@ def test_build_submit_run_state_update_can_preserve_skip_without_submit_ok() -> 
     assert "submit_ok" not in update
     assert update["last_submission_sha256"] == "sha"
     assert update["submit_attempts_count"] == 1
+
+
+def test_build_submit_knowledge_payload_formats_error_and_fix_summary() -> None:
+    payload = build_submit_knowledge_payload(
+        iteration=None,
+        error_kind="transient",
+        reason="network_or_timeout",
+        action_taken="retry",
+        fingerprint="fp",
+        details="  first line\nsecond line  ",
+        normalize_detail=lambda text, max_chars: " ".join(str(text).split())[:max_chars],
+    )
+
+    assert payload.iteration == 1
+    assert payload.error_message == "submit_error kind=transient reason=network_or_timeout fingerprint=fp"
+    assert payload.fix_summary == "submit_action=retry; detail=first line second line"
+
+
+def test_build_submit_knowledge_payload_preserves_explicit_iteration() -> None:
+    payload = build_submit_knowledge_payload(
+        iteration=3,
+        error_kind="validation",
+        reason="local_submission_validation_failed",
+        action_taken="abort",
+        fingerprint="fp",
+        details="bad submission",
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+    )
+
+    assert payload.iteration == 3

@@ -10208,6 +10208,26 @@ def _build_submit_run_state_update(
     )
 
 
+def _build_submit_knowledge_payload(
+    *,
+    iteration: int | None,
+    error_kind: str,
+    reason: str,
+    action_taken: str,
+    fingerprint: str,
+    details: str,
+) -> _submit_attempts.SubmitKnowledgePayload:
+    return _submit_attempts.build_submit_knowledge_payload(
+        iteration=iteration,
+        error_kind=error_kind,
+        reason=reason,
+        action_taken=action_taken,
+        fingerprint=fingerprint,
+        details=details,
+        normalize_detail=normalize_error_text,
+    )
+
+
 def _submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
     normalized_sha = str(submission_sha or "").strip()
     if not normalized_sha:
@@ -10563,19 +10583,23 @@ def _record_submit_reason_knowledge(
     fingerprint: str,
     details: str,
 ) -> None:
-    iteration = _infer_iteration_from_submission_path(submission_path) or 1
-    summary = normalize_error_text(details, max_chars=1200)
-    message = f"submit_error kind={error_kind} reason={reason} fingerprint={fingerprint}"
-    fix = f"submit_action={action_taken}; detail={summary}"
+    payload = _build_submit_knowledge_payload(
+        iteration=_infer_iteration_from_submission_path(submission_path),
+        error_kind=error_kind,
+        reason=reason,
+        action_taken=action_taken,
+        fingerprint=fingerprint,
+        details=details,
+    )
     try:
         record_error_fix_insight(
             knowledge_paths=config.knowledge_paths,
             slug=config.slug,
             run_id=run_id,
-            iteration=iteration,
+            iteration=payload.iteration,
             problem_types=problem_types,
-            error_message=message,
-            fix_summary=fix,
+            error_message=payload.error_message,
+            fix_summary=payload.fix_summary,
             resolved=False,
             outcome_bucket="unknown",
             submission_score=None,

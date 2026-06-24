@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SubmitKnowledgePayload:
+    iteration: int
+    error_message: str
+    fix_summary: str
+
 
 def build_submit_attempt_payload(
     *,
@@ -67,3 +77,21 @@ def build_submit_run_state_update(
     if submission_sha256 is not None:
         update["last_submission_sha256"] = submission_sha256
     return update
+
+
+def build_submit_knowledge_payload(
+    *,
+    iteration: int | None,
+    error_kind: str,
+    reason: str,
+    action_taken: str,
+    fingerprint: str,
+    details: str,
+    normalize_detail: Callable[..., str],
+) -> SubmitKnowledgePayload:
+    normalized_detail = normalize_detail(details, max_chars=1200)
+    return SubmitKnowledgePayload(
+        iteration=iteration or 1,
+        error_message=f"submit_error kind={error_kind} reason={reason} fingerprint={fingerprint}",
+        fix_summary=f"submit_action={action_taken}; detail={normalized_detail}",
+    )
