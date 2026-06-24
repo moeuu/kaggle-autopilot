@@ -6,7 +6,9 @@ from kagglebot.submit_notebook import (
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_reference,
     decide_ambiguous_notebook_submit_retry,
+    decide_notebook_submit_artifact_mode,
     decide_submit_kernel_cpu_fallback,
+    is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
 )
 
@@ -64,6 +66,46 @@ def test_build_kaggle_submit_kernel_kwargs_uses_reference_fields() -> None:
         "version": "3",
         "dry_run": True,
     }
+
+
+def test_decide_notebook_submit_artifact_mode_forces_inference_for_code_competition() -> None:
+    decision = decide_notebook_submit_artifact_mode(
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        code_competition=True,
+        sample_data_rows=100,
+        submission_data_rows=100,
+    )
+
+    assert decision.mode == "inference"
+    assert decision.reason == "code_competition"
+
+
+def test_decide_notebook_submit_artifact_mode_forces_inference_for_tiny_public_contract() -> None:
+    decision = decide_notebook_submit_artifact_mode(
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        code_competition=False,
+        sample_data_rows=3,
+        submission_data_rows=3,
+    )
+
+    assert decision.mode == "inference"
+    assert decision.reason == "tiny_public_sample_notebook_contract"
+    assert "hidden-test row mismatch" in decision.message
+
+
+def test_decide_notebook_submit_artifact_mode_keeps_wrapper_for_regular_notebook_submit() -> None:
+    decision = decide_notebook_submit_artifact_mode(
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        code_competition=False,
+        sample_data_rows=100,
+        submission_data_rows=100,
+    )
+
+    assert decision.mode == "wrapper"
+    assert decision.reason == ""
 
 
 def test_decide_ambiguous_notebook_submit_retry_uses_output_fallback() -> None:
@@ -148,3 +190,13 @@ def test_decide_submit_kernel_cpu_fallback_rejects_strict_or_non_gpu() -> None:
     assert strict.retry_on_cpu is False
     assert strict.message == ""
     assert cpu.retry_on_cpu is False
+
+
+def test_is_submit_kernel_push_error_text_detects_known_markers() -> None:
+    assert is_submit_kernel_push_error_text(output="Kernel push error: Notebook not found") is True
+    assert is_submit_kernel_push_error_text(stderr="kernel not found after push") is True
+    assert is_submit_kernel_push_error_text(stdout="Kaggle kernel push failed") is True
+
+
+def test_is_submit_kernel_push_error_text_rejects_generic_errors() -> None:
+    assert is_submit_kernel_push_error_text(stderr="400 Client Error: Bad Request") is False

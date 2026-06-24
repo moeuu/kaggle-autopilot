@@ -3466,6 +3466,39 @@ def _resolve_notebook_submit_artifact_mode(*, paths: CompetitionPaths, submit_mo
     return "inference" if infer_code_competition_from_paths(paths) else "wrapper"
 
 
+def _decide_notebook_submit_artifact_mode_for_submission(
+    *,
+    paths: CompetitionPaths,
+    requested_mode: str | None,
+    notebook_submit_required: bool,
+    submission_path: Path,
+) -> _submit_notebook.NotebookSubmitArtifactModeDecision:
+    code_competition = infer_code_competition_from_paths(paths) if notebook_submit_required else False
+    sample_rows = _count_csv_data_rows_capped(paths.sample_submission_path)
+    if sample_rows is None:
+        sample_rows = _count_csv_data_rows_capped(paths.data_dir / "sample_submission.csv")
+    return _submit_notebook.decide_notebook_submit_artifact_mode(
+        requested_mode=requested_mode,
+        notebook_submit_required=notebook_submit_required,
+        code_competition=code_competition,
+        sample_data_rows=sample_rows,
+        submission_data_rows=_count_csv_data_rows_capped(submission_path),
+    )
+
+
+def _count_csv_data_rows_capped(path: Path, *, cap: int = 10) -> int | None:
+    data_rows = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            for index, _line in enumerate(handle):
+                if index > cap:
+                    return cap + 1
+                data_rows = index
+    except OSError:
+        return None
+    return data_rows
+
+
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
     def choose(value, fallback, default):
         if value is not None:
@@ -9386,6 +9419,15 @@ def _attempt_submit(
         if notebook_submit_required
         else str(notebook_submit_artifact_mode or "wrapper")
     )
+    artifact_mode_decision = _decide_notebook_submit_artifact_mode_for_submission(
+        paths=config.paths,
+        requested_mode=submission_artifact_mode,
+        notebook_submit_required=notebook_submit_required,
+        submission_path=prepared_submission_path,
+    )
+    submission_artifact_mode = artifact_mode_decision.mode
+    if artifact_mode_decision.message:
+        print(artifact_mode_decision.message)
     if notebook_submit_required:
         print("[yellow]submit mode[/yellow]: using notebook submit")
 
@@ -9478,10 +9520,19 @@ def _attempt_submit(
                     paths=config.paths,
                     submit_mode="notebook",
                 )
+                artifact_mode_decision = _decide_notebook_submit_artifact_mode_for_submission(
+                    paths=config.paths,
+                    requested_mode=submission_artifact_mode,
+                    notebook_submit_required=notebook_submit_required,
+                    submission_path=prepared_submission_path,
+                )
+                submission_artifact_mode = artifact_mode_decision.mode
                 print(
                     "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
                     "retrying via notebook submit automatically."
                 )
+                if artifact_mode_decision.message:
+                    print(artifact_mode_decision.message)
                 continue
             fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
             if fingerprint in seen_fingerprints:
@@ -9868,21 +9919,11 @@ def _decide_submit_kernel_cpu_fallback(
 
 
 def _is_submit_kernel_push_error(exc: KaggleCliError) -> bool:
-    text = "\n".join(
-        part
-        for part in (
-            str(exc),
-            getattr(exc, "output", "") or "",
-            getattr(exc, "stdout", "") or "",
-            getattr(exc, "stderr", "") or "",
-        )
-        if part
-    ).lower()
-    return (
-        "kernel push error:" in text
-        or "kaggle kernel push failed" in text
-        or "kernel not found after push" in text
-        or "notebook not found" in text
+    return _submit_notebook.is_submit_kernel_push_error_text(
+        message=str(exc),
+        output=getattr(exc, "output", "") or "",
+        stdout=getattr(exc, "stdout", "") or "",
+        stderr=getattr(exc, "stderr", "") or "",
     )
 
 

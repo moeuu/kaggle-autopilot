@@ -29,8 +29,51 @@ class NotebookSubmitCpuFallbackDecision:
     message: str
 
 
+@dataclass(frozen=True)
+class NotebookSubmitArtifactModeDecision:
+    mode: str
+    reason: str
+    message: str
+
+
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:
     return str(value or "wrapper").strip().lower() or "wrapper"
+
+
+def decide_notebook_submit_artifact_mode(
+    *,
+    requested_mode: str | None,
+    notebook_submit_required: bool,
+    code_competition: bool,
+    sample_data_rows: int | None,
+    submission_data_rows: int | None,
+    tiny_row_limit: int = 10,
+) -> NotebookSubmitArtifactModeDecision:
+    mode = normalize_notebook_submit_artifact_mode(requested_mode)
+    if not notebook_submit_required:
+        return _artifact_mode_decision(mode)
+    if mode == "inference":
+        return _artifact_mode_decision(mode)
+    if code_competition:
+        return _artifact_mode_decision(
+            "inference",
+            reason="code_competition",
+            message=("[yellow]submit mode[/yellow]: code competition detected; using inference-mode notebook submit."),
+        )
+    if _is_tiny_public_notebook_contract(
+        sample_data_rows=sample_data_rows,
+        submission_data_rows=submission_data_rows,
+        tiny_row_limit=tiny_row_limit,
+    ):
+        return _artifact_mode_decision(
+            "inference",
+            reason="tiny_public_sample_notebook_contract",
+            message=(
+                "[yellow]submit mode[/yellow]: tiny notebook sample/submission detected; "
+                "using inference-mode notebook submit to avoid hidden-test row mismatch."
+            ),
+        )
+    return _artifact_mode_decision(mode)
 
 
 def build_notebook_submit_reference(
@@ -123,6 +166,42 @@ def decide_submit_kernel_cpu_fallback(
         reason=reason,
         message=f"[yellow]submit notebook[/yellow]: {reason}; retrying submit kernel on CPU.",
     )
+
+
+def is_submit_kernel_push_error_text(
+    *,
+    message: str = "",
+    output: str = "",
+    stdout: str = "",
+    stderr: str = "",
+) -> bool:
+    text = "\n".join(part for part in (message, output, stdout, stderr) if part).lower()
+    return (
+        "kernel push error:" in text
+        or "kaggle kernel push failed" in text
+        or "kernel not found after push" in text
+        or "notebook not found" in text
+    )
+
+
+def _artifact_mode_decision(
+    mode: str,
+    *,
+    reason: str = "",
+    message: str = "",
+) -> NotebookSubmitArtifactModeDecision:
+    return NotebookSubmitArtifactModeDecision(mode=mode, reason=reason, message=message)
+
+
+def _is_tiny_public_notebook_contract(
+    *,
+    sample_data_rows: int | None,
+    submission_data_rows: int | None,
+    tiny_row_limit: int,
+) -> bool:
+    if sample_data_rows is None or submission_data_rows is None:
+        return False
+    return 0 < sample_data_rows <= tiny_row_limit and 0 < submission_data_rows <= tiny_row_limit
 
 
 def _no_cpu_fallback() -> NotebookSubmitCpuFallbackDecision:

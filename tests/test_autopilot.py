@@ -25,6 +25,7 @@ from kagglebot.autopilot import (
     _callable_accepts_keyword_argument,
     _count_submission_rows_in_recent_window,
     _count_submission_rows_on_utc_day,
+    _decide_notebook_submit_artifact_mode_for_submission,
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
     _error_strategy_skip_reason,
@@ -767,6 +768,25 @@ def test_resolve_plan_uses_inference_mode_for_notebook_tiny_public_test(tmp_path
     assert resolved["submit_mode"] == "notebook"
     assert resolved["code_competition"] is True
     assert resolved["notebook_submit_artifact_mode"] == "inference"
+
+
+def test_decide_notebook_submit_artifact_mode_for_submission_detects_tiny_contract(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, compute="local_gpu")
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.data_dir.mkdir(parents=True, exist_ok=True)
+    config.paths.sample_submission_path.write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
+
+    decision = _decide_notebook_submit_artifact_mode_for_submission(
+        paths=config.paths,
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        submission_path=submission_path,
+    )
+
+    assert decision.mode == "inference"
+    assert decision.reason == "tiny_public_sample_notebook_contract"
 
 
 def test_resolve_plan_defaults_to_winner_target_for_leaderboard(tmp_path: Path) -> None:
