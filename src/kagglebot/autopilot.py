@@ -9823,10 +9823,6 @@ def _submit_with_notebook_kernel(
     return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
 
 
-def _should_retry_submit_kernel_on_cpu(*, config: AutopilotConfig, exc: Exception) -> bool:
-    return _decide_submit_kernel_cpu_fallback(config=config, exc=exc).retry_on_cpu
-
-
 def _decide_submit_kernel_cpu_fallback(
     *,
     config: AutopilotConfig,
@@ -9840,21 +9836,6 @@ def _decide_submit_kernel_cpu_fallback(
         is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
         and _submit_notebook.is_submit_kernel_push_error(candidate),
     )
-
-
-def _is_submit_kernel_push_error(exc: KaggleCliError) -> bool:
-    return _submit_notebook.is_submit_kernel_push_error(exc)
-
-
-def _submit_kernel_cpu_retry_reason(exc: Exception) -> str:
-    return _submit_notebook.decide_submit_kernel_cpu_fallback_for_exception(
-        accelerator="gpu",
-        strict_accelerator=False,
-        exc=exc,
-        is_capacity_error=lambda candidate: isinstance(candidate, KernelCapacityError),
-        is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
-        and _submit_notebook.is_submit_kernel_push_error(candidate),
-    ).reason
 
 
 def _infer_campaign_candidate_category(
