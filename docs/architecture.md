@@ -72,6 +72,8 @@ Submit failure classification, notebook-submit fallback detection, and repair-ta
 `src/kagglebot/submit_failure_policy.py`. The loop still owns persistence, ledgers, and knowledge recording, but it no
 longer owns the pure decision table for whether a failed submit should repair the artifact, submit mode/kernel, platform
 polling path, or wait for manual intervention.
+Submit failure context persistence, reference parsing, and prompt formatting live in
+`src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out of the main loop.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 
@@ -144,8 +146,8 @@ Recommended extraction order:
    normalization, and competition-specific overrides are already out of the main loop.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object.
-3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification is
-   now extracted; next, move repair artifact resolution and submit autofix context construction behind a small adapter.
+3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification
+   and context formatting are now extracted; next, move repair artifact resolution behind a small adapter.
 4. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

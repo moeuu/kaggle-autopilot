@@ -28,6 +28,7 @@ from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import score_sources as _score_sources
 from kagglebot import submission_policy as _submission_policy
+from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
@@ -270,6 +271,13 @@ _submit_error_targets_submit_mode = _submit_failure_policy.submit_error_targets_
 _classify_submit_failure_repair_decision = _submit_failure_policy.classify_submit_failure_repair
 _submit_error_text_indicates_file_issue = _submit_failure_policy.submit_error_text_indicates_file_issue
 _submit_error_requires_file_fix = _submit_failure_policy.submit_error_requires_file_fix
+_SUBMIT_FAILURE_CONTEXT_FILENAME = _submit_failure_context.SUBMIT_FAILURE_CONTEXT_FILENAME
+_submit_failure_context_path = _submit_failure_context.submit_failure_context_path
+_load_submit_failure_context = _submit_failure_context.load_submit_failure_context
+_save_submit_failure_context = _submit_failure_context.save_submit_failure_context
+_mark_submit_failure_context_resolved = _submit_failure_context.mark_submit_failure_context_resolved
+_path_from_submit_reference = _submit_failure_context.path_from_submit_reference
+_format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
 
 
 def _classify_submit_failure_repair(
@@ -378,7 +386,6 @@ _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
-_SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 _CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
@@ -10192,29 +10199,6 @@ def _submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
     return False
 
 
-def _submit_failure_context_path(run_dir: Path) -> Path:
-    return run_dir / _SUBMIT_FAILURE_CONTEXT_FILENAME
-
-
-def _load_submit_failure_context(run_dir: Path) -> dict[str, object]:
-    path = _submit_failure_context_path(run_dir)
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    return _normalize_loaded_submit_failure_context(payload)
-
-
-def _save_submit_failure_context(run_dir: Path, payload: dict[str, object]) -> None:
-    path = _submit_failure_context_path(run_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
 def _build_submit_failure_context_payload(
     *,
     run_dir: Path,
@@ -10272,23 +10256,6 @@ def _build_submit_failure_context_payload(
     return payload
 
 
-def _mark_submit_failure_context_resolved(
-    *,
-    run_dir: Path,
-    resolution: str,
-    submission_ref: str | None = None,
-) -> None:
-    payload = _load_submit_failure_context(run_dir)
-    if not payload:
-        return
-    payload["active"] = False
-    payload["resolution"] = resolution
-    payload["resolved_at"] = datetime.now(UTC).isoformat()
-    if submission_ref is not None:
-        payload["resolved_submission_ref"] = submission_ref
-    _save_submit_failure_context(run_dir, payload)
-
-
 def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path) -> None:
     state = _load_run_state(run_dir)
     repaired_path = _path_from_submit_reference(state.get("submit_autofix_submission_path"))
@@ -10308,16 +10275,6 @@ def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path
     failure_context["stale_repaired_artifact_cleared_at"] = datetime.now(UTC).isoformat()
     failure_context["superseded_by_submission_path"] = str(submission_path)
     _save_submit_failure_context(run_dir, failure_context)
-
-
-def _path_from_submit_reference(value: object) -> Path | None:
-    text = str(value or "").strip()
-    if not text or text.startswith("kernel:"):
-        return None
-    try:
-        return Path(text)
-    except TypeError:
-        return None
 
 
 def _resolve_submit_autofix_submission_artifact(*, config: AutopilotConfig, run_id: str, run_dir: Path) -> Path | None:
@@ -10477,104 +10434,11 @@ def _submit_file_fix_contract_satisfied(
 
 
 def _build_submit_autofix_context(run_dir: Path) -> str:
-    failure_context = _load_submit_failure_context(run_dir)
-    state = _load_run_state(run_dir)
-    latest = _load_latest_submit_attempt(run_dir)
-    lines: list[str] = []
-    if failure_context:
-        lines.append("submit_failure_context:")
-        for key in (
-            "ts",
-            "active",
-            "repair_target",
-            "repairable",
-            "reason",
-            "error_kind",
-            "fingerprint",
-            "submit_mode",
-            "artifact_mode",
-            "submission_ref",
-            "submission_artifact_path",
-            "submission_artifact_sha256",
-            "manual_next_step",
-            "summary",
-        ):
-            value = failure_context.get(key)
-            if value in (None, "", []):
-                continue
-            lines.append(f"- {key}: {value}")
-        latest_context_attempt = failure_context.get("latest_submit_attempt")
-        if isinstance(latest_context_attempt, dict) and latest_context_attempt:
-            lines.append("failure_context_latest_submit_attempt:")
-            for key in (
-                "ts",
-                "ok",
-                "exit_code",
-                "error_kind",
-                "reason",
-                "action_taken",
-                "fingerprint",
-                "sub_path",
-            ):
-                value = latest_context_attempt.get(key)
-                if value in (None, ""):
-                    continue
-                lines.append(f"- {key}: {value}")
-        run_state_excerpt = failure_context.get("run_state_excerpt")
-        if isinstance(run_state_excerpt, dict) and run_state_excerpt:
-            lines.append("failure_context_run_state:")
-            for key in (
-                "submit_attempted",
-                "submit_ok",
-                "last_reason",
-                "last_error_kind",
-                "last_submission_path",
-                "submit_autofix_submission_path",
-            ):
-                value = run_state_excerpt.get(key)
-                if value in (None, ""):
-                    continue
-                lines.append(f"- {key}: {value}")
-    state_keys = (
-        "submit_attempted",
-        "submit_ok",
-        "last_error_kind",
-        "last_reason",
-        "last_action",
-        "last_submit_fingerprint",
-        "last_submission_path",
-        "submit_autofix_submission_path",
+    return _format_submit_autofix_context(
+        failure_context=_load_submit_failure_context(run_dir),
+        run_state=_load_run_state(run_dir),
+        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
-    lines.append("run_state:")
-    for key in state_keys:
-        value = state.get(key)
-        if value in (None, ""):
-            continue
-        lines.append(f"- {key}: {value}")
-
-    if latest:
-        lines.append("latest_submit_attempt:")
-        for key in (
-            "ts",
-            "ok",
-            "exit_code",
-            "error_kind",
-            "reason",
-            "action_taken",
-            "fingerprint",
-            "sub_path",
-        ):
-            value = latest.get(key)
-            if value in (None, ""):
-                continue
-            lines.append(f"- {key}: {value}")
-        stdout_tail = normalize_error_text(str(latest.get("stdout_tail") or ""), max_chars=1200)
-        stderr_tail = normalize_error_text(str(latest.get("stderr_tail") or ""), max_chars=1200)
-        if stdout_tail:
-            lines.append(f"- stdout_tail: {stdout_tail}")
-        if stderr_tail:
-            lines.append(f"- stderr_tail: {stderr_tail}")
-    return "\n".join(lines).strip()
 
 
 def _sha256_or_none(path: Path | None) -> str | None:
