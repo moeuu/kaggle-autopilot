@@ -4,6 +4,7 @@ import json
 
 from kagglebot.submit_attempts import (
     SubmitAttemptRecorder,
+    SubmitAttemptStatePayloads,
     append_submit_attempt,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
@@ -101,9 +102,11 @@ def test_submit_attempt_recorder_appends_attempt_and_saves_state(tmp_path) -> No
         run_dir=tmp_path,
         save_run_state=saved_updates.append,
     )
-    recorder.record_state(
-        attempt_payload={"run_id": "run-1", "ok": True},
-        run_state_update={"submit_attempted": True, "submit_ok": True},
+    recorder.record_payloads(
+        SubmitAttemptStatePayloads(
+            attempt_payload={"run_id": "run-1", "ok": True},
+            run_state_update={"submit_attempted": True, "submit_ok": True},
+        )
     )
 
     rows = load_submit_attempt_rows(tmp_path)

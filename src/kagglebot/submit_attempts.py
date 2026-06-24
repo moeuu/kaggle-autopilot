@@ -21,21 +21,14 @@ class SubmitOutcomeRecordingDecision:
 
 
 @dataclass(frozen=True)
-class SubmitSuccessRecordPayloads:
+class SubmitAttemptStatePayloads:
     attempt_payload: dict[str, object]
     run_state_update: dict[str, object]
 
 
-@dataclass(frozen=True)
-class SubmitAbortRecordPayloads:
-    attempt_payload: dict[str, object]
-    run_state_update: dict[str, object]
-
-
-@dataclass(frozen=True)
-class SubmitSkipRecordPayloads:
-    attempt_payload: dict[str, object]
-    run_state_update: dict[str, object]
+SubmitSuccessRecordPayloads = SubmitAttemptStatePayloads
+SubmitAbortRecordPayloads = SubmitAttemptStatePayloads
+SubmitSkipRecordPayloads = SubmitAttemptStatePayloads
 
 
 @dataclass(frozen=True)
@@ -49,6 +42,12 @@ class SubmitAttemptRecorder:
     def record_state(self, *, attempt_payload: dict[str, object], run_state_update: dict[str, object]) -> None:
         self.append(attempt_payload)
         self.save_run_state(run_state_update)
+
+    def record_payloads(self, payloads: SubmitAttemptStatePayloads) -> None:
+        self.record_state(
+            attempt_payload=payloads.attempt_payload,
+            run_state_update=payloads.run_state_update,
+        )
 
 
 def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso: str | None = None) -> None:
@@ -224,8 +223,8 @@ def build_submit_success_record_payloads(
     prior_state: dict[str, object],
     stdout_tail_chars: int,
     stderr_tail_chars: int,
-) -> SubmitSuccessRecordPayloads:
-    return SubmitSuccessRecordPayloads(
+) -> SubmitAttemptStatePayloads:
+    return SubmitAttemptStatePayloads(
         attempt_payload=build_submit_attempt_payload(
             run_id=run_id,
             submission_ref=submission_ref,
@@ -270,8 +269,8 @@ def build_submit_abort_record_payloads(
     prior_submit_ok: bool,
     stdout_tail_chars: int,
     stderr_tail_chars: int,
-) -> SubmitAbortRecordPayloads:
-    return SubmitAbortRecordPayloads(
+) -> SubmitAttemptStatePayloads:
+    return SubmitAttemptStatePayloads(
         attempt_payload=build_submit_attempt_payload(
             run_id=run_id,
             submission_ref=submission_ref,
@@ -345,8 +344,8 @@ def build_submit_skip_record_payloads(
     stdout_tail_chars: int,
     stderr_tail_chars: int,
     duplicate_sources: list[str] | None = None,
-) -> SubmitSkipRecordPayloads:
-    return SubmitSkipRecordPayloads(
+) -> SubmitAttemptStatePayloads:
+    return SubmitAttemptStatePayloads(
         attempt_payload=build_submit_skip_attempt_payload(
             run_id=run_id,
             submission_ref=submission_ref,

@@ -9346,10 +9346,7 @@ def _attempt_submit(
             stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
             duplicate_sources=duplicate_sources,
         )
-        submit_attempt_recorder.record_state(
-            attempt_payload=skip_payloads.attempt_payload,
-            run_state_update=skip_payloads.run_state_update,
-        )
+        submit_attempt_recorder.record_payloads(skip_payloads)
         _mark_submit_failure_context_resolved(
             run_dir=run_dir,
             resolution=reason,
@@ -9659,10 +9656,7 @@ def _attempt_submit(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-    submit_attempt_recorder.record_state(
-        attempt_payload=submit_success_payloads.attempt_payload,
-        run_state_update=submit_success_payloads.run_state_update,
-    )
+    submit_attempt_recorder.record_payloads(submit_success_payloads)
     print("[green]submission recorded[/green]")
     try:
         outcome = _wait_for_submission_outcome(
@@ -10082,10 +10076,7 @@ def _abort_submit_for_run(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-    submit_attempt_recorder.record_state(
-        attempt_payload=abort_payloads.attempt_payload,
-        run_state_update=abort_payloads.run_state_update,
-    )
+    submit_attempt_recorder.record_payloads(abort_payloads)
     _save_submit_failure_context(
         run_dir,
         _build_submit_failure_context_payload(
