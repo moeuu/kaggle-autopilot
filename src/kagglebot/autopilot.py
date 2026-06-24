@@ -9442,9 +9442,8 @@ def _attempt_submit(
             print(same_path_decision.message)
         elif same_path_decision.action == "skip":
             print(same_path_decision.message)
-            _submit_attempts.append_submit_attempt(
-                run_dir=run_dir,
-                payload=_submit_attempts.build_submit_skip_attempt_payload(
+            submit_attempt_recorder.append(
+                _submit_attempts.build_submit_skip_attempt_payload(
                     run_id=run_id,
                     submission_ref=str(prepared_submission_path),
                     submission_sha256=_sha256_or_none(prepared_submission_path),
@@ -9453,7 +9452,7 @@ def _attempt_submit(
                     reason=same_path_decision.reason,
                     stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
                     stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-                ),
+                )
             )
             return None
 
@@ -9571,9 +9570,8 @@ def _attempt_submit(
                 )
             seen_fingerprints.add(fingerprint)
             if error_action.action == "retry":
-                _submit_attempts.append_submit_attempt(
-                    run_dir=run_dir,
-                    payload=_submit_attempts.build_submit_retry_attempt_payload(
+                submit_attempt_recorder.append(
+                    _submit_attempts.build_submit_retry_attempt_payload(
                         run_id=run_id,
                         submission_ref=submission_reference,
                         submission_sha256=_sha256_or_none(submission_artifact_path),
@@ -9584,7 +9582,7 @@ def _attempt_submit(
                         stderr=classification_stderr,
                         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
                         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-                    ),
+                    )
                 )
                 _record_submit_reason_knowledge(
                     config=config,
