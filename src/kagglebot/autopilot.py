@@ -9307,18 +9307,16 @@ def _attempt_submit(
             )
             _save_run_state(
                 run_dir,
-                {
-                    "submit_attempted": True,
-                    "last_submit_fingerprint": fingerprint,
-                    "last_fingerprint": fingerprint,
-                    "last_submit_code_fingerprint": submit_code_fingerprint,
-                    "last_error_kind": "none",
-                    "last_action": "skip",
-                    "last_reason": reason,
-                    "last_submission_path": str(prepared_submission_path),
-                    "last_submission_sha256": prepared_submission_sha,
-                    "submit_attempts_count": int(_load_run_state(run_dir).get("submit_attempts_count", 0)) + 1,
-                },
+                _build_submit_run_state_update(
+                    prior_state=_load_run_state(run_dir),
+                    fingerprint=fingerprint,
+                    code_fingerprint=submit_code_fingerprint,
+                    error_kind="none",
+                    action_taken="skip",
+                    reason=reason,
+                    submission_ref=str(prepared_submission_path),
+                    submission_sha256=prepared_submission_sha,
+                ),
             )
             _mark_submit_failure_context_resolved(
                 run_dir=run_dir,
@@ -9633,18 +9631,16 @@ def _attempt_submit(
     )
     _save_run_state(
         run_dir,
-        {
-            "submit_attempted": True,
-            "submit_ok": True,
-            "last_submit_fingerprint": fingerprint,
-            "last_fingerprint": fingerprint,
-            "last_submit_code_fingerprint": submit_code_fingerprint,
-            "last_error_kind": "none",
-            "last_action": "submit",
-            "last_reason": "submitted",
-            "last_submission_path": submission_ref,
-            "submit_attempts_count": int(_load_run_state(run_dir).get("submit_attempts_count", 0)) + 1,
-        },
+        _build_submit_run_state_update(
+            prior_state=_load_run_state(run_dir),
+            fingerprint=fingerprint,
+            code_fingerprint=submit_code_fingerprint,
+            error_kind="none",
+            action_taken="submit",
+            reason="submitted",
+            submission_ref=submission_ref,
+            submit_ok=True,
+        ),
     )
     print("[green]submission recorded[/green]")
     try:
@@ -10096,18 +10092,16 @@ def _abort_submit_for_run(
     prior_ok = bool(prior.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
     _save_run_state(
         run_dir,
-        {
-            "submit_attempted": True,
-            "submit_ok": prior_ok,
-            "last_submit_fingerprint": fingerprint,
-            "last_fingerprint": fingerprint,
-            "last_submit_code_fingerprint": code_fingerprint or "",
-            "last_error_kind": error_kind,
-            "last_action": "abort",
-            "last_reason": reason,
-            "last_submission_path": submission_ref_text,
-            "submit_attempts_count": int(prior.get("submit_attempts_count", 0)) + 1,
-        },
+        _build_submit_run_state_update(
+            prior_state=prior,
+            fingerprint=fingerprint,
+            code_fingerprint=code_fingerprint or "",
+            error_kind=error_kind,
+            action_taken="abort",
+            reason=reason,
+            submission_ref=submission_ref_text,
+            submit_ok=prior_ok,
+        ),
     )
     _save_submit_failure_context(
         run_dir,
@@ -10185,6 +10179,31 @@ def _build_submit_attempt_payload(
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         code_fingerprint=code_fingerprint,
         extra=extra,
+    )
+
+
+def _build_submit_run_state_update(
+    *,
+    prior_state: dict[str, object],
+    fingerprint: str,
+    code_fingerprint: str,
+    error_kind: str,
+    action_taken: str,
+    reason: str,
+    submission_ref: str,
+    submit_ok: bool | None = None,
+    submission_sha256: str | None = None,
+) -> dict[str, object]:
+    return _submit_attempts.build_submit_run_state_update(
+        prior_state=prior_state,
+        fingerprint=fingerprint,
+        code_fingerprint=code_fingerprint,
+        error_kind=error_kind,
+        action_taken=action_taken,
+        reason=reason,
+        submission_ref=submission_ref,
+        submit_ok=submit_ok,
+        submission_sha256=submission_sha256,
     )
 
 

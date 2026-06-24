@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kagglebot.submit_attempts import build_submit_attempt_payload
+from kagglebot.submit_attempts import build_submit_attempt_payload, build_submit_run_state_update
 
 
 def test_build_submit_attempt_payload_sets_required_fields_and_tails() -> None:
@@ -57,3 +57,46 @@ def test_build_submit_attempt_payload_includes_optional_fields() -> None:
     assert payload["code_fingerprint"] == "code-fp"
     assert payload["duplicate_sources"] == ["run_attempts"]
     assert payload["sub_sha256"] is None
+
+
+def test_build_submit_run_state_update_sets_common_last_submit_fields() -> None:
+    update = build_submit_run_state_update(
+        prior_state={"submit_attempts_count": 4},
+        fingerprint="fp",
+        code_fingerprint="code-fp",
+        error_kind="none",
+        action_taken="submit",
+        reason="submitted",
+        submission_ref="submission.csv",
+        submit_ok=True,
+    )
+
+    assert update == {
+        "submit_attempted": True,
+        "submit_ok": True,
+        "last_submit_fingerprint": "fp",
+        "last_fingerprint": "fp",
+        "last_submit_code_fingerprint": "code-fp",
+        "last_error_kind": "none",
+        "last_action": "submit",
+        "last_reason": "submitted",
+        "last_submission_path": "submission.csv",
+        "submit_attempts_count": 5,
+    }
+
+
+def test_build_submit_run_state_update_can_preserve_skip_without_submit_ok() -> None:
+    update = build_submit_run_state_update(
+        prior_state={},
+        fingerprint="fp",
+        code_fingerprint="code-fp",
+        error_kind="none",
+        action_taken="skip",
+        reason="duplicate_submission_sha_seen",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+    )
+
+    assert "submit_ok" not in update
+    assert update["last_submission_sha256"] == "sha"
+    assert update["submit_attempts_count"] == 1
