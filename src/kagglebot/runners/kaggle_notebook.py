@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -11,6 +10,7 @@ from pathlib import Path
 from rich import print
 
 from kagglebot import kaggle_cli
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.runners.base import RunContext, RunResult
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
@@ -450,7 +450,7 @@ class KaggleNotebookRunner:
             source_config=load_kernel_source_config(paths.plan_path),
         )
         kernel_metadata_path = kernel_dir / "kernel-metadata.json"
-        kernel_metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        write_json_object(kernel_metadata_path, metadata)
 
         kernel_main_path = kernel_dir / "main.py"
         kernel_main_path.write_text(render_kernel_main(slug, accelerator), encoding="utf-8")
@@ -479,7 +479,7 @@ class KaggleNotebookRunner:
             print("[yellow]DRY RUN[/yellow]: Kaggle CLI commands will not be executed.")
             for command in commands:
                 print(f"[cyan]planned[/cyan]: {command}")
-            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+            write_json_object(summary_path, summary)
             return RunResult(
                 run_id=run_id,
                 runner=self.name,
@@ -504,7 +504,7 @@ class KaggleNotebookRunner:
         shutil.copy2(submission_path, local_submission)
 
         summary["submission_path"] = str(local_submission)
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        write_json_object(summary_path, summary)
 
         return RunResult(
             run_id=run_id,
@@ -592,7 +592,9 @@ def resolve_kaggle_username(explicit: str | None) -> str:
     config_dir = Path(os.getenv("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser()
     config_path = config_dir / "kaggle.json"
     if config_path.exists():
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload = load_json_object(config_path)
+        if payload is None:
+            raise ValueError(f"Kaggle config is not a JSON object: {config_path}")
         username = payload.get("username")
         if username:
             return str(username)
@@ -678,14 +680,16 @@ def _stop_failed_kernel_run(
     stop_log = logs_dir / "kernel_stop.log"
     try:
         metadata_path = kernel_dir / "kernel-metadata.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = load_json_object(metadata_path)
+        if metadata is None:
+            raise ValueError(f"Kernel metadata is not a JSON object: {metadata_path}")
         metadata["id"] = kernel_id
         metadata["enable_gpu"] = False
         metadata["enable_tpu"] = False
         metadata["enable_internet"] = False
         metadata["code_file"] = "main.py"
         stop_dir.mkdir(parents=True, exist_ok=True)
-        (stop_dir / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        write_json_object(stop_dir / "kernel-metadata.json", metadata)
         (stop_dir / "main.py").write_text(
             "\n".join(
                 [
