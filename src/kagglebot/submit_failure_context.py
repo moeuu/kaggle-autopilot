@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,6 +10,12 @@ from kagglebot.submission.guard import normalize_error_text
 from kagglebot.submit_failure_policy import normalize_loaded_submit_failure_context
 
 SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
+
+
+@dataclass(frozen=True)
+class StaleSubmitAutofixDecision:
+    clear_repaired_path: bool
+    failure_context_updates: dict[str, object]
 
 
 def submit_failure_context_path(run_dir: Path) -> Path:
@@ -58,6 +66,81 @@ def path_from_submit_reference(value: object) -> Path | None:
         return Path(text)
     except TypeError:
         return None
+
+
+def decide_stale_submit_autofix_artifact(
+    *,
+    run_state: dict[str, object],
+    failure_context: dict[str, object],
+    submission_path: Path,
+    now_iso: str,
+) -> StaleSubmitAutofixDecision | None:
+    repaired_path = path_from_submit_reference(run_state.get("submit_autofix_submission_path"))
+    if repaired_path is None:
+        return None
+    if not failure_context:
+        return None
+    failed_artifact_path = path_from_submit_reference(
+        failure_context.get("submission_artifact_path") or failure_context.get("submission_ref")
+    )
+    if failed_artifact_path is None:
+        return None
+    if submission_path == failed_artifact_path or submission_path == repaired_path:
+        return None
+    return StaleSubmitAutofixDecision(
+        clear_repaired_path=True,
+        failure_context_updates={
+            "stale_repaired_artifact_cleared_at": now_iso,
+            "superseded_by_submission_path": str(submission_path),
+        },
+    )
+
+
+def resolve_submit_autofix_submission_artifact(
+    *,
+    run_state: dict[str, object],
+    latest_submit_attempt: dict[str, object],
+    failure_context: dict[str, object],
+    fallback_iteration_dirs: Iterable[Path],
+    resolve_iteration_submission_artifact: Callable[[Path], Path | None],
+) -> Path | None:
+    candidates = (
+        run_state.get("submit_autofix_submission_path"),
+        failure_context.get("submission_artifact_path"),
+        latest_submit_attempt.get("sub_path"),
+        run_state.get("last_submission_path"),
+    )
+    for candidate in candidates:
+        path = path_from_submit_reference(candidate)
+        if path is None:
+            continue
+        if path.exists() and path.is_file():
+            return path
+    for iter_dir in fallback_iteration_dirs:
+        if not iter_dir.exists():
+            continue
+        resolved = resolve_iteration_submission_artifact(iter_dir)
+        if resolved is not None and resolved.exists():
+            return resolved
+    return None
+
+
+def submit_file_fix_contract_satisfied(
+    *,
+    run_state: dict[str, object],
+    baseline_path: Path | None,
+    baseline_sha256: str | None,
+    sha256_or_none: Callable[[Path | None], str | None],
+) -> bool:
+    candidate = path_from_submit_reference(run_state.get("submit_autofix_submission_path"))
+    if candidate is None or not candidate.exists():
+        return False
+    candidate_sha256 = sha256_or_none(candidate)
+    if candidate_sha256 is None:
+        return False
+    if baseline_path is None or baseline_sha256 is None:
+        return True
+    return candidate != baseline_path or candidate_sha256 != baseline_sha256
 
 
 def format_submit_autofix_context(

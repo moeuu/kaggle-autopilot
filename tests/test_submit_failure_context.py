@@ -4,12 +4,15 @@ import json
 from pathlib import Path
 
 from kagglebot.submit_failure_context import (
+    decide_stale_submit_autofix_artifact,
     format_submit_autofix_context,
     load_submit_failure_context,
     mark_submit_failure_context_resolved,
     path_from_submit_reference,
+    resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
     submit_failure_context_path,
+    submit_file_fix_contract_satisfied,
 )
 
 
@@ -60,6 +63,95 @@ def test_path_from_submit_reference_ignores_kernel_references() -> None:
     assert path_from_submit_reference("kernel:user/demo") is None
     assert path_from_submit_reference("") is None
     assert path_from_submit_reference("/tmp/submission.csv") == Path("/tmp/submission.csv")
+
+
+def test_decide_stale_submit_autofix_artifact_returns_context_updates(tmp_path: Path) -> None:
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    new_submission = tmp_path / "iter-2" / "submission.csv"
+
+    decision = decide_stale_submit_autofix_artifact(
+        run_state={"submit_autofix_submission_path": str(repaired)},
+        failure_context={"submission_artifact_path": str(original)},
+        submission_path=new_submission,
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+
+    assert decision is not None
+    assert decision.clear_repaired_path is True
+    assert decision.failure_context_updates["superseded_by_submission_path"] == str(new_submission)
+
+
+def test_decide_stale_submit_autofix_artifact_keeps_same_failed_artifact(tmp_path: Path) -> None:
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+
+    assert (
+        decide_stale_submit_autofix_artifact(
+            run_state={"submit_autofix_submission_path": str(repaired)},
+            failure_context={"submission_artifact_path": str(original)},
+            submission_path=original,
+            now_iso="2026-06-25T00:00:00+00:00",
+        )
+        is None
+    )
+
+
+def test_resolve_submit_autofix_submission_artifact_prefers_repaired_path(tmp_path: Path) -> None:
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    failed = tmp_path / "iter-1" / "submission.csv"
+    repaired.parent.mkdir(parents=True)
+    failed.parent.mkdir(parents=True, exist_ok=True)
+    repaired.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    failed.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    resolved = resolve_submit_autofix_submission_artifact(
+        run_state={"submit_autofix_submission_path": str(repaired), "last_submission_path": str(failed)},
+        latest_submit_attempt={},
+        failure_context={"submission_artifact_path": str(failed)},
+        fallback_iteration_dirs=[],
+        resolve_iteration_submission_artifact=lambda path: None,
+    )
+
+    assert resolved == repaired
+
+
+def test_resolve_submit_autofix_submission_artifact_uses_iteration_fallback(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    fallback = iter_dir / "submission.csv"
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    resolved = resolve_submit_autofix_submission_artifact(
+        run_state={},
+        latest_submit_attempt={},
+        failure_context={},
+        fallback_iteration_dirs=[iter_dir],
+        resolve_iteration_submission_artifact=lambda path: path / "submission.csv",
+    )
+
+    assert resolved == fallback
+
+
+def test_submit_file_fix_contract_satisfied_requires_changed_artifact(tmp_path: Path) -> None:
+    baseline = tmp_path / "submission.csv"
+    fixed = tmp_path / "submission-fixed.csv"
+    baseline.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    fixed.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    hashes = {baseline: "old", fixed: "new"}
+
+    assert submit_file_fix_contract_satisfied(
+        run_state={"submit_autofix_submission_path": str(fixed)},
+        baseline_path=baseline,
+        baseline_sha256="old",
+        sha256_or_none=lambda path: hashes.get(path),
+    )
+    assert not submit_file_fix_contract_satisfied(
+        run_state={"submit_autofix_submission_path": str(baseline)},
+        baseline_path=baseline,
+        baseline_sha256="old",
+        sha256_or_none=lambda path: hashes.get(path),
+    )
 
 
 def test_format_submit_autofix_context_includes_failure_state_and_latest_attempt() -> None:

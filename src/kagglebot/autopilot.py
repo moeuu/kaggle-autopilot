@@ -278,6 +278,11 @@ _save_submit_failure_context = _submit_failure_context.save_submit_failure_conte
 _mark_submit_failure_context_resolved = _submit_failure_context.mark_submit_failure_context_resolved
 _path_from_submit_reference = _submit_failure_context.path_from_submit_reference
 _format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
+_decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
+_resolve_submit_autofix_submission_artifact_from_state = (
+    _submit_failure_context.resolve_submit_autofix_submission_artifact
+)
+_submit_file_fix_contract_satisfied_from_state = _submit_failure_context.submit_file_fix_contract_satisfied
 
 
 def _classify_submit_failure_repair(
@@ -10258,49 +10263,32 @@ def _build_submit_failure_context_payload(
 
 def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path) -> None:
     state = _load_run_state(run_dir)
-    repaired_path = _path_from_submit_reference(state.get("submit_autofix_submission_path"))
-    if repaired_path is None:
-        return
     failure_context = _load_submit_failure_context(run_dir)
-    if not failure_context:
-        return
-    failed_artifact_path = _path_from_submit_reference(
-        failure_context.get("submission_artifact_path") or failure_context.get("submission_ref")
+    decision = _decide_stale_submit_autofix_artifact(
+        run_state=state,
+        failure_context=failure_context,
+        submission_path=submission_path,
+        now_iso=datetime.now(UTC).isoformat(),
     )
-    if failed_artifact_path is None:
+    if decision is None:
         return
-    if submission_path == failed_artifact_path or submission_path == repaired_path:
-        return
-    _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
-    failure_context["stale_repaired_artifact_cleared_at"] = datetime.now(UTC).isoformat()
-    failure_context["superseded_by_submission_path"] = str(submission_path)
+    if decision.clear_repaired_path:
+        _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
+    failure_context.update(decision.failure_context_updates)
     _save_submit_failure_context(run_dir, failure_context)
 
 
 def _resolve_submit_autofix_submission_artifact(*, config: AutopilotConfig, run_id: str, run_dir: Path) -> Path | None:
-    state = _load_run_state(run_dir)
-    latest = _load_latest_submit_attempt(run_dir)
-    failure_context = _load_submit_failure_context(run_dir)
-    candidates = (
-        state.get("submit_autofix_submission_path"),
-        failure_context.get("submission_artifact_path"),
-        latest.get("sub_path"),
-        state.get("last_submission_path"),
+    max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
+    return _resolve_submit_autofix_submission_artifact_from_state(
+        run_state=_load_run_state(run_dir),
+        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
+        failure_context=_load_submit_failure_context(run_dir),
+        fallback_iteration_dirs=(
+            config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
+        ),
+        resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
     )
-    for candidate in candidates:
-        path = _path_from_submit_reference(candidate)
-        if path is None:
-            continue
-        if path.exists() and path.is_file():
-            return path
-    for iteration in range(MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES, 0, -1):
-        iter_dir = config.paths.iter_dir(run_id, iteration)
-        if not iter_dir.exists():
-            continue
-        resolved = _resolve_iteration_submission_artifact(iter_dir)
-        if resolved is not None and resolved.exists():
-            return resolved
-    return None
 
 
 def _build_kaggle_submit_error_detail(
@@ -10421,16 +10409,12 @@ def _submit_file_fix_contract_satisfied(
     baseline_path: Path | None,
     baseline_sha256: str | None,
 ) -> bool:
-    state = _load_run_state(run_dir)
-    candidate = _path_from_submit_reference(state.get("submit_autofix_submission_path"))
-    if candidate is None or not candidate.exists():
-        return False
-    candidate_sha256 = _sha256_or_none(candidate)
-    if candidate_sha256 is None:
-        return False
-    if baseline_path is None or baseline_sha256 is None:
-        return True
-    return candidate != baseline_path or candidate_sha256 != baseline_sha256
+    return _submit_file_fix_contract_satisfied_from_state(
+        run_state=_load_run_state(run_dir),
+        baseline_path=baseline_path,
+        baseline_sha256=baseline_sha256,
+        sha256_or_none=_sha256_or_none,
+    )
 
 
 def _build_submit_autofix_context(run_dir: Path) -> str:
