@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 
+from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
 
 
@@ -56,11 +57,8 @@ def _resume_best_online_submission_score(
         metrics_path = paths.iter_dir(run_id, iteration) / "metrics.json"
         if not metrics_path.exists():
             continue
-        try:
-            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
+        payload = load_json_object(metrics_path)
+        if payload is None:
             continue
         score = _to_float(payload.get("submission_score"))
         if score is None:

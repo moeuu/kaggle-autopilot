@@ -11,6 +11,7 @@ import pytest
 from kagglebot.autopilot import (
     _effective_best_score_for_progress,
     _infer_column_mapping,
+    _resume_best_online_submission_score,
     _should_force_major_overhaul_by_rank,
     _TrainingLiveStdout,
     _update_best_score,
@@ -124,6 +125,37 @@ class TestUpdateBestScore:
         # Just meeting threshold should count
         assert _update_best_score(best=0.5, current=0.4, direction="minimize", min_improvement=0.1) is True
         assert _update_best_score(best=0.4, current=0.5, direction="maximize", min_improvement=0.1) is True
+
+
+def test_resume_best_online_submission_score_ignores_missing_invalid_and_non_object_metrics(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_id = "run-1"
+
+    iter_1 = paths.iter_dir(run_id, 1)
+    iter_1.mkdir(parents=True)
+    (iter_1 / "metrics.json").write_text(json.dumps({"submission_score": "0.72"}), encoding="utf-8")
+
+    iter_2 = paths.iter_dir(run_id, 2)
+    iter_2.mkdir(parents=True)
+    (iter_2 / "metrics.json").write_text("{", encoding="utf-8")
+
+    iter_3 = paths.iter_dir(run_id, 3)
+    iter_3.mkdir(parents=True)
+    (iter_3 / "metrics.json").write_text("[]", encoding="utf-8")
+
+    iter_4 = paths.iter_dir(run_id, 4)
+    iter_4.mkdir(parents=True)
+    (iter_4 / "metrics.json").write_text(json.dumps({"submission_score": "0.81"}), encoding="utf-8")
+
+    assert (
+        _resume_best_online_submission_score(
+            paths=paths,
+            run_id=run_id,
+            direction="maximize",
+            max_iterations=5,
+        )
+        == 0.81
+    )
 
 
 class TestPatienceLogic:
