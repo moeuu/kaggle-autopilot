@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +101,14 @@ def infer_iteration_from_submission_path(path: Path | None) -> int | None:
         return int(name.split("-", 1)[1])
     except Exception:  # noqa: BLE001
         return None
+
+
+def submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
+    if isinstance(online_score, (int, float)):
+        value = float(online_score)
+        if math.isfinite(value):
+            return value, "submission_public_score"
+    return float(offline_score), "offline"
 
 
 def find_campaign_candidate_for_submission(

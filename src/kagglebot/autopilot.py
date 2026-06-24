@@ -10687,13 +10687,7 @@ def _build_rank_force_reason(
 
 
 def _infer_iteration_from_submission_path(path: Path) -> int | None:
-    try:
-        name = path.parent.name
-        if not name.startswith("iter-"):
-            return None
-        return int(name.split("-", 1)[1])
-    except Exception:  # noqa: BLE001
-        return None
+    return _submit_stage.infer_iteration_from_submission_path(path)
 
 
 def _print_iteration_submit_status(
@@ -11130,11 +11124,7 @@ def _effective_best_score_for_progress(
 
 def _submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
     """Select the score used by submit-improvement gating."""
-    if isinstance(online_score, (int, float)):
-        value = float(online_score)
-        if math.isfinite(value):
-            return value, "submission_public_score"
-    return float(offline_score), "offline"
+    return _submit_stage.submission_score_for_tracking(offline_score=offline_score, online_score=online_score)
 
 
 def _extract_score_from_text(text: str) -> float | None:

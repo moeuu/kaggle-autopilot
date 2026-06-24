@@ -15,6 +15,7 @@ from kagglebot.submit_stage import (
     normalize_submission_outcome_status,
     resolve_submission_message,
     run_submit_stage_attempt,
+    submission_score_for_tracking,
 )
 
 
@@ -93,6 +94,12 @@ def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
 def test_infer_iteration_from_submission_path_reads_iter_parent() -> None:
     assert infer_iteration_from_submission_path(Path("runs/run-1/iter-3/submission.csv")) == 3
     assert infer_iteration_from_submission_path(Path("submission.csv")) is None
+
+
+def test_submission_score_for_tracking_prefers_finite_online_score() -> None:
+    assert submission_score_for_tracking(offline_score=0.9, online_score=0.8) == (0.8, "submission_public_score")
+    assert submission_score_for_tracking(offline_score=0.9, online_score=float("nan")) == (0.9, "offline")
+    assert submission_score_for_tracking(offline_score=0.9, online_score=None) == (0.9, "offline")
 
 
 def test_resolve_submission_message_builds_compact_default(tmp_path: Path) -> None:
