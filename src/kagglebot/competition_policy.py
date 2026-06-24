@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
 
 
@@ -98,13 +98,8 @@ class CompetitionPolicy:
 
 def load_competition_policy(paths: CompetitionPaths) -> CompetitionPolicy:
     path = paths.competition_policy_path
-    if not path.exists():
-        return CompetitionPolicy(slug=paths.slug)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return CompetitionPolicy(slug=paths.slug)
-    if not isinstance(payload, dict):
+    payload = load_json_object(path)
+    if payload is None:
         return CompetitionPolicy(slug=paths.slug)
 
     notebook_selection = payload.get("notebook_selection")
