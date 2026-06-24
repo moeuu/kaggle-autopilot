@@ -218,16 +218,6 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
-_TRUSTED_SCORE_SOURCES = _score_sources.TRUSTED_SCORE_SOURCES
-_DEFAULT_ACCEPTED_SCORE_SOURCES = _score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES
-_normalize_score_source_name = _score_sources.normalize_score_source_name
-_is_trusted_offline_score_source = _score_sources.is_trusted_offline_score_source
-_normalize_score_source_list = _score_sources.normalize_score_source_list
-_SPLIT_STRATEGY_PRIORITY = _plan_policy.SPLIT_STRATEGY_PRIORITY
-_COMPETITION_EVAL_OVERRIDES = _plan_policy.COMPETITION_EVAL_OVERRIDES
-_normalize_split_strategy_name = _plan_policy.normalize_split_strategy_name
-_competition_eval_override = _plan_policy.competition_eval_override
-_apply_competition_eval_override = _plan_policy.apply_competition_eval_override
 _infer_split_strategy_from_hint_text = _plan_policy.infer_split_strategy_from_hint_text
 _extract_plan_split_strategy_hints = _plan_policy.extract_plan_split_strategy_hints
 _profile_has_temporal_signal = _plan_policy.profile_has_temporal_signal
@@ -3582,7 +3572,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     target_metric = choose(config.target_metric, plan.target_metric, spec_metric)
     target_score = choose(config.target_score, plan.target_score, spec_readiness_target)
     target_direction = choose(config.target_direction, plan.target_direction, spec_direction or "auto")
-    competition_override = _competition_eval_override(config.paths.slug)
+    competition_override = _plan_policy.competition_eval_override(config.paths.slug)
     override_metric = str(competition_override.get("metric_name") or "").strip()
     override_direction = str(competition_override.get("direction") or "").strip().lower()
     override_split_strategy = str(competition_override.get("split_strategy") or "").strip()
@@ -3639,7 +3629,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
                     )
                     target_direction = spec_direction
     score_source = str(choose(config.score_source, plan.score_source, "cv") or "cv")
-    normalized_score_source = _normalize_score_source_name(score_source)
+    normalized_score_source = _score_sources.normalize_score_source_name(score_source)
     if normalized_score_source not in {"cv", "holdout"}:
         print("[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.")
         score_source = "cv"
@@ -3651,7 +3641,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         split_strategy=split_strategy,
     )
     if override_split_strategy:
-        normalized_override_split = _normalize_split_strategy_name(override_split_strategy)
+        normalized_override_split = _plan_policy.normalize_split_strategy_name(override_split_strategy)
         if normalized_override_split is not None and split_strategy != normalized_override_split:
             print(
                 "[yellow]note[/yellow]: competition override is active; "
@@ -4038,7 +4028,7 @@ def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
         return {}
     if not isinstance(payload, dict):
         return {}
-    return _apply_competition_eval_override(slug=paths.slug, payload=payload)
+    return _plan_policy.apply_competition_eval_override(slug=paths.slug, payload=payload)
 
 
 def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
@@ -4053,8 +4043,8 @@ def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
     if issues:
         issue_text = "; ".join(issues)
         print(f"[yellow]evaluation spec ignored[/yellow]: {issue_text}")
-        return _apply_competition_eval_override(slug=paths.slug, payload={}, include_spec_keys=True)
-    return _apply_competition_eval_override(
+        return _plan_policy.apply_competition_eval_override(slug=paths.slug, payload={}, include_spec_keys=True)
+    return _plan_policy.apply_competition_eval_override(
         slug=paths.slug,
         payload=spec or {},
         include_spec_keys=True,
@@ -4657,14 +4647,14 @@ def _evaluation_from_kernel_metrics_payload(
             if std_value is None and len(parsed_fold_scores) > 1:
                 std_value = float(np.std(parsed_fold_scores, ddof=1))
 
-    score_source = _normalize_score_source_name(payload.get("score_source", "holdout"))
+    score_source = _score_sources.normalize_score_source_name(payload.get("score_source", "holdout"))
     if score_source == "holdout":
         for key in payload.keys():
             if isinstance(key, str) and key.lower().startswith("oof_"):
                 score_source = "cv"
                 break
     trusted_fallback_value = None
-    if not _is_trusted_offline_score_source(score_source):
+    if not _score_sources.is_trusted_offline_score_source(score_source):
         trusted_fallback_value = _extract_trusted_cv_value_from_metrics_payload(payload)
         if trusted_fallback_value is not None:
             value = trusted_fallback_value
@@ -4703,11 +4693,11 @@ def _build_evaluation_contract(
     split_strategy: str | None,
 ) -> dict[str, object]:
     faithfulness = eval_spec.get("faithfulness") if isinstance(eval_spec.get("faithfulness"), dict) else {}
-    accepted_score_sources = _normalize_score_source_list(
+    accepted_score_sources = _score_sources.normalize_score_source_list(
         faithfulness.get("accepted_score_sources") if isinstance(faithfulness, dict) else None
     )
     require_full_dataset_default = paths.slug.strip().lower() in _FULL_DATASET_REQUIRED_COMPETITIONS
-    competition_override = _competition_eval_override(paths.slug)
+    competition_override = _plan_policy.competition_eval_override(paths.slug)
     metric_source = (
         competition_override.get("metric_name") if competition_override.get("metric_name") else target_metric
     )
@@ -4725,8 +4715,8 @@ def _build_evaluation_contract(
             if isinstance(direction_source, str) and str(direction_source).strip().lower() in {"minimize", "maximize"}
             else None
         ),
-        "expected_split_strategy": _normalize_split_strategy_name(split_source),
-        "accepted_score_sources": accepted_score_sources or list(_DEFAULT_ACCEPTED_SCORE_SOURCES),
+        "expected_split_strategy": _plan_policy.normalize_split_strategy_name(split_source),
+        "accepted_score_sources": accepted_score_sources or list(_score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES),
         "require_metric_match": (
             bool(faithfulness.get("require_metric_match"))
             if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_metric_match"), bool)
@@ -4765,9 +4755,9 @@ def _extract_competition_faithfulness(
 ) -> dict[str, object]:
     payload = kernel_metrics_payload or {}
     contract = evaluation_contract or {}
-    accepted_score_sources = _normalize_score_source_list(contract.get("accepted_score_sources"))
+    accepted_score_sources = _score_sources.normalize_score_source_list(contract.get("accepted_score_sources"))
     if not accepted_score_sources:
-        accepted_score_sources = list(_DEFAULT_ACCEPTED_SCORE_SOURCES)
+        accepted_score_sources = list(_score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES)
 
     expected_metric = str(contract.get("expected_metric") or "").strip() or None
     actual_metric = None
@@ -4780,15 +4770,15 @@ def _extract_competition_faithfulness(
             actual_metric = metric_raw.strip()
         else:
             actual_metric = str(evaluation.metric or "").strip() or None
-    expected_split = _normalize_split_strategy_name(contract.get("expected_split_strategy"))
-    actual_split = _normalize_split_strategy_name(payload.get("split_strategy"))
+    expected_split = _plan_policy.normalize_split_strategy_name(contract.get("expected_split_strategy"))
+    actual_split = _plan_policy.normalize_split_strategy_name(payload.get("split_strategy"))
     readiness_payload = payload.get("readiness")
     if actual_split is None and isinstance(readiness_payload, dict):
-        actual_split = _normalize_split_strategy_name(readiness_payload.get("split_strategy"))
+        actual_split = _plan_policy.normalize_split_strategy_name(readiness_payload.get("split_strategy"))
     if actual_split is None and evaluation_report is not None:
-        actual_split = _normalize_split_strategy_name(evaluation_report.split_strategy)
+        actual_split = _plan_policy.normalize_split_strategy_name(evaluation_report.split_strategy)
 
-    score_source = _normalize_score_source_name(payload.get("score_source") or evaluation.score_source)
+    score_source = _score_sources.normalize_score_source_name(payload.get("score_source") or evaluation.score_source)
     score_source_mismatch = score_source not in accepted_score_sources
     derived_noncompetitive = any(token in score_source for token in _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS)
 
@@ -4958,7 +4948,7 @@ def _build_accuracy_potential(
         competition_faithfulness=faithfulness if isinstance(faithfulness, dict) else None,
         evaluation_contract=evaluation_contract,
     )
-    trusted = _is_trusted_offline_score_source(evaluation.score_source)
+    trusted = _score_sources.is_trusted_offline_score_source(evaluation.score_source)
     faithful = bool(faithfulness.get("faithful", False))
     capacity_priority = _CAPACITY_TIER_PRIORITY.get(capacity_tier, 0)
     data_priority = {"minimum_submit_data": 0, "trusted_eval_data": 1, "high_accuracy_data": 2}.get(data_tier, 0)
@@ -5935,8 +5925,8 @@ def _build_kernel_quality_guard(
     is_final_iteration = iteration >= max_iterations
     payload = kernel_metrics_payload or {}
 
-    normalized_score_source = _normalize_score_source_name(evaluation.score_source)
-    if not _is_trusted_offline_score_source(normalized_score_source):
+    normalized_score_source = _score_sources.normalize_score_source_name(evaluation.score_source)
+    if not _score_sources.is_trusted_offline_score_source(normalized_score_source):
         reasons.append("untrusted_score_source")
         warnings.append(f"score_source={normalized_score_source}")
         if not force_submit:
@@ -6171,7 +6161,7 @@ def _iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationRe
         faithfulness = payload.get("competition_faithfulness")
         if isinstance(faithfulness, dict) and isinstance(faithfulness.get("faithful"), bool):
             return bool(faithfulness.get("faithful"))
-    return _is_trusted_offline_score_source(evaluation.score_source)
+    return _score_sources.is_trusted_offline_score_source(evaluation.score_source)
 
 
 def _build_metrics_payload(
@@ -6331,7 +6321,7 @@ def _build_iteration_evaluation_report(
 
 
 def _build_eval_data_cache_fallback(*, split_strategy: str | None, cv_folds: int) -> dict[str, object]:
-    normalized_split = _normalize_split_strategy_name(split_strategy) or "kfold"
+    normalized_split = _plan_policy.normalize_split_strategy_name(split_strategy) or "kfold"
     return {
         "split_strategy": normalized_split,
         "n_splits": max(2, int(cv_folds)),
