@@ -9745,20 +9745,18 @@ def _attempt_submit(
                 exit_code=None,
             )
 
-    if isinstance(outcome, dict) and outcome.get("score") is not None:
-        print(
-            "[cyan]submission result[/cyan]: "
-            f"status={outcome.get('status') or 'unknown'} score={float(outcome['score']):.6f}"
-        )
-    else:
-        print("[yellow]submission result[/yellow]: score not available yet; knowledge update skipped")
-    if isinstance(outcome, dict) and submission_for_submit_path is not None and submission_for_submit_path.exists():
+    outcome_recording = _decide_submit_outcome_recording(
+        outcome=outcome,
+        submission_artifact_exists=bool(submission_for_submit_path is not None and submission_for_submit_path.exists()),
+    )
+    print(outcome_recording.message)
+    if outcome_recording.ledger_outcome is not None and submission_for_submit_path is not None:
         SubmissionLedger(config.paths.submission_ledger_path).record_outcome(
             slug=config.slug,
             message=message,
             submission_path=submission_for_submit_path,
             run_id=run_id,
-            outcome=dict(outcome),
+            outcome=outcome_recording.ledger_outcome,
         )
     _mark_submit_failure_context_resolved(run_dir=run_dir, resolution="submitted", submission_ref=submission_ref)
     return _build_submit_result_payload(
@@ -10253,6 +10251,17 @@ def _build_submit_result_payload(
         skipped=skipped,
         reason=reason,
         duplicate_sources=duplicate_sources,
+    )
+
+
+def _decide_submit_outcome_recording(
+    *,
+    outcome: object,
+    submission_artifact_exists: bool,
+) -> _submit_attempts.SubmitOutcomeRecordingDecision:
+    return _submit_attempts.decide_submit_outcome_recording(
+        outcome=outcome,
+        submission_artifact_exists=submission_artifact_exists,
     )
 
 

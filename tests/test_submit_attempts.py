@@ -5,6 +5,7 @@ from kagglebot.submit_attempts import (
     build_submit_knowledge_payload,
     build_submit_result_payload,
     build_submit_run_state_update,
+    decide_submit_outcome_recording,
 )
 
 
@@ -175,3 +176,36 @@ def test_build_submit_result_payload_for_duplicate_skip_omits_outcome() -> None:
         "reason": "duplicate_submission_sha_seen",
         "duplicate_sources": ["run_attempts"],
     }
+
+
+def test_decide_submit_outcome_recording_formats_scored_result() -> None:
+    decision = decide_submit_outcome_recording(
+        outcome={"status": "complete", "score": "0.42"},
+        submission_artifact_exists=True,
+    )
+
+    assert decision.message == "[cyan]submission result[/cyan]: status=complete score=0.420000"
+    assert decision.ledger_outcome == {"status": "complete", "score": "0.42"}
+
+
+def test_decide_submit_outcome_recording_skips_ledger_without_artifact() -> None:
+    decision = decide_submit_outcome_recording(
+        outcome={"status": "complete", "score": 0.42},
+        submission_artifact_exists=False,
+    )
+
+    assert "score=0.420000" in decision.message
+    assert decision.ledger_outcome is None
+
+
+def test_decide_submit_outcome_recording_handles_scoreless_or_missing_outcome() -> None:
+    scoreless = decide_submit_outcome_recording(
+        outcome={"status": "complete", "score": None},
+        submission_artifact_exists=True,
+    )
+    missing = decide_submit_outcome_recording(outcome=None, submission_artifact_exists=True)
+
+    assert scoreless.message == "[yellow]submission result[/yellow]: score not available yet; knowledge update skipped"
+    assert scoreless.ledger_outcome == {"status": "complete", "score": None}
+    assert missing.message == "[yellow]submission result[/yellow]: score not available yet; knowledge update skipped"
+    assert missing.ledger_outcome is None

@@ -11,6 +11,12 @@ class SubmitKnowledgePayload:
     fix_summary: str
 
 
+@dataclass(frozen=True)
+class SubmitOutcomeRecordingDecision:
+    message: str
+    ledger_outcome: dict[str, object] | None
+
+
 def build_submit_attempt_payload(
     *,
     run_id: str,
@@ -123,3 +129,19 @@ def build_submit_result_payload(
     if not skipped:
         payload["outcome"] = outcome
     return payload
+
+
+def decide_submit_outcome_recording(
+    *,
+    outcome: object,
+    submission_artifact_exists: bool,
+) -> SubmitOutcomeRecordingDecision:
+    if isinstance(outcome, dict) and outcome.get("score") is not None:
+        message = (
+            "[cyan]submission result[/cyan]: "
+            f"status={outcome.get('status') or 'unknown'} score={float(outcome['score']):.6f}"
+        )
+    else:
+        message = "[yellow]submission result[/yellow]: score not available yet; knowledge update skipped"
+    ledger_outcome = dict(outcome) if isinstance(outcome, dict) and submission_artifact_exists else None
+    return SubmitOutcomeRecordingDecision(message=message, ledger_outcome=ledger_outcome)
