@@ -92,24 +92,8 @@ def _load_submit_phase_completed_iterations(
     *,
     infer_iteration_from_submission_path: Callable[[Path], int | None],
 ) -> set[int]:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return set()
     completed: set[int] = set()
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return completed
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
+    for payload in _submit_attempts.load_submit_attempt_rows(run_dir):
         if not _is_legacy_submit_attempt_complete(payload):
             continue
         iteration = _to_int(payload.get("iteration"))
@@ -153,23 +137,7 @@ def _infer_iteration_from_submit_attempt(payload: dict[str, object]) -> int | No
 
 
 def _latest_submit_attempt_for_iteration(run_dir: Path, iteration: int) -> dict[str, object] | None:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return None
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    for raw in reversed(lines):
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
+    for payload in reversed(_submit_attempts.load_submit_attempt_rows(run_dir)):
         if _infer_iteration_from_submit_attempt(payload) == iteration:
             return payload
     return None
