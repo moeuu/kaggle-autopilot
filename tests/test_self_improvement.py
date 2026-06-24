@@ -34,7 +34,14 @@ def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: P
     )
     _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.7, "score_source": "cv"})
     (run_dir / "submit_attempts.jsonl").write_text(
-        json.dumps({"action_taken": "failed", "reason": "submit error", "iteration": 1}) + "\n",
+        "\n".join(
+            [
+                "not-json",
+                json.dumps(["not", "a", "dict"]),
+                json.dumps({"action_taken": "failed", "reason": "submit error", "iteration": 1}),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     _write_json(artifacts / slug / "context" / "top1_public.json", {"score": 0.9})

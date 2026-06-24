@@ -11,6 +11,7 @@ from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.exec_utils import run_command
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.submit_attempts import load_submit_attempt_rows
 
 
 @dataclass(frozen=True)
@@ -430,7 +431,7 @@ def _load_campaign_outcomes(path: Path, *, run_id: str) -> list[dict[str, object
 
 def _load_submit_failures(path: Path) -> list[dict[str, object]]:
     failures: list[dict[str, object]] = []
-    for record in _read_jsonl(path):
+    for record in load_submit_attempt_rows(path.parent):
         action = str(record.get("action_taken") or record.get("event") or "").lower()
         reason = str(record.get("reason") or record.get("error") or "").lower()
         if "fail" in action or "abort" in action or "error" in reason or reason:
