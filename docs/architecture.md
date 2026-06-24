@@ -56,8 +56,8 @@ Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 Main loop is in `src/kagglebot/autopilot.py`.
 Supporting state/resume helpers now live in `src/kagglebot/autopilot_state.py`, and score/policy helpers live in
 `src/kagglebot/autopilot_helpers.py`, so the main file stays focused on orchestration.
-Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; `autopilot.py` only keeps compatibility
-aliases for older tests/extensions that imported private rule helpers from the main module.
+Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the loop calls that public module directly
+instead of carrying private rule-parsing aliases in `autopilot.py`.
 Offline score-source normalization and trust checks live in `src/kagglebot/score_sources.py` for the same reason:
 the loop should consume normalized policy answers rather than own every parsing rule inline.
 Split-strategy policy and competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps

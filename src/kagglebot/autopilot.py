@@ -218,12 +218,6 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
-# Backward-compatible private symbols for tests/extensions that imported rule parsing from autopilot.
-_CompetitionRuleConstraints = _competition_rules.CompetitionRuleConstraints
-_matches_any_rule_pattern = _competition_rules.matches_any_rule_pattern
-_extract_submission_limit_per_day = _competition_rules.extract_submission_limit_per_day
-_load_competition_rule_constraints = _competition_rules.load_competition_rule_constraints
-_runtime_limit_for_compute = _competition_rules.runtime_limit_for_compute
 _TRUSTED_SCORE_SOURCES = _score_sources.TRUSTED_SCORE_SOURCES
 _DEFAULT_ACCEPTED_SCORE_SOURCES = _score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES
 _normalize_score_source_name = _score_sources.normalize_score_source_name
@@ -3710,7 +3704,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             f"upgrading to default {_DEFAULT_EVAL_REPEATS} to reduce noise."
         )
         eval_repeats = _DEFAULT_EVAL_REPEATS
-    constraints = _load_competition_rule_constraints(config.paths)
+    constraints = _competition_rules.load_competition_rule_constraints(config.paths)
     code_competition = infer_code_competition_from_paths(config.paths)
     if code_competition and submit_mode != "notebook":
         print("[yellow]note[/yellow]: code competition detected; forcing submit_mode=notebook.")
@@ -3735,7 +3729,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     if constraints.internet_must_be_off and str(internet).strip().lower() != "off":
         print("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.")
         internet = "off"
-    runtime_limit_min = _runtime_limit_for_compute(constraints=constraints, compute=config.compute)
+    runtime_limit_min = _competition_rules.runtime_limit_for_compute(constraints=constraints, compute=config.compute)
     if runtime_limit_min is not None:
         current_limit = int(time_budget_min) if isinstance(time_budget_min, (int, float)) else None
         if current_limit is None or current_limit > runtime_limit_min:
@@ -9332,7 +9326,7 @@ def _attempt_submit(
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
-    constraints = _load_competition_rule_constraints(config.paths)
+    constraints = _competition_rules.load_competition_rule_constraints(config.paths)
     requested_notebook_submit = normalize_submit_mode(submit_mode, default="file") == "notebook"
     resolved_notebook_artifact_mode = (
         _resolve_notebook_submit_artifact_mode(paths=config.paths, submit_mode="notebook")

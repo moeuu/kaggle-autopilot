@@ -40,7 +40,6 @@ from kagglebot.autopilot import (
     _infer_kernel_submit_version_label,
     _is_agent_capacity_failure,
     _is_submit_abort_autofixable,
-    _load_competition_rule_constraints,
     _load_previous_submission_history,
     _load_run_state,
     _load_submit_failure_context,
@@ -62,6 +61,7 @@ from kagglebot.autopilot import (
     _write_iteration_state_marker,
     run_autopilot,
 )
+from kagglebot.competition_rules import load_competition_rule_constraints
 from kagglebot.eval import EvaluationReport
 from kagglebot.exceptions import (
     KaggleCliError,
@@ -2175,7 +2175,7 @@ def test_attempt_submit_switches_to_notebook_submit_after_bad_request(monkeypatc
     monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
     )
     monkeypatch.setattr("kagglebot.autopilot.infer_code_competition_from_paths", lambda *args, **kwargs: True)
@@ -2264,7 +2264,7 @@ def test_attempt_submit_does_not_switch_to_notebook_on_generic_bad_request(
     monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
     )
     monkeypatch.setattr(
@@ -2359,7 +2359,7 @@ def test_attempt_submit_treats_submission_limit_as_manual_blocker(
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
     )
     monkeypatch.setattr(
@@ -2477,7 +2477,7 @@ def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch,
     monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
     )
     monkeypatch.setattr(
@@ -2851,7 +2851,7 @@ def test_attempt_submit_retries_same_path_after_code_change(monkeypatch, tmp_pat
     )
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type("C", (), {"notebook_submissions_only": False})(),
     )
     monkeypatch.setattr(
@@ -4562,7 +4562,7 @@ def test_load_competition_rule_constraints_detects_submit_page_internet_ban(tmp_
         "Please disable internet in the Notebook editor and save a new version.",
     )
 
-    constraints = _load_competition_rule_constraints(paths)
+    constraints = load_competition_rule_constraints(paths)
 
     assert constraints.internet_must_be_off is True
 
@@ -7229,7 +7229,7 @@ def test_autopilot_skips_fallback_submit_after_untrusted_final_iteration(
     monkeypatch.setattr("kagglebot.autopilot._should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type(
             "Constraints",
             (),
@@ -7320,7 +7320,7 @@ def test_autopilot_skips_fallback_submit_when_higher_potential_candidate_exists(
     monkeypatch.setattr("kagglebot.autopilot._should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
-        "kagglebot.autopilot._load_competition_rule_constraints",
+        "kagglebot.competition_rules.load_competition_rule_constraints",
         lambda *args, **kwargs: type(
             "Constraints",
             (),
