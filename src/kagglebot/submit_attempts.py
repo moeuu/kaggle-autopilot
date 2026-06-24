@@ -17,6 +17,12 @@ class SubmitOutcomeRecordingDecision:
     ledger_outcome: dict[str, object] | None
 
 
+@dataclass(frozen=True)
+class SubmitSuccessRecordPayloads:
+    attempt_payload: dict[str, object]
+    run_state_update: dict[str, object]
+
+
 def build_submit_attempt_payload(
     *,
     run_id: str,
@@ -83,6 +89,49 @@ def build_submit_run_state_update(
     if submission_sha256 is not None:
         update["last_submission_sha256"] = submission_sha256
     return update
+
+
+def build_submit_success_record_payloads(
+    *,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    exit_code: int | None,
+    fingerprint: str,
+    code_fingerprint: str,
+    stdout: str,
+    stderr: str,
+    prior_state: dict[str, object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+) -> SubmitSuccessRecordPayloads:
+    return SubmitSuccessRecordPayloads(
+        attempt_payload=build_submit_attempt_payload(
+            run_id=run_id,
+            submission_ref=submission_ref,
+            submission_sha256=submission_sha256,
+            exit_code=exit_code,
+            ok=True,
+            fingerprint=fingerprint,
+            error_kind="none",
+            action_taken="submit",
+            reason="submitted",
+            stdout=stdout,
+            stderr=stderr,
+            stdout_tail_chars=stdout_tail_chars,
+            stderr_tail_chars=stderr_tail_chars,
+        ),
+        run_state_update=build_submit_run_state_update(
+            prior_state=prior_state,
+            fingerprint=fingerprint,
+            code_fingerprint=code_fingerprint,
+            error_kind="none",
+            action_taken="submit",
+            reason="submitted",
+            submission_ref=submission_ref,
+            submit_ok=True,
+        ),
+    )
 
 
 def build_submit_knowledge_payload(

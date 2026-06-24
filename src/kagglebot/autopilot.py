@@ -9659,35 +9659,24 @@ def _attempt_submit(
         submission_result=submission_result,
         compute_error_fingerprint=compute_error_fingerprint,
     )
+    submit_success_payloads = _submit_attempts.build_submit_success_record_payloads(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=_sha256_or_none(submission_for_submit_path),
+        exit_code=submit_success_record.exit_code,
+        fingerprint=submit_success_record.fingerprint,
+        code_fingerprint=submit_code_fingerprint,
+        stdout=submit_success_record.stdout,
+        stderr=submit_success_record.stderr,
+        prior_state=_load_run_state(run_dir),
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+    )
     _append_submit_attempt(
         run_dir=run_dir,
-        payload=_build_submit_attempt_payload(
-            run_id=run_id,
-            submission_ref=submission_ref,
-            submission_sha256=_sha256_or_none(submission_for_submit_path),
-            exit_code=submit_success_record.exit_code,
-            ok=True,
-            fingerprint=submit_success_record.fingerprint,
-            error_kind="none",
-            action_taken="submit",
-            reason="submitted",
-            stdout=submit_success_record.stdout,
-            stderr=submit_success_record.stderr,
-        ),
+        payload=submit_success_payloads.attempt_payload,
     )
-    _save_run_state(
-        run_dir,
-        _build_submit_run_state_update(
-            prior_state=_load_run_state(run_dir),
-            fingerprint=submit_success_record.fingerprint,
-            code_fingerprint=submit_code_fingerprint,
-            error_kind="none",
-            action_taken="submit",
-            reason="submitted",
-            submission_ref=submission_ref,
-            submit_ok=True,
-        ),
-    )
+    _save_run_state(run_dir, submit_success_payloads.run_state_update)
     print("[green]submission recorded[/green]")
     try:
         outcome = _wait_for_submission_outcome(

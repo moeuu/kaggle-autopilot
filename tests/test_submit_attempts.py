@@ -5,6 +5,7 @@ from kagglebot.submit_attempts import (
     build_submit_knowledge_payload,
     build_submit_result_payload,
     build_submit_run_state_update,
+    build_submit_success_record_payloads,
     decide_submit_outcome_recording,
 )
 
@@ -106,6 +107,48 @@ def test_build_submit_run_state_update_can_preserve_skip_without_submit_ok() -> 
     assert "submit_ok" not in update
     assert update["last_submission_sha256"] == "sha"
     assert update["submit_attempts_count"] == 1
+
+
+def test_build_submit_success_record_payloads_combines_attempt_and_run_state() -> None:
+    payloads = build_submit_success_record_payloads(
+        run_id="run-1",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+        exit_code=0,
+        fingerprint="fp",
+        code_fingerprint="code-fp",
+        stdout="abcdef",
+        stderr="uvwxyz",
+        prior_state={"submit_attempts_count": 2},
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+    )
+
+    assert payloads.attempt_payload == {
+        "run_id": "run-1",
+        "sub_path": "submission.csv",
+        "sub_sha256": "sha",
+        "exit_code": 0,
+        "ok": True,
+        "fingerprint": "fp",
+        "error_kind": "none",
+        "action_taken": "submit",
+        "reason": "submitted",
+        "stdout_tail": "def",
+        "stderr_tail": "wxyz",
+    }
+    assert payloads.run_state_update == {
+        "submit_attempted": True,
+        "submit_ok": True,
+        "last_submit_fingerprint": "fp",
+        "last_fingerprint": "fp",
+        "last_submit_code_fingerprint": "code-fp",
+        "last_error_kind": "none",
+        "last_action": "submit",
+        "last_reason": "submitted",
+        "last_submission_path": "submission.csv",
+        "submit_attempts_count": 3,
+    }
 
 
 def test_build_submit_knowledge_payload_formats_error_and_fix_summary() -> None:
