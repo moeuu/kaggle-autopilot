@@ -29,6 +29,12 @@ class SubmitAutofixInputDecision:
     message: str
 
 
+@dataclass(frozen=True)
+class SubmitAbortAutofixDecision:
+    autofixable: bool
+    message: str
+
+
 def submit_failure_context_path(run_dir: Path) -> Path:
     return run_dir / SUBMIT_FAILURE_CONTEXT_FILENAME
 
@@ -203,6 +209,49 @@ def decide_submit_autofix_input_submission(
         input_submission_path=repaired_path,
         message=(
             f"[yellow]submit retry[/yellow]: using repaired submission artifact from submit autofix: {repaired_path}"
+        ),
+    )
+
+
+def decide_submit_abort_autofixability(
+    *,
+    failure_context: dict[str, object],
+    run_state: dict[str, object],
+) -> SubmitAbortAutofixDecision:
+    if failure_context:
+        reason = str(failure_context.get("reason") or "unknown").strip().lower()
+        if reason == "ambiguous_notebook_bad_request":
+            return SubmitAbortAutofixDecision(
+                autofixable=False,
+                message=(
+                    "[yellow]autofix skipped[/yellow]: submit abort is an ambiguous notebook 400; "
+                    "not treating it as a kernel-repairable failure."
+                ),
+            )
+        if bool(failure_context.get("repairable")):
+            return SubmitAbortAutofixDecision(autofixable=True, message="")
+        repair_target = str(failure_context.get("repair_target") or "unknown").strip().lower()
+        manual_next_step = str(failure_context.get("manual_next_step") or "").strip()
+        suffix = f" next_step={manual_next_step}" if manual_next_step else ""
+        return SubmitAbortAutofixDecision(
+            autofixable=False,
+            message=(
+                "[yellow]autofix skipped[/yellow]: submit abort requires manual intervention "
+                f"(target={repair_target}, reason={reason}){suffix}"
+            ),
+        )
+
+    kind = str(run_state.get("last_error_kind") or "").strip().lower()
+    reason = str(run_state.get("last_reason") or "").strip().lower()
+    if kind in {"validation", "transient", "unknown"}:
+        return SubmitAbortAutofixDecision(autofixable=True, message="")
+    if reason == "same_error_fingerprint_recurred":
+        return SubmitAbortAutofixDecision(autofixable=True, message="")
+    return SubmitAbortAutofixDecision(
+        autofixable=False,
+        message=(
+            "[yellow]autofix skipped[/yellow]: submit abort is not safely auto-fixable "
+            f"(kind={kind or 'unknown'}, reason={reason or 'unknown'})"
         ),
     )
 

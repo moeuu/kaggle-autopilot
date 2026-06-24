@@ -282,6 +282,7 @@ _build_submit_failure_context_payload_from_state = _submit_failure_context.build
 _path_from_submit_reference = _submit_failure_context.path_from_submit_reference
 _format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
 _decide_submit_autofix_input_submission = _submit_failure_context.decide_submit_autofix_input_submission
+_decide_submit_abort_autofixability = _submit_failure_context.decide_submit_abort_autofixability
 _decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
 _resolve_submit_autofix_submission_artifact_from_state = (
     _submit_failure_context.resolve_submit_autofix_submission_artifact
@@ -10368,36 +10369,14 @@ def _should_defer_submit_abort_to_next_iteration(
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
     run_dir = config.paths.run_dir(run_id)
     failure_context = _load_submit_failure_context(run_dir)
-    if failure_context:
-        reason = str(failure_context.get("reason") or "unknown").strip().lower()
-        if reason == "ambiguous_notebook_bad_request":
-            print(
-                "[yellow]autofix skipped[/yellow]: submit abort is an ambiguous notebook 400; "
-                "not treating it as a kernel-repairable failure."
-            )
-            return False
-        if bool(failure_context.get("repairable")):
-            return True
-        repair_target = str(failure_context.get("repair_target") or "unknown").strip().lower()
-        manual_next_step = str(failure_context.get("manual_next_step") or "").strip()
-        suffix = f" next_step={manual_next_step}" if manual_next_step else ""
-        print(
-            "[yellow]autofix skipped[/yellow]: submit abort requires manual intervention "
-            f"(target={repair_target}, reason={reason}){suffix}"
-        )
-        return False
     state = _load_run_state(run_dir)
-    kind = str(state.get("last_error_kind") or "").strip().lower()
-    reason = str(state.get("last_reason") or "").strip().lower()
-    if kind in {"validation", "transient", "unknown"}:
-        return True
-    if reason == "same_error_fingerprint_recurred":
-        return True
-    print(
-        "[yellow]autofix skipped[/yellow]: submit abort is not safely auto-fixable "
-        f"(kind={kind or 'unknown'}, reason={reason or 'unknown'})"
+    decision = _decide_submit_abort_autofixability(
+        failure_context=failure_context,
+        run_state=state,
     )
-    return False
+    if decision.message:
+        print(decision.message)
+    return decision.autofixable
 
 
 def _is_non_autofixable_runtime_error(error: Exception) -> bool:

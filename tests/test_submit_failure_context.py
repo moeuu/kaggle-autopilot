@@ -6,6 +6,7 @@ from pathlib import Path
 from kagglebot.submit_failure_context import (
     build_submit_failure_context_payload,
     decide_stale_submit_autofix_artifact,
+    decide_submit_abort_autofixability,
     decide_submit_autofix_input_submission,
     format_submit_autofix_context,
     load_submit_failure_context,
@@ -198,6 +199,62 @@ def test_decide_submit_autofix_input_submission_ignores_repair_for_different_fai
 
     assert decision.input_submission_path == original
     assert decision.message == ""
+
+
+def test_decide_submit_abort_autofixability_allows_repairable_failure_context() -> None:
+    decision = decide_submit_abort_autofixability(
+        failure_context={"repairable": True, "reason": "local_submission_validation_failed"},
+        run_state={},
+    )
+
+    assert decision.autofixable is True
+    assert decision.message == ""
+
+
+def test_decide_submit_abort_autofixability_rejects_manual_failure_context() -> None:
+    decision = decide_submit_abort_autofixability(
+        failure_context={
+            "repairable": False,
+            "repair_target": "manual_intervention",
+            "reason": "rules_not_accepted",
+            "manual_next_step": "Accept the competition rules.",
+        },
+        run_state={},
+    )
+
+    assert decision.autofixable is False
+    assert "manual intervention" in decision.message
+    assert "Accept the competition rules." in decision.message
+
+
+def test_decide_submit_abort_autofixability_rejects_ambiguous_notebook_bad_request() -> None:
+    decision = decide_submit_abort_autofixability(
+        failure_context={"repairable": True, "reason": "ambiguous_notebook_bad_request"},
+        run_state={},
+    )
+
+    assert decision.autofixable is False
+    assert "ambiguous notebook 400" in decision.message
+
+
+def test_decide_submit_abort_autofixability_uses_legacy_run_state() -> None:
+    validation = decide_submit_abort_autofixability(
+        failure_context={},
+        run_state={"last_error_kind": "validation", "last_reason": "local_submission_validation_failed"},
+    )
+    repeated = decide_submit_abort_autofixability(
+        failure_context={},
+        run_state={"last_error_kind": "permanent", "last_reason": "same_error_fingerprint_recurred"},
+    )
+    permanent = decide_submit_abort_autofixability(
+        failure_context={},
+        run_state={"last_error_kind": "permanent", "last_reason": "rules_not_accepted"},
+    )
+
+    assert validation.autofixable is True
+    assert repeated.autofixable is True
+    assert permanent.autofixable is False
+    assert "not safely auto-fixable" in permanent.message
 
 
 def test_resolve_submit_autofix_submission_artifact_prefers_repaired_path(tmp_path: Path) -> None:
