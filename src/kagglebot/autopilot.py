@@ -9308,6 +9308,7 @@ def _attempt_submit(
             stdout_tail="",
             stderr_tail=str(exc),
             exit_code=SubmissionValidationError.exit_code,
+            submit_attempt_recorder=submit_attempt_recorder,
         )
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
@@ -9379,6 +9380,7 @@ def _attempt_submit(
                 stdout_tail=exc.stdout,
                 stderr_tail=exc.stderr or exc.output,
                 exit_code=exc.exit_code,
+                submit_attempt_recorder=submit_attempt_recorder,
             )
         raise
     if not rules_accepted:
@@ -9395,6 +9397,7 @@ def _attempt_submit(
             stdout_tail="",
             stderr_tail="rules_not_accepted",
             exit_code=RulesNotAcceptedError.exit_code,
+            submit_attempt_recorder=submit_attempt_recorder,
         )
 
     constraints = _load_competition_rule_constraints(config.paths)
@@ -9564,6 +9567,7 @@ def _attempt_submit(
                     stdout_tail=exc.stdout,
                     stderr_tail=classification_stderr,
                     exit_code=exc.exit_code,
+                    submit_attempt_recorder=submit_attempt_recorder,
                 )
             seen_fingerprints.add(fingerprint)
             if error_action.action == "retry":
@@ -9611,6 +9615,7 @@ def _attempt_submit(
                 stdout_tail="",
                 stderr_tail=str(exc),
                 exit_code=getattr(exc, "exit_code", 1),
+                submit_attempt_recorder=submit_attempt_recorder,
             )
         except KaggleCliError as exc:
             if _is_missing_kaggle_credentials_error(exc):
@@ -9631,6 +9636,7 @@ def _attempt_submit(
                     stdout_tail=exc.stdout,
                     stderr_tail=exc.stderr or exc.output,
                     exit_code=exc.exit_code,
+                    submit_attempt_recorder=submit_attempt_recorder,
                 )
             raise
         break
@@ -9681,6 +9687,7 @@ def _attempt_submit(
             stdout_tail="",
             stderr_tail=detail or str(exc),
             exit_code=None,
+            submit_attempt_recorder=submit_attempt_recorder,
         )
 
     if isinstance(outcome, dict):
@@ -9711,6 +9718,7 @@ def _attempt_submit(
                 stdout_tail="",
                 stderr_tail=raw_detail or outcome_status,
                 exit_code=None,
+                submit_attempt_recorder=submit_attempt_recorder,
             )
         if (
             outcome_status in _SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
@@ -9752,6 +9760,7 @@ def _attempt_submit(
                 stdout_tail="",
                 stderr_tail=raw_detail,
                 exit_code=None,
+                submit_attempt_recorder=submit_attempt_recorder,
             )
 
     outcome_recording = _submit_attempts.decide_submit_outcome_recording(
@@ -10044,12 +10053,14 @@ def _abort_submit_for_run(
     stdout_tail: str,
     stderr_tail: str,
     exit_code: int | None,
+    submit_attempt_recorder: _submit_attempts.SubmitAttemptRecorder | None = None,
 ) -> None:
     run_dir = config.paths.run_dir(run_id)
-    submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
-        run_dir=run_dir,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
-    )
+    if submit_attempt_recorder is None:
+        submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
+            run_dir=run_dir,
+            save_run_state=lambda updates: _save_run_state(run_dir, updates),
+        )
     submission_ref_text = str(submission_ref)
     artifact_path: Path | None
     if submission_artifact_path is not None:
