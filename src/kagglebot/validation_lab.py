@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, list_candidates
+from kagglebot.scalar_utils import non_nan_float as _to_float
 
 VALIDATION_LAB_REPORT_FILENAME = "validation_lab_report.json"
 
@@ -240,13 +241,3 @@ def _offline_online_correlation(candidates: list[CampaignCandidate]) -> float | 
     if denominator == 0.0:
         return None
     return round(numerator / denominator, 6)
-
-
-def _to_float(value: object) -> float | None:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if parsed != parsed:
-        return None
-    return parsed

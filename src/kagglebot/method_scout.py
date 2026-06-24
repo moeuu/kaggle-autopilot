@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.paths import CompetitionPaths
+from kagglebot.scalar_utils import non_nan_float as _to_float
 
 METHOD_REGISTRY_FILENAME = "method_registry.json"
 METHOD_SCOUT_QUERIES_FILENAME = "method_scout_queries.json"
@@ -1004,13 +1005,3 @@ def _count_source_types(sources: list[dict[str, object]], *, slug: str) -> dict[
         source_type = classify_source(source, slug=slug)
         counts[source_type] = counts.get(source_type, 0) + 1
     return counts
-
-
-def _to_float(value: object) -> float | None:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if parsed != parsed:
-        return None
-    return parsed

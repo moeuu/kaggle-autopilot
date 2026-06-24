@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from kagglebot.campaign import CampaignCandidate, SubmissionAllocation
+from kagglebot.scalar_utils import non_nan_float as _to_float
 from kagglebot.scalar_utils import optional_str as _optional_str
 
 EXPERIMENT_GRAPH_FILENAME = "experiment_graph.json"
@@ -410,13 +411,3 @@ def _method_adapters(method_registry: dict[str, object]) -> dict[str, dict[str, 
                 enriched["dependency_check"] = dependency_check
             adapters[method_id] = enriched
     return adapters
-
-
-def _to_float(value: object) -> float | None:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if parsed != parsed:
-        return None
-    return parsed
