@@ -69,7 +69,8 @@ Implementation contract for `kernel.py`:
   - Save under local output dir always, and mirror to `/kaggle/working` only when writable
   - For any multi-fold or long-running candidate, save an intermediate candidate after each completed fold:
     `oof_preds_<name>_fold<N>.npy`, `test_preds_<name>_fold<N>.npy`,
-    `preds_<name>_fold<N>_metadata.json`, and a fold-level `submission_<name>_fold<N>.csv`.
+    `preds_<name>_fold<N>_metadata.json`, `candidate_<name>_fold<N>.json`, and a fold-level
+    `submission_<name>_fold<N>.csv`.
     The fold-level submission must be valid against `sample_submission.csv` and usable if the remaining folds are
     stopped. Do not keep completed-fold predictions only in memory.
 - Evaluation:

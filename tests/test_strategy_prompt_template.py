@@ -32,7 +32,9 @@ def test_prompts_require_fold_intermediate_submissions() -> None:
     combined = kernel_template + "\n" + improve_template
 
     assert "submission_<name>_fold<N>.csv" in kernel_template
+    assert "candidate_<name>_fold<N>.json" in kernel_template
     assert "submission_<candidate>_fold<N>.csv" in improve_template
+    assert "candidate_<candidate>_fold<N>.json" in improve_template
     assert "sample_submission.csv" in combined
     assert "completed folds only in memory" in combined
 

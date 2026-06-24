@@ -146,8 +146,9 @@ Top1 campaign portfolio override:
 - If improvement_mode is `validation_redesign`, create group/time/leak-safe/proxy validation candidates first and justify the active validation profile using historical public outcomes.
 - Persist OOF/test predictions and candidate metadata so `candidate_registry.json`, `portfolio_plan.json`, and `blend_report.json` can rank low-correlation candidates and allocate submissions by information value.
 - For long-running multi-fold candidates, persist a valid intermediate candidate at the end of every fold. Save
-  completed-fold OOF/test predictions, metadata, and a `submission_<candidate>_fold<N>.csv` that matches
-  `sample_submission.csv`; never leave completed folds only in memory until all folds finish.
+  completed-fold OOF/test predictions, metadata, `candidate_<candidate>_fold<N>.json`, and a
+  `submission_<candidate>_fold<N>.csv` that matches `sample_submission.csv`; never leave completed folds only in memory
+  until all folds finish.
 
 Candidate selection guard:
 - Do not select the final submission by CV alone when multiple candidates exist.

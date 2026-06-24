@@ -25,6 +25,7 @@ from kagglebot.kernel_runner import (
     _extract_pipeline_done_from_line,
     _extract_pipeline_start_from_line,
     _extract_training_stage_from_line,
+    _find_intermediate_submission_file,
     _find_output_file,
     _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
@@ -1074,6 +1075,36 @@ def test_find_output_file_prefers_newest_under_run_tree(tmp_path: Path) -> None:
     os.utime(newer, (2000, 2000))
 
     assert _find_output_file(root, "metrics.json") == newer
+
+
+def test_find_submission_file_uses_newest_fold_intermediate_when_final_missing(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fold1 = output_dir / "submission_qwen_fold1.csv"
+    fold2 = output_dir / "nested" / "submission_qwen_fold2.csv"
+    fold2.parent.mkdir()
+    fold1.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    fold2.write_text("id,target\n1,0.2\n", encoding="utf-8")
+
+    os.utime(fold1, (1000, 1000))
+    os.utime(fold2, (2000, 2000))
+
+    assert _find_intermediate_submission_file(output_dir) == fold2
+    assert find_submission_file(output_dir) == fold2
+
+
+def test_find_submission_file_prefers_final_submission_over_fold_intermediate(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    final = output_dir / "submission.csv"
+    fold = output_dir / "submission_qwen_fold1.csv"
+    final.write_text("id,target\n1,0.3\n", encoding="utf-8")
+    fold.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    os.utime(final, (1000, 1000))
+    os.utime(fold, (2000, 2000))
+
+    assert find_submission_file(output_dir) == final
 
 
 def test_kernel_metadata_tpu(tmp_path: Path) -> None:

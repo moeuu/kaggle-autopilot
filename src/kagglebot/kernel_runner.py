@@ -114,6 +114,7 @@ _PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_s
 _PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
     r"\b(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*seed=(?P<seed>\d+)\s+fold=(?P<fold>\d+)\b"
 )
+_INTERMEDIATE_SUBMISSION_RE = re.compile(r"^submission(?:_[A-Za-z0-9_.-]+)?_fold(?P<fold>\d+)\.csv$", re.IGNORECASE)
 _PIPELINE_START_RE = re.compile(r"\b(?:Running|Training)\s+pipeline:\s*(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)")
 _PIPELINE_DONE_RE = re.compile(r"\bPipeline\s+(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:")
 _PIPELINE_SUITE_RE = re.compile(r"\bSuite:\s*(?P<suite>[A-Za-z0-9][A-Za-z0-9_.-]*)")
@@ -1410,6 +1411,9 @@ def find_submission_file(output_dir: Path) -> Path | None:
         if staging_dir is not None or members:
             return manifest_path
     candidate = _find_output_file(output_dir, "submission.csv")
+    if candidate:
+        return candidate
+    candidate = _find_intermediate_submission_file(output_dir)
     if candidate:
         return candidate
     return _find_submission_by_extension(output_dir)
@@ -5749,3 +5753,27 @@ def _find_submission_by_extension(output_dir: Path) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda path: (path.stat().st_mtime, str(path)))
+
+
+def _find_intermediate_submission_file(output_dir: Path) -> Path | None:
+    """Find the newest fold-level submission emitted by an interrupted run."""
+
+    candidates: list[tuple[int, Path]] = []
+    try:
+        paths = output_dir.rglob("submission*_fold*.csv")
+    except OSError:
+        return None
+    for path in paths:
+        if not path.is_file():
+            continue
+        match = _INTERMEDIATE_SUBMISSION_RE.match(path.name)
+        if match is None:
+            continue
+        try:
+            fold = int(match.group("fold"))
+        except ValueError:
+            continue
+        candidates.append((fold, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[1].stat().st_mtime, item[0], str(item[1])))[1]
