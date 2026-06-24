@@ -223,14 +223,6 @@ _extract_plan_split_strategy_hints = _plan_policy.extract_plan_split_strategy_hi
 _profile_has_temporal_signal = _plan_policy.profile_has_temporal_signal
 _resolve_split_strategy_from_hints = _plan_policy.resolve_split_strategy_from_artifacts
 _SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = _submission_policy.SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS
-_quality_reasons_allow_initial_submit_probe = _submission_policy.quality_reasons_allow_initial_submit_probe
-_decide_quality_submit_override = _submission_policy.decide_quality_submit_override
-_decide_initial_submit_probe = _submission_policy.decide_initial_submit_probe
-_decide_limited_submission_holdback = _submission_policy.decide_limited_submission_holdback
-_parse_kaggle_submission_timestamp = _submission_policy.parse_kaggle_submission_timestamp
-_submission_row_timestamp = _submission_policy.submission_row_timestamp
-_count_submission_rows_on_utc_day = _submission_policy.count_submission_rows_on_utc_day
-_count_submission_rows_in_recent_window = _submission_policy.count_submission_rows_in_recent_window
 _SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE
 _SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM
 _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
@@ -1999,7 +1991,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     experiment_graph=experiment_graph,
                 )
             forced_submit_reason: str | None = None
-            quality_submit_override = _decide_quality_submit_override(
+            quality_submit_override = _submission_policy.decide_quality_submit_override(
                 submit_enabled=submit_enabled,
                 quality_allows_submit=quality_allows_submit,
                 force_submit=config.force_submit,
@@ -2152,7 +2144,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 and submission_limit_per_day > 0
                 and max(0, int(successful_submit_count)) >= submission_limit_per_day
             )
-            limited_holdback_decision = _decide_limited_submission_holdback(
+            limited_holdback_decision = _submission_policy.decide_limited_submission_holdback(
                 submit_enabled=submit_enabled,
                 submission_limit_per_day=submission_limit_per_day,
                 quality_allows_submit=quality_allows_submit,
@@ -2172,7 +2164,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
                     "is active because daily limit is lower than max iterations."
                 )
-            initial_probe_decision = _decide_initial_submit_probe(
+            initial_probe_decision = _submission_policy.decide_initial_submit_probe(
                 force_initial_submit=force_initial_submit,
                 quality_allows_submit=quality_allows_submit,
                 force_submit=config.force_submit,
@@ -6544,8 +6536,8 @@ def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) ->
         return None
     now = datetime.now(UTC)
     return max(
-        _count_submission_rows_on_utc_day(rows, now=now),
-        _count_submission_rows_in_recent_window(rows, now=now),
+        _submission_policy.count_submission_rows_on_utc_day(rows, now=now),
+        _submission_policy.count_submission_rows_in_recent_window(rows, now=now),
     )
 
 

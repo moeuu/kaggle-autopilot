@@ -23,8 +23,6 @@ from kagglebot.autopilot import (
     _build_submit_autofix_context,
     _build_submit_failure_improvement_context,
     _callable_accepts_keyword_argument,
-    _count_submission_rows_in_recent_window,
-    _count_submission_rows_on_utc_day,
     _decide_notebook_submit_artifact_mode_for_submission,
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
@@ -44,7 +42,6 @@ from kagglebot.autopilot import (
     _load_submit_failure_context,
     _load_submit_retry_artifacts,
     _maybe_restart_for_src_changes,
-    _quality_reasons_allow_initial_submit_probe,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
     _resume_iteration_state,
@@ -75,7 +72,10 @@ from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.submission.guard import compute_error_fingerprint
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
 from kagglebot.submission_policy import (
+    count_submission_rows_in_recent_window,
+    count_submission_rows_on_utc_day,
     has_spare_daily_submission_slot,
+    quality_reasons_allow_initial_submit_probe,
     quality_reasons_allow_spare_submit,
     should_attempt_submit_for_readiness,
     should_force_initial_submit,
@@ -967,7 +967,7 @@ def test_count_submission_rows_on_utc_day_uses_kaggle_cli_dates() -> None:
         {"date": "not-a-date", "status": "COMPLETE"},
     ]
 
-    assert _count_submission_rows_on_utc_day(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
+    assert count_submission_rows_on_utc_day(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
 
 
 def test_count_submission_rows_in_recent_window_covers_rolling_daily_limits() -> None:
@@ -977,7 +977,7 @@ def test_count_submission_rows_in_recent_window_covers_rolling_daily_limits() ->
         {"date": "2026-05-08 12:48:07.633000", "status": "COMPLETE"},
     ]
 
-    assert _count_submission_rows_in_recent_window(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
+    assert count_submission_rows_in_recent_window(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
 
 
 def test_has_spare_daily_submission_slot_requires_slots_for_remaining_iterations() -> None:
@@ -1005,9 +1005,9 @@ def test_quality_reasons_allow_spare_submit_only_for_soft_blocks() -> None:
 
 
 def test_quality_reasons_allow_initial_submit_probe_only_for_detected_baseline_soft_block() -> None:
-    assert _quality_reasons_allow_initial_submit_probe(["selected_worse_than_detected_baseline"])
-    assert not _quality_reasons_allow_initial_submit_probe(["below_code_reference_baseline"])
-    assert not _quality_reasons_allow_initial_submit_probe(
+    assert quality_reasons_allow_initial_submit_probe(["selected_worse_than_detected_baseline"])
+    assert not quality_reasons_allow_initial_submit_probe(["below_code_reference_baseline"])
+    assert not quality_reasons_allow_initial_submit_probe(
         ["selected_worse_than_detected_baseline", "untrusted_score_source"]
     )
 
