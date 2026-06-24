@@ -10,6 +10,7 @@ from kagglebot.agents.strategy_runner import StrategyResult, run_strategy
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.eval.core import MetricRegistry
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.medals import (
     MEDAL_TARGET_PERCENTILES,
     TARGET_MEDAL_ERROR,
@@ -83,13 +84,12 @@ class EvaluationAdvisor:
 
         errors: list[str] = []
         if self.spec_path.exists() and not self.force:
-            frozen = _load_json(self.spec_path)
-            if isinstance(frozen, dict):
-                stale_reason = _stale_frozen_spec_reason(frozen=frozen, paths=self.paths)
-                if stale_reason is None:
-                    self._write_status(source="frozen", attempts=0, errors=[], notes="existing frozen spec reused")
-                    return frozen, "frozen"
-                errors.append(f"stale frozen spec detected: {stale_reason}")
+            frozen = load_json_object_or_empty(self.spec_path)
+            stale_reason = _stale_frozen_spec_reason(frozen=frozen, paths=self.paths)
+            if stale_reason is None:
+                self._write_status(source="frozen", attempts=0, errors=[], notes="existing frozen spec reused")
+                return frozen, "frozen"
+            errors.append(f"stale frozen spec detected: {stale_reason}")
 
         if self.dry_run or not self._search_capability_check():
             fallback = self._fallback_spec(reason="advisor_unavailable")
@@ -130,7 +130,7 @@ class EvaluationAdvisor:
             assert spec is not None
             assert sources_summary is not None
             assert queries is not None
-            (attempt_dir / "validated_payload.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            write_json_object(attempt_dir / "validated_payload.json", payload)
             self._persist_sources_summary(sources_summary=sources_summary, queries=queries)
             self._persist_final_spec(spec, source="advisor", attempts=attempt, errors=errors)
             return spec, "advisor"
@@ -197,7 +197,7 @@ class EvaluationAdvisor:
         )
 
     def _fallback_spec(self, *, reason: str) -> dict[str, object]:
-        profile = _load_json(self.paths.dataset_profile_path)
+        profile = load_json_object_or_empty(self.paths.dataset_profile_path)
         competition_policy = load_competition_policy(self.paths)
         context_text = "\n".join(
             [
@@ -255,13 +255,11 @@ class EvaluationAdvisor:
     def _persist_sources_summary(self, *, sources_summary: str, queries: list[str]) -> None:
         summary_path = self.log_dir / "sources_summary.md"
         summary_path.write_text((sources_summary.strip() + "\n") if sources_summary.strip() else "", encoding="utf-8")
-        queries_path = self.log_dir / "search_queries.json"
-        queries_path.write_text(json.dumps({"queries": queries}, indent=2), encoding="utf-8")
+        write_json_object(self.log_dir / "search_queries.json", {"queries": queries})
 
     def _persist_final_spec(self, spec: dict[str, object], *, source: str, attempts: int, errors: list[str]) -> None:
-        self.spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
-        chosen_path = self.log_dir / "chosen_evaluation_spec.json"
-        chosen_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+        write_json_object(self.spec_path, spec)
+        write_json_object(self.log_dir / "chosen_evaluation_spec.json", spec)
         self._write_status(source=source, attempts=attempts, errors=errors, notes="spec written")
 
     def _write_status(self, *, source: str, attempts: int, errors: list[str], notes: str) -> None:
@@ -273,8 +271,7 @@ class EvaluationAdvisor:
             "updated_at": datetime.now(UTC).isoformat(),
             "spec_path": str(self.spec_path),
         }
-        status_path = self.log_dir / "status.json"
-        status_path.write_text(json.dumps(status, indent=2), encoding="utf-8")
+        write_json_object(self.log_dir / "status.json", status)
 
 
 def validate_advisor_payload(
@@ -729,20 +726,8 @@ def _read_sample_head(paths: CompetitionPaths, *, limit_lines: int) -> str:
     return "\n".join(lines[:limit_lines])
 
 
-def _load_json(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
-
-
 def _load_top1_score(paths: CompetitionPaths) -> float | None:
-    payload = _load_json(paths.top1_public_path)
+    payload = load_json_object_or_empty(paths.top1_public_path)
     score = payload.get("score")
     if isinstance(score, (int, float)):
         return float(score)
