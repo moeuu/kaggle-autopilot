@@ -39,7 +39,6 @@ from kagglebot.autopilot import (
     _is_submit_abort_autofixable,
     _load_previous_submission_history,
     _load_run_state,
-    _load_submit_failure_context,
     _load_submit_retry_artifacts,
     _maybe_restart_for_src_changes,
     _resolve_iteration_submission_artifact,
@@ -80,6 +79,7 @@ from kagglebot.submission_policy import (
     should_attempt_submit_for_readiness,
     should_force_initial_submit,
 )
+from kagglebot.submit_failure_context import load_submit_failure_context
 from kagglebot.submit_stage import resolve_submission_message, resolve_submission_rank_payload
 from kagglebot.types import PlanConfig
 
@@ -2303,7 +2303,7 @@ def test_attempt_submit_does_not_switch_to_notebook_on_generic_bad_request(
             problem_types=[],
         )
     assert notebook_calls["count"] == 0
-    context = _load_submit_failure_context(run_dir)
+    context = load_submit_failure_context(run_dir)
     assert context["reason"] == "ambiguous_notebook_bad_request"
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
@@ -2333,7 +2333,7 @@ def test_load_submit_failure_context_normalizes_stale_ambiguous_notebook_context
         encoding="utf-8",
     )
 
-    context = _load_submit_failure_context(run_dir)
+    context = load_submit_failure_context(run_dir)
 
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
@@ -2387,7 +2387,7 @@ def test_attempt_submit_treats_submission_limit_as_manual_blocker(
             problem_types=[],
         )
 
-    context = _load_submit_failure_context(run_dir)
+    context = load_submit_failure_context(run_dir)
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
     assert "submission limit" in context["manual_next_step"].lower()
@@ -3248,7 +3248,7 @@ def test_attempt_submit_does_not_reuse_stale_repaired_submit_artifact(monkeypatc
     assert seen["path"] == new_submission
     run_state = _load_run_state(run_dir)
     assert run_state.get("submit_autofix_submission_path") == ""
-    context = _load_submit_failure_context(run_dir)
+    context = load_submit_failure_context(run_dir)
     assert context["superseded_by_submission_path"] == str(new_submission)
 
 
@@ -3796,7 +3796,7 @@ def test_attempt_submit_persists_submit_failure_context_for_validation_abort(mon
             problem_types=[],
         )
 
-    context = _load_submit_failure_context(run_dir)
+    context = load_submit_failure_context(run_dir)
     assert context["repair_target"] == "submission_artifact"
     assert context["repairable"] is True
     assert context["reason"] == "local_submission_validation_failed"
@@ -3857,7 +3857,7 @@ def test_attempt_submit_persists_manual_submit_failure_context_for_rules_block(m
             problem_types=[],
         )
 
-    context = _load_submit_failure_context(run_dir)
+    context = load_submit_failure_context(run_dir)
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
     assert context["reason"] == "rules_not_accepted"

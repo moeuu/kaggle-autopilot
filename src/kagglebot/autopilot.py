@@ -218,29 +218,6 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
-_SUBMIT_FAILURE_CONTEXT_FILENAME = _submit_failure_context.SUBMIT_FAILURE_CONTEXT_FILENAME
-_submit_failure_context_path = _submit_failure_context.submit_failure_context_path
-_load_submit_failure_context = _submit_failure_context.load_submit_failure_context
-_save_submit_failure_context = _submit_failure_context.save_submit_failure_context
-_mark_submit_failure_context_resolved = _submit_failure_context.mark_submit_failure_context_resolved
-_build_submit_failure_context_payload_from_state = _submit_failure_context.build_submit_failure_context_payload
-_path_from_submit_reference = _submit_failure_context.path_from_submit_reference
-_format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
-_decide_submit_autofix_input_submission = _submit_failure_context.decide_submit_autofix_input_submission
-_decide_submit_abort_autofixability = _submit_failure_context.decide_submit_abort_autofixability
-_should_force_resubmit_after_submit_abort_from_state = _submit_failure_context.should_force_resubmit_after_submit_abort
-_should_defer_submit_abort_to_next_iteration_from_state = (
-    _submit_failure_context.should_defer_submit_abort_to_next_iteration
-)
-_build_submit_failure_improvement_context_from_state = _submit_failure_context.build_submit_failure_improvement_context
-_decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
-_resolve_submit_autofix_submission_artifact_from_state = (
-    _submit_failure_context.resolve_submit_autofix_submission_artifact
-)
-_submit_file_fix_contract_satisfied_from_state = _submit_failure_context.submit_file_fix_contract_satisfied
-_prepare_submit_file_autofix_result = _submit_autofix.prepare_submit_file_autofix
-_submit_file_fix_required_for_attempt = _submit_autofix.submit_file_fix_required_for_attempt
-
 
 def _classify_submit_failure_repair(
     *,
@@ -8139,7 +8116,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     if submit_autofix:
         submit_context = _build_submit_autofix_context(run_dir)
         latest_submit_attempt = _load_latest_submit_attempt(run_dir)
-        submit_file_fix_required = _submit_file_fix_required_for_attempt(latest_submit_attempt)
+        submit_file_fix_required = _submit_autofix.submit_file_fix_required_for_attempt(latest_submit_attempt)
         if submit_file_fix_required:
             submit_file_fix_baseline_path = _resolve_submit_autofix_submission_artifact(
                 config=config,
@@ -9147,11 +9124,11 @@ def _attempt_submit(
     )
     _clear_stale_submit_autofix_artifact(run_dir=run_dir, submission_path=submission_path)
     run_state = _load_run_state(run_dir)
-    submit_failure_context = _load_submit_failure_context(run_dir)
+    submit_failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
     latest_submit_attempt = _load_latest_submit_attempt(run_dir)
     submit_code_fingerprint = _compute_submit_code_fingerprint(config)
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
-    autofix_input_decision = _decide_submit_autofix_input_submission(
+    autofix_input_decision = _submit_failure_context.decide_submit_autofix_input_submission(
         run_state=run_state,
         latest_submit_attempt=latest_submit_attempt,
         failure_context=submit_failure_context,
@@ -9241,7 +9218,7 @@ def _attempt_submit(
             duplicate_sources=duplicate_sources,
         )
         submit_attempt_recorder.record_payloads(skip_payloads)
-        _mark_submit_failure_context_resolved(
+        _submit_failure_context.mark_submit_failure_context_resolved(
             run_dir=run_dir,
             resolution=reason,
             submission_ref=str(prepared_submission_path),
@@ -9634,7 +9611,9 @@ def _attempt_submit(
             run_id=run_id,
             outcome=outcome_recording.ledger_outcome,
         )
-    _mark_submit_failure_context_resolved(run_dir=run_dir, resolution="submitted", submission_ref=submission_ref)
+    _submit_failure_context.mark_submit_failure_context_resolved(
+        run_dir=run_dir, resolution="submitted", submission_ref=submission_ref
+    )
     return _submit_attempts.build_submit_result_payload(
         message=message,
         submission_ref=submission_ref,
@@ -9926,7 +9905,7 @@ def _abort_submit_for_run(
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
     submit_attempt_recorder.record_payloads(abort_payloads)
-    _save_submit_failure_context(
+    _submit_failure_context.save_submit_failure_context(
         run_dir,
         _build_submit_failure_context_payload(
             run_dir=run_dir,
@@ -9980,7 +9959,7 @@ def _build_submit_failure_context_payload(
         error_kind=error_kind,
         detail=detail,
     )
-    return _build_submit_failure_context_payload_from_state(
+    return _submit_failure_context.build_submit_failure_context_payload(
         now_iso=datetime.now(UTC).isoformat(),
         submission_ref=submission_ref,
         artifact_path=artifact_path,
@@ -10004,8 +9983,8 @@ def _build_submit_failure_context_payload(
 
 def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path) -> None:
     state = _load_run_state(run_dir)
-    failure_context = _load_submit_failure_context(run_dir)
-    decision = _decide_stale_submit_autofix_artifact(
+    failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
+    decision = _submit_failure_context.decide_stale_submit_autofix_artifact(
         run_state=state,
         failure_context=failure_context,
         submission_path=submission_path,
@@ -10016,15 +9995,15 @@ def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path
     if decision.clear_repaired_path:
         _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
     failure_context.update(decision.failure_context_updates)
-    _save_submit_failure_context(run_dir, failure_context)
+    _submit_failure_context.save_submit_failure_context(run_dir, failure_context)
 
 
 def _resolve_submit_autofix_submission_artifact(*, config: AutopilotConfig, run_id: str, run_dir: Path) -> Path | None:
     max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
-    return _resolve_submit_autofix_submission_artifact_from_state(
+    return _submit_failure_context.resolve_submit_autofix_submission_artifact(
         run_state=_load_run_state(run_dir),
         latest_submit_attempt=_load_latest_submit_attempt(run_dir),
-        failure_context=_load_submit_failure_context(run_dir),
+        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
         fallback_iteration_dirs=(
             config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
         ),
@@ -10110,7 +10089,7 @@ def _prepare_submit_file_autofix(
     def save_repaired_path(fixed: Path) -> None:
         _save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
 
-    preparation = _prepare_submit_file_autofix_result(
+    preparation = _submit_autofix.prepare_submit_file_autofix(
         latest_submit_attempt=latest,
         resolve_source=resolve_source,
         validate_and_prepare=service.validate_and_prepare_submission,
@@ -10125,7 +10104,7 @@ def _submit_file_fix_contract_satisfied(
     baseline_path: Path | None,
     baseline_sha256: str | None,
 ) -> bool:
-    return _submit_file_fix_contract_satisfied_from_state(
+    return _submit_failure_context.submit_file_fix_contract_satisfied(
         run_state=_load_run_state(run_dir),
         baseline_path=baseline_path,
         baseline_sha256=baseline_sha256,
@@ -10134,8 +10113,8 @@ def _submit_file_fix_contract_satisfied(
 
 
 def _build_submit_autofix_context(run_dir: Path) -> str:
-    return _format_submit_autofix_context(
-        failure_context=_load_submit_failure_context(run_dir),
+    return _submit_failure_context.format_submit_autofix_context(
+        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
         run_state=_load_run_state(run_dir),
         latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
@@ -10211,7 +10190,7 @@ def _env_truthy(name: str) -> bool:
 
 
 def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
-    return _should_force_resubmit_after_submit_abort_from_state(_load_run_state(run_dir))
+    return _submit_failure_context.should_force_resubmit_after_submit_abort(_load_run_state(run_dir))
 
 
 def _should_defer_submit_abort_to_next_iteration(
@@ -10221,9 +10200,9 @@ def _should_defer_submit_abort_to_next_iteration(
     iteration: int,
     max_iterations: int,
 ) -> bool:
-    return _should_defer_submit_abort_to_next_iteration_from_state(
+    return _submit_failure_context.should_defer_submit_abort_to_next_iteration(
         compute=compute,
-        failure_context=_load_submit_failure_context(run_dir),
+        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
         iteration=iteration,
         max_iterations=max_iterations,
     )
@@ -10231,9 +10210,9 @@ def _should_defer_submit_abort_to_next_iteration(
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
     run_dir = config.paths.run_dir(run_id)
-    failure_context = _load_submit_failure_context(run_dir)
+    failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
     state = _load_run_state(run_dir)
-    decision = _decide_submit_abort_autofixability(
+    decision = _submit_failure_context.decide_submit_abort_autofixability(
         failure_context=failure_context,
         run_state=state,
     )
@@ -10568,8 +10547,8 @@ def _campaign_prefers_validation_redesign(
 
 
 def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:
-    return _build_submit_failure_improvement_context_from_state(
-        failure_context=_load_submit_failure_context(run_dir),
+    return _submit_failure_context.build_submit_failure_improvement_context(
+        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
         latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
 
