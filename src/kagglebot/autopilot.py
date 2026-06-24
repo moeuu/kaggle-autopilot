@@ -10654,33 +10654,17 @@ def _print_iteration_submit_status(
     quality_reasons: list[str],
     competition_faithfulness: dict[str, object] | None = None,
 ) -> None:
-    if not submit_enabled:
-        return
-    if submit_allowed_by_gate:
-        print(f"[cyan]submit[/cyan]: iter {iteration}/{max_iterations} attempting submission now.")
-        return
-    detail = ""
-    if quality_reasons and submit_phase_state == "blocked_quality_guard":
-        detail = f" reasons={','.join(quality_reasons)}"
-    if isinstance(competition_faithfulness, dict):
-        metric_detail = ""
-        expected_metric = str(competition_faithfulness.get("expected_metric") or "").strip()
-        actual_metric = str(competition_faithfulness.get("actual_metric") or "").strip()
-        if expected_metric or actual_metric:
-            metric_detail = f" metric={actual_metric or 'unknown'}/{expected_metric or 'unknown'}"
-        split_detail = ""
-        expected_split = str(competition_faithfulness.get("expected_split_strategy") or "").strip()
-        actual_split = str(competition_faithfulness.get("actual_split_strategy") or "").strip()
-        if expected_split or actual_split:
-            split_detail = f" split={actual_split or 'unknown'}/{expected_split or 'unknown'}"
-        dataset_mode = str(competition_faithfulness.get("dataset_mode") or "").strip()
-        dataset_detail = f" dataset_mode={dataset_mode}" if dataset_mode else ""
-        detail = f"{detail}{metric_detail}{split_detail}{dataset_detail}"
-    print(
-        "[cyan]submit[/cyan]: "
-        f"iter {iteration}/{max_iterations} not attempted yet "
-        f"(state={submit_phase_state}{detail})."
+    message = _submit_stage.format_iteration_submit_status_message(
+        iteration=iteration,
+        max_iterations=max_iterations,
+        submit_enabled=submit_enabled,
+        submit_allowed_by_gate=submit_allowed_by_gate,
+        submit_phase_state=submit_phase_state,
+        quality_reasons=quality_reasons,
+        competition_faithfulness=competition_faithfulness,
     )
+    if message:
+        print(message)
 
 
 def _record_submission_knowledge(

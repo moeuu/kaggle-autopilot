@@ -12,6 +12,7 @@ from kagglebot.submit_stage import (
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
     find_campaign_candidate_for_submission,
+    format_iteration_submit_status_message,
     format_rank_force_reason,
     format_submission_rank_message,
     infer_iteration_from_submission_path,
@@ -205,6 +206,53 @@ def test_format_submission_rank_message_formats_observed_and_estimated_rank() ->
     assert observed == "[cyan]submission rank[/cyan]: 12/100 (percentile=12.00%) source=submission_row"
     assert estimated == (
         "[yellow]submission rank estimate[/yellow]: 20/200 (percentile=10.00%) source=leaderboard_score_estimate"
+    )
+
+
+def test_format_iteration_submit_status_message_handles_disabled_allowed_and_blocked() -> None:
+    assert (
+        format_iteration_submit_status_message(
+            iteration=1,
+            max_iterations=3,
+            submit_enabled=False,
+            submit_allowed_by_gate=False,
+            submit_phase_state="disabled",
+            quality_reasons=[],
+        )
+        is None
+    )
+    assert (
+        format_iteration_submit_status_message(
+            iteration=1,
+            max_iterations=3,
+            submit_enabled=True,
+            submit_allowed_by_gate=True,
+            submit_phase_state="ready",
+            quality_reasons=[],
+        )
+        == "[cyan]submit[/cyan]: iter 1/3 attempting submission now."
+    )
+
+    blocked = format_iteration_submit_status_message(
+        iteration=2,
+        max_iterations=3,
+        submit_enabled=True,
+        submit_allowed_by_gate=False,
+        submit_phase_state="blocked_quality_guard",
+        quality_reasons=["collapsed_predictions", "weak_cv"],
+        competition_faithfulness={
+            "expected_metric": "logloss",
+            "actual_metric": "accuracy",
+            "expected_split_strategy": "group_kfold",
+            "actual_split_strategy": "kfold",
+            "dataset_mode": "sample",
+        },
+    )
+
+    assert blocked == (
+        "[cyan]submit[/cyan]: iter 2/3 not attempted yet "
+        "(state=blocked_quality_guard reasons=collapsed_predictions,weak_cv "
+        "metric=accuracy/logloss split=kfold/group_kfold dataset_mode=sample)."
     )
 
 
