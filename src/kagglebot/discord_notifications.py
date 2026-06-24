@@ -14,6 +14,7 @@ from uuid import uuid4
 from rich import print
 
 from kagglebot.kaggle_api import leaderboard_rank_for_score
+from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 
 SOURCE = "kaggle-autopilot"
 DEFAULT_ACCOUNT = "lab_rdp"
@@ -808,24 +809,6 @@ def _submission_timestamp(record: dict[str, object], *, fallback_index: int) -> 
             if parsed is not None:
                 return parsed.timestamp()
     return float(fallback_index)
-
-
-def _metrics_equivalent(left: str | None, right: str | None) -> bool:
-    left_metric = _normalize_metric_name(left)
-    right_metric = _normalize_metric_name(right)
-    if not left_metric or not right_metric:
-        return False
-    aliases = {
-        "balancedacc": "balancedaccuracy",
-        "balancedaccuracy": "balancedaccuracy",
-    }
-    return aliases.get(left_metric, left_metric) == aliases.get(right_metric, right_metric)
-
-
-def _normalize_metric_name(value: str | None) -> str:
-    if not value:
-        return ""
-    return "".join(ch for ch in value.lower() if ch.isalnum())
 
 
 def _metric_score(metrics: dict[str, object]) -> float | None:

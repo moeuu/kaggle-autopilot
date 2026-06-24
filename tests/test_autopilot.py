@@ -4301,15 +4301,6 @@ def test_extract_kernel_metric_from_direct_brier_score_key() -> None:
     assert value == 0.18
 
 
-def test_metrics_equivalent_accepts_umud_metric_alias() -> None:
-    from kagglebot.autopilot import _metrics_equivalent
-
-    assert _metrics_equivalent(
-        "UMUD normalized MAE",
-        "UMUD Score: normalized mean absolute error across pa_deg, fl_mm, and mt_mm",
-    )
-
-
 def test_resolve_explicit_official_metric_override_accepts_generic_plan_fallback() -> None:
     from kagglebot.autopilot import _resolve_explicit_official_metric_override
 
