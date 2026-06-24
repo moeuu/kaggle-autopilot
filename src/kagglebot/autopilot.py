@@ -9479,27 +9479,27 @@ def _attempt_submit(
     submission_artifact_path: Path | None = prepared_submission_path
     for attempt in range(1, max_attempts + 1):
         try:
-            if notebook_submit_required:
-                notebook_result, notebook_ref, notebook_artifact_path = _submit_with_notebook_kernel(
+            submit_attempt_result = _submit_stage.run_submit_stage_attempt(
+                notebook_submit_required=notebook_submit_required,
+                file_submission_path=prepared_submission_path,
+                run_notebook_submit=lambda: _submit_with_notebook_kernel(
                     config=config,
                     run_id=run_id,
                     submission_path=prepared_submission_path,
                     message=message,
                     artifact_mode=submission_artifact_mode,
-                )
-                submission_result = notebook_result
-                submission_reference = notebook_ref
-                submission_artifact_path = notebook_artifact_path
-            else:
-                submission_result = submission_service.submit_prepared(
+                ),
+                run_file_submit=lambda: submission_service.submit_prepared(
                     prepared_path=prepared_submission_path,
                     message=message,
                     run_id=run_id,
                     offline_score=best_score,
                     score_source="offline",
-                )
-                submission_reference = str(submission_result.submission_path)
-                submission_artifact_path = submission_result.submission_path
+                ),
+            )
+            submission_result = submit_attempt_result.submission_result
+            submission_reference = submit_attempt_result.submission_reference
+            submission_artifact_path = submit_attempt_result.submission_artifact_path
         except SubmissionCliError as exc:
             submit_error_classification = _submit_stage.classify_submit_stage_error(
                 stdout=exc.stdout,

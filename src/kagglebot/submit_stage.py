@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,13 @@ class SubmitStageErrorActionDecision:
     messages: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SubmitStageAttemptResult:
+    submission_result: object
+    submission_reference: str
+    submission_artifact_path: Path | None
+
+
 def decide_initial_submit_stage_mode(
     *,
     requested_notebook_submit: bool,
@@ -66,6 +74,30 @@ def decide_initial_submit_stage_mode(
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
+    )
+
+
+def run_submit_stage_attempt(
+    *,
+    notebook_submit_required: bool,
+    file_submission_path: Path,
+    run_notebook_submit: Callable[[], tuple[object, str, Path | None]],
+    run_file_submit: Callable[[], object],
+) -> SubmitStageAttemptResult:
+    if notebook_submit_required:
+        notebook_result, notebook_ref, notebook_artifact_path = run_notebook_submit()
+        return SubmitStageAttemptResult(
+            submission_result=notebook_result,
+            submission_reference=notebook_ref,
+            submission_artifact_path=notebook_artifact_path,
+        )
+
+    file_result = run_file_submit()
+    file_result_path = getattr(file_result, "submission_path", file_submission_path)
+    return SubmitStageAttemptResult(
+        submission_result=file_result,
+        submission_reference=str(file_result_path),
+        submission_artifact_path=file_result_path if isinstance(file_result_path, Path) else file_submission_path,
     )
 
 

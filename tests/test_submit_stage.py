@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from kagglebot.submit_stage import (
     classify_submit_stage_error,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
     decide_submit_stage_error_action,
+    run_submit_stage_attempt,
 )
+
+
+class FileSubmitResult:
+    def __init__(self, submission_path: Path) -> None:
+        self.submission_path = submission_path
 
 
 def test_decide_initial_submit_stage_mode_keeps_file_submit() -> None:
@@ -51,6 +59,37 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
         "[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit",
         "[yellow]submit mode[/yellow]: using notebook submit",
     )
+
+
+def test_run_submit_stage_attempt_uses_file_submit_result_path(tmp_path: Path) -> None:
+    prepared_path = tmp_path / "prepared.csv"
+    submitted_path = tmp_path / "submitted.csv"
+
+    result = run_submit_stage_attempt(
+        notebook_submit_required=False,
+        file_submission_path=prepared_path,
+        run_notebook_submit=lambda: (_ for _ in ()).throw(AssertionError("notebook should not run")),
+        run_file_submit=lambda: FileSubmitResult(submitted_path),
+    )
+
+    assert isinstance(result.submission_result, FileSubmitResult)
+    assert result.submission_reference == str(submitted_path)
+    assert result.submission_artifact_path == submitted_path
+
+
+def test_run_submit_stage_attempt_uses_notebook_submit_tuple(tmp_path: Path) -> None:
+    notebook_artifact = tmp_path / "notebook-submission.csv"
+
+    result = run_submit_stage_attempt(
+        notebook_submit_required=True,
+        file_submission_path=tmp_path / "prepared.csv",
+        run_notebook_submit=lambda: ("notebook-result", "kernel:user/demo", notebook_artifact),
+        run_file_submit=lambda: (_ for _ in ()).throw(AssertionError("file should not run")),
+    )
+
+    assert result.submission_result == "notebook-result"
+    assert result.submission_reference == "kernel:user/demo"
+    assert result.submission_artifact_path == notebook_artifact
 
 
 def test_classify_submit_stage_error_uses_output_fallback() -> None:
