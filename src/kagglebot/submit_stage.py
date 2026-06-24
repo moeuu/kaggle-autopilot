@@ -11,6 +11,15 @@ class SubmitStageModeDecision:
     messages: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SubmitStageNotebookFallbackDecision:
+    retry_as_notebook: bool
+    notebook_submit_required: bool
+    notebook_fallback_activated: bool
+    submission_artifact_mode: str
+    messages: tuple[str, ...] = ()
+
+
 def decide_initial_submit_stage_mode(
     *,
     requested_notebook_submit: bool,
@@ -37,4 +46,31 @@ def decide_initial_submit_stage_mode(
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
+    )
+
+
+def decide_notebook_fallback_after_file_submit_error(
+    *,
+    notebook_submit_required: bool,
+    notebook_fallback_activated: bool,
+    should_use_notebook_fallback: bool,
+    resolved_notebook_artifact_mode: str | None,
+    current_submission_artifact_mode: str,
+) -> SubmitStageNotebookFallbackDecision:
+    if notebook_submit_required or notebook_fallback_activated or not should_use_notebook_fallback:
+        return SubmitStageNotebookFallbackDecision(
+            retry_as_notebook=False,
+            notebook_submit_required=notebook_submit_required,
+            notebook_fallback_activated=notebook_fallback_activated,
+            submission_artifact_mode=current_submission_artifact_mode,
+        )
+    return SubmitStageNotebookFallbackDecision(
+        retry_as_notebook=True,
+        notebook_submit_required=True,
+        notebook_fallback_activated=True,
+        submission_artifact_mode=str(resolved_notebook_artifact_mode or "wrapper"),
+        messages=(
+            "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
+            "retrying via notebook submit automatically.",
+        ),
     )

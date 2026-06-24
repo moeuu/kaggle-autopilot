@@ -90,8 +90,9 @@ kernel output artifact/reference handling, output file selection, Kaggle submit-
 submit retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
-Initial submit-stage mode decisions live in `src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit`
-into typed file-submit/notebook-submit stage services.
+Initial submit-stage mode decisions and file-submit-to-notebook fallback decisions live in
+`src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit` into typed file-submit/notebook-submit stage
+services.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
@@ -170,8 +171,9 @@ Recommended extraction order:
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, tiny public sample guards, notebook submit
    kernel-run kwargs construction, notebook submit result artifact/reference handling, and notebook submit exception/retry
-   orchestration are extracted. Initial submit-stage mode decisions are now in `submit_stage.py`. Next, continue moving
-   `_attempt_submit`'s file-submit and notebook-submit branches into that typed submit-stage service.
+   orchestration are extracted. Initial submit-stage mode decisions and file-submit-to-notebook fallback decisions are
+   now in `submit_stage.py`. Next, continue moving `_attempt_submit`'s file-submit and notebook-submit branches into
+   that typed submit-stage service.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

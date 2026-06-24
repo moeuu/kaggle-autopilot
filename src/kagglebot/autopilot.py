@@ -9511,21 +9511,24 @@ def _attempt_submit(
                 classification_stderr = fallback_stderr
             classification_kind = str(classification.get("kind") or "unknown")
             classification_reason = str(classification.get("reason") or "unclassified_submit_error")
-            if (
-                (not notebook_submit_required)
-                and (not notebook_fallback_activated)
-                and _should_use_notebook_submit_fallback(
+            notebook_fallback_decision = _submit_stage.decide_notebook_fallback_after_file_submit_error(
+                notebook_submit_required=notebook_submit_required,
+                notebook_fallback_activated=notebook_fallback_activated,
+                should_use_notebook_fallback=_should_use_notebook_submit_fallback(
                     reason=classification_reason,
                     stdout=exc.stdout,
                     stderr=exc.stderr,
-                )
-            ):
-                notebook_submit_required = True
-                notebook_fallback_activated = True
-                submission_artifact_mode = _resolve_notebook_submit_artifact_mode(
+                ),
+                resolved_notebook_artifact_mode=_resolve_notebook_submit_artifact_mode(
                     paths=config.paths,
                     submit_mode="notebook",
-                )
+                ),
+                current_submission_artifact_mode=submission_artifact_mode,
+            )
+            if notebook_fallback_decision.retry_as_notebook:
+                notebook_submit_required = notebook_fallback_decision.notebook_submit_required
+                notebook_fallback_activated = notebook_fallback_decision.notebook_fallback_activated
+                submission_artifact_mode = notebook_fallback_decision.submission_artifact_mode
                 artifact_mode_decision = _decide_notebook_submit_artifact_mode_for_submission(
                     paths=config.paths,
                     requested_mode=submission_artifact_mode,
@@ -9533,10 +9536,8 @@ def _attempt_submit(
                     submission_path=prepared_submission_path,
                 )
                 submission_artifact_mode = artifact_mode_decision.mode
-                print(
-                    "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
-                    "retrying via notebook submit automatically."
-                )
+                for mode_message in notebook_fallback_decision.messages:
+                    print(mode_message)
                 if artifact_mode_decision.message:
                     print(artifact_mode_decision.message)
                 continue
