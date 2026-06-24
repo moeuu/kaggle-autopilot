@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from rich import print
 
+from kagglebot import submit_attempts as _submit_attempts
 from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
@@ -621,104 +622,20 @@ def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
 
 
 def _has_submit_attempt_records(run_dir: Path) -> bool:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return False
-    try:
-        for line in attempts_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                return True
-    except OSError:
-        return False
-    return False
+    return _submit_attempts.has_submit_attempt_records(run_dir)
 
 
 def _has_successful_submit_attempt(run_dir: Path) -> bool:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return False
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and bool(payload.get("ok")):
-            return True
-    return False
+    return _submit_attempts.has_successful_submit_attempt(run_dir)
 
 
 def _count_successful_submit_attempts(run_dir: Path) -> int:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return 0
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-    count = 0
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if not bool(payload.get("ok")):
-            continue
-        action_taken = str(payload.get("action_taken") or "").strip().lower()
-        if action_taken and action_taken != "submit":
-            continue
-        count += 1
-    return count
+    return _submit_attempts.count_successful_submit_attempts(run_dir)
 
 
 def _load_submit_fingerprints(run_dir: Path) -> list[str]:
-    fingerprints: list[str] = []
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return fingerprints
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return fingerprints
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        fingerprint = str(row.get("fingerprint") or "").strip()
-        if not fingerprint:
-            continue
-        fingerprints.append(fingerprint)
-    return fingerprints
+    return _submit_attempts.load_submit_fingerprints(run_dir)
 
 
 def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
-    attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return {}
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    for raw in reversed(lines):
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return {}
+    return _submit_attempts.load_latest_submit_attempt(run_dir)

@@ -49,17 +49,15 @@ def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
-def submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
-    normalized_sha = str(submission_sha or "").strip()
-    if not normalized_sha:
-        return False
+def load_submit_attempt_rows(run_dir: Path) -> list[dict[str, object]]:
     attempts_path = run_dir / "submit_attempts.jsonl"
     if not attempts_path.exists():
-        return False
+        return []
     try:
         lines = attempts_path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return False
+        return []
+    rows: list[dict[str, object]] = []
     for line in lines:
         if not line.strip():
             continue
@@ -67,11 +65,56 @@ def submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(row, dict):
-            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:
+    normalized_sha = str(submission_sha or "").strip()
+    if not normalized_sha:
+        return False
+    for row in load_submit_attempt_rows(run_dir):
         if str(row.get("sub_sha256") or "").strip() == normalized_sha:
             return True
     return False
+
+
+def has_submit_attempt_records(run_dir: Path) -> bool:
+    return bool(load_submit_attempt_rows(run_dir))
+
+
+def has_successful_submit_attempt(run_dir: Path) -> bool:
+    return any(bool(row.get("ok")) for row in load_submit_attempt_rows(run_dir))
+
+
+def count_successful_submit_attempts(run_dir: Path) -> int:
+    count = 0
+    for row in load_submit_attempt_rows(run_dir):
+        if not bool(row.get("ok")):
+            continue
+        action_taken = str(row.get("action_taken") or "").strip().lower()
+        if action_taken and action_taken != "submit":
+            continue
+        count += 1
+    return count
+
+
+def load_submit_fingerprints(run_dir: Path) -> list[str]:
+    fingerprints: list[str] = []
+    for row in load_submit_attempt_rows(run_dir):
+        fingerprint = str(row.get("fingerprint") or "").strip()
+        if not fingerprint:
+            continue
+        fingerprints.append(fingerprint)
+    return fingerprints
+
+
+def load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
+    rows = load_submit_attempt_rows(run_dir)
+    if not rows:
+        return {}
+    return rows[-1]
 
 
 def build_submit_attempt_payload(

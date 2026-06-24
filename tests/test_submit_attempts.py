@@ -13,7 +13,13 @@ from kagglebot.submit_attempts import (
     build_submit_skip_attempt_payload,
     build_submit_skip_record_payloads,
     build_submit_success_record_payloads,
+    count_successful_submit_attempts,
     decide_submit_outcome_recording,
+    has_submit_attempt_records,
+    has_successful_submit_attempt,
+    load_latest_submit_attempt,
+    load_submit_attempt_rows,
+    load_submit_fingerprints,
     submit_attempt_sha_seen,
 )
 
@@ -104,6 +110,44 @@ def test_submit_attempt_sha_seen_ignores_invalid_rows(tmp_path) -> None:
     assert submit_attempt_sha_seen(run_dir=tmp_path, submission_sha="sha")
     assert not submit_attempt_sha_seen(run_dir=tmp_path, submission_sha="missing")
     assert not submit_attempt_sha_seen(run_dir=tmp_path, submission_sha="")
+
+
+def test_load_submit_attempt_rows_filters_invalid_jsonl_rows(tmp_path) -> None:
+    (tmp_path / "submit_attempts.jsonl").write_text(
+        "\n".join(
+            [
+                "",
+                "not-json",
+                json.dumps(["not", "a", "dict"]),
+                json.dumps({"ok": False, "fingerprint": "fp-1"}),
+                json.dumps({"ok": True, "action_taken": "submit", "fingerprint": "fp-2"}),
+                json.dumps({"ok": True, "action_taken": "skip", "fingerprint": "fp-3"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = load_submit_attempt_rows(tmp_path)
+
+    assert rows == [
+        {"ok": False, "fingerprint": "fp-1"},
+        {"ok": True, "action_taken": "submit", "fingerprint": "fp-2"},
+        {"ok": True, "action_taken": "skip", "fingerprint": "fp-3"},
+    ]
+    assert has_submit_attempt_records(tmp_path)
+    assert has_successful_submit_attempt(tmp_path)
+    assert count_successful_submit_attempts(tmp_path) == 1
+    assert load_submit_fingerprints(tmp_path) == ["fp-1", "fp-2", "fp-3"]
+    assert load_latest_submit_attempt(tmp_path) == {"ok": True, "action_taken": "skip", "fingerprint": "fp-3"}
+
+
+def test_submit_attempt_readers_return_empty_defaults_for_missing_file(tmp_path) -> None:
+    assert load_submit_attempt_rows(tmp_path) == []
+    assert not has_submit_attempt_records(tmp_path)
+    assert not has_successful_submit_attempt(tmp_path)
+    assert count_successful_submit_attempts(tmp_path) == 0
+    assert load_submit_fingerprints(tmp_path) == []
+    assert load_latest_submit_attempt(tmp_path) == {}
 
 
 def test_build_submit_run_state_update_sets_common_last_submit_fields() -> None:
