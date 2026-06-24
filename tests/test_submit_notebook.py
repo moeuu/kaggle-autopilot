@@ -5,6 +5,7 @@ from pathlib import Path
 from kagglebot.submit_notebook import (
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_reference,
+    build_submit_kernel_run_kwargs,
     decide_ambiguous_notebook_submit_retry,
     decide_notebook_submit_artifact_mode,
     decide_submit_kernel_cpu_fallback,
@@ -65,6 +66,39 @@ def test_build_kaggle_submit_kernel_kwargs_uses_reference_fields() -> None:
         "output_file": "submission.csv",
         "version": "3",
         "dry_run": True,
+    }
+
+
+def test_build_submit_kernel_run_kwargs_normalizes_mode_and_preserves_fields(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    kwargs = build_submit_kernel_run_kwargs(
+        slug="demo",
+        run_id="run-abcdef",
+        iteration=3,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name="kernel-name",
+        accelerator="gpu",
+        enable_internet=False,
+        submission_path=submission_path,
+        artifact_mode=" Inference ",
+        dry_run=True,
+        timeout_minutes=120,
+    )
+
+    assert kwargs == {
+        "slug": "demo",
+        "run_id": "run-abcdef",
+        "iteration": 3,
+        "base_dir": tmp_path,
+        "kaggle_username": "user",
+        "kernel_name": "kernel-name",
+        "accelerator": "gpu",
+        "enable_internet": False,
+        "submission_path": submission_path,
+        "mode": "inference",
+        "dry_run": True,
+        "timeout_minutes": 120,
     }
 
 

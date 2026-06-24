@@ -109,6 +109,37 @@ def build_kaggle_submit_kernel_kwargs(
     }
 
 
+def build_submit_kernel_run_kwargs(
+    *,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    base_dir: Path,
+    kaggle_username: str,
+    kernel_name: str | None,
+    accelerator: str,
+    enable_internet: bool,
+    submission_path: Path,
+    artifact_mode: str | None,
+    dry_run: bool,
+    timeout_minutes: int | None,
+) -> dict[str, object]:
+    return {
+        "slug": slug,
+        "run_id": run_id,
+        "iteration": iteration,
+        "base_dir": base_dir,
+        "kaggle_username": kaggle_username,
+        "kernel_name": kernel_name,
+        "accelerator": accelerator,
+        "enable_internet": enable_internet,
+        "submission_path": submission_path,
+        "mode": normalize_notebook_submit_artifact_mode(artifact_mode),
+        "dry_run": dry_run,
+        "timeout_minutes": timeout_minutes,
+    }
+
+
 def decide_ambiguous_notebook_submit_retry(
     *,
     stdout: str,

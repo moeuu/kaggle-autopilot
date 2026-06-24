@@ -9832,21 +9832,20 @@ def _submit_with_notebook_kernel(
     iteration = _infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = config.paths.iter_dir(run_id, iteration)
     kaggle_user = resolve_kaggle_username(config.kaggle_username)
-    normalized_artifact_mode = _submit_notebook.normalize_notebook_submit_artifact_mode(artifact_mode)
-    submit_kernel_kwargs = {
-        "slug": config.slug,
-        "run_id": run_id,
-        "iteration": iteration,
-        "base_dir": config.paths.base_dir.parent,
-        "kaggle_username": kaggle_user,
-        "kernel_name": config.kernel_name,
-        "accelerator": config.accelerator,
-        "enable_internet": False,
-        "submission_path": submission_path,
-        "mode": normalized_artifact_mode,
-        "dry_run": config.dry_run,
-        "timeout_minutes": config.time_budget_min,
-    }
+    submit_kernel_kwargs = _submit_notebook.build_submit_kernel_run_kwargs(
+        slug=config.slug,
+        run_id=run_id,
+        iteration=iteration,
+        base_dir=config.paths.base_dir.parent,
+        kaggle_username=kaggle_user,
+        kernel_name=config.kernel_name,
+        accelerator=config.accelerator,
+        enable_internet=False,
+        submission_path=submission_path,
+        artifact_mode=artifact_mode,
+        dry_run=config.dry_run,
+        timeout_minutes=config.time_budget_min,
+    )
     try:
         kernel_result = run_submit_kernel(**submit_kernel_kwargs)
     except Exception as exc:  # noqa: BLE001
