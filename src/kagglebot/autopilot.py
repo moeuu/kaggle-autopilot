@@ -218,24 +218,6 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
-_infer_split_strategy_from_hint_text = _plan_policy.infer_split_strategy_from_hint_text
-_extract_plan_split_strategy_hints = _plan_policy.extract_plan_split_strategy_hints
-_profile_has_temporal_signal = _plan_policy.profile_has_temporal_signal
-_resolve_split_strategy_from_hints = _plan_policy.resolve_split_strategy_from_artifacts
-_SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = _submission_policy.SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS
-_SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE
-_SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM
-_SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
-_SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN = _submit_failure_policy.SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN
-_SUBMIT_FILE_ERROR_MARKERS = _submit_failure_policy.SUBMIT_FILE_ERROR_MARKERS
-_NOTEBOOK_FALLBACK_HINTS = _submit_failure_policy.NOTEBOOK_FALLBACK_HINTS
-_should_use_notebook_submit_fallback = _submit_failure_policy.should_use_notebook_submit_fallback
-_should_retry_ambiguous_notebook_submit_error = _submit_failure_policy.should_retry_ambiguous_notebook_submit_error
-_normalize_loaded_submit_failure_context = _submit_failure_policy.normalize_loaded_submit_failure_context
-_submit_failure_manual_next_step = _submit_failure_policy.submit_failure_manual_next_step
-_submit_error_targets_submit_mode = _submit_failure_policy.submit_error_targets_submit_mode
-_classify_submit_failure_repair_decision = _submit_failure_policy.classify_submit_failure_repair
-_submit_error_text_indicates_file_issue = _submit_failure_policy.submit_error_text_indicates_file_issue
 _SUBMIT_FAILURE_CONTEXT_FILENAME = _submit_failure_context.SUBMIT_FAILURE_CONTEXT_FILENAME
 _submit_failure_context_path = _submit_failure_context.submit_failure_context_path
 _load_submit_failure_context = _submit_failure_context.load_submit_failure_context
@@ -266,7 +248,11 @@ def _classify_submit_failure_repair(
     error_kind: object,
     detail: str,
 ) -> tuple[str, bool, str]:
-    decision = _classify_submit_failure_repair_decision(reason=reason, error_kind=error_kind, detail=detail)
+    decision = _submit_failure_policy.classify_submit_failure_repair(
+        reason=reason,
+        error_kind=error_kind,
+        detail=detail,
+    )
     return decision.repair_target, decision.repairable, decision.manual_next_step
 
 
@@ -3618,7 +3604,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
     cv_folds = choose(config.cv_folds, plan.cv_folds, spec_folds if spec_folds is not None else 5)
     split_strategy = choose(None, plan.split_strategy, spec_split)
-    split_strategy, split_strategy_note = _resolve_split_strategy_from_hints(
+    split_strategy, split_strategy_note = _plan_policy.resolve_split_strategy_from_artifacts(
         paths=config.paths,
         split_strategy=split_strategy,
     )
@@ -9408,7 +9394,7 @@ def _attempt_submit(
             notebook_fallback_decision = _submit_stage.decide_notebook_fallback_after_file_submit_error(
                 notebook_submit_required=notebook_submit_required,
                 notebook_fallback_activated=notebook_fallback_activated,
-                should_use_notebook_fallback=_should_use_notebook_submit_fallback(
+                should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback(
                     reason=classification_reason,
                     stdout=exc.stdout,
                     stderr=exc.stderr,
@@ -9715,7 +9701,7 @@ def _submit_with_notebook_kernel(
         run_kaggle_submit_kernel=run_kaggle_submit_kernel,
         submit_error_types=SubmissionCliError,
         classify_submit_error=classify_submit_error,
-        should_retry_ambiguous=_should_retry_ambiguous_notebook_submit_error,
+        should_retry_ambiguous=_submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
         sleep=time.sleep,
         on_message=print,
     )
@@ -9989,7 +9975,7 @@ def _build_submit_failure_context_payload(
     exit_code: int | None,
 ) -> dict[str, object]:
     detail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
-    repair_decision = _classify_submit_failure_repair_decision(
+    repair_decision = _submit_failure_policy.classify_submit_failure_repair(
         reason=reason,
         error_kind=error_kind,
         detail=detail,
