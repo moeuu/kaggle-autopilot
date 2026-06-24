@@ -56,6 +56,20 @@ Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 Main loop is in `src/kagglebot/autopilot.py`.
 Supporting state/resume helpers now live in `src/kagglebot/autopilot_state.py`, and score/policy helpers live in
 `src/kagglebot/autopilot_helpers.py`, so the main file stays focused on orchestration.
+Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; `autopilot.py` only keeps compatibility
+aliases for older tests/extensions that imported private rule helpers from the main module.
+Offline score-source normalization and trust checks live in `src/kagglebot/score_sources.py` for the same reason:
+the loop should consume normalized policy answers rather than own every parsing rule inline.
+Split-strategy policy and competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps
+plan resolution moving toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still
+being retired incrementally.
+Submit-gate normalization, target/top1 checks, quality reason soft overrides, daily-limit row counting, and slot spacing live in
+`src/kagglebot/submission_policy.py`, leaving Kaggle API quota lookup and ledger side effects in the orchestration layer.
+Explicit submit decision objects such as `QualitySubmitOverrideDecision`, `InitialSubmitProbeDecision`, and
+`LimitedSubmissionHoldbackDecision` now carry soft override/probe/holdback results back to the loop instead of spreading
+that state across several booleans.
+Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy modules do not reimplement permissive
+artifact reads.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
@@ -114,3 +128,22 @@ knowledge/
 
 - Git branch/stash automation is not part of current implementation.
 - Autofix can patch `src/` when runtime errors require framework-level fixes.
+
+## Architecture Improvement Direction
+
+The main architectural risk is still the size of `src/kagglebot/autopilot.py`. Future updates should keep extracting
+stable, testable orchestration policies out of that file rather than adding new loop branches inline.
+
+Recommended extraction order:
+
+1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization, score-source
+   normalization, and competition-specific overrides are already out of the main loop.
+2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
+   `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object.
+3. Kernel repair/autofix policy: isolate submit-error classification and repair-target selection from the loop so notebook
+   submit failures, artifact format failures, and platform failures can be tested without running an autopilot session.
+4. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
+   objects rather than raw CLI stdout/stderr parsing.
+
+Each extraction should preserve the existing private compatibility names in `autopilot.py` until downstream tests and
+extensions have moved to the new public module.

@@ -17,13 +17,17 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 from rich import print
 
+from kagglebot import competition_rules as _competition_rules
+from kagglebot import plan_policy as _plan_policy
+from kagglebot import score_sources as _score_sources
+from kagglebot import submission_policy as _submission_policy
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
@@ -119,6 +123,7 @@ from kagglebot.experiment_graph import (
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file
 from kagglebot.history import SubmissionLedger, new_run_id
+from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     leaderboard_rank_for_score,
@@ -207,6 +212,46 @@ from kagglebot.writeup import (
     normalize_deliverable_mode,
     normalize_submit_mode,
 )
+
+# Backward-compatible private symbols for tests/extensions that imported rule parsing from autopilot.
+_CompetitionRuleConstraints = _competition_rules.CompetitionRuleConstraints
+_matches_any_rule_pattern = _competition_rules.matches_any_rule_pattern
+_extract_submission_limit_per_day = _competition_rules.extract_submission_limit_per_day
+_load_competition_rule_constraints = _competition_rules.load_competition_rule_constraints
+_runtime_limit_for_compute = _competition_rules.runtime_limit_for_compute
+_TRUSTED_SCORE_SOURCES = _score_sources.TRUSTED_SCORE_SOURCES
+_DEFAULT_ACCEPTED_SCORE_SOURCES = _score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES
+_normalize_score_source_name = _score_sources.normalize_score_source_name
+_is_trusted_offline_score_source = _score_sources.is_trusted_offline_score_source
+_normalize_score_source_list = _score_sources.normalize_score_source_list
+_SPLIT_STRATEGY_PRIORITY = _plan_policy.SPLIT_STRATEGY_PRIORITY
+_COMPETITION_EVAL_OVERRIDES = _plan_policy.COMPETITION_EVAL_OVERRIDES
+_normalize_split_strategy_name = _plan_policy.normalize_split_strategy_name
+_competition_eval_override = _plan_policy.competition_eval_override
+_apply_competition_eval_override = _plan_policy.apply_competition_eval_override
+_infer_split_strategy_from_hint_text = _plan_policy.infer_split_strategy_from_hint_text
+_extract_plan_split_strategy_hints = _plan_policy.extract_plan_split_strategy_hints
+_profile_has_temporal_signal = _plan_policy.profile_has_temporal_signal
+_resolve_split_strategy_from_hints = _plan_policy.resolve_split_strategy_from_artifacts
+_meets_target = _submission_policy.meets_target
+_is_top1_tier = _submission_policy.is_top1_tier
+_has_spare_daily_submission_slot = _submission_policy.has_spare_daily_submission_slot
+_non_final_submission_checkpoints = _submission_policy.non_final_submission_checkpoints
+_should_attempt_submit_for_readiness = _submission_policy.should_attempt_submit_for_readiness
+_submission_gate_for_policy = _submission_policy.submission_gate_for_policy
+_normalized_submit_policy = _submission_policy.normalized_submit_policy
+_normalized_submission_gate = _submission_policy.normalized_submission_gate
+_should_force_initial_submit = _submission_policy.should_force_initial_submit
+_SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = _submission_policy.SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS
+_quality_reasons_allow_spare_submit = _submission_policy.quality_reasons_allow_spare_submit
+_quality_reasons_allow_initial_submit_probe = _submission_policy.quality_reasons_allow_initial_submit_probe
+_decide_quality_submit_override = _submission_policy.decide_quality_submit_override
+_decide_initial_submit_probe = _submission_policy.decide_initial_submit_probe
+_decide_limited_submission_holdback = _submission_policy.decide_limited_submission_holdback
+_parse_kaggle_submission_timestamp = _submission_policy.parse_kaggle_submission_timestamp
+_submission_row_timestamp = _submission_policy.submission_row_timestamp
+_count_submission_rows_on_utc_day = _submission_policy.count_submission_rows_on_utc_day
+_count_submission_rows_in_recent_window = _submission_policy.count_submission_rows_in_recent_window
 
 
 # Backward-compatible symbol for tests/extensions.
@@ -333,14 +378,6 @@ _NOTEBOOK_FALLBACK_HINTS = (
     "kernel must be specified as <owner>/<notebook>",
     "kernel must be specified",
 )
-_COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
-    "deep-past-initiative-machine-translation": {
-        "metric_name": "Geometric Mean of the BLEU and the chrF++ scores",
-        "direction": "maximize",
-        "split_strategy": "group_kfold",
-        "group_column_hint": "oare_id",
-    }
-}
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
 _DEFAULT_EVAL_REPEATS = 2
 _DEFAULT_MAX_ITERATIONS = 5
@@ -373,20 +410,12 @@ _QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = 0.01
 _QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
 _QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
 _HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
-_SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = frozenset(
-    {
-        "selected_worse_than_detected_baseline",
-        "below_code_reference_baseline",
-    }
-)
 _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = 0.02
 _BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = 0.01
 _REGRESSION_GUARD_ABS_DROP_PROB = 0.03
 _REGRESSION_GUARD_ABS_DROP_DEFAULT = 0.10
 _CONSERVATIVE_COLLAPSE_MAX_FEATURES = 5
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
-_TRUSTED_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
-_DEFAULT_ACCEPTED_SCORE_SOURCES = ("cv", "holdout")
 _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
     "sample",
     "smoke",
@@ -417,12 +446,6 @@ _HIGH_CAPACITY_MARKERS = (
     "stack",
 )
 _EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
-_SPLIT_STRATEGY_PRIORITY = {
-    "kfold": 0,
-    "stratified_kfold": 1,
-    "group_kfold": 2,
-    "timeseries_split": 3,
-}
 _BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
 _CODE_REFERENCE_IMPL_MARKER_PREFIX = "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED:"
 _SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT = "submission_artifact"
@@ -430,55 +453,6 @@ _SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = "submit_mode_or_kernel"
 _SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM = "platform_or_polling"
 _SUBMIT_FAILURE_REPAIR_TARGET_MANUAL = "manual_intervention"
 _SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN = "unknown"
-_NUMBER_WORD_TO_INT = {
-    "zero": 0,
-    "one": 1,
-    "two": 2,
-    "three": 3,
-    "four": 4,
-    "five": 5,
-    "six": 6,
-    "seven": 7,
-    "eight": 8,
-    "nine": 9,
-    "ten": 10,
-}
-_NOTEBOOK_SUBMISSION_ONLY_RULE_PATTERNS = (
-    r"submissions?\s+to\s+this\s+competition\s+must\s+be\s+made\s+through\s+notebooks?",
-    r"submissions?\s+must\s+be\s+made\s+through\s+notebooks?",
-    r"only\s+accepts?\s+submissions?\s+from\s+notebooks?",
-)
-_INTERNET_DISABLED_RULE_PATTERNS = (
-    r"internet\s+access\s+disabled",
-    r"internet\s+access\s+(?:is\s+)?(?:disabled|disallowed|not\s+allowed|forbidden|prohibited|unavailable)",
-    r"cannot\s+use\s+internet\s+access(?:\s+in\s+this\s+competition)?",
-    r"notebooks?\s+cannot\s+use\s+internet\s+access(?:\s+in\s+this\s+competition)?",
-    r"disable\s+internet\s+in\s+the\s+notebook\s+editor",
-    r"turn\s+off\s+internet(?:\s+access)?",
-    r"internet\s+must\s+be\s+(?:disabled|off)",
-    r"no\s+internet\s+access",
-    r"enable[_\s-]?internet\s*[:=]\s*false",
-)
-_UNRESTRICTED_SUBMISSION_ATTEMPT_PATTERNS = (
-    r"submit\s+without\s+restriction\s+as\s+to\s+the\s+number\s+of\s+attempts",
-    r"submissions?\s+(?:are\s+)?unlimited",
-    r"unlimited\s+submissions?",
-    r"no\s+limit\s+on\s+(?:the\s+number\s+of\s+)?submissions?",
-)
-
-
-@dataclass(frozen=True)
-class _CompetitionRuleConstraints:
-    notebook_submissions_only: bool = False
-    internet_must_be_off: bool = False
-    submission_limit_detected: bool = False
-    submission_limit_per_day: int | None = None
-    cpu_runtime_limit_min: int | None = None
-    gpu_runtime_limit_min: int | None = None
-
-
-def _matches_any_rule_pattern(text: str, patterns: tuple[str, ...]) -> bool:
-    return any(re.search(pattern, text) for pattern in patterns)
 
 
 @dataclass(frozen=True)
@@ -2034,30 +2008,26 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     experiment_graph=experiment_graph,
                 )
             forced_submit_reason: str | None = None
-            if (
-                submit_enabled
-                and (not quality_allows_submit)
-                and (not config.force_submit)
-                and (not force_initial_submit)
-                and spare_daily_submission_slot
-                and _quality_reasons_allow_spare_submit(quality_reasons)
-            ):
-                quality_allows_submit = True
-                forced_submit_reason = _SPARE_DAILY_SUBMIT_REASON
+            quality_submit_override = _decide_quality_submit_override(
+                submit_enabled=submit_enabled,
+                quality_allows_submit=quality_allows_submit,
+                force_submit=config.force_submit,
+                force_initial_submit=force_initial_submit,
+                spare_daily_submission_slot=spare_daily_submission_slot,
+                quality_reasons=quality_reasons,
+                spare_reason=_SPARE_DAILY_SUBMIT_REASON,
+            )
+            quality_allows_submit = quality_submit_override.quality_allows_submit
+            forced_submit_reason = quality_submit_override.forced_submit_reason
+            if quality_submit_override.override_reason == _SPARE_DAILY_SUBMIT_REASON:
                 print(
                     "[yellow]submit override[/yellow]: spare daily submission slots remain; "
                     "allowing submit through soft quality guard reasons."
                 )
-            if (
-                submit_enabled
-                and (not quality_allows_submit)
-                and (not config.force_submit)
-                and (not force_initial_submit)
-            ):
-                reason_text = ", ".join(quality_reasons) if quality_reasons else "quality_guard_blocked_submit"
+            if quality_submit_override.blocked_reason is not None:
                 print(
                     "[yellow]submit blocked[/yellow]: kernel quality guard detected unstable evaluation "
-                    f"({reason_text}); submission is deferred to a later iteration."
+                    f"({quality_submit_override.blocked_reason}); submission is deferred to a later iteration."
                 )
             high_potential_improved = False
             if accuracy_potential.get("eligible"):
@@ -2191,48 +2161,51 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 and submission_limit_per_day > 0
                 and max(0, int(successful_submit_count)) >= submission_limit_per_day
             )
-            submit_limited_holdback = False
-            if (
-                submit_enabled
-                and submission_limit_per_day is not None
-                and quality_allows_submit
-                and submit_improvement_allowed
-            ):
-                reserve_start = max(0, submission_limit_per_day - 1)
-                strict_limit_mode = max_iterations > submission_limit_per_day
-                if (successful_submit_count >= reserve_start and not allow_submit) or (
-                    strict_limit_mode and (not allow_submit)
-                ):
-                    submit_limited_holdback = True
-                    if successful_submit_count >= reserve_start:
-                        print(
-                            "[yellow]submit deferred[/yellow]: reserved final submission slot "
-                            "until offline score reaches top1-tier, readiness target, or final iteration."
-                        )
-                    else:
-                        print(
-                            "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
-                            "is active because daily limit is lower than max iterations."
-                        )
-            if force_initial_submit and not quality_allows_submit and not config.force_submit:
-                if _quality_reasons_allow_initial_submit_probe(quality_reasons):
-                    quality_allows_submit = True
-                    print(
-                        "[yellow]submit override[/yellow]: iter 1 only failed a soft baseline guard; "
-                        "submitting the trained/validated artifact to probe the Kaggle contract."
-                    )
-                else:
-                    force_initial_submit = False
-                    forced_submit_reason = None
-                    allow_submit = False
-                    print(
-                        "[yellow]submit override skipped[/yellow]: "
-                        "iter 1 artifact failed training/validation quality guard; "
-                        "not probing with an untrusted output."
-                    )
-            if force_initial_submit:
-                forced_submit_reason = _FORCED_INITIAL_SUBMIT_REASON
-                allow_submit = True
+            limited_holdback_decision = _decide_limited_submission_holdback(
+                submit_enabled=submit_enabled,
+                submission_limit_per_day=submission_limit_per_day,
+                quality_allows_submit=quality_allows_submit,
+                submit_improvement_allowed=submit_improvement_allowed,
+                successful_submit_count=successful_submit_count,
+                max_iterations=max_iterations,
+                allow_submit=allow_submit,
+            )
+            submit_limited_holdback = limited_holdback_decision.holdback
+            if limited_holdback_decision.reason == "reserved_final_slot":
+                print(
+                    "[yellow]submit deferred[/yellow]: reserved final submission slot "
+                    "until offline score reaches top1-tier, readiness target, or final iteration."
+                )
+            elif limited_holdback_decision.reason == "strict_limited_cadence":
+                print(
+                    "[yellow]submit deferred[/yellow]: strict limited-submission cadence "
+                    "is active because daily limit is lower than max iterations."
+                )
+            initial_probe_decision = _decide_initial_submit_probe(
+                force_initial_submit=force_initial_submit,
+                quality_allows_submit=quality_allows_submit,
+                force_submit=config.force_submit,
+                quality_reasons=quality_reasons,
+                allow_submit=allow_submit,
+                forced_submit_reason=forced_submit_reason,
+                probe_reason=_FORCED_INITIAL_SUBMIT_REASON,
+            )
+            force_initial_submit = initial_probe_decision.force_initial_submit
+            quality_allows_submit = initial_probe_decision.quality_allows_submit
+            allow_submit = initial_probe_decision.allow_submit
+            forced_submit_reason = initial_probe_decision.forced_submit_reason
+            if initial_probe_decision.soft_probe_override:
+                print(
+                    "[yellow]submit override[/yellow]: iter 1 only failed a soft baseline guard; "
+                    "submitting the trained/validated artifact to probe the Kaggle contract."
+                )
+            if initial_probe_decision.skipped_reason == "quality_guard":
+                print(
+                    "[yellow]submit override skipped[/yellow]: "
+                    "iter 1 artifact failed training/validation quality guard; "
+                    "not probing with an untrusted output."
+                )
+            if initial_probe_decision.probe_forced:
                 submit_non_improving = False
                 defer_submit_for_accuracy_frontier = False
                 submit_limited_holdback = False
@@ -3415,173 +3388,6 @@ def _load_plan(paths: CompetitionPaths) -> PlanConfig:
     return PlanConfig.from_dict(payload)
 
 
-def _normalize_split_strategy_name(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    if not normalized:
-        return None
-    aliases = {
-        "k": "kfold",
-        "kfold": "kfold",
-        "stratified": "stratified_kfold",
-        "stratifiedkfold": "stratified_kfold",
-        "stratified_kfold": "stratified_kfold",
-        "group": "group_kfold",
-        "groupkfold": "group_kfold",
-        "group_kfold": "group_kfold",
-        "group_kfold_oare_id": "group_kfold",
-        "time": "timeseries_split",
-        "timeseries": "timeseries_split",
-        "timeseriessplit": "timeseries_split",
-        "timeseries_split": "timeseries_split",
-    }
-    return aliases.get(normalized)
-
-
-def _competition_eval_override(slug: str) -> dict[str, str]:
-    return dict(_COMPETITION_EVAL_OVERRIDES.get(str(slug).strip().lower(), {}))
-
-
-def _apply_competition_eval_override(
-    *,
-    slug: str,
-    payload: dict[str, object],
-    include_spec_keys: bool = False,
-) -> dict[str, object]:
-    override = _competition_eval_override(slug)
-    if not override:
-        return payload
-    updated = dict(payload)
-    updated["metric"] = override["metric_name"]
-    updated["direction"] = override["direction"]
-    updated["split_strategy_hint"] = override["split_strategy"]
-    updated["group_column_hint"] = override["group_column_hint"]
-    task = str(updated.get("task") or "").strip().lower()
-    if task in {"classification", "binary", "multiclass", ""}:
-        updated["task"] = "translation"
-    updated["task_by_target"] = {"translation": "translation"}
-    updated["prediction_kind_by_target"] = {"translation": "text"}
-    updated["tags"] = ["text", "translation", "n_rows_small", "high_cardinality_cats"]
-    if include_spec_keys:
-        updated["metric_name"] = override["metric_name"]
-        updated["split_strategy"] = override["split_strategy"]
-    return updated
-
-
-def _infer_split_strategy_from_hint_text(text: str) -> str | None:
-    lowered = text.strip().lower()
-    if not lowered:
-        return None
-    direct = _normalize_split_strategy_name(lowered)
-    if direct is not None:
-        return direct
-    if re.search(r"\btime[-_\s]?series\b|\bchronolog\b|\bforecast\b", lowered):
-        return "timeseries_split"
-    if re.search(r"\bgroupkfold\b|\bgroup[_\s-]?kfold\b|\bgroup[_\s-]?fold\b|\bgroup[_\s-]?cv\b", lowered):
-        return "group_kfold"
-    if re.search(r"\bstratifiedkfold\b|\bstratified[_\s-]?kfold\b|\bstratified[_\s-]?cv\b", lowered):
-        return "stratified_kfold"
-    if re.search(r"\bk[-_\s]?fold\b", lowered):
-        return "kfold"
-    return None
-
-
-def _extract_plan_split_strategy_hints(plan_payload: dict[str, object]) -> list[str]:
-    hints: list[str] = []
-
-    evaluation_protocol = plan_payload.get("evaluation_protocol")
-    if isinstance(evaluation_protocol, dict):
-        for key in ("cv_type", "split_strategy"):
-            raw = evaluation_protocol.get(key)
-            if isinstance(raw, str) and raw.strip():
-                hints.append(raw)
-
-    toggles = plan_payload.get("toggles")
-    if isinstance(toggles, dict):
-        for key in ("CV_TYPE", "cv_type", "split_strategy", "SPLIT_STRATEGY"):
-            raw = toggles.get(key)
-            if isinstance(raw, str) and raw.strip():
-                hints.append(raw)
-
-    for key in ("cv_type", "split_strategy"):
-        raw = plan_payload.get(key)
-        if isinstance(raw, str) and raw.strip():
-            hints.append(raw)
-
-    return hints
-
-
-def _profile_has_temporal_signal(profile: dict[str, object]) -> bool:
-    dtype_map_raw = profile.get("dtype_by_column")
-    if not isinstance(dtype_map_raw, dict):
-        return False
-    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
-    for name, dtype in dtype_map_raw.items():
-        column_name = str(name)
-        dtype_name = str(dtype).lower()
-        if "datetime" in dtype_name or "timedelta" in dtype_name:
-            return True
-        if temporal_name.search(column_name):
-            return True
-    return False
-
-
-def _resolve_split_strategy_from_hints(
-    *,
-    paths: CompetitionPaths,
-    split_strategy: object,
-) -> tuple[str | None, str | None]:
-    raw_current = str(split_strategy).strip() if isinstance(split_strategy, str) else ""
-    normalized_current = _normalize_split_strategy_name(raw_current)
-    if raw_current and normalized_current is None:
-        return raw_current, None
-    if normalized_current not in {None, "kfold"}:
-        return normalized_current, None
-
-    plan_payload = _load_json_object(paths.plan_path) or {}
-    hints = _extract_plan_split_strategy_hints(plan_payload)
-    hinted_strategy: str | None = None
-    for hint in hints:
-        candidate = _infer_split_strategy_from_hint_text(hint)
-        if candidate is None:
-            continue
-        if hinted_strategy is None or (_SPLIT_STRATEGY_PRIORITY[candidate] > _SPLIT_STRATEGY_PRIORITY[hinted_strategy]):
-            hinted_strategy = candidate
-
-    if (
-        hinted_strategy in {"timeseries_split", "group_kfold", "stratified_kfold"}
-        and hinted_strategy != normalized_current
-    ):
-        return (
-            hinted_strategy,
-            f"split_strategy '{normalized_current or 'auto'}' -> '{hinted_strategy}' "
-            "using plan evaluation hints for better local/public alignment.",
-        )
-
-    profile = _load_json_object(paths.dataset_profile_path) or {}
-    if (
-        str(profile.get("modality", "")).strip().lower() == "timeseries"
-        and _profile_has_temporal_signal(profile)
-        and normalized_current != "timeseries_split"
-    ):
-        return (
-            "timeseries_split",
-            f"split_strategy '{normalized_current or 'auto'}' -> 'timeseries_split' "
-            "using dataset_profile temporal signal.",
-        )
-
-    task = str(profile.get("task", "")).strip().lower()
-    if task in {"classification", "binary", "multiclass"} and normalized_current in {None, "kfold"}:
-        return (
-            "stratified_kfold",
-            f"split_strategy '{normalized_current or 'auto'}' -> 'stratified_kfold' "
-            "using dataset_profile classification task.",
-        )
-
-    return normalized_current, None
-
-
 def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
     existing: dict[str, object] = {}
     if paths.plan_path.exists():
@@ -3613,123 +3419,6 @@ def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
         return False
     kernel_path = paths.kernel_source_dir / "kernel.py"
     return kernel_path.exists()
-
-
-def _extract_submission_limit_per_day(lowered_rules_text: str) -> int | None:
-    """Extract an explicit daily or rolling-24h submission limit from rules text."""
-    candidates: list[int] = []
-    normalized_rules_text = re.sub(r"[*_`]+", " ", lowered_rules_text)
-    normalized_rules_text = re.sub(r"\s+", " ", normalized_rules_text)
-
-    for match in re.finditer(r"\((\d+)\)\W+submissions?\s+per\s+day", normalized_rules_text):
-        candidates.append(int(match.group(1)))
-
-    numeric_patterns = (
-        r"\b(\d+)\s+submissions?\s+per\s+day\b",
-        r"\bmaximum\s+of\s+(\d+)\s+submissions?\s+per\s+day\b",
-        r"\b(\d+)\s+submissions?\s+within\s+24\s+hours?\b",
-        r"\b(\d+)\s+submissions?\s+per\s+24\s*h(?:ours?)?\s*(?:interval|window)?\b",
-        r"\b(\d+)\s+submissions?\s+per\s+24\s+hours?\s*(?:interval|window)?\b",
-    )
-    for pattern in numeric_patterns:
-        for match in re.finditer(pattern, normalized_rules_text):
-            candidates.append(int(match.group(1)))
-
-    word_patterns = (
-        r"\b([a-z]+)(?:\s+\(\d+\))?\s+submissions?\s+per\s+day\b",
-        r"\bmaximum\s+of\s+([a-z]+)(?:\s+\(\d+\))?\s+submissions?\s+per\s+day\b",
-        r"\b([a-z]+)\s+submissions?\s+within\s+24\s+hours?\b",
-        r"\b([a-z]+)\s+submissions?\s+per\s+24\s*h(?:ours?)?\s*(?:interval|window)?\b",
-        r"\b([a-z]+)\s+submissions?\s+per\s+24\s+hours?\s*(?:interval|window)?\b",
-    )
-    for pattern in word_patterns:
-        for match in re.finditer(pattern, normalized_rules_text):
-            number_word = match.group(1)
-            if number_word in _NUMBER_WORD_TO_INT:
-                candidates.append(_NUMBER_WORD_TO_INT[number_word])
-
-    for match in re.finditer(
-        r"submission\s+limit\s+is\s+(\d+)\s+submissions?\s+within\s+24\s+hours?", normalized_rules_text
-    ):
-        candidates.append(int(match.group(1)))
-
-    for match in re.finditer(
-        r"submission\s+limit\s+is\s+([a-z]+)\s+submissions?\s+within\s+24\s+hours?",
-        normalized_rules_text,
-    ):
-        number_word = match.group(1)
-        if number_word in _NUMBER_WORD_TO_INT:
-            candidates.append(_NUMBER_WORD_TO_INT[number_word])
-
-    positive = [value for value in candidates if value > 0]
-    if not positive:
-        return None
-    return min(positive)
-
-
-def _load_competition_rule_constraints(paths: CompetitionPaths) -> _CompetitionRuleConstraints:
-    text_parts: list[str] = []
-    for path in (paths.rules_md_path, paths.rules_html_path):
-        if not path.exists():
-            continue
-        try:
-            text_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            continue
-    if not text_parts:
-        return _CompetitionRuleConstraints()
-    text = "\n".join(text_parts)
-    lowered = text.lower()
-
-    notebook_submissions_only = _matches_any_rule_pattern(lowered, _NOTEBOOK_SUBMISSION_ONLY_RULE_PATTERNS)
-    internet_must_be_off = _matches_any_rule_pattern(lowered, _INTERNET_DISABLED_RULE_PATTERNS)
-    submission_limit_per_day = _extract_submission_limit_per_day(lowered)
-    unrestricted_submission_attempts = submission_limit_per_day is None and _matches_any_rule_pattern(
-        lowered, _UNRESTRICTED_SUBMISSION_ATTEMPT_PATTERNS
-    )
-    submission_limit_detected = (not unrestricted_submission_attempts) and bool(
-        re.search(r"maximum\s+number\s+of\s+submissions", lowered)
-        or re.search(r"submission\s+limit", lowered)
-        or re.search(r"\bmax(?:imum)?\s+submissions?\b", lowered)
-        or re.search(r"\b\d+\s+submissions?\s+per\s+day\b", lowered)
-        or re.search(r"\bdaily\s+submissions?\b", lowered)
-        or submission_limit_per_day is not None
-    )
-
-    cpu_runtime_limit_min: int | None = None
-    gpu_runtime_limit_min: int | None = None
-    for match in re.finditer(
-        r"\b(cpu|gpu)\s+notebook\s*<=?\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b",
-        lowered,
-    ):
-        device = match.group(1)
-        hours = float(match.group(2))
-        minutes = max(1, int(round(hours * 60)))
-        if device == "cpu":
-            cpu_runtime_limit_min = minutes if cpu_runtime_limit_min is None else min(cpu_runtime_limit_min, minutes)
-        else:
-            gpu_runtime_limit_min = minutes if gpu_runtime_limit_min is None else min(gpu_runtime_limit_min, minutes)
-
-    return _CompetitionRuleConstraints(
-        notebook_submissions_only=notebook_submissions_only,
-        internet_must_be_off=internet_must_be_off,
-        submission_limit_detected=submission_limit_detected,
-        submission_limit_per_day=submission_limit_per_day,
-        cpu_runtime_limit_min=cpu_runtime_limit_min,
-        gpu_runtime_limit_min=gpu_runtime_limit_min,
-    )
-
-
-def _runtime_limit_for_compute(*, constraints: _CompetitionRuleConstraints, compute: str) -> int | None:
-    normalized = str(compute or "").strip().lower()
-    if normalized == "kaggle_gpu":
-        return constraints.gpu_runtime_limit_min or constraints.cpu_runtime_limit_min
-    if normalized == "kaggle_tpu":
-        limits = [value for value in (constraints.gpu_runtime_limit_min, constraints.cpu_runtime_limit_min) if value]
-        if limits:
-            return min(limits)
-        return None
-    return None
 
 
 def _is_local_gpu_compute(compute: object) -> bool:
@@ -4926,16 +4615,6 @@ def _append_fix_retry_feedback(
     )
 
 
-def _load_json_object(path: Path) -> dict[str, object] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
 def _finite_float_or_none(value: object) -> float | None:
     parsed = _to_float(value)
     if parsed is None:
@@ -5016,37 +4695,6 @@ def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str 
         direction=direction,
         target_metric=target_metric,
     )
-
-
-def _normalize_score_source_name(value: object) -> str:
-    """Normalize score_source labels for trust checks."""
-    text = str(value or "").strip().lower()
-    if not text:
-        return "holdout"
-    normalized = text.replace("-", "_").replace(" ", "_")
-    alias_map = {
-        "cross_validation": "cv",
-        "crossval": "cv",
-        "validation": "holdout",
-        "lbproxy": "lb_proxy",
-    }
-    return alias_map.get(normalized, normalized)
-
-
-def _is_trusted_offline_score_source(score_source: str) -> bool:
-    """Return whether score source is trusted for offline model-selection decisions."""
-    return _normalize_score_source_name(score_source) in _TRUSTED_SCORE_SOURCES
-
-
-def _normalize_score_source_list(value: object) -> list[str]:
-    normalized: list[str] = []
-    if not isinstance(value, list):
-        return normalized
-    for item in value:
-        candidate = _normalize_score_source_name(item)
-        if candidate and candidate not in normalized:
-            normalized.append(candidate)
-    return normalized
 
 
 def _build_evaluation_contract(
@@ -6904,75 +6552,6 @@ def _resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[fl
     return prev_score, streak
 
 
-def _parse_kaggle_submission_timestamp(value: str | None) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-
-    text = value.strip()
-    assume_utc = False
-    if text.upper().endswith(" UTC"):
-        text = text[:-4].strip()
-        assume_utc = True
-    text = text.replace("Z", "+00:00")
-
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        parsed = None
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-            try:
-                parsed = datetime.strptime(text, fmt)
-                break
-            except ValueError:
-                continue
-        if parsed is None:
-            return None
-
-    if parsed.tzinfo is None or assume_utc:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _submission_row_timestamp(row: dict[str, str]) -> datetime | None:
-    for key, value in row.items():
-        normalized = str(key).strip().lower().replace("_", "").replace(" ", "")
-        if normalized in {"date", "submissiondate", "submitted", "submittedat"}:
-            return _parse_kaggle_submission_timestamp(value)
-    return None
-
-
-def _count_submission_rows_on_utc_day(
-    rows: list[dict[str, str]],
-    *,
-    now: datetime | None = None,
-) -> int:
-    now_utc = (now or datetime.now(UTC)).astimezone(UTC)
-    day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
-    count = 0
-    for row in rows:
-        ts = _submission_row_timestamp(row)
-        if ts is not None and day_start <= ts < day_end:
-            count += 1
-    return count
-
-
-def _count_submission_rows_in_recent_window(
-    rows: list[dict[str, str]],
-    *,
-    now: datetime | None = None,
-    window: timedelta = timedelta(days=1),
-) -> int:
-    now_utc = (now or datetime.now(UTC)).astimezone(UTC)
-    window_start = now_utc - window
-    count = 0
-    for row in rows:
-        ts = _submission_row_timestamp(row)
-        if ts is not None and window_start <= ts <= now_utc:
-            count += 1
-    return count
-
-
 def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) -> int | None:
     if dry_run:
         return 0
@@ -7003,161 +6582,6 @@ def _submission_count_for_daily_limit(
     if daily_count is None:
         return fallback_count
     return max(0, int(daily_count))
-
-
-def _has_spare_daily_submission_slot(
-    *,
-    submission_limit_per_day: int | None,
-    submissions_used_today: int,
-    iteration: int,
-    max_iterations: int,
-) -> bool:
-    if not isinstance(submission_limit_per_day, int) or submission_limit_per_day <= 0:
-        return False
-    remaining_slots = max(0, submission_limit_per_day - max(0, int(submissions_used_today)))
-    remaining_iterations = max(1, int(max_iterations) - int(iteration) + 1)
-    return remaining_slots >= remaining_iterations
-
-
-def _quality_reasons_allow_spare_submit(reasons: list[str]) -> bool:
-    if not reasons:
-        return False
-    return all(reason in _SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS for reason in reasons)
-
-
-def _quality_reasons_allow_initial_submit_probe(reasons: list[str]) -> bool:
-    if not reasons:
-        return False
-    return all(reason == "selected_worse_than_detected_baseline" for reason in reasons)
-
-
-def _non_final_submission_checkpoints(*, max_iterations: int, non_final_slots: int) -> set[int]:
-    """Spread non-final submit slots across the loop to avoid early budget burn."""
-    if max_iterations <= 1 or non_final_slots <= 0:
-        return set()
-    last_non_final = max_iterations - 1
-    if non_final_slots >= last_non_final:
-        return set(range(1, max_iterations))
-
-    checkpoints: set[int] = set()
-    for idx in range(1, non_final_slots + 1):
-        # Integer spacing over [1, max_iterations-1], leaving room for final slot.
-        candidate = (idx * max_iterations) // (non_final_slots + 1)
-        candidate = max(1, min(last_non_final, candidate))
-        checkpoints.add(candidate)
-
-    if len(checkpoints) < non_final_slots:
-        for candidate in range(last_non_final, 0, -1):
-            checkpoints.add(candidate)
-            if len(checkpoints) >= non_final_slots:
-                break
-    return checkpoints
-
-
-def _should_attempt_submit_for_readiness(
-    *,
-    gate: str,
-    readiness_score: float | None,
-    readiness_target: float,
-    direction: str,
-    iteration: int,
-    max_iterations: int,
-    submission_limit_per_day: int | None = None,
-    successful_submissions: int = 0,
-    top1_score: float | None = None,
-) -> bool:
-    normalized = _normalized_submission_gate(gate, default="always")
-    is_final_iteration = iteration >= max_iterations
-    met_target = readiness_score is not None and _meets_target(readiness_score, readiness_target, direction)
-    top1_tier = readiness_score is not None and _is_top1_tier(readiness_score, top1_score, direction)
-
-    if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
-        if max(0, int(successful_submissions)) >= submission_limit_per_day:
-            return False
-
-    if normalized in {"final_only", "at_final"}:
-        return is_final_iteration
-    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
-        return met_target
-
-    if isinstance(submission_limit_per_day, int) and submission_limit_per_day > 0:
-        if is_final_iteration:
-            return True
-
-        non_final_slots = max(0, submission_limit_per_day - 1)
-        if non_final_slots <= 0:
-            return False
-
-        if _has_spare_daily_submission_slot(
-            submission_limit_per_day=submission_limit_per_day,
-            submissions_used_today=successful_submissions,
-            iteration=iteration,
-            max_iterations=max_iterations,
-        ):
-            return True
-
-        if successful_submissions >= non_final_slots:
-            return top1_tier or met_target
-
-        if max_iterations > submission_limit_per_day:
-            checkpoints = _non_final_submission_checkpoints(
-                max_iterations=max_iterations,
-                non_final_slots=non_final_slots,
-            )
-            return (iteration in checkpoints) or top1_tier or met_target
-
-        return True
-
-    if normalized in {"always", "each_iteration"}:
-        return True
-    if normalized in {"readiness_or_final", "target_or_final"}:
-        return met_target or is_final_iteration
-    if readiness_score is None:
-        return is_final_iteration
-    return met_target or is_final_iteration
-
-
-def _submission_gate_for_policy(policy: str | None) -> str:
-    normalized = _normalized_submit_policy(policy)
-    if normalized == "improved":
-        return "always"
-    if normalized in {"always", "each_iteration"}:
-        return "always"
-    if normalized in {"final_only", "at_final"}:
-        return "final_only"
-    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
-        return "readiness_only"
-    if normalized in {"readiness_or_final", "target_or_final"}:
-        return "readiness_or_final"
-    return "always"
-
-
-def _normalized_submit_policy(policy: str | None) -> str:
-    normalized = str(policy or "").strip().lower()
-    if normalized in {"improved", "improvement_only", "improved_only", "on_improvement"}:
-        return "improved"
-    if normalized in {"always", "each_iteration"}:
-        return "always"
-    if normalized in {"final_only", "at_final"}:
-        return "final_only"
-    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
-        return "readiness_only"
-    if normalized in {"readiness_or_final", "target_or_final"}:
-        return "readiness_or_final"
-    return "always"
-
-
-def _normalized_submission_gate(gate: str | None, *, default: str) -> str:
-    normalized = str(gate or "").strip().lower()
-    if normalized in {"always", "each_iteration"}:
-        return "always"
-    if normalized in {"final_only", "at_final"}:
-        return "final_only"
-    if normalized in {"readiness_only", "readiness_target", "on_target_only"}:
-        return "readiness_only"
-    if normalized in {"readiness_or_final", "target_or_final"}:
-        return "readiness_or_final"
-    return default
 
 
 def _pipeline_config_hash(*, model_summary: dict[str, object], metric: str, accelerator: str) -> str:
@@ -11432,19 +10856,6 @@ def _env_truthy(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _should_force_initial_submit(
-    *,
-    deliverable_mode: str,
-    iteration: int,
-    submit_enabled: bool,
-    dry_run: bool,
-    submit_policy: str | None = None,
-    submission_limit_per_day: int | None = None,
-) -> bool:
-    _ = submit_policy, submission_limit_per_day
-    return submit_enabled and (not dry_run) and deliverable_mode == "leaderboard" and iteration == 1
-
-
 def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
     state = _load_run_state(run_dir)
     reason = str(state.get("last_reason") or "").strip().lower()
@@ -12254,20 +11665,6 @@ def _infer_metric_direction_for_mismatch(metric: str, fallback_direction: str) -
     if any(key in metric_lower for key in ["auc", "accuracy", "f1", "precision", "recall", "ap", "r2", "map"]):
         return "maximize", True
     return fallback_direction, False
-
-
-def _meets_target(value: float, target: float, direction: str) -> bool:
-    if direction == "minimize":
-        return value <= target
-    return value >= target
-
-
-def _is_top1_tier(value: float, top1_score: float | None, direction: str) -> bool:
-    if top1_score is None:
-        return False
-    if direction == "minimize":
-        return value <= top1_score
-    return value >= top1_score
 
 
 def _is_confirmed_first_place(rank: int | None, source: str | None) -> bool:
