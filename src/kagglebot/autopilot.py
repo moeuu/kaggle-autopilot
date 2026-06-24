@@ -11,7 +11,6 @@ import random
 import re
 import shlex
 import shutil
-import sys
 import time
 import traceback
 from collections.abc import Callable
@@ -23,6 +22,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from rich import print
 
+from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import score_sources as _score_sources
@@ -8969,62 +8969,15 @@ def _load_submit_retry_artifacts(
 
 
 def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:
-    if config.dry_run:
-        return
-    if os.environ.get("KAGGLEBOT_NO_RESTART") == "1":
-        return
-    if not any(path.startswith("src/") for path in changed):
-        return
-    run_dir = config.paths.run_dir(run_id)
-    state_path = run_dir / "autofix_restart.json"
-    state = {}
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            state = {}
-    stage_family = _restart_stage_family(stage)
-    counts_by_stage: dict[str, int] = {}
-    raw_counts = state.get("counts_by_stage")
-    if isinstance(raw_counts, dict):
-        for key, value in raw_counts.items():
-            if not isinstance(key, str):
-                continue
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                continue
-            if parsed > 0:
-                counts_by_stage[key] = parsed
-    elif int(state.get("count", 0)) > 0:
-        # Backward compatibility with legacy single-counter state files.
-        legacy_stage = str(state.get("last_stage") or "").strip()
-        legacy_family = _restart_stage_family(legacy_stage) if legacy_stage else "legacy"
-        counts_by_stage[legacy_family] = int(state.get("count", 0))
-    stage_count = int(counts_by_stage.get(stage_family, 0))
-    if stage_count >= MAX_AUTOFIX_RESTARTS:
-        print(f"[yellow]autofix[/yellow]: src changes detected in {stage}, restart limit reached")
-        return
-    counts_by_stage[stage_family] = stage_count + 1
-    state["counts_by_stage"] = counts_by_stage
-    state["count"] = sum(counts_by_stage.values())
-    state["last_stage"] = stage
-    state["last_stage_family"] = stage_family
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    print(
-        f"[yellow]autofix[/yellow]: src changes detected in {stage}; "
-        "current process may be stale, restarting to reload code"
+    _autofix_restart.maybe_restart_for_src_changes(
+        dry_run=config.dry_run,
+        run_dir=config.paths.run_dir(run_id),
+        run_id=run_id,
+        slug=config.slug,
+        changed=changed,
+        stage=stage,
+        max_restarts=MAX_AUTOFIX_RESTARTS,
     )
-    os.environ["KAGGLEBOT_RESUME_RUN_ID"] = run_id
-    os.environ["KAGGLEBOT_RESUME_SLUG"] = config.slug
-    os.execv(sys.executable, [sys.executable, *sys.argv])
-
-
-def _restart_stage_family(stage: str) -> str:
-    normalized = str(stage or "").strip().lower()
-    if not normalized:
-        return "unknown"
-    return normalized.split("_attempt_", 1)[0]
 
 
 def _attempt_submit(

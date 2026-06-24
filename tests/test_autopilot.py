@@ -39,7 +39,6 @@ from kagglebot.autopilot import (
     _load_previous_submission_history,
     _load_run_state,
     _load_submit_retry_artifacts,
-    _maybe_restart_for_src_changes,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
     _resume_iteration_state,
@@ -3620,71 +3619,6 @@ def test_load_run_state_infers_submit_ok_from_submit_attempts(tmp_path: Path) ->
     state = _load_run_state(run_dir)
     assert state["submit_attempted"] is True
     assert state["submit_ok"] is True
-
-
-def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_restart(
-    monkeypatch, tmp_path: Path
-) -> None:
-    config = _make_config(tmp_path)
-    run_id = config.run_id or "run-1"
-    run_dir = config.paths.run_dir(run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    state_path = run_dir / "autofix_restart.json"
-    state_path.write_text(
-        json.dumps({"count": 1, "last_stage": "kernel_fix_attempt_1"}, indent=2),
-        encoding="utf-8",
-    )
-
-    execv_calls: list[tuple[str, list[str]]] = []
-
-    def fake_execv(executable: str, argv: list[str]) -> None:
-        execv_calls.append((executable, argv))
-
-    monkeypatch.setattr("kagglebot.autopilot.os.execv", fake_execv)
-
-    _maybe_restart_for_src_changes(
-        config=config,
-        run_id=run_id,
-        changed=["src/kagglebot/solver/io.py"],
-        stage="autofix_attempt_1",
-    )
-
-    assert len(execv_calls) == 1
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["last_stage"] == "autofix_attempt_1"
-    assert state["last_stage_family"] == "autofix"
-    assert state["counts_by_stage"]["kernel_fix"] == 1
-    assert state["counts_by_stage"]["autofix"] == 1
-
-
-def test_maybe_restart_for_src_changes_blocks_second_restart_in_same_stage_family(monkeypatch, tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    run_id = config.run_id or "run-1"
-    run_dir = config.paths.run_dir(run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    state_path = run_dir / "autofix_restart.json"
-    state_path.write_text(
-        json.dumps({"counts_by_stage": {"autofix": 1}, "count": 1, "last_stage": "autofix_attempt_1"}, indent=2),
-        encoding="utf-8",
-    )
-
-    execv_calls: list[tuple[str, list[str]]] = []
-
-    def fake_execv(executable: str, argv: list[str]) -> None:
-        execv_calls.append((executable, argv))
-
-    monkeypatch.setattr("kagglebot.autopilot.os.execv", fake_execv)
-
-    _maybe_restart_for_src_changes(
-        config=config,
-        run_id=run_id,
-        changed=["src/kagglebot/autopilot.py"],
-        stage="autofix_attempt_2",
-    )
-
-    assert execv_calls == []
 
 
 def test_build_submit_autofix_context_includes_latest_attempt(tmp_path: Path) -> None:
