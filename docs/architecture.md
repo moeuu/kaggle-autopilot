@@ -87,7 +87,7 @@ while the loop remains responsible for persistence. Submit success outcome displ
 live there.
 Notebook submit artifact-mode normalization, tiny public sample hidden-test guards, submit-kernel run kwargs construction,
 kernel output artifact/reference handling, output file selection, Kaggle submit-kernel kwargs construction, ambiguous
-submit retry decisions, push-error text detection, and CPU fallback decisions live in `src/kagglebot/submit_notebook.py`.
+submit retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 
@@ -167,8 +167,9 @@ Recommended extraction order:
    creation are now centralized; duplicate-submit skip decisions and submit result payload construction are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, tiny public sample guards, notebook submit
-   kernel-run kwargs construction, and notebook submit result artifact/reference handling are extracted. Next, move
-   notebook submit exception/retry orchestration behind a small adapter.
+   kernel-run kwargs construction, notebook submit result artifact/reference handling, and notebook submit exception/retry
+   orchestration are extracted. Next, separate `_attempt_submit`'s file-submit and notebook-submit branches into a typed
+   submit-stage service.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

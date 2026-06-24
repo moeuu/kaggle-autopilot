@@ -9846,20 +9846,14 @@ def _submit_with_notebook_kernel(
         dry_run=config.dry_run,
         timeout_minutes=config.time_budget_min,
     )
-    try:
-        kernel_result = run_submit_kernel(**submit_kernel_kwargs)
-    except Exception as exc:  # noqa: BLE001
-        cpu_fallback_decision = _decide_submit_kernel_cpu_fallback(config=config, exc=exc)
-        if cpu_fallback_decision.retry_on_cpu:
-            print(cpu_fallback_decision.message)
-            try:
-                kernel_result = run_submit_kernel(**{**submit_kernel_kwargs, "accelerator": "cpu"})
-            except Exception as retry_exc:  # noqa: BLE001
-                raise _notebook_kernel_submission_error(retry_exc) from retry_exc
-        elif isinstance(exc, KernelCapacityError):
-            raise
-        else:
-            raise _notebook_kernel_submission_error(exc) from exc
+    kernel_result = _submit_notebook.run_submit_kernel_with_cpu_fallback(
+        submit_kernel_kwargs=submit_kernel_kwargs,
+        run_submit_kernel=run_submit_kernel,
+        decide_cpu_fallback=lambda exc: _decide_submit_kernel_cpu_fallback(config=config, exc=exc),
+        is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
+        wrap_error=_notebook_kernel_submission_error,
+        on_message=print,
+    )
 
     output_reference = _submit_notebook.build_notebook_submit_output_reference(
         kernel_id=kernel_result.kernel_id,
@@ -9878,23 +9872,15 @@ def _submit_with_notebook_kernel(
         message=message,
         dry_run=config.dry_run,
     )
-    try:
-        submit_result = run_kaggle_submit_kernel(**submit_kwargs)
-    except SubmissionCliError as exc:
-        retry_decision = _submit_notebook.decide_ambiguous_notebook_submit_retry(
-            stdout=exc.stdout,
-            stderr=exc.stderr or "",
-            output=exc.output or "",
-            exit_code=exc.exit_code,
-            classify_submit_error=classify_submit_error,
-            should_retry_ambiguous=_should_retry_ambiguous_notebook_submit_error,
-        )
-        if retry_decision.retry:
-            print(retry_decision.message)
-            time.sleep(retry_decision.wait_seconds)
-            submit_result = run_kaggle_submit_kernel(**submit_kwargs)
-        else:
-            raise
+    submit_result = _submit_notebook.run_kaggle_submit_kernel_with_retry(
+        submit_kwargs=submit_kwargs,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        submit_error_types=SubmissionCliError,
+        classify_submit_error=classify_submit_error,
+        should_retry_ambiguous=_should_retry_ambiguous_notebook_submit_error,
+        sleep=time.sleep,
+        on_message=print,
+    )
     return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
 
 

@@ -165,6 +165,58 @@ def build_submit_kernel_run_kwargs(
     }
 
 
+def run_submit_kernel_with_cpu_fallback(
+    *,
+    submit_kernel_kwargs: dict[str, object],
+    run_submit_kernel: Callable[..., object],
+    decide_cpu_fallback: Callable[[BaseException], NotebookSubmitCpuFallbackDecision],
+    is_capacity_error: Callable[[BaseException], bool],
+    wrap_error: Callable[[BaseException], BaseException],
+    on_message: Callable[[str], None],
+) -> object:
+    try:
+        return run_submit_kernel(**submit_kernel_kwargs)
+    except Exception as exc:  # noqa: BLE001
+        cpu_fallback_decision = decide_cpu_fallback(exc)
+        if cpu_fallback_decision.retry_on_cpu:
+            on_message(cpu_fallback_decision.message)
+            try:
+                return run_submit_kernel(**{**submit_kernel_kwargs, "accelerator": "cpu"})
+            except Exception as retry_exc:  # noqa: BLE001
+                raise wrap_error(retry_exc) from retry_exc
+        if is_capacity_error(exc):
+            raise
+        raise wrap_error(exc) from exc
+
+
+def run_kaggle_submit_kernel_with_retry(
+    *,
+    submit_kwargs: dict[str, object],
+    run_kaggle_submit_kernel: Callable[..., object],
+    submit_error_types: type[BaseException] | tuple[type[BaseException], ...],
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
+    should_retry_ambiguous: Callable[..., bool],
+    sleep: Callable[[float], None],
+    on_message: Callable[[str], None],
+) -> object:
+    try:
+        return run_kaggle_submit_kernel(**submit_kwargs)
+    except submit_error_types as exc:
+        retry_decision = decide_ambiguous_notebook_submit_retry(
+            stdout=str(getattr(exc, "stdout", "") or ""),
+            stderr=str(getattr(exc, "stderr", "") or ""),
+            output=str(getattr(exc, "output", "") or ""),
+            exit_code=getattr(exc, "exit_code", None),
+            classify_submit_error=classify_submit_error,
+            should_retry_ambiguous=should_retry_ambiguous,
+        )
+        if retry_decision.retry:
+            on_message(retry_decision.message)
+            sleep(retry_decision.wait_seconds)
+            return run_kaggle_submit_kernel(**submit_kwargs)
+        raise
+
+
 def decide_ambiguous_notebook_submit_retry(
     *,
     stdout: str,

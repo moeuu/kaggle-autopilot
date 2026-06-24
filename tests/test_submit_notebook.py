@@ -12,7 +12,29 @@ from kagglebot.submit_notebook import (
     decide_submit_kernel_cpu_fallback,
     is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
+    run_kaggle_submit_kernel_with_retry,
+    run_submit_kernel_with_cpu_fallback,
 )
+
+
+class SubmitKernelError(Exception):
+    pass
+
+
+class SubmitCliStubError(Exception):
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        output: str = "",
+        exit_code: int | None = None,
+    ) -> None:
+        super().__init__(output or stderr or stdout)
+        self.stdout = stdout
+        self.stderr = stderr
+        self.output = output
+        self.exit_code = exit_code
 
 
 def test_normalize_notebook_submit_artifact_mode_defaults_to_wrapper() -> None:
@@ -214,6 +236,114 @@ def test_decide_ambiguous_notebook_submit_retry_rejects_generic_error() -> None:
     assert decision.wait_seconds == 0.0
     assert decision.message == ""
     assert decision.stderr == "generic bad request"
+
+
+def test_run_submit_kernel_with_cpu_fallback_retries_on_decision() -> None:
+    calls: list[str] = []
+    messages: list[str] = []
+
+    def run_submit_kernel(**kwargs):  # noqa: ANN003
+        calls.append(str(kwargs["accelerator"]))
+        if kwargs["accelerator"] == "gpu":
+            raise SubmitKernelError("gpu unavailable")
+        return "kernel-result"
+
+    result = run_submit_kernel_with_cpu_fallback(
+        submit_kernel_kwargs={"accelerator": "gpu"},
+        run_submit_kernel=run_submit_kernel,
+        decide_cpu_fallback=lambda exc: decide_submit_kernel_cpu_fallback(
+            accelerator="gpu",
+            strict_accelerator=False,
+            is_capacity_error=True,
+            is_push_error=False,
+        ),
+        is_capacity_error=lambda exc: False,
+        wrap_error=lambda exc: SubmitKernelError(f"wrapped: {exc}"),
+        on_message=messages.append,
+    )
+
+    assert result == "kernel-result"
+    assert calls == ["gpu", "cpu"]
+    assert "retrying submit kernel on CPU" in messages[0]
+
+
+def test_run_submit_kernel_with_cpu_fallback_wraps_retry_failure() -> None:
+    def run_submit_kernel(**kwargs):  # noqa: ANN003, ARG001
+        raise SubmitKernelError("still failed")
+
+    try:
+        run_submit_kernel_with_cpu_fallback(
+            submit_kernel_kwargs={"accelerator": "gpu"},
+            run_submit_kernel=run_submit_kernel,
+            decide_cpu_fallback=lambda exc: decide_submit_kernel_cpu_fallback(
+                accelerator="gpu",
+                strict_accelerator=False,
+                is_capacity_error=True,
+                is_push_error=False,
+            ),
+            is_capacity_error=lambda exc: False,
+            wrap_error=lambda exc: SubmitKernelError(f"wrapped: {exc}"),
+            on_message=lambda message: None,
+        )
+    except SubmitKernelError as exc:
+        assert str(exc) == "wrapped: still failed"
+        assert isinstance(exc.__cause__, SubmitKernelError)
+    else:  # pragma: no cover
+        raise AssertionError("expected wrapped retry failure")
+
+
+def test_run_kaggle_submit_kernel_with_retry_retries_ambiguous_error() -> None:
+    calls = 0
+    sleeps: list[float] = []
+    messages: list[str] = []
+
+    def run_submit(**kwargs):  # noqa: ANN003, ARG001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SubmitCliStubError(output="400 Client Error\nkernel must be specified", exit_code=1)
+        return "submit-result"
+
+    result = run_kaggle_submit_kernel_with_retry(
+        submit_kwargs={"kernel": "user/demo"},
+        run_kaggle_submit_kernel=run_submit,
+        submit_error_types=SubmitCliStubError,
+        classify_submit_error=lambda stdout, stderr, exit_code: (
+            {"reason": "ambiguous_notebook_bad_request", "retry_after_seconds": 4}
+            if "kernel must be specified" in stderr
+            else {"reason": "unclassified_submit_error"}
+        ),
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: reason == "ambiguous_notebook_bad_request",
+        sleep=sleeps.append,
+        on_message=messages.append,
+    )
+
+    assert result == "submit-result"
+    assert calls == 2
+    assert sleeps == [4.0]
+    assert "retrying same kernel submit" in messages[0]
+
+
+def test_run_kaggle_submit_kernel_with_retry_reraises_generic_error() -> None:
+    error = SubmitCliStubError(stderr="generic bad request", exit_code=1)
+
+    def run_submit(**kwargs):  # noqa: ANN003, ARG001
+        raise error
+
+    try:
+        run_kaggle_submit_kernel_with_retry(
+            submit_kwargs={"kernel": "user/demo"},
+            run_kaggle_submit_kernel=run_submit,
+            submit_error_types=SubmitCliStubError,
+            classify_submit_error=lambda stdout, stderr, exit_code: {"reason": "bad_request"},
+            should_retry_ambiguous=lambda *, reason, stdout, stderr: False,
+            sleep=lambda seconds: None,
+            on_message=lambda message: None,
+        )
+    except SubmitCliStubError as exc:
+        assert exc is error
+    else:  # pragma: no cover
+        raise AssertionError("expected generic submit error")
 
 
 def test_decide_submit_kernel_cpu_fallback_allows_gpu_capacity_error() -> None:
