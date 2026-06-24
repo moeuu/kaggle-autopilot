@@ -74,7 +74,8 @@ longer owns the pure decision table for whether a failed submit should repair th
 polling path, or wait for manual intervention.
 Submit failure context persistence, reference parsing, prompt formatting, stale repaired-artifact decisions, and submit
 autofix artifact resolution live in `src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out
-of the main loop.
+of the main loop. Submit failure-context payload creation also lives there; the loop supplies repair decisions and
+runtime state snapshots.
 Deterministic submit file repair preparation lives in `src/kagglebot/submit_autofix.py`; the loop supplies persistence
 and validation callbacks while the module owns the repair-required check and result summary.
 Submit code fingerprinting, same-error-fingerprint retry allowance, and same-submission-path retry/skip decisions live in
@@ -156,8 +157,8 @@ Recommended extraction order:
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.
-4. Submit state persistence: submit attempt and submit run-state payload creation are now centralized; next, move submit
-   failure-context payload creation behind a small adapter so `_abort_submit_for_run` does less JSON assembly inline.
+4. Submit state persistence: submit attempt, submit run-state, and submit failure-context payload creation are now
+   centralized; next, move submit failure knowledge-record payload decisions behind a small adapter.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
 

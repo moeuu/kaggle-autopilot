@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from kagglebot.submit_failure_context import (
+    build_submit_failure_context_payload,
     decide_stale_submit_autofix_artifact,
     format_submit_autofix_context,
     load_submit_failure_context,
@@ -14,6 +15,7 @@ from kagglebot.submit_failure_context import (
     submit_failure_context_path,
     submit_file_fix_contract_satisfied,
 )
+from kagglebot.submit_failure_policy import SubmitFailureRepairDecision
 
 
 def test_load_submit_failure_context_normalizes_stale_manual_blocker(tmp_path: Path) -> None:
@@ -57,6 +59,55 @@ def test_save_and_mark_submit_failure_context_resolved(tmp_path: Path) -> None:
     assert payload["resolution"] == "submitted"
     assert payload["resolved_submission_ref"] == "kernel:user/demo"
     assert payload["resolved_at"]
+
+
+def test_build_submit_failure_context_payload_centralizes_record_shape(tmp_path: Path) -> None:
+    artifact = tmp_path / "submission.csv"
+    payload = build_submit_failure_context_payload(
+        now_iso="2026-06-25T00:00:00+00:00",
+        submission_ref="kernel:user/demo",
+        artifact_path=artifact,
+        artifact_sha256="sha",
+        artifact_mode="inference",
+        code_fingerprint="code-fp",
+        fingerprint="error-fp",
+        error_kind="validation",
+        reason="submission_poll_status_error",
+        message="Kaggle scoring failed.",
+        stdout_tail="abcdef",
+        stderr_tail="row count mismatch",
+        exit_code=1,
+        repair_decision=SubmitFailureRepairDecision(
+            repair_target="submission_artifact",
+            repairable=True,
+            manual_next_step="",
+        ),
+        latest_submit_attempt={"reason": "previous"},
+        run_state={
+            "submit_attempted": True,
+            "submit_ok": False,
+            "last_reason": "previous",
+            "last_error_kind": "validation",
+            "last_submission_path": "/tmp/old.csv",
+            "submit_autofix_submission_path": "/tmp/fixed.csv",
+        },
+        stdout_tail_chars=3,
+        stderr_tail_chars=8,
+    )
+
+    assert payload["ts"] == "2026-06-25T00:00:00+00:00"
+    assert payload["active"] is True
+    assert payload["submit_mode"] == "notebook"
+    assert payload["artifact_mode"] == "inference"
+    assert payload["submission_artifact_path"] == str(artifact)
+    assert payload["submission_artifact_sha256"] == "sha"
+    assert payload["stdout_tail"] == "def"
+    assert payload["stderr_tail"] == "mismatch"
+    assert payload["repair_target"] == "submission_artifact"
+    assert payload["repairable"] is True
+    assert payload["latest_submit_attempt"] == {"reason": "previous"}
+    assert payload["run_state_excerpt"]["submit_autofix_submission_path"] == "/tmp/fixed.csv"
+    assert "Kaggle scoring failed" in str(payload["summary"])
 
 
 def test_path_from_submit_reference_ignores_kernel_references() -> None:

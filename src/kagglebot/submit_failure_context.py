@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.submission.guard import normalize_error_text
-from kagglebot.submit_failure_policy import normalize_loaded_submit_failure_context
+from kagglebot.submit_failure_policy import SubmitFailureRepairDecision, normalize_loaded_submit_failure_context
 
 SUBMIT_FAILURE_CONTEXT_FILENAME = "submit_failure_context.json"
 
@@ -56,6 +56,61 @@ def mark_submit_failure_context_resolved(
     if submission_ref is not None:
         payload["resolved_submission_ref"] = submission_ref
     save_submit_failure_context(run_dir, payload)
+
+
+def build_submit_failure_context_payload(
+    *,
+    now_iso: str,
+    submission_ref: str,
+    artifact_path: Path | None,
+    artifact_sha256: str | None,
+    artifact_mode: str | None,
+    code_fingerprint: str,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    message: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    exit_code: int | None,
+    repair_decision: SubmitFailureRepairDecision,
+    latest_submit_attempt: dict[str, object],
+    run_state: dict[str, object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+) -> dict[str, object]:
+    detail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
+    summary = normalize_error_text("\n".join(part for part in (message, detail) if part), max_chars=1200)
+    return {
+        "ts": now_iso,
+        "active": True,
+        "error_kind": error_kind,
+        "reason": reason,
+        "fingerprint": fingerprint,
+        "code_fingerprint": code_fingerprint,
+        "repair_target": repair_decision.repair_target,
+        "repairable": repair_decision.repairable,
+        "manual_next_step": repair_decision.manual_next_step,
+        "message": message,
+        "summary": summary,
+        "submit_mode": "notebook" if submission_ref.startswith("kernel:") else "file",
+        "artifact_mode": str(artifact_mode or "").strip().lower(),
+        "submission_ref": submission_ref,
+        "submission_artifact_path": str(artifact_path) if artifact_path is not None else "",
+        "submission_artifact_sha256": artifact_sha256,
+        "stdout_tail": stdout_tail[-stdout_tail_chars:],
+        "stderr_tail": stderr_tail[-stderr_tail_chars:],
+        "exit_code": exit_code,
+        "latest_submit_attempt": latest_submit_attempt,
+        "run_state_excerpt": {
+            "submit_attempted": bool(run_state.get("submit_attempted")),
+            "submit_ok": bool(run_state.get("submit_ok")),
+            "last_reason": run_state.get("last_reason"),
+            "last_error_kind": run_state.get("last_error_kind"),
+            "last_submission_path": run_state.get("last_submission_path"),
+            "submit_autofix_submission_path": run_state.get("submit_autofix_submission_path"),
+        },
+    }
 
 
 def path_from_submit_reference(value: object) -> Path | None:

@@ -279,6 +279,7 @@ _submit_failure_context_path = _submit_failure_context.submit_failure_context_pa
 _load_submit_failure_context = _submit_failure_context.load_submit_failure_context
 _save_submit_failure_context = _submit_failure_context.save_submit_failure_context
 _mark_submit_failure_context_resolved = _submit_failure_context.mark_submit_failure_context_resolved
+_build_submit_failure_context_payload_from_state = _submit_failure_context.build_submit_failure_context_payload
 _path_from_submit_reference = _submit_failure_context.path_from_submit_reference
 _format_submit_autofix_context = _submit_failure_context.format_submit_autofix_context
 _decide_stale_submit_autofix_artifact = _submit_failure_context.decide_stale_submit_autofix_artifact
@@ -10253,40 +10254,26 @@ def _build_submit_failure_context_payload(
         error_kind=error_kind,
         detail=detail,
     )
-    latest_submit_attempt = _load_latest_submit_attempt(run_dir)
-    run_state = _load_run_state(run_dir)
-    summary = normalize_error_text("\n".join(part for part in (message, detail) if part), max_chars=1200)
-    payload: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(),
-        "active": True,
-        "error_kind": error_kind,
-        "reason": reason,
-        "fingerprint": fingerprint,
-        "code_fingerprint": code_fingerprint,
-        "repair_target": repair_decision.repair_target,
-        "repairable": repair_decision.repairable,
-        "manual_next_step": repair_decision.manual_next_step,
-        "message": message,
-        "summary": summary,
-        "submit_mode": "notebook" if submission_ref.startswith("kernel:") else "file",
-        "artifact_mode": str(artifact_mode or "").strip().lower(),
-        "submission_ref": submission_ref,
-        "submission_artifact_path": str(artifact_path) if artifact_path is not None else "",
-        "submission_artifact_sha256": _sha256_or_none(artifact_path),
-        "stdout_tail": stdout_tail[-_SUBMIT_STDOUT_TAIL_CHARS:],
-        "stderr_tail": stderr_tail[-_SUBMIT_STDERR_TAIL_CHARS:],
-        "exit_code": exit_code,
-        "latest_submit_attempt": latest_submit_attempt,
-        "run_state_excerpt": {
-            "submit_attempted": bool(run_state.get("submit_attempted")),
-            "submit_ok": bool(run_state.get("submit_ok")),
-            "last_reason": run_state.get("last_reason"),
-            "last_error_kind": run_state.get("last_error_kind"),
-            "last_submission_path": run_state.get("last_submission_path"),
-            "submit_autofix_submission_path": run_state.get("submit_autofix_submission_path"),
-        },
-    }
-    return payload
+    return _build_submit_failure_context_payload_from_state(
+        now_iso=datetime.now(UTC).isoformat(),
+        submission_ref=submission_ref,
+        artifact_path=artifact_path,
+        artifact_sha256=_sha256_or_none(artifact_path),
+        artifact_mode=artifact_mode,
+        code_fingerprint=code_fingerprint,
+        fingerprint=fingerprint,
+        error_kind=error_kind,
+        reason=reason,
+        message=message,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
+        repair_decision=repair_decision,
+        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
+        run_state=_load_run_state(run_dir),
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+    )
 
 
 def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path) -> None:
