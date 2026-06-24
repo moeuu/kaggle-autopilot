@@ -6,6 +6,26 @@ from pathlib import Path
 from kagglebot.kernel_sources import load_kernel_source_config
 
 
+def test_load_kernel_source_config_defaults_for_missing_invalid_or_non_object_plan(tmp_path: Path) -> None:
+    missing = load_kernel_source_config(tmp_path / "missing.json")
+    assert missing.dataset_sources == ()
+    assert missing.kernel_sources == ()
+    assert missing.model_sources == ()
+    assert missing.has_text_runtime_features() is False
+
+    invalid_path = tmp_path / "invalid.json"
+    invalid_path.write_text("{", encoding="utf-8")
+    invalid = load_kernel_source_config(invalid_path)
+    assert invalid.dataset_sources == ()
+    assert invalid.has_text_runtime_features() is False
+
+    array_path = tmp_path / "array.json"
+    array_path.write_text("[]", encoding="utf-8")
+    non_object = load_kernel_source_config(array_path)
+    assert non_object.dataset_sources == ()
+    assert non_object.has_text_runtime_features() is False
+
+
 def test_load_kernel_source_config_parses_text_runtime_fields(tmp_path: Path) -> None:
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(

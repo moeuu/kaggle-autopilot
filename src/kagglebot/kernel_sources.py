@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from kagglebot.json_utils import load_json_object
 
 
 @dataclass(frozen=True)
@@ -51,13 +52,8 @@ def pipeline_env_suffix(name: str) -> str:
 
 
 def load_kernel_source_config(plan_path: Path) -> KernelSourceConfig:
-    if not plan_path.exists():
-        return KernelSourceConfig()
-    try:
-        payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return KernelSourceConfig()
-    if not isinstance(payload, dict):
+    payload = load_json_object(plan_path)
+    if payload is None:
         return KernelSourceConfig()
 
     raw = payload.get("kaggle_kernel_sources")
