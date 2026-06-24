@@ -9272,8 +9272,8 @@ def _attempt_submit(
         )
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
+    duplicate_sources: list[str] = []
     if prepared_submission_sha and not allow_force:
-        duplicate_sources: list[str] = []
         if _submit_attempt_sha_seen(run_dir=run_dir, submission_sha=prepared_submission_sha):
             duplicate_sources.append("run_attempts")
         if SubmissionLedger(config.paths.submission_ledger_path).is_duplicate(
@@ -9282,57 +9282,62 @@ def _attempt_submit(
             submission_path=prepared_submission_path,
         ):
             duplicate_sources.append("submission_ledger")
-        if duplicate_sources:
-            reason = "duplicate_submission_sha_seen"
-            fingerprint = compute_error_fingerprint("", f"{reason}:{config.slug}:{prepared_submission_sha}")
-            print(
-                "[yellow]submit skipped[/yellow]: prepared submission SHA already seen "
-                f"({', '.join(duplicate_sources)}); no Kaggle submit attempted."
-            )
-            _append_submit_attempt(
-                run_dir=run_dir,
-                payload=_build_submit_attempt_payload(
-                    run_id=run_id,
-                    submission_ref=str(prepared_submission_path),
-                    submission_sha256=prepared_submission_sha,
-                    exit_code=None,
-                    ok=False,
-                    fingerprint=fingerprint,
-                    error_kind="none",
-                    action_taken="skip",
-                    reason=reason,
-                    stdout="",
-                    stderr="",
-                    extra={"duplicate_sources": duplicate_sources},
-                ),
-            )
-            _save_run_state(
-                run_dir,
-                _build_submit_run_state_update(
-                    prior_state=_load_run_state(run_dir),
-                    fingerprint=fingerprint,
-                    code_fingerprint=submit_code_fingerprint,
-                    error_kind="none",
-                    action_taken="skip",
-                    reason=reason,
-                    submission_ref=str(prepared_submission_path),
-                    submission_sha256=prepared_submission_sha,
-                ),
-            )
-            _mark_submit_failure_context_resolved(
-                run_dir=run_dir,
-                resolution=reason,
+    duplicate_decision = _submit_retry_policy.decide_duplicate_submission_action(
+        slug=config.slug,
+        prepared_submission_sha=prepared_submission_sha,
+        duplicate_sources=duplicate_sources,
+        allow_force=allow_force,
+        compute_fingerprint=compute_error_fingerprint,
+    )
+    if duplicate_decision.action == "skip":
+        print(duplicate_decision.message)
+        reason = duplicate_decision.reason
+        fingerprint = duplicate_decision.fingerprint
+        duplicate_sources = duplicate_decision.duplicate_sources
+        _append_submit_attempt(
+            run_dir=run_dir,
+            payload=_build_submit_attempt_payload(
+                run_id=run_id,
                 submission_ref=str(prepared_submission_path),
-            )
-            return {
-                "message": message,
-                "submission_path": str(prepared_submission_path),
-                "submitted_at": submitted_at.isoformat(),
-                "iteration": _infer_iteration_from_submission_path(submission_path),
-                "skipped": True,
-                "reason": reason,
-                "duplicate_sources": duplicate_sources,
-            }
+                submission_sha256=prepared_submission_sha,
+                exit_code=None,
+                ok=False,
+                fingerprint=fingerprint,
+                error_kind="none",
+                action_taken="skip",
+                reason=reason,
+                stdout="",
+                stderr="",
+                extra={"duplicate_sources": duplicate_sources},
+            ),
+        )
+        _save_run_state(
+            run_dir,
+            _build_submit_run_state_update(
+                prior_state=_load_run_state(run_dir),
+                fingerprint=fingerprint,
+                code_fingerprint=submit_code_fingerprint,
+                error_kind="none",
+                action_taken="skip",
+                reason=reason,
+                submission_ref=str(prepared_submission_path),
+                submission_sha256=prepared_submission_sha,
+            ),
+        )
+        _mark_submit_failure_context_resolved(
+            run_dir=run_dir,
+            resolution=reason,
+            submission_ref=str(prepared_submission_path),
+        )
+        return {
+            "message": message,
+            "submission_path": str(prepared_submission_path),
+            "submitted_at": submitted_at.isoformat(),
+            "iteration": _infer_iteration_from_submission_path(submission_path),
+            "skipped": True,
+            "reason": reason,
+            "duplicate_sources": duplicate_sources,
+        }
 
     try:
         rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)

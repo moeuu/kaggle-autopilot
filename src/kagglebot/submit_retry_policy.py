@@ -14,6 +14,15 @@ class SameSubmissionPathDecision:
     fingerprint: str
 
 
+@dataclass(frozen=True)
+class DuplicateSubmissionDecision:
+    action: str
+    reason: str
+    message: str
+    fingerprint: str
+    duplicate_sources: list[str]
+
+
 def compute_submit_code_fingerprint(
     *,
     src_root: Path,
@@ -45,6 +54,32 @@ def compute_submit_code_fingerprint(
             hasher.update((sha256_or_none(path) or "missing").encode())
             hasher.update(b"\n")
     return hasher.hexdigest()
+
+
+def decide_duplicate_submission_action(
+    *,
+    slug: str,
+    prepared_submission_sha: str,
+    duplicate_sources: list[str],
+    allow_force: bool,
+    compute_fingerprint: Callable[[str, str], str],
+) -> DuplicateSubmissionDecision:
+    normalized_sha = str(prepared_submission_sha or "").strip()
+    sources = [str(source).strip() for source in duplicate_sources if str(source).strip()]
+    if allow_force or not normalized_sha or not sources:
+        return _duplicate_not_applicable()
+    reason = "duplicate_submission_sha_seen"
+    fingerprint = compute_fingerprint("", f"{reason}:{slug}:{normalized_sha}")
+    return DuplicateSubmissionDecision(
+        action="skip",
+        reason=reason,
+        message=(
+            "[yellow]submit skipped[/yellow]: prepared submission SHA already seen "
+            f"({', '.join(sources)}); no Kaggle submit attempted."
+        ),
+        fingerprint=fingerprint,
+        duplicate_sources=sources,
+    )
 
 
 def decide_same_submission_path_action(
@@ -170,3 +205,7 @@ def _record_same_fingerprint_allowance(
 
 def _same_path_not_applicable() -> SameSubmissionPathDecision:
     return SameSubmissionPathDecision(action="proceed", reason="", message="", fingerprint="")
+
+
+def _duplicate_not_applicable() -> DuplicateSubmissionDecision:
+    return DuplicateSubmissionDecision(action="proceed", reason="", message="", fingerprint="", duplicate_sources=[])

@@ -6,6 +6,7 @@ from pathlib import Path
 from kagglebot.submit_retry_policy import (
     compute_submit_code_fingerprint,
     consume_same_submit_fingerprint_retry_allowance,
+    decide_duplicate_submission_action,
     decide_same_submission_path_action,
 )
 
@@ -150,6 +151,47 @@ def test_decide_same_submission_path_action_proceeds_when_path_differs(tmp_path:
         submit_code_fingerprint="code",
         allow_force=False,
         notebook_submit_required=False,
+    )
+
+    assert decision.action == "proceed"
+
+
+def test_decide_duplicate_submission_action_proceeds_when_not_duplicate() -> None:
+    decision = decide_duplicate_submission_action(
+        slug="demo",
+        prepared_submission_sha="sha",
+        duplicate_sources=[],
+        allow_force=False,
+        compute_fingerprint=lambda stdout, stderr: f"{stdout}:{stderr}",
+    )
+
+    assert decision.action == "proceed"
+    assert decision.duplicate_sources == []
+
+
+def test_decide_duplicate_submission_action_skips_with_fingerprint_and_sources() -> None:
+    decision = decide_duplicate_submission_action(
+        slug="demo",
+        prepared_submission_sha="sha",
+        duplicate_sources=["run_attempts", "submission_ledger"],
+        allow_force=False,
+        compute_fingerprint=lambda stdout, stderr: f"fp:{stderr}",
+    )
+
+    assert decision.action == "skip"
+    assert decision.reason == "duplicate_submission_sha_seen"
+    assert decision.fingerprint == "fp:duplicate_submission_sha_seen:demo:sha"
+    assert decision.duplicate_sources == ["run_attempts", "submission_ledger"]
+    assert "run_attempts, submission_ledger" in decision.message
+
+
+def test_decide_duplicate_submission_action_force_bypasses_duplicates() -> None:
+    decision = decide_duplicate_submission_action(
+        slug="demo",
+        prepared_submission_sha="sha",
+        duplicate_sources=["run_attempts"],
+        allow_force=True,
+        compute_fingerprint=lambda stdout, stderr: "fp",
     )
 
     assert decision.action == "proceed"
