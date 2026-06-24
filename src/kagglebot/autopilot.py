@@ -4086,47 +4086,19 @@ def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
 
 
 def _normalize_eval_seeds(value: object, *, fallback: list[int] | None = None) -> list[int]:
-    candidates: list[int] = []
-    source = value
-    if source is None:
-        source = fallback
-    if isinstance(source, list):
-        for item in source:
-            if isinstance(item, int):
-                candidates.append(int(item))
-    seen: set[int] = set()
-    normalized: list[int] = []
-    for seed in candidates:
-        if seed in seen:
-            continue
-        seen.add(seed)
-        normalized.append(seed)
-    if normalized:
-        return normalized
-    return list(_DEFAULT_EVAL_SEEDS)
+    return _plan_policy.normalize_eval_seeds(value, fallback=fallback, default_seeds=_DEFAULT_EVAL_SEEDS)
 
 
 def _normalize_eval_repeats(value: object, *, fallback: int | None = None) -> int:
-    resolved = value if isinstance(value, int) else fallback
-    if isinstance(resolved, int):
-        return max(1, min(resolved, 10))
-    return _DEFAULT_EVAL_REPEATS
+    return _plan_policy.normalize_eval_repeats(value, fallback=fallback, default_repeats=_DEFAULT_EVAL_REPEATS)
 
 
 def _normalize_rank_force_percentile(value: object, *, fallback: float) -> float:
-    if isinstance(value, (int, float)):
-        parsed = float(value)
-        if 0.0 < parsed <= 1.0:
-            return parsed
-    return float(fallback)
+    return _plan_policy.normalize_rank_force_percentile(value, fallback=fallback)
 
 
 def _normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
-    if isinstance(value, int):
-        return max(1, value)
-    if isinstance(value, float):
-        return max(1, int(value))
-    return max(1, int(fallback))
+    return _plan_policy.normalize_rank_force_min_teams(value, fallback=fallback)
 
 
 def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
@@ -4143,26 +4115,21 @@ def _normalize_target_rank_percentile(
 
 
 def _improvement_mode_rank(mode: str) -> int:
-    return {"minor_tuning": 0, "moderate_update": 1, "major_overhaul": 2, "validation_redesign": 3}.get(mode, 0)
+    return _plan_policy.improvement_mode_rank(mode)
 
 
 def _upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> str:
-    if not minimum_mode:
-        return current_mode
-    if _improvement_mode_rank(minimum_mode) > _improvement_mode_rank(current_mode):
-        return minimum_mode
-    return current_mode
+    return _plan_policy.upgrade_improvement_mode(current_mode, minimum_mode)
 
 
 def _expanded_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
-    seeds = _normalize_eval_seeds(base_seeds)
-    repeats_norm = _normalize_eval_repeats(repeats)
-    expanded: list[int] = []
-    for repeat_idx in range(repeats_norm):
-        offset = repeat_idx * _EVAL_REPEAT_SEED_OFFSET
-        for seed in seeds:
-            expanded.append(int(seed + offset))
-    return expanded
+    return _plan_policy.expanded_eval_seeds(
+        base_seeds=base_seeds,
+        repeats=repeats,
+        default_seeds=_DEFAULT_EVAL_SEEDS,
+        default_repeats=_DEFAULT_EVAL_REPEATS,
+        repeat_seed_offset=_EVAL_REPEAT_SEED_OFFSET,
+    )
 
 
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:

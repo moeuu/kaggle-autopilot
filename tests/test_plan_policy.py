@@ -7,10 +7,16 @@ from kagglebot.paths import CompetitionPaths
 from kagglebot.plan_policy import (
     apply_competition_eval_override,
     competition_eval_override,
+    expanded_eval_seeds,
     extract_plan_split_strategy_hints,
     infer_split_strategy_from_hint_text,
+    normalize_eval_repeats,
+    normalize_eval_seeds,
+    normalize_rank_force_min_teams,
+    normalize_rank_force_percentile,
     normalize_split_strategy_name,
     resolve_split_strategy_from_artifacts,
+    upgrade_improvement_mode,
 )
 
 
@@ -79,3 +85,41 @@ def test_competition_eval_override_applies_deep_past_contract() -> None:
     assert payload["task"] == "translation"
     assert payload["metric_name"] == override["metric_name"]
     assert payload["split_strategy"] == "group_kfold"
+
+
+def test_normalize_eval_seeds_deduplicates_and_uses_defaults() -> None:
+    defaults = (42, 2024, 777)
+
+    assert normalize_eval_seeds([1, "x", 1, 2], default_seeds=defaults) == [1, 2]
+    assert normalize_eval_seeds(None, fallback=[3, 3], default_seeds=defaults) == [3]
+    assert normalize_eval_seeds(None, default_seeds=defaults) == [42, 2024, 777]
+
+
+def test_normalize_eval_repeats_clamps_range() -> None:
+    assert normalize_eval_repeats(0, default_repeats=2) == 1
+    assert normalize_eval_repeats(99, default_repeats=2) == 10
+    assert normalize_eval_repeats(None, fallback=3, default_repeats=2) == 3
+    assert normalize_eval_repeats(None, default_repeats=2) == 2
+
+
+def test_normalize_rank_force_values() -> None:
+    assert normalize_rank_force_percentile(0.2, fallback=0.5) == 0.2
+    assert normalize_rank_force_percentile(2.0, fallback=0.5) == 0.5
+    assert normalize_rank_force_min_teams(10.9, fallback=100) == 10
+    assert normalize_rank_force_min_teams(-1, fallback=100) == 1
+
+
+def test_upgrade_improvement_mode_respects_priority() -> None:
+    assert upgrade_improvement_mode("minor_tuning", "major_overhaul") == "major_overhaul"
+    assert upgrade_improvement_mode("validation_redesign", "major_overhaul") == "validation_redesign"
+    assert upgrade_improvement_mode("moderate_update", None) == "moderate_update"
+
+
+def test_expanded_eval_seeds_offsets_repeats() -> None:
+    assert expanded_eval_seeds(
+        base_seeds=[1, 2],
+        repeats=2,
+        default_seeds=(42,),
+        default_repeats=1,
+        repeat_seed_offset=100,
+    ) == [1, 2, 101, 102]

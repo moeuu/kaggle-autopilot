@@ -190,3 +190,82 @@ def resolve_split_strategy_from_artifacts(
         )
 
     return normalized_current, None
+
+
+def normalize_eval_seeds(
+    value: object,
+    *,
+    fallback: list[int] | None = None,
+    default_seeds: list[int] | tuple[int, ...],
+) -> list[int]:
+    candidates: list[int] = []
+    source = value
+    if source is None:
+        source = fallback
+    if isinstance(source, list):
+        for item in source:
+            if isinstance(item, int):
+                candidates.append(int(item))
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for seed in candidates:
+        if seed in seen:
+            continue
+        seen.add(seed)
+        normalized.append(seed)
+    if normalized:
+        return normalized
+    return list(default_seeds)
+
+
+def normalize_eval_repeats(value: object, *, fallback: int | None = None, default_repeats: int) -> int:
+    resolved = value if isinstance(value, int) else fallback
+    if isinstance(resolved, int):
+        return max(1, min(resolved, 10))
+    return int(default_repeats)
+
+
+def normalize_rank_force_percentile(value: object, *, fallback: float) -> float:
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if 0.0 < parsed <= 1.0:
+            return parsed
+    return float(fallback)
+
+
+def normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
+    if isinstance(value, int):
+        return max(1, value)
+    if isinstance(value, float):
+        return max(1, int(value))
+    return max(1, int(fallback))
+
+
+def improvement_mode_rank(mode: str) -> int:
+    return {"minor_tuning": 0, "moderate_update": 1, "major_overhaul": 2, "validation_redesign": 3}.get(mode, 0)
+
+
+def upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> str:
+    if not minimum_mode:
+        return current_mode
+    if improvement_mode_rank(minimum_mode) > improvement_mode_rank(current_mode):
+        return minimum_mode
+    return current_mode
+
+
+def expanded_eval_seeds(
+    *,
+    base_seeds: list[int],
+    repeats: int,
+    default_seeds: list[int] | tuple[int, ...],
+    default_repeats: int,
+    repeat_seed_offset: int,
+) -> list[int]:
+    seeds = normalize_eval_seeds(base_seeds, default_seeds=default_seeds)
+    repeats_norm = normalize_eval_repeats(repeats, default_repeats=default_repeats)
+    expanded: list[int] = []
+    for repeat_idx in range(repeats_norm):
+        offset = repeat_idx * repeat_seed_offset
+        for seed in seeds:
+            expanded.append(int(seed + offset))
+    return expanded
