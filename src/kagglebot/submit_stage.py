@@ -111,6 +111,30 @@ def submission_score_for_tracking(*, offline_score: float, online_score: float |
     return float(offline_score), "offline"
 
 
+def classify_submission_outcome(
+    *,
+    score: float,
+    direction: str,
+    target_score: float | None,
+    top1_score: float | None,
+) -> str:
+    if target_score is not None and _meets_target(score, target_score, direction):
+        return "good"
+    if top1_score is not None:
+        if direction == "minimize":
+            gap = score - top1_score
+        else:
+            gap = top1_score - score
+        scale = max(abs(top1_score), 1.0)
+        if max(gap, 0.0) / scale <= 0.1:
+            return "good"
+    return "low"
+
+
+def _meets_target(value: float, target: float, direction: str) -> bool:
+    return value <= target if str(direction).lower() == "minimize" else value >= target
+
+
 def find_campaign_candidate_for_submission(
     *,
     candidates: list[CampaignCandidate],

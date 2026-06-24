@@ -5,6 +5,7 @@ from pathlib import Path
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
     build_submit_stage_success_record,
+    classify_submission_outcome,
     classify_submit_stage_error,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
@@ -100,6 +101,20 @@ def test_submission_score_for_tracking_prefers_finite_online_score() -> None:
     assert submission_score_for_tracking(offline_score=0.9, online_score=0.8) == (0.8, "submission_public_score")
     assert submission_score_for_tracking(offline_score=0.9, online_score=float("nan")) == (0.9, "offline")
     assert submission_score_for_tracking(offline_score=0.9, online_score=None) == (0.9, "offline")
+
+
+def test_classify_submission_outcome_uses_target_score() -> None:
+    assert classify_submission_outcome(score=0.4, direction="minimize", target_score=0.5, top1_score=None) == "good"
+    assert classify_submission_outcome(score=0.6, direction="minimize", target_score=0.5, top1_score=None) == "low"
+    assert classify_submission_outcome(score=0.8, direction="maximize", target_score=0.7, top1_score=None) == "good"
+    assert classify_submission_outcome(score=0.6, direction="maximize", target_score=0.7, top1_score=None) == "low"
+
+
+def test_classify_submission_outcome_treats_top1_near_miss_as_good() -> None:
+    assert classify_submission_outcome(score=1.09, direction="minimize", target_score=None, top1_score=1.0) == "good"
+    assert classify_submission_outcome(score=1.2, direction="minimize", target_score=None, top1_score=1.0) == "low"
+    assert classify_submission_outcome(score=0.91, direction="maximize", target_score=None, top1_score=1.0) == "good"
+    assert classify_submission_outcome(score=0.8, direction="maximize", target_score=None, top1_score=1.0) == "low"
 
 
 def test_resolve_submission_message_builds_compact_default(tmp_path: Path) -> None:

@@ -10814,17 +10814,12 @@ def _classify_submission_outcome(
     target_score: float | None,
     top1_score: float | None,
 ) -> str:
-    if target_score is not None and _meets_target(score, target_score, direction):
-        return "good"
-    if top1_score is not None:
-        if direction == "minimize":
-            gap = score - top1_score
-        else:
-            gap = top1_score - score
-        scale = max(abs(top1_score), 1.0)
-        if max(gap, 0.0) / scale <= 0.1:
-            return "good"
-    return "low"
+    return _submit_stage.classify_submission_outcome(
+        score=score,
+        direction=direction,
+        target_score=target_score,
+        top1_score=top1_score,
+    )
 
 
 def _submission_message(
