@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,15 @@ class NotebookSubmitReference:
     submission_ref: str
     output_file: str
     version: str
+
+
+@dataclass(frozen=True)
+class NotebookSubmitRetryDecision:
+    retry: bool
+    classification: dict[str, object]
+    stderr: str
+    wait_seconds: float
+    message: str
 
 
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:
@@ -47,3 +57,38 @@ def build_kaggle_submit_kernel_kwargs(
         "version": reference.version,
         "dry_run": dry_run,
     }
+
+
+def decide_ambiguous_notebook_submit_retry(
+    *,
+    stdout: str,
+    stderr: str,
+    output: str,
+    exit_code: int | None,
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
+    should_retry_ambiguous: Callable[..., bool],
+) -> NotebookSubmitRetryDecision:
+    classification_stderr = stderr or ""
+    classification = classify_submit_error(stdout, classification_stderr, exit_code)
+    if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and output:
+        classification_stderr = "\n".join(part for part in [classification_stderr, output] if part)
+        classification = classify_submit_error(stdout, classification_stderr, exit_code)
+    retry = should_retry_ambiguous(
+        reason=str(classification.get("reason") or ""),
+        stdout=stdout,
+        stderr=classification_stderr,
+    )
+    wait_seconds = float(classification.get("retry_after_seconds") or 3.0) if retry else 0.0
+    message = (
+        "[yellow]submit retry[/yellow]: notebook submit returned an ambiguous 400; "
+        f"retrying same kernel submit in {wait_seconds:.1f}s."
+        if retry
+        else ""
+    )
+    return NotebookSubmitRetryDecision(
+        retry=retry,
+        classification=classification,
+        stderr=classification_stderr,
+        wait_seconds=wait_seconds,
+        message=message,
+    )

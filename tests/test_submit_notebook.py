@@ -5,6 +5,7 @@ from pathlib import Path
 from kagglebot.submit_notebook import (
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_reference,
+    decide_ambiguous_notebook_submit_retry,
     normalize_notebook_submit_artifact_mode,
 )
 
@@ -62,3 +63,43 @@ def test_build_kaggle_submit_kernel_kwargs_uses_reference_fields() -> None:
         "version": "3",
         "dry_run": True,
     }
+
+
+def test_decide_ambiguous_notebook_submit_retry_uses_output_fallback() -> None:
+    calls: list[str] = []
+
+    def classify(stdout: str, stderr: str, exit_code: int | None) -> dict[str, object]:  # noqa: ARG001
+        calls.append(stderr)
+        if "kernel must be specified" in stderr:
+            return {"reason": "ambiguous_notebook_bad_request", "retry_after_seconds": 4}
+        return {"reason": "unclassified_submit_error"}
+
+    decision = decide_ambiguous_notebook_submit_retry(
+        stdout="",
+        stderr="",
+        output="400 Client Error\nkernel must be specified as <owner>/<notebook>",
+        exit_code=1,
+        classify_submit_error=classify,
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: reason == "ambiguous_notebook_bad_request",
+    )
+
+    assert decision.retry is True
+    assert decision.wait_seconds == 4.0
+    assert "retrying same kernel submit in 4.0s" in decision.message
+    assert calls == ["", "400 Client Error\nkernel must be specified as <owner>/<notebook>"]
+
+
+def test_decide_ambiguous_notebook_submit_retry_rejects_generic_error() -> None:
+    decision = decide_ambiguous_notebook_submit_retry(
+        stdout="",
+        stderr="generic bad request",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {"reason": "bad_request"},
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: False,
+    )
+
+    assert decision.retry is False
+    assert decision.wait_seconds == 0.0
+    assert decision.message == ""
+    assert decision.stderr == "generic bad request"

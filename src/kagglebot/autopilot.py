@@ -9835,25 +9835,17 @@ def _submit_with_notebook_kernel(
     try:
         submit_result = run_kaggle_submit_kernel(**submit_kwargs)
     except SubmissionCliError as exc:
-        classification_stderr = exc.stderr or ""
-        classification = classify_submit_error(exc.stdout, classification_stderr, exc.exit_code)
-        if (
-            str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error"
-            and exc.output
-        ):
-            classification_stderr = "\n".join(part for part in [classification_stderr, exc.output] if part)
-            classification = classify_submit_error(exc.stdout, classification_stderr, exc.exit_code)
-        if _should_retry_ambiguous_notebook_submit_error(
-            reason=str(classification.get("reason") or ""),
+        retry_decision = _submit_notebook.decide_ambiguous_notebook_submit_retry(
             stdout=exc.stdout,
-            stderr=classification_stderr,
-        ):
-            wait_seconds = float(classification.get("retry_after_seconds") or 3.0)
-            print(
-                "[yellow]submit retry[/yellow]: notebook submit returned an ambiguous 400; "
-                f"retrying same kernel submit in {wait_seconds:.1f}s."
-            )
-            time.sleep(wait_seconds)
+            stderr=exc.stderr or "",
+            output=exc.output or "",
+            exit_code=exc.exit_code,
+            classify_submit_error=classify_submit_error,
+            should_retry_ambiguous=_should_retry_ambiguous_notebook_submit_error,
+        )
+        if retry_decision.retry:
+            print(retry_decision.message)
+            time.sleep(retry_decision.wait_seconds)
             submit_result = run_kaggle_submit_kernel(**submit_kwargs)
         else:
             raise
