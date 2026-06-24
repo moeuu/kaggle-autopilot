@@ -20,6 +20,7 @@ from kagglebot.submit_attempts import (
     load_latest_submit_attempt,
     load_submit_attempt_rows,
     load_submit_fingerprints,
+    record_submit_attempt_state,
     submit_attempt_sha_seen,
 )
 
@@ -91,6 +92,24 @@ def test_append_submit_attempt_writes_jsonl_record(tmp_path) -> None:
     rows = [json.loads(line) for line in attempts_path.read_text(encoding="utf-8").splitlines()]
 
     assert rows == [{"ts": "2026-06-25T00:00:00+00:00", "run_id": "run-1", "sub_sha256": "sha", "ok": False}]
+
+
+def test_record_submit_attempt_state_appends_attempt_and_saves_state(tmp_path) -> None:
+    saved_updates: list[dict[str, object]] = []
+
+    record_submit_attempt_state(
+        run_dir=tmp_path,
+        attempt_payload={"run_id": "run-1", "ok": True},
+        run_state_update={"submit_attempted": True, "submit_ok": True},
+        save_run_state=saved_updates.append,
+    )
+
+    rows = load_submit_attempt_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "run-1"
+    assert rows[0]["ok"] is True
+    assert "ts" in rows[0]
+    assert saved_updates == [{"submit_attempted": True, "submit_ok": True}]
 
 
 def test_submit_attempt_sha_seen_ignores_invalid_rows(tmp_path) -> None:

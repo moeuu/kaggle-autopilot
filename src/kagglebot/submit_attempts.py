@@ -49,6 +49,17 @@ def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
+def record_submit_attempt_state(
+    *,
+    run_dir: Path,
+    attempt_payload: dict[str, object],
+    run_state_update: dict[str, object],
+    save_run_state: Callable[[dict[str, object]], None],
+) -> None:
+    append_submit_attempt(run_dir=run_dir, payload=attempt_payload)
+    save_run_state(run_state_update)
+
+
 def load_submit_attempt_rows(run_dir: Path) -> list[dict[str, object]]:
     attempts_path = run_dir / "submit_attempts.jsonl"
     if not attempts_path.exists():
