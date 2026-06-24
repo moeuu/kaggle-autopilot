@@ -84,6 +84,7 @@ Submission behavior:
 - Repeated submit-error fingerprints are aborted safely
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
+- notebook submissions with tiny public `test.csv`/`sample_submission.csv` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test CSV in a wrapper kernel
 - heuristic `writeup` inference is conservative and ignores negative mentions such as `not a judged/writeup competition`
 - leaderboard runs default to `target_medal=winner` and `target_rank_percentile=0.001`; until that near-first-place band is reached, autopilot will not collapse into `minor_tuning`
 - for large tabular binary datasets with meaningful categoricals, planning quality gates require multi-family search plus at least one OOF blend candidate
@@ -91,6 +92,7 @@ Submission behavior:
 - if pseudo-labeling fully fails or an external/original-data feature path collapses to constants, the next iteration gets explicit repair targets instead of silently accepting the degraded path
 - if CV improves but public LB regresses, autopilot treats that as a validation mismatch first and forces validation redesign with group/time/leak/proxy split candidates before model-only changes
 - when kernels report multiple candidate pipelines, autopilot blocks CV-only winners whose holdout/validation score is materially worse than another candidate, especially if their test/submission prediction distribution collapses to sparse or constant-like outputs
+- long-running multi-fold candidates are instructed to persist fold-level OOF/test predictions, metadata, and a valid `submission_<candidate>_fold<N>.csv` after each completed fold so an interrupted run can still submit the completed-fold candidate
 
 ## Important Defaults
 

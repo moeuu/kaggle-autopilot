@@ -751,6 +751,24 @@ def test_resolve_plan_uses_inference_artifact_mode_for_code_competition(tmp_path
     assert resolved["notebook_submit_artifact_mode"] == "inference"
 
 
+def test_resolve_plan_uses_inference_mode_for_notebook_tiny_public_test(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, compute="local_gpu")
+    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
+    (config.paths.context_dir / "evaluation_spec.json").write_text(
+        json.dumps({"submit_mode": "notebook"}, indent=2),
+        encoding="utf-8",
+    )
+    config.paths.data_dir.mkdir(parents=True, exist_ok=True)
+    (config.paths.data_dir / "test.csv").write_text("id,x\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    (config.paths.data_dir / "sample_submission.csv").write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+
+    resolved = _resolve_plan(PlanConfig(), config)
+
+    assert resolved["submit_mode"] == "notebook"
+    assert resolved["code_competition"] is True
+    assert resolved["notebook_submit_artifact_mode"] == "inference"
+
+
 def test_resolve_plan_defaults_to_winner_target_for_leaderboard(tmp_path: Path) -> None:
     config = _make_config(tmp_path, compute="local_gpu")
     _write_dataset_profile(config.paths, task="classification", modality="tabular")
@@ -2945,6 +2963,61 @@ def test_attempt_submit_aborts_when_polling_reports_error_status(monkeypatch, tm
     assert [row["action_taken"] for row in rows[-2:]] == ["submit", "abort"]
     assert rows[-1]["reason"] == "submission_poll_status_error"
     assert "Kaggle reported: bad submission from Kaggle" in rows[-1]["stderr_tail"]
+
+
+def test_attempt_submit_aborts_when_complete_has_no_score(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path, submit=True, max_iterations=1)
+    run_id = config.run_id or "run-1"
+    run_dir = config.paths.run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
+        lambda self, path: path,  # noqa: ARG005
+    )
+    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "kagglebot.submission_service.run_kaggle_submit",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot._wait_for_submission_outcome",
+        lambda **kwargs: {
+            "status": "SubmissionStatus.COMPLETE",
+            "score": None,
+            "raw": {"status": "SubmissionStatus.COMPLETE", "publicScore": "", "privateScore": ""},
+        },
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.list_competition_submissions",
+        lambda *args, **kwargs: [{"status": "complete", "publicScore": "", "privateScore": "", "description": "demo"}],
+    )
+
+    with pytest.raises(SubmitAbortedError, match="no score"):
+        _attempt_submit(
+            config=config,
+            run_id=run_id,
+            submission_path=submission_path,
+            best_score=0.4,
+            problem_types=[],
+        )
+
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "submit_attempts.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["action_taken"] for row in rows[-2:]] == ["submit", "abort"]
+    assert rows[-1]["reason"] == "submission_poll_status_complete_no_score"
+    assert "scoring error" in rows[-1]["stderr_tail"].lower()
+    failure_context = json.loads((run_dir / "submit_failure_context.json").read_text(encoding="utf-8"))
+    assert failure_context["active"] is True
+    assert failure_context["repairable"] is True
+    assert failure_context["repair_target"] == "submission_artifact"
 
 
 def test_build_submit_failure_improvement_context_for_file_issue(tmp_path: Path) -> None:

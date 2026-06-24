@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -72,6 +73,8 @@ _CODE_COMPETITION_PATTERNS = (
     re.compile(r"\bkernel submissions only\b"),
     re.compile(r"\bnotebook-only competition\b"),
     re.compile(r"\bhidden(?:/| or )full test\b"),
+    re.compile(r"\bdummy\s+(?:public\s+)?test\b"),
+    re.compile(r"\bpublic\s+test\s+(?:set\s+)?(?:is|contains)\s+(?:dummy|placeholder)\b"),
 )
 
 
@@ -205,7 +208,46 @@ def infer_code_competition_from_paths(
             texts.append(path.read_text(encoding="utf-8"))
         except OSError:
             continue
-    return infer_code_competition(*texts, default=default)
+    if infer_code_competition(*texts, default=default):
+        return True
+    return _looks_like_notebook_hidden_test_contract(paths)
+
+
+def _looks_like_notebook_hidden_test_contract(paths: CompetitionPaths) -> bool:
+    """Infer code/notebook rerun submissions from a tiny public test contract.
+
+    Some Kaggle code competitions only state `submit_mode: notebook` in the local
+    evaluation spec and ship a tiny public test/sample pair. Embedding that local
+    submission in a wrapper kernel passes local validation but fails Kaggle scoring
+    once the notebook is evaluated against the real/full test contract.
+    """
+    if not _evaluation_spec_submit_mode_is_notebook(paths):
+        return False
+    test_rows = _csv_data_row_count_at_most(paths.data_dir / "test.csv", limit=10)
+    sample_rows = _csv_data_row_count_at_most(paths.data_dir / "sample_submission.csv", limit=10)
+    return test_rows is True and sample_rows is True
+
+
+def _evaluation_spec_submit_mode_is_notebook(paths: CompetitionPaths) -> bool:
+    try:
+        payload = json.loads((paths.context_dir / "evaluation_spec.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return normalize_submit_mode(payload.get("submit_mode"), default="") == "notebook"
+
+
+def _csv_data_row_count_at_most(path: Path, *, limit: int) -> bool | None:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            # Header plus at most `limit` data rows may be present.
+            for index, _line in enumerate(handle):
+                if index > limit:
+                    return False
+    except OSError:
+        return None
+    return True
 
 
 def summarize_writeup_requirements(paths: CompetitionPaths, *, max_lines: int = 8) -> str:

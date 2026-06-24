@@ -25,6 +25,18 @@ def test_codex_kernel_impl_prompt_requires_safe_pipeline_lookup() -> None:
     assert "explicit blend candidate" in template
 
 
+def test_prompts_require_fold_intermediate_submissions() -> None:
+    base_dir = Path(agent_pipeline.__file__).resolve().parents[1]
+    kernel_template = (base_dir / "prompts" / "codex_kernel_impl.md").read_text(encoding="utf-8")
+    improve_template = (base_dir / "templates" / "improve_iteration.md").read_text(encoding="utf-8")
+    combined = kernel_template + "\n" + improve_template
+
+    assert "submission_<name>_fold<N>.csv" in kernel_template
+    assert "submission_<candidate>_fold<N>.csv" in improve_template
+    assert "sample_submission.csv" in combined
+    assert "completed folds only in memory" in combined
+
+
 def test_strategy_plan_prompt_includes_quality_gate_checklist() -> None:
     base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts"
     template = (base_dir / "strategy_plan.md").read_text(encoding="utf-8")

@@ -296,6 +296,7 @@ _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
 _FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
+_SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES = {"complete", "completed"}
 _FORCED_INITIAL_SUBMIT_STATE = "forced_initial_submit"
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
 _SPARE_DAILY_SUBMIT_REASON = "spare_daily_submission_slot"
@@ -10290,6 +10291,47 @@ def _attempt_submit(
                 ),
                 stdout_tail="",
                 stderr_tail=raw_detail or outcome_status,
+                exit_code=None,
+            )
+        if (
+            outcome_status in _SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
+            and outcome.get("score") is None
+            and infer_deliverable_mode_from_paths(config.paths, default="leaderboard") == "leaderboard"
+        ):
+            raw_detail = _build_kaggle_submit_error_detail(
+                slug=config.slug,
+                message=message,
+                submitted_at=submitted_at,
+                outcome=outcome,
+            )
+            if not raw_detail:
+                raw_detail = (
+                    "Kaggle submission completed without a public/private score. "
+                    "For leaderboard submissions this usually indicates a scoring error, "
+                    "such as an invalid notebook-generated submission file."
+                )
+            elif "submission file" not in raw_detail.lower() and "scoring error" not in raw_detail.lower():
+                raw_detail = (
+                    raw_detail + "\nKaggle scoring error inferred: leaderboard submission file completed "
+                    "without a public/private score."
+                )
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_ref=submission_ref,
+                submission_artifact_path=submission_for_submit_path,
+                artifact_mode=submission_artifact_mode,
+                code_fingerprint=submit_code_fingerprint,
+                fingerprint=compute_error_fingerprint("", raw_detail),
+                error_kind="validation",
+                reason=f"submission_poll_status_{outcome_status}_no_score",
+                message=(
+                    f"Submission finished with status '{outcome_status}' but no score; "
+                    "treating as scoring failure for this leaderboard run."
+                ),
+                stdout_tail="",
+                stderr_tail=raw_detail,
                 exit_code=None,
             )
 
