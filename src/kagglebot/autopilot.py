@@ -9861,18 +9861,16 @@ def _submit_with_notebook_kernel(
         else:
             raise _notebook_kernel_submission_error(exc) from exc
 
-    submission_artifact_path: Path | None = None
-    if kernel_result.submission_path:
-        submission_artifact_path = _copy_submission_artifact_to_iteration_dir(
-            source=kernel_result.submission_path,
-            iter_dir=iter_dir,
-        )
-    submit_reference = _submit_notebook.build_notebook_submit_reference(
+    output_reference = _submit_notebook.build_notebook_submit_output_reference(
         kernel_id=kernel_result.kernel_id,
-        submission_artifact_path=submission_artifact_path,
         kernel_submission_path=kernel_result.submission_path,
         version_label=_infer_kernel_submit_version_label(iter_dir / "logs"),
+        copy_submission_artifact=lambda source: _copy_submission_artifact_to_iteration_dir(
+            source=source,
+            iter_dir=iter_dir,
+        ),
     )
+    submit_reference = output_reference.reference
     print(f"[cyan]submit notebook[/cyan]: {submit_reference.kernel_ref}")
     submit_kwargs = _submit_notebook.build_kaggle_submit_kernel_kwargs(
         slug=config.slug,
@@ -9897,7 +9895,7 @@ def _submit_with_notebook_kernel(
             submit_result = run_kaggle_submit_kernel(**submit_kwargs)
         else:
             raise
-    return submit_result, submit_reference.submission_ref, submission_artifact_path
+    return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
 
 
 def _should_retry_submit_kernel_on_cpu(*, config: AutopilotConfig, exc: Exception) -> bool:

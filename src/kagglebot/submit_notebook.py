@@ -14,6 +14,12 @@ class NotebookSubmitReference:
 
 
 @dataclass(frozen=True)
+class NotebookSubmitOutputReference:
+    submission_artifact_path: Path | None
+    reference: NotebookSubmitReference
+
+
+@dataclass(frozen=True)
 class NotebookSubmitRetryDecision:
     retry: bool
     classification: dict[str, object]
@@ -89,6 +95,25 @@ def build_notebook_submit_reference(
         submission_ref=f"kernel:{kernel_id}",
         output_file=output_path.name if output_path is not None else "submission.csv",
         version=str(version_label or "").strip() or "1",
+    )
+
+
+def build_notebook_submit_output_reference(
+    *,
+    kernel_id: str,
+    kernel_submission_path: Path | None,
+    version_label: str | None,
+    copy_submission_artifact: Callable[[Path], Path],
+) -> NotebookSubmitOutputReference:
+    submission_artifact_path = copy_submission_artifact(kernel_submission_path) if kernel_submission_path else None
+    return NotebookSubmitOutputReference(
+        submission_artifact_path=submission_artifact_path,
+        reference=build_notebook_submit_reference(
+            kernel_id=kernel_id,
+            submission_artifact_path=submission_artifact_path,
+            kernel_submission_path=kernel_submission_path,
+            version_label=version_label,
+        ),
     )
 
 

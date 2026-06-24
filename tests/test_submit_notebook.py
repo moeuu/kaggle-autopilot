@@ -4,6 +4,7 @@ from pathlib import Path
 
 from kagglebot.submit_notebook import (
     build_kaggle_submit_kernel_kwargs,
+    build_notebook_submit_output_reference,
     build_notebook_submit_reference,
     build_submit_kernel_run_kwargs,
     decide_ambiguous_notebook_submit_retry,
@@ -44,6 +45,39 @@ def test_build_notebook_submit_reference_uses_kernel_path_and_default_version() 
 
     assert reference.output_file == "submission.csv"
     assert reference.version == "1"
+
+
+def test_build_notebook_submit_output_reference_copies_kernel_submission(tmp_path: Path) -> None:
+    copied_paths: list[Path] = []
+    kernel_submission = Path("/kaggle/working/submission.csv")
+    copied_submission = tmp_path / "submission.csv"
+
+    output = build_notebook_submit_output_reference(
+        kernel_id="user/demo",
+        kernel_submission_path=kernel_submission,
+        version_label="2",
+        copy_submission_artifact=lambda source: copied_paths.append(source) or copied_submission,
+    )
+
+    assert copied_paths == [kernel_submission]
+    assert output.submission_artifact_path == copied_submission
+    assert output.reference.kernel_ref == "user/demo"
+    assert output.reference.submission_ref == "kernel:user/demo"
+    assert output.reference.output_file == "submission.csv"
+    assert output.reference.version == "2"
+
+
+def test_build_notebook_submit_output_reference_handles_missing_submission() -> None:
+    output = build_notebook_submit_output_reference(
+        kernel_id="user/demo",
+        kernel_submission_path=None,
+        version_label=None,
+        copy_submission_artifact=lambda source: source,
+    )
+
+    assert output.submission_artifact_path is None
+    assert output.reference.output_file == "submission.csv"
+    assert output.reference.version == "1"
 
 
 def test_build_kaggle_submit_kernel_kwargs_uses_reference_fields() -> None:
