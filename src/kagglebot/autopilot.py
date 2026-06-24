@@ -10074,38 +10074,26 @@ def _abort_submit_for_run(
         artifact_path = submission_ref
     else:
         artifact_path = None
-    _append_submit_attempt(
-        run_dir=run_dir,
-        payload=_build_submit_attempt_payload(
-            run_id=run_id,
-            submission_ref=submission_ref_text,
-            submission_sha256=_sha256_or_none(artifact_path),
-            exit_code=exit_code,
-            ok=False,
-            fingerprint=fingerprint,
-            code_fingerprint=code_fingerprint or "",
-            error_kind=error_kind,
-            action_taken="abort",
-            reason=reason,
-            stdout=stdout_tail,
-            stderr=stderr_tail,
-        ),
-    )
     prior = _load_run_state(run_dir)
     prior_ok = bool(prior.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
-    _save_run_state(
-        run_dir,
-        _build_submit_run_state_update(
-            prior_state=prior,
-            fingerprint=fingerprint,
-            code_fingerprint=code_fingerprint or "",
-            error_kind=error_kind,
-            action_taken="abort",
-            reason=reason,
-            submission_ref=submission_ref_text,
-            submit_ok=prior_ok,
-        ),
+    abort_payloads = _submit_attempts.build_submit_abort_record_payloads(
+        run_id=run_id,
+        submission_ref=submission_ref_text,
+        submission_sha256=_sha256_or_none(artifact_path),
+        exit_code=exit_code,
+        fingerprint=fingerprint,
+        code_fingerprint=code_fingerprint or "",
+        error_kind=error_kind,
+        reason=reason,
+        stdout=stdout_tail,
+        stderr=stderr_tail,
+        prior_state=prior,
+        prior_submit_ok=prior_ok,
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
+    _append_submit_attempt(run_dir=run_dir, payload=abort_payloads.attempt_payload)
+    _save_run_state(run_dir, abort_payloads.run_state_update)
     _save_submit_failure_context(
         run_dir,
         _build_submit_failure_context_payload(
