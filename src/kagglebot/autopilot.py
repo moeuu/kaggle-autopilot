@@ -34,6 +34,7 @@ from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot import submit_notebook as _submit_notebook
 from kagglebot import submit_retry_policy as _submit_retry_policy
+from kagglebot import submit_stage as _submit_stage
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
@@ -9409,16 +9410,23 @@ def _attempt_submit(
         )
 
     constraints = _load_competition_rule_constraints(config.paths)
-    notebook_submit_required = normalize_submit_mode(submit_mode, default="file") == "notebook"
-    if constraints.notebook_submissions_only and not notebook_submit_required:
-        notebook_submit_required = True
-        print("[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit")
-    notebook_fallback_activated = notebook_submit_required
-    submission_artifact_mode = (
+    requested_notebook_submit = normalize_submit_mode(submit_mode, default="file") == "notebook"
+    resolved_notebook_artifact_mode = (
         _resolve_notebook_submit_artifact_mode(paths=config.paths, submit_mode="notebook")
-        if notebook_submit_required
-        else str(notebook_submit_artifact_mode or "wrapper")
+        if requested_notebook_submit or constraints.notebook_submissions_only
+        else None
     )
+    submit_stage_mode = _submit_stage.decide_initial_submit_stage_mode(
+        requested_notebook_submit=requested_notebook_submit,
+        notebook_submissions_only=constraints.notebook_submissions_only,
+        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
+        resolved_notebook_artifact_mode=resolved_notebook_artifact_mode,
+    )
+    notebook_submit_required = submit_stage_mode.notebook_submit_required
+    notebook_fallback_activated = submit_stage_mode.notebook_fallback_activated
+    submission_artifact_mode = submit_stage_mode.submission_artifact_mode
+    for mode_message in submit_stage_mode.messages:
+        print(mode_message)
     artifact_mode_decision = _decide_notebook_submit_artifact_mode_for_submission(
         paths=config.paths,
         requested_mode=submission_artifact_mode,
@@ -9428,8 +9436,6 @@ def _attempt_submit(
     submission_artifact_mode = artifact_mode_decision.mode
     if artifact_mode_decision.message:
         print(artifact_mode_decision.message)
-    if notebook_submit_required:
-        print("[yellow]submit mode[/yellow]: using notebook submit")
 
     if not notebook_submit_required:
         same_path_decision = _submit_retry_policy.decide_same_submission_path_action(
