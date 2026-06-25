@@ -131,6 +131,7 @@ from kagglebot.kaggle_api import (
     leaderboard_top1,
     list_competition_submissions,
 )
+from kagglebot.kaggle_cli_errors import is_missing_kaggle_credentials_error as _is_missing_kaggle_credentials_error
 from kagglebot.kernel_runner import (
     _collect_log_tail,
     resolve_kaggle_username,
@@ -7196,18 +7197,6 @@ def _record_submit_reason_knowledge(
     except Exception:  # noqa: BLE001
         # Knowledge recording must not block submit abort/retry control.
         return
-
-
-def _is_missing_kaggle_credentials_error(exc: KaggleCliError) -> bool:
-    text = (exc.message or "") + "\n" + (exc.output or "")
-    lowered = text.lower()
-    if "kaggle.json" in lowered and "could not find" in lowered:
-        return True
-    if "kaggle.json" in lowered and "environment method" in lowered:
-        return True
-    if "api.authenticate" in lowered and "kaggle.json" in lowered:
-        return True
-    return False
 
 
 def _wait_for_submission_outcome(

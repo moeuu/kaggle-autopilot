@@ -66,6 +66,8 @@ competition-specific verify compatibility shims live in `src/kagglebot/verify_ar
 that module from the verify step.
 Kernel error formatting, normalized same-error fingerprints, and pushed-kernel registration failure detection live in
 `src/kagglebot/kernel_errors.py`; the loop only records the resulting text/fingerprint and enforces retry limits.
+Kaggle CLI error-shape helpers such as missing-credentials detection live in `src/kagglebot/kaggle_cli_errors.py`; the
+loop maps those typed predicates to submit abort reasons instead of parsing credential hints inline.
 Split-strategy policy, evaluation seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and
 competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
 toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
@@ -269,7 +271,7 @@ Recommended extraction order:
    side-effect orchestration into a typed service that coordinates the existing `submit_attempts`, `submit_stage`,
    `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
-   objects rather than raw CLI stdout/stderr parsing.
+   objects and shared `kaggle_cli_errors.py` predicates rather than raw CLI stdout/stderr parsing.
 6. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment
    isolation, and competition-specific compatibility shims in `verify_artifacts.py`; avoid adding generated shim strings
    or pytest-specific execution rules back into `autopilot.py`.
