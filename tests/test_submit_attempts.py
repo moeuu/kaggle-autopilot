@@ -7,6 +7,7 @@ from kagglebot.submit_attempts import (
     SubmitAttemptRecorder,
     SubmitAttemptStatePayloads,
     append_submit_attempt,
+    build_same_submission_path_skip_attempt_payload,
     build_seen_submit_fingerprint_set,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
@@ -342,6 +343,32 @@ def test_build_submit_skip_attempt_payload_sets_skip_contract() -> None:
         "error_kind": "unknown",
         "action_taken": "skip",
         "reason": "same_submission_path",
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+
+def test_build_same_submission_path_skip_attempt_payload_sets_unknown_error_kind() -> None:
+    payload = build_same_submission_path_skip_attempt_payload(
+        run_id="run-1",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+        fingerprint="fp",
+        reason="same_submission_path_reused_in_run",
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+    )
+
+    assert payload == {
+        "run_id": "run-1",
+        "sub_path": "submission.csv",
+        "sub_sha256": "sha",
+        "exit_code": None,
+        "ok": False,
+        "fingerprint": "fp",
+        "error_kind": "unknown",
+        "action_taken": "skip",
+        "reason": "same_submission_path_reused_in_run",
         "stdout_tail": "",
         "stderr_tail": "",
     }

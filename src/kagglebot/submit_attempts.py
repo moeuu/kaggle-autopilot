@@ -330,6 +330,28 @@ def build_submit_skip_attempt_payload(
     )
 
 
+def build_same_submission_path_skip_attempt_payload(
+    *,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    fingerprint: str,
+    reason: str,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+) -> dict[str, object]:
+    return build_submit_skip_attempt_payload(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=submission_sha256,
+        fingerprint=fingerprint,
+        error_kind="unknown",
+        reason=reason,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+    )
+
+
 def build_submit_skip_record_payloads(
     *,
     run_id: str,

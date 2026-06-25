@@ -5199,12 +5199,11 @@ def _attempt_submit(
         elif same_path_decision.action == "skip":
             print(same_path_decision.message)
             submit_attempt_recorder.append(
-                _submit_attempts.build_submit_skip_attempt_payload(
+                _submit_attempts.build_same_submission_path_skip_attempt_payload(
                     run_id=run_id,
                     submission_ref=str(prepared_submission_path),
                     submission_sha256=_sha256_or_none(prepared_submission_path),
                     fingerprint=same_path_decision.fingerprint,
-                    error_kind="unknown",
                     reason=same_path_decision.reason,
                     stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
                     stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
