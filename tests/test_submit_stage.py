@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    build_submission_outcome_error_detail,
     build_submit_stage_success_record,
     classify_submission_outcome,
     classify_submit_stage_error,
@@ -373,6 +375,43 @@ def test_decide_submission_outcome_abort_allows_scoreless_writeup_complete() -> 
     )
 
     assert decision.should_abort is False
+
+
+def test_build_submission_outcome_error_detail_prefers_matched_submission_row() -> None:
+    rows = [
+        {
+            "description": "target message",
+            "status": "SubmissionStatus.COMPLETE",
+            "publicScore": "",
+            "errorDescription": "Submission Scoring Error: incorrect format",
+            "date": "2026-06-25T00:41:17Z",
+        }
+    ]
+
+    detail = build_submission_outcome_error_detail(
+        slug="demo",
+        message="target message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        outcome={"status": "complete", "score": None, "raw": {"status": "complete"}},
+        fetch_submission_rows=lambda slug: rows,
+        normalize_detail=lambda text: text,
+    )
+
+    assert "Submission Scoring Error" in detail
+    assert "errorDescription" in detail
+
+
+def test_build_submission_outcome_error_detail_falls_back_to_raw_payload() -> None:
+    detail = build_submission_outcome_error_detail(
+        slug="demo",
+        message="target message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        outcome={"status": "complete", "score": None, "raw": "raw failure"},
+        fetch_submission_rows=lambda slug: (_ for _ in ()).throw(RuntimeError("unavailable")),
+        normalize_detail=lambda text: text,
+    )
+
+    assert 'Kaggle submission raw payload: "raw failure"' in detail
 
 
 def test_run_submit_stage_attempt_uses_file_submit_result_path(tmp_path: Path) -> None:

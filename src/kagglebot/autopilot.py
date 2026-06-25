@@ -7662,11 +7662,13 @@ def _attempt_submit(
             and outcome.get("score") is None
             and infer_deliverable_mode_from_paths(config.paths, default="leaderboard") == "leaderboard"
         ):
-            raw_detail = _build_kaggle_submit_error_detail(
+            raw_detail = _submit_stage.build_submission_outcome_error_detail(
                 slug=config.slug,
                 message=message,
                 submitted_at=submitted_at,
                 outcome=outcome,
+                fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
+                normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
             )
         outcome_abort_decision = _submit_stage.decide_submission_outcome_abort(
             outcome_status=outcome_status,
@@ -7990,59 +7992,6 @@ def _resolve_submit_autofix_submission_artifact(*, config: AutopilotConfig, run_
         ),
         resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
     )
-
-
-def _build_kaggle_submit_error_detail(
-    *,
-    slug: str,
-    message: str,
-    submitted_at: datetime,
-    outcome: dict[str, object],
-) -> str:
-    def _extract_row_message(row: dict[str, object]) -> str:
-        for key in (
-            "errorDescription",
-            "error_description",
-            "failureReason",
-            "failure_reason",
-            "error",
-            "message",
-            "comments",
-            "comment",
-            "description",
-        ):
-            value = row.get(key)
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text:
-                return text
-        return ""
-
-    row: dict[str, object] | None = None
-    raw_payload = outcome.get("raw")
-    if isinstance(raw_payload, dict):
-        row = dict(raw_payload)
-    try:
-        rows = list_competition_submissions(slug, dry_run=False)
-        selector = SubmissionOutcomeService(fetch_rows=lambda current_slug: rows)
-        matched = selector._select_submission_row(rows=rows, message=message, submitted_at=submitted_at)  # noqa: SLF001
-        if isinstance(matched, dict):
-            row = dict(matched)
-    except Exception:
-        pass
-
-    details: list[str] = []
-    if row:
-        row_message = _extract_row_message(row)
-        if row_message:
-            details.append(f"Kaggle reported: {row_message}")
-        details.append(f"Kaggle submission row: {json.dumps(row, ensure_ascii=True)}")
-    elif raw_payload is not None:
-        details.append(f"Kaggle submission raw payload: {json.dumps(raw_payload, ensure_ascii=True)}")
-    else:
-        details.append(f"Kaggle submission status: {outcome.get('status') or 'unknown'}")
-    return normalize_error_text("\n".join(details), max_chars=1200)
 
 
 def _prepare_submit_file_autofix(

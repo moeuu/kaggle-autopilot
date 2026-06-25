@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from kagglebot.campaign import (
@@ -14,6 +16,7 @@ from kagglebot.campaign import (
     normalize_campaign_mode,
 )
 from kagglebot.json_utils import load_json_object
+from kagglebot.submission.outcome_service import SubmissionOutcomeService
 
 
 @dataclass(frozen=True)
@@ -439,6 +442,62 @@ def decide_submission_outcome_abort(
         )
 
     return SubmitOutcomeAbortDecision(should_abort=False)
+
+
+def build_submission_outcome_error_detail(
+    *,
+    slug: str,
+    message: str,
+    submitted_at: datetime,
+    outcome: dict[str, object],
+    fetch_submission_rows: Callable[[str], list[dict[str, str]]],
+    normalize_detail: Callable[[str], str],
+) -> str:
+    row: dict[str, object] | None = None
+    raw_payload = outcome.get("raw")
+    if isinstance(raw_payload, dict):
+        row = dict(raw_payload)
+    try:
+        rows = fetch_submission_rows(slug)
+        selector = SubmissionOutcomeService(fetch_rows=lambda current_slug: rows)
+        matched = selector._select_submission_row(rows=rows, message=message, submitted_at=submitted_at)  # noqa: SLF001
+        if isinstance(matched, dict):
+            row = dict(matched)
+    except Exception:  # noqa: BLE001
+        pass
+
+    details: list[str] = []
+    if row:
+        row_message = _extract_submission_row_message(row)
+        if row_message:
+            details.append(f"Kaggle reported: {row_message}")
+        details.append(f"Kaggle submission row: {json.dumps(row, ensure_ascii=True)}")
+    elif raw_payload is not None:
+        details.append(f"Kaggle submission raw payload: {json.dumps(raw_payload, ensure_ascii=True)}")
+    else:
+        details.append(f"Kaggle submission status: {outcome.get('status') or 'unknown'}")
+    return normalize_detail("\n".join(details))
+
+
+def _extract_submission_row_message(row: dict[str, object]) -> str:
+    for key in (
+        "errorDescription",
+        "error_description",
+        "failureReason",
+        "failure_reason",
+        "error",
+        "message",
+        "comments",
+        "comment",
+        "description",
+    ):
+        value = row.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
 
 
 def build_submit_stage_success_record(
