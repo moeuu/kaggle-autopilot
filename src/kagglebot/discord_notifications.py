@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from rich import print
 
+from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
 from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
@@ -819,15 +820,7 @@ def _read_json_object(path: Path) -> dict[str, object]:
 
 
 def _parse_datetime(value: object) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    return parse_iso_datetime_utc(value)
 
 
 def _put_if_not_none(payload: dict[str, object], key: str, value: object | None) -> None:

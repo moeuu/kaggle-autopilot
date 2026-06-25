@@ -16,6 +16,7 @@ from rich import print
 
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
+from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.env_utils import parse_float_value, parse_int_value
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import (
@@ -1432,12 +1433,4 @@ def _set_resume_env(*, slug: str, run_id: str) -> None:
 
 
 def _parse_ts(value: object) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    return parse_iso_datetime_utc(value)

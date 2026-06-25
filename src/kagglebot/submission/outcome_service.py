@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 
 _RANK_PAIR_RE = re.compile(r"(?P<rank>\d+)\s*/\s*(?P<total>\d+)")
@@ -262,22 +263,21 @@ class SubmissionOutcomeService:
         raw = str(value).strip()
         if not raw:
             return None
-        normalized = raw.replace("Z", "+00:00")
-        try:
-            dt = datetime.fromisoformat(normalized)
-        except ValueError:
-            for fmt in (
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d %H:%M:%S%z",
-                "%Y/%m/%d %H:%M:%S",
-            ):
-                try:
-                    dt = datetime.strptime(raw, fmt)
-                    break
-                except ValueError:
-                    continue
-            else:
-                return None
+        parsed = parse_iso_datetime_utc(raw)
+        if parsed is not None:
+            return parsed
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y/%m/%d %H:%M:%S",
+        ):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(UTC)
