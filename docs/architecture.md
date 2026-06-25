@@ -61,6 +61,8 @@ Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the 
 instead of carrying private rule-parsing aliases in `autopilot.py`.
 Offline score-source normalization and trust checks live in `src/kagglebot/score_sources.py` for the same reason:
 the loop should consume normalized policy answers rather than own every parsing rule inline.
+External artifact mirroring for pytest verification, including competition-specific verify compatibility shims, lives in
+`src/kagglebot/verify_artifacts.py`; `autopilot.py` only invokes it from the verify step.
 Split-strategy policy, evaluation seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and
 competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
 toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
@@ -265,7 +267,9 @@ Recommended extraction order:
    `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects rather than raw CLI stdout/stderr parsing.
-6. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
+6. Verify artifact staging: keep local/external artifact mirroring and competition-specific compatibility shims in
+   `verify_artifacts.py`; avoid adding generated shim strings back into `autopilot.py`.
+7. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
    should avoid ad hoc `json.dumps(...).write_text(...)` for artifact files unless they need non-object JSON, JSONL, or
    generated kernel code that runs outside the package.
 
