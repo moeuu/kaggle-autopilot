@@ -43,20 +43,24 @@ def load_jsonl_records(path: Path, *, errors: str = "strict", limit: int | None 
     if max_records == 0:
         return records
     try:
-        lines = path.read_text(encoding="utf-8", errors=errors).splitlines()
-    except (OSError, UnicodeDecodeError):
+        with path.open("rb") as handle:
+            for raw_line in handle:
+                try:
+                    line = raw_line.decode("utf-8", errors=errors)
+                except UnicodeDecodeError:
+                    return records
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
+                    if max_records is not None and len(records) >= max_records:
+                        break
+    except OSError:
         return records
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-            if max_records is not None and len(records) >= max_records:
-                break
     return records
 
 

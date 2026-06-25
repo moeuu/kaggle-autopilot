@@ -134,6 +134,14 @@ def test_load_jsonl_records_limit_counts_valid_dict_rows(tmp_path) -> None:
     assert load_jsonl_records(path, limit=0) == []
 
 
+def test_load_jsonl_records_limit_stops_before_later_decode_error(tmp_path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_bytes(b'{"first": true}\n\xff{"bad": true}\n')
+
+    assert load_jsonl_records(path, limit=1) == [{"first": True}]
+    assert load_jsonl_records(path) == [{"first": True}]
+
+
 def test_write_json_object_creates_parent_and_writes_indented_json(tmp_path) -> None:
     path = tmp_path / "nested" / "payload.json"
 
