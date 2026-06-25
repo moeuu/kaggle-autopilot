@@ -19,7 +19,7 @@ from kagglebot.medals import (
     validate_target_rank_percentile,
 )
 from kagglebot.paths import CompetitionPaths
-from kagglebot.solver.metrics import infer_direction
+from kagglebot.solver.metrics import infer_direction, normalize_direction
 from kagglebot.writeup import (
     infer_deliverable_mode,
     infer_submit_mode,
@@ -373,8 +373,8 @@ def validate_evaluation_spec(spec_raw: object) -> tuple[dict[str, object] | None
         metric_def = None
         issues.append(f"evaluation_spec.metric_name unsupported: {metric_name!r}")
 
-    direction = str(spec_raw.get("direction", "")).strip().lower()
-    if direction not in {"maximize", "minimize"}:
+    direction = normalize_direction(spec_raw.get("direction"))
+    if direction is None:
         issues.append("evaluation_spec.direction must be 'maximize' or 'minimize'")
     elif metric_def is not None and metric_def.direction != direction:
         issues.append("evaluation_spec.direction must match metric direction in registry")

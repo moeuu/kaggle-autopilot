@@ -26,6 +26,13 @@ from sklearn.metrics import (
 Direction = Literal["minimize", "maximize"]
 
 
+def normalize_direction(value: object, *, default: Direction | None = None) -> Direction | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"minimize", "maximize"}:
+        return normalized  # type: ignore[return-value]
+    return default
+
+
 def canonical_metric(metric: str) -> str:
     metric_raw = metric.strip()
     if metric_raw.lower().startswith("custom:"):
@@ -64,8 +71,9 @@ def canonical_metric(metric: str) -> str:
 
 
 def infer_direction(metric: str, explicit: str | None = None) -> Direction:
-    if explicit and explicit != "auto":
-        return explicit  # type: ignore[return-value]
+    normalized_explicit = normalize_direction(explicit)
+    if normalized_explicit is not None:
+        return normalized_explicit
 
     metric_name = canonical_metric(metric)
     if metric_name in {"rmse", "rmsle", "mae", "mape", "mse", "logloss", "brier_score"}:

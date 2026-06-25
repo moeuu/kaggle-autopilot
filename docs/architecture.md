@@ -85,6 +85,8 @@ Agent prompt/response file I/O, capacity-error detection, failure detail formatt
 live in `src/kagglebot/agent_io.py`; the loop supplies agent identity and paths but does not own transcript formatting.
 Context artifact reads such as dataset profile loading, evaluation-spec validation/override application, and capped CSV
 data-row counting live in `src/kagglebot/context_artifacts.py`; orchestration code consumes normalized context payloads.
+Metric aliases, metric direction inference, and canonical direction normalization live in
+`src/kagglebot/solver/metrics.py`; callers should not hand-roll `minimize|maximize` parsing.
 Split-strategy policy, planning necessity/resume-skip checks, evaluation seed/repeat normalization, rank-force
 thresholds, improvement-mode upgrades, and competition-specific evaluation overrides live in
 `src/kagglebot/plan_policy.py`. This keeps plan resolution moving toward a set of small policy functions while the

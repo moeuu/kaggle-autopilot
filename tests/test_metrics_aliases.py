@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from sklearn.metrics import average_precision_score, brier_score_loss, f1_score, roc_auc_score
 
-from kagglebot.solver.metrics import compute_metric, infer_direction, metric_requires_proba
+from kagglebot.solver.metrics import compute_metric, infer_direction, metric_requires_proba, normalize_direction
 
 
 def test_auc_roc_alias_requires_probability() -> None:
@@ -19,6 +19,17 @@ def test_auc_roc_alias_computes_auc() -> None:
 
 def test_auc_roc_alias_direction() -> None:
     assert infer_direction("AUC-ROC") == "maximize"
+
+
+def test_normalize_direction_accepts_only_canonical_directions() -> None:
+    assert normalize_direction(" MAXIMIZE ") == "maximize"
+    assert normalize_direction("minimize") == "minimize"
+    assert normalize_direction("auto", default="minimize") == "minimize"
+    assert normalize_direction("bad") is None
+
+
+def test_infer_direction_ignores_invalid_explicit_direction() -> None:
+    assert infer_direction("AUC", explicit="bad") == "maximize"
 
 
 def test_average_precision_alias_requires_probability() -> None:

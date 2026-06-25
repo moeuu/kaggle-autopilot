@@ -11,6 +11,7 @@ from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.scalar_utils import finite_float as _to_float
 from kagglebot.scalar_utils import optional_int as _to_int
 from kagglebot.scalar_utils import optional_str as _optional_str
+from kagglebot.solver.metrics import normalize_direction
 
 CampaignMode = Literal["baseline", "top1"]
 
@@ -516,8 +517,7 @@ def _infer_information_value(*, candidate: CampaignCandidate, novelty: float, va
 
 
 def _normalize_direction(value: object) -> str:
-    normalized = str(value or "").strip().lower()
-    return "maximize" if normalized == "maximize" else "minimize"
+    return normalize_direction(value, default="minimize") or "minimize"
 
 
 def _float_mapping(value: object) -> dict[str, float]:
