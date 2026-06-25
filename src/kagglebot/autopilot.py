@@ -5949,8 +5949,9 @@ def _attempt_submit(
                         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
                     )
                 )
-                _record_submit_reason_knowledge(
-                    config=config,
+                _submit_attempts.record_submit_reason_knowledge(
+                    knowledge_paths=config.knowledge_paths,
+                    slug=config.slug,
                     run_id=run_id,
                     problem_types=problem_types,
                     submission_path=submission_artifact_path or prepared_submission_path,
@@ -5959,6 +5960,9 @@ def _attempt_submit(
                     action_taken="retry",
                     fingerprint=fingerprint,
                     details=f"attempt={attempt}; wait={error_action.wait_seconds:.1f}s",
+                    infer_iteration=_submit_stage.infer_iteration_from_submission_path,
+                    normalize_detail=normalize_error_text,
+                    record_error_fix_insight=record_error_fix_insight,
                 )
                 time.sleep(error_action.wait_seconds)
                 continue
@@ -6251,8 +6255,9 @@ def _abort_submit_for_run(
         now_iso=datetime.now(UTC).isoformat(),
     )
     knowledge_submission_path = artifact_path or Path(submission_ref_text)
-    _record_submit_reason_knowledge(
-        config=config,
+    _submit_attempts.record_submit_reason_knowledge(
+        knowledge_paths=config.knowledge_paths,
+        slug=config.slug,
         run_id=run_id,
         problem_types=problem_types,
         submission_path=knowledge_submission_path,
@@ -6261,6 +6266,9 @@ def _abort_submit_for_run(
         action_taken="abort",
         fingerprint=fingerprint,
         details=message,
+        infer_iteration=_submit_stage.infer_iteration_from_submission_path,
+        normalize_detail=normalize_error_text,
+        record_error_fix_insight=record_error_fix_insight,
     )
     print(f"[red]submit aborted[/red]: {message}")
     raise SubmitAbortedError(message)
@@ -6320,45 +6328,6 @@ def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> boo
     if decision.message:
         print(decision.message)
     return decision.autofixable
-
-
-def _record_submit_reason_knowledge(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    problem_types: list[str],
-    submission_path: Path,
-    error_kind: str,
-    reason: str,
-    action_taken: str,
-    fingerprint: str,
-    details: str,
-) -> None:
-    payload = _submit_attempts.build_submit_knowledge_payload(
-        iteration=_submit_stage.infer_iteration_from_submission_path(submission_path),
-        error_kind=error_kind,
-        reason=reason,
-        action_taken=action_taken,
-        fingerprint=fingerprint,
-        details=details,
-        normalize_detail=normalize_error_text,
-    )
-    try:
-        record_error_fix_insight(
-            knowledge_paths=config.knowledge_paths,
-            slug=config.slug,
-            run_id=run_id,
-            iteration=payload.iteration,
-            problem_types=problem_types,
-            error_message=payload.error_message,
-            fix_summary=payload.fix_summary,
-            resolved=False,
-            outcome_bucket="unknown",
-            submission_score=None,
-        )
-    except Exception:  # noqa: BLE001
-        # Knowledge recording must not block submit abort/retry control.
-        return
 
 
 def _record_submission_knowledge(

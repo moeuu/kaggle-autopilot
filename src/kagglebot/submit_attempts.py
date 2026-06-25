@@ -405,6 +405,49 @@ def build_submit_knowledge_payload(
     )
 
 
+def record_submit_reason_knowledge(
+    *,
+    knowledge_paths: object,
+    slug: str,
+    run_id: str,
+    problem_types: list[str],
+    submission_path: Path,
+    error_kind: str,
+    reason: str,
+    action_taken: str,
+    fingerprint: str,
+    details: str,
+    infer_iteration: Callable[[Path], int | None],
+    normalize_detail: Callable[..., str],
+    record_error_fix_insight: Callable[..., object],
+) -> bool:
+    payload = build_submit_knowledge_payload(
+        iteration=infer_iteration(submission_path),
+        error_kind=error_kind,
+        reason=reason,
+        action_taken=action_taken,
+        fingerprint=fingerprint,
+        details=details,
+        normalize_detail=normalize_detail,
+    )
+    try:
+        record_error_fix_insight(
+            knowledge_paths=knowledge_paths,
+            slug=slug,
+            run_id=run_id,
+            iteration=payload.iteration,
+            problem_types=problem_types,
+            error_message=payload.error_message,
+            fix_summary=payload.fix_summary,
+            resolved=False,
+            outcome_bucket="unknown",
+            submission_score=None,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def build_submit_result_payload(
     *,
     message: str,

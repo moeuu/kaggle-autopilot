@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from kagglebot.submit_attempts import (
     SubmitAttemptRecorder,
@@ -22,6 +23,7 @@ from kagglebot.submit_attempts import (
     load_latest_submit_attempt,
     load_submit_attempt_rows,
     load_submit_fingerprints,
+    record_submit_reason_knowledge,
     submit_attempt_sha_seen,
 )
 
@@ -432,6 +434,66 @@ def test_build_submit_knowledge_payload_preserves_explicit_iteration() -> None:
     )
 
     assert payload.iteration == 3
+
+
+def test_record_submit_reason_knowledge_records_payload() -> None:
+    calls: list[dict[str, object]] = []
+    knowledge_paths = object()
+
+    recorded = record_submit_reason_knowledge(
+        knowledge_paths=knowledge_paths,
+        slug="demo",
+        run_id="run-1",
+        problem_types=["tabular"],
+        submission_path=Path("runs/run-1/iter-3/submission.csv"),
+        error_kind="transient",
+        reason="network_or_timeout",
+        action_taken="retry",
+        fingerprint="fp",
+        details="retry later",
+        infer_iteration=lambda path: 3 if "iter-3" in path.as_posix() else None,
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert recorded is True
+    assert calls == [
+        {
+            "knowledge_paths": knowledge_paths,
+            "slug": "demo",
+            "run_id": "run-1",
+            "iteration": 3,
+            "problem_types": ["tabular"],
+            "error_message": "submit_error kind=transient reason=network_or_timeout fingerprint=fp",
+            "fix_summary": "submit_action=retry; detail=retry later",
+            "resolved": False,
+            "outcome_bucket": "unknown",
+            "submission_score": None,
+        }
+    ]
+
+
+def test_record_submit_reason_knowledge_suppresses_record_errors() -> None:
+    def fail_record(**_kwargs: object) -> None:
+        raise RuntimeError("db unavailable")
+
+    recorded = record_submit_reason_knowledge(
+        knowledge_paths=object(),
+        slug="demo",
+        run_id="run-1",
+        problem_types=[],
+        submission_path=Path("submission.csv"),
+        error_kind="validation",
+        reason="bad_submission",
+        action_taken="abort",
+        fingerprint="fp",
+        details="bad",
+        infer_iteration=lambda _path: None,
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=fail_record,
+    )
+
+    assert recorded is False
 
 
 def test_build_submit_result_payload_for_success_includes_outcome() -> None:
