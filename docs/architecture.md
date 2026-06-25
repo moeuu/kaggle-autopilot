@@ -282,8 +282,9 @@ The next high-value modernization work is:
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`.
-   Agent write-guard policy, snapshots, repairs, and secret prompt checks now live in `write_guard.py`; agent and
-   autopilot orchestration import that shared module instead of sharing guard internals through `agent_pipeline.py`.
+   Agent write-guard policy, repair edit-scope construction, snapshots, repairs, and secret prompt checks now live in
+   `write_guard.py`; agent and autopilot orchestration import that shared module instead of sharing guard internals
+   through `agent_pipeline.py`.
    Watch-state phase updates now live in `watch_state.py`; autopilot orchestration reports phase transitions without
    owning the state-file environment lookup or JSON update details.
    Initial `run.json` payload construction and final run summary payload construction now live in `autopilot_state.py`,

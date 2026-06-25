@@ -223,12 +223,11 @@ from kagglebot.validation_lab import normalize_validation_lab_mode, run_validati
 from kagglebot.validators import kernel_source_preflight_error
 from kagglebot.verify_artifacts import run_verify as _verify_run_verify
 from kagglebot.write_guard import (
-    WriteGuardPolicy,
     _backup_guarded_files,
     _diff_snapshots,
     _enforce_allowlist_changes,
-    _repo_root_write_policy,
     _snapshot_tree,
+    build_repair_write_policy,
 )
 from kagglebot.writeup import (
     build_writeup_bundle,
@@ -3963,7 +3962,13 @@ def _run_improvement(
     # eval advisor status) and run-scoped metadata (run.json, evaluation_report.json). Those are
     # side effects of Kagglebot itself rather than agent edits, so they must be allowlisted here
     # to avoid spurious write-guard failures.
-    allowed_prefixes = _repair_allowed_prefixes(config, extra_paths=[agent_dir])
+    allowed_prefixes = build_repair_write_policy(
+        repo_root=config.paths.repo_root,
+        data_dir=config.paths.data_dir,
+        kernels_dir=config.paths.kernels_dir,
+        module_file=Path(__file__),
+        extra_allowed_prefixes=[agent_dir],
+    )
 
     def _run_improve_codex_pass(*, current_prompt_path: Path, stage_suffix: str) -> tuple[str, Path]:
         capacity_attempts = max(
@@ -4265,7 +4270,12 @@ def _run_kernel_fix(
         prompt_text=base_prompt_text,
     )
 
-    allowed_prefixes = _repair_allowed_prefixes(config)
+    allowed_prefixes = build_repair_write_policy(
+        repo_root=config.paths.repo_root,
+        data_dir=config.paths.data_dir,
+        kernels_dir=config.paths.kernels_dir,
+        module_file=Path(__file__),
+    )
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
     codex_pass_limit = max(1, int(max_codex_passes or MAX_KERNEL_FIX_CODEX_PASSES))
     retry_feedback = ""
@@ -4728,7 +4738,12 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     error_path.write_text(header + error_text + "\n", encoding="utf-8")
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
-    allowed_prefixes = _autofix_allowed_prefixes(config)
+    allowed_prefixes = build_repair_write_policy(
+        repo_root=config.paths.repo_root,
+        data_dir=config.paths.data_dir,
+        kernels_dir=config.paths.kernels_dir,
+        module_file=Path(__file__),
+    )
     prompt_text = _agent_prompts.build_autofix_prompt(
         slug=config.slug,
         run_id=run_id,
@@ -4906,24 +4921,6 @@ an ad-hoc repaired copy behind.
         return
 
     raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
-
-
-def _repair_allowed_prefixes(config: AutopilotConfig, *, extra_paths: list[Path] | None = None) -> WriteGuardPolicy:
-    extra_allowed: list[Path] = []
-    if extra_paths:
-        extra_allowed.extend(extra_paths)
-    module_src_root = Path(__file__).resolve().parents[1]
-    if module_src_root.name == "src":
-        extra_allowed.append(module_src_root)
-    return _repo_root_write_policy(
-        repo_root=config.paths.repo_root,
-        denied_prefixes=[config.paths.data_dir, config.paths.kernels_dir],
-        extra_allowed_prefixes=extra_allowed,
-    )
-
-
-def _autofix_allowed_prefixes(config: AutopilotConfig) -> WriteGuardPolicy:
-    return _repair_allowed_prefixes(config)
 
 
 def _log_codex_sandbox_fallback(*, stage_label: str, result: object) -> None:

@@ -550,6 +550,27 @@ def test_repo_root_write_policy_allows_src_but_restores_data_and_generated_kerne
     assert staged_kernel_path.read_text(encoding="utf-8") == "print('original')\n"
 
 
+def test_build_repair_write_policy_allows_src_and_denies_data_and_kernels(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    module_file = repo_root / "src" / "kagglebot" / "autopilot.py"
+    agent_dir = repo_root / "artifacts" / "demo" / "runs" / "run-1" / "iter-1" / "agent"
+    module_file.parent.mkdir(parents=True, exist_ok=True)
+
+    policy = write_guard.build_repair_write_policy(
+        repo_root=repo_root,
+        data_dir=repo_root / "artifacts" / "demo" / "data",
+        kernels_dir=repo_root / "artifacts" / "demo" / "kernels",
+        module_file=module_file,
+        extra_allowed_prefixes=[agent_dir],
+    )
+
+    assert repo_root in policy.allowed_prefixes
+    assert repo_root / "src" in policy.allowed_prefixes
+    assert agent_dir in policy.allowed_prefixes
+    assert repo_root / "artifacts" / "demo" / "data" in policy.denied_prefixes
+    assert repo_root / "artifacts" / "demo" / "kernels" in policy.denied_prefixes
+
+
 def test_repo_root_write_policy_rejects_sensitive_repo_files(tmp_path: Path) -> None:
     repo_root = tmp_path
     env_path = repo_root / ".env.local"

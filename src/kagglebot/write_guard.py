@@ -93,6 +93,27 @@ def _repo_root_write_policy(
     )
 
 
+def build_repair_write_policy(
+    *,
+    repo_root: Path,
+    data_dir: Path,
+    kernels_dir: Path,
+    module_file: Path,
+    extra_allowed_prefixes: list[Path] | None = None,
+) -> WriteGuardPolicy:
+    extra_allowed: list[Path] = []
+    if extra_allowed_prefixes:
+        extra_allowed.extend(extra_allowed_prefixes)
+    module_src_root = module_file.resolve().parents[1]
+    if module_src_root.name == "src":
+        extra_allowed.append(module_src_root)
+    return _repo_root_write_policy(
+        repo_root=repo_root,
+        denied_prefixes=[data_dir, kernels_dir],
+        extra_allowed_prefixes=extra_allowed,
+    )
+
+
 def _coerce_write_policy(
     root: Path,
     allowed_prefixes: list[Path] | WriteGuardPolicy,

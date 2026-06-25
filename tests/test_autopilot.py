@@ -8324,13 +8324,3 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
             attempt=2,
             pending_error_fixes=[],
         )
-
-
-def test_autofix_allows_src_edits(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _autofix_allowed_prefixes
-
-    config = _make_config(tmp_path)
-    write_policy = _autofix_allowed_prefixes(config)
-    assert config.paths.repo_root in write_policy.allowed_prefixes
-    assert config.paths.data_dir in write_policy.denied_prefixes
-    assert config.paths.kernels_dir in write_policy.denied_prefixes
