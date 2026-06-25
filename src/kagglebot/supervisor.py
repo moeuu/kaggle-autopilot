@@ -16,6 +16,7 @@ from rich import print
 
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
+from kagglebot.env_utils import parse_float_value, parse_int_value
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import (
     KaggleCliResourceError,
@@ -583,14 +584,8 @@ def _kaggle_gpu_quota_file_timestamp(*, path: Path, payload: dict[str, object]) 
 
 
 def _kaggle_gpu_quota_file_max_age_hours() -> float:
-    raw = os.environ.get("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS")
-    if raw is None:
-        return _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS
-    try:
-        value = float(raw.strip())
-    except ValueError:
-        return _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS
-    return value
+    value = parse_float_value(os.environ.get("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS"))
+    return _DEFAULT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS if value is None else value
 
 
 def _fetch_kaggle_gpu_quota_from_web_cookie() -> KaggleGpuQuotaStatus | None:
@@ -750,13 +745,7 @@ def _coerce_minutes(value: object) -> int | None:
 
 
 def _env_int(name: str) -> int | None:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return None
-    try:
-        return int(float(raw.strip()))
-    except ValueError:
-        return None
+    return parse_int_value(os.environ.get(name), allow_float=True)
 
 
 def _read_env_or_file(env_name: str, file_env_name: str) -> str | None:
@@ -1360,12 +1349,8 @@ def _resource_blocked_slugs(records: list[dict[str, object]]) -> set[str]:
 
 
 def _resource_block_ttl_hours() -> float:
-    raw = os.environ.get("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS")
-    if raw is None:
-        return _DEFAULT_RESOURCE_BLOCK_TTL_HOURS
-    try:
-        value = float(raw.strip())
-    except ValueError:
+    value = parse_float_value(os.environ.get("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS"))
+    if value is None:
         return _DEFAULT_RESOURCE_BLOCK_TTL_HOURS
     return max(0.0, value)
 
@@ -1435,13 +1420,10 @@ def _active_state_is_stale(state: dict[str, object]) -> bool:
 
 
 def _active_run_stale_hours() -> float:
-    raw = os.environ.get("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS")
-    if raw is None or not raw.strip():
+    value = parse_float_value(os.environ.get("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS"))
+    if value is None:
         return _DEFAULT_ACTIVE_RUN_STALE_HOURS
-    try:
-        return max(0.0, float(raw.strip()))
-    except ValueError:
-        return _DEFAULT_ACTIVE_RUN_STALE_HOURS
+    return max(0.0, value)
 
 
 def _safe_state_scope(value: str) -> str:

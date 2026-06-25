@@ -624,6 +624,28 @@ def test_read_kaggle_gpu_quota_file_ignores_stale_cache(monkeypatch, tmp_path: P
     assert _read_kaggle_gpu_quota_file(quota_path) is None
 
 
+def test_watch_env_hour_parsers_fallback_for_invalid_and_non_finite(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS", "nan")
+    assert supervisor._kaggle_gpu_quota_file_max_age_hours() == 24.0  # noqa: SLF001
+
+    monkeypatch.setenv("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS", "nan")
+    assert supervisor._resource_block_ttl_hours() == 168.0  # noqa: SLF001
+
+    monkeypatch.setenv("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS", "-1")
+    assert supervisor._resource_block_ttl_hours() == 0.0  # noqa: SLF001
+
+    monkeypatch.setenv("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS", "bad")
+    assert supervisor._active_run_stale_hours() == 24.0  # noqa: SLF001
+
+
+def test_watch_env_int_accepts_integral_float_and_rejects_fraction(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES", "90.0")
+    assert supervisor._env_int("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES") == 90  # noqa: SLF001
+
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES", "90.5")
+    assert supervisor._env_int("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES") is None  # noqa: SLF001
+
+
 def test_read_kaggle_gpu_quota_file_honors_explicit_expiry(tmp_path: Path) -> None:
     quota_path = tmp_path / "quota.json"
     quota_path.write_text(
