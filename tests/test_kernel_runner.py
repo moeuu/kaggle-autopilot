@@ -29,6 +29,7 @@ from kagglebot.kernel_runner import (
     _find_output_file,
     _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
+    _load_dataset_profile_identity,
     _LocalKernelLogFilterState,
     _resolve_fold_current,
     _resolve_kernel_slug,
@@ -2551,6 +2552,23 @@ def test_run_kernel_local_mirrors_context_dataset_profile(tmp_path: Path) -> Non
     assert json.loads(staged_profile.read_text(encoding="utf-8")) == profile_payload
     assert result.submission_path is not None and result.submission_path.exists()
     assert result.metrics_path is not None and result.metrics_path.exists()
+
+
+def test_load_dataset_profile_identity_ignores_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+
+    assert _load_dataset_profile_identity(context_dir=context_dir) == (None, None)
+
+    profile_path = context_dir / "dataset_profile.json"
+    profile_path.write_text("{", encoding="utf-8")
+    assert _load_dataset_profile_identity(context_dir=context_dir) == (None, None)
+
+    profile_path.write_text("[]", encoding="utf-8")
+    assert _load_dataset_profile_identity(context_dir=context_dir) == (None, None)
+
+    profile_path.write_text(json.dumps({"target_column": "target", "id_column": "id"}), encoding="utf-8")
+    assert _load_dataset_profile_identity(context_dir=context_dir) == ("target", "id")
 
 
 def test_ensure_local_sample_submission_file_expands_placeholder_template(tmp_path: Path) -> None:

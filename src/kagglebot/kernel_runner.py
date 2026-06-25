@@ -3197,13 +3197,8 @@ def _sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
 
 def _load_dataset_profile_identity(*, context_dir: Path) -> tuple[str | None, str | None]:
     profile_path = context_dir / "dataset_profile.json"
-    if not profile_path.exists():
-        return None, None
-    try:
-        payload = json.loads(profile_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None, None
-    if not isinstance(payload, dict):
+    payload = load_json_object(profile_path)
+    if payload is None:
         return None, None
     target_raw = payload.get("target_column")
     id_raw = payload.get("id_column")
