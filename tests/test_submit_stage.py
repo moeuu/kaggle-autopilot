@@ -19,6 +19,7 @@ from kagglebot.submit_stage import (
     format_submission_rank_message,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
+    resolve_iteration_submit_phase_state,
     resolve_submission_message,
     resolve_submission_rank_payload,
     run_submit_stage_attempt,
@@ -255,6 +256,77 @@ def test_format_iteration_submit_status_message_handles_disabled_allowed_and_blo
         "[cyan]submit[/cyan]: iter 2/3 not attempted yet "
         "(state=blocked_quality_guard reasons=collapsed_predictions,weak_cv "
         "metric=accuracy/logloss split=kfold/group_kfold dataset_mode=sample)."
+    )
+
+
+def test_resolve_iteration_submit_phase_state_prioritizes_hard_limit() -> None:
+    assert (
+        resolve_iteration_submit_phase_state(
+            submit_enabled=True,
+            daily_submission_limit_reached=True,
+            force_initial_submit=True,
+            quality_allows_submit=False,
+            force_submit=False,
+            submit_non_improving=False,
+            defer_submit_for_accuracy_frontier=False,
+            submit_limited_holdback=False,
+        )
+        == "daily_submission_limit_reached"
+    )
+
+
+def test_resolve_iteration_submit_phase_state_handles_quality_and_force() -> None:
+    blocked = resolve_iteration_submit_phase_state(
+        submit_enabled=True,
+        daily_submission_limit_reached=False,
+        force_initial_submit=False,
+        quality_allows_submit=False,
+        force_submit=False,
+        submit_non_improving=False,
+        defer_submit_for_accuracy_frontier=False,
+        submit_limited_holdback=False,
+    )
+    forced = resolve_iteration_submit_phase_state(
+        submit_enabled=True,
+        daily_submission_limit_reached=False,
+        force_initial_submit=False,
+        quality_allows_submit=False,
+        force_submit=True,
+        submit_non_improving=False,
+        defer_submit_for_accuracy_frontier=False,
+        submit_limited_holdback=False,
+    )
+
+    assert blocked == "blocked_quality_guard"
+    assert forced == "pending_submit"
+
+
+def test_resolve_iteration_submit_phase_state_defers_override_pending_states() -> None:
+    assert (
+        resolve_iteration_submit_phase_state(
+            submit_enabled=True,
+            daily_submission_limit_reached=False,
+            force_initial_submit=True,
+            quality_allows_submit=True,
+            force_submit=False,
+            submit_non_improving=True,
+            defer_submit_for_accuracy_frontier=False,
+            submit_limited_holdback=False,
+        )
+        == "deferred_non_improving"
+    )
+    assert (
+        resolve_iteration_submit_phase_state(
+            submit_enabled=True,
+            daily_submission_limit_reached=False,
+            force_initial_submit=False,
+            quality_allows_submit=True,
+            force_submit=False,
+            submit_non_improving=True,
+            defer_submit_for_accuracy_frontier=True,
+            submit_limited_holdback=True,
+        )
+        == "deferred_for_final_slot"
     )
 
 

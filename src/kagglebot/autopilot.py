@@ -444,7 +444,6 @@ _MAX_METRIC_FIX_CODEX_PASSES = 4
 _SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
-_FORCED_INITIAL_SUBMIT_STATE = "forced_initial_submit"
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
 _SPARE_DAILY_SUBMIT_REASON = "spare_daily_submission_slot"
 _SUBMIT_FAILED_DEFERRED_STATE = "submit_failed_deferred"
@@ -2225,21 +2224,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             submit_phase_required = submit_enabled and not config.dry_run
             submit_allowed_by_gate = submit_enabled and allow_submit
-            pre_submit_phase_state = "disabled"
-            if submit_enabled:
-                pre_submit_phase_state = "pending_submit"
-            if daily_submission_limit_reached:
-                pre_submit_phase_state = "daily_submission_limit_reached"
-            elif force_initial_submit:
-                pre_submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
-            elif submit_enabled and (not quality_allows_submit) and (not config.force_submit):
-                pre_submit_phase_state = "blocked_quality_guard"
-            if submit_non_improving:
-                pre_submit_phase_state = "deferred_non_improving"
-            if defer_submit_for_accuracy_frontier:
-                pre_submit_phase_state = "deferred_accuracy_frontier"
-            if submit_limited_holdback:
-                pre_submit_phase_state = "deferred_for_final_slot"
+            pre_submit_phase_state = _submit_stage.resolve_iteration_submit_phase_state(
+                submit_enabled=submit_enabled,
+                daily_submission_limit_reached=daily_submission_limit_reached,
+                force_initial_submit=force_initial_submit,
+                quality_allows_submit=quality_allows_submit,
+                force_submit=config.force_submit,
+                submit_non_improving=submit_non_improving,
+                defer_submit_for_accuracy_frontier=defer_submit_for_accuracy_frontier,
+                submit_limited_holdback=submit_limited_holdback,
+            )
             pre_submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate)
             submit_status_message = _submit_stage.format_iteration_submit_status_message(
                 iteration=iteration,
@@ -2317,18 +2311,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submission_skipped = False
             submit_failed_deferred = False
             online_score: float | None = None
-            if daily_submission_limit_reached:
-                submit_phase_state = "daily_submission_limit_reached"
-            elif force_initial_submit:
-                submit_phase_state = _FORCED_INITIAL_SUBMIT_STATE
-            elif submit_non_improving:
-                submit_phase_state = "deferred_non_improving"
-            elif defer_submit_for_accuracy_frontier:
-                submit_phase_state = "deferred_accuracy_frontier"
-            elif submit_limited_holdback:
-                submit_phase_state = "deferred_for_final_slot"
-            else:
-                submit_phase_state = pre_submit_phase_state if submit_enabled else "disabled"
+            submit_phase_state = pre_submit_phase_state
             if submit_enabled and allow_submit and submission_phase is not None:
                 try:
                     submission_result = submission_phase.attempt(

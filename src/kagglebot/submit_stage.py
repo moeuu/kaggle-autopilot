@@ -83,6 +83,33 @@ FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"
 SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES = {"complete", "completed"}
 
 
+def resolve_iteration_submit_phase_state(
+    *,
+    submit_enabled: bool,
+    daily_submission_limit_reached: bool,
+    force_initial_submit: bool,
+    quality_allows_submit: bool,
+    force_submit: bool,
+    submit_non_improving: bool,
+    defer_submit_for_accuracy_frontier: bool,
+    submit_limited_holdback: bool,
+) -> str:
+    state = "pending_submit" if submit_enabled else "disabled"
+    if daily_submission_limit_reached:
+        state = "daily_submission_limit_reached"
+    elif force_initial_submit:
+        state = "forced_initial_submit"
+    elif submit_enabled and (not quality_allows_submit) and (not force_submit):
+        state = "blocked_quality_guard"
+    if submit_non_improving:
+        state = "deferred_non_improving"
+    if defer_submit_for_accuracy_frontier:
+        state = "deferred_accuracy_frontier"
+    if submit_limited_holdback:
+        state = "deferred_for_final_slot"
+    return state
+
+
 def normalize_submission_outcome_status(value: object) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
