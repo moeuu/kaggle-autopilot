@@ -20,6 +20,7 @@ from kagglebot.submit_stage import (
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
     resolve_iteration_submit_phase_state,
+    resolve_submission_knowledge_context,
     resolve_submission_message,
     resolve_submission_rank_payload,
     run_submit_stage_attempt,
@@ -149,6 +150,41 @@ def test_classify_submission_outcome_treats_top1_near_miss_as_good() -> None:
     assert classify_submission_outcome(score=1.2, direction="minimize", target_score=None, top1_score=1.0) == "low"
     assert classify_submission_outcome(score=0.91, direction="maximize", target_score=None, top1_score=1.0) == "good"
     assert classify_submission_outcome(score=0.8, direction="maximize", target_score=None, top1_score=1.0) == "low"
+
+
+def test_resolve_submission_knowledge_context_extracts_score_bucket_and_iteration() -> None:
+    context = resolve_submission_knowledge_context(
+        submission_result={"outcome": {"score": "0.42"}, "iteration": 3},
+        metric_direction="minimize",
+        target_score=0.5,
+        top1_score=None,
+    )
+
+    assert context is not None
+    assert context.online_score == 0.42
+    assert context.outcome_bucket == "good"
+    assert context.iteration == 3
+
+
+def test_resolve_submission_knowledge_context_rejects_scoreless_result() -> None:
+    assert (
+        resolve_submission_knowledge_context(
+            submission_result={"outcome": {"status": "complete"}, "iteration": 3},
+            metric_direction="minimize",
+            target_score=0.5,
+            top1_score=None,
+        )
+        is None
+    )
+    assert (
+        resolve_submission_knowledge_context(
+            submission_result={"outcome": {"score": "nan"}, "iteration": "3"},
+            metric_direction="minimize",
+            target_score=0.5,
+            top1_score=None,
+        )
+        is None
+    )
 
 
 def test_resolve_submission_rank_payload_keeps_reported_rank() -> None:

@@ -6342,22 +6342,17 @@ def _record_submission_knowledge(
     target_score: float | None,
     top1_score: float | None,
 ) -> None:
-    if not submission_result:
-        return
-    outcome_payload = submission_result.get("outcome")
-    if not isinstance(outcome_payload, dict):
-        return
-    online_score = tolerant_finite_float(outcome_payload.get("score"))
-    if online_score is None:
-        return
-    outcome_bucket = _submit_stage.classify_submission_outcome(
-        score=online_score,
-        direction=metric_direction,
+    knowledge_context = _submit_stage.resolve_submission_knowledge_context(
+        submission_result=submission_result,
+        metric_direction=metric_direction,
         target_score=target_score,
         top1_score=top1_score,
     )
-    submitted_iteration = submission_result.get("iteration")
-    iteration_value = submitted_iteration if isinstance(submitted_iteration, int) else None
+    if knowledge_context is None:
+        return
+    online_score = knowledge_context.online_score
+    outcome_bucket = knowledge_context.outcome_bucket
+    iteration_value = knowledge_context.iteration
     if not pending_problem_insights:
         diagnostics_text = ""
         if iteration_value is not None:

@@ -73,6 +73,13 @@ class SubmitStageSuccessRecord:
 
 
 @dataclass(frozen=True)
+class SubmissionKnowledgeContext:
+    online_score: float
+    outcome_bucket: str
+    iteration: int | None
+
+
+@dataclass(frozen=True)
 class SubmitOutcomeAbortDecision:
     should_abort: bool
     error_kind: str = ""
@@ -161,6 +168,35 @@ def classify_submission_outcome(
         if max(gap, 0.0) / scale <= 0.1:
             return "good"
     return "low"
+
+
+def resolve_submission_knowledge_context(
+    *,
+    submission_result: dict[str, object] | None,
+    metric_direction: str,
+    target_score: float | None,
+    top1_score: float | None,
+) -> SubmissionKnowledgeContext | None:
+    if not submission_result:
+        return None
+    outcome_payload = submission_result.get("outcome")
+    if not isinstance(outcome_payload, dict):
+        return None
+    online_score = parse_finite_float(outcome_payload.get("score"))
+    if online_score is None:
+        return None
+    submitted_iteration = submission_result.get("iteration")
+    iteration_value = submitted_iteration if isinstance(submitted_iteration, int) else None
+    return SubmissionKnowledgeContext(
+        online_score=online_score,
+        outcome_bucket=classify_submission_outcome(
+            score=online_score,
+            direction=metric_direction,
+            target_score=target_score,
+            top1_score=top1_score,
+        ),
+        iteration=iteration_value,
+    )
 
 
 def resolve_submission_rank_payload(
