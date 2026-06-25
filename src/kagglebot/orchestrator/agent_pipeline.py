@@ -563,18 +563,15 @@ def _ensure_context_materials(paths: CompetitionPaths) -> None:
         )
     paths.code_notebooks_dir.mkdir(parents=True, exist_ok=True)
     if not paths.code_notebooks_index_path.exists():
-        paths.code_notebooks_index_path.write_text(
-            json.dumps({"source_url": f"{competition_base_url}/code", "notebook_count": 0, "notebooks": []}, indent=2),
-            encoding="utf-8",
+        write_json_object(
+            paths.code_notebooks_index_path,
+            {"source_url": f"{competition_base_url}/code", "notebook_count": 0, "notebooks": []},
         )
     paths.discussion_threads_dir.mkdir(parents=True, exist_ok=True)
     if not paths.discussion_threads_index_path.exists():
-        paths.discussion_threads_index_path.write_text(
-            json.dumps(
-                {"source_url": f"{competition_base_url}/discussions", "thread_count": 0, "threads": []},
-                indent=2,
-            ),
-            encoding="utf-8",
+        write_json_object(
+            paths.discussion_threads_index_path,
+            {"source_url": f"{competition_base_url}/discussions", "thread_count": 0, "threads": []},
         )
 
     sample_needs_refresh = (not paths.sample_submission_path.exists()) or (
