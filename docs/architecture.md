@@ -332,7 +332,8 @@ Recommended extraction order:
    candidate-selection mismatch, prediction-distribution collapse, and the aggregate submit quality-guard payload builder
    are now in `kernel_quality.py`.
    Iteration metrics payload assembly, evaluation-result serialization, evaluation data-cache/fingerprint helpers, and
-   iteration submit eligibility, plus run evaluation-report resume/persistence, are now in `iteration_metrics.py`.
+   iteration submit eligibility, plus iteration record kwargs/compat persistence and run evaluation-report
+   resume/persistence, are now in `iteration_metrics.py`.
    Iteration repair-signal extraction and next-iteration policy/knowledge payload assembly are now in
    `iteration_signals.py`.
    Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.

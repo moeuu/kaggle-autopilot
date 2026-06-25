@@ -6,11 +6,13 @@ from kagglebot.eval import EvaluationReport
 from kagglebot.iteration_metrics import (
     append_run_evaluation_report,
     build_eval_data_cache_fallback,
+    build_iteration_record_kwargs,
     build_metrics_payload,
     build_split_index_fingerprints,
     evaluation_to_payload,
     extract_fold_scores_for_report,
     iteration_metrics_allow_submit,
+    record_iteration_with_submit_phase_compat,
     resume_best_readiness_score,
     resume_noise_guard_state,
 )
@@ -128,6 +130,97 @@ def test_build_metrics_payload_includes_readiness_and_offline_sources() -> None:
     assert payload["evaluation_contract"] == {"faithful": True}
     assert payload["competition_faithfulness"] == {"faithful": True}
     assert payload["accuracy_potential"] == {"status": "frontier"}
+
+
+def test_build_iteration_record_kwargs_uses_evaluation_and_top1_score() -> None:
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.81,
+        std=0.02,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+
+    assert build_iteration_record_kwargs(
+        knowledge_paths="knowledge",
+        run_id="run-1",
+        iteration=2,
+        evaluation=evaluation,
+        top1_info={"score": 0.95},
+        met_target=False,
+    ) == {
+        "knowledge_paths": "knowledge",
+        "run_id": "run-1",
+        "iteration": 2,
+        "score_source": "cv",
+        "offline_value": 0.81,
+        "offline_std": 0.02,
+        "top1_public_score": 0.95,
+        "met_target": False,
+        "git_commit": None,
+    }
+
+
+def test_record_iteration_with_submit_phase_compat_uses_primary_when_supported() -> None:
+    calls: list[dict[str, object]] = []
+
+    def primary(**kwargs: object) -> None:
+        calls.append({"primary": kwargs})
+
+    def canonical(**kwargs: object) -> None:
+        calls.append({"canonical": kwargs})
+
+    record_iteration_with_submit_phase_compat(
+        record_iteration=primary,
+        canonical_record_iteration=canonical,
+        iteration_record_kwargs={"run_id": "run-1"},
+        submit_phase_finished=True,
+    )
+
+    assert calls == [{"primary": {"run_id": "run-1"}}]
+
+
+def test_record_iteration_with_submit_phase_compat_falls_back_to_canonical_submit_phase() -> None:
+    calls: list[dict[str, object]] = []
+
+    def primary(**kwargs: object) -> None:
+        raise TypeError("missing required keyword-only argument: submit_phase_finished")
+
+    def canonical(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    record_iteration_with_submit_phase_compat(
+        record_iteration=primary,
+        canonical_record_iteration=canonical,
+        iteration_record_kwargs={"run_id": "run-1"},
+        submit_phase_finished=False,
+    )
+
+    assert calls == [{"run_id": "run-1", "submit_phase_finished": False}]
+
+
+def test_record_iteration_with_submit_phase_compat_handles_legacy_canonical() -> None:
+    calls: list[dict[str, object]] = []
+
+    def primary(**kwargs: object) -> None:
+        raise TypeError("missing required keyword-only argument: submit_phase_finished")
+
+    def canonical(**kwargs: object) -> None:
+        if "submit_phase_finished" in kwargs:
+            raise TypeError("got an unexpected keyword argument 'submit_phase_finished'")
+        calls.append(kwargs)
+
+    record_iteration_with_submit_phase_compat(
+        record_iteration=primary,
+        canonical_record_iteration=canonical,
+        iteration_record_kwargs={"run_id": "run-1"},
+        submit_phase_finished=False,
+    )
+
+    assert calls == [{"run_id": "run-1"}]
 
 
 def test_iteration_metrics_allow_submit_prefers_quality_guard(tmp_path) -> None:

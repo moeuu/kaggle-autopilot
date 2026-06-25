@@ -27,6 +27,7 @@ from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
+from kagglebot import knowledge as _knowledge
 from kagglebot import knowledge_context as _knowledge_context
 from kagglebot import loop_control as _loop_control
 from kagglebot import plan_policy as _plan_policy
@@ -2559,33 +2560,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 or submit_failed_deferred
             )
 
-            iteration_record_kwargs = {
-                "knowledge_paths": config.knowledge_paths,
-                "run_id": run_id,
-                "iteration": iteration,
-                "score_source": evaluation.score_source,
-                "offline_value": evaluation.value,
-                "offline_std": evaluation.std,
-                "top1_public_score": top1_info.get("score") if isinstance(top1_info, dict) else None,
-                "met_target": met_target,
-                "git_commit": None,
-            }
-            try:
-                record_iteration(**iteration_record_kwargs)
-            except TypeError as exc:
-                if "submit_phase_finished" not in str(exc):
-                    raise
-                from kagglebot.knowledge import record_iteration as _record_iteration_canonical
-
-                try:
-                    _record_iteration_canonical(
-                        **iteration_record_kwargs,
-                        submit_phase_finished=submit_phase_finished,
-                    )
-                except TypeError as fallback_exc:
-                    if "submit_phase_finished" not in str(fallback_exc):
-                        raise
-                    _record_iteration_canonical(**iteration_record_kwargs)
+            iteration_record_kwargs = _iteration_metrics.build_iteration_record_kwargs(
+                knowledge_paths=config.knowledge_paths,
+                run_id=run_id,
+                iteration=iteration,
+                evaluation=evaluation,
+                top1_info=top1_info if isinstance(top1_info, dict) else {},
+                met_target=met_target,
+            )
+            _iteration_metrics.record_iteration_with_submit_phase_compat(
+                record_iteration=record_iteration,
+                canonical_record_iteration=_knowledge.record_iteration,
+                iteration_record_kwargs=iteration_record_kwargs,
+                submit_phase_finished=submit_phase_finished,
+            )
             _write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,

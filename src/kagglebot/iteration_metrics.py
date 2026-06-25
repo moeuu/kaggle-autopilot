@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -106,6 +107,51 @@ def build_metrics_payload(
     if accuracy_potential:
         payload["accuracy_potential"] = accuracy_potential
     return payload
+
+
+def build_iteration_record_kwargs(
+    *,
+    knowledge_paths: object,
+    run_id: str,
+    iteration: int,
+    evaluation: EvaluationResult,
+    top1_info: dict[str, object],
+    met_target: bool,
+) -> dict[str, object]:
+    return {
+        "knowledge_paths": knowledge_paths,
+        "run_id": run_id,
+        "iteration": iteration,
+        "score_source": evaluation.score_source,
+        "offline_value": evaluation.value,
+        "offline_std": evaluation.std,
+        "top1_public_score": top1_info.get("score") if isinstance(top1_info, dict) else None,
+        "met_target": met_target,
+        "git_commit": None,
+    }
+
+
+def record_iteration_with_submit_phase_compat(
+    *,
+    record_iteration: Callable[..., object],
+    canonical_record_iteration: Callable[..., object],
+    iteration_record_kwargs: dict[str, object],
+    submit_phase_finished: bool,
+) -> None:
+    try:
+        record_iteration(**iteration_record_kwargs)
+    except TypeError as exc:
+        if "submit_phase_finished" not in str(exc):
+            raise
+        try:
+            canonical_record_iteration(
+                **iteration_record_kwargs,
+                submit_phase_finished=submit_phase_finished,
+            )
+        except TypeError as fallback_exc:
+            if "submit_phase_finished" not in str(fallback_exc):
+                raise
+            canonical_record_iteration(**iteration_record_kwargs)
 
 
 def iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationResult) -> bool:
