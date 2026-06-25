@@ -64,6 +64,8 @@ the loop should consume normalized policy answers rather than own every parsing 
 Verify command execution support, external artifact mirroring for pytest verification, pytest environment isolation, and
 competition-specific verify compatibility shims live in `src/kagglebot/verify_artifacts.py`; `autopilot.py` only invokes
 that module from the verify step.
+Kernel error formatting, normalized same-error fingerprints, and pushed-kernel registration failure detection live in
+`src/kagglebot/kernel_errors.py`; the loop only records the resulting text/fingerprint and enforces retry limits.
 Split-strategy policy, evaluation seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and
 competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
 toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
@@ -271,7 +273,10 @@ Recommended extraction order:
 6. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment
    isolation, and competition-specific compatibility shims in `verify_artifacts.py`; avoid adding generated shim strings
    or pytest-specific execution rules back into `autopilot.py`.
-7. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
+7. Kernel error policy: keep exception formatting, same-error fingerprinting, and pushed-kernel registration failure
+   classification in `kernel_errors.py`; `autopilot.py` should only decide how many repeats are allowed and where logs
+   are persisted.
+8. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
    should avoid ad hoc `json.dumps(...).write_text(...)` for artifact files unless they need non-object JSON, JSONL, or
    generated kernel code that runs outside the package.
 

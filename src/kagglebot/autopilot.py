@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-import hashlib
 import json
 import math
 import os
@@ -24,6 +23,7 @@ from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import diagnostics as _diagnostics
 from kagglebot import iteration_metrics as _iteration_metrics
+from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
@@ -1034,7 +1034,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         raise
                     except KaggleNetworkError as exc:
                         kernel_attempts += 1
-                        error_text = _format_kernel_error(exc)
+                        error_text = _kernel_errors.format_kernel_error(exc)
                         _record_kernel_error(
                             logs_dir=logs_dir,
                             attempt=kernel_attempts,
@@ -1044,7 +1044,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                         raise
                     except KernelStillRunningError as exc:
-                        error_text = _format_kernel_error(exc)
+                        error_text = _kernel_errors.format_kernel_error(exc)
                         logs_dir.mkdir(parents=True, exist_ok=True)
                         (logs_dir / "kernel_remote_still_running.txt").write_text(error_text + "\n", encoding="utf-8")
                         _update_watch_phase(
@@ -1065,7 +1065,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         continue
                     except KernelCapacityError as exc:
                         kernel_attempts += 1
-                        error_text = _format_kernel_error(exc)
+                        error_text = _kernel_errors.format_kernel_error(exc)
                         _record_kernel_error(
                             logs_dir=logs_dir,
                             attempt=kernel_attempts,
@@ -1095,9 +1095,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         time.sleep(wait_seconds)
                         continue
                     except Exception as exc:  # noqa: BLE001
-                        if _is_kernel_registration_error(exc):
+                        if _kernel_errors.is_kernel_registration_error(exc):
                             kernel_attempts += 1
-                            error_text = _format_kernel_error(exc)
+                            error_text = _kernel_errors.format_kernel_error(exc)
                             _record_kernel_error(
                                 logs_dir=logs_dir,
                                 attempt=kernel_attempts,
@@ -1115,7 +1115,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             time.sleep(wait_seconds)
                             continue
                         kernel_attempts += 1
-                        error_text = _format_kernel_error(exc)
+                        error_text = _kernel_errors.format_kernel_error(exc)
                         try:
                             _record_kernel_error(
                                 logs_dir=logs_dir,
@@ -1208,7 +1208,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         break
                     except Exception as exc:  # noqa: BLE001
                         kernel_attempts += 1
-                        error_text = _format_kernel_error(exc)
+                        error_text = _kernel_errors.format_kernel_error(exc)
                         try:
                             _record_kernel_error(
                                 logs_dir=logs_dir,
@@ -4271,16 +4271,6 @@ def _submission_count_for_daily_limit(
     return max(0, int(daily_count))
 
 
-def _format_kernel_error(exc: Exception) -> str:
-    trace = traceback.format_exc()
-    header = f"{exc.__class__.__name__}: {exc}".strip()
-    if isinstance(exc, KaggleCliError) and getattr(exc, "output", ""):
-        header = f"{header}\nKaggle CLI output:\n{exc.output}".strip()
-    if trace and trace != "NoneType: None\n":
-        return f"{header}\n{trace}".strip()
-    return header
-
-
 def _kernel_source_preflight_error(*, config: AutopilotConfig) -> str | None:
     """Return source contract validation error text, or None when ready."""
     kernel_dir = config.paths.kernel_source_dir
@@ -4294,7 +4284,7 @@ def _kernel_source_preflight_error(*, config: AutopilotConfig) -> str | None:
     try:
         ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=False)
     except Exception as exc:  # noqa: BLE001
-        return _format_kernel_error(exc)
+        return _kernel_errors.format_kernel_error(exc)
     return None
 
 
@@ -4338,11 +4328,6 @@ def _run_kernel_source_preflight_fixes(
         )
 
 
-def _fingerprint_error(message: str) -> str:
-    normalized = " ".join(message.split())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-
-
 def _record_kernel_error(
     *,
     logs_dir: Path,
@@ -4357,7 +4342,7 @@ def _record_kernel_error(
         log_tail = _collect_log_tail(output_dir, max_lines=200)
         if log_tail and log_tail not in enriched_error:
             enriched_error = f"{enriched_error}\n\n--- kernel log tail ---\n{log_tail}"
-    fingerprint = _fingerprint_error(enriched_error)
+    fingerprint = _kernel_errors.fingerprint_error(enriched_error)
     error_fingerprints[fingerprint] = error_fingerprints.get(fingerprint, 0) + 1
     repeat_limit = MAX_SAME_KERNEL_ERROR_REPEATS if max_repeats is None else max_repeats
     if repeat_limit is not None and error_fingerprints[fingerprint] > repeat_limit:
@@ -4373,14 +4358,6 @@ def _record_kernel_error(
     numbered_path = logs_dir / f"kernel_error-{attempt_tag}.txt"
     numbered_path.write_text(header + enriched_error + "\n", encoding="utf-8")
     (logs_dir / "kernel_error.txt").write_text(header + enriched_error + "\n", encoding="utf-8")
-
-
-def _is_kernel_registration_error(exc: Exception) -> bool:
-    if isinstance(exc, KernelFailedError) and "kernel not found after push" in str(exc).lower():
-        return True
-    if isinstance(exc, KaggleCliError) and "kernels/status" in str(getattr(exc, "output", "")).lower():
-        return True
-    return False
 
 
 def _run_improvement(
