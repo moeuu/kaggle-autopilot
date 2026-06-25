@@ -187,7 +187,7 @@ from kagglebot.runtime_policy import (
 )
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.score_utils import should_update_best_score as _update_best_score
-from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction
+from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission.guard import (
     classify_submit_error,
     compute_error_fingerprint,
@@ -4570,11 +4570,12 @@ def _rerun_kernel_for_metric_recheck(
     )
     needs_recompute = evaluation is None or metric_mismatch
     if needs_recompute:
-        recomputed = _recompute_metric_from_oof_artifact(
+        recomputed = _kernel_metrics.recompute_metric_from_oof_artifact(
             iter_dir=iter_dir,
             payload=payload,
             target_metric=target_metric,
             metric_direction=metric_direction,
+            resolve_iteration_artifact=_resolve_iteration_artifact,
         )
         if recomputed is not None:
             evaluation, payload = recomputed
@@ -4586,90 +4587,6 @@ def _rerun_kernel_for_metric_recheck(
     if evaluation is None:
         raise RuntimeError("Metric recheck failed: kernel metrics missing expected score.")
     return evaluation, payload, rechecked_submission_path
-
-
-def _recompute_metric_from_oof_artifact(
-    *,
-    iter_dir: Path,
-    payload: dict[str, object] | None,
-    target_metric: str | None,
-    metric_direction: str,
-) -> tuple[EvaluationResult, dict[str, object]] | None:
-    """Recompute target metric from cached OOF predictions without rerunning training."""
-    if not target_metric:
-        return None
-    oof_path = _resolve_iteration_artifact(iter_dir, "oof_predictions.csv")
-    if oof_path is None or not oof_path.exists():
-        return None
-    try:
-        import pandas as pd
-    except Exception:
-        return None
-    try:
-        oof = pd.read_csv(oof_path)
-    except Exception:
-        return None
-    if oof.empty:
-        return None
-
-    y_col = _kernel_metrics.pick_oof_target_column(oof)
-    pred_col = _kernel_metrics.pick_oof_prediction_column(oof, metric=target_metric)
-    if y_col is None or pred_col is None:
-        return None
-
-    y_series = pd.to_numeric(oof[y_col], errors="coerce")
-    pred_series = pd.to_numeric(oof[pred_col], errors="coerce")
-    valid_mask = y_series.notna() & pred_series.notna()
-    if int(valid_mask.sum()) < 2:
-        return None
-    y_values = y_series[valid_mask].to_numpy()
-    pred_values = pred_series[valid_mask].to_numpy()
-
-    try:
-        metric_value = float(compute_metric(target_metric, y_values, pred_values))
-    except Exception:
-        return None
-
-    metric_name = canonical_metric(target_metric)
-    direction = infer_direction(metric_name, metric_direction)
-    score_source_raw = payload.get("score_source") if isinstance(payload, dict) else None
-    score_source = (
-        str(score_source_raw).strip() if isinstance(score_source_raw, str) and str(score_source_raw).strip() else "cv"
-    )
-    std_value = tolerant_finite_float(payload.get("offline_std")) if isinstance(payload, dict) else None
-    train_score = tolerant_finite_float(payload.get("train_score")) if isinstance(payload, dict) else None
-    val_score = tolerant_finite_float(payload.get("val_score")) if isinstance(payload, dict) else None
-    fold_scores = (
-        _kernel_metrics.extract_numeric_list(payload.get("fold_scores")) if isinstance(payload, dict) else None
-    )
-
-    from kagglebot.solver.evaluate import EvaluationResult
-
-    evaluation = EvaluationResult(
-        score_source=score_source,
-        metric=metric_name,
-        direction=direction,  # type: ignore[arg-type]
-        value=metric_value,
-        std=std_value,
-        train_score=train_score,
-        val_score=val_score,
-        fold_scores=fold_scores,
-    )
-    updated_payload = dict(payload) if isinstance(payload, dict) else {}
-    updated_payload["metric"] = metric_name
-    updated_payload["direction"] = direction
-    updated_payload["score_source"] = score_source
-    updated_payload["offline_value"] = metric_value
-    updated_payload["value"] = metric_value
-    updated_payload["metric_recheck_source"] = f"oof_predictions:{oof_path.name}"
-    updated_payload["metric_recheck_without_retrain"] = True
-    loop_decision = updated_payload.get("loop_decision")
-    if isinstance(loop_decision, dict):
-        loop_decision["source"] = score_source
-        loop_decision["value"] = metric_value
-    else:
-        updated_payload["loop_decision"] = {"source": score_source, "value": metric_value}
-    return evaluation, updated_payload
 
 
 def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception) -> None:

@@ -18,6 +18,7 @@ from kagglebot.kernel_metrics import (
     persist_metric_recheck_payload,
     pick_oof_prediction_column,
     pick_oof_target_column,
+    recompute_metric_from_oof_artifact,
 )
 
 
@@ -85,6 +86,56 @@ def test_persist_metric_recheck_payload_dedupes_resolved_iter_metrics_path(tmp_p
 
     assert json.loads(resolved_path.read_text(encoding="utf-8")) == {"metric": "rmse"}
     assert json.loads((iter_dir / "output" / "metrics.json").read_text(encoding="utf-8")) == {"metric": "rmse"}
+
+
+def test_recompute_metric_from_oof_artifact_updates_payload_without_retraining(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    oof_path = iter_dir / "output" / "oof_predictions.csv"
+    oof_path.parent.mkdir(parents=True)
+    oof_path.write_text(
+        "\n".join(
+            [
+                "row_id,y,oof_pred,oof_proba,fold",
+                "0,0,0,0.01,1",
+                "1,0,0,0.10,1",
+                "2,1,1,0.90,2",
+                "3,1,1,0.99,2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = recompute_metric_from_oof_artifact(
+        iter_dir=iter_dir,
+        payload={"score_source": "cv", "metric": "accuracy", "offline_std": 0.01},
+        target_metric="auc",
+        metric_direction="maximize",
+        resolve_iteration_artifact=lambda _iter_dir, filename: oof_path if filename == "oof_predictions.csv" else None,
+    )
+
+    assert result is not None
+    evaluation, payload = result
+    assert evaluation.metric == "auc"
+    assert evaluation.value == pytest.approx(1.0)
+    assert evaluation.std == 0.01
+    assert payload["metric"] == "auc"
+    assert payload["offline_value"] == pytest.approx(1.0)
+    assert payload["metric_recheck_without_retrain"] is True
+    assert payload["loop_decision"] == {"source": "cv", "value": pytest.approx(1.0)}
+
+
+def test_recompute_metric_from_oof_artifact_returns_none_without_target_metric(tmp_path: Path) -> None:
+    assert (
+        recompute_metric_from_oof_artifact(
+            iter_dir=tmp_path,
+            payload={},
+            target_metric=None,
+            metric_direction="maximize",
+            resolve_iteration_artifact=lambda _iter_dir, _filename: None,
+        )
+        is None
+    )
 
 
 def test_extract_kernel_metric_ignores_non_finite_direct_values() -> None:

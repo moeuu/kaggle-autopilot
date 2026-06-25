@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 from statistics import stdev
 
@@ -9,7 +10,7 @@ from kagglebot.metric_matching import normalize_metric_name
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
 from kagglebot.solver.evaluate import EvaluationResult
-from kagglebot.solver.metrics import metric_requires_proba
+from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
 
 
 def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) -> float | None:
@@ -89,6 +90,87 @@ def persist_metric_recheck_payload(*, iter_dir: Path, resolved_metrics_path: Pat
             continue
         seen.add(path)
         write_json_object(path, payload)
+
+
+def recompute_metric_from_oof_artifact(
+    *,
+    iter_dir: Path,
+    payload: dict[str, object] | None,
+    target_metric: str | None,
+    metric_direction: str,
+    resolve_iteration_artifact: Callable[[Path, str], Path | None],
+) -> tuple[EvaluationResult, dict[str, object]] | None:
+    """Recompute target metric from cached OOF predictions without rerunning training."""
+    if not target_metric:
+        return None
+    oof_path = resolve_iteration_artifact(iter_dir, "oof_predictions.csv")
+    if oof_path is None or not oof_path.exists():
+        return None
+    try:
+        import pandas as pd
+    except Exception:
+        return None
+    try:
+        oof = pd.read_csv(oof_path)
+    except Exception:
+        return None
+    if oof.empty:
+        return None
+
+    y_col = pick_oof_target_column(oof)
+    pred_col = pick_oof_prediction_column(oof, metric=target_metric)
+    if y_col is None or pred_col is None:
+        return None
+
+    y_series = pd.to_numeric(oof[y_col], errors="coerce")
+    pred_series = pd.to_numeric(oof[pred_col], errors="coerce")
+    valid_mask = y_series.notna() & pred_series.notna()
+    if int(valid_mask.sum()) < 2:
+        return None
+    y_values = y_series[valid_mask].to_numpy()
+    pred_values = pred_series[valid_mask].to_numpy()
+
+    try:
+        metric_value = float(compute_metric(target_metric, y_values, pred_values))
+    except Exception:
+        return None
+
+    metric_name = canonical_metric(target_metric)
+    direction = infer_direction(metric_name, metric_direction)
+    score_source_raw = payload.get("score_source") if isinstance(payload, dict) else None
+    score_source = (
+        str(score_source_raw).strip() if isinstance(score_source_raw, str) and str(score_source_raw).strip() else "cv"
+    )
+    std_value = tolerant_finite_float(payload.get("offline_std")) if isinstance(payload, dict) else None
+    train_score = tolerant_finite_float(payload.get("train_score")) if isinstance(payload, dict) else None
+    val_score = tolerant_finite_float(payload.get("val_score")) if isinstance(payload, dict) else None
+    fold_scores = extract_numeric_list(payload.get("fold_scores")) if isinstance(payload, dict) else None
+
+    evaluation = EvaluationResult(
+        score_source=score_source,
+        metric=metric_name,
+        direction=direction,  # type: ignore[arg-type]
+        value=metric_value,
+        std=std_value,
+        train_score=train_score,
+        val_score=val_score,
+        fold_scores=fold_scores,
+    )
+    updated_payload = dict(payload) if isinstance(payload, dict) else {}
+    updated_payload["metric"] = metric_name
+    updated_payload["direction"] = direction
+    updated_payload["score_source"] = score_source
+    updated_payload["offline_value"] = metric_value
+    updated_payload["value"] = metric_value
+    updated_payload["metric_recheck_source"] = f"oof_predictions:{oof_path.name}"
+    updated_payload["metric_recheck_without_retrain"] = True
+    loop_decision = updated_payload.get("loop_decision")
+    if isinstance(loop_decision, dict):
+        loop_decision["source"] = score_source
+        loop_decision["value"] = metric_value
+    else:
+        updated_payload["loop_decision"] = {"source": score_source, "value": metric_value}
+    return evaluation, updated_payload
 
 
 def extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:

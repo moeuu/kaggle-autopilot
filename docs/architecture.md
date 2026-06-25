@@ -313,8 +313,8 @@ Recommended extraction order:
    Top1 campaign metadata extraction from kernel metrics and validation-redesign preference checks are now in
    `campaign_metrics.py`.
    Kernel metrics payload parsing, evaluation-result normalization, CV fallback extraction, metric-recheck OOF column
-   helpers and payload persistence, fold-score list parsing, baseline score extraction, and kernel-log metric scraping are now in
-   `kernel_metrics.py`.
+   helpers, OOF metric recomputation, and payload persistence, fold-score list parsing, baseline score extraction, and
+   kernel-log metric scraping are now in `kernel_metrics.py`.
    Kernel quality guard constants, payload-level detectors for subgroup collapse, external test-label transfer,
    candidate-selection mismatch, prediction-distribution collapse, and the aggregate submit quality-guard payload builder
    are now in `kernel_quality.py`.
