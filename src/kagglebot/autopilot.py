@@ -315,6 +315,7 @@ _merge_quality_signal_messages = _kernel_quality.merge_quality_signal_messages
 _build_external_label_transfer_quality_signal = _kernel_quality.build_external_label_transfer_quality_signal
 _build_metric_mismatch_quality_signal = _kernel_quality.build_metric_mismatch_quality_signal
 _build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
+_build_subgroup_collapse_quality_signal = _kernel_quality.build_subgroup_collapse_quality_signal
 _build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
 _build_candidate_selection_quality_signal = _kernel_quality.build_candidate_selection_quality_signal
 _pipeline_name_from_payload = _kernel_quality.pipeline_name_from_payload
@@ -4761,12 +4762,14 @@ def _build_kernel_quality_guard(
     if bool(validation_stability_signal.get("block_submit")):
         block_submit = True
 
-    subgroup_collapse_signal = _detect_subgroup_collapse_signal(
+    subgroup_collapse_quality_signal = _build_subgroup_collapse_quality_signal(
         kernel_metrics_payload=payload,
         direction=direction,
     )
-    if subgroup_collapse_signal is not None:
-        warnings.append("cv_subgroup_collapse_detected")
+    subgroup_collapse_signal = subgroup_collapse_quality_signal.get("collapse")
+    if not isinstance(subgroup_collapse_signal, dict):
+        subgroup_collapse_signal = None
+    merge_signal_messages(subgroup_collapse_quality_signal)
 
     metric_mismatch_signal = _build_metric_mismatch_quality_signal(
         detected=metric_mismatch_detected,
@@ -4812,6 +4815,7 @@ def _build_kernel_quality_guard(
             "collapse_detected": step_bucket_signal.get("collapse_detected"),
         },
         "subgroup_collapse": subgroup_collapse_signal,
+        "subgroup_collapse_signal": subgroup_collapse_quality_signal,
         "external_label_transfer": external_label_transfer_signal.get("transfer"),
         "external_label_transfer_signal": external_label_transfer_signal,
         "candidate_selection_mismatch": candidate_selection_mismatch,

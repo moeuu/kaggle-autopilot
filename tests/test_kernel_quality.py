@@ -13,6 +13,7 @@ from kagglebot.kernel_quality import (
     build_oracle_override_signal,
     build_prediction_distribution_quality_signal,
     build_score_source_quality_signal,
+    build_subgroup_collapse_quality_signal,
     build_validation_metric_alignment,
     build_validation_stability_quality_signal,
     detect_candidate_selection_mismatch,
@@ -172,6 +173,43 @@ def test_detect_subgroup_collapse_signal_reports_worst_model_node() -> None:
     assert signal["node_type"] == 1
     assert signal["worst_step_bucket"] == "144-155"
     assert "Subgroup collapse detected" in str(signal["note"])
+
+
+def test_build_subgroup_collapse_quality_signal_warns_without_blocking() -> None:
+    payload = {
+        "cv_breakdown_by_model_node": {
+            "model_1_node_type_1": 0.015,
+            "model_1_node_type_2": 0.010,
+            "model_2_node_type_1": 0.220,
+            "model_2_node_type_2": 0.080,
+        },
+    }
+
+    signal = build_subgroup_collapse_quality_signal(
+        kernel_metrics_payload=payload,
+        direction="minimize",
+    )
+
+    assert signal["detected"] is True
+    assert signal["collapse"]["worst_key"] == "model_2_node_type_1"
+    assert signal["reasons"] == []
+    assert signal["warnings"] == ["cv_subgroup_collapse_detected"]
+    assert signal["block_submit"] is False
+
+
+def test_build_subgroup_collapse_quality_signal_allows_missing_collapse() -> None:
+    signal = build_subgroup_collapse_quality_signal(
+        kernel_metrics_payload={"cv_breakdown_by_model_node": {"model_1_node_type_1": 0.015}},
+        direction="minimize",
+    )
+
+    assert signal == {
+        "detected": False,
+        "collapse": None,
+        "reasons": [],
+        "warnings": [],
+        "block_submit": False,
+    }
 
 
 def test_detect_step_bucket_collapse_signal_reports_count_and_collapse() -> None:

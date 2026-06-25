@@ -239,6 +239,27 @@ def detect_subgroup_collapse_signal(
     }
 
 
+def build_subgroup_collapse_quality_signal(
+    *,
+    kernel_metrics_payload: dict[str, object] | None,
+    direction: str,
+) -> dict[str, object]:
+    collapse = detect_subgroup_collapse_signal(
+        kernel_metrics_payload=kernel_metrics_payload,
+        direction=direction,
+    )
+    warnings: list[str] = []
+    if collapse is not None:
+        warnings.append("cv_subgroup_collapse_detected")
+    return {
+        "detected": collapse is not None,
+        "collapse": collapse,
+        "reasons": [],
+        "warnings": warnings,
+        "block_submit": False,
+    }
+
+
 def detect_step_bucket_collapse_signal(
     payload: dict[str, object] | None,
 ) -> dict[str, object]:
