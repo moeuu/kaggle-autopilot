@@ -499,7 +499,10 @@ class KnowledgePhase:
         _refresh_knowledge_hints(self.config)
 
     def load_dataset_profile(self) -> dict[str, object]:
-        return _load_dataset_profile(self.config.paths)
+        return _context_load_dataset_profile(
+            slug=self.config.paths.slug,
+            dataset_profile_path=self.config.paths.dataset_profile_path,
+        )
 
     def derive_problem_types(self) -> list[str]:
         return derive_problem_types(self.load_dataset_profile())
@@ -3241,7 +3244,10 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             return fallback
         return default
 
-    eval_spec = _load_evaluation_spec(config.paths)
+    eval_spec = _context_load_evaluation_spec(
+        slug=config.paths.slug,
+        evaluation_spec_path=config.paths.context_dir / "evaluation_spec.json",
+    )
     spec_values = _plan_policy.extract_evaluation_spec_values(eval_spec)
     spec_eval_seeds = list(spec_values.eval_seeds)
 
@@ -3312,7 +3318,10 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         print(message)
     if split_strategy_note:
         print(f"[yellow]note[/yellow]: {split_strategy_note}")
-    dataset_profile = _load_dataset_profile(config.paths)
+    dataset_profile = _context_load_dataset_profile(
+        slug=config.paths.slug,
+        dataset_profile_path=config.paths.dataset_profile_path,
+    )
     profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
     heavy_local_gpu = _is_local_gpu_compute(config.compute) and _is_heavy_deep_learning_modality(profile_modality)
     seed = choose(config.seed, plan.seed, spec_values.seed if spec_values.seed is not None else 42)
@@ -3622,21 +3631,13 @@ def _build_run_payload(
     }
 
 
-def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
-    return _context_load_dataset_profile(slug=paths.slug, dataset_profile_path=paths.dataset_profile_path)
-
-
-def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
-    return _context_load_evaluation_spec(
-        slug=paths.slug,
-        evaluation_spec_path=paths.context_dir / "evaluation_spec.json",
-    )
-
-
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
     from kagglebot.self_improvement import load_self_improvement_context
 
-    profile = _load_dataset_profile(config.paths)
+    profile = _context_load_dataset_profile(
+        slug=config.paths.slug,
+        dataset_profile_path=config.paths.dataset_profile_path,
+    )
     raw_tags = profile.get("tags", []) if isinstance(profile, dict) else []
     tags = [str(tag).strip() for tag in raw_tags if isinstance(tag, str) and str(tag).strip()]
 
@@ -3676,7 +3677,10 @@ def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
 
 
 def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5) -> str:
-    profile = _load_dataset_profile(config.paths)
+    profile = _context_load_dataset_profile(
+        slug=config.paths.slug,
+        dataset_profile_path=config.paths.dataset_profile_path,
+    )
     problem_types = derive_problem_types(profile)
     try:
         insights = resolve_problem_type_insights(config.knowledge_paths, problem_types, limit=limit)
@@ -4270,7 +4274,12 @@ def _run_improvement(
             "- Until this leaderboard percentile is reached, keep search breadth high and "
             "avoid same-family-only tweaks.\n"
         )
-    if _requires_tabular_multi_family_policy(_load_dataset_profile(config.paths)):
+    if _requires_tabular_multi_family_policy(
+        _context_load_dataset_profile(
+            slug=config.paths.slug,
+            dataset_profile_path=config.paths.dataset_profile_path,
+        )
+    ):
         base_prompt_text += (
             "\n\nHigh-accuracy tabular policy is active.\n"
             "- This dataset is tabular binary with meaningful categorical structure.\n"
