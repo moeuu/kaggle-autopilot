@@ -24,6 +24,7 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import new_run_id
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import (
     EnteredCompetition,
     competition_total_size_bytes,
@@ -530,13 +531,8 @@ def _kaggle_gpu_quota_file_candidates(config: WatchConfig) -> list[Path]:
 
 
 def _read_kaggle_gpu_quota_file(path: Path) -> KaggleGpuQuotaStatus | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
+    payload = load_json_object(path)
+    if payload is None:
         return None
     expires_at = _parse_ts(payload.get("expires_at"))
     if expires_at is not None and expires_at <= datetime.now(UTC):
@@ -955,11 +951,8 @@ def _watch_max_iterations_for_candidate(*, config: WatchConfig, paths: Competiti
 
 
 def _plan_max_iterations(plan_path: Path) -> int | None:
-    try:
-        payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
+    payload = load_json_object(plan_path)
+    if payload is None:
         return None
     raw = payload.get("max_iterations")
     if isinstance(raw, bool):
@@ -1292,13 +1285,8 @@ def _has_autopilot_history(*, config: WatchConfig, slug: str) -> bool:
 
 def _load_metric_direction(paths: CompetitionPaths) -> str | None:
     spec_path = paths.context_dir / "evaluation_spec.json"
-    if not spec_path.exists():
-        return None
-    try:
-        payload = json.loads(spec_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
+    payload = load_json_object(spec_path)
+    if payload is None:
         return None
     explicit = payload.get("direction")
     if isinstance(explicit, str) and explicit.strip() and explicit.strip().lower() != "auto":
@@ -1425,9 +1413,8 @@ def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[
     run_json = run_dir / "run.json"
     if not run_json.exists():
         return True
-    try:
-        payload = json.loads(run_json.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    payload = load_json_object(run_json)
+    if payload is None:
         return True
     status = str(payload.get("status") or "").strip().lower()
     return status not in _TERMINAL_RUN_STATUSES
@@ -1482,20 +1469,13 @@ def _candidate_from_slug(slug: str) -> EnteredCompetition:
 
 
 def _load_state(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return load_json_object(path) or {}
 
 
 def _write_state(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(payload)
     payload.setdefault("updated_at", datetime.now(UTC).isoformat())
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_object(path, payload, sort_keys=True)
 
 
 def _set_resume_env(*, slug: str, run_id: str) -> None:

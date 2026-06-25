@@ -16,7 +16,9 @@ from kagglebot.supervisor import (
     WatchLedger,
     _build_autopilot_config,
     _estimate_training_minutes,
+    _load_state,
     _parse_kaggle_gpu_quota_text,
+    _plan_max_iterations,
     _read_kaggle_gpu_quota_file,
     run_watch_once,
     select_next_competition,
@@ -593,6 +595,18 @@ def test_parse_kaggle_gpu_quota_text_available_of_total() -> None:
     assert quota.source == "test"
 
 
+def test_read_kaggle_gpu_quota_file_ignores_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    assert _read_kaggle_gpu_quota_file(tmp_path / "missing.json") is None
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _read_kaggle_gpu_quota_file(invalid) is None
+
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert _read_kaggle_gpu_quota_file(array_payload) is None
+
+
 def test_read_kaggle_gpu_quota_file_ignores_stale_cache(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS", raising=False)
     quota_path = tmp_path / "quota.json"
@@ -628,6 +642,30 @@ def test_read_kaggle_gpu_quota_file_honors_explicit_expiry(tmp_path: Path) -> No
 
     assert quota is not None
     assert quota.available_minutes == 1800
+
+
+def test_load_state_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    assert _load_state(tmp_path / "missing.json") == {}
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _load_state(invalid) == {}
+
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert _load_state(array_payload) == {}
+
+
+def test_plan_max_iterations_ignores_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    assert _plan_max_iterations(tmp_path / "missing.json") is None
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _plan_max_iterations(invalid) is None
+
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert _plan_max_iterations(array_payload) is None
 
 
 def test_run_watch_once_blocks_new_kaggle_gpu_competition_when_quota_low(
