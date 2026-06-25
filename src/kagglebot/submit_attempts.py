@@ -122,6 +122,18 @@ def load_submit_fingerprints(run_dir: Path) -> list[str]:
     return fingerprints
 
 
+def build_seen_submit_fingerprint_set(
+    *,
+    attempt_fingerprints: list[str],
+    run_state: dict[str, object],
+) -> set[str]:
+    fingerprints = {str(fingerprint).strip() for fingerprint in attempt_fingerprints if str(fingerprint).strip()}
+    state_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "").strip()
+    if state_fingerprint:
+        fingerprints.add(state_fingerprint)
+    return fingerprints
+
+
 def load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
     rows = load_submit_attempt_rows(run_dir)
     if not rows:

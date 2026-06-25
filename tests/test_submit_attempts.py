@@ -7,6 +7,7 @@ from kagglebot.submit_attempts import (
     SubmitAttemptRecorder,
     SubmitAttemptStatePayloads,
     append_submit_attempt,
+    build_seen_submit_fingerprint_set,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
     build_submit_knowledge_payload,
@@ -174,6 +175,18 @@ def test_submit_attempt_readers_return_empty_defaults_for_missing_file(tmp_path)
     assert count_successful_submit_attempts(tmp_path) == 0
     assert load_submit_fingerprints(tmp_path) == []
     assert load_latest_submit_attempt(tmp_path) == {}
+
+
+def test_build_seen_submit_fingerprint_set_merges_attempts_and_run_state() -> None:
+    assert build_seen_submit_fingerprint_set(
+        attempt_fingerprints=[" fp-1 ", "", "fp-2", "fp-1"],
+        run_state={"last_fingerprint": "legacy-fp"},
+    ) == {"fp-1", "fp-2", "legacy-fp"}
+
+    assert build_seen_submit_fingerprint_set(
+        attempt_fingerprints=[],
+        run_state={"last_submit_fingerprint": "submit-fp", "last_fingerprint": "legacy-fp"},
+    ) == {"submit-fp"}
 
 
 def test_build_submit_run_state_update_sets_common_last_submit_fields() -> None:

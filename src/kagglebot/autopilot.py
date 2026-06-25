@@ -5201,10 +5201,10 @@ def _attempt_submit(
             )
             return None
 
-    seen_fingerprints = set(_load_submit_fingerprints(run_dir))
-    state_fingerprint = str(run_state.get("last_submit_fingerprint") or run_state.get("last_fingerprint") or "").strip()
-    if state_fingerprint:
-        seen_fingerprints.add(state_fingerprint)
+    seen_fingerprints = _submit_attempts.build_seen_submit_fingerprint_set(
+        attempt_fingerprints=_load_submit_fingerprints(run_dir),
+        run_state=run_state,
+    )
     max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)
     submission_result = None
     submission_reference = str(prepared_submission_path)

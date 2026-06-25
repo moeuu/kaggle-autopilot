@@ -100,9 +100,9 @@ decisions, and same-submission-path retry/skip decisions live in `src/kagglebot/
 supplies paths, hashing, and state persistence callbacks.
 Submit attempt payloads, submit run-state updates, submit knowledge-record message/fix summaries, submit result payloads,
 and submit success outcome display/ledger-recording decisions live in `src/kagglebot/submit_attempts.py`. The same module
-now owns `submit_attempts.jsonl` append, duplicate SHA lookup, and tolerant row readers used by resume state and
-self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules centralized instead of
-duplicated across the loop, state helpers, and improvement analysis.
+now owns `submit_attempts.jsonl` append, duplicate SHA lookup, seen-fingerprint set assembly, and tolerant row readers
+used by resume state and self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules
+centralized instead of duplicated across the loop, state helpers, and improvement analysis.
 Historical Kaggle submission row normalization, best/latest public-score summary construction, online-regression
 detection against historical submissions, history fetch/cache fallback, and prompt formatting for that history live in
 `src/kagglebot/submission_history.py`; the loop supplies the Kaggle fetch adapter and consumes the resulting summary.
@@ -335,7 +335,7 @@ Recommended extraction order:
 4. Submit state persistence: submit attempt JSONL writing/reading, duplicate SHA lookup, submit attempt/run-state payloads,
    submit-abort artifact path resolution, repair-classified submit failure-context payloads, submit knowledge-record
    payloads/orchestration, submit-abort attempt/context persistence, and submit result payload construction are now
-   centralized. Duplicate-submit source collection and skip decisions are extracted.
+   centralized. Seen-fingerprint set assembly, duplicate-submit source collection, and skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, initial artifact-mode resolution, tiny public
    sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,
