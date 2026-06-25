@@ -234,7 +234,7 @@ The next high-value modernization work is:
    local progress tracking, stall detection, and heartbeat formatting is now in `local_kernel_progress.py`;
    local model-cache discovery and staging is now in `local_kernel_models.py`; local text-runtime aux input staging is
    now in `local_kernel_aux_inputs.py`; kernel package source/runtime/external-file staging is now in
-   `kernel_package_files.py`;
+   `kernel_package_files.py`; local-module inlining for packaged kernels is now in `kernel_module_inliner.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
