@@ -29,10 +29,12 @@ from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import knowledge as _knowledge
 from kagglebot import knowledge_context as _knowledge_context
+from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
+from kagglebot import score_utils as _score_utils
 from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
@@ -149,11 +151,6 @@ from kagglebot.knowledge import (
     record_problem_type_insight,
     record_run,
 )
-from kagglebot.leaderboard_policy import build_medal_target_reason as _build_medal_target_reason
-from kagglebot.leaderboard_policy import meets_rank_percentile_target as _meets_rank_percentile_target
-from kagglebot.leaderboard_policy import resume_best_online_submission_score as _resume_best_online_submission_score
-from kagglebot.leaderboard_policy import should_force_major_overhaul_by_rank as _should_force_major_overhaul_by_rank
-from kagglebot.leaderboard_policy import update_best_online_submission_score as _update_best_online_submission_score
 from kagglebot.medals import (
     DEFAULT_TARGET_MEDAL,
     normalize_target_medal,
@@ -187,7 +184,6 @@ from kagglebot.runtime_policy import (
     local_gpu_time_budget_limit_min as _local_gpu_time_budget_limit_min,
 )
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
-from kagglebot.score_utils import should_update_best_score as _update_best_score
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission.guard import (
     classify_submit_error,
@@ -750,7 +746,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         max_iterations=max_iterations,
         load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
-    best_online_submission_score = _resume_best_online_submission_score(
+    best_online_submission_score = _leaderboard_policy.resume_best_online_submission_score(
         paths=config.paths,
         run_id=run_id,
         direction=metric_direction,
@@ -766,9 +762,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     historical_best_submission_score = tolerant_finite_float(previous_submission_history.get("best_score"))
     if historical_best_submission_score is not None:
-        if _update_best_score(best_submitted_score, historical_best_submission_score, metric_direction, 0.0):
+        if _score_utils.should_update_best_score(
+            best_submitted_score,
+            historical_best_submission_score,
+            metric_direction,
+            0.0,
+        ):
             best_submitted_score = historical_best_submission_score
-        best_online_submission_score = _update_best_online_submission_score(
+        best_online_submission_score = _leaderboard_policy.update_best_online_submission_score(
             current_best_score=best_online_submission_score,
             candidate_score=historical_best_submission_score,
             direction=metric_direction,
@@ -1857,7 +1858,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 else:
                     frontier_no_improve_streak += 1
             if submit_enabled and (quality_allows_submit or config.force_submit):
-                if _update_best_score(best_submittable_score, decision_score, metric_direction, 0.0):
+                if _score_utils.should_update_best_score(best_submittable_score, decision_score, metric_direction, 0.0):
                     best_submittable_score = decision_score
                     best_submittable_submission = submission_path
 
@@ -2174,7 +2175,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                     rank_payload=rank_payload,
                                     rank_force_major_max_percentile=rank_force_major_max_percentile,
                                     rank_force_major_min_teams=rank_force_major_min_teams,
-                                    should_force_major_overhaul_by_rank=_should_force_major_overhaul_by_rank,
+                                    should_force_major_overhaul_by_rank=(
+                                        _leaderboard_policy.should_force_major_overhaul_by_rank
+                                    ),
                                 )
                                 outcome_payload.update(rank_state.rank_payload)
                                 submission_rank = rank_state.rank
@@ -2195,7 +2198,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 online_score=online_score,
                             )
                         )
-                        if _update_best_score(best_submitted_score, submitted_tracking_score, metric_direction, 0.0):
+                        if _score_utils.should_update_best_score(
+                            best_submitted_score,
+                            submitted_tracking_score,
+                            metric_direction,
+                            0.0,
+                        ):
                             best_submitted_score = submitted_tracking_score
                             if submitted_tracking_source != "offline":
                                 print(
@@ -2205,14 +2213,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 else:
                     submit_phase_state = "dry_run" if config.dry_run else "attempted_no_result"
             if target_rank_percentile is not None and deliverable_mode == "leaderboard":
-                medal_target_met = _meets_rank_percentile_target(
+                medal_target_met = _leaderboard_policy.meets_rank_percentile_target(
                     rank_percentile=submission_rank_percentile,
                     estimated_rank_percentile=submission_rank_percentile_estimate,
                     target_rank_percentile=target_rank_percentile,
                 )
                 if not medal_target_met:
                     medal_minimum_improvement_mode = "moderate_update"
-                    medal_policy_reason = _build_medal_target_reason(
+                    medal_policy_reason = _leaderboard_policy.build_medal_target_reason(
                         target_medal=target_medal,
                         target_rank_percentile=target_rank_percentile,
                         rank_percentile=submission_rank_percentile,
@@ -2399,7 +2407,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     _submission_history.detect_online_regression_vs_submission_history
                 ),
             )
-            best_online_submission_score = _update_best_online_submission_score(
+            best_online_submission_score = _leaderboard_policy.update_best_online_submission_score(
                 current_best_score=best_online_submission_score,
                 candidate_score=online_score,
                 direction=metric_direction,

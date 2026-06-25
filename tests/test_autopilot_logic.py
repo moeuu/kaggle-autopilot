@@ -9,15 +9,17 @@ from pathlib import Path
 import pytest
 
 from kagglebot.autopilot import (
-    _resume_best_online_submission_score,
-    _should_force_major_overhaul_by_rank,
     _TrainingLiveStdout,
-    _update_best_score,
+)
+from kagglebot.leaderboard_policy import (
+    resume_best_online_submission_score,
+    should_force_major_overhaul_by_rank,
 )
 from kagglebot.paths import CompetitionPaths
 from kagglebot.plan_policy import write_plan_config as _write_plan
 from kagglebot.runtime_fixes import infer_column_mapping
 from kagglebot.score_progress import effective_best_score_for_progress
+from kagglebot.score_utils import should_update_best_score as _update_best_score
 from kagglebot.submission_policy import is_top1_tier, meets_target
 from kagglebot.types import PlanConfig
 
@@ -148,7 +150,7 @@ def test_resume_best_online_submission_score_ignores_missing_invalid_and_non_obj
     (iter_4 / "metrics.json").write_text(json.dumps({"submission_score": "0.81"}), encoding="utf-8")
 
     assert (
-        _resume_best_online_submission_score(
+        resume_best_online_submission_score(
             paths=paths,
             run_id=run_id,
             direction="maximize",
@@ -249,19 +251,17 @@ class TestTop1Tier:
 class TestRankDrivenMajorOverhaul:
     def test_rank_policy_forces_major_overhaul_when_percentile_is_poor(self) -> None:
         assert (
-            _should_force_major_overhaul_by_rank(rank=1300, total_teams=2700, max_percentile=0.35, min_teams=200)
-            is True
+            should_force_major_overhaul_by_rank(rank=1300, total_teams=2700, max_percentile=0.35, min_teams=200) is True
         )
 
     def test_rank_policy_does_not_force_for_good_rank(self) -> None:
         assert (
-            _should_force_major_overhaul_by_rank(rank=200, total_teams=2700, max_percentile=0.35, min_teams=200)
-            is False
+            should_force_major_overhaul_by_rank(rank=200, total_teams=2700, max_percentile=0.35, min_teams=200) is False
         )
 
     def test_rank_policy_does_not_force_for_small_competition(self) -> None:
         assert (
-            _should_force_major_overhaul_by_rank(rank=50, total_teams=120, max_percentile=0.35, min_teams=200) is False
+            should_force_major_overhaul_by_rank(rank=50, total_teams=120, max_percentile=0.35, min_teams=200) is False
         )
 
 
