@@ -11,6 +11,7 @@ from kagglebot.kernel_quality import (
     build_prediction_distribution_quality_signal,
     build_score_source_quality_signal,
     build_validation_metric_alignment,
+    build_validation_stability_quality_signal,
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
     detect_prediction_distribution_collapse,
@@ -196,6 +197,41 @@ def test_build_validation_metric_alignment_handles_missing_scores() -> None:
         "validation_score_count": 0,
         "severe_mismatch": False,
     }
+
+
+def test_build_validation_stability_quality_signal_blocks_unstable_nonfinal_iteration() -> None:
+    signal = build_validation_stability_quality_signal(
+        current_value=1.3,
+        validation_scores=[0.4, 0.42, 0.45],
+        payload={"cv_step_buckets": {"a": 0.4, "b": 0.41, "c": 0.39, "d": 1.6}},
+        direction="minimize",
+        is_final_iteration=False,
+        force_submit=False,
+    )
+
+    assert signal["block_submit"] is True
+    assert signal["severe_validation_mismatch"] is True
+    assert signal["reasons"] == [
+        "validation_metric_mismatch_vs_final_metric",
+        "severe_step_bucket_instability",
+    ]
+    assert signal["warnings"] == ["cv_step_bucket_collapse_detected"]
+    assert signal["metric_alignment"]["best_validation_score"] == 0.4
+    assert signal["step_bucket"]["collapse_detected"] is True
+
+
+def test_build_validation_stability_quality_signal_allows_final_iteration() -> None:
+    signal = build_validation_stability_quality_signal(
+        current_value=1.3,
+        validation_scores=[0.4, 0.42, 0.45],
+        payload={},
+        direction="minimize",
+        is_final_iteration=True,
+        force_submit=False,
+    )
+
+    assert signal["reasons"] == ["validation_metric_mismatch_vs_final_metric"]
+    assert signal["block_submit"] is False
 
 
 def test_build_baseline_quality_signal_uses_best_minimize_baseline() -> None:

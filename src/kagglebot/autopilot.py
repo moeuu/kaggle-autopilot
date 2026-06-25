@@ -324,7 +324,7 @@ _build_prediction_distribution_quality_signal = _kernel_quality.build_prediction
 _build_competition_faithfulness_quality_signal = _kernel_quality.build_competition_faithfulness_quality_signal
 _build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
 _build_code_reference_quality_signal = _kernel_quality.build_code_reference_quality_signal
-_build_validation_metric_alignment = _kernel_quality.build_validation_metric_alignment
+_build_validation_stability_quality_signal = _kernel_quality.build_validation_stability_quality_signal
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
 _capture_best_kernel_snapshot = _kernel_snapshot.capture_best_kernel_snapshot
@@ -4756,24 +4756,28 @@ def _build_kernel_quality_guard(
             block_submit = True
 
     validation_scores = _extract_validation_scores_from_log_text(log_text, evaluation.metric)
-    metric_alignment = _build_validation_metric_alignment(
+    validation_stability_signal = _build_validation_stability_quality_signal(
         current_value=float(evaluation.value),
         validation_scores=validation_scores,
+        payload=payload,
         direction=direction,
+        is_final_iteration=is_final_iteration,
+        force_submit=force_submit,
     )
-    severe_validation_mismatch = bool(metric_alignment.get("severe_mismatch"))
-    if severe_validation_mismatch:
-        reasons.append("validation_metric_mismatch_vs_final_metric")
-        if not is_final_iteration and not force_submit:
-            block_submit = True
-
-    step_bucket_signal = _kernel_quality.detect_step_bucket_collapse_signal(payload)
-    if bool(step_bucket_signal.get("collapse_detected")):
-        warnings.append("cv_step_bucket_collapse_detected")
-        if severe_validation_mismatch:
-            reasons.append("severe_step_bucket_instability")
-            if not is_final_iteration and not force_submit:
-                block_submit = True
+    metric_alignment = validation_stability_signal.get("metric_alignment")
+    if not isinstance(metric_alignment, dict):
+        metric_alignment = {}
+    step_bucket_signal = validation_stability_signal.get("step_bucket")
+    if not isinstance(step_bucket_signal, dict):
+        step_bucket_signal = {}
+    for reason in validation_stability_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in validation_stability_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    if bool(validation_stability_signal.get("block_submit")):
+        block_submit = True
 
     subgroup_collapse_signal = _detect_subgroup_collapse_signal(
         kernel_metrics_payload=payload,
@@ -4817,6 +4821,7 @@ def _build_kernel_quality_guard(
         "competition_faithfulness_signal": competition_faithfulness_signal,
         "baseline": baseline_signal,
         "metric_alignment": metric_alignment,
+        "validation_stability": validation_stability_signal,
         "step_bucket": {
             "count": step_bucket_signal.get("count"),
             "collapse_detected": step_bucket_signal.get("collapse_detected"),

@@ -274,6 +274,40 @@ def build_validation_metric_alignment(
     }
 
 
+def build_validation_stability_quality_signal(
+    *,
+    current_value: float,
+    validation_scores: list[float],
+    payload: dict[str, object] | None,
+    direction: str,
+    is_final_iteration: bool,
+    force_submit: bool,
+) -> dict[str, object]:
+    metric_alignment = build_validation_metric_alignment(
+        current_value=current_value,
+        validation_scores=validation_scores,
+        direction=direction,
+    )
+    step_bucket_signal = detect_step_bucket_collapse_signal(payload)
+    severe_validation_mismatch = bool(metric_alignment.get("severe_mismatch"))
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if severe_validation_mismatch:
+        reasons.append("validation_metric_mismatch_vs_final_metric")
+    if bool(step_bucket_signal.get("collapse_detected")):
+        warnings.append("cv_step_bucket_collapse_detected")
+        if severe_validation_mismatch:
+            reasons.append("severe_step_bucket_instability")
+    return {
+        "metric_alignment": metric_alignment,
+        "step_bucket": step_bucket_signal,
+        "severe_validation_mismatch": severe_validation_mismatch,
+        "reasons": reasons,
+        "warnings": warnings,
+        "block_submit": bool(reasons) and not is_final_iteration and not force_submit,
+    }
+
+
 def build_baseline_quality_signal(
     *,
     current_value: float,
