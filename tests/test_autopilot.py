@@ -19,8 +19,6 @@ from kagglebot.autopilot import (
     AutopilotConfig,
     SubmissionPhase,
     _attempt_submit,
-    _build_accuracy_potential,
-    _build_kernel_quality_guard,
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
     _extract_missing_ensemble_signal,
@@ -51,7 +49,11 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import SubmissionLedger
-from kagglebot.kernel_quality import extract_competition_faithfulness
+from kagglebot.kernel_quality import (
+    build_accuracy_potential,
+    build_kernel_quality_guard,
+    extract_competition_faithfulness,
+)
 from kagglebot.kernel_runner import KernelRunResult
 from kagglebot.knowledge import resolve_problem_type_insights
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -250,7 +252,7 @@ def test_autopilot_does_not_force_iter1_submit_when_quality_gate_blocks(monkeypa
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr(
-        "kagglebot.autopilot._build_kernel_quality_guard",
+        "kagglebot.kernel_quality.build_kernel_quality_guard",
         lambda **kwargs: {"allow_submit": False, "block_submit": True, "reasons": ["below_code_reference_baseline"]},
     )
     monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: False)
@@ -327,7 +329,7 @@ def test_autopilot_forces_iter1_submit_through_soft_detected_baseline_guard(
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr(
-        "kagglebot.autopilot._build_kernel_quality_guard",
+        "kagglebot.kernel_quality.build_kernel_quality_guard",
         lambda **kwargs: {
             "allow_submit": False,
             "block_submit": True,
@@ -3442,7 +3444,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.25})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
-    monkeypatch.setattr("kagglebot.autopilot._build_kernel_quality_guard", fake_quality_guard)
+    monkeypatch.setattr("kagglebot.kernel_quality.build_kernel_quality_guard", fake_quality_guard)
     monkeypatch.setattr("kagglebot.submission_policy.submission_count_for_daily_limit", lambda **kwargs: 1)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
@@ -4175,7 +4177,7 @@ def test_kernel_quality_guard_blocks_when_selected_worse_than_baseline() -> None
             {"name": "heavy_model", "offline_value": 0.5},
         ],
     }
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload=payload,
         evaluation_report=None,
@@ -4218,7 +4220,7 @@ def test_kernel_quality_guard_ignores_baseline_fold_indices_in_logs(tmp_path: Pa
         val_score=None,
         fold_scores=[0.84, 0.85, 0.87, 0.88],
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={},
         evaluation_report=None,
@@ -4254,7 +4256,7 @@ def test_kernel_quality_guard_blocks_on_severe_validation_mismatch(tmp_path: Pat
         val_score=None,
         fold_scores=[1.15, 1.25],
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={},
         evaluation_report=None,
@@ -4270,7 +4272,7 @@ def test_kernel_quality_guard_blocks_on_severe_validation_mismatch(tmp_path: Pat
     assert isinstance(reasons, list)
     assert "validation_metric_mismatch_vs_final_metric" in reasons
 
-    final_guard = _build_kernel_quality_guard(
+    final_guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={},
         evaluation_report=None,
@@ -4312,7 +4314,7 @@ def test_kernel_quality_guard_blocks_cv_selected_pipeline_with_worse_holdout_can
             },
         ],
     }
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload=payload,
         evaluation_report=None,
@@ -4358,7 +4360,7 @@ def test_kernel_quality_guard_surfaces_subgroup_collapse() -> None:
         },
     }
 
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload=payload,
         evaluation_report=None,
@@ -4390,7 +4392,7 @@ def test_kernel_quality_guard_blocks_oracle_or_untrusted_score_source() -> None:
         val_score=None,
         fold_scores=[0.1, 0.1],
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={"oracle": {"mode_setting": "auto", "applied": True}},
         evaluation_report=None,
@@ -4438,7 +4440,7 @@ def test_kernel_quality_guard_blocks_external_test_label_transfer_even_when_forc
             },
         },
     }
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload=payload,
         evaluation_report=None,
@@ -4458,7 +4460,7 @@ def test_kernel_quality_guard_blocks_external_test_label_transfer_even_when_forc
     assert isinstance(transfer, dict)
     assert transfer["test_selected_row_count"] == 6872
 
-    potential = _build_accuracy_potential(
+    potential = build_accuracy_potential(
         evaluation=evaluation,
         kernel_metrics_payload=payload,
         model_summary=None,
@@ -4481,7 +4483,7 @@ def test_kernel_quality_guard_blocks_when_below_code_reference_baseline() -> Non
         val_score=None,
         fold_scores=[0.60, 0.64],
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={},
         evaluation_report=None,
@@ -4514,7 +4516,7 @@ def test_kernel_quality_guard_normalizes_percent_code_reference_for_accuracy() -
         val_score=None,
         fold_scores=[0.995, 0.996],
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={},
         evaluation_report=None,
@@ -4562,7 +4564,7 @@ def test_kernel_quality_guard_blocks_competition_split_mismatch() -> None:
         drift_auc=None,
         readiness_score=0.12,
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={"readiness": {"split_strategy": "kfold"}},
         evaluation_report=report,
@@ -4599,7 +4601,7 @@ def test_kernel_quality_guard_blocks_missing_competitive_data_from_sample_score_
         val_score=None,
         fold_scores=[0.02],
     )
-    guard = _build_kernel_quality_guard(
+    guard = build_kernel_quality_guard(
         evaluation=evaluation,
         kernel_metrics_payload={},
         evaluation_report=None,
@@ -4646,7 +4648,7 @@ def test_build_accuracy_potential_prefers_high_capacity_candidate_when_not_yet_f
             "full_dataset_resolved": False,
         },
     }
-    potential = _build_accuracy_potential(
+    potential = build_accuracy_potential(
         evaluation=evaluation,
         kernel_metrics_payload={"selected_pipeline": "graph_transformer_hybrid"},
         model_summary={"models": ["graph_transformer_hybrid"]},

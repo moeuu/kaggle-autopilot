@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from pathlib import Path
 
-from kagglebot import plan_policy, score_progress, score_sources
+from kagglebot import kernel_metrics, plan_policy, score_progress, score_sources
 from kagglebot.metric_matching import metrics_equivalent
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 
@@ -118,6 +119,190 @@ def quality_signal_blocks_submit(
     if not bool(signal.get("block_submit")):
         return False
     return not (forceable and force_submit)
+
+
+def build_kernel_quality_guard(
+    *,
+    evaluation,
+    kernel_metrics_payload: dict[str, object] | None,
+    evaluation_report,
+    evaluation_contract: dict[str, object] | None,
+    logs_dir: Path | None,
+    direction: str,
+    iteration: int,
+    max_iterations: int,
+    force_submit: bool,
+    code_reference_score: float | None = None,
+    code_reference_source: str | None = None,
+    metric_mismatch_detected: bool = False,
+    metric_mismatch_reason: str | None = None,
+) -> dict[str, object]:
+    """Build submit guard signals that reject unstable or non-generalizable evaluations."""
+    reasons: list[str] = []
+    warnings: list[str] = []
+    block_submit = False
+    is_final_iteration = iteration >= max_iterations
+    payload = kernel_metrics_payload or {}
+
+    def merge_signal_messages(signal: dict[str, object], *, dedupe: bool = False) -> None:
+        nonlocal reasons, warnings
+        merged = merge_quality_signal_messages(
+            reasons=reasons,
+            warnings=warnings,
+            signal=signal,
+            dedupe=dedupe,
+        )
+        reasons = merged["reasons"]
+        warnings = merged["warnings"]
+
+    score_source_signal = build_score_source_quality_signal(evaluation.score_source)
+    merge_signal_messages(score_source_signal)
+    if quality_signal_blocks_submit(score_source_signal, force_submit=force_submit):
+        block_submit = True
+
+    oracle_signal = build_oracle_override_signal(payload)
+    merge_signal_messages(oracle_signal)
+    if quality_signal_blocks_submit(oracle_signal, force_submit=force_submit):
+        block_submit = True
+
+    external_label_transfer_signal = build_external_label_transfer_quality_signal(payload)
+    merge_signal_messages(external_label_transfer_signal)
+    if quality_signal_blocks_submit(external_label_transfer_signal, force_submit=force_submit, forceable=False):
+        block_submit = True
+
+    candidate_selection_signal = build_candidate_selection_quality_signal(payload=payload, direction=direction)
+    merge_signal_messages(candidate_selection_signal)
+    candidate_selection_mismatch = candidate_selection_signal.get("mismatch")
+    if quality_signal_blocks_submit(candidate_selection_signal, force_submit=force_submit):
+        block_submit = True
+
+    prediction_distribution_signal = build_prediction_distribution_quality_signal(
+        payload=payload,
+        candidate_selection_mismatch=candidate_selection_mismatch,
+    )
+    merge_signal_messages(prediction_distribution_signal)
+    prediction_distribution_collapse = prediction_distribution_signal.get("collapse")
+    if quality_signal_blocks_submit(prediction_distribution_signal, force_submit=force_submit):
+        block_submit = True
+
+    competition_faithfulness_signal = build_competition_faithfulness_quality_signal(
+        evaluation_metric=evaluation.metric,
+        evaluation_score_source=evaluation.score_source,
+        kernel_metrics_payload=payload,
+        evaluation_report_split_strategy=evaluation_report.split_strategy if evaluation_report is not None else None,
+        evaluation_contract=evaluation_contract,
+        force_submit=force_submit,
+    )
+    competition_faithfulness = competition_faithfulness_signal.get("faithfulness")
+    if not isinstance(competition_faithfulness, dict):
+        competition_faithfulness = {}
+    merge_signal_messages(competition_faithfulness_signal, dedupe=True)
+    if quality_signal_blocks_submit(competition_faithfulness_signal, force_submit=force_submit, forceable=False):
+        block_submit = True
+
+    baseline_candidates = kernel_metrics.extract_baseline_candidates_from_metrics_payload(payload)
+    log_text = kernel_metrics.collect_kernel_log_text(logs_dir)
+    baseline_from_logs = kernel_metrics.extract_baseline_scores_from_log_text(log_text)
+    for index, score in enumerate(baseline_from_logs):
+        baseline_candidates.append((f"logs:baseline[{index}]", float(score)))
+
+    baseline_regression_signal = build_baseline_regression_quality_signal(
+        current_value=float(evaluation.value),
+        baseline_candidates=baseline_candidates,
+        direction=direction,
+        is_final_iteration=is_final_iteration,
+        force_submit=force_submit,
+    )
+    baseline_signal = baseline_regression_signal.get("baseline")
+    if not isinstance(baseline_signal, dict):
+        baseline_signal = {}
+    merge_signal_messages(baseline_regression_signal)
+    if quality_signal_blocks_submit(baseline_regression_signal, force_submit=force_submit, forceable=False):
+        block_submit = True
+
+    validation_scores = kernel_metrics.extract_validation_scores_from_log_text(log_text, evaluation.metric)
+    validation_stability_signal = build_validation_stability_quality_signal(
+        current_value=float(evaluation.value),
+        validation_scores=validation_scores,
+        payload=payload,
+        direction=direction,
+        is_final_iteration=is_final_iteration,
+        force_submit=force_submit,
+    )
+    metric_alignment = validation_stability_signal.get("metric_alignment")
+    if not isinstance(metric_alignment, dict):
+        metric_alignment = {}
+    step_bucket_signal = validation_stability_signal.get("step_bucket")
+    if not isinstance(step_bucket_signal, dict):
+        step_bucket_signal = {}
+    merge_signal_messages(validation_stability_signal)
+    if quality_signal_blocks_submit(validation_stability_signal, force_submit=force_submit, forceable=False):
+        block_submit = True
+
+    subgroup_collapse_quality_signal = build_subgroup_collapse_quality_signal(
+        kernel_metrics_payload=payload,
+        direction=direction,
+    )
+    subgroup_collapse_signal = subgroup_collapse_quality_signal.get("collapse")
+    if not isinstance(subgroup_collapse_signal, dict):
+        subgroup_collapse_signal = None
+    merge_signal_messages(subgroup_collapse_quality_signal)
+
+    metric_mismatch_signal = build_metric_mismatch_quality_signal(
+        detected=metric_mismatch_detected,
+        reason=metric_mismatch_reason,
+        force_submit=force_submit,
+    )
+    merge_signal_messages(metric_mismatch_signal)
+    if quality_signal_blocks_submit(metric_mismatch_signal, force_submit=force_submit, forceable=False):
+        block_submit = True
+
+    code_reference_regression_signal = build_code_reference_regression_quality_signal(
+        current_value=float(evaluation.value),
+        metric=evaluation.metric,
+        code_reference_score=code_reference_score,
+        code_reference_source=code_reference_source,
+        direction=direction,
+        force_submit=force_submit,
+    )
+    code_reference_signal = code_reference_regression_signal.get("code_reference")
+    if not isinstance(code_reference_signal, dict):
+        code_reference_signal = {}
+    merge_signal_messages(code_reference_regression_signal)
+    if quality_signal_blocks_submit(code_reference_regression_signal, force_submit=force_submit, forceable=False):
+        block_submit = True
+
+    allow_submit = not block_submit
+    return {
+        "allow_submit": allow_submit,
+        "block_submit": block_submit,
+        "is_final_iteration": is_final_iteration,
+        "reasons": reasons,
+        "warnings": warnings,
+        "score_source": score_source_signal,
+        "oracle": oracle_signal,
+        "competition_faithfulness": competition_faithfulness,
+        "competition_faithfulness_signal": competition_faithfulness_signal,
+        "baseline": baseline_signal,
+        "baseline_regression": baseline_regression_signal,
+        "metric_alignment": metric_alignment,
+        "validation_stability": validation_stability_signal,
+        "step_bucket": {
+            "count": step_bucket_signal.get("count"),
+            "collapse_detected": step_bucket_signal.get("collapse_detected"),
+        },
+        "subgroup_collapse": subgroup_collapse_signal,
+        "subgroup_collapse_signal": subgroup_collapse_quality_signal,
+        "external_label_transfer": external_label_transfer_signal.get("transfer"),
+        "external_label_transfer_signal": external_label_transfer_signal,
+        "candidate_selection_mismatch": candidate_selection_mismatch,
+        "candidate_selection": candidate_selection_signal,
+        "prediction_distribution_collapse": prediction_distribution_collapse,
+        "prediction_distribution": prediction_distribution_signal,
+        "metric_mismatch": metric_mismatch_signal,
+        "code_reference": code_reference_signal,
+        "code_reference_regression": code_reference_regression_signal,
+    }
 
 
 def build_oracle_override_signal(payload: dict[str, object] | None) -> dict[str, object]:

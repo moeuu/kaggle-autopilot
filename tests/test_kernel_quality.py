@@ -9,6 +9,7 @@ from kagglebot.kernel_quality import (
     build_code_reference_regression_quality_signal,
     build_competition_faithfulness_quality_signal,
     build_external_label_transfer_quality_signal,
+    build_kernel_quality_guard,
     build_metric_mismatch_quality_signal,
     build_oracle_override_signal,
     build_prediction_distribution_quality_signal,
@@ -29,6 +30,7 @@ from kagglebot.kernel_quality import (
     merge_quality_signal_messages,
     quality_signal_blocks_submit,
 )
+from kagglebot.solver.evaluate import EvaluationResult
 
 
 def test_is_significantly_worse_respects_direction_and_margins() -> None:
@@ -124,6 +126,35 @@ def test_quality_signal_blocks_submit_respects_forceable_flag() -> None:
     assert not quality_signal_blocks_submit(signal, force_submit=True)
     assert quality_signal_blocks_submit(signal, force_submit=True, forceable=False)
     assert not quality_signal_blocks_submit({"block_submit": False}, force_submit=False)
+
+
+def test_build_kernel_quality_guard_blocks_untrusted_score_source() -> None:
+    evaluation = EvaluationResult(
+        score_source="oracle",
+        metric="rmse",
+        direction="minimize",
+        value=0.1,
+        std=0.01,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.1, 0.1],
+    )
+
+    guard = build_kernel_quality_guard(
+        evaluation=evaluation,
+        kernel_metrics_payload={"oracle": {"mode_setting": "auto", "applied": True}},
+        evaluation_report=None,
+        evaluation_contract=None,
+        logs_dir=None,
+        direction="minimize",
+        iteration=1,
+        max_iterations=3,
+        force_submit=False,
+    )
+
+    assert guard["allow_submit"] is False
+    assert "untrusted_score_source" in guard["reasons"]
+    assert "oracle_override_detected" in guard["reasons"]
 
 
 def test_build_oracle_override_signal_flags_applied_or_enabled_mode() -> None:
