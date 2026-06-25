@@ -9,6 +9,7 @@ from kagglebot.leaderboard_policy import (
     meets_rank_percentile_target,
     resume_best_online_submission_score,
     should_force_major_overhaul_by_rank,
+    update_best_online_submission_score,
 )
 from kagglebot.paths import CompetitionPaths
 
@@ -31,6 +32,29 @@ def test_resume_best_online_submission_score_ignores_invalid_and_non_finite_scor
         direction="minimize",
         max_iterations=3,
     ) == pytest.approx(0.68)
+
+
+def test_update_best_online_submission_score_respects_direction_and_invalid_values() -> None:
+    assert update_best_online_submission_score(
+        current_best_score=0.72,
+        candidate_score="0.68",
+        direction="minimize",
+    ) == pytest.approx(0.68)
+    assert update_best_online_submission_score(
+        current_best_score=0.72,
+        candidate_score="0.80",
+        direction="minimize",
+    ) == pytest.approx(0.72)
+    assert update_best_online_submission_score(
+        current_best_score=0.72,
+        candidate_score="0.80",
+        direction="maximize",
+    ) == pytest.approx(0.80)
+    assert update_best_online_submission_score(
+        current_best_score=0.72,
+        candidate_score="nan",
+        direction="maximize",
+    ) == pytest.approx(0.72)
 
 
 def test_rank_policy_forces_major_overhaul_only_for_poor_large_competitions() -> None:

@@ -29,6 +29,21 @@ def resume_best_online_submission_score(
     return best
 
 
+def update_best_online_submission_score(
+    *,
+    current_best_score: float | None,
+    candidate_score: object,
+    direction: str,
+    min_improvement: float = 0.0,
+) -> float | None:
+    score = parse_finite_float(candidate_score, allow_commas=True)
+    if score is None:
+        return current_best_score
+    if should_update_best_score(current_best_score, score, direction, min_improvement):
+        return score
+    return current_best_score
+
+
 def should_force_major_overhaul_by_rank(
     *,
     rank: int | None,

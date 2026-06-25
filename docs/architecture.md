@@ -54,8 +54,8 @@ Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 ## 3) Iteration Loop
 
 Main loop is in `src/kagglebot/autopilot.py`.
-Supporting state/resume helpers now live in `src/kagglebot/autopilot_state.py`; score, leaderboard, and iteration-signal
-policy helpers live in `src/kagglebot/score_utils.py`, `src/kagglebot/leaderboard_policy.py`, and
+Supporting state/resume helpers now live in `src/kagglebot/autopilot_state.py`; score, leaderboard/online-best-score,
+and iteration-signal policy helpers live in `src/kagglebot/score_utils.py`, `src/kagglebot/leaderboard_policy.py`, and
 `src/kagglebot/iteration_signals.py`, so the main file stays focused on orchestration.
 Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the loop calls that public module directly
 instead of carrying private rule-parsing aliases in `autopilot.py`.

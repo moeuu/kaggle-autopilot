@@ -158,6 +158,7 @@ from kagglebot.leaderboard_policy import build_medal_target_reason as _build_med
 from kagglebot.leaderboard_policy import meets_rank_percentile_target as _meets_rank_percentile_target
 from kagglebot.leaderboard_policy import resume_best_online_submission_score as _resume_best_online_submission_score
 from kagglebot.leaderboard_policy import should_force_major_overhaul_by_rank as _should_force_major_overhaul_by_rank
+from kagglebot.leaderboard_policy import update_best_online_submission_score as _update_best_online_submission_score
 from kagglebot.medals import (
     DEFAULT_TARGET_MEDAL,
     normalize_target_medal,
@@ -778,8 +779,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     if historical_best_submission_score is not None:
         if _update_best_score(best_submitted_score, historical_best_submission_score, metric_direction, 0.0):
             best_submitted_score = historical_best_submission_score
-        if _update_best_score(best_online_submission_score, historical_best_submission_score, metric_direction, 0.0):
-            best_online_submission_score = historical_best_submission_score
+        best_online_submission_score = _update_best_online_submission_score(
+            current_best_score=best_online_submission_score,
+            candidate_score=historical_best_submission_score,
+            direction=metric_direction,
+        )
         print(
             "[cyan]submission history[/cyan]: "
             f"best public score={historical_best_submission_score:.6f} "
@@ -2429,13 +2433,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 direction=metric_direction,
                 history=previous_submission_history,
             )
-            if isinstance(online_score, (int, float)) and _update_best_score(
-                best_online_submission_score,
-                float(online_score),
-                metric_direction,
-                0.0,
-            ):
-                best_online_submission_score = float(online_score)
+            best_online_submission_score = _update_best_online_submission_score(
+                current_best_score=best_online_submission_score,
+                candidate_score=online_score,
+                direction=metric_direction,
+            )
             if campaign_mode == "top1" and campaign_candidate is not None:
                 if submission_result is not None and not submission_skipped:
                     campaign_candidate = replace(
