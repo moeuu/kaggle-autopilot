@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kagglebot.autopilot_state import (
+    _apply_run_status,
     _build_run_payload,
     _build_run_summary_payload,
     _load_run_state,
@@ -50,6 +51,24 @@ def test_build_run_payload_records_config_and_resolved_state() -> None:
     assert payload["config"]["target_score"] == 0.5
     assert payload["config"]["submit"] is True
     assert payload["config"]["evaluation_contract"] == {"metric_name": "rmse"}
+
+
+def test_apply_run_status_sets_status_and_optional_stop_reason() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+
+    returned = _apply_run_status(payload, status="stopped", stop_reason="max_total_min reached")
+
+    assert returned is payload
+    assert payload["status"] == "stopped"
+    assert payload["stop_reason"] == "max_total_min reached"
+
+
+def test_apply_run_status_omits_empty_stop_reason() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+
+    _apply_run_status(payload, status="completed", stop_reason="")
+
+    assert payload == {"run_id": "run-1", "status": "completed"}
 
 
 def test_build_run_summary_payload_stringifies_paths(tmp_path: Path) -> None:

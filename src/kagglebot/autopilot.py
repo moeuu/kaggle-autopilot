@@ -50,12 +50,7 @@ from kagglebot.agents.identity import (
 )
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot_state import (
-    _build_run_payload as _state_build_run_payload,
-)
-from kagglebot.autopilot_state import (
-    _build_run_summary_payload as _state_build_run_summary_payload,
-)
-from kagglebot.autopilot_state import (
+    _apply_run_status,
     _copy_kernel_support_artifacts_to_iteration_dir,
     _copy_submission_artifact_to_iteration_dir,
     _has_successful_submit_attempt,
@@ -66,6 +61,12 @@ from kagglebot.autopilot_state import (
     _resolve_iteration_submission_artifact,
     _save_run_state,
     _write_iteration_state_marker,
+)
+from kagglebot.autopilot_state import (
+    _build_run_payload as _state_build_run_payload,
+)
+from kagglebot.autopilot_state import (
+    _build_run_summary_payload as _state_build_run_summary_payload,
 )
 from kagglebot.autopilot_state import (
     _load_submit_retry_artifacts as _state_load_submit_retry_artifacts,
@@ -888,8 +889,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 max_total_min=max_total_min,
             )
             if max_total_stop.should_stop:
-                run_payload["status"] = max_total_stop.status
-                run_payload["stop_reason"] = max_total_stop.stop_reason
+                _apply_run_status(
+                    run_payload,
+                    status=max_total_stop.status,
+                    stop_reason=max_total_stop.stop_reason,
+                )
                 print(max_total_stop.message)
                 break
             iter_dir = config.paths.iter_dir(run_id, iteration)
@@ -2950,8 +2954,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 same_config_patience=stop_same_config_patience,
             )
             if stagnation_stop.should_stop:
-                run_payload["status"] = "stopped"
-                run_payload["stop_reason"] = stagnation_stop.reason
+                _apply_run_status(run_payload, status="stopped", stop_reason=stagnation_stop.reason)
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 
@@ -2966,9 +2969,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 allow_max_iteration_stop=False,
             )
             if terminal_stop.should_stop:
-                run_payload["status"] = terminal_stop.status
-                if terminal_stop.stop_reason:
-                    run_payload["stop_reason"] = terminal_stop.stop_reason
+                _apply_run_status(
+                    run_payload,
+                    status=terminal_stop.status,
+                    stop_reason=terminal_stop.stop_reason,
+                )
                 if terminal_stop.message:
                     print(terminal_stop.message)
                 break
@@ -2983,7 +2988,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submitted=submitted,
             )
             if terminal_stop.should_stop:
-                run_payload["status"] = terminal_stop.status
+                _apply_run_status(run_payload, status=terminal_stop.status, stop_reason=terminal_stop.stop_reason)
                 break
 
             print("[cyan]improve[/cyan]: generating next iteration plan")

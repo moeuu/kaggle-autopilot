@@ -128,6 +128,18 @@ def _build_run_summary_payload(
     }
 
 
+def _apply_run_status(
+    payload: dict[str, object],
+    *,
+    status: str,
+    stop_reason: str | None = None,
+) -> dict[str, object]:
+    payload["status"] = status
+    if stop_reason:
+        payload["stop_reason"] = stop_reason
+    return payload
+
+
 def _write_iteration_state_marker(
     *,
     iter_dir: Path,

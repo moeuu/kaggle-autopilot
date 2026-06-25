@@ -298,8 +298,9 @@ The next high-value modernization work is:
    through `agent_pipeline.py`.
    Watch-state phase updates now live in `watch_state.py`; autopilot orchestration reports phase transitions without
    owning the state-file environment lookup or JSON update details.
-   Initial `run.json` payload construction and final run summary payload construction now live in `autopilot_state.py`,
-   keeping run-state schema assembly with the rest of the state/artifact helpers.
+   Initial `run.json` payload construction, run status/stop-reason application, and final run summary payload
+   construction now live in `autopilot_state.py`, keeping run-state schema assembly with the rest of the state/artifact
+   helpers.
    Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
    solver and kernel-runtime submission writers share one row-count contract.
 
