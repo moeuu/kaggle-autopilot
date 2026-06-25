@@ -787,12 +787,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         max_iterations=max_iterations,
         require_submit_phase=submit_enabled and not config.dry_run,
     )
-    best_submitted_score = _resume_best_submitted_offline_score(
+    best_submitted_score = _state_resume_best_submitted_offline_score(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
     best_online_submission_score = _resume_best_online_submission_score(
         paths=config.paths,
@@ -897,12 +898,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     if resumed_best_readiness is not None and best_score is None:
         best_score = resumed_best_readiness
-    best_submittable_score, best_submittable_submission = _resume_best_submittable_iteration_state(
+    best_submittable_score, best_submittable_submission = _state_resume_best_submittable_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        iteration_metrics_allow_submit=_iteration_metrics.iteration_metrics_allow_submit,
     )
     if start_iteration > 1:
         print(f"[yellow]resume[/yellow]: found completed iterations; resuming at {start_iteration}/{max_iterations}")
@@ -5919,43 +5922,6 @@ def _maybe_apply_lightweight_runtime_fix(
         )
         return artifact_name
     return None
-
-
-def _resume_best_submitted_offline_score(
-    *,
-    paths: CompetitionPaths,
-    run_id: str,
-    metric_direction: str,
-    target_metric: str,
-    max_iterations: int,
-) -> float | None:
-    return _state_resume_best_submitted_offline_score(
-        paths=paths,
-        run_id=run_id,
-        metric_direction=metric_direction,
-        target_metric=target_metric,
-        max_iterations=max_iterations,
-        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
-    )
-
-
-def _resume_best_submittable_iteration_state(
-    *,
-    paths: CompetitionPaths,
-    run_id: str,
-    metric_direction: str,
-    target_metric: str,
-    max_iterations: int,
-) -> tuple[float | None, Path | None]:
-    return _state_resume_best_submittable_iteration_state(
-        paths=paths,
-        run_id=run_id,
-        metric_direction=metric_direction,
-        target_metric=target_metric,
-        max_iterations=max_iterations,
-        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
-        iteration_metrics_allow_submit=_iteration_metrics.iteration_metrics_allow_submit,
-    )
 
 
 def _resume_iteration_state(
