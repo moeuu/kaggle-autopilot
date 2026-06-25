@@ -4,6 +4,7 @@ from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_baseline_quality_signal,
     build_code_reference_quality_signal,
+    build_external_label_transfer_quality_signal,
     build_oracle_override_signal,
     build_score_source_quality_signal,
     build_validation_metric_alignment,
@@ -303,6 +304,55 @@ def test_detect_external_test_label_transfer_signal_requires_specific_leak_patte
     assert signal is not None
     assert signal["test_selected_row_count"] == 6872
     assert signal["final_selected_method"] == "official_multiview_overlap_mapping"
+
+
+def test_build_external_label_transfer_quality_signal_hard_blocks_detected_transfer() -> None:
+    signal = build_external_label_transfer_quality_signal(
+        {
+            "final_selected_method": "official_multiview_overlap_mapping",
+            "submission_rows": 6872,
+            "submission_audit": {
+                "external_overlap_trusted": True,
+                "exact_coverage_pass": True,
+                "test_selected_row_count": 6872,
+                "uncovered_test_row_count": 0,
+                "test_exact_sha1_matched_image_count": 926,
+                "official_overlap_audit": {
+                    "match_type_counts": {
+                        "test_selected_rows": {"exact_sha1": 6872},
+                    },
+                },
+            },
+        }
+    )
+
+    assert signal["detected"] is True
+    assert signal["hard_block"] is True
+    assert signal["reasons"] == ["external_test_label_transfer_detected"]
+    assert signal["warnings"] == [
+        "external_test_label_transfer=rows=6872,uncovered=0,method=official_multiview_overlap_mapping"
+    ]
+    transfer = signal["transfer"]
+    assert isinstance(transfer, dict)
+    assert transfer["test_selected_row_count"] == 6872
+
+
+def test_build_external_label_transfer_quality_signal_allows_benign_external_data() -> None:
+    signal = build_external_label_transfer_quality_signal(
+        {
+            "external_data_allowed": True,
+            "submission_rows": 100,
+            "test_selected_row_count": 100,
+        }
+    )
+
+    assert signal == {
+        "detected": False,
+        "hard_block": False,
+        "transfer": None,
+        "reasons": [],
+        "warnings": [],
+    }
 
 
 def test_detect_candidate_selection_mismatch_reports_better_holdout_candidate() -> None:

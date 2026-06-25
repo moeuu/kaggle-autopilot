@@ -547,6 +547,28 @@ def detect_external_test_label_transfer_signal(payload: dict[str, object] | None
     }
 
 
+def build_external_label_transfer_quality_signal(payload: dict[str, object] | None) -> dict[str, object]:
+    transfer = detect_external_test_label_transfer_signal(payload)
+    detected = transfer is not None
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if detected:
+        reasons.append("external_test_label_transfer_detected")
+        warnings.append(
+            "external_test_label_transfer="
+            f"rows={transfer.get('test_selected_row_count')},"
+            f"uncovered={transfer.get('uncovered_test_row_count')},"
+            f"method={transfer.get('final_selected_method') or 'unknown'}"
+        )
+    return {
+        "detected": detected,
+        "hard_block": detected,
+        "transfer": transfer,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
 def pipeline_name_from_payload(pipeline: dict[str, object]) -> str | None:
     for key in ("name", "pipeline", "pipeline_name", "method", "model_name"):
         value = pipeline.get(key)

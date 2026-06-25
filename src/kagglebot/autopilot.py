@@ -311,9 +311,9 @@ _max_nested_int = _kernel_quality.max_nested_int
 _min_nested_int = _kernel_quality.min_nested_int
 _any_nested_bool = _kernel_quality.any_nested_bool
 _nested_text = _kernel_quality.nested_text
+_build_external_label_transfer_quality_signal = _kernel_quality.build_external_label_transfer_quality_signal
 _build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
 _build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
-_detect_external_test_label_transfer_signal = _kernel_quality.detect_external_test_label_transfer_signal
 _pipeline_name_from_payload = _kernel_quality.pipeline_name_from_payload
 _extract_selected_pipeline_name = _kernel_quality.extract_selected_pipeline_name
 _extract_pipeline_candidates = _kernel_quality.extract_pipeline_candidates
@@ -4682,15 +4682,14 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
-    external_label_transfer = _detect_external_test_label_transfer_signal(payload)
-    if external_label_transfer is not None:
-        reasons.append("external_test_label_transfer_detected")
-        warnings.append(
-            "external_test_label_transfer="
-            f"rows={external_label_transfer.get('test_selected_row_count')},"
-            f"uncovered={external_label_transfer.get('uncovered_test_row_count')},"
-            f"method={external_label_transfer.get('final_selected_method') or 'unknown'}"
-        )
+    external_label_transfer_signal = _build_external_label_transfer_quality_signal(payload)
+    for reason in external_label_transfer_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in external_label_transfer_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    if bool(external_label_transfer_signal.get("hard_block")):
         block_submit = True
 
     candidate_selection_mismatch = _detect_candidate_selection_mismatch(payload=payload, direction=direction)
@@ -4817,7 +4816,8 @@ def _build_kernel_quality_guard(
             "collapse_detected": step_bucket_signal.get("collapse_detected"),
         },
         "subgroup_collapse": subgroup_collapse_signal,
-        "external_label_transfer": external_label_transfer,
+        "external_label_transfer": external_label_transfer_signal.get("transfer"),
+        "external_label_transfer_signal": external_label_transfer_signal,
         "candidate_selection_mismatch": candidate_selection_mismatch,
         "prediction_distribution_collapse": prediction_distribution_collapse,
         "code_reference": code_reference_signal,
