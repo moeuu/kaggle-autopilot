@@ -234,9 +234,11 @@ The next high-value modernization work is:
    local generated-kernel data-dir resolver injection is now in `local_kernel_data_resolver.py`; local generated-kernel
    pipeline-config fallback injection is now in `local_kernel_pipeline_cfg.py`; local progress tracking, stall
    detection, and heartbeat formatting is now in `local_kernel_progress.py`;
-   local model-cache discovery and staging is now in `local_kernel_models.py`; local text-runtime aux input staging is
-   now in `local_kernel_aux_inputs.py`; kernel package source/runtime/external-file staging is now in
-   `kernel_package_files.py`; local-module inlining for packaged kernels is now in `kernel_module_inliner.py`;
+   local runtime env defaults, optional-backend downgrades, and CUDA-OOM fallback env policy are now in
+   `local_kernel_runtime_env.py`; local model-cache discovery and staging is now in `local_kernel_models.py`; local
+   text-runtime aux input staging is now in `local_kernel_aux_inputs.py`; kernel package source/runtime/external-file
+   staging is now in `kernel_package_files.py`; local-module inlining for packaged kernels is now in
+   `kernel_module_inliner.py`;
    zero-overlap drift guard generation is now in `local_kernel_drift_guard.py`; kernel bootstrap/env injection is now
    in `kernel_bootstrap.py`; local sitecustomize shim injection is now in `local_kernel_shims.py`; static submit
    wrapper rendering and code-competition tiny-submission rejection are now in `kernel_submit_wrapper.py`; Kaggle push

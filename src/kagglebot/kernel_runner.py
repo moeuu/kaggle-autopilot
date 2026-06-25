@@ -32,6 +32,7 @@ from kagglebot import local_kernel_limits as _local_kernel_limits
 from kagglebot import local_kernel_models as _local_kernel_models
 from kagglebot import local_kernel_pipeline_cfg as _local_kernel_pipeline_cfg
 from kagglebot import local_kernel_progress as _local_kernel_progress
+from kagglebot import local_kernel_runtime_env as _local_kernel_runtime_env
 from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
 from kagglebot import remote_kernel_state as _remote_kernel_state
@@ -88,7 +89,6 @@ _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
 _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
 _LOCAL_KERNEL_EXIT_PIPE_DRAIN_SEC = 1.0
-_LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 _SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
 _TRUSTED_KERNEL_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
 _URBAN_FLOOD_SAMPLEISH_SCORE_SOURCES = frozenset(
@@ -480,121 +480,6 @@ def _run_local_kernel_once(
         killed_for_stall=bool(stall_state["killed_for_stall"]),
         stall_kill_message=(str(stall_state["stall_kill_message"]) if stall_state["stall_kill_message"] else None),
     )
-
-
-def _env_truthy(raw: str | None) -> bool:
-    if raw is None:
-        return False
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _module_available(module_name: str) -> bool:
-    try:
-        import importlib.util
-
-        return importlib.util.find_spec(module_name) is not None
-    except Exception:
-        return False
-
-
-def _local_lightgbm_gpu_probe_usable() -> bool:
-    global _LOCAL_LGBM_GPU_PROBE_OK
-    if _LOCAL_LGBM_GPU_PROBE_OK is not None:
-        return _LOCAL_LGBM_GPU_PROBE_OK
-    if _env_truthy(os.environ.get("KAGGLEBOT_SKIP_LGBM_GPU_PROBE")):
-        _LOCAL_LGBM_GPU_PROBE_OK = False
-        return False
-    try:
-        import lightgbm as lgb
-        import numpy as np
-    except Exception:
-        _LOCAL_LGBM_GPU_PROBE_OK = False
-        return False
-
-    rng = np.random.default_rng(42)
-    x = rng.normal(size=(128, 4)).astype(np.float32)
-    y = (0.4 * x[:, 0] - 0.3 * x[:, 1] + 0.2 * x[:, 2]).astype(np.float32)
-    try:
-        model = lgb.LGBMRegressor(
-            n_estimators=16,
-            learning_rate=0.1,
-            num_leaves=15,
-            max_depth=5,
-            min_data_in_leaf=1,
-            min_data_in_bin=1,
-            device_type="gpu",
-            verbosity=-1,
-        )
-        model.fit(x, y)
-    except Exception:
-        _LOCAL_LGBM_GPU_PROBE_OK = False
-        return False
-    _LOCAL_LGBM_GPU_PROBE_OK = True
-    return True
-
-
-def _apply_local_runtime_env_defaults(
-    *,
-    env: dict[str, str],
-    accelerator: str,
-    local_working_dir: Path,
-) -> list[str]:
-    """Apply local execution defaults and force training to stay enabled."""
-    notes: list[str] = []
-    env.setdefault("KAGGLEBOT_LOCAL_WORKING_DIR", str(local_working_dir))
-    env.setdefault("KAGGLEBOT_DISABLE_KAGGLE_WORKING_WRITES", "1")
-    env.setdefault("KAGGLEBOT_NUM_WORKERS", "0")
-    env.setdefault("KAGGLEBOT_TORCH_SHARING_STRATEGY", "file_system")
-    env.setdefault("KAGGLEBOT_LOCAL_NOFILE", "4096")
-    env.setdefault(_local_kernel_limits.STALL_ENV, str(int(_local_kernel_limits.DEFAULT_STALL_SEC)))
-    env.setdefault("PYTHONUNBUFFERED", "1")
-    env["KAGGLEBOT_DO_TRAIN"] = "1"
-    env["KAGGLEBOT_FORCE_TRAIN"] = "1"
-    env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] = "1"
-    notes.append("forcing KAGGLEBOT_DO_TRAIN=1 and KAGGLEBOT_FORCE_TRAIN=1")
-    notes.append("forcing KAGGLEBOT_ALLOW_MODEL_DOWNLOAD=1")
-    notes.append(f"defaulting KAGGLEBOT_NUM_WORKERS={env['KAGGLEBOT_NUM_WORKERS']} for local kernels")
-    notes.append(f"defaulting KAGGLEBOT_TORCH_SHARING_STRATEGY={env['KAGGLEBOT_TORCH_SHARING_STRATEGY']}")
-    notes.append(f"defaulting KAGGLEBOT_LOCAL_NOFILE={env['KAGGLEBOT_LOCAL_NOFILE']}")
-    notes.append(f"defaulting {_local_kernel_limits.STALL_ENV}={env[_local_kernel_limits.STALL_ENV]}")
-    notes.append(f"defaulting PYTHONUNBUFFERED={env['PYTHONUNBUFFERED']}")
-
-    if not _module_available("xgboost"):
-        env.setdefault("USE_XGB", "0")
-        env.setdefault("KAGGLEBOT_DISABLE_XGBOOST", "1")
-        notes.append("xgboost unavailable; forcing USE_XGB=0")
-
-    force_lgbm_gpu = _env_truthy(os.environ.get("KAGGLEBOT_FORCE_LGBM_GPU"))
-    if accelerator == "gpu" and not force_lgbm_gpu and not _local_lightgbm_gpu_probe_usable():
-        env.setdefault("USE_LGBM_GPU", "0")
-        env.setdefault("KAGGLEBOT_DISABLE_LGBM_GPU", "1")
-        notes.append("LightGBM GPU probe failed; forcing CPU LightGBM")
-    return notes
-
-
-def _detect_cuda_oom(text: str) -> bool:
-    lowered = text.lower()
-    if "out of memory" not in lowered:
-        return False
-    if "cuda" in lowered:
-        return True
-    if "cublas_status_alloc_failed" in lowered:
-        return True
-    if "hiperroroutofmemory" in lowered:
-        return True
-    if "mps" in lowered and "out of memory" in lowered:
-        return True
-    return False
-
-
-def _apply_local_kernel_oom_fallback_env(env: dict[str, str]) -> list[str]:
-    notes: list[str] = []
-    env["ENABLE_LLM"] = "0"
-    env["PIPELINE_NAME"] = "retrieval_only_baseline"
-    env["ENABLE_SELF_CONSIST"] = "0"
-    env["SAVE_INTERMEDIATE"] = "0"
-    notes.append("CUDA OOM detected; retrying with ENABLE_LLM=0 and retrieval_only_baseline")
-    return notes
 
 
 @dataclass(frozen=True)
@@ -1247,7 +1132,7 @@ def run_kernel_local(
         env[key] = value
     for key, value in local_model_env.items():
         env[key] = value
-    env_notes = _apply_local_runtime_env_defaults(
+    env_notes = _local_kernel_runtime_env.apply_local_runtime_env_defaults(
         env=env,
         accelerator=accelerator,
         local_working_dir=kernel_stage_dir / "outputs" / "kaggle_working",
@@ -1316,10 +1201,15 @@ def run_kernel_local(
     if result.returncode != 0:
         combined = "\n".join(part for part in [result.stdout, result.stderr] if part)
         enable_llm_env = env.get("ENABLE_LLM")
-        llm_disabled_by_env = enable_llm_env is not None and not _env_truthy(enable_llm_env)
-        if accelerator == "gpu" and not strict_accelerator and not llm_disabled_by_env and _detect_cuda_oom(combined):
+        llm_disabled_by_env = enable_llm_env is not None and not _local_kernel_runtime_env.env_truthy(enable_llm_env)
+        if (
+            accelerator == "gpu"
+            and not strict_accelerator
+            and not llm_disabled_by_env
+            and _local_kernel_runtime_env.detect_cuda_oom(combined)
+        ):
             retry_env = env.copy()
-            retry_notes = _apply_local_kernel_oom_fallback_env(retry_env)
+            retry_notes = _local_kernel_runtime_env.apply_local_kernel_oom_fallback_env(retry_env)
             for note in retry_notes:
                 print(f"[yellow]kernel local[/yellow]: {note}")
             try:

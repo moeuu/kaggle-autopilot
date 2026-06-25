@@ -1192,46 +1192,6 @@ def test_inject_training_progress_shim(tmp_path: Path) -> None:
     assert "train done:" in text
 
 
-def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from kagglebot import kernel_runner
-
-    monkeypatch.setattr(
-        kernel_runner,
-        "_module_available",
-        lambda name: False if name == "xgboost" else True,
-    )
-    monkeypatch.setattr(kernel_runner, "_local_lightgbm_gpu_probe_usable", lambda: False)
-    monkeypatch.delenv("KAGGLEBOT_FORCE_LGBM_GPU", raising=False)
-
-    env: dict[str, str] = {}
-    notes = kernel_runner._apply_local_runtime_env_defaults(
-        env=env,
-        accelerator="gpu",
-        local_working_dir=tmp_path / "local-working",
-    )
-
-    assert env["KAGGLEBOT_DISABLE_KAGGLE_WORKING_WRITES"] == "1"
-    assert env["KAGGLEBOT_LOCAL_WORKING_DIR"] == str(tmp_path / "local-working")
-    assert env["KAGGLEBOT_NUM_WORKERS"] == "0"
-    assert env["KAGGLEBOT_TORCH_SHARING_STRATEGY"] == "file_system"
-    assert env["KAGGLEBOT_LOCAL_NOFILE"] == "4096"
-    assert env["KAGGLEBOT_LOCAL_KERNEL_STALL_SEC"] == "900"
-    assert env["KAGGLEBOT_DO_TRAIN"] == "1"
-    assert env["KAGGLEBOT_FORCE_TRAIN"] == "1"
-    assert env["KAGGLEBOT_ALLOW_MODEL_DOWNLOAD"] == "1"
-    assert env["USE_XGB"] == "0"
-    assert env["KAGGLEBOT_DISABLE_XGBOOST"] == "1"
-    assert env["USE_LGBM_GPU"] == "0"
-    assert env["KAGGLEBOT_DISABLE_LGBM_GPU"] == "1"
-    assert any("xgboost unavailable" in note for note in notes)
-    assert any("LightGBM GPU probe failed" in note for note in notes)
-    assert any("KAGGLEBOT_ALLOW_MODEL_DOWNLOAD=1" in note for note in notes)
-    assert any("KAGGLEBOT_NUM_WORKERS=0" in note for note in notes)
-    assert any("KAGGLEBOT_TORCH_SHARING_STRATEGY=file_system" in note for note in notes)
-
-
 def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
