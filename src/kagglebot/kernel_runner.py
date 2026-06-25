@@ -1066,7 +1066,7 @@ class KernelPackageBuilder:
         _inject_column_fill_shim(kernel_dir, context_dir)
         _inject_object_coerce_shim(kernel_dir, context_dir)
         _inject_device_coerce_shim(kernel_dir, context_dir)
-        _inject_training_progress_shim(kernel_dir)
+        _local_kernel_shims.inject_training_progress_shim(kernel_dir)
         _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_dir)
         _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
             base_dir=config.base_dir,
@@ -1167,7 +1167,7 @@ class KernelSubmitPackageBuilder:
             _inject_column_fill_shim(kernel_dir, context_dir)
             _inject_object_coerce_shim(kernel_dir, context_dir)
             _inject_device_coerce_shim(kernel_dir, context_dir)
-            _inject_training_progress_shim(kernel_dir)
+            _local_kernel_shims.inject_training_progress_shim(kernel_dir)
             _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_dir)
             _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
                 base_dir=config.base_dir,
@@ -1557,7 +1557,7 @@ def run_kernel_local(
     _local_kernel_shims.inject_kaggle_working_redirect_shim(kernel_stage_dir)
     _local_kernel_shims.inject_lgbm_gpu_guard_shim(kernel_stage_dir)
     _local_kernel_shims.inject_torch_runtime_guard_shim(kernel_stage_dir)
-    _inject_training_progress_shim(kernel_stage_dir)
+    _local_kernel_shims.inject_training_progress_shim(kernel_stage_dir)
     _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_stage_dir)
     _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
     _inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
@@ -2485,274 +2485,6 @@ def _inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
     if site_path.exists():
         text = site_path.read_text(encoding="utf-8", errors="ignore")
         if _DEVICE_COERCE_SHIM_MARKER in text:
-            return
-        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
-        return
-    site_path.write_text("\n".join(shim), encoding="utf-8")
-
-
-def _inject_training_progress_shim(kernel_dir: Path) -> None:
-    site_path = kernel_dir / "sitecustomize.py"
-    shim = (
-        (
-            f"""
-{_local_kernel_shims.TRAIN_PROGRESS_SHIM_MARKER}
-import importlib
-import os
-import threading
-import time
-
-_KB_PROGRESS = {{
-    "started_at": time.monotonic(),
-    "last_event_at": time.monotonic(),
-    "watchdog_started": False,
-}}
-
-def _kb_progress_enabled() -> bool:
-    value = str(os.environ.get("KAGGLEBOT_TRAIN_PROGRESS", "1")).strip().lower()
-    return value not in {{"0", "false", "off", "no"}}
-
-def _kb_int_env(name: str, default: int, minimum: int) -> int:
-    raw = os.environ.get(name, str(default))
-    try:
-        value = int(raw)
-    except Exception:
-        value = default
-    return max(minimum, value)
-
-def _kb_float_env(name: str, default: float, minimum: float) -> float:
-    raw = os.environ.get(name, str(default))
-    try:
-        value = float(raw)
-    except Exception:
-        value = default
-    return max(minimum, value)
-
-def _kb_emit(msg: str) -> None:
-    _KB_PROGRESS["last_event_at"] = time.monotonic()
-    print(f"[kernel] {{msg}}", flush=True)
-
-def _kb_get_shape(args):
-    if not args:
-        return None, None
-    x = args[0]
-    rows = None
-    cols = None
-    try:
-        rows = int(len(x))
-    except Exception:
-        rows = None
-    try:
-        shape = getattr(x, "shape", None)
-        if shape is not None and len(shape) >= 2:
-            cols = int(shape[1])
-    except Exception:
-        cols = None
-    return rows, cols
-
-def _kb_estimator_iter_budget(estimator) -> int | None:
-    params = {{}}
-    try:
-        params = estimator.get_params(deep=False)
-    except Exception:
-        params = {{}}
-    for key in ("iterations", "n_estimators", "max_iter", "num_iterations"):
-        value = params.get(key)
-        if isinstance(value, int) and value > 0:
-            return value
-    return None
-
-def _kb_resolve_boosting_log_every(estimator) -> int:
-    forced = _kb_int_env("KAGGLEBOT_BOOSTING_LOG_EVERY", 0, 0)
-    if forced > 0:
-        return forced
-    budget = _kb_estimator_iter_budget(estimator)
-    if budget is None:
-        return 100
-    # Target around 20-30 evaluation points across a full fit.
-    period = max(1, budget // 25)
-    return min(max(period, 10), 200)
-
-def _kb_choose_fit_tick_interval(label: str, rows: int | None) -> float:
-    base = _kb_float_env("KAGGLEBOT_MODEL_PROGRESS_INTERVAL_SEC", 12.0, 5.0)
-    if label in {{"catboost", "lightgbm", "xgboost"}}:
-        # Boosting models also emit iteration logs; keep timer sparse.
-        return max(base, 30.0)
-    if rows is None:
-        return base
-    if rows >= 200000:
-        return max(base, 30.0)
-    if rows >= 50000:
-        return max(base, 20.0)
-    if rows >= 10000:
-        return max(base, 12.0)
-    return base
-
-def _kb_start_watchdog_thread() -> None:
-    if not _kb_progress_enabled():
-        return
-    if bool(_KB_PROGRESS.get("watchdog_started", False)):
-        return
-    _KB_PROGRESS["watchdog_started"] = True
-    silence_sec = _kb_float_env("KAGGLEBOT_PROGRESS_INTERVAL_SEC", 45.0, 10.0)
-    poll_sec = max(1.0, min(5.0, silence_sec / 6.0))
-    def _run():
-        while True:
-            time.sleep(poll_sec)
-            now = time.monotonic()
-            last = float(_KB_PROGRESS.get("last_event_at", now))
-            if now - last < silence_sec:
-                continue
-            elapsed = int(max(0.0, now - float(_KB_PROGRESS.get("started_at", now))))
-            quiet = int(max(0.0, now - last))
-            _kb_emit(f"train watchdog: elapsed={{elapsed}}s no_new_logs_for={{quiet}}s")
-    t = threading.Thread(target=_run, daemon=True, name="kb-train-watchdog")
-    t.start()
-
-def _kb_wrap_splitter(module_name: str, class_name: str) -> None:
-    if not _kb_progress_enabled():
-        return
-    try:
-        mod = importlib.import_module(module_name)
-    except Exception:
-        return
-    cls = getattr(mod, class_name, None)
-    if cls is None:
-        return
-    split = getattr(cls, "split", None)
-    if split is None or not callable(split):
-        return
-    if getattr(split, "__kb_progress_wrapped__", False):
-        return
-    def _wrapped(self, *args, **kwargs):
-        iterator = split(self, *args, **kwargs)
-        total = getattr(self, "n_splits", None)
-        idx = 0
-        for item in iterator:
-            idx += 1
-            train_n = "?"
-            valid_n = "?"
-            if isinstance(item, tuple) and len(item) >= 2:
-                try:
-                    train_n = str(len(item[0]))
-                except Exception:
-                    pass
-                try:
-                    valid_n = str(len(item[1]))
-                except Exception:
-                    pass
-            fold_part = f"{{idx}}/{{total}}" if isinstance(total, int) and total > 0 else str(idx)
-            _kb_emit(
-                f"cv fold start: splitter={{class_name}} fold={{fold_part}} train={{train_n}} valid={{valid_n}}"
-            )
-            yield item
-        if idx > 0:
-            _kb_emit(f"cv split done: splitter={{class_name}} folds={{idx}}")
-    _wrapped.__kb_progress_wrapped__ = True
-    setattr(cls, "split", _wrapped)
-
-def _kb_wrap_fit(module_name: str, class_name: str, label: str) -> None:
-    if not _kb_progress_enabled():
-        return
-    try:
-        mod = importlib.import_module(module_name)
-    except Exception:
-        return
-    cls = getattr(mod, class_name, None)
-    if cls is None:
-        return
-    fit = getattr(cls, "fit", None)
-    if fit is None or not callable(fit):
-        return
-    if getattr(fit, "__kb_progress_wrapped__", False):
-        return
-    def _wrapped(self, *args, **kwargs):
-        model_name = self.__class__.__name__
-        rows, cols = _kb_get_shape(args)
-        iter_budget = _kb_estimator_iter_budget(self)
-        log_every = None
-        if label in {{"catboost", "lightgbm", "xgboost"}}:
-            log_every = _kb_resolve_boosting_log_every(self)
-        summary = [f"train start: model={{label}}.{{model_name}}"]
-        if rows is not None:
-            summary.append(f"rows={{rows}}")
-        if cols is not None:
-            summary.append(f"cols={{cols}}")
-        if iter_budget is not None:
-            summary.append(f"iter_budget={{iter_budget}}")
-        if log_every is not None:
-            summary.append(f"log_every={{log_every}}")
-        _kb_emit(" ".join(summary))
-        try:
-            if label == "lightgbm":
-                import lightgbm as _lgb
-                callbacks = list(kwargs.get("callbacks") or [])
-                callbacks.append(_lgb.log_evaluation(period=log_every))
-                kwargs["callbacks"] = callbacks
-            elif label == "xgboost":
-                if kwargs.get("eval_set"):
-                    kwargs["verbose"] = log_every
-            elif label == "catboost":
-                try:
-                    self.set_params(verbose=log_every)
-                except Exception:
-                    pass
-                kwargs.setdefault("verbose", log_every)
-        except Exception:
-            pass
-        started = time.monotonic()
-        interval = _kb_choose_fit_tick_interval(label, rows)
-        stop = threading.Event()
-        def _ticker():
-            while not stop.wait(interval):
-                elapsed = int(max(0.0, time.monotonic() - started))
-                _kb_emit(f"train running: model={{label}}.{{model_name}} elapsed={{elapsed}}s")
-        thread = threading.Thread(target=_ticker, daemon=True, name=f"kb-fit-{{label}}")
-        thread.start()
-        try:
-            return fit(self, *args, **kwargs)
-        finally:
-            stop.set()
-            thread.join(timeout=0.2)
-            elapsed = int(max(0.0, time.monotonic() - started))
-            _kb_emit(f"train done: model={{label}}.{{model_name}} elapsed={{elapsed}}s")
-    _wrapped.__kb_progress_wrapped__ = True
-    setattr(cls, "fit", _wrapped)
-
-def _kb_patch_training_progress() -> None:
-    if not _kb_progress_enabled():
-        return
-    _kb_start_watchdog_thread()
-    splitters = [
-        ("sklearn.model_selection", "KFold"),
-        ("sklearn.model_selection", "StratifiedKFold"),
-        ("sklearn.model_selection", "GroupKFold"),
-        ("sklearn.model_selection", "TimeSeriesSplit"),
-    ]
-    for module_name, class_name in splitters:
-        _kb_wrap_splitter(module_name, class_name)
-    targets = [
-        ("catboost", "CatBoostRegressor", "catboost"),
-        ("lightgbm", "LGBMRegressor", "lightgbm"),
-        ("xgboost", "XGBRegressor", "xgboost"),
-        ("sklearn.ensemble", "HistGradientBoostingRegressor", "sklearn"),
-        ("sklearn.linear_model", "ElasticNet", "sklearn"),
-        ("sklearn.linear_model", "Ridge", "sklearn"),
-        ("sklearn.linear_model", "SGDRegressor", "sklearn"),
-        ("sklearn.kernel_ridge", "KernelRidge", "sklearn"),
-    ]
-    for module_name, class_name, label in targets:
-        _kb_wrap_fit(module_name, class_name, label)
-
-_kb_patch_training_progress()
-"""
-        )
-        .strip("\n")
-        .splitlines()
-    )
-    if site_path.exists():
-        text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _local_kernel_shims.TRAIN_PROGRESS_SHIM_MARKER in text:
             return
         site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return

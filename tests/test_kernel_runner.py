@@ -34,6 +34,7 @@ from kagglebot.local_kernel_shims import (
     ensure_training_progress_shim,
     inject_kaggle_working_redirect_shim,
     inject_lgbm_gpu_guard_shim,
+    inject_training_progress_shim,
     inject_transformers_eval_strategy_shim,
 )
 
@@ -1227,6 +1228,23 @@ def test_inject_transformers_eval_strategy_shim(tmp_path: Path) -> None:
     assert "evaluation_strategy" in text
     assert "eval_strategy" in text
     assert "Seq2SeqTrainingArguments" in text
+
+
+def test_inject_training_progress_shim(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+
+    inject_training_progress_shim(kernel_dir)
+    inject_training_progress_shim(kernel_dir)
+
+    site_path = kernel_dir / "sitecustomize.py"
+    assert site_path.exists()
+    text = site_path.read_text(encoding="utf-8")
+    assert text.count("kagglebot: train-progress-shim") == 1
+    assert "train watchdog" in text
+    assert "cv fold start:" in text
+    assert "train start:" in text
+    assert "train done:" in text
 
 
 def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
