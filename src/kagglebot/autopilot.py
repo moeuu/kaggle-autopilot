@@ -4701,9 +4701,8 @@ def _build_kernel_quality_guard(
     )
     merge_signal_messages(prediction_distribution_signal)
     prediction_distribution_collapse = prediction_distribution_signal.get("collapse")
-    if prediction_distribution_signal.get("reasons"):
-        if not force_submit:
-            block_submit = True
+    if bool(prediction_distribution_signal.get("block_submit")) and not force_submit:
+        block_submit = True
 
     competition_faithfulness_signal = _build_competition_faithfulness_quality_signal(
         evaluation_metric=evaluation.metric,

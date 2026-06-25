@@ -689,6 +689,7 @@ def test_build_prediction_distribution_quality_signal_warns_on_collapse() -> Non
         "prediction_distribution_collapse="
         "selected=sparse,selected_mean=2.0,largest_mean_candidate=dense,largest_mean=10.0"
     ]
+    assert signal["block_submit"] is False
 
 
 def test_build_prediction_distribution_quality_signal_blocks_with_candidate_mismatch() -> None:
@@ -713,6 +714,7 @@ def test_build_prediction_distribution_quality_signal_blocks_with_candidate_mism
 
     assert signal["detected"] is True
     assert signal["reasons"] == ["prediction_distribution_collapse_vs_candidates"]
+    assert signal["block_submit"] is True
 
 
 def test_extract_competition_faithfulness_prefers_metric_name_over_numeric_metric() -> None:

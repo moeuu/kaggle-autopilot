@@ -983,6 +983,7 @@ def build_prediction_distribution_quality_signal(
         "collapse": collapse,
         "reasons": reasons,
         "warnings": warnings,
+        "block_submit": bool(reasons),
     }
 
 
