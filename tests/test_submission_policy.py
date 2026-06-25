@@ -20,6 +20,7 @@ from kagglebot.submission_policy import (
     normalize_watch_submit_policy,
     normalized_submission_gate,
     normalized_submit_policy,
+    parse_kaggle_submission_timestamp,
     quality_reasons_allow_initial_submit_probe,
     quality_reasons_allow_spare_submit,
     resolve_fallback_submit_blocked_reason,
@@ -466,6 +467,17 @@ def test_submission_row_counts_use_kaggle_cli_dates() -> None:
 
     assert count_submission_rows_on_utc_day(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
     assert count_submission_rows_in_recent_window(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
+
+
+def test_parse_kaggle_submission_timestamp_uses_shared_iso_policy_and_cli_fallbacks() -> None:
+    assert parse_kaggle_submission_timestamp("2026-05-09T23:59:59Z") == datetime(2026, 5, 9, 23, 59, 59, tzinfo=UTC)
+    assert parse_kaggle_submission_timestamp("2026-05-10T08:59:59+09:00") == datetime(
+        2026, 5, 9, 23, 59, 59, tzinfo=UTC
+    )
+    assert parse_kaggle_submission_timestamp("2026-05-09 06:16:21.527000") == datetime(
+        2026, 5, 9, 6, 16, 21, 527000, tzinfo=UTC
+    )
+    assert parse_kaggle_submission_timestamp("2026-05-09 06:16:21 UTC") == datetime(2026, 5, 9, 6, 16, 21, tzinfo=UTC)
 
 
 def test_count_daily_competition_submissions_uses_max_of_utc_day_and_recent_window() -> None:

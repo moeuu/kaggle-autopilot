@@ -4,6 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from kagglebot.datetime_utils import parse_iso_datetime_utc
+
 SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = frozenset(
     {
         "selected_worse_than_detected_baseline",
@@ -489,19 +491,18 @@ def parse_kaggle_submission_timestamp(value: str | None) -> datetime | None:
     if text.upper().endswith(" UTC"):
         text = text[:-4].strip()
         assume_utc = True
-    text = text.replace("Z", "+00:00")
 
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        parsed = None
+    parsed = parse_iso_datetime_utc(text)
+    if parsed is not None and not assume_utc:
+        return parsed
+    if parsed is None:
         for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
             try:
                 parsed = datetime.strptime(text, fmt)
                 break
             except ValueError:
                 continue
-        if parsed is None:
+        else:
             return None
 
     if parsed.tzinfo is None or assume_utc:

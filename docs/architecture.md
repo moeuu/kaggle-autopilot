@@ -324,7 +324,7 @@ The next high-value modernization work is:
    selection, and candidate-vs-baseline comparisons now live in `score_utils.py`, leaving campaign modules as
    compatibility call sites and self-improvement run summaries on the shared score policy. ISO timestamp parsing that
    normalizes values to UTC now lives in `datetime_utils.py`, so bootstrap, Kaggle API adapters, notification,
-   supervisor, submission ledger, and submission-outcome code share one timezone policy.
+   supervisor, submission ledger, submission quota policy, and submission-outcome code share one timezone policy.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.
