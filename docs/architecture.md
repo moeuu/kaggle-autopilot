@@ -281,6 +281,8 @@ The next high-value modernization work is:
    orchestration modules; obsolete autopilot plan load/write/resolved conversion wrappers have been retired.
    Agent write-guard policy, snapshots, repairs, and secret prompt checks now live in `write_guard.py`; agent and
    autopilot orchestration import that shared module instead of sharing guard internals through `agent_pipeline.py`.
+   Watch-state phase updates now live in `watch_state.py`; autopilot orchestration reports phase transitions without
+   owning the state-file environment lookup or JSON update details.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.

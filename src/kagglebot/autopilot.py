@@ -35,6 +35,7 @@ from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot import submit_notebook as _submit_notebook
 from kagglebot import submit_retry_policy as _submit_retry_policy
 from kagglebot import submit_stage as _submit_stage
+from kagglebot import watch_state as _watch_state
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
@@ -124,7 +125,6 @@ from kagglebot.iteration_signals import extract_pseudo_label_failure_signal as _
 from kagglebot.iteration_signals import extract_same_family_plateau_signal as _extract_same_family_plateau_signal
 from kagglebot.iteration_signals import requires_tabular_multi_family_policy as _requires_tabular_multi_family_policy
 from kagglebot.json_utils import load_json_object as _load_json_object
-from kagglebot.json_utils import load_json_object_or_empty as _load_json_object_or_empty
 from kagglebot.json_utils import write_json_object as _write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
@@ -312,7 +312,6 @@ MAX_AUTOFIX_CODEX_PASSES = 3
 MAX_KERNEL_FIX_CODEX_PASSES = 3
 MAX_AGENT_CAPACITY_ATTEMPTS = 3
 AGENT_CAPACITY_RETRY_SLEEP = 5.0
-_WATCH_STATE_ENV = "KAGGLEBOT_WATCH_STATE_PATH"
 _ERROR_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
 _ERROR_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
 _ERROR_STRATEGY_MODEL = STRATEGY_AGENT.model
@@ -482,7 +481,7 @@ class PlanningPhase:
             plan_target_direction=plan.target_direction,
         ):
             print("[cyan]plan[/cyan]: generating initial plan")
-            _update_watch_phase(
+            _watch_state.update_watch_phase(
                 self.config,
                 self.run_id,
                 "gpt_planning",
@@ -545,47 +544,6 @@ class SubmissionPhase:
         )
 
 
-def _update_watch_phase(
-    config: AutopilotConfig,
-    run_id: str,
-    phase: str,
-    *,
-    detail: str | None = None,
-    iteration: int | None = None,
-) -> None:
-    state_raw = os.environ.get(_WATCH_STATE_ENV)
-    if not state_raw:
-        return
-    state_path = Path(state_raw)
-    payload = _load_json_object_or_empty(state_path)
-    active_slug = str(payload.get("active_slug") or "").strip()
-    active_run_id = str(payload.get("active_run_id") or "").strip()
-    if active_slug and active_slug != config.slug:
-        return
-    if active_run_id and active_run_id != run_id:
-        return
-    payload.update(
-        {
-            "active_slug": config.slug,
-            "active_run_id": run_id,
-            "last_status": "running",
-            "phase": phase,
-            "compute": config.compute,
-            "updated_at": datetime.now(UTC).isoformat(),
-        }
-    )
-    if detail:
-        payload["phase_detail"] = detail
-    else:
-        payload.pop("phase_detail", None)
-    if iteration is not None:
-        payload["iteration"] = iteration
-    try:
-        _write_json_object(state_path, payload, sort_keys=True)
-    except OSError:
-        return
-
-
 @dataclass(frozen=True)
 class AutopilotSession:
     config: AutopilotConfig
@@ -607,7 +565,7 @@ class AutopilotSession:
 def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
-    _update_watch_phase(config, run_id, "autopilot_starting")
+    _watch_state.update_watch_phase(config, run_id, "autopilot_starting")
     print(f"[green]run started[/green]: {run_id}")
     planning_phase = PlanningPhase(config=config, run_id=run_id, resume_run=resume_run)
     knowledge_phase = KnowledgePhase(config=config)
@@ -615,7 +573,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     if not config.paths.plan_path.exists():
         _plan_policy.write_plan_config(config.paths, plan)
 
-    _update_watch_phase(config, run_id, "leaderboard_fetching")
+    _watch_state.update_watch_phase(config, run_id, "leaderboard_fetching")
     print(f"[cyan]fetching leaderboard[/cyan]: {config.slug}")
     metric_hint = config.target_metric or plan.target_metric
     top1_info = leaderboard_top1(
@@ -626,11 +584,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     _write_json_object(config.paths.top1_public_path, top1_info)
     print(format_top1_public_score_message(top1_info))
-    _update_watch_phase(config, run_id, "knowledge_refreshing")
+    _watch_state.update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()
     plan = planning_phase.execute(plan)
 
-    _update_watch_phase(config, run_id, "resolving_plan")
+    _watch_state.update_watch_phase(config, run_id, "resolving_plan")
     resolved = _resolve_plan(plan, config)
     target_metric = resolved["target_metric"]
     target_score = resolved["target_score"]
@@ -684,7 +642,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
         default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
-    _update_watch_phase(config, run_id, "initializing_iterations")
+    _watch_state.update_watch_phase(config, run_id, "initializing_iterations")
     run_payload = _build_run_payload(
         run_id=run_id,
         config=config,
@@ -936,7 +894,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
     try:
         for iteration in range(start_iteration, max_iterations + 1):
-            _update_watch_phase(config, run_id, "iteration_starting", iteration=iteration)
+            _watch_state.update_watch_phase(config, run_id, "iteration_starting", iteration=iteration)
             last_completed_iteration = iteration
             if max_total_min is not None and max_total_min > 0:
                 elapsed_total_min = (time.monotonic() - loop_started_at) / 60.0
@@ -958,7 +916,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             print(f"[cyan]iteration[/cyan]: {iteration}/{max_iterations}")
             knowledge_phase.refresh()
 
-            _update_watch_phase(config, run_id, "verifying", iteration=iteration)
+            _watch_state.update_watch_phase(config, run_id, "verifying", iteration=iteration)
             _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
 
             submission_path = iter_dir / "submission.csv"
@@ -998,7 +956,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
 
             if evaluation is None:
-                _update_watch_phase(config, run_id, "kernel_preflight", iteration=iteration)
+                _watch_state.update_watch_phase(config, run_id, "kernel_preflight", iteration=iteration)
                 _run_kernel_source_preflight_fixes(
                     config=config,
                     run_id=run_id,
@@ -1009,7 +967,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
             if evaluation is None and config.compute.startswith("kaggle_"):
                 kaggle_user = resolve_kaggle_username(config.kaggle_username)
-                _update_watch_phase(config, run_id, "kaggle_kernel_running", iteration=iteration)
+                _watch_state.update_watch_phase(config, run_id, "kaggle_kernel_running", iteration=iteration)
                 print(f"[cyan]kernel run[/cyan]: {config.compute}")
                 kernel_attempts = 0
                 error_fingerprints: dict[str, int] = {}
@@ -1074,7 +1032,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         error_text = _kernel_errors.format_kernel_error(exc)
                         logs_dir.mkdir(parents=True, exist_ok=True)
                         (logs_dir / "kernel_remote_still_running.txt").write_text(error_text + "\n", encoding="utf-8")
-                        _update_watch_phase(
+                        _watch_state.update_watch_phase(
                             config,
                             run_id,
                             "kaggle_kernel_still_running",
@@ -1105,7 +1063,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "KAGGLEBOT_KERNEL_CAPACITY_RETRIES",
                             default=MAX_KERNEL_CAPACITY_RETRIES,
                         )
-                        _update_watch_phase(
+                        _watch_state.update_watch_phase(
                             config,
                             run_id,
                             "kaggle_gpu_no_capacity",
@@ -1187,7 +1145,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         "Local autopilot requires kernel.py, but "
                         f"{kernel_path} was not found. Run planning/implement to generate kernel.py first."
                     )
-                _update_watch_phase(config, run_id, "local_kernel_running", iteration=iteration)
+                _watch_state.update_watch_phase(config, run_id, "local_kernel_running", iteration=iteration)
                 print(f"[cyan]kernel local run[/cyan]: {config.compute}")
                 kernel_attempts = 0
                 error_fingerprints = {}
@@ -1488,7 +1446,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         val_score=evaluation.val_score,
                         fold_scores=evaluation.fold_scores,
                     )
-            _update_watch_phase(config, run_id, "evaluating_iteration", iteration=iteration)
+            _watch_state.update_watch_phase(config, run_id, "evaluating_iteration", iteration=iteration)
             report, report_payload, eval_data_cache = _iteration_metrics.build_iteration_evaluation_report(
                 config=config,
                 run_id=run_id,
@@ -3634,7 +3592,7 @@ def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = 
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
     print(f"[cyan]plan[/cyan]: {planning_flow_summary()}")
-    _update_watch_phase(
+    _watch_state.update_watch_phase(
         config,
         run_id,
         "gpt_planning",
@@ -3659,7 +3617,12 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         time_budget_min=config.time_budget_min,
     )
     run_agent_pipeline(paths=config.paths, config=pipeline_config)
-    _update_watch_phase(config, run_id, "verifying", detail="Verifying the generated plan and kernel scaffold.")
+    _watch_state.update_watch_phase(
+        config,
+        run_id,
+        "verifying",
+        detail="Verifying the generated plan and kernel scaffold.",
+    )
     _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
 
 
@@ -4344,7 +4307,7 @@ def _run_improvement(
         problem_type_knowledge=problem_type_knowledge,
     )
     strategy_dir = agent_dir / f"improve_strategy-{iteration:02d}"
-    _update_watch_phase(
+    _watch_state.update_watch_phase(
         config,
         run_id,
         "gpt_improvement_thinking",
@@ -4376,7 +4339,7 @@ def _run_improvement(
     )
 
     print(f"[cyan]improve[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} implementer")
-    _update_watch_phase(
+    _watch_state.update_watch_phase(
         config,
         run_id,
         "gpt_improvement_fixing",
@@ -4451,7 +4414,7 @@ def _run_improvement(
             raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} improvement failed.\n{detail}")
         raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} improvement failed.")
 
-    _update_watch_phase(
+    _watch_state.update_watch_phase(
         config,
         run_id,
         "gpt_improvement_fixing",
@@ -4710,7 +4673,7 @@ def _run_kernel_fix(
             f"skipping gpt strategy ({strategy_skip_reason}); invoking {IMPLEMENTATION_AGENT.log_alias} fixer directly."
         )
     else:
-        _update_watch_phase(
+        _watch_state.update_watch_phase(
             config,
             run_id,
             "gpt_kernel_fix_thinking",
@@ -4787,7 +4750,7 @@ def _run_kernel_fix(
             agent_dir if codex_pass == 1 else agent_dir / f"kernel_fix_pass-{attempt:02d}-{codex_pass:02d}"
         )
         print(f"[cyan]kernel fix[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} fixer")
-        _update_watch_phase(
+        _watch_state.update_watch_phase(
             config,
             run_id,
             "gpt_kernel_fix_fixing",
@@ -5248,7 +5211,7 @@ an ad-hoc repaired copy behind.
     )
     thinking_phase = "gpt_submit_autofix_thinking" if submit_autofix else "gpt_autofix_thinking"
     fixing_phase = "gpt_submit_autofix_fixing" if submit_autofix else "gpt_autofix_fixing"
-    _update_watch_phase(
+    _watch_state.update_watch_phase(
         config,
         run_id,
         thinking_phase,
@@ -5317,7 +5280,7 @@ an ad-hoc repaired copy behind.
 
         before = _snapshot_tree(config.paths.repo_root)
         pass_output_dir = autofix_dir if codex_pass == 1 else autofix_dir / f"pass-{codex_pass:02d}"
-        _update_watch_phase(
+        _watch_state.update_watch_phase(
             config,
             run_id,
             fixing_phase,
