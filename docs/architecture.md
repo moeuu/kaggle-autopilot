@@ -322,8 +322,8 @@ Recommended extraction order:
    iteration submit eligibility, plus run evaluation-report resume/persistence, are now in `iteration_metrics.py`.
    Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
-   context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
-   submit retry decisions are now extracted.
+   context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file
+   repair preparation, same-fingerprint retry allowance, and submit retry decisions are now extracted.
    Lightweight runtime-fix artifact writers for missing columns, column aliases, object dtype coercion, device coercion,
    blocked modules, deterministic strategy-skip decisions, and kernel-first non-autofixable runtime checks are now in
    `runtime_fixes.py`.

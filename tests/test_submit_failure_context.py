@@ -12,6 +12,8 @@ from kagglebot.submit_failure_context import (
     decide_submit_abort_autofixability,
     decide_submit_autofix_input_submission,
     format_submit_autofix_context,
+    format_submit_file_repair_contract_prompt,
+    format_submit_file_repair_contract_retry_feedback,
     load_submit_failure_context,
     mark_submit_failure_context_resolved,
     path_from_submit_reference,
@@ -574,6 +576,23 @@ def test_submit_file_fix_contract_satisfied_requires_changed_artifact(tmp_path: 
         baseline_sha256="old",
         sha256_or_none=lambda path: hashes.get(path),
     )
+
+
+def test_submit_file_repair_contract_text_and_retry_feedback(tmp_path: Path) -> None:
+    prompt = format_submit_file_repair_contract_prompt()
+    assert "## Submission File Repair Contract" in prompt
+    assert "submit_autofix_submission_path" in prompt
+    assert "authoritative source" in prompt
+
+    baseline = tmp_path / "submission.csv"
+    feedback = format_submit_file_repair_contract_retry_feedback(
+        baseline_path=baseline,
+        baseline_sha256="abc123",
+    )
+    assert "Submission file repair contract not satisfied." in feedback
+    assert f"baseline_submission_path={baseline}" in feedback
+    assert "baseline_submission_sha256=abc123" in feedback
+    assert "submit_autofix_submission_path" in feedback
 
 
 def test_format_submit_autofix_context_includes_failure_state_and_latest_attempt() -> None:

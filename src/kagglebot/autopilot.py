@@ -4764,16 +4764,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         submit_context=submit_context,
     )
     if submit_file_fix_required:
-        prompt_text += """
-
-## Submission File Repair Contract
-
-Kaggle rejected the submission artifact itself. This autofix is not complete unless the submission file bytes or
-artifact path change, and `run_state.json` records `submit_autofix_submission_path` pointing to the repaired file.
-If you repair the file in place, ensure the file contents actually change.
-If this is competition-specific, fix the authoritative source that generates the artifact rather than leaving only
-an ad-hoc repaired copy behind.
-"""
+        prompt_text += _submit_failure_context.format_submit_file_repair_contract_prompt()
     strategy_stage = "submit_autofix" if submit_autofix else "autofix"
     strategy_label = "submit autofix" if submit_autofix else "autofix"
     print(
@@ -4899,13 +4890,9 @@ an ad-hoc repaired copy behind.
             baseline_sha256=submit_file_fix_baseline_sha256,
             sha256_or_none=_sha256_or_none,
         ):
-            retry_feedback = (
-                "Submission file repair contract not satisfied.\n"
-                "Kaggle rejected the submission artifact itself, so this autofix must change the prepared "
-                "submission file bytes or output path.\n"
-                f"baseline_submission_path={submit_file_fix_baseline_path}\n"
-                f"baseline_submission_sha256={submit_file_fix_baseline_sha256}\n"
-                "Record the repaired artifact in run_state.json as submit_autofix_submission_path."
+            retry_feedback = _submit_failure_context.format_submit_file_repair_contract_retry_feedback(
+                baseline_path=submit_file_fix_baseline_path,
+                baseline_sha256=submit_file_fix_baseline_sha256,
             )
             if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
                 continue

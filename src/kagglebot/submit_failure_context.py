@@ -400,6 +400,34 @@ def should_defer_submit_abort_to_next_iteration(
     return bool(failure_context.get("active")) and bool(failure_context.get("repairable"))
 
 
+def format_submit_file_repair_contract_prompt() -> str:
+    return """
+
+## Submission File Repair Contract
+
+Kaggle rejected the submission artifact itself. This autofix is not complete unless the submission file bytes or
+artifact path change, and `run_state.json` records `submit_autofix_submission_path` pointing to the repaired file.
+If you repair the file in place, ensure the file contents actually change.
+If this is competition-specific, fix the authoritative source that generates the artifact rather than leaving only
+an ad-hoc repaired copy behind.
+"""
+
+
+def format_submit_file_repair_contract_retry_feedback(
+    *,
+    baseline_path: Path | None,
+    baseline_sha256: str | None,
+) -> str:
+    return (
+        "Submission file repair contract not satisfied.\n"
+        "Kaggle rejected the submission artifact itself, so this autofix must change the prepared "
+        "submission file bytes or output path.\n"
+        f"baseline_submission_path={baseline_path}\n"
+        f"baseline_submission_sha256={baseline_sha256}\n"
+        "Record the repaired artifact in run_state.json as submit_autofix_submission_path."
+    )
+
+
 def build_submit_failure_improvement_context(
     *,
     failure_context: dict[str, object],
