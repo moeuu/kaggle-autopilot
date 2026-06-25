@@ -5,6 +5,7 @@ from typing import Any
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
+from kagglebot.scalar_utils import parse_finite_float, parse_int
 
 
 @dataclass(frozen=True)
@@ -175,10 +176,10 @@ def _to_float_dict(raw: object, *, key: str) -> dict[str, float]:
         keyword = str(item_key).strip()
         if not keyword:
             continue
-        try:
-            converted[keyword] = float(value)
-        except (TypeError, ValueError):
+        parsed = parse_finite_float(value)
+        if parsed is None:
             continue
+        converted[keyword] = parsed
     return converted
 
 
@@ -205,32 +206,10 @@ def _to_bool(raw: object, *, key: str) -> bool:
 def _to_int(raw: object, *, key: str) -> int | None:
     if not isinstance(raw, dict):
         return None
-    value = raw.get(key)
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str) and value.strip():
-        try:
-            return int(float(value.strip()))
-        except ValueError:
-            return None
-    return None
+    return parse_int(raw.get(key), allow_float=True)
 
 
 def _to_float(raw: object, *, key: str) -> float | None:
     if not isinstance(raw, dict):
         return None
-    value = raw.get(key)
-    if isinstance(value, bool):
-        return float(int(value))
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str) and value.strip():
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
+    return parse_finite_float(raw.get(key))

@@ -39,7 +39,13 @@ def test_load_competition_policy_normalizes_nested_policy_values(tmp_path: Path)
                 "required_capabilities": ["requires_oof_blend"],
                 "execution_hints": {"folds": 3},
                 "notebook_selection": {
-                    "keyword_boosts": {"xgb": "2.5", "bad": "nan-value"},
+                    "keyword_boosts": {
+                        "xgb": "2.5",
+                        "bad": "nan-value",
+                        "bool": True,
+                        "nan": float("nan"),
+                        "inf": float("inf"),
+                    },
                     "required_reference_keywords": ["gold"],
                 },
                 "reference_inputs": {
@@ -84,3 +90,24 @@ def test_load_competition_policy_normalizes_nested_policy_values(tmp_path: Path)
     assert policy.repair.same_family_plateau_signal is True
     assert policy.evaluation.fallback_overrides == {"metric": "auc"}
     assert policy.evaluation.search_stop_rank_percentile == 0.01
+
+
+def test_load_competition_policy_rejects_unsafe_numeric_policy_values(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.competition_policy_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "prompt": {"min_model_families_before_stop": "2.5"},
+                "evaluation": {"search_stop_rank_percentile": True},
+                "notebook_selection": {"keyword_boosts": {"boost": False}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    policy = load_competition_policy(paths)
+
+    assert policy.notebook_selection.keyword_boosts == {}
+    assert policy.prompt.min_model_families_before_stop is None
+    assert policy.evaluation.search_stop_rank_percentile is None
