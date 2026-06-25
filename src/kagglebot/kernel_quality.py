@@ -81,6 +81,7 @@ def build_score_source_quality_signal(score_source: str | None) -> dict[str, obj
         "trusted": trusted,
         "reasons": reasons,
         "warnings": warnings,
+        "block_submit": not trusted,
     }
 
 

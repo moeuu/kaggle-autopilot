@@ -4676,9 +4676,8 @@ def _build_kernel_quality_guard(
 
     score_source_signal = _build_score_source_quality_signal(evaluation.score_source)
     merge_signal_messages(score_source_signal)
-    if not bool(score_source_signal.get("trusted")):
-        if not force_submit:
-            block_submit = True
+    if bool(score_source_signal.get("block_submit")) and not force_submit:
+        block_submit = True
 
     oracle_signal = _build_oracle_override_signal(payload)
     merge_signal_messages(oracle_signal)

@@ -62,6 +62,7 @@ def test_build_score_source_quality_signal_flags_untrusted_sources() -> None:
         "trusted": False,
         "reasons": ["untrusted_score_source"],
         "warnings": ["score_source=sample_cv"],
+        "block_submit": True,
     }
 
 
@@ -73,6 +74,7 @@ def test_build_score_source_quality_signal_allows_trusted_sources() -> None:
         "trusted": True,
         "reasons": [],
         "warnings": [],
+        "block_submit": False,
     }
 
 
