@@ -4692,9 +4692,8 @@ def _build_kernel_quality_guard(
     candidate_selection_signal = _build_candidate_selection_quality_signal(payload=payload, direction=direction)
     merge_signal_messages(candidate_selection_signal)
     candidate_selection_mismatch = candidate_selection_signal.get("mismatch")
-    if bool(candidate_selection_signal.get("detected")):
-        if not force_submit:
-            block_submit = True
+    if bool(candidate_selection_signal.get("block_submit")) and not force_submit:
+        block_submit = True
 
     prediction_distribution_signal = _build_prediction_distribution_quality_signal(
         payload=payload,

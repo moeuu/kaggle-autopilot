@@ -605,6 +605,7 @@ def test_build_candidate_selection_quality_signal_reports_warning_and_reason() -
         "candidate_selection_mismatch=selected=cv_only_sparse,"
         "selected_secondary=0.02,best_secondary_candidate=public_like_reference,best_secondary=0.0384"
     ]
+    assert signal["block_submit"] is True
     mismatch = signal["mismatch"]
     assert isinstance(mismatch, dict)
     assert mismatch["best_secondary_candidate"] == "public_like_reference"
@@ -635,6 +636,7 @@ def test_build_candidate_selection_quality_signal_allows_matching_selection() ->
         "mismatch": None,
         "reasons": [],
         "warnings": [],
+        "block_submit": False,
     }
 
 

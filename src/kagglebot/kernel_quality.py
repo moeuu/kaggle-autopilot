@@ -903,6 +903,7 @@ def build_candidate_selection_quality_signal(
         "mismatch": mismatch,
         "reasons": reasons,
         "warnings": warnings,
+        "block_submit": detected,
     }
 
 
