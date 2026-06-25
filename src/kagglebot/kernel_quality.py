@@ -4,8 +4,8 @@ import re
 from collections.abc import Iterator
 
 from kagglebot import plan_policy, score_progress, score_sources
-from kagglebot.autopilot_helpers import _to_float, _to_int
 from kagglebot.metric_matching import metrics_equivalent
+from kagglebot.scalar_utils import parse_finite_float, parse_int
 
 QUALITY_GUARD_BASELINE_REL_MARGIN = 0.01
 QUALITY_GUARD_BASELINE_ABS_MARGIN = 1e-6
@@ -51,6 +51,14 @@ HIGH_CAPACITY_MARKERS = (
     "stack",
 )
 EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
+
+
+def _to_int(value: object) -> int | None:
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
 
 
 def is_significantly_worse(

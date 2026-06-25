@@ -79,6 +79,20 @@ def test_build_score_source_quality_signal_allows_trusted_sources() -> None:
     }
 
 
+def test_extract_cv_breakdown_by_model_node_ignores_non_finite_scores() -> None:
+    scores = extract_cv_breakdown_by_model_node(
+        {
+            "cv_breakdown_by_model_node": {
+                "model_1_node_type_1": "nan",
+                "model_1_node_type_2": "inf",
+                "model_2_node_type_1": "0.42",
+            },
+        }
+    )
+
+    assert scores == {(2, 1): 0.42}
+
+
 def test_merge_quality_signal_messages_filters_and_dedupes_strings() -> None:
     merged = merge_quality_signal_messages(
         reasons=["existing"],
