@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kagglebot.kernel_quality import (
     build_accuracy_potential,
+    build_baseline_quality_signal,
     build_validation_metric_alignment,
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
@@ -125,6 +126,51 @@ def test_build_validation_metric_alignment_handles_missing_scores() -> None:
         "best_validation_score": None,
         "validation_score_count": 0,
         "severe_mismatch": False,
+    }
+
+
+def test_build_baseline_quality_signal_uses_best_minimize_baseline() -> None:
+    signal = build_baseline_quality_signal(
+        current_value=0.54,
+        baseline_candidates=[("mean", 0.60), ("ridge", 0.50)],
+        direction="minimize",
+    )
+
+    assert signal == {
+        "best_source": "ridge",
+        "best_score": 0.50,
+        "candidate_count": 2,
+        "selected_worse_than_baseline": True,
+    }
+
+
+def test_build_baseline_quality_signal_uses_best_maximize_baseline() -> None:
+    signal = build_baseline_quality_signal(
+        current_value=0.79,
+        baseline_candidates=[("mean", 0.62), ("gbm", 0.82)],
+        direction="maximize",
+    )
+
+    assert signal == {
+        "best_source": "gbm",
+        "best_score": 0.82,
+        "candidate_count": 2,
+        "selected_worse_than_baseline": True,
+    }
+
+
+def test_build_baseline_quality_signal_handles_no_candidates() -> None:
+    signal = build_baseline_quality_signal(
+        current_value=0.79,
+        baseline_candidates=[],
+        direction="maximize",
+    )
+
+    assert signal == {
+        "best_source": None,
+        "best_score": None,
+        "candidate_count": 0,
+        "selected_worse_than_baseline": False,
     }
 
 

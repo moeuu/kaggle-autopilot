@@ -235,6 +235,37 @@ def build_validation_metric_alignment(
     }
 
 
+def build_baseline_quality_signal(
+    *,
+    current_value: float,
+    baseline_candidates: list[tuple[str, float]],
+    direction: str,
+) -> dict[str, object]:
+    best_source: str | None = None
+    best_score: float | None = None
+    if baseline_candidates:
+        if direction == "minimize":
+            best_source, best_score = min(baseline_candidates, key=lambda item: item[1])
+        else:
+            best_source, best_score = max(baseline_candidates, key=lambda item: item[1])
+
+    selected_worse = False
+    if best_score is not None:
+        selected_worse = is_significantly_worse(
+            current=float(current_value),
+            reference=float(best_score),
+            direction=direction,
+            rel_margin=QUALITY_GUARD_BASELINE_REL_MARGIN,
+            abs_margin=QUALITY_GUARD_BASELINE_ABS_MARGIN,
+        )
+    return {
+        "best_source": best_source,
+        "best_score": best_score,
+        "candidate_count": len(baseline_candidates),
+        "selected_worse_than_baseline": selected_worse,
+    }
+
+
 def iter_payload_mappings(payload: object) -> Iterator[dict[object, object]]:
     if isinstance(payload, dict):
         yield payload

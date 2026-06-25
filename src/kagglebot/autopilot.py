@@ -321,6 +321,7 @@ _find_selected_pipeline = _kernel_quality.find_selected_pipeline
 _detect_candidate_selection_mismatch = _kernel_quality.detect_candidate_selection_mismatch
 _prediction_count_mean = _kernel_quality.prediction_count_mean
 _detect_prediction_distribution_collapse = _kernel_quality.detect_prediction_distribution_collapse
+_build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
 _build_validation_metric_alignment = _kernel_quality.build_validation_metric_alignment
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
@@ -468,8 +469,6 @@ _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
 _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
 _KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
-_QUALITY_GUARD_BASELINE_REL_MARGIN = _kernel_quality.QUALITY_GUARD_BASELINE_REL_MARGIN
-_QUALITY_GUARD_BASELINE_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_BASELINE_ABS_MARGIN
 _QUALITY_GUARD_SUBGROUP_RATIO = _kernel_quality.QUALITY_GUARD_SUBGROUP_RATIO
 _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_SUBGROUP_ABS_MARGIN
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CODE_REF_REL_MARGIN
@@ -4737,27 +4736,15 @@ def _build_kernel_quality_guard(
     for index, score in enumerate(baseline_from_logs):
         baseline_candidates.append((f"logs:baseline[{index}]", float(score)))
 
-    best_baseline_source: str | None = None
-    best_baseline_score: float | None = None
-    if baseline_candidates:
-        if direction == "minimize":
-            best_baseline_source, best_baseline_score = min(baseline_candidates, key=lambda item: item[1])
-        else:
-            best_baseline_source, best_baseline_score = max(baseline_candidates, key=lambda item: item[1])
-
-    baseline_worse_than_reference = False
-    if best_baseline_score is not None:
-        baseline_worse_than_reference = _is_significantly_worse(
-            current=float(evaluation.value),
-            reference=float(best_baseline_score),
-            direction=direction,
-            rel_margin=_QUALITY_GUARD_BASELINE_REL_MARGIN,
-            abs_margin=_QUALITY_GUARD_BASELINE_ABS_MARGIN,
-        )
-        if baseline_worse_than_reference:
-            reasons.append("selected_worse_than_detected_baseline")
-            if not is_final_iteration and not force_submit:
-                block_submit = True
+    baseline_signal = _build_baseline_quality_signal(
+        current_value=float(evaluation.value),
+        baseline_candidates=baseline_candidates,
+        direction=direction,
+    )
+    if bool(baseline_signal.get("selected_worse_than_baseline")):
+        reasons.append("selected_worse_than_detected_baseline")
+        if not is_final_iteration and not force_submit:
+            block_submit = True
 
     validation_scores = _extract_validation_scores_from_log_text(log_text, evaluation.metric)
     metric_alignment = _build_validation_metric_alignment(
@@ -4833,12 +4820,7 @@ def _build_kernel_quality_guard(
         "reasons": reasons,
         "warnings": warnings,
         "competition_faithfulness": competition_faithfulness,
-        "baseline": {
-            "best_source": best_baseline_source,
-            "best_score": best_baseline_score,
-            "candidate_count": len(baseline_candidates),
-            "selected_worse_than_baseline": baseline_worse_than_reference,
-        },
+        "baseline": baseline_signal,
         "metric_alignment": metric_alignment,
         "step_bucket": {
             "count": step_bucket_signal.get("count"),
