@@ -238,7 +238,8 @@ The next high-value modernization work is:
    zero-overlap drift guard generation is now in `local_kernel_drift_guard.py`; kernel bootstrap/env injection is now
    in `kernel_bootstrap.py`; local sitecustomize shim injection is now in `local_kernel_shims.py`; static submit
    wrapper rendering and code-competition tiny-submission rejection are now in `kernel_submit_wrapper.py`; Kaggle push
-   source validation is now in `kernel_push_validation.py`;
+   source validation is now in `kernel_push_validation.py`; notebook submit-inference validation and output-root
+   sanitization are now in `kernel_submit_inference.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
