@@ -23,6 +23,7 @@ import numpy as np
 from rich import print
 
 from kagglebot import autofix_restart as _autofix_restart
+from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
@@ -276,6 +277,14 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
+_infer_campaign_candidate_category = _campaign_metrics.infer_campaign_candidate_category
+_infer_campaign_model_family = _campaign_metrics.infer_campaign_model_family
+_infer_campaign_feature_set = _campaign_metrics.infer_campaign_feature_set
+_extract_campaign_fold_scores = _campaign_metrics.extract_campaign_fold_scores
+_extract_campaign_prediction_correlation = _campaign_metrics.extract_campaign_prediction_correlation
+_extract_campaign_artifact_path = _campaign_metrics.extract_campaign_artifact_path
+_extract_campaign_method_id = _campaign_metrics.extract_campaign_method_id
+_extract_campaign_validation_profile_id = _campaign_metrics.extract_campaign_validation_profile_id
 
 
 def _classify_submit_failure_repair(
@@ -9560,120 +9569,6 @@ def _decide_submit_kernel_cpu_fallback(
         is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
         and _submit_notebook.is_submit_kernel_push_error(candidate),
     )
-
-
-def _infer_campaign_candidate_category(
-    *,
-    iteration: int,
-    kernel_metrics_payload: dict[str, object] | None,
-    quality_reasons: list[str],
-) -> str:
-    payload = kernel_metrics_payload or {}
-    for key in ("candidate_category", "campaign_category", "strategy_category"):
-        value = str(payload.get(key) or "").strip().lower()
-        if value:
-            return value
-    if "validation" in " ".join(quality_reasons).lower():
-        return "validation_variant"
-    if bool(payload.get("blend")) or bool(payload.get("ensemble")):
-        return "blend"
-    if iteration == 1:
-        return "reference_reproduction"
-    return "strong_single"
-
-
-def _infer_campaign_model_family(
-    model_summary: dict[str, object],
-    kernel_metrics_payload: dict[str, object] | None,
-) -> str | None:
-    for source in (model_summary, kernel_metrics_payload or {}):
-        for key in ("model_family", "family", "model_type", "model_name"):
-            value = source.get(key)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-    return None
-
-
-def _infer_campaign_feature_set(
-    model_summary: dict[str, object],
-    kernel_metrics_payload: dict[str, object] | None,
-) -> str | None:
-    for source in (model_summary, kernel_metrics_payload or {}):
-        for key in ("feature_set", "features", "feature_version"):
-            value = source.get(key)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-    return None
-
-
-def _extract_campaign_fold_scores(kernel_metrics_payload: dict[str, object] | None) -> list[float]:
-    payload = kernel_metrics_payload or {}
-    for key in ("fold_scores", "cv_scores", "scores_by_fold"):
-        raw = payload.get(key)
-        if not isinstance(raw, list):
-            continue
-        scores = [_to_float(item) for item in raw]
-        return [float(score) for score in scores if score is not None]
-    return []
-
-
-def _extract_campaign_prediction_correlation(kernel_metrics_payload: dict[str, object] | None) -> dict[str, float]:
-    payload = kernel_metrics_payload or {}
-    raw = payload.get("prediction_correlation")
-    if not isinstance(raw, dict):
-        raw = payload.get("prediction_correlations")
-    if not isinstance(raw, dict):
-        return {}
-    parsed: dict[str, float] = {}
-    for key, value in raw.items():
-        numeric = _to_float(value)
-        if numeric is not None:
-            parsed[str(key)] = float(numeric)
-    return parsed
-
-
-def _extract_campaign_artifact_path(kernel_metrics_payload: dict[str, object] | None, kind: str) -> Path | None:
-    payload = kernel_metrics_payload or {}
-    if kind == "oof":
-        keys = ("oof_path", "oof_predictions_path", "oof_predictions")
-    else:
-        keys = ("prediction_path", "test_prediction_path", "test_predictions_path", "test_predictions")
-    for key in keys:
-        value = payload.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return Path(text)
-    artifacts = payload.get("artifacts")
-    if isinstance(artifacts, dict):
-        nested = artifacts.get(kind) or artifacts.get(f"{kind}_path")
-        if nested is not None and str(nested).strip():
-            return Path(str(nested).strip())
-    return None
-
-
-def _extract_campaign_method_id(kernel_metrics_payload: dict[str, object] | None) -> str | None:
-    payload = kernel_metrics_payload or {}
-    for key in ("method_id", "active_method_id", "campaign_method_id"):
-        value = payload.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return None
-
-
-def _extract_campaign_validation_profile_id(kernel_metrics_payload: dict[str, object] | None) -> str | None:
-    payload = kernel_metrics_payload or {}
-    for key in ("validation_profile_id", "active_validation_profile", "split_profile_id"):
-        value = payload.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    readiness = payload.get("readiness")
-    if isinstance(readiness, dict):
-        value = readiness.get("validation_profile_id") or readiness.get("split_strategy")
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return None
 
 
 def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
