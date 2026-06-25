@@ -2451,16 +2451,6 @@ def test_load_dataset_profile_identity_ignores_missing_invalid_or_non_object_pay
     assert _load_dataset_profile_identity(context_dir=context_dir) == ("target", "id")
 
 
-def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_non_object_payload(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
-    plan_path = tmp_path / "plan.json"
-    plan_path.write_text("[]", encoding="utf-8")
-
-    with pytest.raises(KernelFailedError, match="must be a JSON object"):
-        kernel_runner._validate_local_kernel_plan_runtime_hyperparameters(plan_path)
-
-
 def test_ensure_local_sample_submission_file_expands_placeholder_template(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 

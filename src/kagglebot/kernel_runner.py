@@ -22,6 +22,7 @@ from rich import print
 
 from kagglebot import kernel_logs as _kernel_logs
 from kagglebot import kernel_metadata as _kernel_metadata
+from kagglebot import kernel_plan_validation as _kernel_plan_validation
 from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import local_kernel_limits as _local_kernel_limits
 from kagglebot import remote_kernel_state as _remote_kernel_state
@@ -256,48 +257,6 @@ def _should_suppress_local_kernel_log_line(line: str, *, state: _LocalKernelLogF
             return True
 
     return any(marker in line for marker in _SUPPRESSED_LOCAL_KERNEL_LOG_MARKERS)
-
-
-def _find_runtime_hyperparameter_sequence_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
-    paths: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            paths.extend(_find_runtime_hyperparameter_sequence_paths(item, prefix=f"{prefix}.{key}"))
-        return paths
-    if isinstance(value, (list, tuple)):
-        paths.append(prefix)
-    return paths
-
-
-def _validate_local_kernel_plan_runtime_hyperparameters(plan_path: Path) -> None:
-    if not plan_path.exists():
-        return
-    try:
-        payload = read_json_object(plan_path)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise KernelFailedError(f"Local kernel staged plan is unreadable: {plan_path} ({exc})") from exc
-    except ValueError as exc:
-        raise KernelFailedError(f"Local kernel staged plan must be a JSON object: {plan_path}") from exc
-
-    pipelines = payload.get("pipelines")
-    if not isinstance(pipelines, list):
-        return
-
-    for index, item in enumerate(pipelines):
-        if not isinstance(item, dict) or "key_hyperparameters" not in item:
-            continue
-        name = str(item.get("name") or f"pipeline_{index + 1}")
-        key_hyperparameters = item.get("key_hyperparameters")
-        if not isinstance(key_hyperparameters, dict):
-            raise KernelFailedError(
-                f"Local kernel staged plan has non-object key_hyperparameters for pipeline '{name}'."
-            )
-        sequence_paths = _find_runtime_hyperparameter_sequence_paths(key_hyperparameters)
-        if sequence_paths:
-            raise KernelFailedError(
-                "Local kernel staged plan contains unresolved hyperparameter sequences for pipeline "
-                f"'{name}': {', '.join(sequence_paths)}"
-            )
 
 
 def _terminate_local_kernel_process(proc: subprocess.Popen[str]) -> None:
@@ -1573,7 +1532,7 @@ def run_kernel_local(
         ],
     )
     kernel_path = kernel_stage_dir / "kernel.py"
-    _validate_local_kernel_plan_runtime_hyperparameters(kernel_stage_dir / "plan.json")
+    _kernel_plan_validation.validate_local_kernel_plan_runtime_hyperparameters(kernel_stage_dir / "plan.json")
 
     if strict_accelerator and accelerator == "gpu":
         availability = detect_local_gpu()
