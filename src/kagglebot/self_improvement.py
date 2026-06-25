@@ -10,6 +10,7 @@ from pathlib import Path
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.submit_attempts import load_submit_attempt_rows
 
@@ -82,7 +83,7 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
     strategy_context = _render_strategy_context(report, backlog=backlog)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    config.latest_json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_object(config.latest_json_path, report, sort_keys=True)
     config.latest_markdown_path.write_text(markdown, encoding="utf-8")
     config.strategy_context_path.write_text(strategy_context, encoding="utf-8")
     config.experiment_backlog_path.write_text(json.dumps(backlog, indent=2, sort_keys=True), encoding="utf-8")
@@ -93,7 +94,7 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
     codex_result = _maybe_run_codex_improvement(config=config, report=report)
     if codex_result is not None:
         report["codex_improvement"] = codex_result
-        config.latest_json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        write_json_object(config.latest_json_path, report, sort_keys=True)
         config.latest_markdown_path.write_text(_render_markdown(report), encoding="utf-8")
     with config.reports_jsonl_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(report, sort_keys=True) + "\n")
@@ -893,11 +894,7 @@ def _latest_text(run_dir: Path, name: str, *, max_chars: int) -> str:
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return load_json_object(path) or {}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:

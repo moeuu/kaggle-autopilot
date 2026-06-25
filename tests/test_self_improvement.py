@@ -8,6 +8,7 @@ from kagglebot.knowledge import build_plan_and_initial_prompt
 from kagglebot.paths import KnowledgePaths
 from kagglebot.self_improvement import (
     SelfImprovementConfig,
+    _read_json_object,
     load_self_improvement_context,
     run_self_improvement_cycle,
 )
@@ -16,6 +17,18 @@ from kagglebot.self_improvement import (
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_read_json_object_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    assert _read_json_object(tmp_path / "missing.json") == {}
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _read_json_object(invalid) == {}
+
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert _read_json_object(array_payload) == {}
 
 
 def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: Path) -> None:
