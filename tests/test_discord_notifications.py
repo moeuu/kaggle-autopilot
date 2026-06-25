@@ -6,6 +6,7 @@ from pathlib import Path
 
 from kagglebot.discord_notifications import (
     DiscordEventNotifier,
+    _read_json_object,
     build_autopilot_status_payload,
     run_discord_notifier_once,
 )
@@ -23,6 +24,18 @@ class RecordingNotifier(DiscordEventNotifier):
     def emit(self, **kwargs):  # type: ignore[no-untyped-def]
         self.events.append(kwargs)
         return True
+
+
+def test_read_json_object_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    assert _read_json_object(tmp_path / "missing.json") == {}
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _read_json_object(invalid) == {}
+
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert _read_json_object(array_payload) == {}
 
 
 def test_build_autopilot_status_payload_reports_current_running_iteration(tmp_path: Path) -> None:

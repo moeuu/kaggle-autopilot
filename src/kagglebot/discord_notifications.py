@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from rich import print
 
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 
@@ -160,8 +161,7 @@ def _run_discord_notifier_for_watch_state(
     if not should_send:
         if current_run_id and current_run_id != last_run_id:
             state["last_run_id"] = current_run_id
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+            write_json_object(state_path, state, sort_keys=True)
         print(f"[cyan]discord notifier[/cyan]: unchanged ({snapshot_key})")
         return False
     if not notifier.enabled:
@@ -175,19 +175,15 @@ def _run_discord_notifier_for_watch_state(
         occurred_at=current_time,
     )
     if ok:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(
-            json.dumps(
-                {
-                    "last_snapshot_key": snapshot_key,
-                    "last_sent_at": current_time.isoformat(),
-                    "last_event_type": event_type,
-                    "last_run_id": current_run_id,
-                },
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        write_json_object(
+            state_path,
+            {
+                "last_snapshot_key": snapshot_key,
+                "last_sent_at": current_time.isoformat(),
+                "last_event_type": event_type,
+                "last_run_id": current_run_id,
+            },
+            sort_keys=True,
         )
         print(f"[green]discord notifier[/green]: sent {event_type} ({snapshot_key})")
     return ok
@@ -830,13 +826,7 @@ def _nested_number(payload: dict[str, object], outer: str, inner: str) -> float 
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return load_json_object(path) or {}
 
 
 def _parse_datetime(value: object) -> datetime | None:
