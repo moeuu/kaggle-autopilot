@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.medals import normalize_target_medal, normalize_target_rank_percentile
@@ -150,6 +151,34 @@ def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSp
         stop_no_improve_patience=_int_or_none(stop_policy.get("no_improve_patience")),
         stop_same_config_patience=_int_or_none(stop_policy.get("same_config_patience")),
     )
+
+
+def needs_planning(
+    *,
+    agent: str | None,
+    config_target_metric: object,
+    config_target_score: object,
+    config_target_direction: object,
+    plan_target_metric: object,
+    plan_target_score: object,
+    plan_target_direction: object,
+) -> bool:
+    if agent in ("codex", "pipeline"):
+        return True
+    target_metric = config_target_metric or plan_target_metric
+    target_score = config_target_score if config_target_score is not None else plan_target_score
+    target_direction = config_target_direction or plan_target_direction
+    if target_metric is None or target_score is None:
+        return True
+    return target_direction in (None, "auto")
+
+
+def should_skip_planning_on_resume(*, resume_run: bool, plan_path: Path, kernel_path: Path) -> bool:
+    if not resume_run:
+        return False
+    if not plan_path.exists():
+        return False
+    return kernel_path.exists()
 
 
 def _str_or_none(value: object) -> str | None:

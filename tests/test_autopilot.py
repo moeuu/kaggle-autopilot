@@ -36,7 +36,6 @@ from kagglebot.autopilot import (
     _resolve_plan,
     _run_autofix,
     _run_kernel_fix,
-    _should_skip_planning,
     _submit_with_notebook_kernel,
     _write_iteration_state_marker,
     run_autopilot,
@@ -178,19 +177,6 @@ def _make_config(tmp_path: Path, **overrides) -> AutopilotConfig:
         dry_run=False,
     )
     return base if not overrides else base.__class__(**{**base.__dict__, **overrides})
-
-
-def test_should_skip_planning_requires_kernel_py(tmp_path: Path) -> None:
-    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
-    _write_plan(paths)
-    (paths.context_dir / "agent").mkdir(parents=True, exist_ok=True)
-
-    assert _should_skip_planning(resume_run=True, paths=paths) is False
-
-    paths.kernel_source_dir.mkdir(parents=True, exist_ok=True)
-    (paths.kernel_source_dir / "kernel.py").write_text("# generated kernel\n", encoding="utf-8")
-
-    assert _should_skip_planning(resume_run=True, paths=paths) is True
 
 
 def test_submission_message_default_is_compact(tmp_path: Path) -> None:
@@ -4703,7 +4689,7 @@ def test_autopilot_missing_kernel_metric_triggers_kernel_fix(monkeypatch, tmp_pa
         target_direction="minimize",
     )
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._needs_planning", lambda *args, **kwargs: False)
+    monkeypatch.setattr("kagglebot.plan_policy.needs_planning", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.MAX_KERNEL_FIX_ATTEMPTS", 1)
@@ -4960,7 +4946,7 @@ def test_metric_only_fix_reruns_local_kernel_to_materialize_metric_outputs(monke
     )
     monkeypatch.setenv("KAGGLEBOT_STRICT_COMPETITION_METRIC", "1")
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._needs_planning", lambda *args, **kwargs: False)
+    monkeypatch.setattr("kagglebot.plan_policy.needs_planning", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)

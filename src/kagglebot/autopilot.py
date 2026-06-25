@@ -463,10 +463,22 @@ class PlanningPhase:
     resume_run: bool
 
     def execute(self, plan: PlanConfig) -> PlanConfig:
-        if _should_skip_planning(resume_run=self.resume_run, paths=self.config.paths):
+        if _plan_policy.should_skip_planning_on_resume(
+            resume_run=self.resume_run,
+            plan_path=self.config.paths.plan_path,
+            kernel_path=self.config.paths.kernel_source_dir / "kernel.py",
+        ):
             print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
             return plan
-        if _needs_planning(plan, self.config):
+        if _plan_policy.needs_planning(
+            agent=self.config.agent,
+            config_target_metric=self.config.target_metric,
+            config_target_score=self.config.target_score,
+            config_target_direction=self.config.target_direction,
+            plan_target_metric=plan.target_metric,
+            plan_target_score=plan.target_score,
+            plan_target_direction=plan.target_direction,
+        ):
             print("[cyan]plan[/cyan]: generating initial plan")
             _update_watch_phase(
                 self.config,
@@ -3193,26 +3205,6 @@ def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
     existing = _load_json_object_or_empty(paths.plan_path)
     payload = _apply_plan_guardrails(paths, {**existing, **plan.to_dict()})
     _write_json_object(paths.plan_path, payload)
-
-
-def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
-    if config.agent in ("codex", "pipeline"):
-        return True
-    target_metric = config.target_metric or plan.target_metric
-    target_score = config.target_score if config.target_score is not None else plan.target_score
-    target_direction = config.target_direction or plan.target_direction
-    if target_metric is None or target_score is None:
-        return True
-    return target_direction in (None, "auto")
-
-
-def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
-    if not resume_run:
-        return False
-    if not paths.plan_path.exists():
-        return False
-    kernel_path = paths.kernel_source_dir / "kernel.py"
-    return kernel_path.exists()
 
 
 def _decide_notebook_submit_artifact_mode_for_submission(

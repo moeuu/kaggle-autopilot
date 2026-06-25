@@ -17,6 +17,7 @@ from kagglebot.plan_policy import (
     extract_evaluation_spec_values,
     extract_plan_split_strategy_hints,
     infer_split_strategy_from_hint_text,
+    needs_planning,
     normalize_default_eval_repeats,
     normalize_default_eval_seeds,
     normalize_eval_repeats,
@@ -37,6 +38,7 @@ from kagglebot.plan_policy import (
     resolve_target_metric_direction,
     resolve_target_objective,
     resolve_time_budget_policy,
+    should_skip_planning_on_resume,
     upgrade_improvement_mode,
 )
 
@@ -111,6 +113,58 @@ def test_extract_evaluation_spec_values_ignores_wrong_shapes() -> None:
     assert values.readiness_method is None
     assert values.drift_enabled is None
     assert values.stop_no_improve_patience is None
+
+
+def test_needs_planning_requires_complete_metric_contract() -> None:
+    assert (
+        needs_planning(
+            agent="local",
+            config_target_metric=None,
+            config_target_score=None,
+            config_target_direction=None,
+            plan_target_metric="auc",
+            plan_target_score=0.8,
+            plan_target_direction="maximize",
+        )
+        is False
+    )
+    assert (
+        needs_planning(
+            agent="codex",
+            config_target_metric="auc",
+            config_target_score=0.8,
+            config_target_direction="maximize",
+            plan_target_metric=None,
+            plan_target_score=None,
+            plan_target_direction=None,
+        )
+        is True
+    )
+    assert (
+        needs_planning(
+            agent="local",
+            config_target_metric="auc",
+            config_target_score=None,
+            config_target_direction="auto",
+            plan_target_metric=None,
+            plan_target_score=None,
+            plan_target_direction=None,
+        )
+        is True
+    )
+
+
+def test_should_skip_planning_on_resume_requires_plan_and_kernel(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    kernel_path = tmp_path / "kernel" / "kernel.py"
+
+    assert should_skip_planning_on_resume(resume_run=True, plan_path=plan_path, kernel_path=kernel_path) is False
+    plan_path.write_text("{}", encoding="utf-8")
+    assert should_skip_planning_on_resume(resume_run=True, plan_path=plan_path, kernel_path=kernel_path) is False
+    kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    kernel_path.write_text("# generated kernel\n", encoding="utf-8")
+    assert should_skip_planning_on_resume(resume_run=False, plan_path=plan_path, kernel_path=kernel_path) is False
+    assert should_skip_planning_on_resume(resume_run=True, plan_path=plan_path, kernel_path=kernel_path) is True
 
 
 def test_resolve_target_metric_direction_applies_competition_override() -> None:

@@ -75,10 +75,10 @@ Agent prompt/response file I/O, capacity-error detection, failure detail formatt
 live in `src/kagglebot/agent_io.py`; the loop supplies agent identity and paths but does not own transcript formatting.
 Context artifact reads such as dataset profile loading, evaluation-spec validation/override application, and capped CSV
 data-row counting live in `src/kagglebot/context_artifacts.py`; orchestration code consumes normalized context payloads.
-Split-strategy policy, evaluation seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and
-competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
-toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
-incrementally.
+Split-strategy policy, planning necessity/resume-skip checks, evaluation seed/repeat normalization, rank-force
+thresholds, improvement-mode upgrades, and competition-specific evaluation overrides live in
+`src/kagglebot/plan_policy.py`. This keeps plan resolution moving toward a set of small policy functions while the
+larger `_resolve_plan` orchestrator is still being retired incrementally.
 Submit-gate normalization, target/top1 checks, quality reason soft overrides, daily-limit row counting, daily quota
 fallback policy, and slot spacing live in `src/kagglebot/submission_policy.py`; the loop supplies the Kaggle fetch
 adapter and ledger fallback count.
@@ -261,6 +261,7 @@ The next high-value modernization work is:
    resolution now read `method_scout.py` directly. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
+   Planning necessity and resume-skip checks now call `plan_policy.py` directly.
    Iteration resume, submit-retry artifact resume, and best-submission resume paths now call `autopilot_state.py`
    directly. Submit autofix context formatting, stale repaired-artifact decisions, autofix artifact resolution,
    submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
@@ -280,8 +281,9 @@ Recommended extraction order:
 
 1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization/override,
    metric/direction override policy, plan score-source normalization, evaluation-spec value extraction, local-GPU
-   evaluation budget/max-iteration policy, submit/runtime constraint application, and competition-specific overrides are
-   already out of the main loop. Leaderboard medal/rank objective resolution is now also in `plan_policy.py`.
+   evaluation budget/max-iteration policy, submit/runtime constraint application, planning necessity/resume-skip checks,
+   and competition-specific overrides are already out of the main loop. Leaderboard medal/rank objective resolution is
+   now also in `plan_policy.py`.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
    submit-policy and submission-gate resolution now also lives there.
