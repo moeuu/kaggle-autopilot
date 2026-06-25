@@ -33,6 +33,32 @@ STOP_POLICY_ABORT_ALIASES = (
     "error_fingerprint_policy",
     "abort_on_repeated_error_fingerprint",
 )
+REQUIRED_SUITE_FIELDS = ("name", "train_mode", "feature_recipe", "lightweight", "promotion_stage")
+HIGH_ACCURACY_TABULAR_REQUIRED_SUITES: tuple[dict[str, object], ...] = (
+    {
+        "name": "competition_only",
+        "train_mode": "competition_only",
+        "feature_recipe": "full",
+        "lightweight": False,
+        "promotion_stage": "full_eval",
+    },
+    {
+        "name": "competition_plus_original",
+        "train_mode": "competition_plus_original",
+        "feature_recipe": "full",
+        "lightweight": False,
+        "promotion_stage": "ablation_fast",
+    },
+    {
+        "name": "orig_signal_only",
+        "train_mode": "competition_only",
+        "feature_recipe": "orig_signal_only",
+        "lightweight": True,
+        "promotion_stage": "ablation_fast",
+    },
+)
+VALID_SUITE_TRAIN_MODES = {"competition_only", "competition_plus_original", "original_only"}
+VALID_SUITE_PROMOTION_STAGES = {"ablation_fast", "full_eval"}
 
 COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
     "deep-past-initiative-machine-translation": {
@@ -207,6 +233,358 @@ def _normalize_pipeline_hyperparameter_value(value: object) -> object | None:
             return None
         return _normalize_pipeline_hyperparameter_value(value[0])
     return value
+
+
+def repair_plan_payload_for_profile(
+    payload: dict[str, object],
+    profile: dict[str, object],
+) -> dict[str, object]:
+    normalized = normalize_plan_payload(payload)
+    if not is_high_accuracy_tabular_blend_target(profile):
+        return normalized
+
+    repaired = dict(normalized)
+    raw_candidates: list[tuple[object, bool]] = []
+    suites_raw = repaired.get("suites")
+    if isinstance(suites_raw, list):
+        raw_candidates.extend((item, True) for item in suites_raw)
+
+    alias_raw = repaired.pop("suite_aware_ablations", None)
+    raw_candidates.extend((item, False) for item in _suite_alias_items(alias_raw))
+
+    toggles_raw = repaired.get("toggles")
+    if isinstance(toggles_raw, dict):
+        toggles = dict(toggles_raw)
+        toggle_alias_raw = toggles.pop("suite_ablations", None)
+        raw_candidates.extend((item, False) for item in _suite_alias_items(toggle_alias_raw))
+        repaired["toggles"] = toggles
+
+    required_by_name = _required_high_accuracy_suites_by_name()
+    required_suites: dict[str, dict[str, object]] = {}
+    extra_suites: list[object] = []
+    for item, preserve_invalid in raw_candidates:
+        if isinstance(item, dict):
+            suite = _complete_required_suite(item)
+            required_name = _canonical_required_suite_name(suite)
+            if required_name is not None:
+                required_suites.setdefault(required_name, suite)
+            elif preserve_invalid or _is_complete_suite(suite):
+                extra_suites.append(suite)
+            continue
+
+        alias_name = _canonical_suite_name_from_alias_text(item)
+        if alias_name is not None:
+            required_suites.setdefault(alias_name, dict(required_by_name[alias_name]))
+        elif preserve_invalid:
+            extra_suites.append(item)
+
+    for suite in HIGH_ACCURACY_TABULAR_REQUIRED_SUITES:
+        required_name = str(suite["name"])
+        required_suites.setdefault(required_name, dict(suite))
+
+    repaired["suites"] = [
+        required_suites[str(suite["name"])] for suite in HIGH_ACCURACY_TABULAR_REQUIRED_SUITES
+    ] + extra_suites
+    return normalize_plan_payload(repaired)
+
+
+def validate_plan_payload(payload: dict[str, object], *, profile: dict[str, object] | None = None) -> list[str]:
+    payload = normalize_plan_payload(payload)
+    issues: list[str] = []
+    required = [
+        "target_metric",
+        "target_direction",
+        "target_score",
+        "score_source",
+        "holdout_frac",
+        "cv_folds",
+        "seed",
+        "max_iterations",
+        "patience",
+        "min_improvement",
+        "pipelines",
+        "toggles",
+        "evaluation_protocol",
+        "stop_policy",
+    ]
+    for key in required:
+        if key not in payload:
+            issues.append(f"PLAN_JSON missing key: {key}.")
+    if payload.get("target_direction") not in ("minimize", "maximize"):
+        issues.append("PLAN_JSON target_direction must be 'minimize' or 'maximize'.")
+    if payload.get("score_source") not in ("holdout", "cv"):
+        issues.append("PLAN_JSON score_source must be one of: holdout, cv.")
+    if not isinstance(payload.get("target_score"), (int, float)):
+        issues.append("PLAN_JSON target_score must be a number.")
+    suites = payload.get("suites")
+    typed_suites: list[dict[str, object]] | None = None
+    if suites is not None:
+        if not isinstance(suites, list):
+            issues.append("PLAN_JSON suites must be an array when provided.")
+        else:
+            typed_suites = []
+            suite_names: set[str] = set()
+            for index, item in enumerate(suites):
+                if not isinstance(item, dict):
+                    issues.append(f"PLAN_JSON suites[{index}] must be an object.")
+                    continue
+                typed_suites.append(item)
+                for key in REQUIRED_SUITE_FIELDS:
+                    if key not in item:
+                        issues.append(f"PLAN_JSON suites[{index}] missing key: {key}.")
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    normalized_name = name.strip()
+                    if normalized_name in suite_names:
+                        issues.append(f"PLAN_JSON suites[{index}] duplicates suite name: {normalized_name}.")
+                    suite_names.add(normalized_name)
+                train_mode = item.get("train_mode")
+                if train_mode is not None and train_mode not in VALID_SUITE_TRAIN_MODES:
+                    issues.append(
+                        "PLAN_JSON suites"
+                        f"[{index}].train_mode must be one of: {', '.join(sorted(VALID_SUITE_TRAIN_MODES))}."
+                    )
+                feature_recipe = item.get("feature_recipe")
+                if "feature_recipe" in item and (not isinstance(feature_recipe, str) or not feature_recipe.strip()):
+                    issues.append(f"PLAN_JSON suites[{index}].feature_recipe must be a non-empty string.")
+                lightweight = item.get("lightweight")
+                if "lightweight" in item and not isinstance(lightweight, bool):
+                    issues.append(f"PLAN_JSON suites[{index}].lightweight must be a boolean.")
+                promotion_stage = item.get("promotion_stage")
+                if promotion_stage is not None and promotion_stage not in VALID_SUITE_PROMOTION_STAGES:
+                    issues.append(
+                        "PLAN_JSON suites"
+                        f"[{index}].promotion_stage must be one of: {', '.join(sorted(VALID_SUITE_PROMOTION_STAGES))}."
+                    )
+    pipelines = payload.get("pipelines")
+    if not isinstance(pipelines, list):
+        issues.append("PLAN_JSON pipelines must be an array.")
+    else:
+        if not 2 <= len(pipelines) <= 4:
+            issues.append("PLAN_JSON pipelines must contain 2-4 entries.")
+        for index, item in enumerate(pipelines):
+            if not isinstance(item, dict):
+                issues.append(f"PLAN_JSON pipelines[{index}] must be an object.")
+                continue
+            for key in (
+                "name",
+                "features",
+                "models",
+                "key_hyperparameters",
+                "runtime_memory",
+                "failure_modes",
+                "fallbacks",
+            ):
+                if key not in item:
+                    issues.append(f"PLAN_JSON pipelines[{index}] missing key: {key}.")
+            key_hyperparameters = item.get("key_hyperparameters")
+            if "key_hyperparameters" in item and not isinstance(key_hyperparameters, dict):
+                issues.append(f"PLAN_JSON pipelines[{index}].key_hyperparameters must be an object.")
+            elif isinstance(key_hyperparameters, dict):
+                sequence_paths = _find_sequence_hyperparameter_paths(key_hyperparameters)
+                if sequence_paths:
+                    issues.append(
+                        "PLAN_JSON pipelines"
+                        f"[{index}].key_hyperparameters must contain scalar runtime values; found sequences at "
+                        + ", ".join(sequence_paths)
+                        + "."
+                    )
+        if not issues and profile and is_high_accuracy_tabular_blend_target(profile):
+            typed_pipelines = [item for item in pipelines if isinstance(item, dict)]
+            issues.extend(_validate_high_accuracy_tabular_plan(typed_pipelines, typed_suites))
+    toggles = payload.get("toggles")
+    if not isinstance(toggles, dict):
+        issues.append("PLAN_JSON toggles must be an object.")
+    elif not toggles:
+        issues.append("PLAN_JSON toggles must not be empty.")
+    evaluation_protocol = payload.get("evaluation_protocol")
+    if not isinstance(evaluation_protocol, dict):
+        issues.append("PLAN_JSON evaluation_protocol must be an object.")
+    else:
+        for key in ("cv_type", "n_folds", "seeds", "primary_metric"):
+            if key not in evaluation_protocol:
+                issues.append(f"PLAN_JSON evaluation_protocol missing key: {key}.")
+        seeds = evaluation_protocol.get("seeds")
+        if not isinstance(seeds, list) or len(seeds) < 1:
+            issues.append("PLAN_JSON evaluation_protocol.seeds must be a non-empty list.")
+        n_folds = evaluation_protocol.get("n_folds")
+        if not isinstance(n_folds, int) or n_folds < 2:
+            issues.append("PLAN_JSON evaluation_protocol.n_folds must be an integer >= 2.")
+        cv_type = evaluation_protocol.get("cv_type")
+        if not isinstance(cv_type, str) or not cv_type.strip():
+            issues.append("PLAN_JSON evaluation_protocol.cv_type must be a non-empty string.")
+        primary_metric = evaluation_protocol.get("primary_metric")
+        if not isinstance(primary_metric, str) or not primary_metric.strip():
+            issues.append("PLAN_JSON evaluation_protocol.primary_metric must be a non-empty string.")
+    stop_policy = payload.get("stop_policy")
+    if not isinstance(stop_policy, dict):
+        issues.append("PLAN_JSON stop_policy must be an object.")
+    else:
+        if "max_iterations" not in stop_policy:
+            issues.append("PLAN_JSON stop_policy missing key: max_iterations.")
+        if "error_fingerprint_abort" not in stop_policy:
+            issues.append("PLAN_JSON stop_policy missing key: error_fingerprint_abort.")
+    return issues
+
+
+def is_high_accuracy_tabular_blend_target(profile: dict[str, object]) -> bool:
+    modality = str(profile.get("modality") or "").strip().lower()
+    task = str(profile.get("task") or "").strip().lower()
+    tags_raw = profile.get("tags")
+    tags = (
+        [str(item).strip().lower() for item in tags_raw if isinstance(item, str)] if isinstance(tags_raw, list) else []
+    )
+    train_rows = _positive_int(profile.get("train_rows")) or 0
+    categorical_count = (
+        len(profile.get("categorical_columns", [])) if isinstance(profile.get("categorical_columns"), list) else 0
+    )
+    high_cardinality_count = (
+        len(profile.get("high_cardinality_columns", []))
+        if isinstance(profile.get("high_cardinality_columns"), list)
+        else 0
+    )
+    binary_like = task == "binary" or "binary" in tags or (task == "classification" and "multiclass" not in tags)
+    mixed_categorical = categorical_count >= 3 or high_cardinality_count >= 1
+    return modality == "tabular" and binary_like and train_rows >= 5000 and mixed_categorical
+
+
+def _find_sequence_hyperparameter_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child_prefix = f"{prefix}.{key}"
+            paths.extend(_find_sequence_hyperparameter_paths(item, prefix=child_prefix))
+        return paths
+    if isinstance(value, (list, tuple)):
+        paths.append(prefix)
+    return paths
+
+
+def _suite_token(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def _required_high_accuracy_suites_by_name() -> dict[str, dict[str, object]]:
+    return {str(item["name"]): dict(item) for item in HIGH_ACCURACY_TABULAR_REQUIRED_SUITES}
+
+
+def _canonical_required_suite_name(suite: dict[str, object]) -> str | None:
+    name = _suite_token(suite.get("name"))
+    train_mode = _suite_token(suite.get("train_mode"))
+    feature_recipe = _suite_token(suite.get("feature_recipe"))
+    if feature_recipe == "orig_signal_only" or name in {"orig_signal_only", "original_signal_only"}:
+        return "orig_signal_only"
+    if train_mode == "competition_plus_original" or name in {"competition_plus_original", "competition_plus_orig"}:
+        return "competition_plus_original"
+    if train_mode == "competition_only" or name in {"competition_only", "comp_only"}:
+        return "competition_only"
+    return None
+
+
+def _canonical_suite_name_from_alias_text(value: object) -> str | None:
+    token = _suite_token(value)
+    if not token:
+        return None
+    if token in {"orig_signal_only", "original_signal_only"} or ("orig" in token and "signal" in token):
+        return "orig_signal_only"
+    if token in {"competition_plus_original", "competition_plus_orig"} or (
+        "competition" in token and "original" in token
+    ):
+        return "competition_plus_original"
+    if token in {"competition_only", "comp_only"} or ("competition" in token and "only" in token):
+        return "competition_only"
+    return None
+
+
+def _complete_required_suite(suite: dict[str, object]) -> dict[str, object]:
+    required_name = _canonical_required_suite_name(suite)
+    if required_name is None:
+        return dict(suite)
+    defaults = _required_high_accuracy_suites_by_name()[required_name]
+    extras = {key: value for key, value in suite.items() if key not in REQUIRED_SUITE_FIELDS}
+    return {**defaults, **extras}
+
+
+def _is_complete_suite(suite: dict[str, object]) -> bool:
+    return all(key in suite for key in REQUIRED_SUITE_FIELDS)
+
+
+def _suite_alias_items(value: object) -> list[object]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return list(value.values())
+    return []
+
+
+def _pipeline_texts(pipeline: dict[str, object]) -> list[str]:
+    texts: list[str] = []
+    for key in ("name",):
+        value = pipeline.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip().lower())
+    for key in ("models", "features", "fallbacks", "failure_modes"):
+        value = pipeline.get(key)
+        if isinstance(value, list):
+            texts.extend(str(item).strip().lower() for item in value if str(item).strip())
+        elif isinstance(value, str) and value.strip():
+            texts.append(value.strip().lower())
+    return texts
+
+
+def _validate_high_accuracy_tabular_plan(
+    pipelines: list[dict[str, object]],
+    suites: list[dict[str, object]] | None,
+) -> list[str]:
+    issues: list[str] = []
+    family_counts = {"catboost": 0, "xgboost": 0, "lightgbm": 0}
+    blend_present = False
+    for pipeline in pipelines:
+        texts = _pipeline_texts(pipeline)
+        haystack = " ".join(texts)
+        for family in family_counts:
+            if family in haystack:
+                family_counts[family] += 1
+        if any(token in haystack for token in ("blend", "ensemble", "stack", "rank", "logit", "weighted")):
+            blend_present = True
+    if len(pipelines) < 3:
+        issues.append("PLAN_JSON must include at least 3 pipelines for high-accuracy tabular binary search.")
+    if family_counts["catboost"] < 1:
+        issues.append("PLAN_JSON must include a CatBoost pipeline for raw categorical handling.")
+    if family_counts["xgboost"] < 1:
+        issues.append("PLAN_JSON must include an XGBoost pipeline with leak-safe encoded/stat features.")
+    if family_counts["lightgbm"] < 1 and (family_counts["catboost"] + family_counts["xgboost"] < 3):
+        issues.append("PLAN_JSON must include LightGBM or a second CatBoost/XGBoost variant.")
+    if not blend_present:
+        issues.append("PLAN_JSON must include at least one OOF blend/ensemble candidate.")
+    if not suites:
+        issues.append(
+            "PLAN_JSON must include suite-aware ablations for high-accuracy tabular search "
+            "(competition_only, competition_plus_original, orig_signal_only)."
+        )
+        return issues
+    suite_names = {str(item.get("name") or "").strip() for item in suites}
+    train_modes = {str(item.get("train_mode") or "").strip() for item in suites}
+    feature_recipes = {str(item.get("feature_recipe") or "").strip() for item in suites}
+    promotion_stages = {str(item.get("promotion_stage") or "").strip() for item in suites}
+    if "competition_only" not in train_modes:
+        issues.append("PLAN_JSON suites must include a competition_only suite.")
+    if "competition_plus_original" not in train_modes:
+        issues.append("PLAN_JSON suites must include a competition_plus_original suite.")
+    if "orig_signal_only" not in feature_recipes and "orig_signal_only" not in suite_names:
+        issues.append("PLAN_JSON suites must include an orig_signal_only ablation suite.")
+    if "full_eval" not in promotion_stages:
+        issues.append("PLAN_JSON suites must include at least one full_eval suite.")
+    return issues
+
+
+def _positive_int(value: object) -> int | None:
+    parsed = parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
 
 
 def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:

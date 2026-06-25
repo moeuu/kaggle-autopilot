@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kagglebot.orchestrator.agent_pipeline import _validate_plan_payload, _write_plan_payload
+from kagglebot.orchestrator.agent_pipeline import _write_plan_payload
 from kagglebot.paths import CompetitionPaths
+from kagglebot.plan_policy import validate_plan_payload
 
 
 def _base_payload() -> dict[str, object]:
@@ -353,7 +354,7 @@ def test_validate_plan_payload_requires_multi_family_blend_for_high_accuracy_tab
         "high_cardinality_columns": ["c"],
     }
 
-    issues = _validate_plan_payload(payload, profile=profile)
+    issues = validate_plan_payload(payload, profile=profile)
 
     assert any("CatBoost" in issue for issue in issues)
     assert any("LightGBM or a second CatBoost/XGBoost variant" in issue for issue in issues)
@@ -400,6 +401,6 @@ def test_validate_plan_payload_requires_suite_aware_ablation_for_high_accuracy_t
         "high_cardinality_columns": ["c"],
     }
 
-    issues = _validate_plan_payload(payload, profile=profile)
+    issues = validate_plan_payload(payload, profile=profile)
 
     assert any("suite-aware ablations" in issue for issue in issues)

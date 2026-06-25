@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-import kagglebot.orchestrator.agent_pipeline as agent_pipeline
-from kagglebot.plan_policy import normalize_plan_payload
+from kagglebot.plan_policy import normalize_plan_payload, repair_plan_payload_for_profile, validate_plan_payload
 
 
 def test_normalize_plan_payload_injects_pipeline_names() -> None:
@@ -117,7 +116,7 @@ def test_validate_plan_payload_tolerates_missing_pipeline_names() -> None:
         "stop_policy": {"max_iterations": 3, "error_fingerprint_abort": True},
     }
 
-    issues = agent_pipeline._validate_plan_payload(payload)  # noqa: SLF001
+    issues = validate_plan_payload(payload)
     assert issues == []
 
 
@@ -164,7 +163,7 @@ def test_validate_plan_payload_rejects_non_generalizable_score_source(score_sour
         "stop_policy": {"max_iterations": 3, "error_fingerprint_abort": True},
     }
 
-    issues = agent_pipeline._validate_plan_payload(payload)  # noqa: SLF001
+    issues = validate_plan_payload(payload)
     assert any("score_source must be one of: holdout, cv." in issue for issue in issues)
 
 
@@ -195,6 +194,32 @@ def test_normalize_plan_payload_scalarizes_pipeline_hyperparameters() -> None:
         "dropout": 0.05,
         "optimizer": {"lr": 0.001, "weight_decay": 0.01},
     }
+
+
+def test_repair_plan_payload_for_profile_adds_high_accuracy_suites() -> None:
+    payload = {
+        "suite_aware_ablations": ["competition only", "competition plus original", "orig signal only"],
+        "toggles": {"suite_ablations": ["ignored duplicate alias"]},
+    }
+    profile = {
+        "task": "classification",
+        "modality": "tabular",
+        "tags": ["binary"],
+        "train_rows": 10000,
+        "categorical_columns": ["a", "b", "c"],
+    }
+
+    repaired = repair_plan_payload_for_profile(payload, profile)
+
+    suites = repaired["suites"]
+    assert isinstance(suites, list)
+    assert [suite["name"] for suite in suites[:3]] == [
+        "competition_only",
+        "competition_plus_original",
+        "orig_signal_only",
+    ]
+    assert "suite_aware_ablations" not in repaired
+    assert repaired["toggles"] == {}
 
 
 def test_validate_plan_payload_rejects_non_object_key_hyperparameters() -> None:
@@ -239,5 +264,5 @@ def test_validate_plan_payload_rejects_non_object_key_hyperparameters() -> None:
         "stop_policy": {"max_iterations": 3, "error_fingerprint_abort": True},
     }
 
-    issues = agent_pipeline._validate_plan_payload(payload)  # noqa: SLF001
+    issues = validate_plan_payload(payload)
     assert any("key_hyperparameters must be an object" in issue for issue in issues)
