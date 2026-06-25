@@ -945,7 +945,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
-            submit_retry_resume = _load_submit_retry_artifacts(
+            submit_retry_resume = _state_load_submit_retry_artifacts(
                 run_dir=run_dir,
                 iter_dir=iter_dir,
                 iteration=iteration,
@@ -953,6 +953,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metric_direction=metric_direction,
                 target_metric=target_metric,
                 require_submit_phase=submit_enabled and not config.dry_run,
+                load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
             )
             if submit_retry_resume is not None:
                 resume_submission_path, resume_metrics_path, resume_evaluation = submit_retry_resume
@@ -5975,28 +5976,6 @@ def _resume_iteration_state(
         require_submit_phase=require_submit_phase,
         load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
         infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
-    )
-
-
-def _load_submit_retry_artifacts(
-    *,
-    run_dir: Path,
-    iter_dir: Path,
-    iteration: int,
-    max_iterations: int,
-    metric_direction: str,
-    target_metric: str,
-    require_submit_phase: bool,
-) -> tuple[Path, Path, EvaluationResult] | None:
-    return _state_load_submit_retry_artifacts(
-        run_dir=run_dir,
-        iter_dir=iter_dir,
-        iteration=iteration,
-        max_iterations=max_iterations,
-        metric_direction=metric_direction,
-        target_metric=target_metric,
-        require_submit_phase=require_submit_phase,
-        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
 

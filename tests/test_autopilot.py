@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
 from kagglebot.autopilot import (
     _DEFAULT_MAX_ITERATIONS,
@@ -34,7 +35,6 @@ from kagglebot.autopilot import (
     _is_submit_abort_autofixable,
     _load_previous_submission_history,
     _load_run_state,
-    _load_submit_retry_artifacts,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
     _resume_iteration_state,
@@ -45,6 +45,7 @@ from kagglebot.autopilot import (
     _write_iteration_state_marker,
     run_autopilot,
 )
+from kagglebot.autopilot_state import _load_submit_retry_artifacts
 from kagglebot.competition_rules import load_competition_rule_constraints
 from kagglebot.eval import EvaluationReport
 from kagglebot.exceptions import (
@@ -7908,6 +7909,7 @@ def test_load_submit_retry_artifacts_prefers_training_metrics_over_submit_only_o
         metric_direction="minimize",
         target_metric="rmse",
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
     assert result is not None
@@ -7948,6 +7950,7 @@ def test_load_submit_retry_artifacts_ignores_later_submit_only_metrics_for_legac
         metric_direction="minimize",
         target_metric="rmse",
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
     assert result is not None
@@ -8021,6 +8024,7 @@ def test_load_submit_retry_artifacts_ignores_prior_success_for_latest_failed_sub
         metric_direction="minimize",
         target_metric="rmse",
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
     assert result is not None
@@ -8081,6 +8085,7 @@ def test_load_submit_retry_artifacts_treats_duplicate_skip_as_terminal(
         metric_direction="minimize",
         target_metric="rmse",
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
     assert result is None
