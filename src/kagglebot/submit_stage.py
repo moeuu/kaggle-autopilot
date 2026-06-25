@@ -18,7 +18,7 @@ from kagglebot.campaign import (
 )
 from kagglebot.json_utils import load_json_object
 from kagglebot.scalar_utils import parse_finite_float, parse_int
-from kagglebot.submission.outcome_service import SubmissionOutcomeService
+from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 
 
@@ -124,6 +124,12 @@ def build_submit_abort_spec_kwargs(spec: SubmitAbortSpec) -> dict[str, object]:
 class SubmissionOutcomePostPollDecision:
     outcome: object
     abort_decision: SubmitOutcomeAbortDecision
+
+
+@dataclass(frozen=True)
+class SubmitOutcomeResolution:
+    outcome: object
+    abort_spec: SubmitAbortSpec | None = None
 
 
 FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
@@ -829,6 +835,60 @@ def wait_for_submission_outcome(
         message=message,
         submitted_at=submitted_at,
     )
+
+
+def resolve_submission_outcome_after_submit(
+    *,
+    slug: str,
+    message: str,
+    submitted_at: datetime,
+    deliverable_mode: str,
+    fetch_submission_rows: Callable[[str], list[dict[str, str]]],
+    max_attempts: int | None,
+    poll_interval_sec: float,
+    max_fetch_errors: int,
+    normalize_detail: Callable[[str], str],
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitOutcomeResolution:
+    try:
+        outcome = wait_for_submission_outcome(
+            slug=slug,
+            message=message,
+            submitted_at=submitted_at,
+            fetch_submission_rows=fetch_submission_rows,
+            max_attempts=max_attempts,
+            poll_interval_sec=poll_interval_sec,
+            max_fetch_errors=max_fetch_errors,
+        )
+    except SubmissionOutcomePollingError as exc:
+        return SubmitOutcomeResolution(
+            outcome=None,
+            abort_spec=build_submission_polling_error_abort_spec(
+                error=exc,
+                detail=exc.detail,
+                normalize_detail=normalize_detail,
+                compute_error_fingerprint=compute_error_fingerprint,
+            ),
+        )
+
+    outcome_post_poll = evaluate_submission_outcome_after_poll(
+        slug=slug,
+        message=message,
+        submitted_at=submitted_at,
+        outcome=outcome,
+        deliverable_mode=deliverable_mode,
+        fetch_submission_rows=fetch_submission_rows,
+        normalize_detail=normalize_detail,
+    )
+    if outcome_post_poll.abort_decision.should_abort:
+        return SubmitOutcomeResolution(
+            outcome=outcome_post_poll.outcome,
+            abort_spec=build_submission_outcome_abort_spec(
+                decision=outcome_post_poll.abort_decision,
+                compute_error_fingerprint=compute_error_fingerprint,
+            ),
+        )
+    return SubmitOutcomeResolution(outcome=outcome_post_poll.outcome)
 
 
 def build_submission_outcome_error_detail(

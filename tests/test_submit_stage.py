@@ -38,6 +38,7 @@ from kagglebot.submit_stage import (
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
     resolve_submission_message,
+    resolve_submission_outcome_after_submit,
     resolve_submission_rank_payload,
     run_submit_stage_attempt,
     submission_score_for_tracking,
@@ -263,6 +264,91 @@ def test_wait_for_submission_outcome_uses_fetch_adapter() -> None:
     assert outcome["status"] == "complete"
     assert outcome["score"] == 0.123
     assert outcome["raw"]["description"] == "submission message"
+
+
+def test_resolve_submission_outcome_after_submit_returns_normalized_outcome() -> None:
+    submitted_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    resolution = resolve_submission_outcome_after_submit(
+        slug="demo",
+        message="submission message",
+        submitted_at=submitted_at,
+        deliverable_mode="leaderboard",
+        fetch_submission_rows=lambda slug: [
+            {
+                "description": "submission message",
+                "date": "2026-01-01T00:01:00Z",
+                "status": "SubmissionStatus.COMPLETE",
+                "publicScore": "0.123",
+            }
+        ],
+        max_attempts=1,
+        poll_interval_sec=0.0,
+        max_fetch_errors=1,
+        normalize_detail=lambda text: text,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert isinstance(resolution.outcome, dict)
+    assert resolution.outcome["status"] == "complete"
+    assert resolution.outcome["score"] == 0.123
+    assert resolution.abort_spec is None
+
+
+def test_resolve_submission_outcome_after_submit_maps_scoreless_leaderboard_to_abort() -> None:
+    submitted_at = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "description": "submission message",
+            "date": "2026-01-01T00:01:00Z",
+            "status": "SubmissionStatus.COMPLETE",
+            "publicScore": "",
+            "errorDescription": "Submission Scoring Error: incorrect format",
+        }
+    ]
+
+    resolution = resolve_submission_outcome_after_submit(
+        slug="demo",
+        message="submission message",
+        submitted_at=submitted_at,
+        deliverable_mode="leaderboard",
+        fetch_submission_rows=lambda slug: rows,
+        max_attempts=1,
+        poll_interval_sec=0.0,
+        max_fetch_errors=1,
+        normalize_detail=lambda text: text,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert isinstance(resolution.outcome, dict)
+    assert resolution.outcome["status"] == "complete"
+    assert resolution.abort_spec is not None
+    assert resolution.abort_spec.error_kind == "validation"
+    assert resolution.abort_spec.reason == "submission_poll_status_complete_no_score"
+    assert "Submission Scoring Error" in resolution.abort_spec.stderr_tail
+
+
+def test_resolve_submission_outcome_after_submit_maps_polling_error_to_abort() -> None:
+    submitted_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    resolution = resolve_submission_outcome_after_submit(
+        slug="demo",
+        message="submission message",
+        submitted_at=submitted_at,
+        deliverable_mode="leaderboard",
+        fetch_submission_rows=lambda slug: (_ for _ in ()).throw(RuntimeError("network unavailable")),
+        max_attempts=1,
+        poll_interval_sec=0.0,
+        max_fetch_errors=1,
+        normalize_detail=lambda text: " ".join(text.split()),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert resolution.outcome is None
+    assert resolution.abort_spec is not None
+    assert resolution.abort_spec.error_kind == "transient"
+    assert resolution.abort_spec.reason == "submission_polling_error"
+    assert "network unavailable" in resolution.abort_spec.stderr_tail
 
 
 def test_infer_iteration_from_submission_path_reads_iter_parent() -> None:

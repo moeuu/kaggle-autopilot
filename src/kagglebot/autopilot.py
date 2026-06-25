@@ -194,7 +194,6 @@ from kagglebot.submission.guard import (
     normalize_error_text,
     run_kaggle_submit_kernel,
 )
-from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
 from kagglebot.submission_history import (
     detect_online_regression_vs_submission_history as _detect_online_regression_vs_submission_history,
 )
@@ -5378,51 +5377,19 @@ def _attempt_submit(
         raise SubmitAbortedError("Submit failed before producing a submission result.")
     submission_ref = submission_reference
     submission_for_submit_path = submission_artifact_path
-    try:
-        outcome = _submit_stage.wait_for_submission_outcome(
-            slug=config.slug,
-            message=message,
-            submitted_at=submitted_at,
-            fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
-            max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
-            poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
-            max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
-        )
-    except SubmissionOutcomePollingError as exc:
-        abort_spec = _submit_stage.build_submission_polling_error_abort_spec(
-            error=exc,
-            detail=exc.detail,
-            normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
-            compute_error_fingerprint=compute_error_fingerprint,
-        )
-        return _abort_submit_for_run(
-            config=config,
-            run_id=run_id,
-            problem_types=problem_types,
-            submission_ref=submission_ref,
-            submission_artifact_path=submission_for_submit_path,
-            artifact_mode=submission_artifact_mode,
-            code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
-            submit_attempt_recorder=submit_attempt_recorder,
-        )
-
-    outcome_post_poll = _submit_stage.evaluate_submission_outcome_after_poll(
+    outcome_resolution = _submit_stage.resolve_submission_outcome_after_submit(
         slug=config.slug,
         message=message,
         submitted_at=submitted_at,
-        outcome=outcome,
         deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
         fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
+        max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
+        poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
+        max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
         normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
+        compute_error_fingerprint=compute_error_fingerprint,
     )
-    outcome = outcome_post_poll.outcome
-    outcome_abort_decision = outcome_post_poll.abort_decision
-    if outcome_abort_decision.should_abort:
-        abort_spec = _submit_stage.build_submission_outcome_abort_spec(
-            decision=outcome_abort_decision,
-            compute_error_fingerprint=compute_error_fingerprint,
-        )
+    if outcome_resolution.abort_spec is not None:
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
@@ -5431,9 +5398,10 @@ def _attempt_submit(
             submission_artifact_path=submission_for_submit_path,
             artifact_mode=submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
+            **_submit_stage.build_submit_abort_spec_kwargs(outcome_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
+    outcome = outcome_resolution.outcome
 
     def mark_submit_failure_context_submitted(submitted_ref: str) -> None:
         _submit_failure_context.mark_submit_failure_context_submitted(
