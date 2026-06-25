@@ -4,6 +4,7 @@ from pathlib import Path
 
 from kagglebot.hashing import sha256_file_or_none
 from kagglebot.submit_retry_policy import (
+    compute_submit_backoff,
     compute_submit_code_fingerprint,
     consume_same_submit_fingerprint_retry_allowance,
     decide_duplicate_submission_action,
@@ -57,6 +58,12 @@ def test_compute_submit_code_fingerprint_ignores_python_cache_files(tmp_path: Pa
     )
 
     assert changed == original
+
+
+def test_compute_submit_backoff_uses_exponential_base_and_jitter() -> None:
+    assert compute_submit_backoff(attempt=1, base_seconds=2.0, jitter=lambda: 0.25) == 2.25
+    assert compute_submit_backoff(attempt=3, base_seconds=2.0, jitter=lambda: 0.25) == 8.25
+    assert compute_submit_backoff(attempt=0, base_seconds=2.0, jitter=lambda: 0.25) == 2.25
 
 
 def test_consume_same_submit_fingerprint_retry_allowance_records_code_change() -> None:

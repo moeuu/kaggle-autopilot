@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,16 @@ def compute_submit_code_fingerprint(
             hasher.update((sha256_or_none(path) or "missing").encode())
             hasher.update(b"\n")
     return hasher.hexdigest()
+
+
+def compute_submit_backoff(
+    *,
+    attempt: int,
+    base_seconds: float,
+    jitter: Callable[[], float] | None = None,
+) -> float:
+    jitter_func = random.random if jitter is None else jitter
+    return float(base_seconds) * (2 ** max(0, int(attempt) - 1)) + float(jitter_func())
 
 
 def decide_duplicate_submission_action(

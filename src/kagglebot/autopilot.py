@@ -5,7 +5,6 @@ import hashlib
 import json
 import math
 import os
-import random
 import re
 import shlex
 import shutil
@@ -8057,9 +8056,10 @@ def _consume_same_submit_fingerprint_retry_allowance(
 
 
 def _compute_submit_backoff(attempt: int) -> float:
-    base = _SUBMIT_BACKOFF_BASE_SEC * (2 ** max(0, attempt - 1))
-    jitter = random.uniform(0.0, 1.0)
-    return base + jitter
+    return _submit_retry_policy.compute_submit_backoff(
+        attempt=attempt,
+        base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
+    )
 
 
 def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
