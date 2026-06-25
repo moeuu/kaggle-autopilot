@@ -452,6 +452,46 @@ def apply_same_submission_path_decision(
     return True
 
 
+def resolve_same_submission_path_for_submit(
+    *,
+    run_state: dict[str, object],
+    latest_submit_attempt: dict[str, object],
+    prepared_submission_path: Path,
+    current_submission_sha: str,
+    submit_code_fingerprint: str,
+    allow_force: bool,
+    notebook_submit_required: bool,
+    decide_same_submission_path_action: Callable[..., object],
+    run_id: str,
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    record_submit_attempt: Callable[[dict[str, object]], object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> bool:
+    if notebook_submit_required:
+        return False
+    decision = decide_same_submission_path_action(
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        prepared_submission_path=prepared_submission_path,
+        current_submission_sha=current_submission_sha,
+        submit_code_fingerprint=submit_code_fingerprint,
+        allow_force=allow_force,
+        notebook_submit_required=notebook_submit_required,
+    )
+    return apply_same_submission_path_decision(
+        decision=decision,
+        run_id=run_id,
+        submission_path=prepared_submission_path,
+        compute_submission_sha256=compute_submission_sha256,
+        record_submit_attempt=record_submit_attempt,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+
+
 def apply_duplicate_submission_decision(
     *,
     decision: object,

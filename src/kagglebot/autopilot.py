@@ -4771,27 +4771,23 @@ def _attempt_submit(
         on_message=print,
     )
 
-    if not submit_stage_state.notebook_submit_required:
-        same_path_decision = _submit_retry_policy.decide_same_submission_path_action(
-            run_state=run_state,
-            latest_submit_attempt=latest_submit_attempt,
-            prepared_submission_path=prepared_submission_path,
-            current_submission_sha=str(_sha256_or_none(prepared_submission_path) or "").strip(),
-            submit_code_fingerprint=submit_code_fingerprint,
-            allow_force=allow_force,
-            notebook_submit_required=submit_stage_state.notebook_submit_required,
-        )
-        if _submit_stage.apply_same_submission_path_decision(
-            decision=same_path_decision,
-            run_id=run_id,
-            submission_path=prepared_submission_path,
-            compute_submission_sha256=_sha256_or_none,
-            record_submit_attempt=submit_attempt_recorder.append,
-            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-            on_message=print,
-        ):
-            return None
+    if _submit_stage.resolve_same_submission_path_for_submit(
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        prepared_submission_path=prepared_submission_path,
+        current_submission_sha=str(_sha256_or_none(prepared_submission_path) or "").strip(),
+        submit_code_fingerprint=submit_code_fingerprint,
+        allow_force=allow_force,
+        notebook_submit_required=submit_stage_state.notebook_submit_required,
+        decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
+        run_id=run_id,
+        compute_submission_sha256=_sha256_or_none,
+        record_submit_attempt=submit_attempt_recorder.append,
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        on_message=print,
+    ):
+        return None
 
     seen_fingerprints = _submit_attempts.build_seen_submit_fingerprint_set(
         attempt_fingerprints=_load_submit_fingerprints(run_dir),
