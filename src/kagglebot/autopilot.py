@@ -2510,12 +2510,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metrics_payload["writeup_bundle"] = writeup_bundle_meta
                 _write_json_object(metrics_path, metrics_payload)
 
-            submit_allowed_by_gate = submit_enabled and allow_submit
-            submit_phase_finished = (
-                (not submit_phase_required)
-                or (not submit_allowed_by_gate)
-                or (submission_result is not None)
-                or submit_failed_deferred
+            submit_phase_completion = _iteration_metrics.resolve_iteration_submit_phase_completion(
+                submit_enabled=submit_enabled,
+                allow_submit=allow_submit,
+                submit_phase_required=submit_phase_required,
+                submission_result=submission_result,
+                submit_failed_deferred=submit_failed_deferred,
             )
 
             iteration_record_kwargs = _iteration_metrics.build_iteration_record_kwargs(
@@ -2530,7 +2530,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 record_iteration=record_iteration,
                 canonical_record_iteration=_knowledge.record_iteration,
                 iteration_record_kwargs=iteration_record_kwargs,
-                submit_phase_finished=submit_phase_finished,
+                submit_phase_finished=submit_phase_completion.submit_phase_finished,
             )
             _write_iteration_state_marker(
                 iter_dir=iter_dir,
@@ -2540,8 +2540,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metrics_path=metrics_path,
                 evaluation_report_path=evaluation_report_path,
                 submit_phase_required=submit_phase_required,
-                submit_phase_finished=submit_phase_finished,
-                submit_allowed_by_gate=submit_allowed_by_gate,
+                submit_phase_finished=submit_phase_completion.submit_phase_finished,
+                submit_allowed_by_gate=submit_phase_completion.submit_allowed_by_gate,
                 submit_phase_state=submit_phase_state,
                 forced_submit_reason=forced_submit_reason,
                 submitted=submission_result is not None and not submission_skipped,

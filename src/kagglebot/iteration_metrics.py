@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +24,12 @@ from kagglebot.solver.io import load_competition_data
 
 if TYPE_CHECKING:
     from kagglebot.solver.evaluate import EvaluationResult
+
+
+@dataclass(frozen=True)
+class IterationSubmitPhaseCompletion:
+    submit_allowed_by_gate: bool
+    submit_phase_finished: bool
 
 
 def evaluation_to_payload(evaluation: EvaluationResult) -> dict[str, object]:
@@ -129,6 +136,27 @@ def build_iteration_record_kwargs(
         "met_target": met_target,
         "git_commit": None,
     }
+
+
+def resolve_iteration_submit_phase_completion(
+    *,
+    submit_enabled: bool,
+    allow_submit: bool,
+    submit_phase_required: bool,
+    submission_result: object,
+    submit_failed_deferred: bool,
+) -> IterationSubmitPhaseCompletion:
+    submit_allowed_by_gate = bool(submit_enabled and allow_submit)
+    submit_phase_finished = (
+        (not submit_phase_required)
+        or (not submit_allowed_by_gate)
+        or (submission_result is not None)
+        or submit_failed_deferred
+    )
+    return IterationSubmitPhaseCompletion(
+        submit_allowed_by_gate=submit_allowed_by_gate,
+        submit_phase_finished=submit_phase_finished,
+    )
 
 
 def build_noise_guard_payload(

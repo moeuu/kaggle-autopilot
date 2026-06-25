@@ -16,6 +16,7 @@ from kagglebot.iteration_metrics import (
     extract_fold_scores_for_report,
     iteration_metrics_allow_submit,
     record_iteration_with_submit_phase_compat,
+    resolve_iteration_submit_phase_completion,
     resume_best_readiness_score,
     resume_noise_guard_state,
 )
@@ -165,6 +166,45 @@ def test_build_iteration_record_kwargs_uses_evaluation_and_top1_score() -> None:
         "met_target": False,
         "git_commit": None,
     }
+
+
+def test_resolve_iteration_submit_phase_completion_waits_for_required_submit() -> None:
+    decision = resolve_iteration_submit_phase_completion(
+        submit_enabled=True,
+        allow_submit=True,
+        submit_phase_required=True,
+        submission_result=None,
+        submit_failed_deferred=False,
+    )
+
+    assert decision.submit_allowed_by_gate is True
+    assert decision.submit_phase_finished is False
+
+
+def test_resolve_iteration_submit_phase_completion_finishes_when_gate_blocks_submit() -> None:
+    decision = resolve_iteration_submit_phase_completion(
+        submit_enabled=True,
+        allow_submit=False,
+        submit_phase_required=True,
+        submission_result=None,
+        submit_failed_deferred=False,
+    )
+
+    assert decision.submit_allowed_by_gate is False
+    assert decision.submit_phase_finished is True
+
+
+def test_resolve_iteration_submit_phase_completion_finishes_after_submit_result() -> None:
+    decision = resolve_iteration_submit_phase_completion(
+        submit_enabled=True,
+        allow_submit=True,
+        submit_phase_required=True,
+        submission_result={"status": "submitted"},
+        submit_failed_deferred=False,
+    )
+
+    assert decision.submit_allowed_by_gate is True
+    assert decision.submit_phase_finished is True
 
 
 def test_build_guard_payload_helpers_preserve_expected_keys() -> None:
