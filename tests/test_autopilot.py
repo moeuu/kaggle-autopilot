@@ -1807,7 +1807,10 @@ def test_attempt_submit_allows_one_repeated_fingerprint_after_code_change(monkey
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fail_then_succeed)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._compute_submit_code_fingerprint", lambda *args, **kwargs: "new-code")
+    monkeypatch.setattr(
+        "kagglebot.submit_retry_policy.compute_submit_code_fingerprint",
+        lambda *args, **kwargs: "new-code",
+    )
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
 
     result = _attempt_submit(
@@ -1870,7 +1873,10 @@ def test_attempt_submit_consumes_repeated_fingerprint_allowance_once(monkeypatch
     )
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", always_fail)
-    monkeypatch.setattr("kagglebot.autopilot._compute_submit_code_fingerprint", lambda *args, **kwargs: "new-code")
+    monkeypatch.setattr(
+        "kagglebot.submit_retry_policy.compute_submit_code_fingerprint",
+        lambda *args, **kwargs: "new-code",
+    )
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
 
     with pytest.raises(SubmitAbortedError):
@@ -1940,7 +1946,10 @@ def test_attempt_submit_allows_one_repeated_fingerprint_for_legacy_state_without
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fail_then_succeed)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._compute_submit_code_fingerprint", lambda *args, **kwargs: "new-code")
+    monkeypatch.setattr(
+        "kagglebot.submit_retry_policy.compute_submit_code_fingerprint",
+        lambda *args, **kwargs: "new-code",
+    )
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
 
     result = _attempt_submit(

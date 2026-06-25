@@ -6018,7 +6018,11 @@ def _attempt_submit(
     run_state = _load_run_state(run_dir)
     submit_failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
     latest_submit_attempt = _load_latest_submit_attempt(run_dir)
-    submit_code_fingerprint = _compute_submit_code_fingerprint(config)
+    submit_code_fingerprint = _submit_retry_policy.compute_submit_code_fingerprint(
+        src_root=Path(__file__).resolve().parent,
+        kernel_source_dir=config.paths.kernel_source_dir,
+        sha256_or_none=_sha256_or_none,
+    )
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
     autofix_input_decision = _submit_failure_context.decide_submit_autofix_input_submission(
         run_state=run_state,
@@ -6830,14 +6834,6 @@ def _submit_file_fix_contract_satisfied(
         run_state=_load_run_state(run_dir),
         baseline_path=baseline_path,
         baseline_sha256=baseline_sha256,
-        sha256_or_none=_sha256_or_none,
-    )
-
-
-def _compute_submit_code_fingerprint(config: AutopilotConfig) -> str:
-    return _submit_retry_policy.compute_submit_code_fingerprint(
-        src_root=Path(__file__).resolve().parent,
-        kernel_source_dir=config.paths.kernel_source_dir,
         sha256_or_none=_sha256_or_none,
     )
 

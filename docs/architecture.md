@@ -258,8 +258,8 @@ The next high-value modernization work is:
    favor of direct `context_artifacts.py` calls. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
-   Submit autofix context formatting now calls `submit_failure_context.py` directly. Submit-kernel CPU fallback
-   decisions now call `submit_notebook.py` directly.
+   Submit autofix context formatting now calls `submit_failure_context.py` directly, and submit code fingerprinting now
+   calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback decisions now call `submit_notebook.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.
