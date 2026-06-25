@@ -225,7 +225,6 @@ from kagglebot.top1_exhaustive import (
 from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
 from kagglebot.validators import ensure_kernel_sources_valid
-from kagglebot.verify_artifacts import mirror_verify_artifacts
 from kagglebot.verify_artifacts import run_verify as _verify_run_verify
 from kagglebot.writeup import (
     build_writeup_bundle,
@@ -3768,10 +3767,6 @@ def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5
         format_error_fix_insights(error_insights, limit=limit),
     ]
     return "\n".join(section for section in sections if section is not None)
-
-
-def _mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
-    mirror_verify_artifacts(artifacts_dir, repo_root=repo_root)
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:

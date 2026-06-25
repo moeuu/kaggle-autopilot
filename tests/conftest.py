@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kagglebot.autopilot import _mirror_verify_artifacts
+from kagglebot.verify_artifacts import mirror_verify_artifacts
 
 
 def pytest_sessionstart(session) -> None:  # noqa: ANN001
@@ -12,4 +12,4 @@ def pytest_sessionstart(session) -> None:  # noqa: ANN001
     external_artifacts_dir = Path(artifacts_dir)
     if not external_artifacts_dir.exists():
         return
-    _mirror_verify_artifacts(external_artifacts_dir, repo_root=repo_root)
+    mirror_verify_artifacts(external_artifacts_dir, repo_root=repo_root)
