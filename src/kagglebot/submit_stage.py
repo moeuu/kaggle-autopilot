@@ -792,6 +792,25 @@ def build_submission_outcome_abort_spec(
     )
 
 
+def build_submit_stage_error_action_abort_spec(
+    *,
+    action: SubmitStageErrorActionDecision,
+    fingerprint: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+) -> SubmitAbortSpec:
+    return SubmitAbortSpec(
+        fingerprint=fingerprint,
+        error_kind=action.error_kind,
+        reason=action.reason,
+        message=action.abort_message,
+        stdout_tail=stdout,
+        stderr_tail=stderr,
+        exit_code=exit_code,
+    )
+
+
 def decide_submission_outcome_abort(
     *,
     outcome_status: str,

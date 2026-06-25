@@ -5285,6 +5285,13 @@ def _attempt_submit(
             for action_message in error_action.messages:
                 print(action_message)
             if error_action.action == "abort":
+                abort_spec = _submit_stage.build_submit_stage_error_action_abort_spec(
+                    action=error_action,
+                    fingerprint=fingerprint,
+                    stdout=exc.stdout,
+                    stderr=submit_error_classification.stderr,
+                    exit_code=exc.exit_code,
+                )
                 return _abort_submit_for_run(
                     config=config,
                     run_id=run_id,
@@ -5293,13 +5300,7 @@ def _attempt_submit(
                     submission_artifact_path=submission_artifact_path,
                     artifact_mode=submit_stage_state.submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
-                    fingerprint=fingerprint,
-                    error_kind=error_action.error_kind,
-                    reason=error_action.reason,
-                    message=error_action.abort_message,
-                    stdout_tail=exc.stdout,
-                    stderr_tail=submit_error_classification.stderr,
-                    exit_code=exc.exit_code,
+                    **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
                     submit_attempt_recorder=submit_attempt_recorder,
                 )
             seen_fingerprints.add(fingerprint)

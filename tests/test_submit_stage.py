@@ -17,6 +17,7 @@ from kagglebot.submit_stage import (
     build_submission_outcome_error_detail,
     build_submission_polling_error_abort_spec,
     build_submit_abort_spec_kwargs,
+    build_submit_stage_error_action_abort_spec,
     build_submit_stage_runtime_state,
     build_submit_stage_success_record,
     classify_submission_outcome,
@@ -350,6 +351,35 @@ def test_build_submission_outcome_abort_spec_maps_decision_contract() -> None:
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "bad submission row"
     assert spec.exit_code is None
+
+
+def test_build_submit_stage_error_action_abort_spec_maps_action_contract() -> None:
+    action = decide_submit_stage_error_action(
+        fingerprint_seen=False,
+        same_fingerprint_retry_allowed=False,
+        classification_kind="permanent",
+        classification_reason="bad_request",
+        attempt=1,
+        max_attempts=2,
+        retry_after_seconds=0.0,
+        backoff_seconds=1.0,
+    )
+
+    spec = build_submit_stage_error_action_abort_spec(
+        action=action,
+        fingerprint="fp",
+        stdout="stdout text",
+        stderr="stderr text",
+        exit_code=1,
+    )
+
+    assert spec.fingerprint == "fp"
+    assert spec.error_kind == "permanent"
+    assert spec.reason == "bad_request"
+    assert spec.message == "Submit failed and is not retryable in this run."
+    assert spec.stdout_tail == "stdout text"
+    assert spec.stderr_tail == "stderr text"
+    assert spec.exit_code == 1
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
