@@ -110,6 +110,17 @@ def merge_quality_signal_messages(
     }
 
 
+def quality_signal_blocks_submit(
+    signal: dict[str, object],
+    *,
+    force_submit: bool,
+    forceable: bool = True,
+) -> bool:
+    if not bool(signal.get("block_submit")):
+        return False
+    return not (forceable and force_submit)
+
+
 def build_oracle_override_signal(payload: dict[str, object] | None) -> dict[str, object]:
     oracle_payload = payload.get("oracle") if isinstance(payload, dict) else None
     mode: str | None = None

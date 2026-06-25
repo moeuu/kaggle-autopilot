@@ -27,6 +27,7 @@ from kagglebot.kernel_quality import (
     infer_data_tier,
     is_significantly_worse,
     merge_quality_signal_messages,
+    quality_signal_blocks_submit,
 )
 
 
@@ -100,6 +101,15 @@ def test_merge_quality_signal_messages_preserves_duplicates_by_default() -> None
     )
 
     assert merged["reasons"] == ["existing", "existing"]
+
+
+def test_quality_signal_blocks_submit_respects_forceable_flag() -> None:
+    signal = {"block_submit": True}
+
+    assert quality_signal_blocks_submit(signal, force_submit=False)
+    assert not quality_signal_blocks_submit(signal, force_submit=True)
+    assert quality_signal_blocks_submit(signal, force_submit=True, forceable=False)
+    assert not quality_signal_blocks_submit({"block_submit": False}, force_submit=False)
 
 
 def test_build_oracle_override_signal_flags_applied_or_enabled_mode() -> None:
