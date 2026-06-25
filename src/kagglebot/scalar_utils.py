@@ -73,3 +73,23 @@ def parse_int(
     if require_integral_float and not parsed.is_integer():
         return None
     return int(parsed)
+
+
+def non_negative_finite_float(
+    value: object,
+    *,
+    default: float = 0.0,
+    allow_strings: bool = False,
+) -> float:
+    parsed = parse_finite_float(value) if allow_strings else _finite_float_from_number(value)
+    if parsed is None:
+        parsed = _finite_float_from_number(default)
+    if parsed is None:
+        return 0.0
+    return max(parsed, 0.0)
+
+
+def _finite_float_from_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return finite_float(value)

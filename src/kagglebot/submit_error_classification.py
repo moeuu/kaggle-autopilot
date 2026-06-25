@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+
+from kagglebot.scalar_utils import non_negative_finite_float
 
 
 @dataclass(frozen=True)
@@ -78,16 +79,4 @@ def normalize_submit_error_text(value: object, *, default: str) -> str:
 
 
 def normalize_retry_after_seconds(value: object, *, default: float = 0.0) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return _finite_non_negative(default)
-    seconds = float(value)
-    if not math.isfinite(seconds):
-        return _finite_non_negative(default)
-    return max(seconds, 0.0)
-
-
-def _finite_non_negative(value: float) -> float:
-    seconds = float(value)
-    if not math.isfinite(seconds):
-        return 0.0
-    return max(seconds, 0.0)
+    return non_negative_finite_float(value, default=default)
