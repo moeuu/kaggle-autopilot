@@ -24,7 +24,6 @@ from kagglebot.autopilot import (
     _decide_notebook_submit_artifact_mode_for_submission,
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
-    _error_strategy_skip_reason,
     _extract_missing_ensemble_signal,
     _extract_orig_proba_signal,
     _extract_original_data_unused_signal,
@@ -3762,44 +3761,6 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
         encoding="utf-8"
     )
     assert "Stage: submit_autofix" in strategy_prompt
-
-
-def test_error_strategy_skip_reason_detects_deterministic_failures() -> None:
-    reason = _error_strategy_skip_reason(
-        stage="kernel_fix",
-        error_text=(
-            "ValueError: Kernel source validation failed:\n- Kernel sources do not reference metrics.json output."
-        ),
-    )
-    assert reason is not None
-    assert "deterministic" in reason
-    reason_data = _error_strategy_skip_reason(
-        stage="kernel_fix",
-        error_text=("FileNotFoundError: Data directory not found: /tmp/artifacts/demo/artifacts/demo/data"),
-    )
-    assert reason_data is not None
-    assert "path resolution" in reason_data
-    reason_metric = _error_strategy_skip_reason(
-        stage="autofix",
-        error_text=(
-            "RuntimeError: Competition metric mismatch persisted after metric-only repairs "
-            "(attempts=2, target=auc/maximize, kernel=accuracy/maximize)."
-        ),
-    )
-    assert reason_metric is not None
-    assert "metric mismatch" in reason_metric
-
-
-def test_error_strategy_skip_reason_detects_metric_mismatch_for_submit_autofix() -> None:
-    reason = _error_strategy_skip_reason(
-        stage="submit_autofix",
-        error_text=(
-            "RuntimeError: Competition metric mismatch persisted after metric-only repairs "
-            "(attempts=3, target=auc/maximize, kernel=accuracy/maximize)."
-        ),
-    )
-    assert reason is not None
-    assert "metric mismatch" in reason
 
 
 def test_run_autofix_submit_error_still_runs_strategy_for_internet_policy(monkeypatch, tmp_path: Path) -> None:

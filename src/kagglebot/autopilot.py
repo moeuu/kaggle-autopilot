@@ -444,7 +444,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
             except Exception as exc:  # noqa: BLE001
                 if config.dry_run:
                     raise
-                if _is_non_autofixable_runtime_error(exc):
+                if _runtime_fixes.is_non_autofixable_runtime_error(exc):
                     raise
                 attempt += 1
                 if attempt > MAX_AUTOFIX_ATTEMPTS:
@@ -4731,91 +4731,6 @@ def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bo
     return strategy_text
 
 
-def _error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
-    """Return a deterministic reason to skip GPT strategy analysis, if any."""
-    normalized_stage = str(stage or "").strip().lower()
-    lowered = normalize_error_text(error_text or "", max_chars=8000).lower()
-    if not lowered:
-        return None
-
-    cross_stage_patterns = (
-        (
-            "competition metric mismatch",
-            "strict competition metric mismatch escalation is deterministic",
-        ),
-    )
-    for needle, reason in cross_stage_patterns:
-        if needle in lowered:
-            return reason
-
-    common_patterns = (
-        (
-            "kernel source validation failed",
-            "deterministic kernel source validation failure",
-        ),
-        (
-            "do not reference metrics.json output",
-            "missing metrics.json output contract is deterministic",
-        ),
-        (
-            "do not reference submission.csv output",
-            "missing submission.csv output contract is deterministic",
-        ),
-        (
-            "unexpected keyword argument 'evaluation_strategy'",
-            "known transformers eval_strategy API mismatch",
-        ),
-        (
-            "modulenotfounderror: no module named",
-            "deterministic missing module error",
-        ),
-        (
-            "keyerror:",
-            "deterministic dataframe key/column error",
-        ),
-        (
-            "not in index",
-            "deterministic dataframe column mismatch",
-        ),
-        (
-            "missing columns",
-            "deterministic missing-column error",
-        ),
-        (
-            "data directory not found:",
-            "deterministic local data path resolution failure",
-        ),
-        (
-            "unable to resolve competition data root",
-            "deterministic competition data path resolution failure",
-        ),
-    )
-    if normalized_stage != "submit_autofix":
-        for needle, reason in common_patterns:
-            if needle in lowered:
-                return reason
-
-    if normalized_stage == "submit_autofix":
-        submit_patterns = (
-            (
-                "cannot use internet access in this competition",
-                "competition internet policy violation is deterministic",
-            ),
-            (
-                "disable internet in the notebook editor",
-                "competition internet policy violation is deterministic",
-            ),
-            (
-                "submission file must be named submission.csv",
-                "submission filename contract violation is deterministic",
-            ),
-        )
-        for needle, reason in submit_patterns:
-            if needle in lowered:
-                return reason
-    return None
-
-
 def _run_kernel_fix(
     *,
     config: AutopilotConfig,
@@ -4912,7 +4827,7 @@ def _run_kernel_fix(
     if not use_gpt_strategy:
         strategy_skip_reason = "metric_fix_policy"
     else:
-        strategy_skip_reason = _error_strategy_skip_reason(stage="kernel_fix", error_text=error_message)
+        strategy_skip_reason = _runtime_fixes.error_strategy_skip_reason(stage="kernel_fix", error_text=error_message)
     if strategy_skip_reason:
         print(
             "[yellow]kernel fix[/yellow]: "
@@ -6702,13 +6617,6 @@ def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> boo
     if decision.message:
         print(decision.message)
     return decision.autofixable
-
-
-def _is_non_autofixable_runtime_error(error: Exception) -> bool:
-    text = str(error).strip().lower()
-    if not text:
-        return False
-    return "requires kernel.py" in text or "kernel-first training" in text
 
 
 def _record_submit_reason_knowledge(

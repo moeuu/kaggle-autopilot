@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_array, load_json_object_or_empty, write_json_array, write_json_object
+from kagglebot.submission.guard import normalize_error_text
 
 COLUMN_MAP_FILENAME = "column_map.json"
 COLUMN_FILL_FILENAME = "column_fill.json"
@@ -35,6 +36,98 @@ COLUMN_ERROR_PATTERNS = (
     "not in index",
     "are in the [columns]",
 )
+
+
+def error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
+    """Return a deterministic reason to skip GPT strategy analysis, if any."""
+    normalized_stage = str(stage or "").strip().lower()
+    lowered = normalize_error_text(error_text or "", max_chars=8000).lower()
+    if not lowered:
+        return None
+
+    cross_stage_patterns = (
+        (
+            "competition metric mismatch",
+            "strict competition metric mismatch escalation is deterministic",
+        ),
+    )
+    for needle, reason in cross_stage_patterns:
+        if needle in lowered:
+            return reason
+
+    common_patterns = (
+        (
+            "kernel source validation failed",
+            "deterministic kernel source validation failure",
+        ),
+        (
+            "do not reference metrics.json output",
+            "missing metrics.json output contract is deterministic",
+        ),
+        (
+            "do not reference submission.csv output",
+            "missing submission.csv output contract is deterministic",
+        ),
+        (
+            "unexpected keyword argument 'evaluation_strategy'",
+            "known transformers eval_strategy API mismatch",
+        ),
+        (
+            "modulenotfounderror: no module named",
+            "deterministic missing module error",
+        ),
+        (
+            "keyerror:",
+            "deterministic dataframe key/column error",
+        ),
+        (
+            "not in index",
+            "deterministic dataframe column mismatch",
+        ),
+        (
+            "missing columns",
+            "deterministic missing-column error",
+        ),
+        (
+            "data directory not found:",
+            "deterministic local data path resolution failure",
+        ),
+        (
+            "unable to resolve competition data root",
+            "deterministic competition data path resolution failure",
+        ),
+    )
+    if normalized_stage != "submit_autofix":
+        for needle, reason in common_patterns:
+            if needle in lowered:
+                return reason
+
+    if normalized_stage == "submit_autofix":
+        submit_patterns = (
+            (
+                "cannot use internet access in this competition",
+                "competition internet policy violation is deterministic",
+            ),
+            (
+                "disable internet in the notebook editor",
+                "competition internet policy violation is deterministic",
+            ),
+            (
+                "submission file must be named submission.csv",
+                "submission filename contract violation is deterministic",
+            ),
+        )
+        for needle, reason in submit_patterns:
+            if needle in lowered:
+                return reason
+    return None
+
+
+def is_non_autofixable_runtime_error(error: Exception) -> bool:
+    text = str(error).strip().lower()
+    if not text:
+        return False
+    return "requires kernel.py" in text or "kernel-first training" in text
 
 
 def maybe_write_column_fill(config: object, error_text: str) -> bool:

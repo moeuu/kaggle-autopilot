@@ -6,9 +6,11 @@ from pathlib import Path
 
 from kagglebot.paths import CompetitionPaths
 from kagglebot.runtime_fixes import (
+    error_strategy_skip_reason,
     extract_candidate_groups,
     extract_missing_module,
     infer_column_mapping,
+    is_non_autofixable_runtime_error,
     maybe_write_column_fill,
     maybe_write_column_map,
     maybe_write_device_coerce,
@@ -26,6 +28,50 @@ class DummyConfig:
 
 def _config(tmp_path: Path) -> DummyConfig:
     return DummyConfig(paths=CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"))
+
+
+def test_error_strategy_skip_reason_detects_deterministic_failures() -> None:
+    reason = error_strategy_skip_reason(
+        stage="kernel_fix",
+        error_text=(
+            "ValueError: Kernel source validation failed:\n- Kernel sources do not reference metrics.json output."
+        ),
+    )
+    assert reason is not None
+    assert "deterministic" in reason
+    reason_data = error_strategy_skip_reason(
+        stage="kernel_fix",
+        error_text=("FileNotFoundError: Data directory not found: /tmp/artifacts/demo/artifacts/demo/data"),
+    )
+    assert reason_data is not None
+    assert "path resolution" in reason_data
+    reason_metric = error_strategy_skip_reason(
+        stage="autofix",
+        error_text=(
+            "RuntimeError: Competition metric mismatch persisted after metric-only repairs "
+            "(attempts=2, target=auc/maximize, kernel=accuracy/maximize)."
+        ),
+    )
+    assert reason_metric is not None
+    assert "metric mismatch" in reason_metric
+
+
+def test_error_strategy_skip_reason_detects_metric_mismatch_for_submit_autofix() -> None:
+    reason = error_strategy_skip_reason(
+        stage="submit_autofix",
+        error_text=(
+            "RuntimeError: Competition metric mismatch persisted after metric-only repairs "
+            "(attempts=3, target=auc/maximize, kernel=accuracy/maximize)."
+        ),
+    )
+    assert reason is not None
+    assert "metric mismatch" in reason
+
+
+def test_is_non_autofixable_runtime_error_detects_kernel_first_failures() -> None:
+    assert is_non_autofixable_runtime_error(RuntimeError("This mode requires kernel.py")) is True
+    assert is_non_autofixable_runtime_error(RuntimeError("Kernel-first training is required")) is True
+    assert is_non_autofixable_runtime_error(RuntimeError("transient")) is False
 
 
 def test_maybe_write_column_fill_from_missing_columns_error(tmp_path: Path) -> None:
