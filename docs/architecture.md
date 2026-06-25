@@ -358,7 +358,8 @@ Recommended extraction order:
    Problem-type knowledge context rendering and knowledge-hints file generation are shared through
    `knowledge_context.py`, so planning and improvement prompts do not duplicate insight/research lookup policy.
    Dataset-profile-to-problem-type resolution also lives there, keeping orchestration code from directly owning profile
-   parsing for knowledge lookup.
+   parsing for knowledge lookup. Improvement orchestration calls these public helpers directly instead of preserving
+   private problem-type knowledge wrappers in `autopilot.py`.
 8. Context artifacts: keep dataset-profile loading, evaluation-spec validation/override normalization, and capped CSV
    row-count helpers in `context_artifacts.py`; loop code should not open these context files directly.
 9. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment

@@ -24,6 +24,7 @@ from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
+from kagglebot import knowledge_context as _knowledge_context
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
@@ -146,11 +147,6 @@ from kagglebot.knowledge import (
     record_iteration,
     record_problem_type_insight,
     record_run,
-)
-from kagglebot.knowledge_context import (
-    load_problem_type_knowledge_text,
-    refresh_knowledge_hints,
-    resolve_problem_types_from_profile,
 )
 from kagglebot.leaderboard_policy import build_medal_target_reason as _build_medal_target_reason
 from kagglebot.leaderboard_policy import meets_rank_percentile_target as _meets_rank_percentile_target
@@ -500,7 +496,7 @@ class KnowledgePhase:
     config: AutopilotConfig
 
     def refresh(self) -> None:
-        refresh_knowledge_hints(paths=self.config.paths, knowledge_paths=self.config.knowledge_paths)
+        _knowledge_context.refresh_knowledge_hints(paths=self.config.paths, knowledge_paths=self.config.knowledge_paths)
 
     def load_dataset_profile(self) -> dict[str, object]:
         return _context_load_dataset_profile(
@@ -509,7 +505,9 @@ class KnowledgePhase:
         )
 
     def derive_problem_types(self) -> list[str]:
-        return resolve_problem_types_from_profile(dataset_profile_path=self.config.paths.dataset_profile_path)
+        return _knowledge_context.resolve_problem_types_from_profile(
+            dataset_profile_path=self.config.paths.dataset_profile_path
+        )
 
 
 @dataclass(frozen=True)
@@ -3431,16 +3429,6 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     }
 
 
-def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5) -> str:
-    return load_problem_type_knowledge_text(
-        dataset_profile_path=config.paths.dataset_profile_path,
-        knowledge_paths=config.knowledge_paths,
-        limit=limit,
-        include_research=False,
-        unavailable_message="Problem-type knowledge unavailable: {error}",
-    )
-
-
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
     _verify_run_verify(
         verify_cmd,
@@ -3930,7 +3918,12 @@ def _run_improvement(
             ]
         )
     base_prompt_text += "\n\n" + "\n".join(code_reference_gate_lines) + "\n"
-    problem_type_knowledge = _load_problem_type_knowledge_text(config)
+    problem_type_knowledge = _knowledge_context.load_problem_type_knowledge_text(
+        dataset_profile_path=config.paths.dataset_profile_path,
+        knowledge_paths=config.knowledge_paths,
+        include_research=False,
+        unavailable_message="Problem-type knowledge unavailable: {error}",
+    )
     hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
     strategy_prompt = _build_improvement_strategy_prompt(
         slug=config.slug,

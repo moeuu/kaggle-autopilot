@@ -5772,7 +5772,7 @@ def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path:
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
 
@@ -5845,7 +5845,7 @@ def test_run_improvement_retries_transient_agent_capacity(monkeypatch, tmp_path:
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.AGENT_CAPACITY_RETRY_SLEEP", 0.0)
@@ -6034,7 +6034,7 @@ def test_run_improvement_appends_code_reference_gate_when_underperforming(monkey
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
 
@@ -6093,7 +6093,7 @@ def test_run_improvement_appends_additional_policy_notes(monkeypatch, tmp_path: 
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
 
@@ -6196,7 +6196,7 @@ def test_run_improvement_appends_competition_policy_override(monkeypatch, tmp_pa
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
 
@@ -6296,7 +6296,7 @@ def test_run_improvement_retries_when_code_reference_impl_is_missing(monkeypatch
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
 
@@ -6382,7 +6382,7 @@ def test_run_improvement_code_reference_repair_allows_src_edits(monkeypatch, tmp
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
-    monkeypatch.setattr("kagglebot.autopilot._load_problem_type_knowledge_text", lambda *args, **kwargs: "")
+    monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
 
