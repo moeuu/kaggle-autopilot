@@ -9,6 +9,13 @@ class LoopStopDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class NoImproveMajorOverhaulDecision:
+    force_major_overhaul: bool
+    reason: str
+    skip_message: str
+
+
 def decide_stagnation_stop(
     *,
     stop_allowed: bool,
@@ -40,3 +47,43 @@ def decide_stagnation_stop(
         )
 
     return LoopStopDecision(should_stop=False, reason="")
+
+
+def decide_no_improve_major_overhaul(
+    *,
+    force_enabled: bool,
+    improved: bool,
+    high_potential_improved: bool,
+    best_score_guarded: bool,
+    metric_name: str,
+    current_score: float,
+    previous_best_score: float | None,
+) -> NoImproveMajorOverhaulDecision:
+    if not force_enabled or improved or high_potential_improved:
+        return NoImproveMajorOverhaulDecision(force_major_overhaul=False, reason="", skip_message="")
+
+    if best_score_guarded:
+        return NoImproveMajorOverhaulDecision(
+            force_major_overhaul=False,
+            reason="",
+            skip_message=(
+                "[yellow]improve guard[/yellow]: "
+                "skipping no-improve major-overhaul override because previous best "
+                "was clipped as an outlier."
+            ),
+        )
+
+    if previous_best_score is None:
+        reason = f"Offline {metric_name} did not improve."
+    else:
+        reason = f"Offline {metric_name} did not improve (current={current_score:.6f}, best={previous_best_score:.6f})."
+    return NoImproveMajorOverhaulDecision(force_major_overhaul=True, reason=reason, skip_message="")
+
+
+def append_policy_reason(existing: str | None, addition: str) -> str | None:
+    normalized = str(addition or "").strip()
+    if not normalized:
+        return existing
+    if existing:
+        return f"{existing} {normalized}".strip()
+    return normalized

@@ -2903,26 +2903,23 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "restored best-known kernel source after severe conservative regression."
                         )
 
-            if force_major_on_no_improve and (not improved) and (not high_potential_improved):
-                if best_score_guard is not None:
-                    print(
-                        "[yellow]improve guard[/yellow]: "
-                        "skipping no-improve major-overhaul override because previous best "
-                        "was clipped as an outlier."
-                    )
-                else:
-                    force_major_overhaul_next = True
-                    regression_reason = (
-                        f"Offline {evaluation.metric} did not improve "
-                        f"(current={decision_score:.6f}, best={float(prev_best):.6f})."
-                        if prev_best is not None
-                        else f"Offline {evaluation.metric} did not improve."
-                    )
-                    forced_major_overhaul_reason = (
-                        f"{forced_major_overhaul_reason} {regression_reason}".strip()
-                        if forced_major_overhaul_reason
-                        else regression_reason
-                    )
+            major_overhaul_decision = _loop_control.decide_no_improve_major_overhaul(
+                force_enabled=force_major_on_no_improve,
+                improved=improved,
+                high_potential_improved=high_potential_improved,
+                best_score_guarded=best_score_guard is not None,
+                metric_name=evaluation.metric,
+                current_score=decision_score,
+                previous_best_score=float(prev_best) if prev_best is not None else None,
+            )
+            if major_overhaul_decision.skip_message:
+                print(major_overhaul_decision.skip_message)
+            if major_overhaul_decision.force_major_overhaul:
+                force_major_overhaul_next = True
+                forced_major_overhaul_reason = _loop_control.append_policy_reason(
+                    forced_major_overhaul_reason,
+                    major_overhaul_decision.reason,
+                )
 
             current_config_hash = _diagnostics.pipeline_config_hash(
                 model_summary=model_summary,
