@@ -11,6 +11,8 @@ from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.scalar_utils import finite_float as _to_float
 from kagglebot.scalar_utils import optional_int as _to_int
 from kagglebot.scalar_utils import optional_str as _optional_str
+from kagglebot.score_utils import best_score as _best_score
+from kagglebot.score_utils import is_better_score as _is_better_score
 from kagglebot.score_utils import score_gap as _score_gap
 from kagglebot.solver.metrics import normalize_direction
 
@@ -472,17 +474,11 @@ def offline_online_correlation(candidates: list[CampaignCandidate]) -> float | N
 
 
 def is_better(candidate: float, baseline: float, *, direction: str, min_delta: float = 0.0) -> bool:
-    if _normalize_direction(direction) == "minimize":
-        return candidate < baseline - min_delta
-    return candidate > baseline + min_delta
+    return _is_better_score(candidate, baseline, direction=direction, min_delta=min_delta)
 
 
 def best_score(*, direction: str, scores: list[object]) -> float | None:
-    parsed = [_to_float(score) for score in scores]
-    parsed = [score for score in parsed if score is not None]
-    if not parsed:
-        return None
-    return min(parsed) if _normalize_direction(direction) == "minimize" else max(parsed)
+    return _best_score(direction=direction, scores=scores)
 
 
 def score_gap(*, current: object, reference: object, direction: str) -> float | None:

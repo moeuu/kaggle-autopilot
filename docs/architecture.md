@@ -320,7 +320,9 @@ The next high-value modernization work is:
    summary payload construction now live in `autopilot_state.py`, keeping run-state schema assembly with the rest of the
    state/artifact helpers.
    Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
-   solver and kernel-runtime submission writers share one row-count contract.
+   solver and kernel-runtime submission writers share one row-count contract. Direction-aware score gaps, best-score
+   selection, and candidate-vs-baseline comparisons now live in `score_utils.py`, leaving campaign modules as
+   compatibility call sites.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.
