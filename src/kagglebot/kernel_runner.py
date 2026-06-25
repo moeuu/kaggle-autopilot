@@ -29,6 +29,7 @@ from kagglebot import local_kernel_data_resolver as _local_kernel_data_resolver
 from kagglebot import local_kernel_drift_guard as _local_kernel_drift_guard
 from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import local_kernel_limits as _local_kernel_limits
+from kagglebot import local_kernel_metrics_normalization as _local_kernel_metrics_normalization
 from kagglebot import local_kernel_models as _local_kernel_models
 from kagglebot import local_kernel_pipeline_cfg as _local_kernel_pipeline_cfg
 from kagglebot import local_kernel_progress as _local_kernel_progress
@@ -47,7 +48,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import CommandResult
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -90,84 +91,11 @@ _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
 _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
 _LOCAL_KERNEL_EXIT_PIPE_DRAIN_SEC = 1.0
 _SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
-_TRUSTED_KERNEL_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
-_URBAN_FLOOD_SAMPLEISH_SCORE_SOURCES = frozenset(
-    {
-        "sample_diagnostic",
-        "sample_mode_smoke_cv",
-        "sample",
-        "fallback",
-    }
-)
-_URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES = frozenset(
-    {
-        "1d_nodes_dynamic_all.csv",
-        "2d_nodes_dynamic_all.csv",
-        "test_1d_nodes_dynamic_all.csv",
-        "test_2d_nodes_dynamic_all.csv",
-        "timesteps.csv",
-        "test_timesteps.csv",
-        "sample_submission.csv",
-    }
-)
-
 _BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
     r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
     re.IGNORECASE,
 )
-
-
-def _normalize_kernel_score_source(value: object) -> str:
-    return str(value or "").strip().lower()
-
-
-def _looks_like_urban_flood_flat_full_root(data_dir: Path) -> bool:
-    if not data_dir.exists() or not data_dir.is_dir():
-        return False
-    names = {child.name for child in data_dir.iterdir() if child.is_file()}
-    return _URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES.issubset(names)
-
-
-def _normalize_local_kernel_metrics(
-    *,
-    slug: str,
-    data_dir: Path,
-    metrics_path: Path | None,
-    score_source: str,
-) -> Path | None:
-    if slug.strip().lower() != "urban-flood-modelling":
-        return metrics_path
-    if metrics_path is None or not metrics_path.exists():
-        return metrics_path
-    if not _looks_like_urban_flood_flat_full_root(data_dir):
-        return metrics_path
-
-    payload = load_json_object(metrics_path)
-    if payload is None:
-        return metrics_path
-
-    normalized_payload_source = _normalize_kernel_score_source(payload.get("score_source"))
-    requested_source = _normalize_kernel_score_source(score_source)
-    if requested_source not in _TRUSTED_KERNEL_SCORE_SOURCES:
-        requested_source = "cv"
-
-    if normalized_payload_source not in _URBAN_FLOOD_SAMPLEISH_SCORE_SOURCES and bool(
-        payload.get("full_dataset_resolved")
-    ):
-        return metrics_path
-
-    payload["score_source"] = requested_source
-    payload["dataset_kind"] = "full"
-    payload["dataset_mode"] = "full"
-    payload["full_dataset_resolved"] = True
-    payload["data_root_layout"] = "flat_full"
-    payload["metrics_normalized_by"] = "kernel_runner.local_full_data_guard"
-    try:
-        write_json_object(metrics_path, payload)
-    except OSError:
-        return metrics_path
-    return metrics_path
 
 
 @dataclass(frozen=True)
@@ -1291,7 +1219,7 @@ def run_kernel_local(
             source=metrics_src,
             destination=output_dir / "metrics.json",
         )
-        metrics_dst = _normalize_local_kernel_metrics(
+        metrics_dst = _local_kernel_metrics_normalization.normalize_local_kernel_metrics(
             slug=slug,
             data_dir=base_dir / slug / "data",
             metrics_path=metrics_dst,
