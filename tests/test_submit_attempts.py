@@ -28,6 +28,7 @@ from kagglebot.submit_attempts import (
     load_latest_submit_attempt,
     load_submit_attempt_rows,
     load_submit_fingerprints,
+    record_submit_outcome_if_available,
     record_submit_reason_knowledge,
     submit_attempt_sha_seen,
 )
@@ -633,3 +634,44 @@ def test_decide_submit_outcome_recording_handles_scoreless_or_missing_outcome() 
     assert scoreless.ledger_outcome == {"status": "complete", "score": None}
     assert missing.message == "[yellow]submission result[/yellow]: score not available yet; knowledge update skipped"
     assert missing.ledger_outcome is None
+
+
+def test_record_submit_outcome_if_available_records_when_path_and_outcome_exist() -> None:
+    calls: list[tuple[Path, dict[str, object]]] = []
+
+    recorded = record_submit_outcome_if_available(
+        decision=decide_submit_outcome_recording(
+            outcome={"status": "complete", "score": 0.42},
+            submission_artifact_exists=True,
+        ),
+        submission_path=Path("submission.csv"),
+        record_outcome=lambda path, outcome: calls.append((path, outcome)),
+    )
+
+    assert recorded is True
+    assert calls == [(Path("submission.csv"), {"status": "complete", "score": 0.42})]
+
+
+def test_record_submit_outcome_if_available_skips_missing_path_or_outcome() -> None:
+    calls: list[tuple[Path, dict[str, object]]] = []
+
+    missing_path = record_submit_outcome_if_available(
+        decision=decide_submit_outcome_recording(
+            outcome={"status": "complete", "score": 0.42},
+            submission_artifact_exists=True,
+        ),
+        submission_path=None,
+        record_outcome=lambda path, outcome: calls.append((path, outcome)),
+    )
+    missing_outcome = record_submit_outcome_if_available(
+        decision=decide_submit_outcome_recording(
+            outcome=None,
+            submission_artifact_exists=True,
+        ),
+        submission_path=Path("submission.csv"),
+        record_outcome=lambda path, outcome: calls.append((path, outcome)),
+    )
+
+    assert missing_path is False
+    assert missing_outcome is False
+    assert calls == []

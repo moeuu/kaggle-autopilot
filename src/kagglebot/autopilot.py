@@ -5515,14 +5515,19 @@ def _attempt_submit(
         submission_artifact_exists=bool(submission_for_submit_path is not None and submission_for_submit_path.exists()),
     )
     print(outcome_recording.message)
-    if outcome_recording.ledger_outcome is not None and submission_for_submit_path is not None:
-        SubmissionLedger(config.paths.submission_ledger_path).record_outcome(
+    _submit_attempts.record_submit_outcome_if_available(
+        decision=outcome_recording,
+        submission_path=submission_for_submit_path,
+        record_outcome=lambda path, ledger_outcome: SubmissionLedger(
+            config.paths.submission_ledger_path
+        ).record_outcome(
             slug=config.slug,
             message=message,
-            submission_path=submission_for_submit_path,
+            submission_path=path,
             run_id=run_id,
-            outcome=outcome_recording.ledger_outcome,
-        )
+            outcome=ledger_outcome,
+        ),
+    )
     _submit_failure_context.mark_submit_failure_context_resolved(
         run_dir=run_dir, resolution="submitted", submission_ref=submission_ref
     )

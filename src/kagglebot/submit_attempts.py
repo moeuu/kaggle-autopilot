@@ -546,3 +546,15 @@ def decide_submit_outcome_recording(
         message = "[yellow]submission result[/yellow]: score not available yet; knowledge update skipped"
     ledger_outcome = dict(outcome) if isinstance(outcome, dict) and submission_artifact_exists else None
     return SubmitOutcomeRecordingDecision(message=message, ledger_outcome=ledger_outcome)
+
+
+def record_submit_outcome_if_available(
+    *,
+    decision: SubmitOutcomeRecordingDecision,
+    submission_path: Path | None,
+    record_outcome: Callable[[Path, dict[str, object]], object],
+) -> bool:
+    if decision.ledger_outcome is None or submission_path is None:
+        return False
+    record_outcome(submission_path, decision.ledger_outcome)
+    return True
