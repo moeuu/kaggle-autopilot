@@ -6545,7 +6545,14 @@ def _submit_with_notebook_kernel(
     kernel_result = _submit_notebook.run_submit_kernel_with_cpu_fallback(
         submit_kernel_kwargs=submit_kernel_kwargs,
         run_submit_kernel=run_submit_kernel,
-        decide_cpu_fallback=lambda exc: _decide_submit_kernel_cpu_fallback(config=config, exc=exc),
+        decide_cpu_fallback=lambda exc: _submit_notebook.decide_submit_kernel_cpu_fallback_for_exception(
+            accelerator=config.accelerator,
+            strict_accelerator=config.strict_accelerator,
+            exc=exc,
+            is_capacity_error=lambda candidate: isinstance(candidate, KernelCapacityError),
+            is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
+            and _submit_notebook.is_submit_kernel_push_error(candidate),
+        ),
         is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
         wrap_error=_notebook_kernel_submission_error,
         on_message=print,
@@ -6578,21 +6585,6 @@ def _submit_with_notebook_kernel(
         on_message=print,
     )
     return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
-
-
-def _decide_submit_kernel_cpu_fallback(
-    *,
-    config: AutopilotConfig,
-    exc: Exception,
-) -> _submit_notebook.NotebookSubmitCpuFallbackDecision:
-    return _submit_notebook.decide_submit_kernel_cpu_fallback_for_exception(
-        accelerator=config.accelerator,
-        strict_accelerator=config.strict_accelerator,
-        exc=exc,
-        is_capacity_error=lambda candidate: isinstance(candidate, KernelCapacityError),
-        is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
-        and _submit_notebook.is_submit_kernel_push_error(candidate),
-    )
 
 
 def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
