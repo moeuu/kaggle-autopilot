@@ -6162,7 +6162,7 @@ def _submit_with_notebook_kernel(
             and _submit_notebook.is_submit_kernel_push_error(candidate),
         ),
         is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
-        wrap_error=_notebook_kernel_submission_error,
+        wrap_error=_submit_notebook.notebook_kernel_submission_error,
         on_message=print,
     )
 
@@ -6193,26 +6193,6 @@ def _submit_with_notebook_kernel(
         on_message=print,
     )
     return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
-
-
-def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
-    if isinstance(exc, KaggleCliError):
-        output = exc.output or str(exc)
-        return SubmissionCliError(
-            "Notebook submission fallback failed while running Kaggle kernel.",
-            command=list(exc.command or []),
-            exit_code=exc.exit_code,
-            output=output,
-            stdout=exc.stdout,
-            stderr=exc.stderr or output,
-        )
-    return SubmissionCliError(
-        "Notebook submission fallback failed while running Kaggle kernel.",
-        command=[],
-        output=str(exc),
-        stdout="",
-        stderr=str(exc),
-    )
 
 
 def _abort_submit_for_run(

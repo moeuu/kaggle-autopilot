@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kagglebot.exceptions import KaggleCliError, SubmissionCliError
 from kagglebot.submit_notebook import (
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_output_reference,
@@ -16,6 +17,7 @@ from kagglebot.submit_notebook import (
     is_submit_kernel_push_error,
     is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
+    notebook_kernel_submission_error,
     resolve_notebook_submit_artifact_mode,
     run_kaggle_submit_kernel_with_retry,
     run_submit_kernel_with_cpu_fallback,
@@ -425,6 +427,35 @@ def test_run_submit_kernel_with_cpu_fallback_wraps_retry_failure() -> None:
         assert isinstance(exc.__cause__, SubmitKernelError)
     else:  # pragma: no cover
         raise AssertionError("expected wrapped retry failure")
+
+
+def test_notebook_kernel_submission_error_preserves_kaggle_cli_details() -> None:
+    wrapped = notebook_kernel_submission_error(
+        KaggleCliError(
+            "push failed",
+            command=["kaggle", "kernels", "push"],
+            exit_code=123,
+            output="full output",
+            stdout="stdout text",
+            stderr="stderr text",
+        )
+    )
+
+    assert isinstance(wrapped, SubmissionCliError)
+    assert wrapped.command == ["kaggle", "kernels", "push"]
+    assert wrapped.exit_code == 123
+    assert wrapped.output == "full output"
+    assert wrapped.stdout == "stdout text"
+    assert wrapped.stderr == "stderr text"
+
+
+def test_notebook_kernel_submission_error_wraps_generic_exception() -> None:
+    wrapped = notebook_kernel_submission_error(ValueError("bad kernel"))
+
+    assert isinstance(wrapped, SubmissionCliError)
+    assert wrapped.command == []
+    assert wrapped.output == "bad kernel"
+    assert wrapped.stderr == "bad kernel"
 
 
 def test_run_kaggle_submit_kernel_with_retry_retries_ambiguous_error() -> None:

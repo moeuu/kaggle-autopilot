@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.exceptions import KaggleCliError, SubmissionCliError
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
 
@@ -240,6 +241,27 @@ def run_submit_kernel_with_cpu_fallback(
         if is_capacity_error(exc):
             raise
         raise wrap_error(exc) from exc
+
+
+def notebook_kernel_submission_error(exc: BaseException) -> SubmissionCliError:
+    """Convert submit-kernel execution failures into the submit error type."""
+    if isinstance(exc, KaggleCliError):
+        output = exc.output or str(exc)
+        return SubmissionCliError(
+            "Notebook submission fallback failed while running Kaggle kernel.",
+            command=list(exc.command or []),
+            exit_code=exc.exit_code,
+            output=output,
+            stdout=exc.stdout,
+            stderr=exc.stderr or output,
+        )
+    return SubmissionCliError(
+        "Notebook submission fallback failed while running Kaggle kernel.",
+        command=[],
+        output=str(exc),
+        stdout="",
+        stderr=str(exc),
+    )
 
 
 def run_kaggle_submit_kernel_with_retry(

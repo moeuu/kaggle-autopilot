@@ -327,9 +327,9 @@ Recommended extraction order:
    centralized. Duplicate-submit skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, initial artifact-mode resolution, tiny public
-   sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling, and
-   notebook submit exception/retry orchestration are extracted. Initial submit-stage mode decisions, file/notebook submit
-   attempt dispatch, successful
+   sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,
+   submit-kernel error wrapping, and notebook submit exception/retry orchestration are extracted. Initial submit-stage mode
+   decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, submission
    outcome abort/classification decisions, rank payload/guard/display normalization, iteration submit-status formatting,
    campaign-aware submission message resolution, submission iteration inference, tracking score selection, and
