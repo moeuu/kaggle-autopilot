@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.submit_error_classification import normalize_submit_error_classification
+from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 
 
 @dataclass(frozen=True)
@@ -228,18 +228,20 @@ def decide_ambiguous_notebook_submit_retry(
     classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
     should_retry_ambiguous: Callable[..., bool],
 ) -> NotebookSubmitRetryDecision:
-    classification_stderr = stderr or ""
-    classification = classify_submit_error(stdout, classification_stderr, exit_code)
-    if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and output:
-        classification_stderr = "\n".join(part for part in [classification_stderr, output] if part)
-        classification = classify_submit_error(stdout, classification_stderr, exit_code)
-    normalized = normalize_submit_error_classification(classification, default_retry_after_seconds=3.0)
-    retry = should_retry_ambiguous(
-        reason=normalized.reason,
+    result = classify_submit_error_with_output_fallback(
         stdout=stdout,
-        stderr=classification_stderr,
+        stderr=stderr,
+        output=output,
+        exit_code=exit_code,
+        classify_submit_error=classify_submit_error,
+        default_retry_after_seconds=3.0,
     )
-    wait_seconds = normalized.retry_after_seconds if retry else 0.0
+    retry = should_retry_ambiguous(
+        reason=result.normalized.reason,
+        stdout=stdout,
+        stderr=result.stderr,
+    )
+    wait_seconds = result.normalized.retry_after_seconds if retry else 0.0
     message = (
         "[yellow]submit retry[/yellow]: notebook submit returned an ambiguous 400; "
         f"retrying same kernel submit in {wait_seconds:.1f}s."
@@ -248,8 +250,8 @@ def decide_ambiguous_notebook_submit_retry(
     )
     return NotebookSubmitRetryDecision(
         retry=retry,
-        classification=classification,
-        stderr=classification_stderr,
+        classification=result.classification,
+        stderr=result.stderr,
         wait_seconds=wait_seconds,
         message=message,
     )

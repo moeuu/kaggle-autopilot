@@ -17,7 +17,7 @@ from kagglebot.campaign import (
 )
 from kagglebot.json_utils import load_json_object
 from kagglebot.submission.outcome_service import SubmissionOutcomeService
-from kagglebot.submit_error_classification import normalize_submit_error_classification
+from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 
 
 @dataclass(frozen=True)
@@ -633,18 +633,19 @@ def classify_submit_stage_error(
     exit_code: int | None,
     classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
 ) -> SubmitStageErrorClassification:
-    classification_stderr = stderr or ""
-    classification = classify_submit_error(stdout, classification_stderr, exit_code)
-    if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and output:
-        classification_stderr = "\n".join(part for part in [classification_stderr, output] if part)
-        classification = classify_submit_error(stdout, classification_stderr, exit_code)
-    normalized = normalize_submit_error_classification(classification)
+    result = classify_submit_error_with_output_fallback(
+        stdout=stdout,
+        stderr=stderr,
+        output=output,
+        exit_code=exit_code,
+        classify_submit_error=classify_submit_error,
+    )
     return SubmitStageErrorClassification(
-        classification=classification,
-        stderr=classification_stderr,
-        kind=normalized.kind,
-        reason=normalized.reason,
-        retry_after_seconds=normalized.retry_after_seconds,
+        classification=result.classification,
+        stderr=result.stderr,
+        kind=result.normalized.kind,
+        reason=result.normalized.reason,
+        retry_after_seconds=result.normalized.retry_after_seconds,
     )
 
 
