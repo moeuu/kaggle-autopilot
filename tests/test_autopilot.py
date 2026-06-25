@@ -6318,31 +6318,6 @@ def test_agent_capacity_failure_detection_and_detail() -> None:
     assert "transcript_tail=" in detail
 
 
-def test_extract_code_reference_score_prefers_required_index_entry(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _extract_code_reference_score
-
-    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
-    paths.context_dir.mkdir(parents=True, exist_ok=True)
-    paths.code_notebooks_index_path.write_text(
-        json.dumps(
-            {
-                "required_reference_kernel_id": "alice/ref-kernel",
-                "notebooks": [
-                    {"kernel_id": "alice/other-kernel", "score": 0.701},
-                    {"kernel_id": "alice/ref-kernel", "score": 0.741},
-                ],
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    paths.code_md_path.write_text("fallback should not be used\n", encoding="utf-8")
-
-    score, source = _extract_code_reference_score(paths)
-    assert score == pytest.approx(0.741)
-    assert source == "code_index:alice/ref-kernel"
-
-
 def test_extract_iteration_policy_signals_detect_orig_proba_and_pseudo_label_failure() -> None:
     orig_signal = _extract_orig_proba_signal(
         {

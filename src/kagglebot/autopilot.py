@@ -235,18 +235,6 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
-_CodeReferenceNotebook = _code_reference.CodeReferenceNotebook
-_code_reference_marker = _code_reference.code_reference_marker
-_extract_code_reference_score = _code_reference.extract_code_reference_score
-_extract_code_reference_score_from_index = _code_reference.extract_code_reference_score_from_index
-_extract_code_reference_score_from_markdown = _code_reference.extract_code_reference_score_from_markdown
-_extract_score_from_text = _code_reference.extract_score_from_text
-_load_code_reference_notebook = _code_reference.load_code_reference_notebook
-_load_ensemble_reference_notebook = _code_reference.load_ensemble_reference_notebook
-_load_required_reference_notebook = _code_reference.load_required_reference_notebook
-_reference_requires_tabicl = _code_reference.reference_requires_tabicl
-_validate_code_reference_implementation = _code_reference.validate_code_reference_implementation
-
 
 def _to_float(value: object) -> float | None:
     return parse_finite_float(value, allow_commas=True)
@@ -1653,7 +1641,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             medal_policy_reason: str | None = None
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
-            code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
+            code_reference_score, code_reference_source = _code_reference.extract_code_reference_score(config.paths)
             code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
                 current=decision_score,
                 reference=code_reference_score,
@@ -4854,7 +4842,7 @@ def _run_improvement(
         )
         improvement_mode = forced_improvement_mode
     kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
-    code_reference_score, code_reference_source = _extract_code_reference_score(config.paths)
+    code_reference_score, code_reference_source = _code_reference.extract_code_reference_score(config.paths)
     code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
         current=effective_current_score,
         reference=code_reference_score,
@@ -4874,8 +4862,8 @@ def _run_improvement(
         code_reference_status = "underperforming_code_reference"
     else:
         code_reference_status = "at_or_above_code_reference"
-    required_reference_notebook = _load_required_reference_notebook(config.paths)
-    ensemble_reference_notebook = _load_ensemble_reference_notebook(config.paths)
+    required_reference_notebook = _code_reference.load_required_reference_notebook(config.paths)
+    ensemble_reference_notebook = _code_reference.load_ensemble_reference_notebook(config.paths)
     competition_policy = load_competition_policy(config.paths)
     base_prompt_text = prompt_template.format(
         **prompt_identity_format_args(),
@@ -5120,10 +5108,10 @@ def _run_improvement(
                         if required_reference_notebook.local_dir
                         else "- required_local_dir: unavailable"
                     ),
-                    f"- required_marker: {_code_reference_marker(required_reference_notebook)}",
+                    f"- required_marker: {_code_reference.code_reference_marker(required_reference_notebook)}",
                     (
                         "- required_model_family: tabicl"
-                        if _reference_requires_tabicl(required_reference_notebook)
+                        if _code_reference.reference_requires_tabicl(required_reference_notebook)
                         else "- required_model_family: follow required notebook strategy"
                     ),
                 ]
@@ -5285,7 +5273,7 @@ def _run_improvement(
 
     if code_reference_mandatory and required_reference_notebook is not None and not config.dry_run:
         kernel_path = config.paths.kernel_source_dir / "kernel.py"
-        implementation_issues = _validate_code_reference_implementation(
+        implementation_issues = _code_reference.validate_code_reference_implementation(
             kernel_path=kernel_path,
             reference=required_reference_notebook,
         )
@@ -5308,7 +5296,7 @@ def _run_improvement(
                 current_prompt_path=repair_prompt_path,
                 stage_suffix="_code_reference_repair",
             )
-            implementation_issues = _validate_code_reference_implementation(
+            implementation_issues = _code_reference.validate_code_reference_implementation(
                 kernel_path=kernel_path,
                 reference=required_reference_notebook,
             )
@@ -7834,12 +7822,12 @@ def _record_submission_knowledge(
 def _build_code_reference_repair_prompt(
     *,
     base_prompt_text: str,
-    reference: _CodeReferenceNotebook,
+    reference: _code_reference.CodeReferenceNotebook,
     issues: list[str],
     kernel_path: Path,
 ) -> str:
     issues_text = ", ".join(issues) if issues else "unknown"
-    tabicl_required = _reference_requires_tabicl(reference)
+    tabicl_required = _code_reference.reference_requires_tabicl(reference)
     tabicl_line = (
         "- This reference appears to be TabICL-based. You MUST include a real TabICL path in kernel.py."
         if tabicl_required
@@ -7851,7 +7839,7 @@ def _build_code_reference_repair_prompt(
         f"- Failed checks: {issues_text}\n"
         f"- Required notebook: {reference.kernel_id} ({reference.title})\n"
         f"- Kernel path: {kernel_path}\n"
-        f"- Required marker: `{_code_reference_marker(reference)}`\n"
+        f"- Required marker: `{_code_reference.code_reference_marker(reference)}`\n"
         f"{tabicl_line}\n\n"
         "Make minimal edits to kernel.py so all checks pass.\n"
         "Do not weaken the model by collapsing to tiny conservative feature subsets that reduce offline score.\n\n"
