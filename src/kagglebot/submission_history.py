@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomeService
@@ -43,6 +46,60 @@ def build_previous_submission_history_payload(
         "latest": latest_entry,
         "recent": recent_scored[:10],
     }
+
+
+def load_previous_submission_history(
+    *,
+    slug: str,
+    history_path: Path,
+    direction: str,
+    dry_run: bool,
+    fetch_submission_rows: Callable[[str], list[dict[str, str]]],
+    on_message: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    if dry_run and history_path.exists():
+        cached = load_json_object(history_path)
+        if cached is not None:
+            cached["source"] = str(cached.get("source") or "cache")
+            cached["cache_path"] = str(history_path)
+            return cached
+    if dry_run:
+        return _empty_submission_history_payload(
+            source="dry_run",
+            direction=direction,
+            history_path=history_path,
+        )
+
+    try:
+        rows = fetch_submission_rows(slug)
+    except Exception as exc:  # noqa: BLE001
+        cached = load_json_object(history_path) if history_path.exists() else None
+        if cached is not None:
+            cached["source"] = str(cached.get("source") or "cache")
+            cached["fetch_error"] = f"{type(exc).__name__}: {exc}"
+            cached["cache_path"] = str(history_path)
+            _emit(
+                on_message,
+                "[yellow]submission history[/yellow]: "
+                f"failed to refresh Kaggle submissions; using cached {history_path}",
+            )
+            return cached
+        _emit(on_message, f"[yellow]submission history[/yellow]: failed to fetch Kaggle submissions: {exc}")
+        return _empty_submission_history_payload(
+            source="fetch_error",
+            direction=direction,
+            history_path=history_path,
+            fetch_error=f"{type(exc).__name__}: {exc}",
+        )
+
+    payload = build_previous_submission_history_payload(
+        rows=rows,
+        direction=direction,
+        source="kaggle competitions submissions --csv",
+    )
+    payload["cache_path"] = str(history_path)
+    write_json_object(history_path, payload)
+    return payload
 
 
 def detect_online_regression_vs_submission_history(
@@ -110,6 +167,36 @@ def format_previous_submission_history_for_prompt(history: dict[str, object] | N
         "continuing same-family tuning."
     )
     return "\n".join(lines)
+
+
+def _empty_submission_history_payload(
+    *,
+    source: str,
+    direction: str,
+    history_path: Path,
+    fetch_error: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "source": source,
+        "fetched_at": datetime.now(UTC).isoformat(),
+        "direction": direction,
+        "count": 0,
+        "scored_count": 0,
+        "best_score": None,
+        "best": None,
+        "latest_score": None,
+        "latest": None,
+        "recent": [],
+        "cache_path": str(history_path),
+    }
+    if fetch_error is not None:
+        payload["fetch_error"] = fetch_error
+    return payload
+
+
+def _emit(on_message: Callable[[str], None] | None, message: str) -> None:
+    if on_message is not None:
+        on_message(message)
 
 
 def _submission_history_entry(row: dict[str, str]) -> dict[str, object] | None:

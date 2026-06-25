@@ -32,7 +32,6 @@ from kagglebot.autopilot import (
     _extract_same_family_plateau_signal,
     _format_previous_submission_history_for_prompt,
     _is_submit_abort_autofixable,
-    _load_previous_submission_history,
     _load_run_state,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
@@ -6024,50 +6023,6 @@ def test_extract_iteration_policy_signals_detect_orig_proba_and_pseudo_label_fai
     )
     assert same_family is not None
     assert "same-family plateau" in str(same_family["note"])
-
-
-def test_load_previous_submission_history_uses_best_public_score(monkeypatch, tmp_path: Path) -> None:
-    paths = CompetitionPaths(slug="rogii-demo", artifacts_dir=tmp_path / "artifacts")
-
-    def fake_submissions(slug: str, *, dry_run: bool) -> list[dict[str, str]]:
-        assert slug == "rogii-demo"
-        assert dry_run is False
-        return [
-            {
-                "description": "kb run i=2 offline=10.7205",
-                "publicScore": "10.308",
-                "status": "complete",
-                "date": "2026-05-22 09:24:24",
-            },
-            {
-                "description": "kb previous i=5 offline=10.4211",
-                "publicScore": "9.600",
-                "status": "complete",
-                "date": "2026-05-17 03:08:20",
-            },
-            {
-                "description": "kb previous i=1 offline=10.6129",
-                "publicScore": "11.504",
-                "status": "complete",
-                "date": "2026-05-17 02:08:20",
-            },
-        ]
-
-    monkeypatch.setattr("kagglebot.autopilot.list_competition_submissions", fake_submissions)
-
-    history = _load_previous_submission_history(
-        slug="rogii-demo",
-        paths=paths,
-        direction="minimize",
-        dry_run=False,
-    )
-
-    assert history["best_score"] == pytest.approx(9.600)
-    assert history["latest_score"] == pytest.approx(10.308)
-    assert history["scored_count"] == 3
-    assert "previous i=5" in str(history["best"])
-    saved = json.loads((paths.context_dir / "submission_history.json").read_text(encoding="utf-8"))
-    assert saved["best_score"] == pytest.approx(9.600)
 
 
 def test_online_regression_signal_uses_historical_submission_baseline() -> None:

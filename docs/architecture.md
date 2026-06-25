@@ -103,8 +103,8 @@ now owns `submit_attempts.jsonl` append, duplicate SHA lookup, and tolerant row 
 self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules centralized instead of
 duplicated across the loop, state helpers, and improvement analysis.
 Historical Kaggle submission row normalization, best/latest public-score summary construction, online-regression
-detection against historical submissions, and prompt formatting for that history live in
-`src/kagglebot/submission_history.py`; the loop only fetches/cache-persist rows and consumes the resulting summary.
+detection against historical submissions, history fetch/cache fallback, and prompt formatting for that history live in
+`src/kagglebot/submission_history.py`; the loop supplies the Kaggle fetch adapter and consumes the resulting summary.
 Notebook submit artifact-mode normalization, initial artifact-mode resolution, tiny public sample hidden-test guards,
 submit-kernel run kwargs construction, kernel output artifact/reference handling, kernel push version-label inference,
 output file selection, Kaggle submit-kernel kwargs construction, ambiguous submit retry execution, push-error text
@@ -265,7 +265,7 @@ The next high-value modernization work is:
    submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
    directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback
    decisions, initial artifact-mode resolution, and kernel push version-label inference now call `submit_notebook.py`
-   directly.
+   directly. Previous-submission history loading now calls `submission_history.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.

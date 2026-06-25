@@ -204,14 +204,12 @@ from kagglebot.submission.guard import (
 )
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submission_history import (
-    build_previous_submission_history_payload as _build_previous_submission_history_payload,
-)
-from kagglebot.submission_history import (
     detect_online_regression_vs_submission_history as _detect_online_regression_vs_submission_history,
 )
 from kagglebot.submission_history import (
     format_previous_submission_history_for_prompt as _format_previous_submission_history_for_prompt,
 )
+from kagglebot.submission_history import load_previous_submission_history
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.top1_campaign import (
     build_blend_report,
@@ -801,11 +799,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         direction=metric_direction,
         max_iterations=max_iterations,
     )
-    previous_submission_history = _load_previous_submission_history(
+    previous_submission_history = load_previous_submission_history(
         slug=config.slug,
-        paths=config.paths,
+        history_path=config.paths.context_dir / "submission_history.json",
         direction=metric_direction,
         dry_run=config.dry_run,
+        fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
+        on_message=print,
     )
     historical_best_submission_score = tolerant_finite_float(previous_submission_history.get("best_score"))
     if historical_best_submission_score is not None:
@@ -6812,74 +6812,6 @@ def _wait_for_submission_outcome(
         message=message,
         submitted_at=submitted_at,
     )
-
-
-def _load_previous_submission_history(
-    *,
-    slug: str,
-    paths: CompetitionPaths,
-    direction: str,
-    dry_run: bool,
-) -> dict[str, object]:
-    history_path = paths.context_dir / "submission_history.json"
-    if dry_run and history_path.exists():
-        cached = _load_json_object(history_path)
-        if cached is not None:
-            cached["source"] = str(cached.get("source") or "cache")
-            cached["cache_path"] = str(history_path)
-            return cached
-    if dry_run:
-        return {
-            "source": "dry_run",
-            "fetched_at": datetime.now(UTC).isoformat(),
-            "direction": direction,
-            "count": 0,
-            "scored_count": 0,
-            "best_score": None,
-            "best": None,
-            "latest_score": None,
-            "latest": None,
-            "recent": [],
-            "cache_path": str(history_path),
-        }
-
-    try:
-        rows = list_competition_submissions(slug, dry_run=False)
-    except Exception as exc:  # noqa: BLE001
-        cached = _load_json_object(history_path) if history_path.exists() else None
-        if cached is not None:
-            cached["source"] = str(cached.get("source") or "cache")
-            cached["fetch_error"] = f"{type(exc).__name__}: {exc}"
-            cached["cache_path"] = str(history_path)
-            print(
-                "[yellow]submission history[/yellow]: "
-                f"failed to refresh Kaggle submissions; using cached {history_path}"
-            )
-            return cached
-        print(f"[yellow]submission history[/yellow]: failed to fetch Kaggle submissions: {exc}")
-        return {
-            "source": "fetch_error",
-            "fetch_error": f"{type(exc).__name__}: {exc}",
-            "fetched_at": datetime.now(UTC).isoformat(),
-            "direction": direction,
-            "count": 0,
-            "scored_count": 0,
-            "best_score": None,
-            "best": None,
-            "latest_score": None,
-            "latest": None,
-            "recent": [],
-            "cache_path": str(history_path),
-        }
-
-    payload = _build_previous_submission_history_payload(
-        rows=rows,
-        direction=direction,
-        source="kaggle competitions submissions --csv",
-    )
-    payload["cache_path"] = str(history_path)
-    _write_json_object(history_path, payload)
-    return payload
 
 
 def _record_submission_knowledge(
