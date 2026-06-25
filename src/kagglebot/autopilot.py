@@ -5064,38 +5064,30 @@ def _attempt_submit(
         allow_force=allow_force,
         compute_fingerprint=compute_error_fingerprint,
     )
-    if duplicate_decision.action == "skip":
-        print(duplicate_decision.message)
-        reason = duplicate_decision.reason
-        fingerprint = duplicate_decision.fingerprint
-        duplicate_sources = duplicate_decision.duplicate_sources
-        skip_payloads = _submit_attempts.build_duplicate_submit_skip_record_payloads(
-            run_id=run_id,
-            submission_ref=str(prepared_submission_path),
-            submission_sha256=prepared_submission_sha,
-            fingerprint=fingerprint,
-            code_fingerprint=submit_code_fingerprint,
-            reason=reason,
-            prior_state=_load_run_state(run_dir),
-            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-            duplicate_sources=duplicate_sources,
-        )
-        submit_attempt_recorder.record_payloads(skip_payloads)
-        _submit_failure_context.mark_submit_failure_context_duplicate_skipped(
-            run_dir=run_dir,
-            submission_ref=str(prepared_submission_path),
-            reason=reason,
-        )
-        return _submit_attempts.build_duplicate_submit_skip_result_payload(
-            message=message,
-            submission_ref=str(prepared_submission_path),
-            submitted_at=submitted_at,
-            submission_path=submission_path,
-            reason=reason,
-            duplicate_sources=duplicate_sources,
-            infer_iteration=_submit_stage.infer_iteration_from_submission_path,
-        )
+    duplicate_skip_result = _submit_stage.apply_duplicate_submission_decision(
+        decision=duplicate_decision,
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_path=submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha=prepared_submission_sha,
+        code_fingerprint=submit_code_fingerprint,
+        prior_state=_load_run_state(run_dir),
+        record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
+        mark_duplicate_skipped=lambda submission_ref, reason: (
+            _submit_failure_context.mark_submit_failure_context_duplicate_skipped(
+                run_dir=run_dir,
+                submission_ref=submission_ref,
+                reason=reason,
+            )
+        ),
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        on_message=print,
+    )
+    if duplicate_skip_result is not None:
+        return duplicate_skip_result
 
     try:
         rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)

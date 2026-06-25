@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    apply_duplicate_submission_decision,
     apply_initial_submit_stage_artifact_mode,
     apply_notebook_fallback_decision,
     apply_notebook_fallback_retry_state,
@@ -89,6 +90,23 @@ class SamePathDecisionStub:
         self.reason = reason
         self.message = message
         self.fingerprint = fingerprint
+
+
+class DuplicateDecisionStub:
+    def __init__(
+        self,
+        *,
+        action: str,
+        reason: str = "",
+        message: str = "",
+        fingerprint: str = "",
+        duplicate_sources: list[str] | None = None,
+    ) -> None:
+        self.action = action
+        self.reason = reason
+        self.message = message
+        self.fingerprint = fingerprint
+        self.duplicate_sources = duplicate_sources or []
 
 
 class ArtifactModeDecisionStub:
@@ -278,6 +296,84 @@ def test_apply_same_submission_path_decision_reports_retry_without_recording(tmp
     assert skipped is False
     assert messages == ["[yellow]submit retry[/yellow]: retrying"]
     assert recorded == []
+
+
+def test_apply_duplicate_submission_decision_records_skip_and_returns_payload(tmp_path: Path) -> None:
+    prepared_submission_path = tmp_path / "prepared.csv"
+    prepared_submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    source_submission_path = tmp_path / "iter-6" / "submission.csv"
+    recorded_payloads: list[object] = []
+    marked: list[tuple[str, str]] = []
+    messages: list[str] = []
+    submitted_at = datetime(2026, 6, 25, tzinfo=UTC)
+
+    result = apply_duplicate_submission_decision(
+        decision=DuplicateDecisionStub(
+            action="skip",
+            reason="duplicate_submission_sha_seen",
+            message="[yellow]submit skipped[/yellow]: duplicate",
+            fingerprint="fp",
+            duplicate_sources=["run_attempts", "submission_ledger"],
+        ),
+        run_id="run-1",
+        message="submit message",
+        submitted_at=submitted_at,
+        submission_path=source_submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        prior_state={"submit_attempts_count": 2},
+        record_submit_attempt_payloads=recorded_payloads.append,
+        mark_duplicate_skipped=lambda submission_ref, reason: marked.append((submission_ref, reason)),
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert len(recorded_payloads) == 1
+    payloads = recorded_payloads[0]
+    assert payloads.attempt_payload["action_taken"] == "skip"
+    assert payloads.attempt_payload["duplicate_sources"] == ["run_attempts", "submission_ledger"]
+    assert payloads.run_state_update["submit_attempts_count"] == 3
+    assert marked == [(str(prepared_submission_path), "duplicate_submission_sha_seen")]
+    assert messages == ["[yellow]submit skipped[/yellow]: duplicate"]
+    assert result == {
+        "message": "submit message",
+        "submission_path": str(prepared_submission_path),
+        "submitted_at": submitted_at.isoformat(),
+        "iteration": 6,
+        "skipped": True,
+        "reason": "duplicate_submission_sha_seen",
+        "duplicate_sources": ["run_attempts", "submission_ledger"],
+    }
+
+
+def test_apply_duplicate_submission_decision_ignores_non_skip(tmp_path: Path) -> None:
+    recorded_payloads: list[object] = []
+    marked: list[tuple[str, str]] = []
+    messages: list[str] = []
+
+    result = apply_duplicate_submission_decision(
+        decision=DuplicateDecisionStub(action="proceed"),
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        submission_path=tmp_path / "iter-1" / "submission.csv",
+        prepared_submission_path=tmp_path / "prepared.csv",
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        prior_state={},
+        record_submit_attempt_payloads=recorded_payloads.append,
+        mark_duplicate_skipped=lambda submission_ref, reason: marked.append((submission_ref, reason)),
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert result is None
+    assert recorded_payloads == []
+    assert marked == []
+    assert messages == []
 
 
 def test_build_kaggle_credentials_missing_abort_spec_preserves_error_details() -> None:

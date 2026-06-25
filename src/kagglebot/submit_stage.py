@@ -289,6 +289,58 @@ def apply_same_submission_path_decision(
     return True
 
 
+def apply_duplicate_submission_decision(
+    *,
+    decision: object,
+    run_id: str,
+    message: str,
+    submitted_at: datetime,
+    submission_path: Path,
+    prepared_submission_path: Path,
+    prepared_submission_sha: str,
+    code_fingerprint: str,
+    prior_state: dict[str, object],
+    record_submit_attempt_payloads: Callable[[object], object],
+    mark_duplicate_skipped: Callable[[str, str], object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> dict[str, object] | None:
+    action = str(getattr(decision, "action", "") or "").strip().lower()
+    if action != "skip":
+        return None
+
+    decision_message = str(getattr(decision, "message", "") or "").strip()
+    if decision_message:
+        on_message(decision_message)
+    reason = str(getattr(decision, "reason", "") or "")
+    duplicate_sources = list(getattr(decision, "duplicate_sources", []) or [])
+    submission_ref = str(prepared_submission_path)
+    skip_payloads = _submit_attempts.build_duplicate_submit_skip_record_payloads(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=prepared_submission_sha,
+        fingerprint=str(getattr(decision, "fingerprint", "") or ""),
+        code_fingerprint=code_fingerprint,
+        reason=reason,
+        prior_state=prior_state,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        duplicate_sources=duplicate_sources,
+    )
+    record_submit_attempt_payloads(skip_payloads)
+    mark_duplicate_skipped(submission_ref, reason)
+    return _submit_attempts.build_duplicate_submit_skip_result_payload(
+        message=message,
+        submission_ref=submission_ref,
+        submitted_at=submitted_at,
+        submission_path=submission_path,
+        reason=reason,
+        duplicate_sources=duplicate_sources,
+        infer_iteration=infer_iteration_from_submission_path,
+    )
+
+
 def submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
     if isinstance(online_score, (int, float)):
         value = float(online_score)
