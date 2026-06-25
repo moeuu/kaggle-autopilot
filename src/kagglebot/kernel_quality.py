@@ -4,6 +4,7 @@ import math
 import re
 from collections.abc import Iterator
 
+from kagglebot import score_sources
 from kagglebot.autopilot_helpers import _to_float, _to_int
 
 QUALITY_GUARD_BASELINE_REL_MARGIN = 0.01
@@ -21,6 +22,28 @@ QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = 0.01
 QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
 QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
 MODEL_NODE_METRIC_KEY = re.compile(r"^model_(?P<model_id>\d+)_node_type_(?P<node_type>\d+)$")
+HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
+CAPACITY_TIER_PRIORITY = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "extreme": 3,
+}
+LOW_CAPACITY_MARKERS = ("naive", "mean", "persistence", "baseline", "ridge", "linear")
+MEDIUM_CAPACITY_MARKERS = ("lightgbm", "xgboost", "catboost", "randomforest", "tabnet", "tabm", "mlp")
+HIGH_CAPACITY_MARKERS = (
+    "graph",
+    "gnn",
+    "transformer",
+    "seq2seq",
+    "hybrid",
+    "multihorizon",
+    "autoregressive",
+    "ensemble",
+    "blend",
+    "stack",
+)
+EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
 
 
 def is_significantly_worse(
@@ -541,3 +564,128 @@ def detect_prediction_distribution_collapse(payload: dict[str, object] | None) -
             "candidate_count": len(candidate_means),
         }
     return None
+
+
+def infer_capacity_tier(
+    *,
+    kernel_metrics_payload: dict[str, object] | None,
+    model_summary: dict[str, object] | None,
+) -> str:
+    payload = kernel_metrics_payload or {}
+    summary = model_summary or {}
+    text_candidates: list[str] = []
+    for key in ("selected_pipeline", "chosen_pipeline", "model_name", "pipeline_name"):
+        raw = payload.get(key)
+        if isinstance(raw, str) and raw.strip():
+            text_candidates.append(raw.strip().lower())
+    pipelines = payload.get("pipelines")
+    if isinstance(pipelines, list):
+        for item in pipelines[:5]:
+            if isinstance(item, dict):
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    text_candidates.append(name.strip().lower())
+    for key in ("model_name", "selected_pipeline", "pipeline_name"):
+        raw = summary.get(key)
+        if isinstance(raw, str) and raw.strip():
+            text_candidates.append(raw.strip().lower())
+    models = summary.get("models")
+    if isinstance(models, list):
+        for item in models[:5]:
+            if isinstance(item, str) and item.strip():
+                text_candidates.append(item.strip().lower())
+
+    tier = "medium"
+    for text in text_candidates:
+        if any(marker in text for marker in EXTREME_CAPACITY_MARKERS):
+            return "extreme"
+        if any(marker in text for marker in HIGH_CAPACITY_MARKERS):
+            tier = "high"
+            continue
+        if tier != "high" and any(marker in text for marker in LOW_CAPACITY_MARKERS):
+            tier = "low"
+            continue
+        if tier not in {"high", "extreme"} and any(marker in text for marker in MEDIUM_CAPACITY_MARKERS):
+            tier = "medium"
+    return tier
+
+
+def infer_data_tier(
+    *,
+    competition_faithfulness: dict[str, object] | None,
+    evaluation_contract: dict[str, object] | None,
+) -> str:
+    faithfulness = competition_faithfulness or {}
+    contract = evaluation_contract or {}
+    if bool(contract.get("require_full_dataset")) and faithfulness.get("full_dataset_resolved") is False:
+        return "minimum_submit_data"
+    if bool(faithfulness.get("faithful")):
+        return "high_accuracy_data"
+    if bool(faithfulness.get("metric_match")) and bool(faithfulness.get("split_match")):
+        return "trusted_eval_data"
+    return "minimum_submit_data"
+
+
+def build_accuracy_potential(
+    *,
+    score_source: object,
+    kernel_metrics_payload: dict[str, object] | None,
+    model_summary: dict[str, object] | None,
+    quality_guard: dict[str, object] | None,
+    evaluation_contract: dict[str, object] | None,
+) -> dict[str, object]:
+    payload = kernel_metrics_payload or {}
+    guard = quality_guard or {}
+    faithfulness = (
+        guard.get("competition_faithfulness") if isinstance(guard.get("competition_faithfulness"), dict) else {}
+    )
+    reasons_raw = guard.get("reasons")
+    reasons = [str(item) for item in reasons_raw if isinstance(item, str)] if isinstance(reasons_raw, list) else []
+    policy_blocked = any(reason in HARD_POLICY_BLOCK_REASONS for reason in reasons)
+    capacity_tier = infer_capacity_tier(kernel_metrics_payload=payload, model_summary=model_summary)
+    data_tier = infer_data_tier(
+        competition_faithfulness=faithfulness if isinstance(faithfulness, dict) else None,
+        evaluation_contract=evaluation_contract,
+    )
+    trusted = score_sources.is_trusted_offline_score_source(score_source)
+    faithful = bool(faithfulness.get("faithful", False))
+    capacity_priority = CAPACITY_TIER_PRIORITY.get(capacity_tier, 0)
+    data_priority = {"minimum_submit_data": 0, "trusted_eval_data": 1, "high_accuracy_data": 2}.get(data_tier, 0)
+    blocked_by_submit_only = (
+        all(
+            reason in {"competition_split_mismatch", "competition_evaluation_unfaithful", "missing_competitive_data"}
+            for reason in reasons
+        )
+        if reasons
+        else False
+    )
+    eligible = (
+        False
+        if policy_blocked
+        else faithful or trusted or (capacity_priority >= 2 and (blocked_by_submit_only or data_priority >= 1))
+    )
+    status = (
+        "blocked"
+        if policy_blocked
+        else "frontier"
+        if eligible and capacity_priority >= 2
+        else ("trusted" if faithful or trusted else "blocked")
+    )
+    primary_reason = "trusted_competition_faithful"
+    if status == "frontier" and not faithful:
+        primary_reason = "high_capacity_candidate_requires_better_data_or_eval"
+    elif reasons:
+        primary_reason = reasons[0]
+    return {
+        "status": status,
+        "eligible": eligible,
+        "trusted": trusted,
+        "faithful": faithful,
+        "capacity_tier": capacity_tier,
+        "capacity_priority": capacity_priority,
+        "data_tier": data_tier,
+        "data_priority": data_priority,
+        "frontier_priority": capacity_priority * 10 + data_priority * 3 + int(faithful) + int(trusted),
+        "primary_reason": primary_reason,
+        "quality_reasons": reasons,
+    }

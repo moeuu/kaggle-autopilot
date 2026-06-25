@@ -481,7 +481,6 @@ _QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CAND
 _QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN
 _QUALITY_GUARD_PREDICTION_COUNT_RATIO = _kernel_quality.QUALITY_GUARD_PREDICTION_COUNT_RATIO
 _QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN
-_HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
     "sample",
@@ -492,27 +491,6 @@ _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
 )
 _MODEL_NODE_METRIC_KEY = _kernel_quality.MODEL_NODE_METRIC_KEY
 _FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
-_CAPACITY_TIER_PRIORITY = {
-    "low": 0,
-    "medium": 1,
-    "high": 2,
-    "extreme": 3,
-}
-_LOW_CAPACITY_MARKERS = ("naive", "mean", "persistence", "baseline", "ridge", "linear")
-_MEDIUM_CAPACITY_MARKERS = ("lightgbm", "xgboost", "catboost", "randomforest", "tabnet", "tabm", "mlp")
-_HIGH_CAPACITY_MARKERS = (
-    "graph",
-    "gnn",
-    "transformer",
-    "seq2seq",
-    "hybrid",
-    "multihorizon",
-    "autoregressive",
-    "ensemble",
-    "blend",
-    "stack",
-)
-_EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
 
 
 class _TrainingLiveStdout:
@@ -4787,43 +4765,10 @@ def _infer_capacity_tier(
     kernel_metrics_payload: dict[str, object] | None,
     model_summary: dict[str, object] | None,
 ) -> str:
-    payload = kernel_metrics_payload or {}
-    summary = model_summary or {}
-    text_candidates: list[str] = []
-    for key in ("selected_pipeline", "chosen_pipeline", "model_name", "pipeline_name"):
-        raw = payload.get(key)
-        if isinstance(raw, str) and raw.strip():
-            text_candidates.append(raw.strip().lower())
-    pipelines = payload.get("pipelines")
-    if isinstance(pipelines, list):
-        for item in pipelines[:5]:
-            if isinstance(item, dict):
-                name = item.get("name")
-                if isinstance(name, str) and name.strip():
-                    text_candidates.append(name.strip().lower())
-    for key in ("model_name", "selected_pipeline", "pipeline_name"):
-        raw = summary.get(key)
-        if isinstance(raw, str) and raw.strip():
-            text_candidates.append(raw.strip().lower())
-    models = summary.get("models")
-    if isinstance(models, list):
-        for item in models[:5]:
-            if isinstance(item, str) and item.strip():
-                text_candidates.append(item.strip().lower())
-
-    tier = "medium"
-    for text in text_candidates:
-        if any(marker in text for marker in _EXTREME_CAPACITY_MARKERS):
-            return "extreme"
-        if any(marker in text for marker in _HIGH_CAPACITY_MARKERS):
-            tier = "high"
-            continue
-        if tier != "high" and any(marker in text for marker in _LOW_CAPACITY_MARKERS):
-            tier = "low"
-            continue
-        if tier not in {"high", "extreme"} and any(marker in text for marker in _MEDIUM_CAPACITY_MARKERS):
-            tier = "medium"
-    return tier
+    return _kernel_quality.infer_capacity_tier(
+        kernel_metrics_payload=kernel_metrics_payload,
+        model_summary=model_summary,
+    )
 
 
 def _infer_data_tier(
@@ -4831,15 +4776,10 @@ def _infer_data_tier(
     competition_faithfulness: dict[str, object] | None,
     evaluation_contract: dict[str, object] | None,
 ) -> str:
-    faithfulness = competition_faithfulness or {}
-    contract = evaluation_contract or {}
-    if bool(contract.get("require_full_dataset")) and faithfulness.get("full_dataset_resolved") is False:
-        return "minimum_submit_data"
-    if bool(faithfulness.get("faithful")):
-        return "high_accuracy_data"
-    if bool(faithfulness.get("metric_match")) and bool(faithfulness.get("split_match")):
-        return "trusted_eval_data"
-    return "minimum_submit_data"
+    return _kernel_quality.infer_data_tier(
+        competition_faithfulness=competition_faithfulness,
+        evaluation_contract=evaluation_contract,
+    )
 
 
 def _build_accuracy_potential(
@@ -4850,61 +4790,13 @@ def _build_accuracy_potential(
     quality_guard: dict[str, object] | None,
     evaluation_contract: dict[str, object] | None,
 ) -> dict[str, object]:
-    payload = kernel_metrics_payload or {}
-    guard = quality_guard or {}
-    faithfulness = (
-        guard.get("competition_faithfulness") if isinstance(guard.get("competition_faithfulness"), dict) else {}
-    )
-    reasons_raw = guard.get("reasons")
-    reasons = [str(item) for item in reasons_raw if isinstance(item, str)] if isinstance(reasons_raw, list) else []
-    policy_blocked = any(reason in _HARD_POLICY_BLOCK_REASONS for reason in reasons)
-    capacity_tier = _infer_capacity_tier(kernel_metrics_payload=payload, model_summary=model_summary)
-    data_tier = _infer_data_tier(
-        competition_faithfulness=faithfulness if isinstance(faithfulness, dict) else None,
+    return _kernel_quality.build_accuracy_potential(
+        score_source=evaluation.score_source,
+        kernel_metrics_payload=kernel_metrics_payload,
+        model_summary=model_summary,
+        quality_guard=quality_guard,
         evaluation_contract=evaluation_contract,
     )
-    trusted = _score_sources.is_trusted_offline_score_source(evaluation.score_source)
-    faithful = bool(faithfulness.get("faithful", False))
-    capacity_priority = _CAPACITY_TIER_PRIORITY.get(capacity_tier, 0)
-    data_priority = {"minimum_submit_data": 0, "trusted_eval_data": 1, "high_accuracy_data": 2}.get(data_tier, 0)
-    blocked_by_submit_only = (
-        all(
-            reason in {"competition_split_mismatch", "competition_evaluation_unfaithful", "missing_competitive_data"}
-            for reason in reasons
-        )
-        if reasons
-        else False
-    )
-    eligible = (
-        False
-        if policy_blocked
-        else faithful or trusted or (capacity_priority >= 2 and (blocked_by_submit_only or data_priority >= 1))
-    )
-    status = (
-        "blocked"
-        if policy_blocked
-        else "frontier"
-        if eligible and capacity_priority >= 2
-        else ("trusted" if faithful or trusted else "blocked")
-    )
-    primary_reason = "trusted_competition_faithful"
-    if status == "frontier" and not faithful:
-        primary_reason = "high_capacity_candidate_requires_better_data_or_eval"
-    elif reasons:
-        primary_reason = reasons[0]
-    return {
-        "status": status,
-        "eligible": eligible,
-        "trusted": trusted,
-        "faithful": faithful,
-        "capacity_tier": capacity_tier,
-        "capacity_priority": capacity_priority,
-        "data_tier": data_tier,
-        "data_priority": data_priority,
-        "frontier_priority": capacity_priority * 10 + data_priority * 3 + int(faithful) + int(trusted),
-        "primary_reason": primary_reason,
-        "quality_reasons": reasons,
-    }
 
 
 def _build_kernel_quality_guard(

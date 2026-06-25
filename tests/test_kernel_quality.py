@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from kagglebot.kernel_quality import (
+    build_accuracy_potential,
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
     detect_prediction_distribution_collapse,
     detect_subgroup_collapse_signal,
     extract_cv_breakdown_by_model_node,
+    infer_capacity_tier,
+    infer_data_tier,
     is_significantly_worse,
 )
 
@@ -146,3 +149,90 @@ def test_detect_prediction_distribution_collapse_compares_candidate_means() -> N
     assert signal is not None
     assert signal["selected"] == "sparse"
     assert signal["largest_mean_candidate"] == "dense"
+
+
+def test_infer_capacity_tier_uses_pipeline_and_model_summary_hints() -> None:
+    assert (
+        infer_capacity_tier(
+            kernel_metrics_payload={"selected_pipeline": "qwen llm blend"},
+            model_summary=None,
+        )
+        == "extreme"
+    )
+    assert (
+        infer_capacity_tier(
+            kernel_metrics_payload={"pipelines": [{"name": "graph transformer"}]},
+            model_summary=None,
+        )
+        == "high"
+    )
+    assert (
+        infer_capacity_tier(
+            kernel_metrics_payload={},
+            model_summary={"model_name": "ridge baseline"},
+        )
+        == "low"
+    )
+
+
+def test_infer_data_tier_uses_faithfulness_and_full_dataset_contract() -> None:
+    assert (
+        infer_data_tier(
+            competition_faithfulness={"faithful": True},
+            evaluation_contract={"require_full_dataset": True},
+        )
+        == "high_accuracy_data"
+    )
+    assert (
+        infer_data_tier(
+            competition_faithfulness={"metric_match": True, "split_match": True},
+            evaluation_contract={},
+        )
+        == "trusted_eval_data"
+    )
+    assert (
+        infer_data_tier(
+            competition_faithfulness={"full_dataset_resolved": False},
+            evaluation_contract={"require_full_dataset": True},
+        )
+        == "minimum_submit_data"
+    )
+
+
+def test_build_accuracy_potential_marks_high_capacity_unfaithful_candidate_as_frontier() -> None:
+    potential = build_accuracy_potential(
+        score_source="sample",
+        kernel_metrics_payload={"selected_pipeline": "transformer ensemble"},
+        model_summary=None,
+        quality_guard={
+            "competition_faithfulness": {
+                "faithful": False,
+                "metric_match": True,
+                "split_match": True,
+                "full_dataset_resolved": False,
+            },
+            "reasons": ["missing_competitive_data"],
+        },
+        evaluation_contract={"require_full_dataset": True},
+    )
+
+    assert potential["status"] == "frontier"
+    assert potential["eligible"] is True
+    assert potential["capacity_tier"] == "high"
+    assert potential["data_tier"] == "minimum_submit_data"
+
+
+def test_build_accuracy_potential_blocks_hard_policy_reasons() -> None:
+    potential = build_accuracy_potential(
+        score_source="cv",
+        kernel_metrics_payload={"selected_pipeline": "foundation transformer"},
+        model_summary=None,
+        quality_guard={
+            "competition_faithfulness": {"faithful": True},
+            "reasons": ["external_test_label_transfer_detected"],
+        },
+        evaluation_contract=None,
+    )
+
+    assert potential["status"] == "blocked"
+    assert potential["eligible"] is False
