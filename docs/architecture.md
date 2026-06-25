@@ -357,7 +357,8 @@ Recommended extraction order:
    sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,
    submit-kernel error wrapping, and notebook submit exception/retry orchestration are extracted. Initial submit-stage mode
    decisions, file/notebook submit attempt dispatch, successful
-   submit result normalization, submit-stage runtime state transitions, initial artifact-mode decision application,
+   submit result normalization, submit-stage runtime state transitions, initial submit runtime-state resolution,
+   initial artifact-mode decision application,
    submit-error classification normalization, classification-driven retry/abort decisions, submit-error action abort specs,
    submit-retry attempt/knowledge recording orchestration, abort-spec kwargs mapping,
    duplicate-submit decision application, local validation resolution, rules-acceptance blocker resolution,

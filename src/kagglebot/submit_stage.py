@@ -21,6 +21,7 @@ from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
+from kagglebot.writeup import normalize_submit_mode
 
 
 @dataclass(frozen=True)
@@ -359,6 +360,52 @@ def apply_initial_submit_stage_artifact_mode(
     if artifact_message:
         on_message(artifact_message)
     return state
+
+
+def resolve_initial_submit_stage_runtime_state(
+    *,
+    submit_mode: object,
+    notebook_submissions_only: bool,
+    notebook_submit_artifact_mode: str | None,
+    code_competition: bool,
+    sample_submission_path: Path,
+    fallback_sample_submission_path: Path,
+    submission_path: Path,
+    resolve_notebook_submit_artifact_mode: Callable[..., str],
+    decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
+    count_csv_data_rows: Callable[[Path], int | None],
+    on_message: Callable[[str], object],
+) -> SubmitStageRuntimeState:
+    requested_notebook_submit = normalize_submit_mode(submit_mode, default="file") == "notebook"
+    resolved_notebook_artifact_mode = (
+        resolve_notebook_submit_artifact_mode(
+            submit_mode="notebook",
+            code_competition=code_competition,
+        )
+        if requested_notebook_submit or notebook_submissions_only
+        else None
+    )
+    mode_decision = decide_initial_submit_stage_mode(
+        requested_notebook_submit=requested_notebook_submit,
+        notebook_submissions_only=notebook_submissions_only,
+        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
+        resolved_notebook_artifact_mode=resolved_notebook_artifact_mode,
+    )
+    return apply_initial_submit_stage_artifact_mode(
+        mode_decision=mode_decision,
+        resolve_artifact_mode=lambda requested_mode, notebook_required: (
+            decide_notebook_submit_artifact_mode_for_paths(
+                requested_mode=requested_mode,
+                notebook_submit_required=notebook_required,
+                code_competition=code_competition,
+                sample_submission_path=sample_submission_path,
+                fallback_sample_submission_path=fallback_sample_submission_path,
+                submission_path=submission_path,
+                count_csv_data_rows=count_csv_data_rows,
+            )
+        ),
+        on_message=on_message,
+    )
 
 
 def apply_same_submission_path_decision(

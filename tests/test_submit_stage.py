@@ -45,6 +45,7 @@ from kagglebot.submit_stage import (
     record_submission_knowledge_entries,
     record_submit_stage_retry_attempt,
     record_successful_submit_stage_result,
+    resolve_initial_submit_stage_runtime_state,
     resolve_iteration_submit_phase_state,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
@@ -261,6 +262,98 @@ def test_apply_initial_submit_stage_artifact_mode_emits_messages_and_updates_sta
     assert messages == [
         "[yellow]submit mode[/yellow]: using notebook submit",
         "[yellow]submit mode[/yellow]: using inference artifact",
+    ]
+
+
+def test_resolve_initial_submit_stage_runtime_state_keeps_file_submit(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    sample_path = tmp_path / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data_sample_submission.csv"
+    calls: list[tuple[str, bool, bool]] = []
+    messages: list[str] = []
+
+    def resolve_notebook_mode(**kwargs: object) -> str:
+        raise AssertionError(f"notebook mode should not be resolved for file submit: {kwargs}")
+
+    def decide_artifact_mode(**kwargs: object) -> ArtifactModeDecisionStub:
+        calls.append(
+            (
+                str(kwargs["requested_mode"]),
+                bool(kwargs["notebook_submit_required"]),
+                bool(kwargs["code_competition"]),
+            )
+        )
+        return ArtifactModeDecisionStub(mode="wrapper")
+
+    state = resolve_initial_submit_stage_runtime_state(
+        submit_mode="file",
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="wrapper",
+        code_competition=False,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        submission_path=submission_path,
+        resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
+        decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
+        count_csv_data_rows=lambda path: 3,
+        on_message=messages.append,
+    )
+
+    assert state.notebook_submit_required is False
+    assert state.notebook_fallback_activated is False
+    assert state.submission_artifact_mode == "wrapper"
+    assert calls == [("wrapper", False, False)]
+    assert messages == []
+
+
+def test_resolve_initial_submit_stage_runtime_state_forces_notebook_only_inference(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    sample_path = tmp_path / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data_sample_submission.csv"
+    artifact_calls: list[tuple[str, bool, bool]] = []
+    resolver_calls: list[dict[str, object]] = []
+    messages: list[str] = []
+
+    def resolve_notebook_mode(**kwargs: object) -> str:
+        resolver_calls.append(kwargs)
+        return "inference"
+
+    def decide_artifact_mode(**kwargs: object) -> ArtifactModeDecisionStub:
+        artifact_calls.append(
+            (
+                str(kwargs["requested_mode"]),
+                bool(kwargs["notebook_submit_required"]),
+                bool(kwargs["code_competition"]),
+            )
+        )
+        return ArtifactModeDecisionStub(
+            mode="inference",
+            message="[yellow]submit mode[/yellow]: tiny notebook sample/submission detected",
+        )
+
+    state = resolve_initial_submit_stage_runtime_state(
+        submit_mode="file",
+        notebook_submissions_only=True,
+        notebook_submit_artifact_mode="wrapper",
+        code_competition=True,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        submission_path=submission_path,
+        resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
+        decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
+        count_csv_data_rows=lambda path: 3,
+        on_message=messages.append,
+    )
+
+    assert state.notebook_submit_required is True
+    assert state.notebook_fallback_activated is True
+    assert state.submission_artifact_mode == "inference"
+    assert resolver_calls == [{"submit_mode": "notebook", "code_competition": True}]
+    assert artifact_calls == [("inference", True, True)]
+    assert messages == [
+        "[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit",
+        "[yellow]submit mode[/yellow]: using notebook submit",
+        "[yellow]submit mode[/yellow]: tiny notebook sample/submission detected",
     ]
 
 

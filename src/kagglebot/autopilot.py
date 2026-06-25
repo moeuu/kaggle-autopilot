@@ -4776,35 +4776,18 @@ def _attempt_submit(
         )
 
     constraints = _competition_rules.load_competition_rule_constraints(config.paths)
-    requested_notebook_submit = normalize_submit_mode(submit_mode, default="file") == "notebook"
     code_competition = infer_code_competition_from_paths(config.paths)
-    resolved_notebook_artifact_mode = (
-        _submit_notebook.resolve_notebook_submit_artifact_mode(
-            submit_mode="notebook",
-            code_competition=code_competition,
-        )
-        if requested_notebook_submit or constraints.notebook_submissions_only
-        else None
-    )
-    submit_stage_mode = _submit_stage.decide_initial_submit_stage_mode(
-        requested_notebook_submit=requested_notebook_submit,
+    submit_stage_state = _submit_stage.resolve_initial_submit_stage_runtime_state(
+        submit_mode=submit_mode,
         notebook_submissions_only=constraints.notebook_submissions_only,
         notebook_submit_artifact_mode=notebook_submit_artifact_mode,
-        resolved_notebook_artifact_mode=resolved_notebook_artifact_mode,
-    )
-    submit_stage_state = _submit_stage.apply_initial_submit_stage_artifact_mode(
-        mode_decision=submit_stage_mode,
-        resolve_artifact_mode=lambda requested_mode, notebook_required: (
-            _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
-                requested_mode=requested_mode,
-                notebook_submit_required=notebook_required,
-                code_competition=code_competition,
-                sample_submission_path=config.paths.sample_submission_path,
-                fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-                submission_path=prepared_submission_path,
-                count_csv_data_rows=_count_csv_data_rows_capped,
-            )
-        ),
+        code_competition=code_competition,
+        sample_submission_path=config.paths.sample_submission_path,
+        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+        submission_path=prepared_submission_path,
+        resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
+        decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
+        count_csv_data_rows=_count_csv_data_rows_capped,
         on_message=print,
     )
 
