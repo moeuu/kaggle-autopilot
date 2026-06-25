@@ -22,6 +22,7 @@ from rich import print
 
 from kagglebot import kernel_logs as _kernel_logs
 from kagglebot import kernel_metadata as _kernel_metadata
+from kagglebot import kernel_package_files as _kernel_package_files
 from kagglebot import kernel_plan_validation as _kernel_plan_validation
 from kagglebot import local_kernel_aux_inputs as _local_kernel_aux_inputs
 from kagglebot import local_kernel_context as _local_kernel_context
@@ -1048,10 +1049,14 @@ class KernelPackageBuilder:
                 f"Expected: {custom_kernel_path}. "
                 "Generate/update artifacts/<slug>/kernel/kernel.py before running training."
             )
-        _copy_kernel_sources(custom_kernel_dir, kernel_dir)
-        _copy_shared_kernel_runtime_modules(kernel_dir)
-        _copy_competition_external_assets(base_dir=config.base_dir, slug=config.slug, kernel_dir=kernel_dir)
-        _sync_plan_snapshot(
+        _kernel_package_files.copy_kernel_sources(custom_kernel_dir, kernel_dir)
+        _kernel_package_files.copy_shared_kernel_runtime_modules(kernel_dir)
+        _kernel_package_files.copy_competition_external_assets(
+            base_dir=config.base_dir,
+            slug=config.slug,
+            kernel_dir=kernel_dir,
+        )
+        _kernel_package_files.sync_plan_snapshot(
             plan_path=config.base_dir / config.slug / "plan.json",
             targets=[kernel_dir / "plan.json"],
         )
@@ -1146,10 +1151,14 @@ class KernelSubmitPackageBuilder:
                 raise KernelFailedError(
                     f"Authoritative kernel entrypoint is missing for notebook submit. Expected: {custom_kernel_path}."
                 )
-            _copy_kernel_sources(custom_kernel_dir, kernel_dir)
-            _copy_shared_kernel_runtime_modules(kernel_dir)
-            _copy_competition_external_assets(base_dir=config.base_dir, slug=config.slug, kernel_dir=kernel_dir)
-            _sync_plan_snapshot(
+            _kernel_package_files.copy_kernel_sources(custom_kernel_dir, kernel_dir)
+            _kernel_package_files.copy_shared_kernel_runtime_modules(kernel_dir)
+            _kernel_package_files.copy_competition_external_assets(
+                base_dir=config.base_dir,
+                slug=config.slug,
+                kernel_dir=kernel_dir,
+            )
+            _kernel_package_files.sync_plan_snapshot(
                 plan_path=config.base_dir / config.slug / "plan.json",
                 targets=[kernel_dir / "plan.json"],
             )
@@ -1516,10 +1525,10 @@ def run_kernel_local(
     if kernel_stage_dir.exists():
         shutil.rmtree(kernel_stage_dir)
     kernel_stage_dir.mkdir(parents=True, exist_ok=True)
-    _copy_kernel_sources(kernel_source_dir, kernel_stage_dir)
-    _copy_shared_kernel_runtime_modules(kernel_stage_dir)
-    _copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_stage_dir)
-    _sync_plan_snapshot(
+    _kernel_package_files.copy_kernel_sources(kernel_source_dir, kernel_stage_dir)
+    _kernel_package_files.copy_shared_kernel_runtime_modules(kernel_stage_dir)
+    _kernel_package_files.copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_stage_dir)
+    _kernel_package_files.sync_plan_snapshot(
         plan_path=base_dir / slug / "plan.json",
         targets=[
             kernel_stage_dir / "plan.json",
@@ -1809,51 +1818,6 @@ def run_kernel_local(
         submission_path=submission_dst,
         metrics_path=metrics_dst,
     )
-
-
-def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
-    for path in source_dir.iterdir():
-        if path.name in {"output", "outputs", "__pycache__"}:
-            continue
-        dest_path = dest_dir / path.name
-        if path.is_dir():
-            if dest_path.exists():
-                shutil.rmtree(dest_path)
-            shutil.copytree(path, dest_path)
-        elif path.is_file():
-            if path.suffix == ".pyc":
-                continue
-            shutil.copy2(path, dest_path)
-
-
-def _copy_competition_external_assets(*, base_dir: Path, slug: str, kernel_dir: Path) -> None:
-    external_dir = base_dir / slug / "external"
-    if not external_dir.exists():
-        return
-    for path in external_dir.iterdir():
-        if not path.is_file():
-            continue
-        shutil.copy2(path, kernel_dir / path.name)
-
-
-def _copy_shared_kernel_runtime_modules(kernel_dir: Path) -> None:
-    runtime_dir = Path(__file__).resolve().parent / "kernel_runtime"
-    if not runtime_dir.exists():
-        return
-    for path in sorted(runtime_dir.glob("*.py")):
-        if path.name == "__init__.py":
-            continue
-        shutil.copy2(path, kernel_dir / path.name)
-
-
-def _sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
-    if not plan_path.exists():
-        return
-    for target in targets:
-        if target.resolve() == plan_path.resolve():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(plan_path, target)
 
 
 def _infer_target_column_from_frames(*, train_columns: list[str], test_columns: list[str]) -> str | None:

@@ -14,10 +14,13 @@ from pathlib import Path
 import pytest
 
 from kagglebot.exceptions import KernelCapacityError, KernelFailedError, KernelStillRunningError, KernelTimeoutError
+from kagglebot.kernel_package_files import (
+    copy_competition_external_assets,
+    copy_kernel_sources,
+    copy_shared_kernel_runtime_modules,
+    sync_plan_snapshot,
+)
 from kagglebot.kernel_runner import (
-    _copy_competition_external_assets,
-    _copy_kernel_sources,
-    _copy_shared_kernel_runtime_modules,
     _ensure_training_progress_shim,
     _LocalKernelLogFilterState,
     _run_local_kernel_once,
@@ -880,9 +883,9 @@ def test_copy_kernel_sources_skips_output_dirs_and_copy_external_assets(tmp_path
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
 
-    _copy_kernel_sources(kernel_source_dir, kernel_dir)
-    _copy_shared_kernel_runtime_modules(kernel_dir)
-    _copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_dir)
+    copy_kernel_sources(kernel_source_dir, kernel_dir)
+    copy_shared_kernel_runtime_modules(kernel_dir)
+    copy_competition_external_assets(base_dir=base_dir, slug=slug, kernel_dir=kernel_dir)
 
     assert (kernel_dir / "kernel.py").exists()
     assert (kernel_dir / "runtime.py").exists()
@@ -891,6 +894,16 @@ def test_copy_kernel_sources_skips_output_dirs_and_copy_external_assets(tmp_path
     assert not (kernel_dir / "output").exists()
     assert not (kernel_dir / "outputs").exists()
     assert not (kernel_dir / "__pycache__").exists()
+
+
+def test_sync_plan_snapshot_skips_self_copy_and_writes_targets(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text('{"name": "demo"}\n', encoding="utf-8")
+    target = tmp_path / "kernel" / "plan.json"
+
+    sync_plan_snapshot(plan_path=plan_path, targets=[plan_path, target])
+
+    assert target.read_text(encoding="utf-8") == plan_path.read_text(encoding="utf-8")
 
 
 def test_run_local_kernel_once_does_not_wait_for_inherited_stdout_holders(tmp_path: Path) -> None:
