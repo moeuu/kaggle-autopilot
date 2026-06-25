@@ -9,6 +9,7 @@ import pytest
 from kagglebot.bootstrap import (
     _cache_sample_submission,
     _mirror_sample_submission_to_data,
+    _read_direction_from_json,
     _write_sample_head,
     bootstrap_competition,
 )
@@ -16,6 +17,18 @@ from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 pytestmark = pytest.mark.slow
+
+
+def test_read_direction_from_json_ignores_missing_invalid_or_non_object_payload(tmp_path) -> None:
+    assert _read_direction_from_json(tmp_path / "missing.json", ("direction",)) is None
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _read_direction_from_json(invalid, ("direction",)) is None
+
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert _read_direction_from_json(array_payload, ("direction",)) is None
 
 
 def test_rules_file_written_to_markdown(tmp_path) -> None:

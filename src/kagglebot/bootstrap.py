@@ -16,6 +16,7 @@ from pathlib import Path
 from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.competition import rules_url_for_slug
 from kagglebot.competition_policy import NotebookSelectionPolicy, load_competition_policy
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import (
     DownloadProgressCallback,
     download_competition,
@@ -169,7 +170,7 @@ def bootstrap_competition(
 def _write_json(path: Path, payload: dict[str, object], *, force: bool) -> None:
     if path.exists() and not force:
         return
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_object(path, payload)
 
 
 def _capture_rules(
@@ -756,13 +757,8 @@ def _resolve_code_score_direction(*, paths: CompetitionPaths) -> str:
 
 def _read_direction_from_json(path: Path, keys: tuple[str, ...]) -> str | None:
     """Read direction from a JSON file if present and valid."""
-    if not path.exists() or not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
+    payload = load_json_object(path, errors="ignore")
+    if payload is None:
         return None
     for key in keys:
         raw = str(payload.get(key) or "").strip().lower()
@@ -987,7 +983,7 @@ def _fetch_and_download_competition_code(*, paths: CompetitionPaths, slug: str, 
         "required_capabilities": list(competition_policy.required_capabilities),
         "notebooks": entries,
     }
-    paths.code_notebooks_index_path.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
+    write_json_object(paths.code_notebooks_index_path, index_payload)
 
     lines = [
         "# Code Notebook Snapshot",
@@ -1254,7 +1250,7 @@ def _fetch_and_download_competition_discussions(*, paths: CompetitionPaths, slug
         "thread_count": len(rows),
         "threads": rows,
     }
-    paths.discussion_threads_index_path.write_text(json.dumps(index_payload, indent=2), encoding="utf-8")
+    write_json_object(paths.discussion_threads_index_path, index_payload)
 
     lines = [
         "# Discussion Threads Snapshot",
@@ -1584,7 +1580,7 @@ def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
 
     profile = build_dataset_profile(paths.data_dir)
     paths.context_dir.mkdir(parents=True, exist_ok=True)
-    paths.dataset_profile_path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+    write_json_object(paths.dataset_profile_path, profile)
     return profile
 
 
