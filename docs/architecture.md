@@ -229,7 +229,8 @@ The next high-value modernization work is:
    tailing/JSON-log formatting is now in `kernel_logs.py`; local duration-history estimation is now in
    `local_kernel_duration.py`; local memory/stall guard policy is now in `local_kernel_limits.py`; kernel
    slug/metadata construction is now in `kernel_metadata.py`; local staged-plan runtime-parameter validation is now
-   in `kernel_plan_validation.py`; competition-specific generated code belongs in `kernel_runtime/`.
+   in `kernel_plan_validation.py`; local sample-submission mirroring/placeholder expansion is now in
+   `local_sample_submission.py`; competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
    helpers rather than open-coding tolerant dictionary access in orchestration modules.
