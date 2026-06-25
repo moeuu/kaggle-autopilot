@@ -98,8 +98,9 @@ and validation callbacks while the module owns the repair-required check and res
 Submit code fingerprinting, same-error-fingerprint reuse/allowance decisions, duplicate-submission source collection
 and skip decisions, and same-submission-path retry/skip decisions live in `src/kagglebot/submit_retry_policy.py`; the
 loop supplies paths, hashing, and state persistence callbacks.
-Submit attempt payloads, submit run-state updates, submit knowledge-record message/fix summaries, retry knowledge detail
-formatting, submit result payload construction, and submit success outcome display/ledger-recording decisions live in
+Submit attempt payloads, submit run-state updates, duplicate-skip record payloads, submit knowledge-record message/fix
+summaries, retry knowledge detail formatting, submit result payload construction, and submit success outcome
+display/ledger-recording decisions live in
 `src/kagglebot/submit_attempts.py`. The same module now owns successful/duplicate-skip result timestamp/iteration
 wiring, outcome ledger recording callback dispatch, `submit_attempts.jsonl` append, duplicate SHA lookup,
 seen-fingerprint set assembly, and tolerant row readers

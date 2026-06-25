@@ -8,6 +8,7 @@ from kagglebot.submit_attempts import (
     SubmitAttemptRecorder,
     SubmitAttemptStatePayloads,
     append_submit_attempt,
+    build_duplicate_submit_skip_record_payloads,
     build_duplicate_submit_skip_result_payload,
     build_same_submission_path_skip_attempt_payload,
     build_seen_submit_fingerprint_set,
@@ -420,6 +421,30 @@ def test_build_submit_skip_record_payloads_combines_attempt_and_run_state() -> N
         "submit_attempts_count": 8,
         "last_submission_sha256": "sha",
     }
+
+
+def test_build_duplicate_submit_skip_record_payloads_sets_duplicate_contract() -> None:
+    payloads = build_duplicate_submit_skip_record_payloads(
+        run_id="run-1",
+        submission_ref="submission.csv",
+        submission_sha256="sha",
+        fingerprint="fp",
+        code_fingerprint="code-fp",
+        reason="duplicate_submission_sha_seen",
+        prior_state={"submit_attempts_count": 2},
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+        duplicate_sources=["run_attempts", "submission_ledger"],
+    )
+
+    assert payloads.attempt_payload["error_kind"] == "none"
+    assert payloads.attempt_payload["action_taken"] == "skip"
+    assert payloads.attempt_payload["reason"] == "duplicate_submission_sha_seen"
+    assert payloads.attempt_payload["duplicate_sources"] == ["run_attempts", "submission_ledger"]
+    assert payloads.run_state_update["last_error_kind"] == "none"
+    assert payloads.run_state_update["last_reason"] == "duplicate_submission_sha_seen"
+    assert payloads.run_state_update["last_submission_sha256"] == "sha"
+    assert payloads.run_state_update["submit_attempts_count"] == 3
 
 
 def test_build_submit_retry_attempt_payload_sets_retry_contract() -> None:

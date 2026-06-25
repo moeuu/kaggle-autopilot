@@ -5076,13 +5076,12 @@ def _attempt_submit(
         reason = duplicate_decision.reason
         fingerprint = duplicate_decision.fingerprint
         duplicate_sources = duplicate_decision.duplicate_sources
-        skip_payloads = _submit_attempts.build_submit_skip_record_payloads(
+        skip_payloads = _submit_attempts.build_duplicate_submit_skip_record_payloads(
             run_id=run_id,
             submission_ref=str(prepared_submission_path),
             submission_sha256=prepared_submission_sha,
             fingerprint=fingerprint,
             code_fingerprint=submit_code_fingerprint,
-            error_kind="none",
             reason=reason,
             prior_state=_load_run_state(run_dir),
             stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,

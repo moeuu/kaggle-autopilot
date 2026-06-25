@@ -391,6 +391,34 @@ def build_submit_skip_record_payloads(
     )
 
 
+def build_duplicate_submit_skip_record_payloads(
+    *,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    fingerprint: str,
+    code_fingerprint: str,
+    reason: str,
+    prior_state: dict[str, object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    duplicate_sources: list[str],
+) -> SubmitAttemptStatePayloads:
+    return build_submit_skip_record_payloads(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=submission_sha256,
+        fingerprint=fingerprint,
+        code_fingerprint=code_fingerprint,
+        error_kind="none",
+        reason=reason,
+        prior_state=prior_state,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        duplicate_sources=duplicate_sources,
+    )
+
+
 def build_submit_retry_attempt_payload(
     *,
     run_id: str,
