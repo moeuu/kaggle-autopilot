@@ -5378,25 +5378,6 @@ def _attempt_submit(
         raise SubmitAbortedError("Submit failed before producing a submission result.")
     submission_ref = submission_reference
     submission_for_submit_path = submission_artifact_path
-    submit_success_record = _submit_stage.build_submit_stage_success_record(
-        submission_result=submission_result,
-        compute_error_fingerprint=compute_error_fingerprint,
-    )
-    submit_success_payloads = _submit_attempts.build_submit_success_record_payloads(
-        run_id=run_id,
-        submission_ref=submission_ref,
-        submission_sha256=_sha256_or_none(submission_for_submit_path),
-        exit_code=submit_success_record.exit_code,
-        fingerprint=submit_success_record.fingerprint,
-        code_fingerprint=submit_code_fingerprint,
-        stdout=submit_success_record.stdout,
-        stderr=submit_success_record.stderr,
-        prior_state=_load_run_state(run_dir),
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-    )
-    submit_attempt_recorder.record_payloads(submit_success_payloads)
-    print("[green]submission recorded[/green]")
     try:
         outcome = _submit_stage.wait_for_submission_outcome(
             slug=config.slug,
@@ -5454,14 +5435,26 @@ def _attempt_submit(
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
-    outcome_recording = _submit_attempts.decide_submit_outcome_recording(
+    def mark_submit_failure_context_submitted(submitted_ref: str) -> None:
+        _submit_failure_context.mark_submit_failure_context_submitted(
+            run_dir=run_dir,
+            submission_ref=submitted_ref,
+        )
+
+    return _submit_stage.record_successful_submit_stage_result(
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_ref=submission_ref,
+        submission_result=submission_result,
+        submission_path=submission_path,
+        submission_artifact_path=submission_for_submit_path,
         outcome=outcome,
-        submission_artifact_exists=bool(submission_for_submit_path is not None and submission_for_submit_path.exists()),
-    )
-    print(outcome_recording.message)
-    _submit_attempts.record_submit_outcome_if_available(
-        decision=outcome_recording,
-        submission_path=submission_for_submit_path,
+        code_fingerprint=submit_code_fingerprint,
+        prior_state=_load_run_state(run_dir),
+        compute_error_fingerprint=compute_error_fingerprint,
+        compute_submission_sha256=_sha256_or_none,
+        record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
         record_outcome=lambda path, ledger_outcome: SubmissionLedger(
             config.paths.submission_ledger_path
         ).record_outcome(
@@ -5471,15 +5464,10 @@ def _attempt_submit(
             run_id=run_id,
             outcome=ledger_outcome,
         ),
-    )
-    _submit_failure_context.mark_submit_failure_context_submitted(run_dir=run_dir, submission_ref=submission_ref)
-    return _submit_attempts.build_successful_submit_result_payload(
-        message=message,
-        submission_ref=submission_ref,
-        submitted_at=submitted_at,
-        submission_path=submission_path,
-        outcome=outcome,
-        infer_iteration=_submit_stage.infer_iteration_from_submission_path,
+        mark_failure_context_submitted=mark_submit_failure_context_submitted,
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        on_message=print,
     )
 
 

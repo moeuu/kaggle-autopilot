@@ -33,6 +33,7 @@ from kagglebot.submit_stage import (
     normalize_submission_outcome_status,
     record_submission_knowledge,
     record_submission_knowledge_entries,
+    record_successful_submit_stage_result,
     resolve_iteration_submit_phase_state,
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
@@ -967,6 +968,61 @@ def test_build_submit_stage_success_record_uses_returncode_fallback() -> None:
     assert record.fingerprint == ":"
     assert record.stdout == ""
     assert record.stderr == ""
+
+
+def test_record_successful_submit_stage_result_records_attempt_outcome_and_payload(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-7" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    artifact_path = tmp_path / "kernel-output" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("id,prediction\n1,0.5\n", encoding="utf-8")
+    outcome = {"status": "complete", "score": 0.12345}
+    recorded_payloads: list[object] = []
+    recorded_outcomes: list[tuple[Path, dict[str, object]]] = []
+    marked_refs: list[str] = []
+    messages: list[str] = []
+    submitted_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    result = record_successful_submit_stage_result(
+        run_id="run-1",
+        message="submit message",
+        submitted_at=submitted_at,
+        submission_ref="kernel:user/demo/submission.csv",
+        submission_result=SubmitResultStub(stdout="ok", stderr="warn", exit_code=0),
+        submission_path=submission_path,
+        submission_artifact_path=artifact_path,
+        outcome=outcome,
+        code_fingerprint="code-fp",
+        prior_state={"submit_attempts_count": 2},
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "sha256" if path == artifact_path else None,
+        record_submit_attempt_payloads=recorded_payloads.append,
+        record_outcome=lambda path, ledger_outcome: recorded_outcomes.append((path, ledger_outcome)),
+        mark_failure_context_submitted=marked_refs.append,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert len(recorded_payloads) == 1
+    payloads = recorded_payloads[0]
+    assert payloads.attempt_payload["ok"] is True
+    assert payloads.attempt_payload["fingerprint"] == "fp:ok:warn"
+    assert payloads.attempt_payload["sub_sha256"] == "sha256"
+    assert payloads.run_state_update["submit_attempts_count"] == 3
+    assert recorded_outcomes == [(artifact_path, outcome)]
+    assert marked_refs == ["kernel:user/demo/submission.csv"]
+    assert messages == [
+        "[green]submission recorded[/green]",
+        "[cyan]submission result[/cyan]: status=complete score=0.123450",
+    ]
+    assert result == {
+        "message": "submit message",
+        "submission_path": "kernel:user/demo/submission.csv",
+        "submitted_at": submitted_at.isoformat(),
+        "iteration": 7,
+        "outcome": outcome,
+    }
 
 
 def test_classify_submit_stage_error_uses_output_fallback() -> None:
