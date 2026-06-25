@@ -30,6 +30,7 @@ from kagglebot import local_kernel_drift_guard as _local_kernel_drift_guard
 from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import local_kernel_limits as _local_kernel_limits
 from kagglebot import local_kernel_models as _local_kernel_models
+from kagglebot import local_kernel_pipeline_cfg as _local_kernel_pipeline_cfg
 from kagglebot import local_kernel_progress as _local_kernel_progress
 from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
@@ -719,7 +720,7 @@ class KernelPackageBuilder:
         )
         _kernel_module_inliner.inline_kernel_modules(kernel_dir)
         _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
-        _inject_pipeline_cfg_fallback(kernel_dir)
+        _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_dir)
         _local_kernel_shims.inject_column_map_shim(kernel_dir, context_dir)
         _local_kernel_shims.inject_column_fill_shim(kernel_dir, context_dir)
         _local_kernel_shims.inject_object_coerce_shim(kernel_dir, context_dir)
@@ -820,7 +821,7 @@ class KernelSubmitPackageBuilder:
             _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
             _kernel_module_inliner.inline_kernel_modules(kernel_dir)
             _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
-            _inject_pipeline_cfg_fallback(kernel_dir)
+            _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_dir)
             _local_kernel_shims.inject_column_map_shim(kernel_dir, context_dir)
             _local_kernel_shims.inject_column_fill_shim(kernel_dir, context_dir)
             _local_kernel_shims.inject_object_coerce_shim(kernel_dir, context_dir)
@@ -1171,7 +1172,7 @@ def run_kernel_local(
     _kernel_bootstrap.inject_hardware_profile_env(kernel_stage_dir, hardware_profile, compute="local_gpu")
     _kernel_module_inliner.inline_kernel_modules(kernel_stage_dir)
     _local_kernel_data_resolver.inject_data_dir_resolver(kernel_stage_dir)
-    _inject_pipeline_cfg_fallback(kernel_stage_dir)
+    _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_stage_dir)
     _local_kernel_shims.inject_column_map_shim(kernel_stage_dir, context_dir)
     _local_kernel_shims.inject_column_fill_shim(kernel_stage_dir, context_dir)
     _local_kernel_shims.inject_object_coerce_shim(kernel_stage_dir, context_dir)
@@ -1440,50 +1441,6 @@ def run_kernel_local(
         submission_path=submission_dst,
         metrics_path=metrics_dst,
     )
-
-
-_KERNEL_PIPELINE_CFG_MARKER = "# kagglebot:pipeline_cfg_fallback"
-
-
-def _inject_pipeline_cfg_fallback(kernel_dir: Path) -> None:
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_PIPELINE_CFG_MARKER in text:
-        return
-
-    lines = text.splitlines()
-    changed = False
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped.startswith("raise KeyError("):
-            continue
-        if "Pipeline not found in plan" not in stripped:
-            continue
-        indent = line[: len(line) - len(line.lstrip())]
-        replacement = [
-            f"{indent}{_KERNEL_PIPELINE_CFG_MARKER}",
-            f"{indent}return {{",
-            f'{indent}    "name": str(name),',
-            f'{indent}    "features": [],',
-            f'{indent}    "models": [str(name)],',
-            f'{indent}    "key_hyperparameters": {{}},',
-            f'{indent}    "runtime_memory": "unknown",',
-            f'{indent}    "failure_modes": ["missing_pipeline_in_plan"],',
-            f'{indent}    "fallbacks": ["use_default_pipeline_behavior"],',
-            f"{indent}}}",
-        ]
-        lines[idx : idx + 1] = replacement
-        changed = True
-        break
-    if not changed:
-        return
-
-    updated = "\n".join(lines)
-    if text.endswith("\n"):
-        updated += "\n"
-    kernel_path.write_text(updated, encoding="utf-8")
 
 
 LOG_POLL_INTERVAL = 2.0

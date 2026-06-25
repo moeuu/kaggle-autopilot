@@ -1232,33 +1232,6 @@ def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
     assert any("KAGGLEBOT_TORCH_SHARING_STRATEGY=file_system" in note for note in notes)
 
 
-def test_inject_pipeline_cfg_fallback_replaces_keyerror(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
-    kernel_dir = tmp_path / "kernel"
-    kernel_dir.mkdir(parents=True, exist_ok=True)
-    kernel_path = kernel_dir / "kernel.py"
-    kernel_path.write_text(
-        "\n".join(
-            [
-                "def get_pipeline_cfg(plan, name):",
-                "    for p in plan.get('pipelines', []):",
-                "        if p.get('name') == name:",
-                "            return p",
-                '    raise KeyError(f"Pipeline not found in plan: {name}")',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    kernel_runner._inject_pipeline_cfg_fallback(kernel_dir)
-    text = kernel_path.read_text(encoding="utf-8")
-    assert "kagglebot:pipeline_cfg_fallback" in text
-    assert "raise KeyError" not in text
-    assert "missing_pipeline_in_plan" in text
-
-
 def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)

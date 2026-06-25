@@ -231,8 +231,9 @@ The next high-value modernization work is:
    slug/metadata construction is now in `kernel_metadata.py`; local staged-plan runtime-parameter validation is now
    in `kernel_plan_validation.py`; local sample-submission mirroring/placeholder expansion is now in
    `local_sample_submission.py`; local data/context profile staging is now in `local_kernel_context.py`;
-   local generated-kernel data-dir resolver injection is now in `local_kernel_data_resolver.py`; local progress
-   tracking, stall detection, and heartbeat formatting is now in `local_kernel_progress.py`;
+   local generated-kernel data-dir resolver injection is now in `local_kernel_data_resolver.py`; local generated-kernel
+   pipeline-config fallback injection is now in `local_kernel_pipeline_cfg.py`; local progress tracking, stall
+   detection, and heartbeat formatting is now in `local_kernel_progress.py`;
    local model-cache discovery and staging is now in `local_kernel_models.py`; local text-runtime aux input staging is
    now in `local_kernel_aux_inputs.py`; kernel package source/runtime/external-file staging is now in
    `kernel_package_files.py`; local-module inlining for packaged kernels is now in `kernel_module_inliner.py`;
