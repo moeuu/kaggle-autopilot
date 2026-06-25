@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 import builtins
-import csv
 import hashlib
 import json
 import math
@@ -27,6 +25,7 @@ from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
+from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
 from kagglebot import score_sources as _score_sources
 from kagglebot import submission_policy as _submission_policy
@@ -133,10 +132,8 @@ from kagglebot.experiment_graph import (
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
-from kagglebot.json_utils import load_json_array as _load_json_array
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.json_utils import load_json_object_or_empty as _load_json_object_or_empty
-from kagglebot.json_utils import write_json_array as _write_json_array
 from kagglebot.json_utils import write_json_object as _write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
@@ -285,6 +282,23 @@ _extract_campaign_prediction_correlation = _campaign_metrics.extract_campaign_pr
 _extract_campaign_artifact_path = _campaign_metrics.extract_campaign_artifact_path
 _extract_campaign_method_id = _campaign_metrics.extract_campaign_method_id
 _extract_campaign_validation_profile_id = _campaign_metrics.extract_campaign_validation_profile_id
+_maybe_write_column_fill = _runtime_fixes.maybe_write_column_fill
+_maybe_write_object_coerce = _runtime_fixes.maybe_write_object_coerce
+_maybe_write_device_coerce = _runtime_fixes.maybe_write_device_coerce
+_parse_missing_columns = _runtime_fixes.parse_missing_columns
+_maybe_write_column_map = _runtime_fixes.maybe_write_column_map
+_scan_tabular_headers = _runtime_fixes.scan_tabular_headers
+_read_header = _runtime_fixes.read_header
+_extract_candidate_groups = _runtime_fixes.extract_candidate_groups
+_infer_column_mapping = _runtime_fixes.infer_column_mapping
+_normalize_column = _runtime_fixes.normalize_column
+_normalize_group_tokens = _runtime_fixes.normalize_group_tokens
+_keywords_from_group = _runtime_fixes.keywords_from_group
+_keyword_score = _runtime_fixes.keyword_score
+_extract_missing_module = _runtime_fixes.extract_missing_module
+_load_blocked_modules = _runtime_fixes.load_blocked_modules
+_save_blocked_modules = _runtime_fixes.save_blocked_modules
+_record_blocked_module = _runtime_fixes.record_blocked_module
 
 
 def _classify_submit_failure_repair(
@@ -8418,349 +8432,6 @@ def _run_error_strategy(
     return strategy_text
 
 
-_COLUMN_MAP_FILENAME = "column_map.json"
-_COLUMN_FILL_FILENAME = "column_fill.json"
-_OBJECT_COERCE_FILENAME = "object_coerce.json"
-_DEVICE_COERCE_FILENAME = "device_coerce.json"
-_BLOCKED_MODULES_FILENAME = "blocked_modules.json"
-_MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]")
-_MISSING_COLUMNS_RE = re.compile(r"missing columns?:\s*\[([^\]]+)\]", re.IGNORECASE)
-_MISSING_COLUMNS_KEYERROR_RE = re.compile(
-    r"KeyError:\s*[\"']?\[([^\]]+)\]\s*not in index[\"']?",
-    re.IGNORECASE,
-)
-_MISSING_COLUMNS_FILE_RE = re.compile(
-    r"([A-Za-z0-9_.-]+\.(?:csv|tsv|txt|parquet|json|jsonl))\s+missing columns",
-    re.IGNORECASE,
-)
-_OBJECT_DTYPE_RE = re.compile(r"numpy\.object_", re.IGNORECASE)
-_DEVICE_MISMATCH_RE = re.compile(
-    r"Expected all tensors to be on the same device|found at least two devices",
-    re.IGNORECASE,
-)
-_COLUMN_ERROR_PATTERNS = (
-    "could not resolve column",
-    "unable to locate session",
-    "missing columns",
-    "not in index",
-    "are in the [columns]",
-)
-
-
-def _maybe_write_column_fill(config: AutopilotConfig, error_text: str) -> bool:
-    raw_error = error_text or ""
-    file_name: str | None = None
-    match = _MISSING_COLUMNS_RE.search(raw_error)
-    if match:
-        missing_columns = _parse_missing_columns(match.group(1))
-        file_match = _MISSING_COLUMNS_FILE_RE.search(raw_error)
-        file_name = file_match.group(1) if file_match else None
-    else:
-        keyerror_match = _MISSING_COLUMNS_KEYERROR_RE.search(raw_error)
-        if not keyerror_match:
-            return False
-        missing_columns = _parse_missing_columns(keyerror_match.group(1))
-    if not missing_columns:
-        return False
-
-    deduped_missing: list[str] = []
-    seen_missing: set[str] = set()
-    for column in missing_columns:
-        normalized = str(column).strip()
-        if not normalized or normalized in seen_missing:
-            continue
-        seen_missing.add(normalized)
-        deduped_missing.append(normalized)
-    if not deduped_missing:
-        return False
-
-    context_dir = config.paths.context_dir
-    fill_path = context_dir / _COLUMN_FILL_FILENAME
-    payload = _load_json_object_or_empty(fill_path)
-
-    changed = not fill_path.exists()
-    files_payload = payload.get("files")
-    files: dict[str, list[str]]
-    if isinstance(files_payload, dict):
-        files = {}
-        for key, value in files_payload.items():
-            if not isinstance(key, str) or not isinstance(value, list):
-                continue
-            cleaned: list[str] = []
-            seen_cols: set[str] = set()
-            for col in value:
-                col_name = str(col).strip()
-                if not col_name or col_name in seen_cols:
-                    continue
-                seen_cols.add(col_name)
-                cleaned.append(col_name)
-            files[key] = cleaned
-    else:
-        files = {}
-        if files_payload is not None:
-            changed = True
-
-    if file_name:
-        existing = files.get(file_name, [])
-        merged = list(existing)
-        for col in deduped_missing:
-            if col not in merged:
-                merged.append(col)
-        if merged != existing:
-            files[file_name] = merged
-            changed = True
-    else:
-        missing_payload = payload.get("missing_columns")
-        if isinstance(missing_payload, list):
-            existing_missing: list[str] = []
-            seen_cols: set[str] = set()
-            for col in missing_payload:
-                col_name = str(col).strip()
-                if not col_name or col_name in seen_cols:
-                    continue
-                seen_cols.add(col_name)
-                existing_missing.append(col_name)
-        else:
-            existing_missing = []
-            if missing_payload is not None:
-                changed = True
-        merged_missing = list(existing_missing)
-        for col in deduped_missing:
-            if col not in merged_missing:
-                merged_missing.append(col)
-        if merged_missing != existing_missing:
-            payload["missing_columns"] = merged_missing
-            changed = True
-
-    if not changed:
-        return False
-
-    payload["files"] = files
-    payload.setdefault("source", "autofix")
-    payload.setdefault("created_at", datetime.now(UTC).isoformat())
-    payload["updated_at"] = datetime.now(UTC).isoformat()
-    if "missing_columns" not in payload:
-        payload["missing_columns"] = []
-    _write_json_object(fill_path, payload)
-    return True
-
-
-def _maybe_write_object_coerce(config: AutopilotConfig, error_text: str) -> bool:
-    if not _OBJECT_DTYPE_RE.search(error_text or ""):
-        return False
-    context_dir = config.paths.context_dir
-    coerce_path = context_dir / _OBJECT_COERCE_FILENAME
-    if coerce_path.exists():
-        return False
-    payload = {
-        "source": "autofix",
-        "created_at": datetime.now(UTC).isoformat(),
-        "enabled": True,
-        "reason": "numpy.object_ conversion error",
-    }
-    _write_json_object(coerce_path, payload)
-    return True
-
-
-def _maybe_write_device_coerce(config: AutopilotConfig, error_text: str) -> bool:
-    if not _DEVICE_MISMATCH_RE.search(error_text or ""):
-        return False
-    context_dir = config.paths.context_dir
-    coerce_path = context_dir / _DEVICE_COERCE_FILENAME
-    if coerce_path.exists():
-        return False
-    payload = {
-        "source": "autofix",
-        "created_at": datetime.now(UTC).isoformat(),
-        "enabled": True,
-        "prefer": "cuda",
-        "reason": "torch device mismatch error",
-    }
-    _write_json_object(coerce_path, payload)
-    return True
-
-
-def _parse_missing_columns(raw: str) -> list[str]:
-    text = raw.strip()
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
-    if not text:
-        return []
-    try:
-        parsed = ast.literal_eval(f"[{text}]")
-    except Exception:
-        parsed = [item.strip().strip("'\"") for item in text.split(",") if item.strip()]
-    if isinstance(parsed, (list, tuple)):
-        return [str(item).strip() for item in parsed if str(item).strip()]
-    return []
-
-
-def _maybe_write_column_map(config: AutopilotConfig, error_text: str) -> bool:
-    lowered = error_text.lower()
-    if not any(pattern in lowered for pattern in _COLUMN_ERROR_PATTERNS):
-        return False
-    context_dir = config.paths.context_dir
-    map_path = context_dir / _COLUMN_MAP_FILENAME
-    if map_path.exists():
-        return False
-    columns_by_file = _scan_tabular_headers(config.paths.data_dir)
-    if not columns_by_file:
-        return False
-    candidate_groups = _extract_candidate_groups(error_text)
-    if not candidate_groups:
-        return False
-    mapping = _infer_column_mapping(columns_by_file, candidate_groups)
-    if not mapping:
-        return False
-    payload = {
-        "mapping": mapping,
-        "source": "autofix",
-        "created_at": datetime.now(UTC).isoformat(),
-        "candidates": candidate_groups,
-        "files": columns_by_file,
-    }
-    _write_json_object(map_path, payload)
-    return True
-
-
-def _scan_tabular_headers(data_dir: Path) -> dict[str, list[str]]:
-    columns: dict[str, list[str]] = {}
-    if not data_dir.exists():
-        return columns
-    for path in data_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        suffix = path.suffix.lower()
-        if suffix not in {".csv", ".tsv"}:
-            continue
-        header = _read_header(path)
-        if not header:
-            continue
-        try:
-            rel = str(path.relative_to(data_dir))
-        except ValueError:
-            rel = str(path)
-        columns[rel] = header
-    return columns
-
-
-def _read_header(path: Path) -> list[str]:
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            line = handle.readline()
-    except OSError:
-        return []
-    if not line:
-        return []
-    sep = "\t" if "\t" in line and path.suffix.lower() == ".tsv" else ","
-    try:
-        row = next(csv.reader([line], delimiter=sep))
-    except Exception:
-        return []
-    return [col.strip().strip('"').strip("'") for col in row if col.strip()]
-
-
-def _extract_candidate_groups(error_text: str) -> list[list[str]]:
-    groups: list[list[str]] = []
-    list_match = re.findall(r"candidates:\s*\[([^\]]+)\]", error_text, flags=re.IGNORECASE)
-    for match in list_match:
-        try:
-            items = [item.strip().strip("'\"") for item in match.split(",") if item.strip()]
-        except Exception:
-            items = []
-        if items:
-            groups.append(items)
-    slash_match = re.findall(r"([A-Za-z0-9_]+)\s*/\s*([A-Za-z0-9_]+)", error_text)
-    for left, right in slash_match:
-        groups.append([left, right])
-    lowered = error_text.lower()
-    if "session" in lowered or "visit" in lowered:
-        groups.append(["session_id", "visit_id"])
-    if "product" in lowered or "item" in lowered:
-        groups.append(["product_id", "item_id", "sku"])
-    deduped: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
-    for group in groups:
-        norm = tuple(group)
-        if norm in seen:
-            continue
-        seen.add(norm)
-        deduped.append(group)
-    return deduped
-
-
-def _infer_column_mapping(columns_by_file: dict[str, list[str]], groups: list[list[str]]) -> dict[str, str]:
-    all_columns = []
-    for cols in columns_by_file.values():
-        all_columns.extend(cols)
-    mapping: dict[str, str] = {}
-    normalized = {_normalize_column(col): col for col in all_columns}
-    for group in groups:
-        normalized_group = _normalize_group_tokens(group)
-        if not normalized_group:
-            continue
-        canonical = normalized_group[0]
-        match = _match_column(normalized_group, normalized, all_columns)
-        if match and match not in mapping:
-            mapping[match] = canonical
-    return mapping
-
-
-def _match_column(group: list[str], normalized: dict[str, str], all_columns: list[str]) -> str | None:
-    for cand in group:
-        norm = _normalize_column(cand)
-        if norm in normalized:
-            return normalized[norm]
-    keywords = _keywords_from_group(group)
-    if not keywords:
-        return None
-    best: tuple[int, str] | None = None
-    for col in all_columns:
-        score = _keyword_score(col, keywords)
-        if score <= 0:
-            continue
-        if best is None or score > best[0]:
-            best = (score, col)
-    return best[1] if best else None
-
-
-def _normalize_column(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-
-def _normalize_group_tokens(group: list[object]) -> list[str]:
-    normalized: list[str] = []
-    for cand in group:
-        if cand is None:
-            continue
-        text = cand if isinstance(cand, str) else str(cand)
-        stripped = text.strip()
-        if stripped:
-            normalized.append(stripped)
-    return normalized
-
-
-def _keywords_from_group(group: list[str]) -> set[str]:
-    keywords: set[str] = set()
-    for cand in group:
-        for token in re.split(r"[^a-zA-Z0-9]+", cand):
-            if token:
-                keywords.add(token.lower())
-    return keywords
-
-
-def _keyword_score(column: str, keywords: set[str]) -> int:
-    lowered = column.lower()
-    return sum(1 for key in keywords if key in lowered)
-
-
-def _extract_missing_module(error_text: str) -> str | None:
-    match = _MISSING_MODULE_RE.search(error_text or "")
-    if not match:
-        return None
-    return match.group(1)
-
-
 def _maybe_regenerate_kernel_sources_once(
     *,
     config: AutopilotConfig,
@@ -8856,30 +8527,6 @@ def _maybe_apply_lightweight_runtime_fix(
         )
         return artifact_name
     return None
-
-
-def _load_blocked_modules(context_dir: Path) -> list[str]:
-    payload = _load_json_array(context_dir / _BLOCKED_MODULES_FILENAME)
-    return [str(item) for item in payload if item] if payload is not None else []
-
-
-def _save_blocked_modules(context_dir: Path, modules: list[str]) -> None:
-    context_dir.mkdir(parents=True, exist_ok=True)
-    path = context_dir / _BLOCKED_MODULES_FILENAME
-    if modules:
-        _write_json_array(path, [str(module) for module in modules])
-        return
-    if path.exists():
-        path.unlink()
-
-
-def _record_blocked_module(context_dir: Path, module: str) -> list[str]:
-    context_dir.mkdir(parents=True, exist_ok=True)
-    existing = _load_blocked_modules(context_dir)
-    if module not in existing:
-        existing.append(module)
-        _save_blocked_modules(context_dir, existing)
-    return existing
 
 
 def _resume_best_submitted_offline_score(

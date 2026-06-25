@@ -176,6 +176,8 @@ Recommended extraction order:
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.
+   Lightweight runtime-fix artifact writers for missing columns, column aliases, object dtype coercion, device coercion,
+   and blocked modules are now in `runtime_fixes.py`.
    Code-reference score extraction, reference notebook lookup, implementation marker construction, and reference
    implementation validation are now in `code_reference.py`; keep additional code-reference policy there unless it needs
    direct agent prompt rendering.
