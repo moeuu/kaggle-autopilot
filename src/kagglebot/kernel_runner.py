@@ -25,6 +25,7 @@ from kagglebot import kernel_package_files as _kernel_package_files
 from kagglebot import kernel_plan_validation as _kernel_plan_validation
 from kagglebot import local_kernel_aux_inputs as _local_kernel_aux_inputs
 from kagglebot import local_kernel_context as _local_kernel_context
+from kagglebot import local_kernel_data_resolver as _local_kernel_data_resolver
 from kagglebot import local_kernel_drift_guard as _local_kernel_drift_guard
 from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import local_kernel_limits as _local_kernel_limits
@@ -717,7 +718,7 @@ class KernelPackageBuilder:
             compute="kaggle_gpu" if config.accelerator == "gpu" else "kaggle_tpu",
         )
         _kernel_module_inliner.inline_kernel_modules(kernel_dir)
-        _inject_data_dir_resolver(kernel_dir)
+        _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
         _inject_pipeline_cfg_fallback(kernel_dir)
         _local_kernel_shims.inject_column_map_shim(kernel_dir, context_dir)
         _local_kernel_shims.inject_column_fill_shim(kernel_dir, context_dir)
@@ -818,7 +819,7 @@ class KernelSubmitPackageBuilder:
             _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
             _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
             _kernel_module_inliner.inline_kernel_modules(kernel_dir)
-            _inject_data_dir_resolver(kernel_dir)
+            _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
             _inject_pipeline_cfg_fallback(kernel_dir)
             _local_kernel_shims.inject_column_map_shim(kernel_dir, context_dir)
             _local_kernel_shims.inject_column_fill_shim(kernel_dir, context_dir)
@@ -1169,7 +1170,7 @@ def run_kernel_local(
     _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
     _kernel_bootstrap.inject_hardware_profile_env(kernel_stage_dir, hardware_profile, compute="local_gpu")
     _kernel_module_inliner.inline_kernel_modules(kernel_stage_dir)
-    _inject_data_dir_resolver(kernel_stage_dir)
+    _local_kernel_data_resolver.inject_data_dir_resolver(kernel_stage_dir)
     _inject_pipeline_cfg_fallback(kernel_stage_dir)
     _local_kernel_shims.inject_column_map_shim(kernel_stage_dir, context_dir)
     _local_kernel_shims.inject_column_fill_shim(kernel_stage_dir, context_dir)
@@ -1441,69 +1442,7 @@ def run_kernel_local(
     )
 
 
-_KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
 _KERNEL_PIPELINE_CFG_MARKER = "# kagglebot:pipeline_cfg_fallback"
-_DATA_DIR_JOIN_RE = re.compile(r"(\bdata_dir\s*/\s*)(['\"])([^'\"]+)\2")
-_DATA_DIR_REQUIRED_RE = re.compile(r"all\(\(cand\s*/\s*name\)\.exists\(\)\s*for\s*name\s*in\s*required\)")
-_DATA_DIR_LOCATE_FALLBACK_MARKER = "# kagglebot:data-dir-fallback-scan"
-_DATA_DIR_RAISE_RE = re.compile(
-    r"^\s*raise FileNotFoundError\(f\"Could not find required csv files for slug='\{slug\}'\"\)\s*$",
-    re.MULTILINE,
-)
-
-
-def _inject_data_dir_resolver(kernel_dir: Path) -> None:
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if not _DATA_DIR_JOIN_RE.search(text):
-        return
-    lines = text.splitlines()
-    if _KERNEL_DATA_RESOLVER_MARKER not in text:
-        resolver_block = [
-            _KERNEL_DATA_RESOLVER_MARKER,
-            "from pathlib import Path as _KBPath",
-            "",
-            "def _kb_find_file(base: _KBPath, name: str) -> _KBPath:",
-            "    candidate = base / name",
-            "    if candidate.exists():",
-            "        return candidate",
-            "    try:",
-            "        matches = list(base.rglob(name))",
-            "    except Exception:",
-            "        matches = []",
-            "    if matches:",
-            "        return matches[0]",
-            "    return candidate",
-            "",
-        ]
-        insert_at = _kernel_bootstrap.find_bootstrap_block_end(lines)
-        if insert_at is None:
-            insert_at = _kernel_bootstrap.find_bootstrap_insertion_index(lines)
-        lines = lines[:insert_at] + resolver_block + lines[insert_at:]
-    updated = "\n".join(lines)
-    updated = _DATA_DIR_JOIN_RE.sub(r"_kb_find_file(data_dir, '\3')", updated)
-    updated = _DATA_DIR_REQUIRED_RE.sub(
-        "all(_kb_find_file(cand, name).exists() for name in required)",
-        updated,
-    )
-    if _DATA_DIR_LOCATE_FALLBACK_MARKER not in updated:
-        fallback_block = (
-            "    input_root = _KBPath('/kaggle/input')\n"
-            "    if input_root.exists() and input_root.is_dir():\n"
-            f"        {_DATA_DIR_LOCATE_FALLBACK_MARKER}\n"
-            "        for cand in sorted(input_root.iterdir(), key=lambda p: p.name):\n"
-            "            if not cand.is_dir():\n"
-            "                continue\n"
-            "            if all(_kb_find_file(cand, name).exists() for name in required):\n"
-            "                return cand\n"
-            "    raise FileNotFoundError(f\"Could not find required csv files for slug='{slug}'\")"
-        )
-        updated = _DATA_DIR_RAISE_RE.sub(fallback_block, updated, count=1)
-    if text.endswith("\n"):
-        updated += "\n"
-    kernel_path.write_text(updated, encoding="utf-8")
 
 
 def _inject_pipeline_cfg_fallback(kernel_dir: Path) -> None:
