@@ -337,6 +337,7 @@ Recommended extraction order:
    Iteration repair-signal extraction and next-iteration policy/knowledge payload assembly are now in
    `iteration_signals.py`.
    Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.
+   Loop score-update/streak decisions and terminal/stagnation stop policy are now in `loop_control.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file
    repair preparation, same-fingerprint retry allowance, and submit retry decisions are now extracted.

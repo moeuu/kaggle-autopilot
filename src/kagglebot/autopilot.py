@@ -2591,26 +2591,34 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
 
             prev_best = best_score
-            if metric_mismatch_detected or non_generalizable_eval_detected:
-                delta_offline = None
-                improved = False
-            else:
-                delta_offline = iteration_phase.delta_from_best(prev_best, decision_score)
-                improved = iteration_phase.should_update_best(best_score, decision_score, stop_min_delta)
-            if improved:
-                best_score = decision_score
-                best_submission = submission_path
-                no_improve_streak = 0
+            score_update_decision = _loop_control.decide_iteration_score_update(
+                metric_mismatch_detected=metric_mismatch_detected,
+                non_generalizable_eval_detected=non_generalizable_eval_detected,
+                previous_best_score=prev_best,
+                current_score=decision_score,
+                submission_path=submission_path,
+                no_improve_streak=no_improve_streak,
+                stop_min_delta=stop_min_delta,
+                conservative_regression_detected=conservative_regression_detected,
+                delta_from_best=iteration_phase.delta_from_best,
+                should_update_best=iteration_phase.should_update_best,
+            )
+            delta_offline = score_update_decision.delta_offline
+            improved = score_update_decision.improved
+            no_improve_streak = score_update_decision.no_improve_streak
+            if score_update_decision.best_score is not None:
+                best_score = score_update_decision.best_score
+            if score_update_decision.best_submission is not None:
+                best_submission = score_update_decision.best_submission
+            if score_update_decision.capture_best_snapshot:
                 _kernel_snapshot.capture_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
-            else:
-                no_improve_streak += 1
-                if conservative_regression_detected:
-                    restored = _kernel_snapshot.restore_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
-                    if restored:
-                        print(
-                            "[yellow]kernel regression guard[/yellow]: "
-                            "restored best-known kernel source after severe conservative regression."
-                        )
+            if score_update_decision.restore_regression_snapshot:
+                restored = _kernel_snapshot.restore_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
+                if restored:
+                    print(
+                        "[yellow]kernel regression guard[/yellow]: "
+                        "restored best-known kernel source after severe conservative regression."
+                    )
 
             major_overhaul_decision = _loop_control.decide_no_improve_major_overhaul(
                 force_enabled=force_major_on_no_improve,

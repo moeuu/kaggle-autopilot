@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -22,6 +23,17 @@ class NoImproveMajorOverhaulDecision:
     force_major_overhaul: bool
     reason: str
     skip_message: str
+
+
+@dataclass(frozen=True)
+class IterationScoreUpdateDecision:
+    delta_offline: float | None
+    improved: bool
+    best_score: float | None
+    best_submission: object | None
+    no_improve_streak: int
+    capture_best_snapshot: bool
+    restore_regression_snapshot: bool
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,53 @@ def select_stagnation_track(
     if best_high_potential_score is not None:
         return StagnationTrack(no_improve_streak=frontier_no_improve_streak, label="accuracy frontier")
     return StagnationTrack(no_improve_streak=no_improve_streak, label="offline metric")
+
+
+def decide_iteration_score_update(
+    *,
+    metric_mismatch_detected: bool,
+    non_generalizable_eval_detected: bool,
+    previous_best_score: float | None,
+    current_score: float,
+    submission_path: object,
+    no_improve_streak: int,
+    stop_min_delta: float,
+    conservative_regression_detected: bool,
+    delta_from_best: Callable[[float | None, float], float | None],
+    should_update_best: Callable[[float | None, float, float], bool],
+) -> IterationScoreUpdateDecision:
+    if metric_mismatch_detected or non_generalizable_eval_detected:
+        return IterationScoreUpdateDecision(
+            delta_offline=None,
+            improved=False,
+            best_score=previous_best_score,
+            best_submission=None,
+            no_improve_streak=no_improve_streak + 1,
+            capture_best_snapshot=False,
+            restore_regression_snapshot=bool(conservative_regression_detected),
+        )
+
+    delta_offline = delta_from_best(previous_best_score, current_score)
+    improved = should_update_best(previous_best_score, current_score, stop_min_delta)
+    if improved:
+        return IterationScoreUpdateDecision(
+            delta_offline=delta_offline,
+            improved=True,
+            best_score=current_score,
+            best_submission=submission_path,
+            no_improve_streak=0,
+            capture_best_snapshot=True,
+            restore_regression_snapshot=False,
+        )
+    return IterationScoreUpdateDecision(
+        delta_offline=delta_offline,
+        improved=False,
+        best_score=previous_best_score,
+        best_submission=None,
+        no_improve_streak=no_improve_streak + 1,
+        capture_best_snapshot=False,
+        restore_regression_snapshot=bool(conservative_regression_detected),
+    )
 
 
 def decide_stagnation_stop(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kagglebot.loop_control import (
     append_policy_reason,
+    decide_iteration_score_update,
     decide_max_total_time_stop,
     decide_no_improve_major_overhaul,
     decide_stagnation_stop,
@@ -53,6 +54,73 @@ def test_select_stagnation_track_uses_offline_metric_without_frontier_candidate(
 
     assert track.no_improve_streak == 5
     assert track.label == "offline metric"
+
+
+def test_decide_iteration_score_update_updates_best_and_resets_streak() -> None:
+    decision = decide_iteration_score_update(
+        metric_mismatch_detected=False,
+        non_generalizable_eval_detected=False,
+        previous_best_score=0.8,
+        current_score=0.9,
+        submission_path="iter-2/submission.csv",
+        no_improve_streak=3,
+        stop_min_delta=0.001,
+        conservative_regression_detected=True,
+        delta_from_best=lambda previous, current: None if previous is None else current - previous,
+        should_update_best=lambda previous, current, min_delta: previous is None or current > previous + min_delta,
+    )
+
+    assert round(float(decision.delta_offline or 0.0), 6) == 0.1
+    assert decision.improved is True
+    assert decision.best_score == 0.9
+    assert decision.best_submission == "iter-2/submission.csv"
+    assert decision.no_improve_streak == 0
+    assert decision.capture_best_snapshot is True
+    assert decision.restore_regression_snapshot is False
+
+
+def test_decide_iteration_score_update_blocks_untrusted_metric_and_restores_regression() -> None:
+    decision = decide_iteration_score_update(
+        metric_mismatch_detected=True,
+        non_generalizable_eval_detected=False,
+        previous_best_score=0.8,
+        current_score=0.9,
+        submission_path="iter-2/submission.csv",
+        no_improve_streak=3,
+        stop_min_delta=0.001,
+        conservative_regression_detected=True,
+        delta_from_best=lambda previous, current: current,
+        should_update_best=lambda previous, current, min_delta: True,
+    )
+
+    assert decision.delta_offline is None
+    assert decision.improved is False
+    assert decision.best_score == 0.8
+    assert decision.best_submission is None
+    assert decision.no_improve_streak == 4
+    assert decision.capture_best_snapshot is False
+    assert decision.restore_regression_snapshot is True
+
+
+def test_decide_iteration_score_update_increments_streak_without_regression_restore() -> None:
+    decision = decide_iteration_score_update(
+        metric_mismatch_detected=False,
+        non_generalizable_eval_detected=False,
+        previous_best_score=0.8,
+        current_score=0.8005,
+        submission_path="iter-2/submission.csv",
+        no_improve_streak=1,
+        stop_min_delta=0.001,
+        conservative_regression_detected=False,
+        delta_from_best=lambda previous, current: None if previous is None else current - previous,
+        should_update_best=lambda previous, current, min_delta: previous is None or current > previous + min_delta,
+    )
+
+    assert decision.delta_offline == 0.0004999999999999449
+    assert decision.improved is False
+    assert decision.best_score == 0.8
+    assert decision.no_improve_streak == 2
+    assert decision.restore_regression_snapshot is False
 
 
 def test_decide_stagnation_stop_stops_on_no_improvement_patience() -> None:
