@@ -1076,7 +1076,7 @@ def test_inject_column_fill_shim(tmp_path: Path) -> None:
 
 
 def test_prepare_zero_overlap_drift_guard_detects_high_risk_zero_overlap_feature(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
+    from kagglebot.local_kernel_drift_guard import prepare_zero_overlap_drift_guard
 
     data_dir = tmp_path / "demo" / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -1114,7 +1114,7 @@ def test_prepare_zero_overlap_drift_guard_detects_high_risk_zero_overlap_feature
         encoding="utf-8",
     )
 
-    guard_path = kernel_runner._prepare_zero_overlap_drift_guard(
+    guard_path = prepare_zero_overlap_drift_guard(
         base_dir=tmp_path,
         slug="demo",
         context_dir=context_dir,
