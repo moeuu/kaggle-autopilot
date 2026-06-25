@@ -172,6 +172,9 @@ Recommended extraction order:
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.
+   Code-reference score extraction, reference notebook lookup, implementation marker construction, and reference
+   implementation validation are now in `code_reference.py`; keep additional code-reference policy there unless it needs
+   direct agent prompt rendering.
 4. Submit state persistence: submit attempt JSONL writing/reading, duplicate SHA lookup, submit attempt/run-state payloads,
    submit failure-context payloads, submit knowledge-record payloads, and submit result payload construction are now
    centralized. Duplicate-submit skip decisions are extracted.

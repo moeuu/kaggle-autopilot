@@ -23,6 +23,7 @@ import numpy as np
 from rich import print
 
 from kagglebot import autofix_restart as _autofix_restart
+from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import score_sources as _score_sources
@@ -245,6 +246,18 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
+_CodeReferenceNotebook = _code_reference.CodeReferenceNotebook
+_code_reference_marker = _code_reference.code_reference_marker
+_extract_code_reference_score = _code_reference.extract_code_reference_score
+_extract_code_reference_score_from_index = _code_reference.extract_code_reference_score_from_index
+_extract_code_reference_score_from_markdown = _code_reference.extract_code_reference_score_from_markdown
+_extract_score_from_text = _code_reference.extract_score_from_text
+_load_code_reference_notebook = _code_reference.load_code_reference_notebook
+_load_ensemble_reference_notebook = _code_reference.load_ensemble_reference_notebook
+_load_required_reference_notebook = _code_reference.load_required_reference_notebook
+_reference_requires_tabicl = _code_reference.reference_requires_tabicl
+_validate_code_reference_implementation = _code_reference.validate_code_reference_implementation
+
 
 def _classify_submit_failure_repair(
     *,
@@ -355,7 +368,6 @@ _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
-_CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
 _DEFAULT_EVAL_SEEDS = [42, 2024, 777]
 _DEFAULT_EVAL_REPEATS = 2
 _DEFAULT_MAX_ITERATIONS = 5
@@ -425,16 +437,6 @@ _HIGH_CAPACITY_MARKERS = (
 )
 _EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
 _BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
-_CODE_REFERENCE_IMPL_MARKER_PREFIX = "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED:"
-
-
-@dataclass(frozen=True)
-class _CodeReferenceNotebook:
-    kernel_id: str
-    title: str
-    source_file: str | None = None
-    local_dir: str | None = None
-    summary: str = ""
 
 
 class _TrainingLiveStdout:
@@ -10499,176 +10501,6 @@ def _effective_best_score_for_progress(
             "margin": float(margin),
         }
     return prev_best, None
-
-
-def _extract_score_from_text(text: str) -> float | None:
-    for match in _CODE_SCORE_RE.finditer(text):
-        value = _to_float(match.group(1))
-        if value is None:
-            continue
-        if 0.0 <= value <= 1.0:
-            return value
-    return None
-
-
-def _extract_code_reference_score_from_index(path: Path) -> tuple[float | None, str]:
-    payload = _load_json_object(path)
-    if payload is None:
-        if not path.exists():
-            return None, "missing_code_index"
-        return None, "invalid_code_index"
-    notebooks = payload.get("notebooks")
-    if not isinstance(notebooks, list) or not notebooks:
-        return None, "empty_code_index"
-    required_id_raw = payload.get("required_reference_kernel_id")
-    required_id = str(required_id_raw).strip() if isinstance(required_id_raw, str) else ""
-    selected: dict[str, object] | None = None
-    if required_id:
-        for row in notebooks:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("kernel_id") or "").strip() == required_id:
-                selected = row
-                break
-    if selected is None:
-        for row in notebooks:
-            if isinstance(row, dict):
-                selected = row
-                break
-    if selected is None:
-        return None, "empty_code_index"
-
-    kernel_id = str(selected.get("kernel_id") or "top_entry").strip() or "top_entry"
-    score = _to_float(selected.get("score"))
-    if score is not None:
-        return score, f"code_index:{kernel_id}"
-
-    title_score = _extract_score_from_text(str(selected.get("title") or ""))
-    if title_score is not None:
-        return title_score, f"code_title:{kernel_id}"
-    return None, "code_index_without_numeric_score"
-
-
-def _extract_code_reference_score_from_markdown(path: Path) -> tuple[float | None, str]:
-    if not path.exists():
-        return None, "missing_code_md"
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None, "missing_code_md"
-    if not text.strip():
-        return None, "empty_code_md"
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if "notebook_score:" not in line.lower():
-            continue
-        score = _extract_score_from_text(line)
-        if score is not None:
-            return score, "code_md:notebook_score"
-
-    lowered = text.lower()
-    required_start = lowered.find("required reference notebook")
-    if required_start >= 0:
-        required_section = text[required_start : required_start + 2200]
-        score = _extract_score_from_text(required_section)
-        if score is not None:
-            return score, "code_md:required_reference_section"
-
-    top_snapshot = text[:3000]
-    score = _extract_score_from_text(top_snapshot)
-    if score is not None:
-        return score, "code_md:top_snapshot"
-    return None, "code_md_without_numeric_score"
-
-
-def _extract_code_reference_score(paths: CompetitionPaths) -> tuple[float | None, str]:
-    score, source = _extract_code_reference_score_from_index(paths.code_notebooks_index_path)
-    if score is not None:
-        return score, source
-    score, source = _extract_code_reference_score_from_markdown(paths.code_md_path)
-    if score is not None:
-        return score, source
-    if source and source != "code_md_without_numeric_score":
-        return None, source
-    return None, "unavailable"
-
-
-def _load_code_reference_notebook(paths: CompetitionPaths, *, id_key: str) -> _CodeReferenceNotebook | None:
-    index_path = paths.code_notebooks_index_path
-    payload = _load_json_object(index_path)
-    if payload is None:
-        return None
-    notebooks = payload.get("notebooks")
-    if not isinstance(notebooks, list) or not notebooks:
-        return None
-    required_id_raw = payload.get(id_key)
-    required_id = str(required_id_raw).strip() if isinstance(required_id_raw, str) else ""
-    selected: dict[str, object] | None = None
-    if required_id:
-        for row in notebooks:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("kernel_id") or "").strip() == required_id:
-                selected = row
-                break
-    if selected is None:
-        for row in notebooks:
-            if isinstance(row, dict):
-                selected = row
-                break
-    if selected is None:
-        return None
-    kernel_id = str(selected.get("kernel_id") or "").strip()
-    if not kernel_id:
-        return None
-    title = str(selected.get("title") or kernel_id).strip() or kernel_id
-    source_file_raw = selected.get("source_file")
-    source_file = str(source_file_raw).strip() if isinstance(source_file_raw, str) and source_file_raw else None
-    local_dir_raw = selected.get("local_dir")
-    local_dir = str(local_dir_raw).strip() if isinstance(local_dir_raw, str) and local_dir_raw else None
-    summary_raw = selected.get("summary")
-    summary = str(summary_raw).strip() if isinstance(summary_raw, str) and summary_raw else ""
-    return _CodeReferenceNotebook(
-        kernel_id=kernel_id,
-        title=title,
-        source_file=source_file,
-        local_dir=local_dir,
-        summary=summary,
-    )
-
-
-def _load_required_reference_notebook(paths: CompetitionPaths) -> _CodeReferenceNotebook | None:
-    return _load_code_reference_notebook(paths, id_key="required_reference_kernel_id")
-
-
-def _load_ensemble_reference_notebook(paths: CompetitionPaths) -> _CodeReferenceNotebook | None:
-    return _load_code_reference_notebook(paths, id_key="ensemble_reference_kernel_id")
-
-
-def _reference_requires_tabicl(reference: _CodeReferenceNotebook) -> bool:
-    text = " ".join([reference.kernel_id, reference.title, reference.summary]).lower()
-    return "tabicl" in text
-
-
-def _code_reference_marker(reference: _CodeReferenceNotebook) -> str:
-    return f"{_CODE_REFERENCE_IMPL_MARKER_PREFIX} {reference.kernel_id}"
-
-
-def _validate_code_reference_implementation(*, kernel_path: Path, reference: _CodeReferenceNotebook) -> list[str]:
-    if not kernel_path.exists():
-        return ["kernel_source_missing"]
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    lowered = text.lower()
-    marker = _code_reference_marker(reference).lower()
-    issues: list[str] = []
-    if marker not in lowered:
-        issues.append("missing_code_reference_marker")
-    if _reference_requires_tabicl(reference) and "tabicl" not in lowered:
-        issues.append("missing_tabicl_implementation_path")
-    return issues
 
 
 def _build_code_reference_repair_prompt(
