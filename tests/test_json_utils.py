@@ -181,6 +181,15 @@ def test_write_jsonl_records_creates_parent_and_overwrites(tmp_path) -> None:
     assert rows == [{"b": 2}, {"a": 1}]
 
 
+def test_write_jsonl_records_accepts_generator(tmp_path) -> None:
+    path = tmp_path / "records.jsonl"
+
+    write_jsonl_records(path, ({"row": idx} for idx in range(3)))
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [{"row": 0}, {"row": 1}, {"row": 2}]
+
+
 def test_append_jsonl_record_creates_parent_and_appends(tmp_path) -> None:
     path = tmp_path / "nested" / "records.jsonl"
 

@@ -109,10 +109,9 @@ def write_jsonl_records(
     sort_keys: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(jsonl_record_text(record, ensure_ascii=ensure_ascii, sort_keys=sort_keys) for record in records),
-        encoding="utf-8",
-    )
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(jsonl_record_text(record, ensure_ascii=ensure_ascii, sort_keys=sort_keys))
 
 
 def append_jsonl_record(
