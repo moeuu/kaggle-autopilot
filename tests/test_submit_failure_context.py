@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.submit_attempts import SubmitAttemptRecorder, load_latest_submit_attempt
 from kagglebot.submit_failure_context import (
+    apply_stale_submit_autofix_decision,
     build_submit_failure_context_payload,
     build_submit_failure_context_payload_from_error,
     build_submit_failure_improvement_context,
@@ -291,6 +292,52 @@ def test_decide_stale_submit_autofix_artifact_returns_context_updates(tmp_path: 
     assert decision is not None
     assert decision.clear_repaired_path is True
     assert decision.failure_context_updates["superseded_by_submission_path"] == str(new_submission)
+
+
+def test_apply_stale_submit_autofix_decision_updates_state_and_context(tmp_path: Path) -> None:
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    new_submission = tmp_path / "iter-2" / "submission.csv"
+    failure_context = {"submission_artifact_path": str(original), "active": True}
+    decision = decide_stale_submit_autofix_artifact(
+        run_state={"submit_autofix_submission_path": str(repaired)},
+        failure_context=failure_context,
+        submission_path=new_submission,
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+    state_updates: list[dict[str, object]] = []
+    saved_contexts: list[dict[str, object]] = []
+
+    updated = apply_stale_submit_autofix_decision(
+        decision=decision,
+        failure_context=failure_context,
+        save_run_state=state_updates.append,
+        save_failure_context=saved_contexts.append,
+    )
+
+    assert state_updates == [{"submit_autofix_submission_path": ""}]
+    assert saved_contexts == [updated]
+    assert updated["active"] is True
+    assert updated["stale_repaired_artifact_cleared_at"] == "2026-06-25T00:00:00+00:00"
+    assert updated["superseded_by_submission_path"] == str(new_submission)
+    assert "superseded_by_submission_path" not in failure_context
+
+
+def test_apply_stale_submit_autofix_decision_noops_without_decision() -> None:
+    failure_context = {"active": True}
+    state_updates: list[dict[str, object]] = []
+    saved_contexts: list[dict[str, object]] = []
+
+    updated = apply_stale_submit_autofix_decision(
+        decision=None,
+        failure_context=failure_context,
+        save_run_state=state_updates.append,
+        save_failure_context=saved_contexts.append,
+    )
+
+    assert updated == failure_context
+    assert state_updates == []
+    assert saved_contexts == []
 
 
 def test_decide_stale_submit_autofix_artifact_keeps_same_failed_artifact(tmp_path: Path) -> None:

@@ -310,6 +310,24 @@ def decide_stale_submit_autofix_artifact(
     )
 
 
+def apply_stale_submit_autofix_decision(
+    *,
+    decision: StaleSubmitAutofixDecision | None,
+    failure_context: dict[str, object],
+    save_run_state: Callable[[dict[str, object]], object],
+    save_failure_context: Callable[[dict[str, object]], object],
+) -> dict[str, object]:
+    if decision is None:
+        return failure_context
+
+    if decision.clear_repaired_path:
+        save_run_state({"submit_autofix_submission_path": ""})
+    updated_context = dict(failure_context)
+    updated_context.update(decision.failure_context_updates)
+    save_failure_context(updated_context)
+    return updated_context
+
+
 def decide_submit_autofix_input_submission(
     *,
     run_state: dict[str, object],

@@ -267,9 +267,10 @@ The next high-value modernization work is:
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
    Planning necessity and resume-skip checks now call `plan_policy.py` directly.
    Iteration resume, submit-retry artifact resume, and best-submission resume paths now call `autopilot_state.py`
-   directly. Submit autofix context formatting, stale repaired-artifact decisions, autofix artifact resolution,
-   submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
-   directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback
+   directly. Submit autofix context formatting, stale repaired-artifact decisions and application, autofix artifact
+   resolution, submit-failure improvement context, and submit-file repair contract checks now call
+   `submit_failure_context.py` directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly.
+   Submit-kernel CPU fallback
    decisions, initial/path-based artifact-mode resolution, and kernel push version-label inference now call
    `submit_notebook.py` directly. Previous-submission history loading now calls `submission_history.py` directly.
    Metric-recheck OOF column

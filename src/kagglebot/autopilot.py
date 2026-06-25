@@ -4978,11 +4978,12 @@ def _attempt_submit(
         submission_path=submission_path,
         now_iso=datetime.now(UTC).isoformat(),
     )
-    if stale_autofix_decision is not None:
-        if stale_autofix_decision.clear_repaired_path:
-            _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
-        stale_autofix_context.update(stale_autofix_decision.failure_context_updates)
-        _submit_failure_context.save_submit_failure_context(run_dir, stale_autofix_context)
+    _submit_failure_context.apply_stale_submit_autofix_decision(
+        decision=stale_autofix_decision,
+        failure_context=stale_autofix_context,
+        save_run_state=lambda updates: _save_run_state(run_dir, updates),
+        save_failure_context=lambda payload: _submit_failure_context.save_submit_failure_context(run_dir, payload),
+    )
     run_state = _load_run_state(run_dir)
     submit_failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
     latest_submit_attempt = _load_latest_submit_attempt(run_dir)
