@@ -3850,10 +3850,10 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
             self.returncode = 0
             self.last_message_path = path
 
-    monkeypatch.setattr("kagglebot.autopilot._maybe_write_column_fill", lambda *args, **kwargs: True)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_write_object_coerce", lambda *args, **kwargs: True)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_write_device_coerce", lambda *args, **kwargs: True)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_write_column_map", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.runtime_fixes.maybe_write_column_fill", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.runtime_fixes.maybe_write_object_coerce", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.runtime_fixes.maybe_write_device_coerce", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.runtime_fixes.maybe_write_column_map", lambda *args, **kwargs: True)
 
     def fake_prepare_submit_file_autofix(*, config: AutopilotConfig, run_id: str, run_dir: Path):  # noqa: ARG001
         fixed_submission = config.paths.iter_dir(run_id, 1) / "output" / "submission-fixed.csv"
@@ -4200,36 +4200,6 @@ def test_run_kernel_fix_includes_subgroup_prompt_context(monkeypatch, tmp_path: 
     assert "Subgroup repair target:" in prompt_text
     assert "model=2 node_type=1" in prompt_text
     assert "(model_id,node_type) granularity" in prompt_text
-
-
-def test_resolve_explicit_official_metric_override_accepts_generic_plan_fallback() -> None:
-    from kagglebot.autopilot import _resolve_explicit_official_metric_override
-
-    official_metric = "Geometric mean of corpus BLEU and chrF++ (micro-averaged sufficient statistics)"
-    payload = {"official_metric": official_metric, "metric": official_metric}
-
-    override = _resolve_explicit_official_metric_override(
-        payload,
-        target_metric="accuracy",
-        evaluation_metric=official_metric,
-    )
-
-    assert override == official_metric
-
-
-def test_resolve_explicit_official_metric_override_rejects_non_generic_target() -> None:
-    from kagglebot.autopilot import _resolve_explicit_official_metric_override
-
-    official_metric = "Geometric mean of corpus BLEU and chrF++ (micro-averaged sufficient statistics)"
-    payload = {"official_metric": official_metric, "metric": official_metric}
-
-    override = _resolve_explicit_official_metric_override(
-        payload,
-        target_metric="rmse_on_log_target",
-        evaluation_metric=official_metric,
-    )
-
-    assert override is None
 
 
 def test_build_evaluation_contract_prefers_competition_metric_override_for_deep_past(tmp_path: Path) -> None:
@@ -8534,54 +8504,6 @@ def test_write_iteration_state_marker_derives_submit_phase_finished(tmp_path: Pa
     assert payload["submit_phase_finished"] is False
 
 
-def test_autofix_writes_column_fill(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _maybe_write_column_fill
-
-    config = _make_config(tmp_path)
-    error_text = "ValueError: test.csv missing columns: ['col_a', 'col_b']"
-    assert _maybe_write_column_fill(config, error_text) is True
-    fill_path = config.paths.context_dir / "column_fill.json"
-    assert fill_path.exists()
-    payload = json.loads(fill_path.read_text(encoding="utf-8"))
-    assert payload["files"]["test.csv"] == ["col_a", "col_b"]
-
-
-def test_autofix_writes_column_fill_from_keyerror_not_in_index(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _maybe_write_column_fill
-
-    config = _make_config(tmp_path)
-    error_text = "KeyError: \"['oare_id'] not in index\""
-    assert _maybe_write_column_fill(config, error_text) is True
-    fill_path = config.paths.context_dir / "column_fill.json"
-    payload = json.loads(fill_path.read_text(encoding="utf-8"))
-    assert payload["missing_columns"] == ["oare_id"]
-
-
-def test_autofix_column_fill_merges_existing_payload(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _maybe_write_column_fill
-
-    config = _make_config(tmp_path)
-    fill_path = config.paths.context_dir / "column_fill.json"
-    fill_path.parent.mkdir(parents=True, exist_ok=True)
-    fill_path.write_text(
-        json.dumps(
-            {
-                "source": "autofix",
-                "created_at": "2026-02-23T00:00:00+00:00",
-                "missing_columns": ["id"],
-                "files": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    error_text = "KeyError: \"['oare_id'] not in index\""
-    assert _maybe_write_column_fill(config, error_text) is True
-    payload = json.loads(fill_path.read_text(encoding="utf-8"))
-    assert payload["missing_columns"] == ["id", "oare_id"]
-    assert payload["source"] == "autofix"
-    assert "updated_at" in payload
-
-
 def test_kernel_fix_uses_lightweight_column_fill_for_keyerror(monkeypatch, tmp_path: Path) -> None:
     from kagglebot.autopilot import _run_kernel_fix
 
@@ -8710,29 +8632,3 @@ def test_autofix_allows_src_edits(tmp_path: Path) -> None:
     assert config.paths.repo_root in write_policy.allowed_prefixes
     assert config.paths.data_dir in write_policy.denied_prefixes
     assert config.paths.kernels_dir in write_policy.denied_prefixes
-
-
-def test_autofix_writes_object_coerce(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _maybe_write_object_coerce
-
-    config = _make_config(tmp_path)
-    error_text = "TypeError: can't convert np.ndarray of type numpy.object_"
-    assert _maybe_write_object_coerce(config, error_text) is True
-    coerce_path = config.paths.context_dir / "object_coerce.json"
-    assert coerce_path.exists()
-    payload = json.loads(coerce_path.read_text(encoding="utf-8"))
-    assert payload["enabled"] is True
-
-
-def test_autofix_writes_device_coerce(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _maybe_write_device_coerce
-
-    config = _make_config(tmp_path)
-    error_text = (
-        "RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!"
-    )
-    assert _maybe_write_device_coerce(config, error_text) is True
-    coerce_path = config.paths.context_dir / "device_coerce.json"
-    assert coerce_path.exists()
-    payload = json.loads(coerce_path.read_text(encoding="utf-8"))
-    assert payload["enabled"] is True

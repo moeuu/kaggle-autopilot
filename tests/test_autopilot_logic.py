@@ -9,8 +9,6 @@ from pathlib import Path
 import pytest
 
 from kagglebot.autopilot import (
-    _effective_best_score_for_progress,
-    _infer_column_mapping,
     _resume_best_online_submission_score,
     _should_force_major_overhaul_by_rank,
     _TrainingLiveStdout,
@@ -18,6 +16,8 @@ from kagglebot.autopilot import (
     _write_plan,
 )
 from kagglebot.paths import CompetitionPaths
+from kagglebot.runtime_fixes import infer_column_mapping
+from kagglebot.score_progress import effective_best_score_for_progress
 from kagglebot.submission_policy import is_top1_tier, meets_target
 from kagglebot.types import PlanConfig
 
@@ -267,7 +267,7 @@ class TestRankDrivenMajorOverhaul:
 
 class TestBestScoreOutlierGuard:
     def test_clips_implausible_previous_best_for_maximize_metric(self) -> None:
-        effective_best, guard = _effective_best_score_for_progress(
+        effective_best, guard = effective_best_score_for_progress(
             prev_best=0.999511,
             current_score=0.799651,
             top1_score=0.78,
@@ -279,7 +279,7 @@ class TestBestScoreOutlierGuard:
         assert guard["reason"] == "clip_prev_best_above_top1_band"
 
     def test_does_not_clip_when_current_score_is_still_in_outlier_band(self) -> None:
-        effective_best, guard = _effective_best_score_for_progress(
+        effective_best, guard = effective_best_score_for_progress(
             prev_best=0.999511,
             current_score=0.98,
             top1_score=0.78,
@@ -292,7 +292,7 @@ class TestBestScoreOutlierGuard:
 def test_infer_column_mapping_handles_non_string_group_tokens() -> None:
     columns_by_file = {"train.csv": ["session_id", "target"]}
     groups = [["session_id", None, 123], ["target", object()]]
-    mapping = _infer_column_mapping(columns_by_file, groups)
+    mapping = infer_column_mapping(columns_by_file, groups)
     assert mapping["session_id"] == "session_id"
     assert mapping["target"] == "target"
 

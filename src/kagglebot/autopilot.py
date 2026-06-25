@@ -244,43 +244,6 @@ def _to_int(value: object) -> int | None:
     return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
 
 
-MAJOR_TOP1_GAP = _score_progress.MAJOR_TOP1_GAP
-MODERATE_TOP1_GAP = _score_progress.MODERATE_TOP1_GAP
-_BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = _score_progress.BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN
-_BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = _score_progress.BEST_SCORE_OUTLIER_TOP1_REL_MARGIN
-_REGRESSION_GUARD_ABS_DROP_PROB = _score_progress.REGRESSION_GUARD_ABS_DROP_PROB
-_REGRESSION_GUARD_ABS_DROP_DEFAULT = _score_progress.REGRESSION_GUARD_ABS_DROP_DEFAULT
-_CONSERVATIVE_COLLAPSE_MAX_FEATURES = _score_progress.CONSERVATIVE_COLLAPSE_MAX_FEATURES
-_resolve_explicit_official_metric_override = _score_progress.resolve_explicit_official_metric_override
-_is_confirmed_first_place = _score_progress.is_confirmed_first_place
-_classify_improvement_mode = _score_progress.classify_improvement_mode
-_score_delta_vs_reference = _score_progress.score_delta_vs_reference
-_normalize_code_reference_score_for_comparison = _score_progress.normalize_code_reference_score_for_comparison
-_score_drop_vs_best = _score_progress.score_drop_vs_best
-_regression_drop_threshold = _score_progress.regression_drop_threshold
-_is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
-_is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
-_effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
-_should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
-_maybe_write_column_fill = _runtime_fixes.maybe_write_column_fill
-_maybe_write_object_coerce = _runtime_fixes.maybe_write_object_coerce
-_maybe_write_device_coerce = _runtime_fixes.maybe_write_device_coerce
-_parse_missing_columns = _runtime_fixes.parse_missing_columns
-_maybe_write_column_map = _runtime_fixes.maybe_write_column_map
-_scan_tabular_headers = _runtime_fixes.scan_tabular_headers
-_read_header = _runtime_fixes.read_header
-_extract_candidate_groups = _runtime_fixes.extract_candidate_groups
-_infer_column_mapping = _runtime_fixes.infer_column_mapping
-_normalize_column = _runtime_fixes.normalize_column
-_normalize_group_tokens = _runtime_fixes.normalize_group_tokens
-_keywords_from_group = _runtime_fixes.keywords_from_group
-_keyword_score = _runtime_fixes.keyword_score
-_extract_missing_module = _runtime_fixes.extract_missing_module
-_load_blocked_modules = _runtime_fixes.load_blocked_modules
-_save_blocked_modules = _runtime_fixes.save_blocked_modules
-_record_blocked_module = _runtime_fixes.record_blocked_module
-
-
 def _classify_submit_failure_repair(
     *,
     reason: object,
@@ -1318,7 +1281,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     metric_direction,
                 )
                 confidence_text = "high" if confident else "fallback"
-                official_metric_override = _resolve_explicit_official_metric_override(
+                official_metric_override = _score_progress.resolve_explicit_official_metric_override(
                     kernel_metrics_payload,
                     target_metric=target_metric,
                     evaluation_metric=evaluation.metric,
@@ -1550,7 +1513,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             decision_score = float(evaluation.value)
             decision_source = str(evaluation.score_source or "offline")
             top1_score_value = float(top1_score) if isinstance(top1_score, (int, float)) else None
-            effective_best_score, best_score_guard = _effective_best_score_for_progress(
+            effective_best_score, best_score_guard = _score_progress.effective_best_score_for_progress(
                 prev_best=best_score,
                 current_score=decision_score,
                 top1_score=top1_score_value,
@@ -1580,31 +1543,35 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
             code_reference_score, code_reference_source = _code_reference.extract_code_reference_score(config.paths)
-            code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
+            code_reference_comparison_score = _score_progress.normalize_code_reference_score_for_comparison(
                 current=decision_score,
                 reference=code_reference_score,
                 metric=evaluation.metric,
             )
             code_reference_delta_vs_current = (
-                _score_delta_vs_reference(decision_score, code_reference_comparison_score, metric_direction)
+                _score_progress.score_delta_vs_reference(
+                    decision_score,
+                    code_reference_comparison_score,
+                    metric_direction,
+                )
                 if code_reference_comparison_score is not None
                 else None
             )
             first_iteration_below_code_reference = bool(
                 iteration == 1 and code_reference_delta_vs_current is not None and code_reference_delta_vs_current < 0.0
             )
-            score_drop_vs_best = _score_drop_vs_best(
+            score_drop_vs_best = _score_progress.score_drop_vs_best(
                 best_score=best_score,
                 current_score=decision_score,
                 direction=metric_direction,
             )
-            severe_regression_detected = _is_severe_regression_vs_best(
+            severe_regression_detected = _score_progress.is_severe_regression_vs_best(
                 metric=evaluation.metric,
                 direction=metric_direction,
                 best_score=best_score,
                 current_score=decision_score,
             )
-            conservative_feature_collapse = _is_conservative_feature_collapse(kernel_metrics_payload)
+            conservative_feature_collapse = _score_progress.is_conservative_feature_collapse(kernel_metrics_payload)
             conservative_regression_detected = bool(severe_regression_detected and conservative_feature_collapse)
 
             quality_guard = _build_kernel_quality_guard(
@@ -1654,7 +1621,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             quality_force_reason: str | None = None
             if quality_forced_major_overhaul:
                 if code_reference_comparison_score is not None:
-                    code_delta = _score_delta_vs_reference(
+                    code_delta = _score_progress.score_delta_vs_reference(
                         decision_score,
                         code_reference_comparison_score,
                         metric_direction,
@@ -1907,7 +1874,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             high_potential_improved = False
             if accuracy_potential.get("eligible"):
-                if _should_update_best_accuracy_candidate(
+                if _score_progress.should_update_best_accuracy_candidate(
                     current_potential=accuracy_potential,
                     best_potential=best_high_potential_meta,
                     current_score=decision_score,
@@ -2395,7 +2362,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
                 code_reference_force_reason = (
                     "Detected severe regression with conservative feature collapse "
-                    f"(drop_vs_best={drop_text}, max_features={_CONSERVATIVE_COLLAPSE_MAX_FEATURES}). "
+                    f"(drop_vs_best={drop_text}, max_features={_score_progress.CONSERVATIVE_COLLAPSE_MAX_FEATURES}). "
                     "Next iteration must recover from code reference baseline instead of keeping the collapsed path."
                 )
             force_major_overhaul_next = (
@@ -3028,7 +2995,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 
-            if _is_confirmed_first_place(submission_rank, submission_rank_source):
+            if _score_progress.is_confirmed_first_place(submission_rank, submission_rank_source):
                 run_payload["status"] = "submitted" if submitted else "completed"
                 run_payload["stop_reason"] = "submission_rank_1"
                 print("[green]stop[/green]: submission rank reached #1")
@@ -4783,7 +4750,7 @@ def _run_improvement(
     )
     top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
     effective_current_score = evaluation.value if current_score is None else current_score
-    improvement_mode, top1_gap = _classify_improvement_mode(
+    improvement_mode, top1_gap = _score_progress.classify_improvement_mode(
         effective_current_score,
         top1_score,
         evaluation.direction,
@@ -4803,13 +4770,17 @@ def _run_improvement(
         improvement_mode = forced_improvement_mode
     kernel_main_path = config.paths.kernel_source_dir / "kernel.py"
     code_reference_score, code_reference_source = _code_reference.extract_code_reference_score(config.paths)
-    code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
+    code_reference_comparison_score = _score_progress.normalize_code_reference_score_for_comparison(
         current=effective_current_score,
         reference=code_reference_score,
         metric=evaluation.metric,
     )
     code_reference_delta = (
-        _score_delta_vs_reference(effective_current_score, code_reference_comparison_score, evaluation.direction)
+        _score_progress.score_delta_vs_reference(
+            effective_current_score,
+            code_reference_comparison_score,
+            evaluation.direction,
+        )
         if code_reference_comparison_score is not None
         else None
     )
@@ -5497,12 +5468,12 @@ def _run_kernel_fix(
 
     prompt_template = render_prompt_identity(config.paths.codex_kernel_fix_template.read_text(encoding="utf-8"))
     prompt_path = agent_dir / "kernel_fix_prompt.md"
-    missing_module = _extract_missing_module(error_message)
-    blocked_modules = _load_blocked_modules(config.paths.context_dir)
+    missing_module = _runtime_fixes.extract_missing_module(error_message)
+    blocked_modules = _runtime_fixes.load_blocked_modules(config.paths.context_dir)
     if missing_module:
         # Keep dependency recovery paths open: do not auto-block newly missing modules.
         blocked_modules = [name for name in blocked_modules if name != missing_module]
-        _save_blocked_modules(config.paths.context_dir, blocked_modules)
+        _runtime_fixes.save_blocked_modules(config.paths.context_dir, blocked_modules)
     blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
     prompt_text = prompt_template.format(
         **prompt_identity_format_args(),
@@ -6495,22 +6466,22 @@ def _maybe_apply_lightweight_runtime_fix(
         (
             "column_fill.json",
             "missing column error",
-            _maybe_write_column_fill,
+            _runtime_fixes.maybe_write_column_fill,
         ),
         (
             "object_coerce.json",
             "numpy.object_ conversion error",
-            _maybe_write_object_coerce,
+            _runtime_fixes.maybe_write_object_coerce,
         ),
         (
             "device_coerce.json",
             "torch device mismatch error",
-            _maybe_write_device_coerce,
+            _runtime_fixes.maybe_write_device_coerce,
         ),
         (
             "column_map.json",
             "column alias mismatch",
-            _maybe_write_column_map,
+            _runtime_fixes.maybe_write_column_map,
         ),
     )
     for artifact_name, reason, action in actions:
