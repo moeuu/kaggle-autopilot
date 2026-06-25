@@ -334,7 +334,7 @@ Recommended extraction order:
    Iteration metrics payload/guard-section assembly, evaluation-result serialization, evaluation data-cache/fingerprint
    helpers, and iteration submit eligibility, plus iteration record kwargs/compat persistence and run evaluation-report
    resume/persistence, are now in `iteration_metrics.py`.
-   Iteration repair-signal extraction and next-iteration policy/knowledge payload assembly are now in
+   Iteration repair-signal extraction and next-iteration policy/knowledge payload assembly/dispatch are now in
    `iteration_signals.py`.
    Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.
    Loop score-update/readiness-noise/streak decisions and terminal/stagnation stop policy are now in `loop_control.py`.

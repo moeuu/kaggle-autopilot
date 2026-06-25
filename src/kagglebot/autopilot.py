@@ -2508,38 +2508,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             metrics_payload["next_iteration_policy"] = repair_signal_policy.next_iteration_policy
             _write_json_object(metrics_path, metrics_payload)
 
-            for issue in loop_signal_errors:
-                try:
-                    record_error_fix_insight(
-                        knowledge_paths=config.knowledge_paths,
-                        slug=config.slug,
-                        run_id=run_id,
-                        iteration=int(issue.get("iteration") or iteration),
-                        problem_types=problem_types,
-                        error_message=str(issue.get("error_message") or ""),
-                        fix_summary=str(issue.get("fix_summary") or ""),
-                        resolved=bool(issue.get("resolved")),
-                        outcome_bucket=str(issue.get("outcome_bucket") or "unknown"),
-                        submission_score=online_score,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-            for issue in loop_signal_problems:
-                try:
-                    record_problem_type_insight(
-                        knowledge_paths=config.knowledge_paths,
-                        slug=config.slug,
-                        run_id=run_id,
-                        iteration=int(issue.get("iteration") or iteration),
-                        problem_types=problem_types,
-                        why_poor=str(issue.get("why_poor") or ""),
-                        how_improved=str(issue.get("how_improved") or ""),
-                        delta_offline=None,
-                        outcome_bucket=str(issue.get("outcome_bucket") or "unknown"),
-                        submission_score=online_score,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+            _iteration_signals.record_iteration_repair_signal_knowledge(
+                knowledge_paths=config.knowledge_paths,
+                slug=config.slug,
+                run_id=run_id,
+                iteration=iteration,
+                problem_types=problem_types,
+                loop_signal_errors=loop_signal_errors,
+                loop_signal_problems=loop_signal_problems,
+                submission_score=online_score,
+                record_error_fix_insight=record_error_fix_insight,
+                record_problem_type_insight=record_problem_type_insight,
+            )
 
             if writeup_mode:
                 writeup_bundle_meta = build_writeup_bundle(

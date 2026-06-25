@@ -8,6 +8,7 @@ from kagglebot.iteration_signals import (
     extract_original_data_unused_signal,
     extract_pseudo_label_failure_signal,
     extract_same_family_plateau_signal,
+    record_iteration_repair_signal_knowledge,
     requires_tabular_multi_family_policy,
 )
 
@@ -142,6 +143,101 @@ def test_apply_iteration_repair_signal_policy_prefers_validation_redesign_for_on
         "forced_improvement_reason": "online history regression",
         "extra_policy_notes": ["online mismatch", "online history regression"],
     }
+
+
+def test_record_iteration_repair_signal_knowledge_dispatches_errors_and_problems() -> None:
+    error_calls: list[dict[str, object]] = []
+    problem_calls: list[dict[str, object]] = []
+
+    def record_error(**kwargs: object) -> None:
+        error_calls.append(kwargs)
+
+    def record_problem(**kwargs: object) -> None:
+        problem_calls.append(kwargs)
+
+    counts = record_iteration_repair_signal_knowledge(
+        knowledge_paths="knowledge",
+        slug="demo",
+        run_id="run-1",
+        iteration=3,
+        problem_types=["tabular"],
+        loop_signal_errors=[
+            {
+                "iteration": "",
+                "error_message": "pseudo failed",
+                "fix_summary": "disable pseudo",
+                "resolved": False,
+                "outcome_bucket": "unknown",
+            }
+        ],
+        loop_signal_problems=[
+            {
+                "iteration": 2,
+                "why_poor": "missing blend",
+                "how_improved": "add blend",
+                "outcome_bucket": "low",
+            }
+        ],
+        submission_score=0.7,
+        record_error_fix_insight=record_error,
+        record_problem_type_insight=record_problem,
+    )
+
+    assert counts == (1, 1)
+    assert error_calls == [
+        {
+            "knowledge_paths": "knowledge",
+            "slug": "demo",
+            "run_id": "run-1",
+            "iteration": 3,
+            "problem_types": ["tabular"],
+            "error_message": "pseudo failed",
+            "fix_summary": "disable pseudo",
+            "resolved": False,
+            "outcome_bucket": "unknown",
+            "submission_score": 0.7,
+        }
+    ]
+    assert problem_calls == [
+        {
+            "knowledge_paths": "knowledge",
+            "slug": "demo",
+            "run_id": "run-1",
+            "iteration": 2,
+            "problem_types": ["tabular"],
+            "why_poor": "missing blend",
+            "how_improved": "add blend",
+            "delta_offline": None,
+            "outcome_bucket": "low",
+            "submission_score": 0.7,
+        }
+    ]
+
+
+def test_record_iteration_repair_signal_knowledge_skips_record_failures() -> None:
+    problem_calls: list[dict[str, object]] = []
+
+    def record_error(**kwargs: object) -> None:
+        raise RuntimeError("db locked")
+
+    def record_problem(**kwargs: object) -> None:
+        problem_calls.append(kwargs)
+
+    counts = record_iteration_repair_signal_knowledge(
+        knowledge_paths="knowledge",
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        problem_types=[],
+        loop_signal_errors=[{"error_message": "bad"}],
+        loop_signal_problems=[{"why_poor": "poor"}],
+        submission_score=None,
+        record_error_fix_insight=record_error,
+        record_problem_type_insight=record_problem,
+    )
+
+    assert counts == (0, 1)
+    assert len(problem_calls) == 1
 
 
 def test_detect_online_mismatch_signal_requires_offline_only_improvement() -> None:

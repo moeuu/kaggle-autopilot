@@ -484,6 +484,58 @@ def apply_iteration_repair_signal_policy(
     )
 
 
+def record_iteration_repair_signal_knowledge(
+    *,
+    knowledge_paths: object,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    problem_types: list[str],
+    loop_signal_errors: list[dict[str, object]],
+    loop_signal_problems: list[dict[str, object]],
+    submission_score: float | None,
+    record_error_fix_insight: Callable[..., object],
+    record_problem_type_insight: Callable[..., object],
+) -> tuple[int, int]:
+    recorded_errors = 0
+    recorded_problems = 0
+    for issue in loop_signal_errors:
+        try:
+            record_error_fix_insight(
+                knowledge_paths=knowledge_paths,
+                slug=slug,
+                run_id=run_id,
+                iteration=int(issue.get("iteration") or iteration),
+                problem_types=problem_types,
+                error_message=str(issue.get("error_message") or ""),
+                fix_summary=str(issue.get("fix_summary") or ""),
+                resolved=bool(issue.get("resolved")),
+                outcome_bucket=str(issue.get("outcome_bucket") or "unknown"),
+                submission_score=submission_score,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        recorded_errors += 1
+    for issue in loop_signal_problems:
+        try:
+            record_problem_type_insight(
+                knowledge_paths=knowledge_paths,
+                slug=slug,
+                run_id=run_id,
+                iteration=int(issue.get("iteration") or iteration),
+                problem_types=problem_types,
+                why_poor=str(issue.get("why_poor") or ""),
+                how_improved=str(issue.get("how_improved") or ""),
+                delta_offline=None,
+                outcome_bucket=str(issue.get("outcome_bucket") or "unknown"),
+                submission_score=submission_score,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        recorded_problems += 1
+    return recorded_errors, recorded_problems
+
+
 def requires_tabular_multi_family_policy(dataset_profile: dict[str, object] | None) -> bool:
     profile = dataset_profile or {}
     modality = str(profile.get("modality") or "").strip().lower()
