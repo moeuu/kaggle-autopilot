@@ -321,6 +321,7 @@ _find_selected_pipeline = _kernel_quality.find_selected_pipeline
 _detect_candidate_selection_mismatch = _kernel_quality.detect_candidate_selection_mismatch
 _prediction_count_mean = _kernel_quality.prediction_count_mean
 _detect_prediction_distribution_collapse = _kernel_quality.detect_prediction_distribution_collapse
+_build_validation_metric_alignment = _kernel_quality.build_validation_metric_alignment
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
 _capture_best_kernel_snapshot = _kernel_snapshot.capture_best_kernel_snapshot
@@ -469,9 +470,6 @@ _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
 _KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
 _QUALITY_GUARD_BASELINE_REL_MARGIN = _kernel_quality.QUALITY_GUARD_BASELINE_REL_MARGIN
 _QUALITY_GUARD_BASELINE_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_BASELINE_ABS_MARGIN
-_QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE = _kernel_quality.QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE
-_QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE = _kernel_quality.QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE
-_QUALITY_GUARD_MISMATCH_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_MISMATCH_ABS_MARGIN
 _QUALITY_GUARD_SUBGROUP_RATIO = _kernel_quality.QUALITY_GUARD_SUBGROUP_RATIO
 _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_SUBGROUP_ABS_MARGIN
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CODE_REF_REL_MARGIN
@@ -4762,26 +4760,16 @@ def _build_kernel_quality_guard(
                 block_submit = True
 
     validation_scores = _extract_validation_scores_from_log_text(log_text, evaluation.metric)
-    best_validation: float | None = None
-    severe_validation_mismatch = False
-    if validation_scores:
-        best_validation = min(validation_scores) if direction == "minimize" else max(validation_scores)
-        mismatch_rel = (
-            _QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE
-            if direction == "minimize"
-            else _QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE
-        )
-        severe_validation_mismatch = _is_significantly_worse(
-            current=float(evaluation.value),
-            reference=float(best_validation),
-            direction=direction,
-            rel_margin=mismatch_rel,
-            abs_margin=_QUALITY_GUARD_MISMATCH_ABS_MARGIN,
-        )
-        if severe_validation_mismatch:
-            reasons.append("validation_metric_mismatch_vs_final_metric")
-            if not is_final_iteration and not force_submit:
-                block_submit = True
+    metric_alignment = _build_validation_metric_alignment(
+        current_value=float(evaluation.value),
+        validation_scores=validation_scores,
+        direction=direction,
+    )
+    severe_validation_mismatch = bool(metric_alignment.get("severe_mismatch"))
+    if severe_validation_mismatch:
+        reasons.append("validation_metric_mismatch_vs_final_metric")
+        if not is_final_iteration and not force_submit:
+            block_submit = True
 
     step_bucket_signal = _kernel_quality.detect_step_bucket_collapse_signal(payload)
     if bool(step_bucket_signal.get("collapse_detected")):
@@ -4851,11 +4839,7 @@ def _build_kernel_quality_guard(
             "candidate_count": len(baseline_candidates),
             "selected_worse_than_baseline": baseline_worse_than_reference,
         },
-        "metric_alignment": {
-            "best_validation_score": best_validation,
-            "validation_score_count": len(validation_scores),
-            "severe_mismatch": severe_validation_mismatch,
-        },
+        "metric_alignment": metric_alignment,
         "step_bucket": {
             "count": step_bucket_signal.get("count"),
             "collapse_detected": step_bucket_signal.get("collapse_detected"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kagglebot.kernel_quality import (
     build_accuracy_potential,
+    build_validation_metric_alignment,
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
     detect_prediction_distribution_collapse,
@@ -83,6 +84,48 @@ def test_detect_step_bucket_collapse_signal_reports_count_and_collapse() -> None
     assert collapsed["count"] == 4
     assert collapsed["collapse_detected"] is True
     assert collapsed["worst_score"] == 1.6
+
+
+def test_build_validation_metric_alignment_flags_minimize_mismatch() -> None:
+    signal = build_validation_metric_alignment(
+        current_value=1.3,
+        validation_scores=[0.4, 0.42, 0.45],
+        direction="minimize",
+    )
+
+    assert signal == {
+        "best_validation_score": 0.4,
+        "validation_score_count": 3,
+        "severe_mismatch": True,
+    }
+
+
+def test_build_validation_metric_alignment_flags_maximize_mismatch() -> None:
+    signal = build_validation_metric_alignment(
+        current_value=0.62,
+        validation_scores=[0.9, 0.91],
+        direction="maximize",
+    )
+
+    assert signal == {
+        "best_validation_score": 0.91,
+        "validation_score_count": 2,
+        "severe_mismatch": True,
+    }
+
+
+def test_build_validation_metric_alignment_handles_missing_scores() -> None:
+    signal = build_validation_metric_alignment(
+        current_value=0.62,
+        validation_scores=[],
+        direction="maximize",
+    )
+
+    assert signal == {
+        "best_validation_score": None,
+        "validation_score_count": 0,
+        "severe_mismatch": False,
+    }
 
 
 def test_detect_external_test_label_transfer_signal_requires_specific_leak_pattern() -> None:

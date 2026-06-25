@@ -206,6 +206,35 @@ def detect_step_bucket_collapse_signal(
     }
 
 
+def build_validation_metric_alignment(
+    *,
+    current_value: float,
+    validation_scores: list[float],
+    direction: str,
+) -> dict[str, object]:
+    best_validation: float | None = None
+    severe_mismatch = False
+    if validation_scores:
+        best_validation = min(validation_scores) if direction == "minimize" else max(validation_scores)
+        mismatch_rel = (
+            QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE
+            if direction == "minimize"
+            else QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE
+        )
+        severe_mismatch = is_significantly_worse(
+            current=float(current_value),
+            reference=float(best_validation),
+            direction=direction,
+            rel_margin=mismatch_rel,
+            abs_margin=QUALITY_GUARD_MISMATCH_ABS_MARGIN,
+        )
+    return {
+        "best_validation_score": best_validation,
+        "validation_score_count": len(validation_scores),
+        "severe_mismatch": severe_mismatch,
+    }
+
+
 def iter_payload_mappings(payload: object) -> Iterator[dict[object, object]]:
     if isinstance(payload, dict):
         yield payload
