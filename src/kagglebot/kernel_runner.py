@@ -46,8 +46,11 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
+from kagglebot.kernel_outputs import copy_artifact_if_needed as _copy_artifact_if_needed
 from kagglebot.kernel_outputs import find_output_file as _find_output_file
 from kagglebot.kernel_outputs import find_submission_file
+from kagglebot.kernel_outputs import resolve_local_kernel_artifact_file as _resolve_local_kernel_artifact_file
+from kagglebot.kernel_outputs import resolve_local_kernel_artifacts as _resolve_local_kernel_artifacts
 from kagglebot.kernel_progress import (
     extract_catboost_fallback_reason_from_line,
     extract_pipeline_done_from_line,
@@ -2795,99 +2798,6 @@ def _format_local_gpu_activity_suffix(*, accelerator: str) -> str:
         return ""
     util, mem_used, mem_total = parts[0], parts[1], parts[2]
     return f" (gpu={util}%, mem={mem_used}/{mem_total}MiB)"
-
-
-def _resolve_local_kernel_artifacts(
-    *,
-    kernel_dir: Path,
-    output_dir: Path,
-    started_at: float,
-) -> tuple[Path | None, Path | None]:
-    candidates: list[Path] = [
-        output_dir,
-        # Legacy generated kernels may write to the slug-level kernel_output
-        # directory instead of the per-run output dir.
-        kernel_dir.parents[2] / "kernel_output",
-        # Many kernels treat the parent of the staged copy (run_dir) as the
-        # "challenge dir" and write artifacts under run_dir/outputs.
-        kernel_dir.parent / "outputs",
-        kernel_dir.parent,
-        kernel_dir / "outputs",
-        Path("/kaggle/working"),
-        kernel_dir,
-    ]
-    submission_candidates: list[Path] = []
-    metrics_candidates: list[Path] = []
-    for root in candidates:
-        if not root.exists():
-            continue
-        sub = find_submission_file(root)
-        if sub is not None and sub.exists():
-            submission_candidates.append(sub)
-        metric_path = _find_output_file(root, "metrics.json")
-        if metric_path is not None and metric_path.exists():
-            metrics_candidates.append(metric_path)
-
-    min_mtime = started_at - 1.0
-    submission_path = _pick_latest_artifact(submission_candidates, min_mtime=min_mtime)
-    metrics_path = _pick_latest_artifact(metrics_candidates, min_mtime=min_mtime)
-    return submission_path, metrics_path
-
-
-def _resolve_local_kernel_artifact_file(
-    *,
-    kernel_dir: Path,
-    output_dir: Path,
-    started_at: float,
-    filename: str,
-) -> Path | None:
-    candidates: list[Path] = [
-        output_dir,
-        # Legacy generated kernels may write to the slug-level kernel_output
-        # directory instead of the per-run output dir.
-        kernel_dir.parents[2] / "kernel_output",
-        # Many kernels treat the parent of the staged copy (run_dir) as the
-        # "challenge dir" and write artifacts under run_dir/outputs.
-        kernel_dir.parent / "outputs",
-        kernel_dir.parent,
-        kernel_dir / "outputs",
-        Path("/kaggle/working"),
-        kernel_dir,
-    ]
-    file_candidates: list[Path] = []
-    for root in candidates:
-        if not root.exists():
-            continue
-        match = _find_output_file(root, filename)
-        if match is not None and match.exists():
-            file_candidates.append(match)
-    min_mtime = started_at - 1.0
-    return _pick_latest_artifact(file_candidates, min_mtime=min_mtime)
-
-
-def _pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
-    fresh: list[tuple[float, Path]] = []
-    for path in paths:
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        if mtime < min_mtime:
-            continue
-        fresh.append((mtime, path))
-    if not fresh:
-        return None
-    return max(fresh, key=lambda item: item[0])[1]
-
-
-def _copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
-    source_resolved = source.resolve()
-    destination_resolved = destination.resolve()
-    if source_resolved == destination_resolved:
-        return destination
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-    return destination
 
 
 def _resolve_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:

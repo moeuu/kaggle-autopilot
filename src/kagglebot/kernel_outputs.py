@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
@@ -72,6 +73,90 @@ def find_intermediate_submission_file(output_dir: Path) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda item: (item[1].stat().st_mtime, item[0], str(item[1])))[1]
+
+
+def resolve_local_kernel_artifacts(
+    *,
+    kernel_dir: Path,
+    output_dir: Path,
+    started_at: float,
+) -> tuple[Path | None, Path | None]:
+    candidates = local_kernel_artifact_roots(kernel_dir=kernel_dir, output_dir=output_dir)
+    submission_candidates: list[Path] = []
+    metrics_candidates: list[Path] = []
+    for root in candidates:
+        if not root.exists():
+            continue
+        sub = find_submission_file(root)
+        if sub is not None and sub.exists():
+            submission_candidates.append(sub)
+        metric_path = find_output_file(root, "metrics.json")
+        if metric_path is not None and metric_path.exists():
+            metrics_candidates.append(metric_path)
+
+    min_mtime = started_at - 1.0
+    submission_path = pick_latest_artifact(submission_candidates, min_mtime=min_mtime)
+    metrics_path = pick_latest_artifact(metrics_candidates, min_mtime=min_mtime)
+    return submission_path, metrics_path
+
+
+def resolve_local_kernel_artifact_file(
+    *,
+    kernel_dir: Path,
+    output_dir: Path,
+    started_at: float,
+    filename: str,
+) -> Path | None:
+    file_candidates: list[Path] = []
+    for root in local_kernel_artifact_roots(kernel_dir=kernel_dir, output_dir=output_dir):
+        if not root.exists():
+            continue
+        match = find_output_file(root, filename)
+        if match is not None and match.exists():
+            file_candidates.append(match)
+    min_mtime = started_at - 1.0
+    return pick_latest_artifact(file_candidates, min_mtime=min_mtime)
+
+
+def local_kernel_artifact_roots(*, kernel_dir: Path, output_dir: Path) -> list[Path]:
+    return [
+        output_dir,
+        # Legacy generated kernels may write to the slug-level kernel_output
+        # directory instead of the per-run output dir.
+        kernel_dir.parents[2] / "kernel_output",
+        # Many kernels treat the parent of the staged copy (run_dir) as the
+        # "challenge dir" and write artifacts under run_dir/outputs.
+        kernel_dir.parent / "outputs",
+        kernel_dir.parent,
+        kernel_dir / "outputs",
+        Path("/kaggle/working"),
+        kernel_dir,
+    ]
+
+
+def pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
+    fresh: list[tuple[float, Path]] = []
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < min_mtime:
+            continue
+        fresh.append((mtime, path))
+    if not fresh:
+        return None
+    return max(fresh, key=lambda item: item[0])[1]
+
+
+def copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
+    source_resolved = source.resolve()
+    destination_resolved = destination.resolve()
+    if source_resolved == destination_resolved:
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
 
 
 def _find_submission_by_extension(output_dir: Path) -> Path | None:
