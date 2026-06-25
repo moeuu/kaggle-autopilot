@@ -282,6 +282,7 @@ _extract_fold_scores_for_report = _iteration_metrics.extract_fold_scores_for_rep
 _ensure_eval_data_cache = _iteration_metrics.ensure_eval_data_cache
 _build_split_index_fingerprints = _iteration_metrics.build_split_index_fingerprints
 _iter_split_indices = _iteration_metrics.iter_split_indices
+_iteration_metrics_allow_submit = _iteration_metrics.iteration_metrics_allow_submit
 _append_run_evaluation_report = _iteration_metrics.append_run_evaluation_report
 _resume_best_readiness_score = _iteration_metrics.resume_best_readiness_score
 _resume_noise_guard_state = _iteration_metrics.resume_noise_guard_state
@@ -5177,20 +5178,6 @@ def _build_kernel_quality_guard(
             "rel_margin": _QUALITY_GUARD_CODE_REF_REL_MARGIN,
         },
     }
-
-
-def _iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationResult) -> bool:
-    payload = _load_json_object(metrics_path)
-    if isinstance(payload, dict):
-        if _detect_external_test_label_transfer_signal(payload) is not None:
-            return False
-        quality_guard = payload.get("quality_guard")
-        if isinstance(quality_guard, dict) and isinstance(quality_guard.get("allow_submit"), bool):
-            return bool(quality_guard.get("allow_submit"))
-        faithfulness = payload.get("competition_faithfulness")
-        if isinstance(faithfulness, dict) and isinstance(faithfulness.get("faithful"), bool):
-            return bool(faithfulness.get("faithful"))
-    return _score_sources.is_trusted_offline_score_source(evaluation.score_source)
 
 
 def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) -> int | None:

@@ -10,6 +10,7 @@ from kagglebot.iteration_metrics import (
     build_split_index_fingerprints,
     evaluation_to_payload,
     extract_fold_scores_for_report,
+    iteration_metrics_allow_submit,
     resume_best_readiness_score,
     resume_noise_guard_state,
 )
@@ -127,6 +128,57 @@ def test_build_metrics_payload_includes_readiness_and_offline_sources() -> None:
     assert payload["evaluation_contract"] == {"faithful": True}
     assert payload["competition_faithfulness"] == {"faithful": True}
     assert payload["accuracy_potential"] == {"status": "frontier"}
+
+
+def test_iteration_metrics_allow_submit_prefers_quality_guard(tmp_path) -> None:
+    path = tmp_path / "metrics.json"
+    path.write_text('{"quality_guard": {"allow_submit": false}}\n', encoding="utf-8")
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.8,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+
+    assert iteration_metrics_allow_submit(path, evaluation) is False
+
+
+def test_iteration_metrics_allow_submit_uses_faithfulness_when_quality_missing(tmp_path) -> None:
+    path = tmp_path / "metrics.json"
+    path.write_text('{"competition_faithfulness": {"faithful": true}}\n', encoding="utf-8")
+    evaluation = EvaluationResult(
+        score_source="sample",
+        metric="auc",
+        direction="maximize",
+        value=0.8,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+
+    assert iteration_metrics_allow_submit(path, evaluation) is True
+
+
+def test_iteration_metrics_allow_submit_blocks_external_label_transfer(tmp_path) -> None:
+    path = tmp_path / "metrics.json"
+    path.write_text('{"external_test_label_transfer": true}\n', encoding="utf-8")
+    evaluation = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.8,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+
+    assert iteration_metrics_allow_submit(path, evaluation) is False
 
 
 def test_build_eval_data_cache_fallback_normalizes_split() -> None:

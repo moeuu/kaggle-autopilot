@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from kagglebot import plan_policy
+from kagglebot import kernel_quality, plan_policy, score_sources
 from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
 from kagglebot.eval import (
     DriftChecker,
@@ -109,6 +109,20 @@ def build_metrics_payload(
     if accuracy_potential:
         payload["accuracy_potential"] = accuracy_potential
     return payload
+
+
+def iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationResult) -> bool:
+    payload = load_json_object(metrics_path)
+    if isinstance(payload, dict):
+        if kernel_quality.detect_external_test_label_transfer_signal(payload) is not None:
+            return False
+        quality_guard = payload.get("quality_guard")
+        if isinstance(quality_guard, dict) and isinstance(quality_guard.get("allow_submit"), bool):
+            return bool(quality_guard.get("allow_submit"))
+        faithfulness = payload.get("competition_faithfulness")
+        if isinstance(faithfulness, dict) and isinstance(faithfulness.get("faithful"), bool):
+            return bool(faithfulness.get("faithful"))
+    return score_sources.is_trusted_offline_score_source(evaluation.score_source)
 
 
 def build_iteration_evaluation_report(
