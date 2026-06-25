@@ -68,20 +68,22 @@ _PERMANENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "submission_limit",
+        (
+            re.compile(r"maximum number of submissions", flags=re.IGNORECASE),
+            re.compile(r"submission limit", flags=re.IGNORECASE),
+            re.compile(r"max submissions", flags=re.IGNORECASE),
+            re.compile(r"daily submission allowance", flags=re.IGNORECASE),
+            re.compile(r"submission allowance", flags=re.IGNORECASE),
+        ),
+    ),
+    (
         "competition_unavailable",
         (
             re.compile(r"competition is not accepting submissions", flags=re.IGNORECASE),
             re.compile(r"not allowed", flags=re.IGNORECASE),
             re.compile(r"not found", flags=re.IGNORECASE),
             re.compile(r"closed", flags=re.IGNORECASE),
-        ),
-    ),
-    (
-        "submission_limit",
-        (
-            re.compile(r"maximum number of submissions", flags=re.IGNORECASE),
-            re.compile(r"submission limit", flags=re.IGNORECASE),
-            re.compile(r"max submissions", flags=re.IGNORECASE),
         ),
     ),
 )

@@ -25,6 +25,18 @@ def test_classify_submit_failure_repair_treats_submission_limit_as_manual() -> N
     assert "submission limit" in decision.manual_next_step.lower()
 
 
+def test_classify_submit_failure_repair_treats_daily_allowance_as_manual() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_limit",
+        error_kind="permanent",
+        detail="Submission not allowed: Your team has used its daily Submission allowance (10) today.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_MANUAL
+    assert decision.repairable is False
+    assert "submission limit" in decision.manual_next_step.lower()
+
+
 def test_classify_submit_failure_repair_detects_scoring_file_issue() -> None:
     decision = classify_submit_failure_repair(
         reason="submission_poll_status_complete_no_score",

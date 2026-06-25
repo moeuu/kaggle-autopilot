@@ -471,6 +471,11 @@ def test_validate_submission_sniffs_tab_delimiter_and_flags_missing_header(tmp_p
         ("Kaggle kernel not found after push; aborting.", "permanent", "kernel_push_failed"),
         ("Competition is not accepting submissions", "permanent", "competition_unavailable"),
         ("Submission limit reached: maximum number of submissions", "permanent", "submission_limit"),
+        (
+            "Submission not allowed: Your team has used its daily Submission allowance (10) today.",
+            "permanent",
+            "submission_limit",
+        ),
         ("ConnectionError: temporarily unavailable (503)", "transient", "network_or_timeout"),
         ("Bad Gateway (502)", "transient", "network_or_timeout"),
         ("Gateway Timeout 504", "transient", "network_or_timeout"),

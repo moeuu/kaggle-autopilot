@@ -185,6 +185,8 @@ def _manual_blocker_decision(*, reason: str, detail: str) -> SubmitFailureRepair
             "submission limit",
             "maximum number of submissions",
             "max submissions",
+            "daily submission allowance",
+            "submission allowance",
         )
     ):
         return SubmitFailureRepairDecision(
