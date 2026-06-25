@@ -61,14 +61,6 @@ from kagglebot.agents.identity import (
     render_prompt_identity,
 )
 from kagglebot.agents.strategy_runner import run_strategy
-from kagglebot.autopilot_state import (
-    _apply_final_run_status,
-    _apply_run_status,
-    _copy_kernel_support_artifacts_to_iteration_dir,
-    _copy_submission_artifact_to_iteration_dir,
-    _resolve_iteration_artifact,
-    _save_run_state,
-)
 from kagglebot.campaign import (
     TOP1_TARGET_RANK_PERCENTILE,
     allocate_submission,
@@ -780,7 +772,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 max_total_min=max_total_min,
             )
             if max_total_stop.should_stop:
-                _apply_run_status(
+                _autopilot_state._apply_run_status(
                     run_payload,
                     status=max_total_stop.status,
                     stop_reason=max_total_stop.stop_reason,
@@ -823,7 +815,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if submit_retry_resume is not None:
                 resume_submission_path, resume_metrics_path, resume_evaluation = submit_retry_resume
                 if resume_submission_path != submission_path:
-                    submission_path = _copy_submission_artifact_to_iteration_dir(
+                    submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
                         source=resume_submission_path,
                         iter_dir=iter_dir,
                     )
@@ -875,11 +867,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
-                            submission_path = _copy_submission_artifact_to_iteration_dir(
+                            submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
                                 iter_dir=iter_dir,
                             )
-                        _copy_kernel_support_artifacts_to_iteration_dir(
+                        _autopilot_state._copy_kernel_support_artifacts_to_iteration_dir(
                             kernel_output_dir=kernel_result.output_dir,
                             iter_dir=iter_dir,
                         )
@@ -1051,11 +1043,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
-                            submission_path = _copy_submission_artifact_to_iteration_dir(
+                            submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
                                 iter_dir=iter_dir,
                             )
-                        _copy_kernel_support_artifacts_to_iteration_dir(
+                        _autopilot_state._copy_kernel_support_artifacts_to_iteration_dir(
                             kernel_output_dir=kernel_result.output_dir,
                             iter_dir=iter_dir,
                         )
@@ -1276,11 +1268,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
-                            submission_path = _copy_submission_artifact_to_iteration_dir(
+                            submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
                                 iter_dir=iter_dir,
                             )
-                        _copy_kernel_support_artifacts_to_iteration_dir(
+                        _autopilot_state._copy_kernel_support_artifacts_to_iteration_dir(
                             kernel_output_dir=kernel_result.output_dir,
                             iter_dir=iter_dir,
                         )
@@ -2525,7 +2517,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 same_config_patience=stop_same_config_patience,
             )
             if stagnation_stop.should_stop:
-                _apply_run_status(run_payload, status="stopped", stop_reason=stagnation_stop.reason)
+                _autopilot_state._apply_run_status(run_payload, status="stopped", stop_reason=stagnation_stop.reason)
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 
@@ -2540,7 +2532,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 allow_max_iteration_stop=False,
             )
             if terminal_stop.should_stop:
-                _apply_run_status(
+                _autopilot_state._apply_run_status(
                     run_payload,
                     status=terminal_stop.status,
                     stop_reason=terminal_stop.stop_reason,
@@ -2559,7 +2551,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submitted=submitted,
             )
             if terminal_stop.should_stop:
-                _apply_run_status(run_payload, status=terminal_stop.status, stop_reason=terminal_stop.stop_reason)
+                _autopilot_state._apply_run_status(
+                    run_payload,
+                    status=terminal_stop.status,
+                    stop_reason=terminal_stop.stop_reason,
+                )
                 break
 
             print("[cyan]improve[/cyan]: generating next iteration plan")
@@ -2706,7 +2702,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             record_problem_type_insight=record_problem_type_insight,
             record_error_fix_insight=record_error_fix_insight,
         )
-    _apply_final_run_status(
+    _autopilot_state._apply_final_run_status(
         run_payload,
         submitted=submitted,
         has_submission_result=bool(last_submission_result),
@@ -4059,7 +4055,7 @@ def _rerun_kernel_for_metric_recheck(
             raise RuntimeError(
                 "Metric recheck failed: submission artifact is missing for same-iteration metric-only recheck."
             )
-        rechecked_submission_path = _copy_submission_artifact_to_iteration_dir(
+        rechecked_submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
             source=resolved_submission,
             iter_dir=iter_dir,
         )
@@ -4083,7 +4079,7 @@ def _rerun_kernel_for_metric_recheck(
     add_metrics_candidate(metrics_artifact_path)
     add_metrics_candidate(iter_dir / "metrics.json")
     add_metrics_candidate(output_metrics_path)
-    add_metrics_candidate(_resolve_iteration_artifact(iter_dir, "metrics.json"))
+    add_metrics_candidate(_autopilot_state._resolve_iteration_artifact(iter_dir, "metrics.json"))
 
     loaded_candidates: list[tuple[Path, dict[str, object], EvaluationResult | None]] = []
     for metrics_candidate in metrics_candidates:
@@ -4144,7 +4140,7 @@ def _rerun_kernel_for_metric_recheck(
             payload=payload,
             target_metric=target_metric,
             metric_direction=metric_direction,
-            resolve_iteration_artifact=_resolve_iteration_artifact,
+            resolve_iteration_artifact=_autopilot_state._resolve_iteration_artifact,
         )
         if recomputed is not None:
             evaluation, payload = recomputed
@@ -4538,14 +4534,14 @@ def _attempt_submit(
     run_dir = config.paths.run_dir(run_id)
     submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
         run_dir=run_dir,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
+        save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
     )
     autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_attempt(
         run_dir=run_dir,
         submission_path=submission_path,
         load_run_state=_autopilot_state._load_run_state,
         load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
+        save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
         now_iso=datetime.now(UTC).isoformat(),
     )
     run_state = autofix_attempt_context.run_state
@@ -4752,7 +4748,7 @@ def _attempt_submit(
                 seen_fingerprints=seen_fingerprints,
                 run_state=run_state,
                 code_fingerprint=submit_code_fingerprint,
-                save_run_state=lambda updates: _save_run_state(run_dir, updates),
+                save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
                 on_message=print,
             )
             submit_error_classification = submit_error_resolution.classification
@@ -4938,7 +4934,7 @@ def _submit_with_notebook_kernel(
         timeout_minutes=config.time_budget_min,
         run_submit_kernel=run_submit_kernel,
         run_kaggle_submit_kernel=run_kaggle_submit_kernel,
-        copy_submission_artifact=lambda source: _copy_submission_artifact_to_iteration_dir(
+        copy_submission_artifact=lambda source: _autopilot_state._copy_submission_artifact_to_iteration_dir(
             source=source,
             iter_dir=iter_dir,
         ),
@@ -4974,7 +4970,7 @@ def _abort_submit_for_run(
     if submit_attempt_recorder is None:
         submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
             run_dir=run_dir,
-            save_run_state=lambda updates: _save_run_state(run_dir, updates),
+            save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
         )
     submission_ref_text = str(submission_ref)
     artifact_path = _submit_failure_context.resolve_submit_abort_artifact_path(
@@ -5059,7 +5055,7 @@ def _prepare_submit_file_autofix(
         )
 
     def save_repaired_path(fixed: Path) -> None:
-        _save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
+        _autopilot_state._save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
 
     preparation = _submit_autofix.prepare_submit_file_autofix(
         latest_submit_attempt=latest,
