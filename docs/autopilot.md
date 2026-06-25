@@ -85,6 +85,7 @@ Submission behavior:
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test.csv`/`sample_submission.csv` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test CSV in a wrapper kernel
+- static wrapper submit kernels fail fast for detected code competitions when the embedded CSV has only tiny public-test rows, preventing accidental 3-row notebook submissions
 - heuristic `writeup` inference is conservative and ignores negative mentions such as `not a judged/writeup competition`
 - leaderboard runs default to `target_medal=winner` and `target_rank_percentile=0.001`; until that near-first-place band is reached, autopilot will not collapse into `minor_tuning`
 - for large tabular binary datasets with meaningful categoricals, planning quality gates require multi-family search plus at least one OOF blend candidate

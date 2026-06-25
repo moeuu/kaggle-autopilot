@@ -70,8 +70,10 @@ from kagglebot.kernel_status import (
     parse_kernel_status,
 )
 from kagglebot.logging_utils import truncate_lines
+from kagglebot.paths import CompetitionPaths
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
+from kagglebot.writeup import infer_code_competition_from_paths
 
 _COLUMN_MAP_FILENAME = "column_map.json"
 _COLUMN_MAP_SHIM_MARKER = "# kagglebot: column-map-shim"
@@ -1091,6 +1093,45 @@ def _render_submission_kernel_script(submission_path: Path) -> str:
     return _SUBMISSION_KERNEL_TEMPLATE.replace("__SUBMISSION_GZIP_B64__", payload_b64)
 
 
+def _reject_static_tiny_code_competition_submission(
+    *,
+    slug: str,
+    base_dir: Path,
+    submission_path: Path,
+    tiny_row_limit: int = 10,
+) -> None:
+    """Fail fast before embedding tiny public-test submissions for code competitions."""
+    if _count_csv_data_rows_at_most(submission_path, limit=tiny_row_limit) is not True:
+        return
+    paths = CompetitionPaths(slug=slug, artifacts_dir=base_dir)
+    if not infer_code_competition_from_paths(paths):
+        return
+    raise KernelFailedError(
+        "Refusing to build a static wrapper submit kernel for a code/notebook competition "
+        f"with only {tiny_row_limit} or fewer submission rows. "
+        "Use notebook submit artifact mode 'inference' so Kaggle reruns the authoritative kernel "
+        "against the hidden/full test set."
+    )
+
+
+def _count_csv_data_rows_at_most(path: Path, *, limit: int) -> bool | None:
+    if path.suffix.lower() != ".csv":
+        return None
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            next(handle, None)
+            count = 0
+            for line in handle:
+                if not line.strip():
+                    continue
+                count += 1
+                if count > limit:
+                    return False
+            return True
+    except OSError:
+        return None
+
+
 @dataclass(frozen=True)
 class KernelPackageBuilder:
     def prepare(self, config: KernelBuildConfig) -> KernelPreparation:
@@ -1190,13 +1231,20 @@ class KernelSubmitPackageBuilder:
         if not config.submission_path.exists() or not config.submission_path.is_file():
             raise KernelFailedError(f"Submission artifact not found: {config.submission_path}")
 
+        submit_mode = str(config.mode or "wrapper").strip().lower()
+        if submit_mode != "inference":
+            _reject_static_tiny_code_competition_submission(
+                slug=config.slug,
+                base_dir=config.base_dir,
+                submission_path=config.submission_path,
+            )
+
         if not config.dry_run:
             print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
             kernels_init(kernel_dir, dry_run=False)
 
         kernel_slug = _resolve_submit_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
-        submit_mode = str(config.mode or "wrapper").strip().lower()
         if submit_mode == "inference":
             custom_kernel_dir = config.base_dir / config.slug / "kernel"
             custom_kernel_path = custom_kernel_dir / "kernel.py"

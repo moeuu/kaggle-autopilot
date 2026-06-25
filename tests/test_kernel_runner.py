@@ -211,6 +211,37 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     assert payload["enable_tpu"] is False
 
 
+def test_run_submit_kernel_wrapper_rejects_tiny_code_competition_submission(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "demo"
+    context_dir = tmp_path / slug / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "overview.md").write_text(
+        "This is a Code Competition. The public test set is dummy data and hidden/full test runs in Kaggle.\n",
+        encoding="utf-8",
+    )
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="static wrapper submit kernel"):
+        run_submit_kernel(
+            slug=slug,
+            run_id="run-1",
+            iteration=1,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            enable_internet=False,
+            submission_path=submission_path,
+            mode="wrapper",
+            dry_run=True,
+            timeout_minutes=None,
+        )
+
+
 def test_run_submit_kernel_wrapper_aligns_to_runtime_sample_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
