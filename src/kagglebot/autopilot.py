@@ -189,6 +189,15 @@ from kagglebot.orchestrator.agent_pipeline import (
 )
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
+from kagglebot.runtime_policy import (
+    is_heavy_deep_learning_modality as _is_heavy_deep_learning_modality,
+)
+from kagglebot.runtime_policy import (
+    is_local_gpu_compute as _is_local_gpu_compute,
+)
+from kagglebot.runtime_policy import (
+    local_gpu_time_budget_limit_min as _local_gpu_time_budget_limit_min,
+)
 from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.score_utils import should_update_best_score as _update_best_score
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
@@ -341,7 +350,6 @@ _DEFAULT_EVAL_SEEDS = list(_plan_policy.DEFAULT_EVAL_SEEDS)
 _DEFAULT_MAX_ITERATIONS = 5
 _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN = 12 * 60
 _LONG_LOCAL_GPU_MAX_ITERATIONS = 3
-_HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text"})
 _HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
@@ -3200,27 +3208,6 @@ def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
         return False
     kernel_path = paths.kernel_source_dir / "kernel.py"
     return kernel_path.exists()
-
-
-def _is_local_gpu_compute(compute: object) -> bool:
-    return str(compute or "").strip().lower() == "local_gpu"
-
-
-def _is_heavy_deep_learning_modality(modality: object) -> bool:
-    return str(modality or "").strip().lower() in _HEAVY_DEEP_LEARNING_MODALITIES
-
-
-def _local_gpu_time_budget_limit_min() -> int | None:
-    raw = os.environ.get("KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN")
-    if raw is None or not raw.strip():
-        return None
-    try:
-        parsed = int(float(raw.strip()))
-    except ValueError:
-        return None
-    if parsed <= 0:
-        return None
-    return max(60, parsed)
 
 
 def _resolve_notebook_submit_artifact_mode(*, paths: CompetitionPaths, submit_mode: str) -> str:

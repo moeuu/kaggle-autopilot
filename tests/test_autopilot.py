@@ -561,6 +561,16 @@ def test_resolve_plan_caps_long_heavy_local_gpu_iterations(tmp_path: Path) -> No
     assert resolved["time_budget_min"] is None
 
 
+def test_resolve_plan_treats_rna_structure_as_heavy_local_gpu(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, compute="local_gpu", max_iterations=5, time_budget_min=999)
+    _write_dataset_profile(config.paths, task="structure_prediction", modality="rna_structure")
+
+    resolved = _resolve_plan(PlanConfig(max_iterations=5, cv_folds=5, eval_seeds=[1, 2, 3]), config)
+
+    assert resolved["cv_folds"] == 3
+    assert resolved["eval_seeds"] == [1]
+
+
 def test_resolve_plan_applies_explicit_local_gpu_time_budget_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

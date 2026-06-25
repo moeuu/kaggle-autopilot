@@ -39,6 +39,7 @@ from kagglebot.medals import (
 )
 from kagglebot.method_scout import render_method_registry_for_prompt, run_method_scout
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.runtime_policy import is_heavy_deep_learning_modality
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.types import PlanConfig
@@ -57,7 +58,6 @@ _LONG_ACCURACY_FIRST_TIME_BUDGET_MIN = 12 * 60
 _ACCURACY_FIRST_MIN_PATIENCE = 4
 _ACCURACY_FIRST_MIN_CV_FOLDS = 5
 _ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
-_HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text", "rna_structure"})
 _HEAVY_MAX_FULL_TRAIN_FOLDS = 3
 _DEFAULT_TARGET_MEDAL = DEFAULT_TARGET_MEDAL
 _MEDAL_TARGET_PERCENTILES = MEDAL_TARGET_PERCENTILES
@@ -1212,7 +1212,7 @@ def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) 
         )
 
     accuracy_first_cv = _should_force_accuracy_first_cv(modality=modality)
-    heavy_deep_learning = _is_heavy_deep_learning_modality(modality=modality)
+    heavy_deep_learning = is_heavy_deep_learning_modality(modality)
     if accuracy_first_cv:
         score_source = str(guarded.get("score_source") or "").strip().lower()
         if score_source != "cv":
@@ -1475,7 +1475,7 @@ def _normalize_seed_list(value: object) -> list[int]:
 
 def _should_force_accuracy_first_cv(*, modality: str) -> bool:
     """Return whether score_source should default to CV for this modality."""
-    return not _is_heavy_deep_learning_modality(modality=modality)
+    return not is_heavy_deep_learning_modality(modality)
 
 
 def _should_force_multi_seed_evaluation(*, modality: str, task: str, profile: dict[str, object]) -> bool:
@@ -1483,11 +1483,7 @@ def _should_force_multi_seed_evaluation(*, modality: str, task: str, profile: di
         top_class_ratio = _extract_top_class_ratio(profile)
         if top_class_ratio is not None and top_class_ratio >= 0.98:
             return True
-    return not _is_heavy_deep_learning_modality(modality=modality)
-
-
-def _is_heavy_deep_learning_modality(*, modality: str) -> bool:
-    return str(modality or "").strip().lower() in _HEAVY_DEEP_LEARNING_MODALITIES
+    return not is_heavy_deep_learning_modality(modality)
 
 
 def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:

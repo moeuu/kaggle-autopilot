@@ -68,6 +68,9 @@ Kernel error formatting, normalized same-error fingerprints, and pushed-kernel r
 `src/kagglebot/kernel_errors.py`; the loop only records the resulting text/fingerprint and enforces retry limits.
 Kaggle CLI error-shape helpers such as missing-credentials detection live in `src/kagglebot/kaggle_cli_errors.py`; the
 loop maps those typed predicates to submit abort reasons instead of parsing credential hints inline.
+Shared runtime policy such as `local_gpu` compute detection, heavy deep-learning modality classification, and local GPU
+time-budget environment parsing live in `src/kagglebot/runtime_policy.py`; plan guardrails and autopilot execution use
+the same definitions.
 Split-strategy policy, evaluation seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and
 competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
 toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
@@ -272,13 +275,15 @@ Recommended extraction order:
    `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py` predicates rather than raw CLI stdout/stderr parsing.
-6. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment
+6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` so agent plan guardrails and
+   autopilot execution cannot drift on workload classification.
+7. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment
    isolation, and competition-specific compatibility shims in `verify_artifacts.py`; avoid adding generated shim strings
    or pytest-specific execution rules back into `autopilot.py`.
-7. Kernel error policy: keep exception formatting, same-error fingerprinting, and pushed-kernel registration failure
+8. Kernel error policy: keep exception formatting, same-error fingerprinting, and pushed-kernel registration failure
    classification in `kernel_errors.py`; `autopilot.py` should only decide how many repeats are allowed and where logs
    are persisted.
-8. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
+9. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
    should avoid ad hoc `json.dumps(...).write_text(...)` for artifact files unless they need non-object JSON, JSONL, or
    generated kernel code that runs outside the package.
 
