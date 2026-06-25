@@ -50,8 +50,8 @@ def test_infer_campaign_model_family_and_feature_set_prefer_model_summary() -> N
 
 def test_extract_campaign_fold_scores_and_prediction_correlations() -> None:
     payload = {
-        "fold_scores": ["0.71", "bad", 0.73],
-        "prediction_correlation": {"a": "0.2", "b": None, 3: 0.4},
+        "fold_scores": ["0.71", "bad", "nan", "inf", 0.73],
+        "prediction_correlation": {"a": "0.2", "b": None, "nan": "nan", 3: 0.4},
     }
 
     assert extract_campaign_fold_scores(payload) == [0.71, 0.73]

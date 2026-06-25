@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.autopilot_helpers import _to_float
+from kagglebot.scalar_utils import parse_finite_float
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
 
 
 def infer_campaign_candidate_category(
