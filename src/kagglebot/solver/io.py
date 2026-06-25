@@ -290,12 +290,17 @@ def write_submission(
     target_columns: Sequence[str] | None = None,
     output_path: Path,
 ) -> Path:
-    submission = sample.copy()
     resolved_targets = _resolve_target_columns(
         sample=sample,
         id_column=id_column,
         target_column=target_column,
         target_columns=target_columns,
+    )
+    submission = _submission_template_for_test(
+        sample=sample,
+        test=test,
+        id_column=id_column,
+        target_columns=resolved_targets,
     )
     pred_table = _normalize_prediction_table(preds=preds, target_columns=resolved_targets, row_count=len(test))
 
@@ -315,6 +320,56 @@ def write_submission(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     submission.to_csv(output_path, index=False)
     return output_path
+
+
+def _submission_template_for_test(
+    *,
+    sample: pd.DataFrame,
+    test: pd.DataFrame,
+    id_column: str | None,
+    target_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Return a submission template, expanding tiny public samples to full test ids."""
+    if (
+        id_column
+        and id_column in sample.columns
+        and id_column in test.columns
+        and len(sample) != len(test)
+        and _is_tiny_public_sample_for_test(sample=sample, test=test, id_column=id_column)
+    ):
+        expanded = pd.DataFrame({id_column: test[id_column].to_numpy()})
+        for col in sample.columns:
+            if col == id_column:
+                continue
+            expanded[col] = _sample_column_default(sample, col)
+        for col in target_columns:
+            if col not in expanded.columns:
+                expanded[col] = _sample_column_default(sample, col)
+        return expanded[list(sample.columns)]
+    return sample.copy()
+
+
+def _is_tiny_public_sample_for_test(*, sample: pd.DataFrame, test: pd.DataFrame, id_column: str) -> bool:
+    """Detect code/notebook competitions where sample_submission is only a public placeholder."""
+    if len(sample) <= 0 or len(sample) > 10:
+        return False
+    if len(test) <= len(sample):
+        return False
+    if sample[id_column].duplicated().any() or test[id_column].duplicated().any():
+        return False
+    return True
+
+
+def _sample_column_default(sample: pd.DataFrame, column: str):
+    if column not in sample.columns or sample.empty:
+        return 0.0
+    non_null = sample[column].dropna()
+    if non_null.empty:
+        return 0.0
+    numeric = pd.to_numeric(non_null, errors="coerce").dropna()
+    if not numeric.empty:
+        return float(numeric.mean())
+    return non_null.iloc[0]
 
 
 def _find_tabular_files(root: Path) -> list[Path]:

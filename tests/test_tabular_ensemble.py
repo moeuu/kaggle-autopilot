@@ -107,6 +107,38 @@ def test_write_fold_intermediate_artifacts_writes_valid_submission_and_manifest(
     assert manifest["fold_artifacts"][0]["submission_path"] == "submission_model_a_fold1.csv"
 
 
+def test_write_fold_intermediate_artifacts_expands_tiny_public_sample(tmp_path) -> None:
+    sample = pd.DataFrame({"id": [1, 2, 3], "target": [0.5, 0.5, 0.5]})
+    test = pd.DataFrame({"id": [11, 12, 13, 14], "feature": [1.0, 2.0, 3.0, 4.0]})
+    result = PipelineResult(
+        name="fold-ready",
+        oof_preds=np.array([0.2, 0.8], dtype=np.float64),
+        test_preds=np.array([0.2, 0.4, 0.6, 0.8], dtype=np.float64),
+        cv_score=0.91,
+        fold_scores=[],
+        feature_manifest={},
+        metadata={"kind": "single"},
+        test_predictions_by_fold={"fold_1": np.array([0.2, 0.4, 0.6, 0.8], dtype=np.float64)},
+        oof_predictions_by_fold={"fold_1": np.array([0.2], dtype=np.float64)},
+        valid_indices_by_fold={"fold_1": np.array([0])},
+    )
+
+    records = write_fold_intermediate_artifacts(
+        output_dirs=[tmp_path],
+        result=result,
+        sample_submission=sample,
+        test_df=test,
+        id_col="id",
+        target_col="target",
+    )
+
+    assert records[0]["status"] == "available"
+    submission = pd.read_csv(tmp_path / "submission_fold-ready_fold1.csv")
+    assert list(submission.columns) == ["id", "target"]
+    assert submission["id"].tolist() == [11, 12, 13, 14]
+    assert np.allclose(submission["target"], [0.2, 0.4, 0.6, 0.8])
+
+
 def test_train_xgb_model_forwards_sample_weight(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

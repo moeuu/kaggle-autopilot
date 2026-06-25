@@ -94,3 +94,37 @@ def test_write_submission_accepts_2d_prediction_matrix(tmp_path) -> None:
     frame = pd.read_csv(out)
     assert frame["y1"].tolist() == [0.3, 0.4]
     assert frame["y2"].tolist() == [0.7, 0.6]
+
+
+def test_write_submission_expands_tiny_public_sample_to_test_ids(tmp_path) -> None:
+    sample = pd.DataFrame(
+        {
+            "id": [101, 102, 103],
+            "winner_model_a": [1 / 3, 1 / 3, 1 / 3],
+            "winner_model_b": [1 / 3, 1 / 3, 1 / 3],
+            "winner_tie": [1 / 3, 1 / 3, 1 / 3],
+        }
+    )
+    test = pd.DataFrame({"id": [201, 202, 203, 204], "prompt": ["a", "b", "c", "d"]})
+    preds = np.array(
+        [
+            [0.7, 0.2, 0.1],
+            [0.1, 0.8, 0.1],
+            [0.2, 0.2, 0.6],
+            [0.4, 0.3, 0.3],
+        ]
+    )
+
+    out = write_submission(
+        sample=sample,
+        test=test,
+        preds=preds,
+        id_column="id",
+        target_columns=["winner_model_a", "winner_model_b", "winner_tie"],
+        output_path=tmp_path / "submission.csv",
+    )
+
+    frame = pd.read_csv(out)
+    assert list(frame.columns) == list(sample.columns)
+    assert frame["id"].tolist() == [201, 202, 203, 204]
+    assert np.allclose(frame[["winner_model_a", "winner_model_b", "winner_tie"]].to_numpy(), preds)

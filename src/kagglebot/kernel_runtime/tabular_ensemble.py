@@ -413,7 +413,11 @@ def validate_submission(
     target_col: str,
     preds: np.ndarray,
 ) -> pd.DataFrame:
-    submission = sample_submission.copy()
+    submission = build_submission_template_for_test(
+        sample_submission=sample_submission,
+        test_df=test_df,
+        id_col=id_col,
+    )
     preds = clip_predictions(preds)
     assert list(submission.columns) == [id_col, target_col], (
         "Sample submission columns differ from expected id,target format."
@@ -425,6 +429,55 @@ def validate_submission(
     submission[target_col] = preds
     assert list(submission.columns) == list(sample_submission.columns), "Submission columns changed unexpectedly."
     return submission
+
+
+def build_submission_template_for_test(
+    *,
+    sample_submission: pd.DataFrame,
+    test_df: pd.DataFrame,
+    id_col: str,
+) -> pd.DataFrame:
+    """Expand tiny public sample templates to the actual test ids during notebook reruns."""
+    if (
+        id_col in sample_submission.columns
+        and id_col in test_df.columns
+        and len(sample_submission) != len(test_df)
+        and is_tiny_public_sample_for_test(sample_submission=sample_submission, test_df=test_df, id_col=id_col)
+    ):
+        expanded = pd.DataFrame({id_col: test_df[id_col].to_numpy()})
+        for col in sample_submission.columns:
+            if col == id_col:
+                continue
+            expanded[col] = sample_column_default(sample_submission, col)
+        return expanded[list(sample_submission.columns)]
+    return sample_submission.copy()
+
+
+def is_tiny_public_sample_for_test(
+    *,
+    sample_submission: pd.DataFrame,
+    test_df: pd.DataFrame,
+    id_col: str,
+) -> bool:
+    if len(sample_submission) <= 0 or len(sample_submission) > 10:
+        return False
+    if len(test_df) <= len(sample_submission):
+        return False
+    if sample_submission[id_col].duplicated().any() or test_df[id_col].duplicated().any():
+        return False
+    return True
+
+
+def sample_column_default(sample_submission: pd.DataFrame, column: str):
+    if column not in sample_submission.columns or sample_submission.empty:
+        return 0.0
+    non_null = sample_submission[column].dropna()
+    if non_null.empty:
+        return 0.0
+    numeric = pd.to_numeric(non_null, errors="coerce").dropna()
+    if not numeric.empty:
+        return float(numeric.mean())
+    return non_null.iloc[0]
 
 
 def safe_artifact_stem(value: str) -> str:
