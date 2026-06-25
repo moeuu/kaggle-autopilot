@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from kagglebot.competition import parse_competition_slug
-from kagglebot.env_utils import parse_float_value, parse_int_value
+from kagglebot.env_utils import env_flag, parse_float_value, parse_int_value
 from kagglebot.exceptions import (
     KaggleCliError,
     KaggleCliResourceError,
@@ -337,24 +337,15 @@ def _download_rate_limit_attempts() -> int | None:
 
 
 def _download_single_shot_first_enabled() -> bool:
-    raw = os.getenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST")
-    if raw is None:
-        return _DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return env_flag("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST", default=_DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST)
 
 
 def _download_streaming_enabled() -> bool:
-    raw = os.getenv("KAGGLEBOT_DOWNLOAD_STREAMING")
-    if raw is None:
-        return _DEFAULT_DOWNLOAD_STREAMING
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return env_flag("KAGGLEBOT_DOWNLOAD_STREAMING", default=_DEFAULT_DOWNLOAD_STREAMING)
 
 
 def _download_preserve_paths_enabled() -> bool:
-    raw = os.getenv("KAGGLEBOT_DOWNLOAD_PRESERVE_PATHS")
-    if raw is None:
-        return _DEFAULT_DOWNLOAD_PRESERVE_PATHS
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return env_flag("KAGGLEBOT_DOWNLOAD_PRESERVE_PATHS", default=_DEFAULT_DOWNLOAD_PRESERVE_PATHS)
 
 
 def _download_retry_backoff_sec() -> float:

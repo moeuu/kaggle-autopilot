@@ -372,6 +372,23 @@ def test_download_single_shot_first_reads_env(monkeypatch) -> None:
     monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST", "0")
     assert kaggle_api._download_single_shot_first_enabled() is False
 
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST", "maybe")
+    assert kaggle_api._download_single_shot_first_enabled() is True
+
+
+def test_download_streaming_and_preserve_path_flags_use_shared_env_parser(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_STREAMING", "off")
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_PRESERVE_PATHS", "false")
+
+    assert kaggle_api._download_streaming_enabled() is False
+    assert kaggle_api._download_preserve_paths_enabled() is False
+
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_STREAMING", "yes")
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_PRESERVE_PATHS", "maybe")
+
+    assert kaggle_api._download_streaming_enabled() is True
+    assert kaggle_api._download_preserve_paths_enabled() is True
+
 
 def test_rate_limit_retry_sleep_uses_longer_backoff(monkeypatch) -> None:
     monkeypatch.setattr(kaggle_api, "_download_rate_limit_backoff_sec", lambda: 30.0)

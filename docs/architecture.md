@@ -135,7 +135,7 @@ file-submit/notebook-submit stage services.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
-2. Evaluate (holdout/cv/test/consensus based on resolved plan)
+2. Evaluate (holdout/cv based on resolved plan)
 3. Write `metrics.json` and `diagnostics.md`
 4. Decide:
    - submit current iteration output
