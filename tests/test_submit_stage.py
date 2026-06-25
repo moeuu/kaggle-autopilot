@@ -9,6 +9,7 @@ from kagglebot.submit_stage import (
     build_kaggle_credentials_missing_abort_spec,
     build_local_submission_guardrail_abort_spec,
     build_local_submission_validation_abort_spec,
+    build_notebook_fallback_retry_state,
     build_rules_not_accepted_abort_spec,
     build_submission_outcome_abort_spec,
     build_submission_outcome_error_detail,
@@ -1100,6 +1101,31 @@ def test_decide_notebook_fallback_after_file_submit_error_retries_as_notebook() 
     assert decision.messages == (
         "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
         "retrying via notebook submit automatically.",
+    )
+
+
+def test_build_notebook_fallback_retry_state_combines_artifact_mode_and_messages() -> None:
+    decision = decide_notebook_fallback_after_file_submit_error(
+        notebook_submit_required=False,
+        notebook_fallback_activated=False,
+        should_use_notebook_fallback=True,
+        resolved_notebook_artifact_mode="wrapper",
+        current_submission_artifact_mode="wrapper",
+    )
+
+    state = build_notebook_fallback_retry_state(
+        fallback_decision=decision,
+        artifact_mode="inference",
+        artifact_message="[yellow]submit mode[/yellow]: using inference artifact",
+    )
+
+    assert state.notebook_submit_required is True
+    assert state.notebook_fallback_activated is True
+    assert state.submission_artifact_mode == "inference"
+    assert state.messages == (
+        "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
+        "retrying via notebook submit automatically.",
+        "[yellow]submit mode[/yellow]: using inference artifact",
     )
 
 

@@ -39,6 +39,14 @@ class SubmitStageNotebookFallbackDecision:
 
 
 @dataclass(frozen=True)
+class SubmitStageNotebookFallbackRetryState:
+    notebook_submit_required: bool
+    notebook_fallback_activated: bool
+    submission_artifact_mode: str
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SubmitStageErrorClassification:
     classification: dict[str, object]
     stderr: str
@@ -1011,4 +1019,21 @@ def decide_notebook_fallback_after_file_submit_error(
             "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
             "retrying via notebook submit automatically.",
         ),
+    )
+
+
+def build_notebook_fallback_retry_state(
+    *,
+    fallback_decision: SubmitStageNotebookFallbackDecision,
+    artifact_mode: str,
+    artifact_message: str,
+) -> SubmitStageNotebookFallbackRetryState:
+    messages = list(fallback_decision.messages)
+    if artifact_message:
+        messages.append(artifact_message)
+    return SubmitStageNotebookFallbackRetryState(
+        notebook_submit_required=fallback_decision.notebook_submit_required,
+        notebook_fallback_activated=fallback_decision.notebook_fallback_activated,
+        submission_artifact_mode=artifact_mode,
+        messages=tuple(messages),
     )
