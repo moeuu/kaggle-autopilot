@@ -5427,7 +5427,11 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         if error.output:
             error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
     if submit_autofix:
-        submit_context = _build_submit_autofix_context(run_dir)
+        submit_context = _submit_failure_context.format_submit_autofix_context(
+            failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
+            run_state=_load_run_state(run_dir),
+            latest_submit_attempt=_load_latest_submit_attempt(run_dir),
+        )
         latest_submit_attempt = _load_latest_submit_attempt(run_dir)
         submit_file_fix_required = _submit_autofix.submit_file_fix_required_for_attempt(latest_submit_attempt)
         if submit_file_fix_required:
@@ -6827,14 +6831,6 @@ def _submit_file_fix_contract_satisfied(
         baseline_path=baseline_path,
         baseline_sha256=baseline_sha256,
         sha256_or_none=_sha256_or_none,
-    )
-
-
-def _build_submit_autofix_context(run_dir: Path) -> str:
-    return _submit_failure_context.format_submit_autofix_context(
-        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-        run_state=_load_run_state(run_dir),
-        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
 
 

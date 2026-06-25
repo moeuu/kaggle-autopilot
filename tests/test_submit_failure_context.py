@@ -297,6 +297,70 @@ def test_should_defer_submit_abort_to_next_iteration_requires_kaggle_gpu_repaira
     )
 
 
+def test_format_submit_autofix_context_includes_latest_attempt() -> None:
+    context = format_submit_autofix_context(
+        failure_context={
+            "ts": "2026-02-15T00:00:01+00:00",
+            "active": True,
+            "repair_target": "submission_artifact",
+            "repairable": True,
+            "reason": "local_submission_validation_failed",
+            "error_kind": "validation",
+            "fingerprint": "abc123",
+            "submission_ref": "/tmp/submission.csv",
+            "submission_artifact_path": "/tmp/submission.csv",
+            "summary": "Local submission validation failed.",
+            "latest_submit_attempt": {
+                "ts": "2026-02-15T00:00:00+00:00",
+                "ok": False,
+                "exit_code": 6,
+                "error_kind": "validation",
+                "reason": "local_submission_validation_failed",
+                "action_taken": "abort",
+                "fingerprint": "abc123",
+                "sub_path": "/tmp/submission.csv",
+            },
+            "run_state_excerpt": {
+                "submit_attempted": True,
+                "submit_ok": False,
+                "last_reason": "local_submission_validation_failed",
+                "last_error_kind": "validation",
+                "last_submission_path": "/tmp/submission.csv",
+            },
+        },
+        run_state={
+            "submit_attempted": True,
+            "submit_ok": False,
+            "last_error_kind": "validation",
+            "last_reason": "local_submission_validation_failed",
+            "last_action": "abort",
+            "last_submit_fingerprint": "abc123",
+            "last_submission_path": "/tmp/submission.csv",
+        },
+        latest_submit_attempt={
+            "ts": "2026-02-15T00:00:00+00:00",
+            "ok": False,
+            "exit_code": 6,
+            "error_kind": "validation",
+            "reason": "local_submission_validation_failed",
+            "action_taken": "abort",
+            "fingerprint": "abc123",
+            "sub_path": "/tmp/submission.csv",
+            "stdout_tail": "",
+            "stderr_tail": "Submission validation failed: prediction column contains NaN",
+        },
+    )
+
+    assert "submit_failure_context:" in context
+    assert "repair_target: submission_artifact" in context
+    assert "failure_context_latest_submit_attempt:" in context
+    assert "run_state:" in context
+    assert "latest_submit_attempt:" in context
+    assert "last_reason: local_submission_validation_failed" in context
+    assert "error_kind: validation" in context
+    assert "stderr_tail: Submission validation failed:" in context
+
+
 def test_build_submit_failure_improvement_context_for_file_issue() -> None:
     notes, reason = build_submit_failure_improvement_context(
         failure_context={

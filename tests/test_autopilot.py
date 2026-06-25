@@ -20,7 +20,6 @@ from kagglebot.autopilot import (
     _attempt_submit,
     _build_accuracy_potential,
     _build_kernel_quality_guard,
-    _build_submit_autofix_context,
     _build_submit_failure_improvement_context,
     _decide_notebook_submit_artifact_mode_for_submission,
     _detect_online_mismatch_signal,
@@ -3631,91 +3630,6 @@ def test_load_run_state_infers_submit_ok_from_submit_attempts(tmp_path: Path) ->
     state = _load_run_state(run_dir)
     assert state["submit_attempted"] is True
     assert state["submit_ok"] is True
-
-
-def test_build_submit_autofix_context_includes_latest_attempt(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    run_dir = config.paths.run_dir(config.run_id or "run-1")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "submit_failure_context.json").write_text(
-        json.dumps(
-            {
-                "ts": "2026-02-15T00:00:01+00:00",
-                "active": True,
-                "repair_target": "submission_artifact",
-                "repairable": True,
-                "reason": "local_submission_validation_failed",
-                "error_kind": "validation",
-                "fingerprint": "abc123",
-                "submission_ref": "/tmp/submission.csv",
-                "submission_artifact_path": "/tmp/submission.csv",
-                "summary": "Local submission validation failed.",
-                "latest_submit_attempt": {
-                    "ts": "2026-02-15T00:00:00+00:00",
-                    "ok": False,
-                    "exit_code": 6,
-                    "error_kind": "validation",
-                    "reason": "local_submission_validation_failed",
-                    "action_taken": "abort",
-                    "fingerprint": "abc123",
-                    "sub_path": "/tmp/submission.csv",
-                },
-                "run_state_excerpt": {
-                    "submit_attempted": True,
-                    "submit_ok": False,
-                    "last_reason": "local_submission_validation_failed",
-                    "last_error_kind": "validation",
-                    "last_submission_path": "/tmp/submission.csv",
-                },
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (run_dir / "run_state.json").write_text(
-        json.dumps(
-            {
-                "submit_attempted": True,
-                "submit_ok": False,
-                "last_error_kind": "validation",
-                "last_reason": "local_submission_validation_failed",
-                "last_action": "abort",
-                "last_submit_fingerprint": "abc123",
-                "last_submission_path": "/tmp/submission.csv",
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (run_dir / "submit_attempts.jsonl").write_text(
-        json.dumps(
-            {
-                "ts": "2026-02-15T00:00:00+00:00",
-                "ok": False,
-                "exit_code": 6,
-                "error_kind": "validation",
-                "reason": "local_submission_validation_failed",
-                "action_taken": "abort",
-                "fingerprint": "abc123",
-                "sub_path": "/tmp/submission.csv",
-                "stdout_tail": "",
-                "stderr_tail": "Submission validation failed: prediction column contains NaN",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    context = _build_submit_autofix_context(run_dir)
-
-    assert "submit_failure_context:" in context
-    assert "repair_target: submission_artifact" in context
-    assert "failure_context_latest_submit_attempt:" in context
-    assert "run_state:" in context
-    assert "latest_submit_attempt:" in context
-    assert "last_reason: local_submission_validation_failed" in context
-    assert "error_kind: validation" in context
-    assert "stderr_tail: Submission validation failed:" in context
 
 
 def test_attempt_submit_persists_submit_failure_context_for_validation_abort(monkeypatch, tmp_path: Path) -> None:
