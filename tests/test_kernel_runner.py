@@ -15,13 +15,11 @@ import pytest
 
 from kagglebot.exceptions import KernelCapacityError, KernelFailedError, KernelStillRunningError, KernelTimeoutError
 from kagglebot.kernel_runner import (
-    _append_local_kernel_duration_history,
     _build_local_kernel_progress_tracker,
     _copy_competition_external_assets,
     _copy_kernel_sources,
     _copy_shared_kernel_runtime_modules,
     _ensure_training_progress_shim,
-    _estimate_local_kernel_duration_seconds,
     _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
     _load_dataset_profile_identity,
@@ -2808,21 +2806,6 @@ def test_normalize_local_kernel_metrics_ignores_invalid_or_non_object_metrics(tm
     assert array_payload.read_text(encoding="utf-8") == "[]"
 
 
-def test_local_kernel_duration_history_estimate_uses_recent_median(tmp_path: Path) -> None:
-    for idx, duration in enumerate([100.0, 120.0, 80.0, 110.0], start=1):
-        _append_local_kernel_duration_history(
-            base_dir=tmp_path,
-            slug="demo",
-            run_id="run-a",
-            iteration=idx,
-            duration_sec=duration,
-        )
-
-    estimate, samples = _estimate_local_kernel_duration_seconds(base_dir=tmp_path, slug="demo")
-    assert samples == 4
-    assert estimate == 105.0
-
-
 def test_run_kernel_local_records_duration_history(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -2858,7 +2841,9 @@ def test_run_kernel_local_records_duration_history(tmp_path: Path) -> None:
         timeout_minutes=1,
         strict_accelerator=False,
     )
-    estimate, samples = _estimate_local_kernel_duration_seconds(base_dir=tmp_path, slug="demo")
+    from kagglebot.local_kernel_duration import estimate_local_kernel_duration_seconds
+
+    estimate, samples = estimate_local_kernel_duration_seconds(base_dir=tmp_path, slug="demo")
     assert samples == 1
     assert estimate is not None and estimate > 0.0
 

@@ -21,6 +21,7 @@ from pathlib import Path
 import psutil
 from rich import print
 
+from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot.compute import detect_local_gpu
 from kagglebot.env_utils import parse_float_value, parse_int_value
@@ -93,7 +94,6 @@ _LOCAL_KERNEL_MEMORY_CAP_ENV = "KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB"
 _LOCAL_KERNEL_STALL_ENV = "KAGGLEBOT_LOCAL_KERNEL_STALL_SEC"
 _LOCAL_KERNEL_DEFAULT_STALL_SEC = 900.0
 _LOCAL_KERNEL_MEMORY_CAP_RATIO = 0.80
-_LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 _SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
 _ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
@@ -1642,7 +1642,10 @@ def run_kernel_local(
         )
 
     timeout_sec = None if timeout_minutes is None else max(60, int(timeout_minutes * 60))
-    eta_total_sec, eta_samples = _estimate_local_kernel_duration_seconds(base_dir=base_dir, slug=slug)
+    eta_total_sec, eta_samples = _local_kernel_duration.estimate_local_kernel_duration_seconds(
+        base_dir=base_dir,
+        slug=slug,
+    )
     started_at = time.time()
     monotonic_start = time.monotonic()
     progress_tracker = _build_local_kernel_progress_tracker(
@@ -1801,7 +1804,7 @@ def run_kernel_local(
             if detail:
                 detail = f"\n{detail}"
             raise KernelFailedError(f"Local kernel execution failed with exit code {result.returncode}.{detail}")
-    _append_local_kernel_duration_history(
+    _local_kernel_duration.append_local_kernel_duration_history(
         base_dir=base_dir,
         slug=slug,
         run_id=run_id,
@@ -2661,59 +2664,6 @@ def _detect_local_kernel_stall(
         f"artifacts={artifact_count}, last_artifact={last_artifact_text}, "
         f"pipeline={pipeline}, model={model}."
     )
-
-
-def _local_kernel_history_path(*, base_dir: Path, slug: str) -> Path:
-    return base_dir / slug / "context" / "local_kernel_duration_history.jsonl"
-
-
-def _estimate_local_kernel_duration_seconds(*, base_dir: Path, slug: str) -> tuple[float | None, int]:
-    path = _local_kernel_history_path(base_dir=base_dir, slug=slug)
-    if not path.exists():
-        return None, 0
-    durations: list[float] = []
-    for raw in reversed(path.read_text(encoding="utf-8", errors="ignore").splitlines()):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        value = payload.get("duration_sec")
-        if isinstance(value, (int, float)) and value > 0:
-            durations.append(float(value))
-        if len(durations) >= _LOCAL_KERNEL_DURATION_HISTORY_LIMIT:
-            break
-    if not durations:
-        return None, 0
-    durations_sorted = sorted(durations)
-    mid = len(durations_sorted) // 2
-    if len(durations_sorted) % 2 == 1:
-        median = durations_sorted[mid]
-    else:
-        median = (durations_sorted[mid - 1] + durations_sorted[mid]) / 2.0
-    return median, len(durations_sorted)
-
-
-def _append_local_kernel_duration_history(
-    *,
-    base_dir: Path,
-    slug: str,
-    run_id: str,
-    iteration: int,
-    duration_sec: float,
-) -> None:
-    path = _local_kernel_history_path(base_dir=base_dir, slug=slug)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "run_id": run_id,
-        "iteration": int(iteration),
-        "duration_sec": float(duration_sec),
-        "recorded_at": int(time.time()),
-    }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
 
 def _local_kernel_heartbeat(
