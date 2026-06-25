@@ -175,6 +175,37 @@ def detect_subgroup_collapse_signal(
     }
 
 
+def detect_step_bucket_collapse_signal(
+    payload: dict[str, object] | None,
+) -> dict[str, object]:
+    step_bucket_payload = payload.get("cv_step_buckets") if isinstance(payload, dict) else None
+    step_bucket_scores: list[float] = []
+    if isinstance(step_bucket_payload, dict):
+        for value in step_bucket_payload.values():
+            parsed = _to_float(value)
+            if parsed is not None:
+                step_bucket_scores.append(float(parsed))
+    step_bucket_collapse = False
+    median_bucket: float | None = None
+    worst_bucket: float | None = None
+    if len(step_bucket_scores) >= 4:
+        sorted_scores = sorted(step_bucket_scores)
+        midpoint = len(sorted_scores) // 2
+        if len(sorted_scores) % 2:
+            median_bucket = float(sorted_scores[midpoint])
+        else:
+            median_bucket = float((sorted_scores[midpoint - 1] + sorted_scores[midpoint]) / 2)
+        worst_bucket = float(max(step_bucket_scores))
+        collapse_threshold = max(median_bucket * QUALITY_GUARD_STEP_BUCKET_RATIO, median_bucket + 0.5)
+        step_bucket_collapse = worst_bucket > collapse_threshold
+    return {
+        "count": len(step_bucket_scores),
+        "collapse_detected": step_bucket_collapse,
+        "median_score": median_bucket,
+        "worst_score": worst_bucket,
+    }
+
+
 def iter_payload_mappings(payload: object) -> Iterator[dict[object, object]]:
     if isinstance(payload, dict):
         yield payload

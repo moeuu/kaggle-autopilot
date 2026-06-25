@@ -472,7 +472,6 @@ _QUALITY_GUARD_BASELINE_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_BASELINE_ABS_
 _QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE = _kernel_quality.QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE
 _QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE = _kernel_quality.QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE
 _QUALITY_GUARD_MISMATCH_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_MISMATCH_ABS_MARGIN
-_QUALITY_GUARD_STEP_BUCKET_RATIO = _kernel_quality.QUALITY_GUARD_STEP_BUCKET_RATIO
 _QUALITY_GUARD_SUBGROUP_RATIO = _kernel_quality.QUALITY_GUARD_SUBGROUP_RATIO
 _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_SUBGROUP_ABS_MARGIN
 _QUALITY_GUARD_CODE_REF_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CODE_REF_REL_MARGIN
@@ -4784,25 +4783,13 @@ def _build_kernel_quality_guard(
             if not is_final_iteration and not force_submit:
                 block_submit = True
 
-    step_bucket_payload = payload.get("cv_step_buckets")
-    step_bucket_scores: list[float] = []
-    if isinstance(step_bucket_payload, dict):
-        for value in step_bucket_payload.values():
-            parsed = _to_float(value)
-            if parsed is not None:
-                step_bucket_scores.append(float(parsed))
-    step_bucket_collapse = False
-    if len(step_bucket_scores) >= 4:
-        median_bucket = float(np.median(step_bucket_scores))
-        worst_bucket = float(max(step_bucket_scores))
-        collapse_threshold = max(median_bucket * _QUALITY_GUARD_STEP_BUCKET_RATIO, median_bucket + 0.5)
-        step_bucket_collapse = worst_bucket > collapse_threshold
-        if step_bucket_collapse:
-            warnings.append("cv_step_bucket_collapse_detected")
-            if severe_validation_mismatch:
-                reasons.append("severe_step_bucket_instability")
-                if not is_final_iteration and not force_submit:
-                    block_submit = True
+    step_bucket_signal = _kernel_quality.detect_step_bucket_collapse_signal(payload)
+    if bool(step_bucket_signal.get("collapse_detected")):
+        warnings.append("cv_step_bucket_collapse_detected")
+        if severe_validation_mismatch:
+            reasons.append("severe_step_bucket_instability")
+            if not is_final_iteration and not force_submit:
+                block_submit = True
 
     subgroup_collapse_signal = _detect_subgroup_collapse_signal(
         kernel_metrics_payload=payload,
@@ -4870,8 +4857,8 @@ def _build_kernel_quality_guard(
             "severe_mismatch": severe_validation_mismatch,
         },
         "step_bucket": {
-            "count": len(step_bucket_scores),
-            "collapse_detected": step_bucket_collapse,
+            "count": step_bucket_signal.get("count"),
+            "collapse_detected": step_bucket_signal.get("collapse_detected"),
         },
         "subgroup_collapse": subgroup_collapse_signal,
         "external_label_transfer": external_label_transfer,

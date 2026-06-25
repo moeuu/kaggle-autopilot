@@ -5,6 +5,7 @@ from kagglebot.kernel_quality import (
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
     detect_prediction_distribution_collapse,
+    detect_step_bucket_collapse_signal,
     detect_subgroup_collapse_signal,
     extract_competition_faithfulness,
     extract_cv_breakdown_by_model_node,
@@ -71,6 +72,17 @@ def test_detect_subgroup_collapse_signal_reports_worst_model_node() -> None:
     assert signal["node_type"] == 1
     assert signal["worst_step_bucket"] == "144-155"
     assert "Subgroup collapse detected" in str(signal["note"])
+
+
+def test_detect_step_bucket_collapse_signal_reports_count_and_collapse() -> None:
+    stable = detect_step_bucket_collapse_signal({"cv_step_buckets": {"a": 0.4, "b": 0.41, "c": 0.39, "d": 0.42}})
+    collapsed = detect_step_bucket_collapse_signal({"cv_step_buckets": {"a": 0.4, "b": 0.41, "c": 0.39, "d": 1.6}})
+
+    assert stable["count"] == 4
+    assert stable["collapse_detected"] is False
+    assert collapsed["count"] == 4
+    assert collapsed["collapse_detected"] is True
+    assert collapsed["worst_score"] == 1.6
 
 
 def test_detect_external_test_label_transfer_signal_requires_specific_leak_pattern() -> None:
