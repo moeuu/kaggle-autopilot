@@ -21,6 +21,7 @@ def test_build_previous_submission_history_payload_selects_best_and_latest_for_m
                 "publicScore": "nan",
                 "status": "complete",
                 "date": "2026-05-23 09:24:24",
+                "errorDescription": "Submission Scoring Error: incorrect format",
             },
             {
                 "description": "latest",
@@ -41,10 +42,13 @@ def test_build_previous_submission_history_payload_selects_best_and_latest_for_m
     )
 
     assert payload["best_score"] == pytest.approx(9.600)
-    assert payload["latest_score"] == pytest.approx(10.308)
+    assert payload["latest_score"] is None
     assert payload["scored_count"] == 2
     assert payload["count"] == 3
     assert payload["best"] is not None
+    assert payload["latest"] is not None
+    assert "invalid" in str(payload["latest"])
+    assert "Submission Scoring Error" in str(payload["recent_unscored"])
     assert "best" in str(payload["best"])
 
 
@@ -54,6 +58,14 @@ def test_previous_submission_history_prompt_and_regression_signal() -> None:
         "best_score": 9.600,
         "best": {"description": "best public", "score": 9.600},
         "recent": [{"submitted_at": "2026-05-22T09:24:24+00:00", "score": 10.308}],
+        "recent_unscored": [
+            {
+                "submitted_at": "2026-05-23T09:24:24+00:00",
+                "status": "complete",
+                "description": "invalid",
+                "detail": "Submission Scoring Error: incorrect format",
+            }
+        ],
     }
 
     signal = detect_online_regression_vs_submission_history(
@@ -68,6 +80,8 @@ def test_previous_submission_history_prompt_and_regression_signal() -> None:
     prompt = format_previous_submission_history_for_prompt(history)
     assert "Best historical public score: 9.600000" in prompt
     assert "Do not call a new iteration improved" in prompt
+    assert "Recent unscored submissions" in prompt
+    assert "Submission Scoring Error" in prompt
 
 
 def test_load_previous_submission_history_uses_best_public_score(tmp_path: Path) -> None:

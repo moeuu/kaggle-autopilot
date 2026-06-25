@@ -31,8 +31,10 @@ def build_previous_submission_history_payload(
         submitted_at = str(entry.get("submitted_at") or "")
         return (1 if submitted_at else 0, submitted_at)
 
+    recent_entries = sorted(entries, key=sort_key, reverse=True)
     recent_scored = sorted(scored_entries, key=sort_key, reverse=True)
-    latest_entry = recent_scored[0] if recent_scored else (entries[0] if entries else None)
+    recent_unscored = [entry for entry in recent_entries if tolerant_finite_float(entry.get("score")) is None]
+    latest_entry = recent_entries[0] if recent_entries else None
 
     return {
         "source": source,
@@ -45,6 +47,7 @@ def build_previous_submission_history_payload(
         "latest_score": tolerant_finite_float(latest_entry.get("score")) if latest_entry is not None else None,
         "latest": latest_entry,
         "recent": recent_scored[:10],
+        "recent_unscored": recent_unscored[:10],
     }
 
 
@@ -162,6 +165,22 @@ def format_previous_submission_history_for_prompt(history: dict[str, object] | N
             desc = str(item.get("description") or item.get("label") or "").strip()
             suffix = f" {desc}" if desc else ""
             lines.append(f"  - {submitted}: public={score:.6f}{suffix}")
+    recent_unscored = history.get("recent_unscored")
+    if isinstance(recent_unscored, list) and recent_unscored:
+        lines.append("- Recent unscored submissions:")
+        for item in recent_unscored[:3]:
+            if not isinstance(item, dict):
+                continue
+            submitted = str(item.get("submitted_at") or "unknown_time")
+            status = str(item.get("status") or "unknown")
+            desc = str(item.get("description") or item.get("label") or "").strip()
+            detail = str(item.get("detail") or "").strip()
+            suffix = f" {desc}" if desc else ""
+            detail_suffix = f" ({detail})" if detail else ""
+            lines.append(f"  - {submitted}: status={status}{suffix}{detail_suffix}")
+        lines.append(
+            "- Treat recent unscored leaderboard submissions as possible scoring/format failures before retrying."
+        )
     lines.append(
         "- If the latest public score is worse than the historical best, change the approach instead of "
         "continuing same-family tuning."
@@ -187,6 +206,7 @@ def _empty_submission_history_payload(
         "latest_score": None,
         "latest": None,
         "recent": [],
+        "recent_unscored": [],
         "cache_path": str(history_path),
     }
     if fetch_error is not None:
@@ -218,6 +238,19 @@ def _submission_history_entry(row: dict[str, str]) -> dict[str, object] | None:
         if value and value.strip():
             label = value.strip()
             break
+    detail = None
+    for key in (
+        "errorDescription",
+        "error_description",
+        "failureReason",
+        "statusDescription",
+        "statusMessage",
+        "error",
+    ):
+        value = SubmissionOutcomeService._get_row_value_ci(row, key)
+        if value and value.strip():
+            detail = value.strip()
+            break
 
     entry: dict[str, object] = {
         "score": score,
@@ -229,6 +262,8 @@ def _submission_history_entry(row: dict[str, str]) -> dict[str, object] | None:
         entry["description"] = description
     if label:
         entry["label"] = label
+    if detail:
+        entry["detail"] = detail
     if rank is not None:
         entry["rank"] = rank
     if total_teams is not None:
