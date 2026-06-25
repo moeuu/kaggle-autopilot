@@ -26,6 +26,7 @@ from kagglebot import diagnostics as _diagnostics
 from kagglebot import env_utils as _env_utils
 from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import iteration_signals as _iteration_signals
+from kagglebot import json_utils as _json_utils
 from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
@@ -104,8 +105,6 @@ from kagglebot.hardware import render_hardware_constraints, resolve_hardware_pro
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.iteration_signals import requires_tabular_multi_family_policy as _requires_tabular_multi_family_policy
-from kagglebot.json_utils import load_json_object as _load_json_object
-from kagglebot.json_utils import write_json_object as _write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     leaderboard_rank_for_score,
@@ -461,7 +460,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         dry_run=config.dry_run,
         metric_hint=metric_hint,
     )
-    _write_json_object(config.paths.top1_public_path, top1_info)
+    _json_utils.write_json_object(config.paths.top1_public_path, top1_info)
     print(format_top1_public_score_message(top1_info))
     _watch_state.update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()
@@ -478,7 +477,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             resolved=resolved,
             status="missing_target",
         )
-        _write_json_object(run_dir / "run.json", run_payload)
+        _json_utils.write_json_object(run_dir / "run.json", run_payload)
         return
 
     metric_direction = infer_direction(target_metric, resolved["target_direction"])
@@ -528,7 +527,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         resolved=resolved,
         status="running",
     )
-    _write_json_object(run_dir / "run.json", run_payload)
+    _json_utils.write_json_object(run_dir / "run.json", run_payload)
     _kernel_snapshot.ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
     record_run(
@@ -718,7 +717,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             research_mode=research_scout_mode,
             max_sources=int(config.method_scout_max_sources or 12),
         )
-        source_registry = _load_json_object(config.paths.source_registry_path) or {}
+        source_registry = _json_utils.load_json_object(config.paths.source_registry_path) or {}
         if campaign_mode == "top1":
             campaign_state = update_campaign_state(
                 state_path=campaign_state_file,
@@ -731,7 +730,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submission_history=previous_submission_history,
                 method_registry=method_registry,
             )
-            validation_registry = _load_json_object(config.paths.validation_registry_path) or {}
+            validation_registry = _json_utils.load_json_object(config.paths.validation_registry_path) or {}
             validation_lab_report = run_validation_lab(
                 context_dir=config.paths.context_dir,
                 validation_registry=validation_registry,
@@ -743,10 +742,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 method_registry["active_validation_profile"] = validation_lab_report["registry"].get("active_profile")
         print(f"[cyan]method scout[/cyan]: {config.paths.method_registry_path}")
     elif campaign_mode == "top1":
-        method_registry = _load_json_object(config.paths.method_registry_path) or {}
-        source_registry = _load_json_object(config.paths.source_registry_path) or {}
+        method_registry = _json_utils.load_json_object(config.paths.method_registry_path) or {}
+        source_registry = _json_utils.load_json_object(config.paths.source_registry_path) or {}
     if campaign_mode == "top1":
-        validation_registry_for_contract = _load_json_object(config.paths.validation_registry_path) or {}
+        validation_registry_for_contract = _json_utils.load_json_object(config.paths.validation_registry_path) or {}
         win_contract = build_win_contract(
             context_dir=config.paths.context_dir,
             slug=config.slug,
@@ -840,7 +839,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 if resume_metrics_path != metrics_path:
                     metrics_path.write_bytes(resume_metrics_path.read_bytes())
                 evaluation = resume_evaluation
-                kernel_metrics_payload = _load_json_object(resume_metrics_path)
+                kernel_metrics_payload = _json_utils.load_json_object(resume_metrics_path)
                 kernel_metrics_artifact_path = resume_metrics_path
                 print(
                     "[yellow]resume[/yellow]: "
@@ -895,7 +894,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
-                            kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
+                            kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
                             evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
@@ -1071,7 +1070,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
-                            kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
+                            kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
                             evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
@@ -1292,7 +1291,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
-                            kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
+                            kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
                             evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
@@ -1364,7 +1363,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 run_dir=run_dir, iteration=iteration, payload=report_payload
             )
             evaluation_report_path = iter_dir / "evaluation_report.json"
-            _write_json_object(evaluation_report_path, report_payload)
+            _json_utils.write_json_object(evaluation_report_path, report_payload)
 
             readiness_score = report.readiness_score
             print(
@@ -1616,7 +1615,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     code_reference_score=code_reference_comparison_score,
                     code_reference_source=code_reference_source,
                 )
-                validation_registry = _load_json_object(config.paths.validation_registry_path) or {}
+                validation_registry = _json_utils.load_json_object(config.paths.validation_registry_path) or {}
                 validation_lab_report = run_validation_lab(
                     context_dir=config.paths.context_dir,
                     validation_registry=validation_registry,
@@ -1690,7 +1689,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         iter_dir=iter_dir,
                     )
                     graph_execution_report = graph_execution.to_payload()
-                    experiment_graph = _load_json_object(iter_dir / "experiment_graph.json") or experiment_graph
+                    experiment_graph = (
+                        _json_utils.load_json_object(iter_dir / "experiment_graph.json") or experiment_graph
+                    )
                 private_robustness_report = build_private_robustness_report(
                     context_dir=config.paths.context_dir,
                     registry_path=campaign_registry_file,
@@ -1708,7 +1709,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     submit_policy=top1_submit_policy,
                     direction=metric_direction,
                 )
-                source_registry = _load_json_object(config.paths.source_registry_path) or source_registry
+                source_registry = _json_utils.load_json_object(config.paths.source_registry_path) or source_registry
                 top1_exhaustion_report = build_top1_exhaustion_report(
                     context_dir=config.paths.context_dir,
                     run_id=run_id,
@@ -2003,7 +2004,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "allocator_decision": allocator_decision,
                     "graph_execution_report": graph_execution_report,
                 }
-            _write_json_object(metrics_path, pre_submit_metrics_payload)
+            _json_utils.write_json_object(metrics_path, pre_submit_metrics_payload)
             _autopilot_state._write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
@@ -2045,7 +2046,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                     else:
                         run_payload["status"] = "submit_failed"
-                        _write_json_object(run_dir / "run.json", run_payload)
+                        _json_utils.write_json_object(run_dir / "run.json", run_payload)
                         raise
                 if submission_result:
                     if bool(submission_result.get("skipped")):
@@ -2271,7 +2272,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     code_reference_forced_reproduction=code_reference_forced_reproduction,
                 ),
             )
-            _write_json_object(metrics_path, metrics_payload)
+            _json_utils.write_json_object(metrics_path, metrics_payload)
 
             diff_summary = "Diff tracking disabled (git integration removed)."
             diagnostics = _diagnostics.build_diagnostics(
@@ -2292,7 +2293,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
             competition_policy = load_competition_policy(config.paths)
-            reference_inputs_manifest_payload = _load_json_object(config.paths.reference_inputs_manifest_path)
+            reference_inputs_manifest_payload = _json_utils.load_json_object(
+                config.paths.reference_inputs_manifest_path
+            )
             repair_signals = _iteration_signals.collect_iteration_repair_signals(
                 kernel_metrics_payload=kernel_metrics_payload,
                 diagnostics_text=diagnostics,
@@ -2389,7 +2392,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metrics_payload["repair_signals"] = repair_signal_policy.repair_signals
             metrics_payload["previous_submission_history"] = previous_submission_history
             metrics_payload["next_iteration_policy"] = repair_signal_policy.next_iteration_policy
-            _write_json_object(metrics_path, metrics_payload)
+            _json_utils.write_json_object(metrics_path, metrics_payload)
 
             _iteration_signals.record_iteration_repair_signal_knowledge(
                 knowledge_paths=config.knowledge_paths,
@@ -2416,7 +2419,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
                 metrics_payload["deliverable_mode"] = "writeup"
                 metrics_payload["writeup_bundle"] = writeup_bundle_meta
-                _write_json_object(metrics_path, metrics_payload)
+                _json_utils.write_json_object(metrics_path, metrics_payload)
 
             submit_phase_completion = _iteration_metrics.resolve_iteration_submit_phase_completion(
                 submit_enabled=submit_enabled,
@@ -2597,7 +2600,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
-        _write_json_object(run_dir / "run.json", run_payload)
+        _json_utils.write_json_object(run_dir / "run.json", run_payload)
         print("[yellow]run interrupted[/yellow]")
         return
 
@@ -2647,7 +2650,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             except SubmitAbortedError:
                 run_payload["status"] = "submit_failed"
-                _write_json_object(run_dir / "run.json", run_payload)
+                _json_utils.write_json_object(run_dir / "run.json", run_payload)
                 raise
             if fallback_result:
                 if bool(fallback_result.get("skipped")):
@@ -2728,7 +2731,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         fallback_submit_blocked_reason=fallback_submit_blocked_reason,
     )
 
-    _write_json_object(run_dir / "run.json", run_payload)
+    _json_utils.write_json_object(run_dir / "run.json", run_payload)
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
@@ -3348,7 +3351,7 @@ def _run_improvement(
     history_prompt = _submission_history.format_previous_submission_history_for_prompt(previous_submission_history)
     if history_prompt:
         base_prompt_text += "\n\nPrevious Kaggle Submission Results:\n" + history_prompt + "\n"
-    method_registry_payload = _load_json_object(config.paths.method_registry_path)
+    method_registry_payload = _json_utils.load_json_object(config.paths.method_registry_path)
     method_prompt = (
         render_method_registry_for_prompt(method_registry_payload, max_methods=8)
         if isinstance(method_registry_payload, dict)
@@ -3755,7 +3758,7 @@ def _run_kernel_fix(
         sample_submission=str(config.paths.sample_submission_path),
     )
     subgroup_metrics_path = iter_dir / "output" / "metrics.json"
-    subgroup_payload = _load_json_object(subgroup_metrics_path) if subgroup_metrics_path.exists() else {}
+    subgroup_payload = _json_utils.load_json_object(subgroup_metrics_path) if subgroup_metrics_path.exists() else {}
     subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal(
         kernel_metrics_payload=subgroup_payload if isinstance(subgroup_payload, dict) else None,
         direction="minimize",
@@ -4091,7 +4094,7 @@ def _rerun_kernel_for_metric_recheck(
     for metrics_candidate in metrics_candidates:
         if not metrics_candidate.exists():
             continue
-        candidate_payload = _load_json_object(metrics_candidate)
+        candidate_payload = _json_utils.load_json_object(metrics_candidate)
         if candidate_payload is None:
             continue
         if str(candidate_payload.get("kind") or "").strip().lower() == "submit_only":
@@ -4438,7 +4441,7 @@ def _maybe_regenerate_kernel_sources_once(
         "iteration": int(iteration),
         "run_id": run_id,
     }
-    _write_json_object(marker_path, marker_payload)
+    _json_utils.write_json_object(marker_path, marker_payload)
     print(
         "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
         "regenerating kernel sources once before retry."
