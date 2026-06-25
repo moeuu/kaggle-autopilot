@@ -62,3 +62,38 @@ def write_json_array(
         json.dumps(payload, indent=2, ensure_ascii=ensure_ascii, sort_keys=sort_keys),
         encoding="utf-8",
     )
+
+
+def jsonl_record_text(
+    payload: dict[str, object],
+    *,
+    ensure_ascii: bool = True,
+    sort_keys: bool = False,
+) -> str:
+    return json.dumps(payload, ensure_ascii=ensure_ascii, sort_keys=sort_keys) + "\n"
+
+
+def write_jsonl_records(
+    path: Path,
+    records: list[dict[str, object]],
+    *,
+    ensure_ascii: bool = True,
+    sort_keys: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(jsonl_record_text(record, ensure_ascii=ensure_ascii, sort_keys=sort_keys) for record in records),
+        encoding="utf-8",
+    )
+
+
+def append_jsonl_record(
+    path: Path,
+    payload: dict[str, object],
+    *,
+    ensure_ascii: bool = True,
+    sort_keys: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(jsonl_record_text(payload, ensure_ascii=ensure_ascii, sort_keys=sort_keys))

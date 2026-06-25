@@ -5,12 +5,15 @@ import json
 import pytest
 
 from kagglebot.json_utils import (
+    append_jsonl_record,
+    jsonl_record_text,
     load_json_array,
     load_json_object,
     load_json_object_or_empty,
     read_json_object,
     write_json_array,
     write_json_object,
+    write_jsonl_records,
 )
 
 
@@ -101,3 +104,32 @@ def test_write_json_array_creates_parent_and_writes_indented_json(tmp_path) -> N
     assert path.exists()
     assert json.loads(path.read_text(encoding="utf-8")) == ["z", "あ"]
     assert "\\u3042" in path.read_text(encoding="utf-8")
+
+
+def test_jsonl_record_text_writes_single_line_with_newline() -> None:
+    text = jsonl_record_text({"z": "あ", "a": 1}, ensure_ascii=True, sort_keys=True)
+
+    assert text.endswith("\n")
+    assert json.loads(text) == {"a": 1, "z": "あ"}
+    assert "\\u3042" in text
+
+
+def test_write_jsonl_records_creates_parent_and_overwrites(tmp_path) -> None:
+    path = tmp_path / "nested" / "records.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"old": true}\n', encoding="utf-8")
+
+    write_jsonl_records(path, [{"b": 2}, {"a": 1}], sort_keys=True)
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [{"b": 2}, {"a": 1}]
+
+
+def test_append_jsonl_record_creates_parent_and_appends(tmp_path) -> None:
+    path = tmp_path / "nested" / "records.jsonl"
+
+    append_jsonl_record(path, {"b": 2}, sort_keys=True)
+    append_jsonl_record(path, {"a": 1}, sort_keys=True)
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [{"b": 2}, {"a": 1}]

@@ -10,7 +10,13 @@ from pathlib import Path
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.exec_utils import run_command
-from kagglebot.json_utils import load_json_object, write_json_array, write_json_object
+from kagglebot.json_utils import (
+    append_jsonl_record,
+    load_json_object,
+    write_json_array,
+    write_json_object,
+    write_jsonl_records,
+)
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.scalar_utils import parse_finite_float as _to_float
 from kagglebot.submit_attempts import load_submit_attempt_rows
@@ -88,17 +94,13 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
     config.latest_markdown_path.write_text(markdown, encoding="utf-8")
     config.strategy_context_path.write_text(strategy_context, encoding="utf-8")
     write_json_array(config.experiment_backlog_path, backlog, sort_keys=True)
-    config.outcomes_jsonl_path.write_text(
-        "".join(json.dumps(item, sort_keys=True) + "\n" for item in outcomes),
-        encoding="utf-8",
-    )
+    write_jsonl_records(config.outcomes_jsonl_path, outcomes, sort_keys=True)
     codex_result = _maybe_run_codex_improvement(config=config, report=report)
     if codex_result is not None:
         report["codex_improvement"] = codex_result
         write_json_object(config.latest_json_path, report, sort_keys=True)
         config.latest_markdown_path.write_text(_render_markdown(report), encoding="utf-8")
-    with config.reports_jsonl_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(report, sort_keys=True) + "\n")
+    append_jsonl_record(config.reports_jsonl_path, report, sort_keys=True)
     return {
         "status": "written",
         "report_path": str(config.latest_json_path),
