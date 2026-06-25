@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 from kagglebot.hashing import sha256_file
-from kagglebot.json_utils import append_jsonl_record
+from kagglebot.json_utils import append_jsonl_record, load_jsonl_records
 
 
 def new_run_id() -> str:
@@ -39,19 +38,7 @@ class SubmissionLedger:
         return event in (None, "submit")
 
     def _iter_records(self) -> list[dict[str, object]]:
-        if not self.ledger_path.exists():
-            return []
-        records: list[dict[str, object]] = []
-        for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                records.append(payload)
-        return records
+        return load_jsonl_records(self.ledger_path)
 
     def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
         fingerprint = submission_fingerprint(slug, message, submission_path)

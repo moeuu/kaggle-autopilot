@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kagglebot.json_utils import append_jsonl_record
+from kagglebot.json_utils import append_jsonl_record, load_jsonl_records
 
 
 @dataclass(frozen=True)
@@ -63,23 +62,7 @@ def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso:
 
 def load_submit_attempt_rows(run_dir: Path) -> list[dict[str, object]]:
     attempts_path = run_dir / "submit_attempts.jsonl"
-    if not attempts_path.exists():
-        return []
-    try:
-        lines = attempts_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    rows: list[dict[str, object]] = []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+    return load_jsonl_records(attempts_path)
 
 
 def submit_attempt_sha_seen(*, run_dir: Path, submission_sha: str) -> bool:

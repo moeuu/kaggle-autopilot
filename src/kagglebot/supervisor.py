@@ -25,7 +25,7 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import new_run_id
-from kagglebot.json_utils import append_jsonl_record, load_json_object, write_json_object
+from kagglebot.json_utils import append_jsonl_record, load_json_object, load_jsonl_records, write_json_object
 from kagglebot.kaggle_api import (
     EnteredCompetition,
     competition_total_size_bytes,
@@ -155,19 +155,7 @@ class WatchLedger:
         append_jsonl_record(self.path, record, sort_keys=True)
 
     def records(self) -> list[dict[str, object]]:
-        if not self.path.exists():
-            return []
-        records: list[dict[str, object]] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                records.append(payload)
-        return records
+        return load_jsonl_records(self.path)
 
 
 def _try_acquire_watch_resource_lock(config: WatchConfig, ledger: WatchLedger) -> TextIO | None:
@@ -1170,15 +1158,7 @@ def _load_submission_history(*, config: WatchConfig, slug: str) -> SubmissionHis
     best_rank: int | None = None
     best_total: int | None = None
     best_score: float | None = None
-    for line in ledger_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
+    for record in load_jsonl_records(ledger_path):
         event = record.get("event")
         if event in (None, "submit"):
             submitted = True

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from rich import print
 
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
 from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 
@@ -560,40 +560,29 @@ def _submission_score_summary(
 ) -> dict[str, object]:
     candidates: list[dict[str, object]] = []
     ledger_path = artifacts_dir / slug / "submissions" / "ledger.jsonl"
-    if ledger_path.exists():
-        try:
-            lines = ledger_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            lines = []
-        for index, line in enumerate(lines):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict) or record.get("run_id") != run_id:
-                continue
-            outcome = record.get("outcome")
-            if not isinstance(outcome, dict):
-                continue
-            score = _float_or_none(outcome.get("score"))
-            if score is None:
-                continue
-            candidate = {
-                "score": score,
-                "iteration": _iteration_from_submission_record(record),
-                "timestamp": _submission_timestamp(record, fallback_index=index),
-                "source": "submission_public_score",
-            }
-            candidate.update(_submission_rank_fields(outcome))
-            _refresh_cached_rank_estimate(
-                candidate,
-                artifacts_dir=artifacts_dir,
-                slug=slug,
-                direction=direction,
-            )
-            candidates.append(candidate)
+    for index, record in enumerate(load_jsonl_records(ledger_path)):
+        if record.get("run_id") != run_id:
+            continue
+        outcome = record.get("outcome")
+        if not isinstance(outcome, dict):
+            continue
+        score = _float_or_none(outcome.get("score"))
+        if score is None:
+            continue
+        candidate = {
+            "score": score,
+            "iteration": _iteration_from_submission_record(record),
+            "timestamp": _submission_timestamp(record, fallback_index=index),
+            "source": "submission_public_score",
+        }
+        candidate.update(_submission_rank_fields(outcome))
+        _refresh_cached_rank_estimate(
+            candidate,
+            artifacts_dir=artifacts_dir,
+            slug=slug,
+            direction=direction,
+        )
+        candidates.append(candidate)
 
     for iteration, path in iter_dirs:
         metrics = _read_json_object(path / "metrics.json")

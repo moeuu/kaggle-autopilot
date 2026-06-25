@@ -13,6 +13,7 @@ from kagglebot.exec_utils import run_command
 from kagglebot.json_utils import (
     append_jsonl_record,
     load_json_object,
+    load_jsonl_records,
     write_json_array,
     write_json_object,
     write_jsonl_records,
@@ -901,21 +902,7 @@ def _read_json_object(path: Path) -> dict[str, object]:
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return records
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-    return records
+    return load_jsonl_records(path)
 
 
 def _string_list(value: object) -> list[str]:

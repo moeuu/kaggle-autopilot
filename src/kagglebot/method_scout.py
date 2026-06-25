@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
 from kagglebot.paths import CompetitionPaths
 from kagglebot.scalar_utils import non_nan_float as _to_float
 
@@ -350,18 +349,9 @@ def build_method_scout_queries(
 
 
 def load_research_sources(path: Path, *, limit: int = 12) -> list[dict[str, object]]:
-    if not path.exists():
-        return []
     sources: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            sources.append(payload)
+    for payload in load_jsonl_records(path):
+        sources.append(payload)
         if len(sources) >= max(1, int(limit)):
             break
     return sources

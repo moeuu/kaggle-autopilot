@@ -37,6 +37,24 @@ def load_json_array(path: Path, *, errors: str = "strict") -> list[object] | Non
     return None
 
 
+def load_jsonl_records(path: Path, *, errors: str = "strict") -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors=errors).splitlines()
+    except (OSError, UnicodeDecodeError):
+        return records
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
 def write_json_object(
     path: Path,
     payload: dict[str, object],

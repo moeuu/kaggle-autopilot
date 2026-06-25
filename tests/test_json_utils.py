@@ -10,6 +10,7 @@ from kagglebot.json_utils import (
     load_json_array,
     load_json_object,
     load_json_object_or_empty,
+    load_jsonl_records,
     read_json_object,
     write_json_array,
     write_json_object,
@@ -84,6 +85,34 @@ def test_load_json_array_rejects_missing_invalid_or_non_array_payload(tmp_path) 
     object_payload = tmp_path / "object.json"
     object_payload.write_text('{"ok": true}', encoding="utf-8")
     assert load_json_array(object_payload) is None
+
+
+def test_load_jsonl_records_returns_dict_rows_and_skips_invalid_rows(tmp_path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"ok": true}',
+                "not-json",
+                "[1, 2]",
+                "",
+                '{"value": 3}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_jsonl_records(path) == [{"ok": True}, {"value": 3}]
+
+
+def test_load_jsonl_records_returns_empty_for_missing_or_unreadable_payload(tmp_path) -> None:
+    missing = tmp_path / "missing.jsonl"
+    invalid_encoding = tmp_path / "invalid.jsonl"
+    invalid_encoding.write_bytes(b'{"ok": true}\xff\n')
+
+    assert load_jsonl_records(missing) == []
+    assert load_jsonl_records(invalid_encoding) == []
+    assert load_jsonl_records(invalid_encoding, errors="ignore") == [{"ok": True}]
 
 
 def test_write_json_object_creates_parent_and_writes_indented_json(tmp_path) -> None:
