@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.hashing import sha256_file
 from kagglebot.json_utils import append_jsonl_record, load_jsonl_records
 
@@ -39,6 +40,10 @@ class SubmissionLedger:
 
     def _iter_records(self) -> list[dict[str, object]]:
         return load_jsonl_records(self.ledger_path)
+
+    @staticmethod
+    def _record_timestamp(record: dict[str, object]) -> datetime | None:
+        return parse_iso_datetime_utc(record.get("ts"))
 
     def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
         fingerprint = submission_fingerprint(slug, message, submission_path)
@@ -127,15 +132,9 @@ class SubmissionLedger:
         for rec in self._iter_records():
             if not self._is_submit_event(rec):
                 continue
-            ts_str = rec.get("ts")
-            if not ts_str:
+            ts = self._record_timestamp(rec)
+            if ts is None:
                 continue
-            try:
-                ts = datetime.fromisoformat(ts_str)
-            except ValueError:
-                continue
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=UTC)
             if last_ts is None or ts > last_ts:
                 last_ts = ts
         return last_ts
@@ -147,15 +146,9 @@ class SubmissionLedger:
         for rec in self._iter_records():
             if not self._is_submit_event(rec):
                 continue
-            ts_str = rec.get("ts")
-            if not ts_str:
+            ts = self._record_timestamp(rec)
+            if ts is None:
                 continue
-            try:
-                ts = datetime.fromisoformat(ts_str)
-            except ValueError:
-                continue
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=UTC)
             if ts >= cutoff:
                 count += 1
         return count

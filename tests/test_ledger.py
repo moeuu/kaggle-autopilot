@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -34,6 +35,23 @@ def test_submission_ledger_ignores_malformed_lines(tmp_path):
     assert ledger.is_duplicate(slug="demo", message="first", submission_path=submission) is False
     assert ledger.last_submission_time() is None
     assert ledger.recent_submission_count(hours=24) == 0
+
+
+def test_submission_ledger_parses_timestamps_with_utc_normalization(tmp_path):
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
+    ledger.ledger_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "submit", "ts": "not-a-date"}),
+                json.dumps({"event": "submit", "ts": "2026-06-25T21:00:00+09:00"}),
+                json.dumps({"event": "outcome", "ts": "2026-06-26T00:00:00Z"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert ledger.last_submission_time() == datetime(2026, 6, 25, 12, tzinfo=UTC)
 
 
 def test_submission_ledger_records_offline_metadata_and_outcome(tmp_path):
