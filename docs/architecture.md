@@ -259,8 +259,8 @@ The next high-value modernization work is:
    renderer directly. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
-   Submit-retry artifact and best-submission resume paths now call `autopilot_state.py` directly. Submit autofix
-   context formatting, stale repaired-artifact decisions, autofix artifact resolution,
+   Iteration resume, submit-retry artifact resume, and best-submission resume paths now call `autopilot_state.py`
+   directly. Submit autofix context formatting, stale repaired-artifact decisions, autofix artifact resolution,
    submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
    directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback
    decisions now call `submit_notebook.py` directly.

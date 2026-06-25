@@ -779,13 +779,15 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         run_dir=config.paths.run_dir(run_id),
         max_iterations=max_iterations,
     )
-    start_iteration, best_score, best_submission = _resume_iteration_state(
+    start_iteration, best_score, best_submission = _state_resume_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
         require_submit_phase=submit_enabled and not config.dry_run,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
     )
     best_submitted_score = _state_resume_best_submitted_offline_score(
         paths=config.paths,
@@ -5922,27 +5924,6 @@ def _maybe_apply_lightweight_runtime_fix(
         )
         return artifact_name
     return None
-
-
-def _resume_iteration_state(
-    *,
-    paths: CompetitionPaths,
-    run_id: str,
-    metric_direction: str,
-    target_metric: str,
-    max_iterations: int,
-    require_submit_phase: bool = False,
-) -> tuple[int, float | None, Path | None]:
-    return _state_resume_iteration_state(
-        paths=paths,
-        run_id=run_id,
-        metric_direction=metric_direction,
-        target_metric=target_metric,
-        max_iterations=max_iterations,
-        require_submit_phase=require_submit_phase,
-        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
-        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
-    )
 
 
 def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:

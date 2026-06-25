@@ -37,7 +37,6 @@ from kagglebot.autopilot import (
     _load_run_state,
     _resolve_iteration_submission_artifact,
     _resolve_plan,
-    _resume_iteration_state,
     _run_autofix,
     _run_kernel_fix,
     _should_skip_planning,
@@ -45,7 +44,7 @@ from kagglebot.autopilot import (
     _write_iteration_state_marker,
     run_autopilot,
 )
-from kagglebot.autopilot_state import _load_submit_retry_artifacts
+from kagglebot.autopilot_state import _load_submit_retry_artifacts, _resume_iteration_state
 from kagglebot.competition_rules import load_competition_rule_constraints
 from kagglebot.eval import EvaluationReport
 from kagglebot.exceptions import (
@@ -75,7 +74,11 @@ from kagglebot.submission_policy import (
     should_force_initial_submit,
 )
 from kagglebot.submit_failure_context import load_submit_failure_context
-from kagglebot.submit_stage import resolve_submission_message, resolve_submission_rank_payload
+from kagglebot.submit_stage import (
+    infer_iteration_from_submission_path,
+    resolve_submission_message,
+    resolve_submission_rank_payload,
+)
 from kagglebot.types import PlanConfig
 
 pytestmark = pytest.mark.slow
@@ -7322,7 +7325,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_is_outlier(monkeypa
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
-        "kagglebot.autopilot._resume_iteration_state",
+        "kagglebot.autopilot._state_resume_iteration_state",
         lambda **kwargs: (1, 0.999511, None),  # stale outlier best
     )
 
@@ -7683,7 +7686,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_anchor_is_outlier(m
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
-        "kagglebot.autopilot._resume_iteration_state",
+        "kagglebot.autopilot._state_resume_iteration_state",
         lambda **kwargs: (1, 0.999511, None),  # noqa: ARG005
     )
 
@@ -7770,6 +7773,8 @@ def test_resume_iteration_state_does_not_complete_with_submission_only(tmp_path:
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=False,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start == 1
@@ -7793,6 +7798,8 @@ def test_resume_iteration_state_accepts_zip_submission_artifact(tmp_path: Path) 
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=False,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start == 2
@@ -8106,6 +8113,8 @@ def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: 
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
     assert start_before == 1
 
@@ -8131,6 +8140,8 @@ def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: 
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start_after == 2
@@ -8168,6 +8179,8 @@ def test_resume_iteration_state_accepts_legacy_duplicate_skip(tmp_path: Path) ->
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start == 2
@@ -8203,6 +8216,8 @@ def test_resume_iteration_state_uses_iteration_marker_for_submit_phase(tmp_path:
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start == 2
@@ -8240,6 +8255,8 @@ def test_resume_iteration_state_requires_submit_when_gate_allows(tmp_path: Path)
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start == 1
@@ -8277,6 +8294,8 @@ def test_resume_iteration_state_accepts_duplicate_submission_skip_marker(tmp_pat
         target_metric="rmse",
         max_iterations=3,
         require_submit_phase=True,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
     )
 
     assert start == 2
