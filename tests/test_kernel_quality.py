@@ -4,6 +4,7 @@ from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_baseline_quality_signal,
     build_code_reference_quality_signal,
+    build_oracle_override_signal,
     build_score_source_quality_signal,
     build_validation_metric_alignment,
     detect_candidate_selection_mismatch,
@@ -60,6 +61,46 @@ def test_build_score_source_quality_signal_allows_trusted_sources() -> None:
     assert signal == {
         "normalized_score_source": "cv",
         "trusted": True,
+        "reasons": [],
+        "warnings": [],
+    }
+
+
+def test_build_oracle_override_signal_flags_applied_or_enabled_mode() -> None:
+    applied = build_oracle_override_signal({"oracle": {"mode_setting": "off", "applied": True}})
+    enabled = build_oracle_override_signal({"oracle": {"mode_setting": "auto", "applied": False}})
+
+    assert applied == {
+        "detected": True,
+        "mode": "off",
+        "applied": True,
+        "reasons": ["oracle_override_detected"],
+        "warnings": ["oracle_mode=off"],
+    }
+    assert enabled == {
+        "detected": True,
+        "mode": "auto",
+        "applied": False,
+        "reasons": ["oracle_override_detected"],
+        "warnings": ["oracle_mode=auto"],
+    }
+
+
+def test_build_oracle_override_signal_allows_missing_or_off_payload() -> None:
+    missing = build_oracle_override_signal({})
+    disabled = build_oracle_override_signal({"oracle": {"mode_setting": "off", "applied": False}})
+
+    assert missing == {
+        "detected": False,
+        "mode": None,
+        "applied": False,
+        "reasons": [],
+        "warnings": [],
+    }
+    assert disabled == {
+        "detected": False,
+        "mode": "off",
+        "applied": False,
         "reasons": [],
         "warnings": [],
     }

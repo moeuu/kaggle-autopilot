@@ -311,6 +311,7 @@ _max_nested_int = _kernel_quality.max_nested_int
 _min_nested_int = _kernel_quality.min_nested_int
 _any_nested_bool = _kernel_quality.any_nested_bool
 _nested_text = _kernel_quality.nested_text
+_build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
 _build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
 _detect_external_test_label_transfer_signal = _kernel_quality.detect_external_test_label_transfer_signal
 _pipeline_name_from_payload = _kernel_quality.pipeline_name_from_payload
@@ -4670,15 +4671,16 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
-    oracle_payload = payload.get("oracle")
-    if isinstance(oracle_payload, dict):
-        oracle_mode = str(oracle_payload.get("mode_setting") or "").strip().lower()
-        oracle_applied = bool(oracle_payload.get("applied"))
-        if oracle_applied or (oracle_mode and oracle_mode != "off"):
-            reasons.append("oracle_override_detected")
-            warnings.append(f"oracle_mode={oracle_mode or 'unknown'}")
-            if not force_submit:
-                block_submit = True
+    oracle_signal = _build_oracle_override_signal(payload)
+    for reason in oracle_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in oracle_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    if bool(oracle_signal.get("detected")):
+        if not force_submit:
+            block_submit = True
 
     external_label_transfer = _detect_external_test_label_transfer_signal(payload)
     if external_label_transfer is not None:
@@ -4806,6 +4808,7 @@ def _build_kernel_quality_guard(
         "reasons": reasons,
         "warnings": warnings,
         "score_source": score_source_signal,
+        "oracle": oracle_signal,
         "competition_faithfulness": competition_faithfulness,
         "baseline": baseline_signal,
         "metric_alignment": metric_alignment,

@@ -84,6 +84,29 @@ def build_score_source_quality_signal(score_source: str | None) -> dict[str, obj
     }
 
 
+def build_oracle_override_signal(payload: dict[str, object] | None) -> dict[str, object]:
+    oracle_payload = payload.get("oracle") if isinstance(payload, dict) else None
+    mode: str | None = None
+    applied = False
+    if isinstance(oracle_payload, dict):
+        raw_mode = str(oracle_payload.get("mode_setting") or "").strip().lower()
+        mode = raw_mode or None
+        applied = bool(oracle_payload.get("applied"))
+    detected = bool(applied or (mode and mode != "off"))
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if detected:
+        reasons.append("oracle_override_detected")
+        warnings.append(f"oracle_mode={mode or 'unknown'}")
+    return {
+        "detected": detected,
+        "mode": mode,
+        "applied": applied,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
 def extract_cv_breakdown_by_model_node(payload: dict[str, object] | None) -> dict[tuple[int, int], float]:
     if not isinstance(payload, dict):
         return {}
