@@ -12,7 +12,7 @@ from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.exec_utils import run_command
 from kagglebot.json_utils import (
     append_jsonl_record,
-    load_json_object,
+    load_json_object_or_empty,
     load_jsonl_records,
     write_json_array,
     write_json_object,
@@ -892,7 +892,7 @@ def _latest_text(run_dir: Path, name: str, *, max_chars: int) -> str:
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
-    return load_json_object(path) or {}
+    return load_json_object_or_empty(path)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:

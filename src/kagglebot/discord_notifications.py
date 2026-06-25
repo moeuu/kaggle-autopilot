@@ -14,7 +14,7 @@ from uuid import uuid4
 from rich import print
 
 from kagglebot.datetime_utils import parse_iso_datetime_utc
-from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
+from kagglebot.json_utils import load_json_object_or_empty, load_jsonl_records, write_json_object
 from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 
@@ -816,7 +816,7 @@ def _nested_number(payload: dict[str, object], outer: str, inner: str) -> float 
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
-    return load_json_object(path) or {}
+    return load_json_object_or_empty(path)
 
 
 def _parse_datetime(value: object) -> datetime | None:
