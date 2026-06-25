@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from kagglebot.campaign import CampaignCandidate, SubmissionAllocation
+from kagglebot.json_utils import write_json_object
 from kagglebot.scalar_utils import non_nan_float as _to_float
 from kagglebot.scalar_utils import optional_str as _optional_str
 
@@ -197,9 +198,8 @@ def build_experiment_graph(
     }
     context_dir.mkdir(parents=True, exist_ok=True)
     iter_dir.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(payload, indent=2, ensure_ascii=True)
-    experiment_graph_path(context_dir).write_text(serialized, encoding="utf-8")
-    (iter_dir / EXPERIMENT_GRAPH_FILENAME).write_text(serialized, encoding="utf-8")
+    write_json_object(experiment_graph_path(context_dir), payload)
+    write_json_object(iter_dir / EXPERIMENT_GRAPH_FILENAME, payload)
     return payload
 
 
@@ -221,10 +221,7 @@ def write_allocator_decision(
         "experiment_graph_path": str(iter_dir / EXPERIMENT_GRAPH_FILENAME) if experiment_graph is not None else None,
     }
     iter_dir.mkdir(parents=True, exist_ok=True)
-    (iter_dir / ALLOCATOR_DECISION_FILENAME).write_text(
-        json.dumps(payload, indent=2, ensure_ascii=True),
-        encoding="utf-8",
-    )
+    write_json_object(iter_dir / ALLOCATOR_DECISION_FILENAME, payload)
     return payload
 
 

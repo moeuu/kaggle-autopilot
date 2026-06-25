@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.json_utils import write_json_object
 from kagglebot.paths import KnowledgePaths
 
 _DEFAULT_TAXONOMY: dict[str, object] = {
@@ -57,7 +58,7 @@ class TaxonomyRepository:
     def ensure(self) -> dict[str, object]:
         self.paths.knowledge_dir.mkdir(parents=True, exist_ok=True)
         if not self.paths.taxonomy_path.exists():
-            self.paths.taxonomy_path.write_text(json.dumps(_DEFAULT_TAXONOMY, indent=2), encoding="utf-8")
+            write_json_object(self.paths.taxonomy_path, _DEFAULT_TAXONOMY)
         return self.load(self.paths.taxonomy_path)
 
     @staticmethod
