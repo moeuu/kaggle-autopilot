@@ -84,13 +84,19 @@ from kagglebot.campaign import (
     upsert_candidate,
 )
 from kagglebot.competition_policy import load_competition_policy
+from kagglebot.context_artifacts import (
+    count_csv_data_rows_capped as _count_csv_data_rows_capped,
+)
+from kagglebot.context_artifacts import (
+    load_dataset_profile as _context_load_dataset_profile,
+)
+from kagglebot.context_artifacts import (
+    load_evaluation_spec as _context_load_evaluation_spec,
+)
 from kagglebot.env_utils import env_flag as _env_flag
 from kagglebot.env_utils import env_int as _env_int
 from kagglebot.env_utils import env_truthy as _env_truthy
-from kagglebot.eval import (
-    EvaluationReport,
-    validate_evaluation_spec,
-)
+from kagglebot.eval import EvaluationReport
 from kagglebot.exceptions import (
     DuplicateSubmissionError,
     KaggleCliError,
@@ -3237,19 +3243,6 @@ def _decide_notebook_submit_artifact_mode_for_submission(
     )
 
 
-def _count_csv_data_rows_capped(path: Path, *, cap: int = 10) -> int | None:
-    data_rows = 0
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
-            for index, _line in enumerate(handle):
-                if index > cap:
-                    return cap + 1
-                data_rows = index
-    except OSError:
-        return None
-    return data_rows
-
-
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
     def choose(value, fallback, default):
         if value is not None:
@@ -3649,26 +3642,13 @@ def _build_run_payload(
 
 
 def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
-    payload = _load_json_object(paths.dataset_profile_path)
-    if payload is None:
-        return {}
-    return _plan_policy.apply_competition_eval_override(slug=paths.slug, payload=payload)
+    return _context_load_dataset_profile(slug=paths.slug, dataset_profile_path=paths.dataset_profile_path)
 
 
 def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
-    spec_path = paths.context_dir / "evaluation_spec.json"
-    payload = _load_json_object(spec_path)
-    if payload is None:
-        return {}
-    spec, issues = validate_evaluation_spec(payload)
-    if issues:
-        issue_text = "; ".join(issues)
-        print(f"[yellow]evaluation spec ignored[/yellow]: {issue_text}")
-        return _plan_policy.apply_competition_eval_override(slug=paths.slug, payload={}, include_spec_keys=True)
-    return _plan_policy.apply_competition_eval_override(
+    return _context_load_evaluation_spec(
         slug=paths.slug,
-        payload=spec or {},
-        include_spec_keys=True,
+        evaluation_spec_path=paths.context_dir / "evaluation_spec.json",
     )
 
 
