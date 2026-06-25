@@ -66,24 +66,6 @@ from kagglebot.autopilot_state import (
     _resolve_iteration_artifact,
     _save_run_state,
 )
-from kagglebot.autopilot_state import (
-    _build_run_payload as _state_build_run_payload,
-)
-from kagglebot.autopilot_state import (
-    _build_run_summary_payload as _state_build_run_summary_payload,
-)
-from kagglebot.autopilot_state import (
-    _load_submit_retry_artifacts as _state_load_submit_retry_artifacts,
-)
-from kagglebot.autopilot_state import (
-    _resume_best_submittable_iteration_state as _state_resume_best_submittable_iteration_state,
-)
-from kagglebot.autopilot_state import (
-    _resume_best_submitted_offline_score as _state_resume_best_submitted_offline_score,
-)
-from kagglebot.autopilot_state import (
-    _resume_iteration_state as _state_resume_iteration_state,
-)
 from kagglebot.campaign import (
     TOP1_TARGET_RANK_PERCENTILE,
     allocate_submission,
@@ -568,7 +550,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     target_metric = resolved["target_metric"]
     target_score = resolved["target_score"]
     if target_metric is None or target_score is None:
-        run_payload = _state_build_run_payload(
+        run_payload = _autopilot_state._build_run_payload(
             run_id=run_id,
             config=config,
             resolved=resolved,
@@ -618,7 +600,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
     _watch_state.update_watch_phase(config, run_id, "initializing_iterations")
-    run_payload = _state_build_run_payload(
+    run_payload = _autopilot_state._build_run_payload(
         run_id=run_id,
         config=config,
         resolved=resolved,
@@ -728,7 +710,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         run_dir=config.paths.run_dir(run_id),
         max_iterations=max_iterations,
     )
-    start_iteration, best_score, best_submission = _state_resume_iteration_state(
+    start_iteration, best_score, best_submission = _autopilot_state._resume_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
@@ -738,7 +720,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
         infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
     )
-    best_submitted_score = _state_resume_best_submitted_offline_score(
+    best_submitted_score = _autopilot_state._resume_best_submitted_offline_score(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
@@ -862,7 +844,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     if resumed_best_readiness is not None and best_score is None:
         best_score = resumed_best_readiness
-    best_submittable_score, best_submittable_submission = _state_resume_best_submittable_iteration_state(
+    best_submittable_score, best_submittable_submission = _autopilot_state._resume_best_submittable_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
@@ -916,7 +898,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
-            submit_retry_resume = _state_load_submit_retry_artifacts(
+            submit_retry_resume = _autopilot_state._load_submit_retry_artifacts(
                 run_dir=run_dir,
                 iter_dir=iter_dir,
                 iteration=iteration,
@@ -2817,7 +2799,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         writeup_bundle_meta=writeup_bundle_meta,
     )
 
-    run_payload["summary"] = _state_build_run_summary_payload(
+    run_payload["summary"] = _autopilot_state._build_run_summary_payload(
         best_score=best_score,
         best_submission=best_submission,
         best_submittable_score=best_submittable_score,

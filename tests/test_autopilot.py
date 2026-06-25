@@ -7203,7 +7203,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_is_outlier(monkeypa
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
-        "kagglebot.autopilot._state_resume_iteration_state",
+        "kagglebot.autopilot_state._resume_iteration_state",
         lambda **kwargs: (1, 0.999511, None),  # stale outlier best
     )
 
@@ -7564,7 +7564,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_anchor_is_outlier(m
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
-        "kagglebot.autopilot._state_resume_iteration_state",
+        "kagglebot.autopilot_state._resume_iteration_state",
         lambda **kwargs: (1, 0.999511, None),  # noqa: ARG005
     )
 
