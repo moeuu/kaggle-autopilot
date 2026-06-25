@@ -223,7 +223,8 @@ Recommended extraction order:
 
 1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization/override,
    metric/direction override policy, plan score-source normalization, evaluation-spec value extraction, local-GPU
-   evaluation budget/max-iteration policy, and competition-specific overrides are already out of the main loop.
+   evaluation budget/max-iteration policy, submit/runtime constraint application, and competition-specific overrides are
+   already out of the main loop.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
    submit-policy and submission-gate resolution now also lives there.

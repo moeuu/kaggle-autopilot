@@ -3489,12 +3489,15 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         print(message)
     constraints = _competition_rules.load_competition_rule_constraints(config.paths)
     code_competition = infer_code_competition_from_paths(config.paths)
-    if code_competition and submit_mode != "notebook":
-        print("[yellow]note[/yellow]: code competition detected; forcing submit_mode=notebook.")
-        submit_mode = "notebook"
-    if constraints.notebook_submissions_only and submit_mode != "notebook":
-        print("[yellow]note[/yellow]: competition requires notebook-based submissions; forcing submit_mode=notebook.")
-        submit_mode = "notebook"
+    submit_mode_decision = _plan_policy.resolve_submit_mode_constraints(
+        submit_mode=submit_mode,
+        compute=config.compute,
+        code_competition=code_competition,
+        notebook_submissions_only=constraints.notebook_submissions_only,
+    )
+    submit_mode = submit_mode_decision.submit_mode
+    for message in submit_mode_decision.messages:
+        print(message)
     notebook_submit_artifact_mode = _resolve_notebook_submit_artifact_mode(
         paths=config.paths,
         submit_mode=submit_mode,
@@ -3502,35 +3505,24 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
     internet = choose(config.internet, plan.internet, "on")
-    if internet in (None, "auto"):
-        internet = "on"
-    if submit_mode == "notebook" and not str(config.compute).startswith("kaggle_"):
-        print(
-            "[yellow]note[/yellow]: notebook-based submission is selected; "
-            "autopilot will auto-switch submit mode to notebook submit."
-        )
-    if constraints.internet_must_be_off and str(internet).strip().lower() != "off":
-        print("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.")
-        internet = "off"
+    internet_decision = _plan_policy.resolve_internet_policy(
+        internet=internet,
+        internet_must_be_off=constraints.internet_must_be_off,
+    )
+    internet = internet_decision.internet
+    for message in internet_decision.messages:
+        print(message)
     runtime_limit_min = _competition_rules.runtime_limit_for_compute(constraints=constraints, compute=config.compute)
-    if runtime_limit_min is not None:
-        current_limit = int(time_budget_min) if isinstance(time_budget_min, (int, float)) else None
-        if current_limit is None or current_limit > runtime_limit_min:
-            print(
-                "[yellow]note[/yellow]: rules impose notebook runtime cap; "
-                f"forcing time_budget_min={runtime_limit_min}."
-            )
-            time_budget_min = runtime_limit_min
-    if _is_local_gpu_compute(config.compute):
-        local_budget_min = _local_gpu_time_budget_limit_min()
-        current_limit = int(time_budget_min) if isinstance(time_budget_min, (int, float)) else None
-        if local_budget_min is not None and (current_limit is None or current_limit > local_budget_min):
-            print(
-                "[yellow]note[/yellow]: local_gpu per-kernel budget limit active; "
-                f"forcing time_budget_min={local_budget_min}. "
-                "Unset KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN or set it to 0 for unlimited local runtime."
-            )
-            time_budget_min = local_budget_min
+    is_local_gpu_compute = _is_local_gpu_compute(config.compute)
+    time_budget_decision = _plan_policy.resolve_time_budget_policy(
+        time_budget_min=time_budget_min,
+        runtime_limit_min=runtime_limit_min,
+        local_budget_min=_local_gpu_time_budget_limit_min() if is_local_gpu_compute else None,
+        is_local_gpu=is_local_gpu_compute,
+    )
+    time_budget_min = time_budget_decision.time_budget_min
+    for message in time_budget_decision.messages:
+        print(message)
     max_iterations_decision = _plan_policy.resolve_plan_max_iterations(
         config_max_iterations=config.max_iterations,
         plan_max_iterations=plan.max_iterations,

@@ -93,6 +93,24 @@ class MaxIterationsDecision:
     messages: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SubmitModeDecision:
+    submit_mode: str
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class InternetDecision:
+    internet: object
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TimeBudgetDecision:
+    time_budget_min: object
+    messages: tuple[str, ...] = ()
+
+
 def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:
     """Extract typed values from the persisted evaluation spec contract."""
 
@@ -373,6 +391,78 @@ def resolve_heavy_local_gpu_max_iterations(
             ),
         )
     return MaxIterationsDecision(max_iterations=max_iterations)
+
+
+def resolve_submit_mode_constraints(
+    *,
+    submit_mode: str,
+    compute: object,
+    code_competition: bool,
+    notebook_submissions_only: bool,
+) -> SubmitModeDecision:
+    """Apply notebook/code competition submit-mode constraints."""
+
+    resolved = str(submit_mode or "file")
+    messages: list[str] = []
+    if code_competition and resolved != "notebook":
+        messages.append("[yellow]note[/yellow]: code competition detected; forcing submit_mode=notebook.")
+        resolved = "notebook"
+    if notebook_submissions_only and resolved != "notebook":
+        messages.append(
+            "[yellow]note[/yellow]: competition requires notebook-based submissions; forcing submit_mode=notebook."
+        )
+        resolved = "notebook"
+    if resolved == "notebook" and not str(compute).startswith("kaggle_"):
+        messages.append(
+            "[yellow]note[/yellow]: notebook-based submission is selected; "
+            "autopilot will auto-switch submit mode to notebook submit."
+        )
+    return SubmitModeDecision(submit_mode=resolved, messages=tuple(messages))
+
+
+def resolve_internet_policy(*, internet: object, internet_must_be_off: bool) -> InternetDecision:
+    """Normalize internet mode and apply competition internet constraints."""
+
+    resolved = internet
+    if resolved in (None, "auto"):
+        resolved = "on"
+    if internet_must_be_off and str(resolved).strip().lower() != "off":
+        return InternetDecision(
+            internet="off",
+            messages=("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.",),
+        )
+    return InternetDecision(internet=resolved)
+
+
+def resolve_time_budget_policy(
+    *,
+    time_budget_min: object,
+    runtime_limit_min: int | None,
+    local_budget_min: int | None,
+    is_local_gpu: bool,
+) -> TimeBudgetDecision:
+    """Apply rules and local runtime caps to the requested time budget."""
+
+    resolved = time_budget_min
+    messages: list[str] = []
+    if runtime_limit_min is not None:
+        current_limit = int(resolved) if isinstance(resolved, (int, float)) else None
+        if current_limit is None or current_limit > runtime_limit_min:
+            messages.append(
+                "[yellow]note[/yellow]: rules impose notebook runtime cap; "
+                f"forcing time_budget_min={runtime_limit_min}."
+            )
+            resolved = runtime_limit_min
+    if is_local_gpu:
+        current_limit = int(resolved) if isinstance(resolved, (int, float)) else None
+        if local_budget_min is not None and (current_limit is None or current_limit > local_budget_min):
+            messages.append(
+                "[yellow]note[/yellow]: local_gpu per-kernel budget limit active; "
+                f"forcing time_budget_min={local_budget_min}. "
+                "Unset KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN or set it to 0 for unlimited local runtime."
+            )
+            resolved = local_budget_min
+    return TimeBudgetDecision(time_budget_min=resolved, messages=tuple(messages))
 
 
 def normalize_split_strategy_name(value: object) -> str | None:

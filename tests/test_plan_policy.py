@@ -27,12 +27,15 @@ from kagglebot.plan_policy import (
     resolve_deliverable_mode,
     resolve_eval_budget_policy,
     resolve_heavy_local_gpu_max_iterations,
+    resolve_internet_policy,
     resolve_plan_max_iterations,
     resolve_plan_score_source,
     resolve_split_strategy_from_artifacts,
     resolve_split_strategy_override,
     resolve_submit_mode,
+    resolve_submit_mode_constraints,
     resolve_target_metric_direction,
+    resolve_time_budget_policy,
     upgrade_improvement_mode,
 )
 
@@ -307,6 +310,75 @@ def test_resolve_heavy_local_gpu_max_iterations_caps_long_runs() -> None:
     )
     assert uncapped.max_iterations == 5
     assert uncapped.messages == ()
+
+
+def test_resolve_submit_mode_constraints_forces_notebook_modes() -> None:
+    code_decision = resolve_submit_mode_constraints(
+        submit_mode="file",
+        compute="local_gpu",
+        code_competition=True,
+        notebook_submissions_only=False,
+    )
+    notebook_only_decision = resolve_submit_mode_constraints(
+        submit_mode="file",
+        compute="kaggle_gpu",
+        code_competition=False,
+        notebook_submissions_only=True,
+    )
+
+    assert code_decision.submit_mode == "notebook"
+    assert code_decision.messages == (
+        "[yellow]note[/yellow]: code competition detected; forcing submit_mode=notebook.",
+        "[yellow]note[/yellow]: notebook-based submission is selected; "
+        "autopilot will auto-switch submit mode to notebook submit.",
+    )
+    assert notebook_only_decision.submit_mode == "notebook"
+    assert notebook_only_decision.messages == (
+        "[yellow]note[/yellow]: competition requires notebook-based submissions; forcing submit_mode=notebook.",
+    )
+
+
+def test_resolve_internet_policy_defaults_auto_and_enforces_rules() -> None:
+    assert resolve_internet_policy(internet=None, internet_must_be_off=False).internet == "on"
+    assert resolve_internet_policy(internet="auto", internet_must_be_off=False).internet == "on"
+    decision = resolve_internet_policy(internet="on", internet_must_be_off=True)
+
+    assert decision.internet == "off"
+    assert decision.messages == ("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.",)
+
+
+def test_resolve_time_budget_policy_applies_rule_and_local_caps() -> None:
+    rule_capped = resolve_time_budget_policy(
+        time_budget_min=999,
+        runtime_limit_min=300,
+        local_budget_min=None,
+        is_local_gpu=False,
+    )
+    local_capped = resolve_time_budget_policy(
+        time_budget_min=None,
+        runtime_limit_min=None,
+        local_budget_min=120,
+        is_local_gpu=True,
+    )
+    lower_existing = resolve_time_budget_policy(
+        time_budget_min=60,
+        runtime_limit_min=300,
+        local_budget_min=120,
+        is_local_gpu=True,
+    )
+
+    assert rule_capped.time_budget_min == 300
+    assert rule_capped.messages == (
+        "[yellow]note[/yellow]: rules impose notebook runtime cap; forcing time_budget_min=300.",
+    )
+    assert local_capped.time_budget_min == 120
+    assert local_capped.messages == (
+        "[yellow]note[/yellow]: local_gpu per-kernel budget limit active; "
+        "forcing time_budget_min=120. "
+        "Unset KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN or set it to 0 for unlimited local runtime.",
+    )
+    assert lower_existing.time_budget_min == 60
+    assert lower_existing.messages == ()
 
 
 def test_infer_split_strategy_from_hint_text_handles_natural_language() -> None:
