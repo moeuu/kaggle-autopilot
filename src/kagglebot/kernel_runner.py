@@ -44,6 +44,8 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
+from kagglebot.kernel_outputs import find_output_file as _find_output_file
+from kagglebot.kernel_outputs import find_submission_file
 from kagglebot.kernel_progress import (
     extract_catboost_fallback_reason_from_line,
     extract_pipeline_done_from_line,
@@ -57,7 +59,6 @@ from kagglebot.kernel_progress import (
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config, pipeline_env_suffix
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.solution_guard import ensure_solution_path_allowed
-from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
 _COLUMN_MAP_FILENAME = "column_map.json"
@@ -122,7 +123,6 @@ _URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES = frozenset(
     }
 )
 
-_INTERMEDIATE_SUBMISSION_RE = re.compile(r"^submission(?:_[A-Za-z0-9_.-]+)?_fold(?P<fold>\d+)\.csv$", re.IGNORECASE)
 _BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
     r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
@@ -1394,23 +1394,6 @@ def _raise_for_invalid_kernel_push_sources(output: str, *, kernel_dir: Path) -> 
         "Kaggle kernel push rejected source references: "
         f"{details}. Fix {kernel_dir / 'kernel-metadata.json'} before retrying."
     )
-
-
-def find_submission_file(output_dir: Path) -> Path | None:
-    manifest_path = find_submission_manifest(output_dir)
-    if manifest_path is not None:
-        _, submission_path, staging_dir, members = resolve_manifest_references(manifest_path)
-        if submission_path is not None and submission_path.exists() and submission_path.is_file():
-            return submission_path
-        if staging_dir is not None or members:
-            return manifest_path
-    candidate = _find_output_file(output_dir, "submission.csv")
-    if candidate:
-        return candidate
-    candidate = _find_intermediate_submission_file(output_dir)
-    if candidate:
-        return candidate
-    return _find_submission_by_extension(output_dir)
 
 
 def resolve_kaggle_username(explicit: str | None) -> str:
@@ -5590,78 +5573,3 @@ def _format_log_events(events: list[dict[str, object]]) -> list[str]:
         for line in data.splitlines():
             lines.append(f"{prefix}{line}")
     return lines
-
-
-def _find_output_file(output_dir: Path, filename: str) -> Path | None:
-    """Find the newest matching artifact within an output tree.
-
-    Local kernels can be executed repeatedly for the same run/iteration while
-    iterating on fixes. In that scenario, stale artifacts may exist alongside
-    fresh ones (or nested under additional run directories). Prefer the most
-    recently modified match to avoid accidentally reusing stale outputs.
-    """
-
-    candidates: list[Path] = []
-    direct = output_dir / filename
-    if direct.exists():
-        candidates.append(direct)
-    try:
-        candidates.extend(path for path in output_dir.rglob(filename) if path.exists())
-    except OSError:
-        # Best-effort discovery; callers handle missing artifacts.
-        pass
-    files = [path for path in candidates if path.is_file()]
-    if not files:
-        return None
-    # Deterministic tie-breaker: path string.
-    return max(files, key=lambda path: (path.stat().st_mtime, str(path)))
-
-
-def _find_submission_by_extension(output_dir: Path) -> Path | None:
-    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl", ".zip"}
-    compound_names = {"submission.tar.gz", "submission.tgz"}
-    candidates: list[Path] = []
-    for name in sorted(compound_names):
-        candidate = output_dir / name
-        if candidate.is_file():
-            candidates.append(candidate)
-    for suffix in sorted(suffixes):
-        candidate = output_dir / f"submission{suffix}"
-        if candidate.is_file():
-            candidates.append(candidate)
-    for path in output_dir.rglob("submission.*"):
-        if not path.is_file():
-            continue
-        if path.name.lower() in compound_names:
-            candidates.append(path)
-            continue
-        if path.suffix.lower() not in suffixes:
-            continue
-        candidates.append(path)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: (path.stat().st_mtime, str(path)))
-
-
-def _find_intermediate_submission_file(output_dir: Path) -> Path | None:
-    """Find the newest fold-level submission emitted by an interrupted run."""
-
-    candidates: list[tuple[int, Path]] = []
-    try:
-        paths = output_dir.rglob("submission*_fold*.csv")
-    except OSError:
-        return None
-    for path in paths:
-        if not path.is_file():
-            continue
-        match = _INTERMEDIATE_SUBMISSION_RE.match(path.name)
-        if match is None:
-            continue
-        try:
-            fold = int(match.group("fold"))
-        except ValueError:
-            continue
-        candidates.append((fold, path))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: (item[1].stat().st_mtime, item[0], str(item[1])))[1]

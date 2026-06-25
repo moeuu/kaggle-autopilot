@@ -224,8 +224,8 @@ The next high-value modernization work is:
    dictionary with repeated ad hoc coercion.
 3. **Kernel/run adapter split**: keep runner implementations behind `runners/` and prevent `kernel_runner.py` from
    accumulating unrelated hardware, parsing, and local-runtime policy. Shared runtime parsing belongs in small helpers;
-   local training-progress parsing is now in `kernel_progress.py`; competition-specific generated code belongs in
-   `kernel_runtime/`.
+   local training-progress parsing is now in `kernel_progress.py`, and kernel output/submission discovery is now in
+   `kernel_outputs.py`; competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
    helpers rather than open-coding tolerant dictionary access in orchestration modules.
