@@ -332,6 +332,26 @@ def latest_iteration_fallback_submit_blocked_reason(quality_reasons: list[str]) 
     return None
 
 
+def resolve_fallback_submit_blocked_reason(
+    *,
+    current_reason: str | None,
+    best_high_potential_meta: dict[str, object] | None,
+    best_high_potential_submission: object | None,
+    best_submittable_submission: object | None,
+) -> str | None:
+    if current_reason is not None:
+        return current_reason
+    if not isinstance(best_high_potential_meta, dict):
+        return None
+    if best_high_potential_submission is None:
+        return None
+    if best_high_potential_submission == best_submittable_submission:
+        return None
+    if bool(best_high_potential_meta.get("faithful", False)) and bool(best_high_potential_meta.get("trusted", False)):
+        return None
+    return "higher_potential_unsubmitted_candidate_exists"
+
+
 def decide_major_overhaul_policy(
     *,
     noise_forced_major_overhaul: bool,

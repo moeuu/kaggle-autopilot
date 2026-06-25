@@ -19,6 +19,7 @@ from kagglebot.submission_policy import (
     normalized_submit_policy,
     quality_reasons_allow_initial_submit_probe,
     quality_reasons_allow_spare_submit,
+    resolve_fallback_submit_blocked_reason,
     resolve_plan_submission_policy,
     should_attempt_submit_for_readiness,
     should_force_initial_submit,
@@ -251,6 +252,51 @@ def test_latest_iteration_fallback_submit_blocked_reason_prefers_hard_quality_bl
         == "latest_iteration_external_test_label_transfer_detected"
     )
     assert latest_iteration_fallback_submit_blocked_reason(["selected_worse_than_detected_baseline"]) is None
+
+
+def test_resolve_fallback_submit_blocked_reason_preserves_existing_reason() -> None:
+    assert (
+        resolve_fallback_submit_blocked_reason(
+            current_reason="latest_iteration_competition_metric_mismatch",
+            best_high_potential_meta={"faithful": False, "trusted": False},
+            best_high_potential_submission="iter-2/submission.csv",
+            best_submittable_submission="iter-1/submission.csv",
+        )
+        == "latest_iteration_competition_metric_mismatch"
+    )
+
+
+def test_resolve_fallback_submit_blocked_reason_blocks_untrusted_high_potential_candidate() -> None:
+    assert (
+        resolve_fallback_submit_blocked_reason(
+            current_reason=None,
+            best_high_potential_meta={"faithful": True, "trusted": False},
+            best_high_potential_submission="iter-2/submission.csv",
+            best_submittable_submission="iter-1/submission.csv",
+        )
+        == "higher_potential_unsubmitted_candidate_exists"
+    )
+
+
+def test_resolve_fallback_submit_blocked_reason_allows_trusted_or_same_candidate() -> None:
+    assert (
+        resolve_fallback_submit_blocked_reason(
+            current_reason=None,
+            best_high_potential_meta={"faithful": True, "trusted": True},
+            best_high_potential_submission="iter-2/submission.csv",
+            best_submittable_submission="iter-1/submission.csv",
+        )
+        is None
+    )
+    assert (
+        resolve_fallback_submit_blocked_reason(
+            current_reason=None,
+            best_high_potential_meta={"faithful": False, "trusted": False},
+            best_high_potential_submission="iter-1/submission.csv",
+            best_submittable_submission="iter-1/submission.csv",
+        )
+        is None
+    )
 
 
 def test_decide_major_overhaul_policy_collects_reasons_and_fallback_blocker() -> None:

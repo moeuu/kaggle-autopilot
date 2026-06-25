@@ -318,8 +318,8 @@ Recommended extraction order:
    file I/O, and resolved-plan config conversion are now also in `plan_policy.py`.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
-   submit-policy and submission-gate resolution, latest-iteration fallback-submit blockers, and initial major-overhaul
-   reason aggregation now also live there.
+   submit-policy and submission-gate resolution, latest-iteration/high-potential fallback-submit blockers, and initial
+   major-overhaul reason aggregation now also live there.
    Score progress helpers for official metric overrides, top1 gap classification, code-reference score normalization,
    severe-regression checks, conservative-collapse detection, and best-candidate priority comparison are now in
    `score_progress.py`. Iteration-level score delta/update policy now also lives there instead of in `autopilot.py`.

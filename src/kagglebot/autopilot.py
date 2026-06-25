@@ -2744,17 +2744,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         print("[yellow]run interrupted[/yellow]")
         return
 
-    if (
-        fallback_submit_blocked_reason is None
-        and isinstance(best_high_potential_meta, dict)
-        and best_high_potential_submission is not None
-        and best_high_potential_submission != best_submittable_submission
-        and (
-            not bool(best_high_potential_meta.get("faithful", False))
-            or not bool(best_high_potential_meta.get("trusted", False))
-        )
-    ):
-        fallback_submit_blocked_reason = "higher_potential_unsubmitted_candidate_exists"
+    fallback_submit_blocked_reason = _submission_policy.resolve_fallback_submit_blocked_reason(
+        current_reason=fallback_submit_blocked_reason,
+        best_high_potential_meta=best_high_potential_meta if isinstance(best_high_potential_meta, dict) else None,
+        best_high_potential_submission=best_high_potential_submission,
+        best_submittable_submission=best_submittable_submission,
+    )
 
     if (
         submit_enabled
