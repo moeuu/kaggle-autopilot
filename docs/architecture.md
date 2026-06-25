@@ -180,6 +180,7 @@ Recommended extraction order:
    candidate-selection mismatch, and prediction-distribution collapse are now in `kernel_quality.py`.
    Iteration metrics payload assembly, evaluation-result serialization, evaluation data-cache/fingerprint helpers, and
    run evaluation-report resume/persistence are now in `iteration_metrics.py`.
+   Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.

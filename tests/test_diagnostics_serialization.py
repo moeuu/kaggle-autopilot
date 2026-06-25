@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from kagglebot.autopilot import _build_diagnostics
+from kagglebot.diagnostics import build_diagnostics, pipeline_config_hash
 from kagglebot.solver.evaluate import EvaluationResult
 
 
@@ -22,7 +22,7 @@ def test_build_diagnostics_handles_unserializable_objects() -> None:
     )
     model_summary = {"preprocessing": column_transformer_cls(transformers=[])}
 
-    diagnostics = _build_diagnostics(
+    diagnostics = build_diagnostics(
         evaluation=evaluation,
         model_summary=model_summary,
         best_score=None,
@@ -49,7 +49,7 @@ def test_build_diagnostics_reports_loop_decision_signal() -> None:
         fold_scores=None,
     )
 
-    diagnostics = _build_diagnostics(
+    diagnostics = build_diagnostics(
         evaluation=evaluation,
         model_summary={},
         best_score=0.95,
@@ -64,3 +64,24 @@ def test_build_diagnostics_reports_loop_decision_signal() -> None:
 
     assert "Loop decision: source=submission score=0.953230" in diagnostics
     assert "Score vs target: 0.953230 vs 0.960000" in diagnostics
+
+
+def test_pipeline_config_hash_ignores_runtime_metadata() -> None:
+    base = pipeline_config_hash(
+        model_summary={"family": "lgbm", "timing": {"seconds": 10}, "evaluation_by_source": {"cv": 0.8}},
+        metric="auc",
+        accelerator="gpu",
+    )
+    changed_runtime = pipeline_config_hash(
+        model_summary={"family": "lgbm", "timing": {"seconds": 20}, "duration": 99},
+        metric="auc",
+        accelerator="gpu",
+    )
+    changed_model = pipeline_config_hash(
+        model_summary={"family": "catboost"},
+        metric="auc",
+        accelerator="gpu",
+    )
+
+    assert base == changed_runtime
+    assert base != changed_model
