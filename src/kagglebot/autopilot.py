@@ -21,6 +21,7 @@ from kagglebot import autopilot_state as _autopilot_state
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
+from kagglebot import context_artifacts as _context_artifacts
 from kagglebot import diagnostics as _diagnostics
 from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import iteration_signals as _iteration_signals
@@ -77,15 +78,6 @@ from kagglebot.campaign import (
     upsert_candidate,
 )
 from kagglebot.competition_policy import load_competition_policy
-from kagglebot.context_artifacts import (
-    count_csv_data_rows_capped as _count_csv_data_rows_capped,
-)
-from kagglebot.context_artifacts import (
-    load_dataset_profile as _context_load_dataset_profile,
-)
-from kagglebot.context_artifacts import (
-    load_evaluation_spec as _context_load_evaluation_spec,
-)
 from kagglebot.env_utils import env_flag as _env_flag
 from kagglebot.env_utils import env_int as _env_int
 from kagglebot.env_utils import env_truthy as _env_truthy
@@ -420,7 +412,7 @@ class KnowledgePhase:
         _knowledge_context.refresh_knowledge_hints(paths=self.config.paths, knowledge_paths=self.config.knowledge_paths)
 
     def load_dataset_profile(self) -> dict[str, object]:
-        return _context_load_dataset_profile(
+        return _context_artifacts.load_dataset_profile(
             slug=self.config.paths.slug,
             dataset_profile_path=self.config.paths.dataset_profile_path,
         )
@@ -2765,7 +2757,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
-    eval_spec = _context_load_evaluation_spec(
+    eval_spec = _context_artifacts.load_evaluation_spec(
         slug=config.paths.slug,
         evaluation_spec_path=config.paths.context_dir / "evaluation_spec.json",
     )
@@ -2850,7 +2842,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         print(message)
     if split_strategy_note:
         print(f"[yellow]note[/yellow]: {split_strategy_note}")
-    dataset_profile = _context_load_dataset_profile(
+    dataset_profile = _context_artifacts.load_dataset_profile(
         slug=config.paths.slug,
         dataset_profile_path=config.paths.dataset_profile_path,
     )
@@ -3280,7 +3272,7 @@ def _run_improvement(
             "avoid same-family-only tweaks.\n"
         )
     if _requires_tabular_multi_family_policy(
-        _context_load_dataset_profile(
+        _context_artifacts.load_dataset_profile(
             slug=config.paths.slug,
             dataset_profile_path=config.paths.dataset_profile_path,
         )
@@ -4704,7 +4696,7 @@ def _attempt_submit(
         submission_path=prepared_submission_path,
         resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=_count_csv_data_rows_capped,
+        count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
         on_message=print,
     )
 
@@ -4775,7 +4767,7 @@ def _attempt_submit(
                 submission_path=prepared_submission_path,
                 resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
                 decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-                count_csv_data_rows=_count_csv_data_rows_capped,
+                count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
                 compute_error_fingerprint=compute_error_fingerprint,
                 decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
                 compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
