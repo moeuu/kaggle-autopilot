@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kagglebot.iteration_signals import (
     apply_iteration_repair_signal_policy,
+    collect_iteration_repair_signals,
     detect_online_mismatch_signal,
     extract_missing_ensemble_signal,
     extract_orig_proba_signal,
@@ -111,6 +112,66 @@ def test_apply_iteration_repair_signal_policy_builds_notes_errors_and_major_over
     assert decision.repair_signals is not None
     assert decision.next_iteration_policy["forced_improvement_mode"] == "major_overhaul"
     assert decision.next_iteration_policy["forced_improvement_reason"] == "missing blend same family"
+
+
+def test_collect_iteration_repair_signals_applies_policy_flags_and_detectors() -> None:
+    subgroup_calls: list[dict[str, object]] = []
+    history_calls: list[dict[str, object]] = []
+    payload = {
+        "original_data_found": False,
+        "orig_proba_feature_status": "constant_fallback",
+        "pseudo_label": {"accepted_folds": 0, "total_folds": 3},
+        "model_families": ["xgb", "cat"],
+        "blend_method": "single",
+    }
+
+    def subgroup_detector(**kwargs: object) -> dict[str, object]:
+        subgroup_calls.append(kwargs)
+        return {"note": "subgroup collapsed"}
+
+    def history_detector(**kwargs: object) -> dict[str, object]:
+        history_calls.append(kwargs)
+        return {"note": "history regressed"}
+
+    signals = collect_iteration_repair_signals(
+        kernel_metrics_payload=payload,
+        diagnostics_text="pseudo-label result: 0/3 accepted folds",
+        reference_inputs_manifest_payload={"required_datasets": ["original/data"]},
+        enable_missing_ensemble_signal=True,
+        enable_original_data_unused_signal=False,
+        enable_same_family_plateau_signal=False,
+        direction="maximize",
+        previous_best_offline=0.7,
+        current_offline=0.8,
+        previous_best_online=0.75,
+        current_online=0.74,
+        previous_submission_history={"best_score": 0.75},
+        detect_subgroup_collapse_signal=subgroup_detector,
+        detect_online_history_regression_signal=history_detector,
+    )
+
+    assert signals.orig_proba_signal is not None
+    assert signals.pseudo_label_signal is not None
+    assert signals.missing_ensemble_signal is not None
+    assert signals.original_data_unused_signal is None
+    assert signals.same_family_plateau_signal is None
+    assert signals.subgroup_collapse_signal == {"note": "subgroup collapsed"}
+    assert signals.online_mismatch_signal is not None
+    assert signals.online_history_regression_signal == {"note": "history regressed"}
+    assert subgroup_calls == [
+        {
+            "kernel_metrics_payload": payload,
+            "direction": "maximize",
+        }
+    ]
+    assert history_calls == [
+        {
+            "previous_best_online": 0.75,
+            "current_online": 0.74,
+            "direction": "maximize",
+            "history": {"best_score": 0.75},
+        }
+    ]
 
 
 def test_apply_iteration_repair_signal_policy_prefers_validation_redesign_for_online_mismatch() -> None:

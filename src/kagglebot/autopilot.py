@@ -130,12 +130,6 @@ from kagglebot.experiment_graph import (
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
-from kagglebot.iteration_signals import detect_online_mismatch_signal as _detect_online_mismatch_signal
-from kagglebot.iteration_signals import extract_missing_ensemble_signal as _extract_missing_ensemble_signal
-from kagglebot.iteration_signals import extract_orig_proba_signal as _extract_orig_proba_signal
-from kagglebot.iteration_signals import extract_original_data_unused_signal as _extract_original_data_unused_signal
-from kagglebot.iteration_signals import extract_pseudo_label_failure_signal as _extract_pseudo_label_failure_signal
-from kagglebot.iteration_signals import extract_same_family_plateau_signal as _extract_same_family_plateau_signal
 from kagglebot.iteration_signals import requires_tabular_multi_family_policy as _requires_tabular_multi_family_policy
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.json_utils import write_json_object as _write_json_object
@@ -2391,47 +2385,23 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
 
-            orig_proba_signal = _extract_orig_proba_signal(kernel_metrics_payload)
             competition_policy = load_competition_policy(config.paths)
             reference_inputs_manifest_payload = _load_json_object(config.paths.reference_inputs_manifest_path)
-            pseudo_label_signal = _extract_pseudo_label_failure_signal(
+            repair_signals = _iteration_signals.collect_iteration_repair_signals(
                 kernel_metrics_payload=kernel_metrics_payload,
                 diagnostics_text=diagnostics,
-            )
-            missing_ensemble_signal = (
-                _extract_missing_ensemble_signal(kernel_metrics_payload)
-                if competition_policy.repair.missing_ensemble_signal
-                else None
-            )
-            original_data_unused_signal = (
-                _extract_original_data_unused_signal(
-                    kernel_metrics_payload=kernel_metrics_payload,
-                    reference_inputs_manifest_payload=reference_inputs_manifest_payload,
-                )
-                if competition_policy.repair.original_data_unused_signal
-                else None
-            )
-            same_family_plateau_signal = (
-                _extract_same_family_plateau_signal(kernel_metrics_payload)
-                if competition_policy.repair.same_family_plateau_signal
-                else None
-            )
-            subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal(
-                kernel_metrics_payload=kernel_metrics_payload,
+                reference_inputs_manifest_payload=reference_inputs_manifest_payload,
+                enable_missing_ensemble_signal=competition_policy.repair.missing_ensemble_signal,
+                enable_original_data_unused_signal=competition_policy.repair.original_data_unused_signal,
+                enable_same_family_plateau_signal=competition_policy.repair.same_family_plateau_signal,
                 direction=metric_direction,
-            )
-            online_mismatch_signal = _detect_online_mismatch_signal(
                 previous_best_offline=best_score,
                 current_offline=decision_score,
                 previous_best_online=best_online_submission_score,
                 current_online=online_score,
-                direction=metric_direction,
-            )
-            online_history_regression_signal = _detect_online_regression_vs_submission_history(
-                previous_best_online=best_online_submission_score,
-                current_online=online_score,
-                direction=metric_direction,
-                history=previous_submission_history,
+                previous_submission_history=previous_submission_history,
+                detect_subgroup_collapse_signal=_kernel_quality.detect_subgroup_collapse_signal,
+                detect_online_history_regression_signal=_detect_online_regression_vs_submission_history,
             )
             best_online_submission_score = _update_best_online_submission_score(
                 current_best_score=best_online_submission_score,
@@ -2484,14 +2454,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             repair_signal_policy = _iteration_signals.apply_iteration_repair_signal_policy(
                 iteration=iteration,
-                orig_proba_signal=orig_proba_signal,
-                original_data_unused_signal=original_data_unused_signal,
-                pseudo_label_signal=pseudo_label_signal,
-                missing_ensemble_signal=missing_ensemble_signal,
-                same_family_plateau_signal=same_family_plateau_signal,
-                subgroup_collapse_signal=subgroup_collapse_signal,
-                online_mismatch_signal=online_mismatch_signal,
-                online_history_regression_signal=online_history_regression_signal,
+                orig_proba_signal=repair_signals.orig_proba_signal,
+                original_data_unused_signal=repair_signals.original_data_unused_signal,
+                pseudo_label_signal=repair_signals.pseudo_label_signal,
+                missing_ensemble_signal=repair_signals.missing_ensemble_signal,
+                same_family_plateau_signal=repair_signals.same_family_plateau_signal,
+                subgroup_collapse_signal=repair_signals.subgroup_collapse_signal,
+                online_mismatch_signal=repair_signals.online_mismatch_signal,
+                online_history_regression_signal=repair_signals.online_history_regression_signal,
                 minimum_improvement_mode=medal_minimum_improvement_mode,
                 minimum_improvement_reason=medal_policy_reason,
                 force_major_overhaul=force_major_overhaul_next,

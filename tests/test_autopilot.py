@@ -19,13 +19,7 @@ from kagglebot.autopilot import (
     AutopilotConfig,
     SubmissionPhase,
     _attempt_submit,
-    _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
-    _extract_missing_ensemble_signal,
-    _extract_orig_proba_signal,
-    _extract_original_data_unused_signal,
-    _extract_pseudo_label_failure_signal,
-    _extract_same_family_plateau_signal,
     _format_previous_submission_history_for_prompt,
     _is_submit_abort_autofixable,
     _load_run_state,
@@ -49,6 +43,12 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import SubmissionLedger
+from kagglebot.iteration_signals import detect_online_mismatch_signal as _detect_online_mismatch_signal
+from kagglebot.iteration_signals import extract_missing_ensemble_signal as _extract_missing_ensemble_signal
+from kagglebot.iteration_signals import extract_orig_proba_signal as _extract_orig_proba_signal
+from kagglebot.iteration_signals import extract_original_data_unused_signal as _extract_original_data_unused_signal
+from kagglebot.iteration_signals import extract_pseudo_label_failure_signal as _extract_pseudo_label_failure_signal
+from kagglebot.iteration_signals import extract_same_family_plateau_signal as _extract_same_family_plateau_signal
 from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_kernel_quality_guard,

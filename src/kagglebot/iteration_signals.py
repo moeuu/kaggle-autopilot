@@ -23,6 +23,18 @@ class IterationRepairSignalPolicyDecision:
     next_iteration_policy: dict[str, object]
 
 
+@dataclass(frozen=True)
+class IterationRepairSignals:
+    orig_proba_signal: dict[str, object] | None
+    original_data_unused_signal: dict[str, object] | None
+    pseudo_label_signal: dict[str, object] | None
+    missing_ensemble_signal: dict[str, object] | None
+    same_family_plateau_signal: dict[str, object] | None
+    subgroup_collapse_signal: dict[str, object] | None
+    online_mismatch_signal: dict[str, object] | None
+    online_history_regression_signal: dict[str, object] | None
+
+
 def extract_orig_proba_signal(kernel_metrics_payload: dict[str, object] | None) -> dict[str, object] | None:
     payload = kernel_metrics_payload or {}
     if not isinstance(payload, dict):
@@ -265,6 +277,63 @@ def detect_online_mismatch_signal(
             "model-family diversification plus OOF blend exploration."
         ),
     }
+
+
+def collect_iteration_repair_signals(
+    *,
+    kernel_metrics_payload: dict[str, object] | None,
+    diagnostics_text: str,
+    reference_inputs_manifest_payload: dict[str, object] | None,
+    enable_missing_ensemble_signal: bool,
+    enable_original_data_unused_signal: bool,
+    enable_same_family_plateau_signal: bool,
+    direction: str,
+    previous_best_offline: float | None,
+    current_offline: float,
+    previous_best_online: float | None,
+    current_online: float | None,
+    previous_submission_history: dict[str, object],
+    detect_subgroup_collapse_signal: Callable[..., dict[str, object] | None],
+    detect_online_history_regression_signal: Callable[..., dict[str, object] | None],
+) -> IterationRepairSignals:
+    return IterationRepairSignals(
+        orig_proba_signal=extract_orig_proba_signal(kernel_metrics_payload),
+        original_data_unused_signal=(
+            extract_original_data_unused_signal(
+                kernel_metrics_payload=kernel_metrics_payload,
+                reference_inputs_manifest_payload=reference_inputs_manifest_payload,
+            )
+            if enable_original_data_unused_signal
+            else None
+        ),
+        pseudo_label_signal=extract_pseudo_label_failure_signal(
+            kernel_metrics_payload=kernel_metrics_payload,
+            diagnostics_text=diagnostics_text,
+        ),
+        missing_ensemble_signal=(
+            extract_missing_ensemble_signal(kernel_metrics_payload) if enable_missing_ensemble_signal else None
+        ),
+        same_family_plateau_signal=(
+            extract_same_family_plateau_signal(kernel_metrics_payload) if enable_same_family_plateau_signal else None
+        ),
+        subgroup_collapse_signal=detect_subgroup_collapse_signal(
+            kernel_metrics_payload=kernel_metrics_payload,
+            direction=direction,
+        ),
+        online_mismatch_signal=detect_online_mismatch_signal(
+            previous_best_offline=previous_best_offline,
+            current_offline=current_offline,
+            previous_best_online=previous_best_online,
+            current_online=current_online,
+            direction=direction,
+        ),
+        online_history_regression_signal=detect_online_history_regression_signal(
+            previous_best_online=previous_best_online,
+            current_online=current_online,
+            direction=direction,
+            history=previous_submission_history,
+        ),
+    )
 
 
 def apply_iteration_repair_signal_policy(
