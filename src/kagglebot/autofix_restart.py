@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 
 RESTART_STATE_FILENAME = "autofix_restart.json"
 NO_RESTART_ENV = "KAGGLEBOT_NO_RESTART"
@@ -62,7 +62,7 @@ def restart_stage_family(stage: str) -> str:
 
 
 def _load_restart_state(path: Path) -> dict[str, object]:
-    return load_json_object(path) or {}
+    return load_json_object_or_empty(path)
 
 
 def _restart_counts_by_stage(state: dict[str, object]) -> dict[str, int]:

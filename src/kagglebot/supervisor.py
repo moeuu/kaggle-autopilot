@@ -26,7 +26,13 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import new_run_id
-from kagglebot.json_utils import append_jsonl_record, load_json_object, load_jsonl_records, write_json_object
+from kagglebot.json_utils import (
+    append_jsonl_record,
+    load_json_object,
+    load_json_object_or_empty,
+    load_jsonl_records,
+    write_json_object,
+)
 from kagglebot.kaggle_api import (
     EnteredCompetition,
     competition_total_size_bytes,
@@ -1416,7 +1422,7 @@ def _candidate_from_slug(slug: str) -> EnteredCompetition:
 
 
 def _load_state(path: Path) -> dict[str, object]:
-    return load_json_object(path) or {}
+    return load_json_object_or_empty(path)
 
 
 def _write_state(path: Path, payload: dict[str, object]) -> None:
