@@ -691,11 +691,11 @@ def _load_submit_retry_artifacts(
 def _load_run_state(run_dir: Path) -> dict[str, object]:
     state_path = run_dir / "run_state.json"
     if not state_path.exists():
-        attempted = _has_submit_attempt_records(run_dir)
+        attempted = _submit_attempts.has_submit_attempt_records(run_dir)
         return {"submit_attempted": attempted, "submit_ok": False}
     payload = _load_json_object(state_path) or {}
     if not payload.get("submit_attempted"):
-        payload["submit_attempted"] = _has_submit_attempt_records(run_dir)
+        payload["submit_attempted"] = _submit_attempts.has_submit_attempt_records(run_dir)
     if "submit_ok" not in payload:
         payload["submit_ok"] = False
     if "last_submit_fingerprint" not in payload and payload.get("last_fingerprint"):
@@ -703,7 +703,7 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
     if "last_fingerprint" not in payload and payload.get("last_submit_fingerprint"):
         payload["last_fingerprint"] = payload.get("last_submit_fingerprint")
     if bool(payload.get("submit_attempted")) and not bool(payload.get("submit_ok")):
-        if _has_successful_submit_attempt(run_dir):
+        if _submit_attempts.has_successful_submit_attempt(run_dir):
             payload["submit_ok"] = True
     return payload
 
@@ -711,28 +711,10 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
 def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
     state = _load_run_state(run_dir)
     state.update(updates)
-    state["submit_attempted"] = bool(state.get("submit_attempted")) or _has_submit_attempt_records(run_dir)
-    state["submit_ok"] = bool(state.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
+    state["submit_attempted"] = bool(state.get("submit_attempted")) or _submit_attempts.has_submit_attempt_records(
+        run_dir
+    )
+    state["submit_ok"] = bool(state.get("submit_ok")) or _submit_attempts.has_successful_submit_attempt(run_dir)
     state["updated_at"] = datetime.now(UTC).isoformat()
     state_path = run_dir / "run_state.json"
     write_json_object(state_path, state)
-
-
-def _has_submit_attempt_records(run_dir: Path) -> bool:
-    return _submit_attempts.has_submit_attempt_records(run_dir)
-
-
-def _has_successful_submit_attempt(run_dir: Path) -> bool:
-    return _submit_attempts.has_successful_submit_attempt(run_dir)
-
-
-def _count_successful_submit_attempts(run_dir: Path) -> int:
-    return _submit_attempts.count_successful_submit_attempts(run_dir)
-
-
-def _load_submit_fingerprints(run_dir: Path) -> list[str]:
-    return _submit_attempts.load_submit_fingerprints(run_dir)
-
-
-def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
-    return _submit_attempts.load_latest_submit_attempt(run_dir)

@@ -273,7 +273,9 @@ The next high-value modernization work is:
    Planning necessity and resume-skip checks now call `plan_policy.py` directly.
    Iteration resume, submit-retry artifact resume, best-submission resume paths, run payload/summary construction,
    run-state reads, iteration-state marker writes, and iteration submission-artifact resolution now call
-   `autopilot_state.py` directly. Submit autofix context formatting, stale repaired-artifact decisions and application,
+   `autopilot_state.py` directly. Submit-attempt status/fingerprint lookups now call `submit_attempts.py` directly
+   instead of passing through state wrappers. Submit autofix context formatting, stale repaired-artifact decisions and
+   application,
    autofix artifact
    resolution, submit-failure improvement context, and submit-file repair contract checks now call
    `submit_failure_context.py` directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly.
