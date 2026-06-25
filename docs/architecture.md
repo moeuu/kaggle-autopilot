@@ -256,7 +256,8 @@ The next high-value modernization work is:
    `kernel_quality.py` directly. Autopilot medal/rank normalization wrappers have also been removed; call sites now use
    `medals.py` directly. Dataset-profile/evaluation-spec wrapper reads in `autopilot.py` have also been retired in
    favor of direct `context_artifacts.py` calls. Submit retry backoff and force-resubmit checks now call
-   `submit_retry_policy.py` and `submit_failure_context.py` directly.
+   `submit_retry_policy.py` and `submit_failure_context.py` directly, and same-fingerprint retry allowance now calls
+   `submit_retry_policy.py` directly.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.

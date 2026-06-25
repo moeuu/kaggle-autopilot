@@ -6329,11 +6329,11 @@ def _attempt_submit(
             fingerprint_seen = fingerprint in seen_fingerprints
             same_fingerprint_retry_allowed = False
             if fingerprint_seen:
-                same_fingerprint_retry_allowed = _consume_same_submit_fingerprint_retry_allowance(
-                    run_dir=run_dir,
+                same_fingerprint_retry_allowed = _submit_retry_policy.consume_same_submit_fingerprint_retry_allowance(
                     run_state=run_state,
                     fingerprint=fingerprint,
                     code_fingerprint=submit_code_fingerprint,
+                    save_run_state=lambda updates: _save_run_state(run_dir, updates),
                 )
             error_action = _submit_stage.decide_submit_stage_error_action(
                 fingerprint_seen=fingerprint_seen,
@@ -6890,21 +6890,6 @@ def _compute_submit_code_fingerprint(config: AutopilotConfig) -> str:
         src_root=Path(__file__).resolve().parent,
         kernel_source_dir=config.paths.kernel_source_dir,
         sha256_or_none=_sha256_or_none,
-    )
-
-
-def _consume_same_submit_fingerprint_retry_allowance(
-    *,
-    run_dir: Path,
-    run_state: dict[str, object],
-    fingerprint: str,
-    code_fingerprint: str,
-) -> bool:
-    return _submit_retry_policy.consume_same_submit_fingerprint_retry_allowance(
-        run_state=run_state,
-        fingerprint=fingerprint,
-        code_fingerprint=code_fingerprint,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
 
 
