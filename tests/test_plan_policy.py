@@ -35,6 +35,7 @@ from kagglebot.plan_policy import (
     resolve_submit_mode,
     resolve_submit_mode_constraints,
     resolve_target_metric_direction,
+    resolve_target_objective,
     resolve_time_budget_policy,
     upgrade_improvement_mode,
 )
@@ -193,6 +194,51 @@ def test_resolve_plan_score_source_forces_non_generalizable_sources_to_cv() -> N
     assert decision.messages == (
         "[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",
     )
+
+
+def test_resolve_target_objective_prefers_spec_over_plan_and_defaults() -> None:
+    decision = resolve_target_objective(
+        plan_target_medal="bronze",
+        plan_target_rank_percentile=0.2,
+        spec_target_medal="gold",
+        spec_target_rank_percentile=None,
+        deliverable_mode="leaderboard",
+        search_stop_rank_percentile=None,
+        default_target_medal="winner",
+    )
+
+    assert decision.target_medal == "gold"
+    assert decision.target_rank_percentile == 0.01
+
+
+def test_resolve_target_objective_applies_competition_search_stop_cap() -> None:
+    decision = resolve_target_objective(
+        plan_target_medal=None,
+        plan_target_rank_percentile=0.10,
+        spec_target_medal=None,
+        spec_target_rank_percentile=None,
+        deliverable_mode="leaderboard",
+        search_stop_rank_percentile=0.0005,
+        default_target_medal="winner",
+    )
+
+    assert decision.target_medal == "winner"
+    assert decision.target_rank_percentile == 0.0005
+
+
+def test_resolve_target_objective_disables_default_medal_for_writeup_mode() -> None:
+    decision = resolve_target_objective(
+        plan_target_medal=None,
+        plan_target_rank_percentile=None,
+        spec_target_medal=None,
+        spec_target_rank_percentile=None,
+        deliverable_mode="writeup",
+        search_stop_rank_percentile=None,
+        default_target_medal="winner",
+    )
+
+    assert decision.target_medal is None
+    assert decision.target_rank_percentile is None
 
 
 def test_resolve_split_strategy_override_applies_valid_competition_override() -> None:

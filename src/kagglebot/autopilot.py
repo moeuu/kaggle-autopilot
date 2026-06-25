@@ -3261,28 +3261,18 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         spec_value=eval_spec.get("submit_mode"),
         inferred_value=infer_submit_mode_from_paths(config.paths, default=""),
     )
-    plan_target_medal = _normalize_target_medal(getattr(plan, "target_medal", None), default=None)
-    spec_target_medal = _normalize_target_medal(eval_spec.get("target_medal"), default=None)
-    default_target_medal = _DEFAULT_TARGET_MEDAL if deliverable_mode == "leaderboard" else None
-    target_medal = spec_target_medal or plan_target_medal or default_target_medal
-    target_rank_percentile = _normalize_target_rank_percentile(
-        getattr(plan, "target_rank_percentile", None),
-        medal=target_medal,
-        fallback=None,
-    )
-    target_rank_percentile = _normalize_target_rank_percentile(
-        eval_spec.get("target_rank_percentile"),
-        medal=spec_target_medal or target_medal,
-        fallback=target_rank_percentile,
-    )
     competition_policy = load_competition_policy(config.paths)
-    search_stop_rank_percentile = competition_policy.evaluation.search_stop_rank_percentile
-    if search_stop_rank_percentile is not None:
-        target_rank_percentile = (
-            float(search_stop_rank_percentile)
-            if target_rank_percentile is None
-            else min(float(target_rank_percentile), float(search_stop_rank_percentile))
-        )
+    target_objective = _plan_policy.resolve_target_objective(
+        plan_target_medal=getattr(plan, "target_medal", None),
+        plan_target_rank_percentile=getattr(plan, "target_rank_percentile", None),
+        spec_target_medal=eval_spec.get("target_medal"),
+        spec_target_rank_percentile=eval_spec.get("target_rank_percentile"),
+        deliverable_mode=deliverable_mode,
+        search_stop_rank_percentile=competition_policy.evaluation.search_stop_rank_percentile,
+        default_target_medal=_DEFAULT_TARGET_MEDAL,
+    )
+    target_medal = target_objective.target_medal
+    target_rank_percentile = target_objective.target_rank_percentile
     explicit_target_metric = config.target_metric is not None or plan.target_metric is not None
     explicit_target_direction = config.target_direction is not None or plan.target_direction is not None
     target_metric = choose(config.target_metric, plan.target_metric, spec_values.metric_name)

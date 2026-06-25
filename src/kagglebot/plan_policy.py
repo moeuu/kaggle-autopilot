@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 
 from kagglebot.json_utils import load_json_object
+from kagglebot.medals import normalize_target_medal, normalize_target_rank_percentile
 from kagglebot.metric_matching import canonical_metric_name_for_match, metrics_equivalent
 from kagglebot.paths import CompetitionPaths
 from kagglebot.scalar_utils import parse_int
@@ -109,6 +110,12 @@ class InternetDecision:
 class TimeBudgetDecision:
     time_budget_min: object
     messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TargetObjectiveDecision:
+    target_medal: str | None
+    target_rank_percentile: float | None
 
 
 def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:
@@ -251,6 +258,44 @@ def resolve_plan_score_source(score_source: object) -> PlanScoreSourceDecision:
     return PlanScoreSourceDecision(
         score_source="cv",
         messages=("[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",),
+    )
+
+
+def resolve_target_objective(
+    *,
+    plan_target_medal: object,
+    plan_target_rank_percentile: object,
+    spec_target_medal: object,
+    spec_target_rank_percentile: object,
+    deliverable_mode: str,
+    search_stop_rank_percentile: float | None,
+    default_target_medal: str,
+) -> TargetObjectiveDecision:
+    """Resolve leaderboard medal/rank objectives from plan, evaluation spec, and competition policy."""
+
+    plan_medal = normalize_target_medal(plan_target_medal, default=None)
+    spec_medal = normalize_target_medal(spec_target_medal, default=None)
+    default_medal = default_target_medal if deliverable_mode == "leaderboard" else None
+    target_medal = spec_medal or plan_medal or default_medal
+
+    target_rank_percentile = normalize_target_rank_percentile(
+        plan_target_rank_percentile,
+        medal=target_medal,
+        fallback=None,
+    )
+    target_rank_percentile = normalize_target_rank_percentile(
+        spec_target_rank_percentile,
+        medal=spec_medal or target_medal,
+        fallback=target_rank_percentile,
+    )
+    if search_stop_rank_percentile is not None:
+        search_stop = float(search_stop_rank_percentile)
+        target_rank_percentile = (
+            search_stop if target_rank_percentile is None else min(float(target_rank_percentile), search_stop)
+        )
+    return TargetObjectiveDecision(
+        target_medal=target_medal,
+        target_rank_percentile=target_rank_percentile,
     )
 
 
