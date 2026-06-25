@@ -30,6 +30,14 @@ def print_agent_response(*, log_alias: str, response_path: Path, response_text: 
     builtins.print("")
 
 
+def log_codex_sandbox_fallback(*, stage_label: str, result: object) -> None:
+    if not bool(getattr(result, "used_sandbox_fallback", False)):
+        return
+    excerpt = str(getattr(result, "sandbox_failure_excerpt", "")).strip()
+    detail = f": {excerpt}" if excerpt else ""
+    print(f"[yellow]{stage_label}[/yellow]: codex sandbox fallback used{detail}")
+
+
 def tail_for_prompt(text: str, *, max_chars: int = 6000) -> str:
     normalized = (text or "").replace("\r", "\n").strip()
     if len(normalized) <= max_chars:

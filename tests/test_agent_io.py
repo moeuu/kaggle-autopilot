@@ -6,6 +6,7 @@ from kagglebot.agent_io import (
     agent_failure_detail,
     append_fix_retry_feedback,
     is_agent_capacity_failure,
+    log_codex_sandbox_fallback,
     read_agent_response,
     tail_for_prompt,
 )
@@ -38,6 +39,23 @@ def test_agent_capacity_failure_detection_and_detail() -> None:
     assert "stderr=stderr text" in detail
     assert "response=stale success text" in detail
     assert "transcript_tail=" in detail
+
+
+def test_log_codex_sandbox_fallback_prints_only_when_used(capsys) -> None:  # noqa: ANN001
+    class UnusedResult:
+        used_sandbox_fallback = False
+
+    class UsedResult:
+        used_sandbox_fallback = True
+        sandbox_failure_excerpt = "sandbox denied"
+
+    log_codex_sandbox_fallback(stage_label="kernel fix", result=UnusedResult())
+    assert capsys.readouterr().out == ""
+
+    log_codex_sandbox_fallback(stage_label="kernel fix", result=UsedResult())
+    out = capsys.readouterr().out
+    assert "kernel fix" in out
+    assert "codex sandbox fallback used: sandbox denied" in out
 
 
 def test_append_fix_retry_feedback_adds_clipped_failure_context() -> None:

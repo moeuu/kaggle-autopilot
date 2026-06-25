@@ -4006,7 +4006,7 @@ def _run_improvement(
                 response_path=result.last_message_path,
                 response_text=response,
             )
-            _log_codex_sandbox_fallback(stage_label="improve", result=result)
+            _agent_io.log_codex_sandbox_fallback(stage_label="improve", result=result)
             if result.returncode == 0:
                 return response, result.last_message_path
 
@@ -4345,7 +4345,7 @@ def _run_kernel_fix(
             response_path=result.last_message_path,
             response_text=response_text,
         )
-        _log_codex_sandbox_fallback(stage_label="kernel fix", result=result)
+        _agent_io.log_codex_sandbox_fallback(stage_label="kernel fix", result=result)
         last_response_text = response_text
         if result.returncode != 0:
             retry_feedback = (
@@ -4881,7 +4881,7 @@ an ad-hoc repaired copy behind.
             response_path=result.last_message_path,
             response_text=response_text,
         )
-        _log_codex_sandbox_fallback(stage_label=strategy_label, result=result)
+        _agent_io.log_codex_sandbox_fallback(stage_label=strategy_label, result=result)
         if result.returncode != 0:
             retry_feedback = (
                 f"{IMPLEMENTATION_AGENT.display_name} autofix step failed with non-zero exit status.\n"
@@ -4921,14 +4921,6 @@ an ad-hoc repaired copy behind.
         return
 
     raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
-
-
-def _log_codex_sandbox_fallback(*, stage_label: str, result: object) -> None:
-    if not bool(getattr(result, "used_sandbox_fallback", False)):
-        return
-    excerpt = str(getattr(result, "sandbox_failure_excerpt", "")).strip()
-    detail = f": {excerpt}" if excerpt else ""
-    print(f"[yellow]{stage_label}[/yellow]: codex sandbox fallback used{detail}")
 
 
 def _run_error_strategy(
