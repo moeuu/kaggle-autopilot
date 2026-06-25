@@ -44,6 +44,7 @@ from kagglebot.submit_stage import (
     normalize_submission_outcome_status,
     record_submission_knowledge,
     record_submission_knowledge_entries,
+    record_submit_abort_for_run,
     record_submit_stage_retry_attempt,
     record_successful_submit_stage_result,
     require_prepared_submission_path,
@@ -1073,6 +1074,61 @@ def test_record_submit_stage_retry_attempt_records_attempt_and_knowledge(tmp_pat
     ]
     assert calls[0]["iteration"] == 4
     assert calls[0]["fix_summary"] == "submit_action=retry; detail=attempt=1; wait=3.2s"
+
+
+def test_record_submit_abort_for_run_persists_context_and_records_knowledge(tmp_path: Path) -> None:
+    recorder = SubmitAttemptRecorderStub()
+    run_dir = tmp_path / "run"
+    submission = tmp_path / "iter-5" / "submission.csv"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    persisted: dict[str, object] = {}
+    insights: list[dict[str, object]] = []
+    messages: list[str] = []
+
+    def persist_submit_abort_failure(**kwargs: object) -> None:
+        persisted.update(kwargs)
+
+    record_submit_abort_for_run(
+        run_dir=run_dir,
+        run_id="run-1",
+        slug="demo",
+        knowledge_paths=object(),
+        problem_types=["tabular"],
+        submission_ref=submission,
+        submission_artifact_path=None,
+        artifact_mode="wrapper",
+        code_fingerprint="code-fp",
+        fingerprint="fp",
+        error_kind="validation",
+        reason="local_submission_validation_failed",
+        message="Local validation failed.",
+        stdout_tail="stdout",
+        stderr_tail="stderr",
+        exit_code=6,
+        submit_attempt_recorder=recorder,
+        resolve_submit_abort_artifact_path=lambda **kwargs: kwargs["submission_ref"],
+        persist_submit_abort_failure=persist_submit_abort_failure,
+        load_run_state=lambda _run_dir: {"submit_ok": False},
+        load_latest_submit_attempt=lambda _run_dir: {},
+        has_successful_submit_attempt=lambda _run_dir: False,
+        compute_submission_sha256=lambda path: "sha" if path == submission else None,
+        stdout_tail_chars=10,
+        stderr_tail_chars=11,
+        now_iso="2026-06-25T00:00:00+00:00",
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **kwargs: insights.append(kwargs),
+        on_message=messages.append,
+    )
+
+    assert persisted["submission_ref"] == str(submission)
+    assert persisted["submission_sha256"] == "sha"
+    assert persisted["artifact_path"] == submission
+    assert persisted["prior_submit_ok"] is False
+    assert persisted["now_iso"] == "2026-06-25T00:00:00+00:00"
+    assert insights[0]["iteration"] == 5
+    assert insights[0]["fix_summary"] == "submit_action=abort; detail=Local validation failed."
+    assert messages == ["[red]submit aborted[/red]: Local validation failed."]
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:

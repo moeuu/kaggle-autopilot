@@ -1469,6 +1469,87 @@ def record_submit_stage_retry_attempt(
     )
 
 
+def record_submit_abort_for_run(
+    *,
+    run_dir: Path,
+    run_id: str,
+    slug: str,
+    knowledge_paths: object,
+    problem_types: list[str],
+    submission_ref: str | Path,
+    submission_artifact_path: Path | None,
+    artifact_mode: str | None,
+    code_fingerprint: str,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    message: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    exit_code: int | None,
+    submit_attempt_recorder: object,
+    resolve_submit_abort_artifact_path: Callable[..., Path | None],
+    persist_submit_abort_failure: Callable[..., object],
+    load_run_state: Callable[[Path], dict[str, object]],
+    load_latest_submit_attempt: Callable[[Path], dict[str, object]],
+    has_successful_submit_attempt: Callable[[Path], bool],
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    now_iso: str,
+    normalize_detail: Callable[..., str],
+    record_error_fix_insight: Callable[..., object],
+    on_message: Callable[[str], object],
+) -> None:
+    submission_ref_text = str(submission_ref)
+    artifact_path = resolve_submit_abort_artifact_path(
+        submission_ref=submission_ref,
+        submission_artifact_path=submission_artifact_path,
+    )
+    prior_state = load_run_state(run_dir)
+    prior_submit_ok = bool(prior_state.get("submit_ok")) or has_successful_submit_attempt(run_dir)
+    persist_submit_abort_failure(
+        run_dir=run_dir,
+        run_id=run_id,
+        submission_ref=submission_ref_text,
+        submission_sha256=compute_submission_sha256(artifact_path),
+        artifact_path=artifact_path,
+        artifact_mode=artifact_mode,
+        code_fingerprint=code_fingerprint,
+        fingerprint=fingerprint,
+        error_kind=error_kind,
+        reason=reason,
+        message=message,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
+        prior_state=prior_state,
+        prior_submit_ok=prior_submit_ok,
+        submit_attempt_recorder=submit_attempt_recorder,
+        load_latest_submit_attempt=load_latest_submit_attempt,
+        load_run_state=load_run_state,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        now_iso=now_iso,
+    )
+    _submit_attempts.record_submit_reason_knowledge(
+        knowledge_paths=knowledge_paths,
+        slug=slug,
+        run_id=run_id,
+        problem_types=problem_types,
+        submission_path=artifact_path or Path(submission_ref_text),
+        error_kind=error_kind,
+        reason=reason,
+        action_taken="abort",
+        fingerprint=fingerprint,
+        details=message,
+        infer_iteration=infer_iteration_from_submission_path,
+        normalize_detail=normalize_detail,
+        record_error_fix_insight=record_error_fix_insight,
+    )
+    on_message(f"[red]submit aborted[/red]: {message}")
+
+
 def decide_submission_outcome_abort(
     *,
     outcome_status: str,

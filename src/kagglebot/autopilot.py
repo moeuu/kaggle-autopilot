@@ -4989,19 +4989,14 @@ def _abort_submit_for_run(
             run_dir=run_dir,
             save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
         )
-    submission_ref_text = str(submission_ref)
-    artifact_path = _submit_failure_context.resolve_submit_abort_artifact_path(
-        submission_ref=submission_ref,
-        submission_artifact_path=submission_artifact_path,
-    )
-    prior = _autopilot_state._load_run_state(run_dir)
-    prior_ok = bool(prior.get("submit_ok")) or _submit_attempts.has_successful_submit_attempt(run_dir)
-    _submit_failure_context.persist_submit_abort_failure(
+    _submit_stage.record_submit_abort_for_run(
         run_dir=run_dir,
         run_id=run_id,
-        submission_ref=submission_ref_text,
-        submission_sha256=_sha256_or_none(artifact_path),
-        artifact_path=artifact_path,
+        slug=config.slug,
+        knowledge_paths=config.knowledge_paths,
+        problem_types=problem_types,
+        submission_ref=submission_ref,
+        submission_artifact_path=submission_artifact_path,
         artifact_mode=artifact_mode,
         code_fingerprint=code_fingerprint or "",
         fingerprint=fingerprint,
@@ -5011,32 +5006,20 @@ def _abort_submit_for_run(
         stdout_tail=stdout_tail,
         stderr_tail=stderr_tail,
         exit_code=exit_code,
-        prior_state=prior,
-        prior_submit_ok=prior_ok,
         submit_attempt_recorder=submit_attempt_recorder,
-        load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
+        resolve_submit_abort_artifact_path=_submit_failure_context.resolve_submit_abort_artifact_path,
+        persist_submit_abort_failure=_submit_failure_context.persist_submit_abort_failure,
         load_run_state=_autopilot_state._load_run_state,
+        load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
+        has_successful_submit_attempt=_submit_attempts.has_successful_submit_attempt,
+        compute_submission_sha256=_sha256_or_none,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         now_iso=datetime.now(UTC).isoformat(),
-    )
-    knowledge_submission_path = artifact_path or Path(submission_ref_text)
-    _submit_attempts.record_submit_reason_knowledge(
-        knowledge_paths=config.knowledge_paths,
-        slug=config.slug,
-        run_id=run_id,
-        problem_types=problem_types,
-        submission_path=knowledge_submission_path,
-        error_kind=error_kind,
-        reason=reason,
-        action_taken="abort",
-        fingerprint=fingerprint,
-        details=message,
-        infer_iteration=_submit_stage.infer_iteration_from_submission_path,
         normalize_detail=normalize_error_text,
         record_error_fix_insight=record_error_fix_insight,
+        on_message=print,
     )
-    print(f"[red]submit aborted[/red]: {message}")
     raise SubmitAbortedError(message)
 
 

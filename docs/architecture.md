@@ -384,7 +384,8 @@ Recommended extraction order:
    gate decisions, tracking score selection/update, submission knowledge orchestration/context/default-insight
    preparation/record dispatch resolution, successful submit attempt/outcome/failure-context recording orchestration,
    file-submit-to-notebook fallback decisions, submission
-   outcome polling orchestration, and post-poll abort-spec resolution are now in `submit_stage.py`; submission knowledge
+   outcome polling orchestration, post-poll abort-spec resolution, and submit-abort persistence/knowledge recording are
+   now in `submit_stage.py`; submission knowledge
    recording now calls the submit-stage helper directly from the loop. Notebook kernel submit execution, output-reference
    construction, and kernel-output submit retry orchestration now live together in `submit_notebook.py`; the loop only
    binds run-specific paths and callbacks.
