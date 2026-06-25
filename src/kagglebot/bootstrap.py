@@ -16,6 +16,7 @@ from pathlib import Path
 from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.competition import rules_url_for_slug
 from kagglebot.competition_policy import NotebookSelectionPolicy, load_competition_policy
+from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import (
     DownloadProgressCallback,
@@ -655,18 +656,9 @@ def _parse_vote_count(raw: object) -> int:
 
 def _parse_last_run_epoch(raw: object) -> float:
     """Convert last-run timestamps to epoch seconds for stable sorting."""
-    if isinstance(raw, datetime):
-        dt = raw
-    elif isinstance(raw, str) and raw.strip():
-        text = raw.strip().replace("Z", "+00:00")
-        try:
-            dt = datetime.fromisoformat(text)
-        except ValueError:
-            return 0.0
-    else:
+    dt = parse_iso_datetime_utc(raw)
+    if dt is None:
         return 0.0
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
     return dt.timestamp()
 
 

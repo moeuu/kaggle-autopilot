@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,12 @@ from kagglebot.exceptions import KaggleCliError, KaggleCliResourceError, KernelC
 from kagglebot.exec_utils import CommandResult
 
 pytestmark = pytest.mark.slow
+
+
+def test_optional_datetime_normalizes_iso_values_to_utc() -> None:
+    assert kaggle_api._optional_datetime("2026-02-24T01:00:00Z") == datetime(2026, 2, 24, 1, tzinfo=UTC)
+    assert kaggle_api._optional_datetime("2026-02-24T10:00:00+09:00") == datetime(2026, 2, 24, 1, tzinfo=UTC)
+    assert kaggle_api._optional_datetime("not a date") is None
 
 
 def test_check_rules_accepted(monkeypatch) -> None:

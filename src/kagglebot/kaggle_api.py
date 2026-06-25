@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from kagglebot.competition import parse_competition_slug
+from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.env_utils import env_flag, parse_float_value, parse_int_value
 from kagglebot.exceptions import (
     KaggleCliError,
@@ -1120,16 +1121,7 @@ def _optional_int(value: object) -> int | None:
 
 
 def _optional_datetime(value: object) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    return None
+    return parse_iso_datetime_utc(value)
 
 
 def check_rules_accepted(slug: str, *, dry_run: bool = False) -> bool:

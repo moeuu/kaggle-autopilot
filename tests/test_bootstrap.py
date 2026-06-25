@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
 from kagglebot.bootstrap import (
     _cache_sample_submission,
     _mirror_sample_submission_to_data,
+    _parse_last_run_epoch,
     _read_direction_from_json,
     _write_sample_head,
     bootstrap_competition,
@@ -29,6 +31,14 @@ def test_read_direction_from_json_ignores_missing_invalid_or_non_object_payload(
     array_payload = tmp_path / "array.json"
     array_payload.write_text("[]", encoding="utf-8")
     assert _read_direction_from_json(array_payload, ("direction",)) is None
+
+
+def test_parse_last_run_epoch_normalizes_iso_timestamps_to_utc() -> None:
+    expected = datetime(2026, 2, 24, 1, tzinfo=UTC).timestamp()
+
+    assert _parse_last_run_epoch("2026-02-24T01:00:00Z") == expected
+    assert _parse_last_run_epoch("2026-02-24 10:00:00+09:00") == expected
+    assert _parse_last_run_epoch("not a date") == 0.0
 
 
 def test_rules_file_written_to_markdown(tmp_path) -> None:
