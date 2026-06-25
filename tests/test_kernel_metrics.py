@@ -57,6 +57,71 @@ def test_extract_kernel_metric_from_selected_combined_score_schema() -> None:
     assert value == 0.66824650121148
 
 
+def test_extract_kernel_metric_prefers_map_when_primary_metric_is_map() -> None:
+    payload = {
+        "primary_metric": "mAP@[0.5:0.95]",
+        "selected": {
+            "mean_map": 0.669,
+            "oof_f1": 0.123,
+            "combined_score": 0.456,
+        },
+    }
+
+    metric, value = extract_kernel_metric(payload, "mAP@[0.5:0.95]")
+
+    assert metric == "mAP@[0.5:0.95]"
+    assert value == 0.669
+
+
+def test_extract_kernel_metric_from_selected_cv_mean_schema() -> None:
+    payload = {
+        "metric": "rmse_on_log_target",
+        "selected_cv_mean": 0.11915219856213632,
+        "selected_cv_std": 0.016552210168151973,
+        "selected_pipeline": "demo_pipeline",
+        "leaderboard": [
+            {"pipeline": "demo_pipeline", "cv_mean": 0.11915219856213632, "cv_std": 0.016552210168151973},
+            {"pipeline": "other_pipeline", "cv_mean": 0.12005931755814533, "cv_std": 0.026762972223791422},
+        ],
+        "target_direction": "minimize",
+    }
+
+    metric, value = extract_kernel_metric(payload, "rmse")
+
+    assert metric == "rmse_on_log_target"
+    assert value == 0.11915219856213632
+
+
+def test_extract_kernel_metric_supports_pipelines_cv_mean_schema() -> None:
+    payload = {
+        "metric": "rmse",
+        "pipelines": [
+            {"name": "p1", "cv_mean": "0.12", "cv_std": "0.02"},
+            {"name": "p2", "cv_mean": "0.11", "cv_std": "0.01"},
+        ],
+        "selected": {"name": "p2"},
+        "target_direction": "minimize",
+    }
+
+    metric, value = extract_kernel_metric(payload, "rmse")
+
+    assert metric == "rmse"
+    assert value == 0.11
+
+
+def test_extract_kernel_metric_from_direct_brier_score_key() -> None:
+    payload = {
+        "metric": "brier_score",
+        "brier_score": 0.18,
+        "direction": "minimize",
+    }
+
+    metric, value = extract_kernel_metric(payload, "brier_score")
+
+    assert metric == "brier_score"
+    assert value == 0.18
+
+
 def test_extract_kernel_metric_from_oof_dict_respects_selected_key() -> None:
     payload = {
         "oof_rmse": {

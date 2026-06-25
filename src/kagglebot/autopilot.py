@@ -262,13 +262,6 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
-_extract_trusted_cv_value_from_metrics_payload = _kernel_metrics.extract_trusted_cv_value_from_metrics_payload
-_extract_kernel_metric = _kernel_metrics.extract_kernel_metric
-_metric_value_from_payload_item = _kernel_metrics.metric_value_from_payload_item
-_extract_baseline_candidates_from_metrics_payload = _kernel_metrics.extract_baseline_candidates_from_metrics_payload
-_collect_kernel_log_text = _kernel_metrics.collect_kernel_log_text
-_extract_validation_scores_from_log_text = _kernel_metrics.extract_validation_scores_from_log_text
-_extract_baseline_scores_from_log_text = _kernel_metrics.extract_baseline_scores_from_log_text
 _extract_cv_breakdown_by_model_node = _kernel_quality.extract_cv_breakdown_by_model_node
 _detect_subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal
 _iter_payload_mappings = _kernel_quality.iter_payload_mappings
@@ -4314,7 +4307,7 @@ def _evaluation_from_kernel_metrics_payload(
     """Build an evaluation result from kernel metrics payload with trust-aware source fallback."""
     from kagglebot.solver.evaluate import EvaluationResult
 
-    metric_name, value = _extract_kernel_metric(payload, target_metric)
+    metric_name, value = _kernel_metrics.extract_kernel_metric(payload, target_metric)
     if value is None:
         return None
     payload_direction_raw = payload.get("direction")
@@ -4349,7 +4342,7 @@ def _evaluation_from_kernel_metrics_payload(
                 break
     trusted_fallback_value = None
     if not _score_sources.is_trusted_offline_score_source(score_source):
-        trusted_fallback_value = _extract_trusted_cv_value_from_metrics_payload(payload)
+        trusted_fallback_value = _kernel_metrics.extract_trusted_cv_value_from_metrics_payload(payload)
         if trusted_fallback_value is not None:
             value = trusted_fallback_value
             score_source = "cv"
@@ -4529,9 +4522,9 @@ def _build_kernel_quality_guard(
     if _quality_signal_blocks_submit(competition_faithfulness_signal, force_submit=force_submit, forceable=False):
         block_submit = True
 
-    baseline_candidates = _extract_baseline_candidates_from_metrics_payload(payload)
-    log_text = _collect_kernel_log_text(logs_dir)
-    baseline_from_logs = _extract_baseline_scores_from_log_text(log_text)
+    baseline_candidates = _kernel_metrics.extract_baseline_candidates_from_metrics_payload(payload)
+    log_text = _kernel_metrics.collect_kernel_log_text(logs_dir)
+    baseline_from_logs = _kernel_metrics.extract_baseline_scores_from_log_text(log_text)
     for index, score in enumerate(baseline_from_logs):
         baseline_candidates.append((f"logs:baseline[{index}]", float(score)))
 
@@ -4549,7 +4542,7 @@ def _build_kernel_quality_guard(
     if _quality_signal_blocks_submit(baseline_regression_signal, force_submit=force_submit, forceable=False):
         block_submit = True
 
-    validation_scores = _extract_validation_scores_from_log_text(log_text, evaluation.metric)
+    validation_scores = _kernel_metrics.extract_validation_scores_from_log_text(log_text, evaluation.metric)
     validation_stability_signal = _build_validation_stability_quality_signal(
         current_value=float(evaluation.value),
         validation_scores=validation_scores,
