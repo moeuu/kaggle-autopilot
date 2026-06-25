@@ -173,7 +173,6 @@ from kagglebot.metric_matching import (
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
     WriteGuardPolicy,
-    _apply_plan_guardrails,
     _backup_guarded_files,
     _diff_snapshots,
     _enforce_allowlist_changes,
@@ -181,6 +180,7 @@ from kagglebot.orchestrator.agent_pipeline import (
     _snapshot_tree,
     run_agent_pipeline,
 )
+from kagglebot.plan_policy import apply_plan_guardrails as _apply_plan_guardrails
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
 from kagglebot.runtime_policy import (

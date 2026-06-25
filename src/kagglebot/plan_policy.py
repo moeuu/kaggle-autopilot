@@ -4,10 +4,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.json_utils import load_json_object
-from kagglebot.medals import normalize_target_medal, normalize_target_rank_percentile
+from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.medals import DEFAULT_TARGET_MEDAL, normalize_target_medal, normalize_target_rank_percentile
 from kagglebot.metric_matching import canonical_metric_name_for_match, metrics_equivalent
 from kagglebot.paths import CompetitionPaths
+from kagglebot.runtime_policy import is_heavy_deep_learning_modality
 from kagglebot.scalar_utils import parse_int
 from kagglebot.score_sources import (
     DEFAULT_ACCEPTED_SCORE_SOURCES,
@@ -15,7 +16,8 @@ from kagglebot.score_sources import (
     normalize_score_source_name,
 )
 from kagglebot.solver.metrics import canonical_metric
-from kagglebot.writeup import normalize_deliverable_mode, normalize_submit_mode
+from kagglebot.types import PlanConfig
+from kagglebot.writeup import infer_deliverable_mode_from_paths, normalize_deliverable_mode, normalize_submit_mode
 
 SPLIT_STRATEGY_PRIORITY = {
     "kfold": 0,
@@ -59,6 +61,13 @@ HIGH_ACCURACY_TABULAR_REQUIRED_SUITES: tuple[dict[str, object], ...] = (
 )
 VALID_SUITE_TRAIN_MODES = {"competition_only", "competition_plus_original", "original_only"}
 VALID_SUITE_PROMOTION_STAGES = {"ablation_fast", "full_eval"}
+ACCURACY_FIRST_DEFAULT_MAX_ITERATIONS = 5
+LONG_ACCURACY_FIRST_MAX_ITERATIONS = 3
+LONG_ACCURACY_FIRST_TIME_BUDGET_MIN = 12 * 60
+ACCURACY_FIRST_MIN_PATIENCE = 4
+ACCURACY_FIRST_MIN_CV_FOLDS = 5
+ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
+HEAVY_MAX_FULL_TRAIN_FOLDS = 3
 
 COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
     "deep-past-initiative-machine-translation": {
@@ -427,6 +436,212 @@ def validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obje
     return issues
 
 
+def write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> None:
+    payload = normalize_plan_payload(apply_plan_guardrails(paths, payload))
+    existing = load_json_object(paths.plan_path) or {}
+    merged = normalize_plan_payload({**existing, **payload})
+    defaults = PlanConfig.from_dict(merged).to_dict()
+    persisted = normalize_plan_payload({**merged, **defaults})
+    write_json_object(paths.plan_path, persisted)
+
+
+def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
+    guarded: dict[str, object] = dict(payload)
+
+    raw_toggles = guarded.get("toggles")
+    toggles: dict[str, object] | None = dict(raw_toggles) if isinstance(raw_toggles, dict) else {}
+    if toggles is not None:
+        guarded["toggles"] = toggles
+        if isinstance(toggles.get("FAST_DEV"), bool) and bool(toggles.get("FAST_DEV")):
+            toggles["FAST_DEV"] = False
+            print("[yellow]plan guardrail[/yellow]: forcing FAST_DEV=False for production-quality evaluation.")
+        _force_training_and_validation_toggles(toggles)
+
+    raw_runtime_budget = guarded.get("runtime_budget")
+    runtime_budget: dict[str, object] = dict(raw_runtime_budget) if isinstance(raw_runtime_budget, dict) else {}
+    guarded["runtime_budget"] = runtime_budget
+    _force_training_and_validation_runtime(runtime_budget)
+
+    raw_eval_protocol = guarded.get("evaluation_protocol")
+    evaluation_protocol: dict[str, object] | None = (
+        dict(raw_eval_protocol) if isinstance(raw_eval_protocol, dict) else None
+    )
+    if evaluation_protocol is not None:
+        guarded["evaluation_protocol"] = evaluation_protocol
+
+    profile = _load_dataset_profile_payload(paths)
+    task = str(profile.get("task") or "").strip().lower()
+    modality = str(profile.get("modality") or "").strip().lower()
+    top_class_ratio = _extract_top_class_ratio(profile)
+    severe_imbalance = bool(task == "classification" and top_class_ratio is not None and top_class_ratio >= 0.98)
+    leaderboard_mode = infer_deliverable_mode_from_paths(paths) != "writeup"
+
+    if leaderboard_mode:
+        target_medal = normalize_target_medal(guarded.get("target_medal"), default=DEFAULT_TARGET_MEDAL)
+        target_rank_percentile = normalize_target_rank_percentile(
+            guarded.get("target_rank_percentile"),
+            medal=target_medal,
+            fallback=None,
+        )
+        if target_medal is not None:
+            guarded["target_medal"] = target_medal
+        if target_rank_percentile is not None:
+            guarded["target_rank_percentile"] = target_rank_percentile
+
+    score_source = str(guarded.get("score_source") or "").strip().lower()
+    if score_source not in {"cv", "holdout"}:
+        guarded["score_source"] = "cv"
+        print(
+            "[yellow]plan guardrail[/yellow]: non-generalizable score_source is not allowed; forcing score_source=cv."
+        )
+
+    accuracy_first_cv = _should_force_accuracy_first_cv(modality=modality)
+    heavy_deep_learning = is_heavy_deep_learning_modality(modality)
+    if accuracy_first_cv:
+        score_source = str(guarded.get("score_source") or "").strip().lower()
+        if score_source != "cv":
+            guarded["score_source"] = "cv"
+            print("[yellow]plan guardrail[/yellow]: accuracy-first mode enabled; forcing score_source=cv.")
+
+        cv_folds = _positive_int(guarded.get("cv_folds"))
+        if cv_folds is None or cv_folds < ACCURACY_FIRST_MIN_CV_FOLDS:
+            guarded["cv_folds"] = ACCURACY_FIRST_MIN_CV_FOLDS
+            if evaluation_protocol is not None:
+                evaluation_protocol["n_folds"] = ACCURACY_FIRST_MIN_CV_FOLDS
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                f"accuracy-first mode enabled; forcing cv_folds>={ACCURACY_FIRST_MIN_CV_FOLDS}."
+            )
+        elif evaluation_protocol is not None:
+            protocol_folds = _positive_int(evaluation_protocol.get("n_folds"))
+            if protocol_folds is None or protocol_folds < cv_folds:
+                evaluation_protocol["n_folds"] = cv_folds
+
+    if heavy_deep_learning:
+        cv_folds = _positive_int(guarded.get("cv_folds"))
+        protocol_folds = _positive_int(evaluation_protocol.get("n_folds")) if evaluation_protocol is not None else None
+        requested_folds = max([value for value in (cv_folds, protocol_folds) if value is not None], default=None)
+        if requested_folds is not None and requested_folds > HEAVY_MAX_FULL_TRAIN_FOLDS:
+            guarded["cv_folds"] = HEAVY_MAX_FULL_TRAIN_FOLDS
+            if evaluation_protocol is not None:
+                evaluation_protocol["n_folds"] = HEAVY_MAX_FULL_TRAIN_FOLDS
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                f"heavy modality detected; capping full-training folds at {HEAVY_MAX_FULL_TRAIN_FOLDS}. "
+                "Use cached embeddings, TTA, or lightweight heads for extra validation."
+            )
+
+    eval_seeds = _normalize_seed_list(guarded.get("eval_seeds"))
+    protocol_seeds = _normalize_seed_list(evaluation_protocol.get("seeds")) if evaluation_protocol is not None else []
+    if _should_force_multi_seed_evaluation(modality=modality, task=task, profile=profile) and (
+        len(eval_seeds) < 3 or len(protocol_seeds) < 3
+    ):
+        guarded["eval_seeds"] = list(ACCURACY_FIRST_EVAL_SEEDS)
+        if evaluation_protocol is not None:
+            evaluation_protocol["seeds"] = list(ACCURACY_FIRST_EVAL_SEEDS)
+        print(
+            "[yellow]plan guardrail[/yellow]: "
+            f"forcing evaluation seeds={ACCURACY_FIRST_EVAL_SEEDS} for lower-variance model ranking."
+        )
+    elif heavy_deep_learning:
+        selected_seeds = eval_seeds or protocol_seeds or [ACCURACY_FIRST_EVAL_SEEDS[0]]
+        if len(selected_seeds) > 1:
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                f"heavy modality detected; using one full-training seed ({selected_seeds[0]}). "
+                "Use extra seeds only for cheap heads/blends or final confirmation."
+            )
+            selected_seeds = [selected_seeds[0]]
+        guarded["eval_seeds"] = list(selected_seeds)
+        if evaluation_protocol is not None:
+            evaluation_protocol["seeds"] = list(selected_seeds)
+
+    time_budget_min = _positive_int(guarded.get("time_budget_min"))
+    long_heavy_run = heavy_deep_learning and (
+        time_budget_min is None or time_budget_min >= LONG_ACCURACY_FIRST_TIME_BUDGET_MIN
+    )
+    target_max_iterations = (
+        LONG_ACCURACY_FIRST_MAX_ITERATIONS if long_heavy_run else ACCURACY_FIRST_DEFAULT_MAX_ITERATIONS
+    )
+    max_iterations = _positive_int(guarded.get("max_iterations"))
+    if max_iterations != target_max_iterations:
+        guarded["max_iterations"] = target_max_iterations
+        max_iterations = target_max_iterations
+        print(
+            "[yellow]plan guardrail[/yellow]: "
+            f"forcing max_iterations={target_max_iterations} "
+            "for the selected runtime profile."
+        )
+
+    patience = _positive_int(guarded.get("patience"))
+    if patience is None or patience < ACCURACY_FIRST_MIN_PATIENCE:
+        guarded["patience"] = ACCURACY_FIRST_MIN_PATIENCE
+        print(f"[yellow]plan guardrail[/yellow]: forcing patience>={ACCURACY_FIRST_MIN_PATIENCE} for stability.")
+
+    raw_stop_policy = guarded.get("stop_policy")
+    stop_policy = dict(raw_stop_policy) if isinstance(raw_stop_policy, dict) else {}
+    guarded["stop_policy"] = stop_policy
+    stop_max_iterations = _positive_int(stop_policy.get("max_iterations"))
+    if stop_max_iterations != max_iterations:
+        stop_policy["max_iterations"] = max_iterations
+        print("[yellow]plan guardrail[/yellow]: aligning stop_policy.max_iterations with top-level max_iterations.")
+
+    if severe_imbalance:
+        score_source = str(guarded.get("score_source") or "").strip().lower()
+        if score_source != "cv":
+            guarded["score_source"] = "cv"
+            print("[yellow]plan guardrail[/yellow]: detected severe class imbalance; forcing score_source=cv.")
+
+        if evaluation_protocol is not None and _should_force_multi_seed_evaluation(
+            modality=modality,
+            task=task,
+            profile=profile,
+        ):
+            seeds = evaluation_protocol.get("seeds")
+            normalized_seeds = [seed for seed in seeds if isinstance(seed, int)] if isinstance(seeds, list) else []
+            if len(normalized_seeds) < 3:
+                evaluation_protocol["seeds"] = [42, 2024, 777]
+                guarded["eval_seeds"] = [42, 2024, 777]
+                print(
+                    "[yellow]plan guardrail[/yellow]: "
+                    "detected severe class imbalance; forcing evaluation seeds=[42, 2024, 777]."
+                )
+
+        if isinstance(guarded.get("cv_folds"), int):
+            cv_folds = int(guarded["cv_folds"])
+            adjusted_folds = _adjust_cv_folds_for_imbalance(profile=profile, cv_folds=cv_folds)
+            if adjusted_folds < cv_folds:
+                guarded["cv_folds"] = adjusted_folds
+                if evaluation_protocol is not None:
+                    evaluation_protocol["n_folds"] = adjusted_folds
+                print(
+                    "[yellow]plan guardrail[/yellow]: "
+                    f"detected severe class imbalance; reducing cv_folds from {cv_folds} to {adjusted_folds}."
+                )
+
+        if toggles is not None:
+            classifier_keys = [
+                key for key in toggles if "CLASSIFIER" in key.upper() and key.upper() != "ALLOW_PRETRAINED_WEIGHTS"
+            ]
+            if classifier_keys and not any(bool(toggles.get(key)) for key in classifier_keys):
+                toggles[classifier_keys[0]] = True
+                print(
+                    f"[yellow]plan guardrail[/yellow]: detected severe class imbalance; enabling {classifier_keys[0]}."
+                )
+
+    if toggles is not None and modality in {"image", "video", "audio", "text", "rna_structure"}:
+        allow_pretrained = toggles.get("ALLOW_PRETRAINED_WEIGHTS")
+        if isinstance(allow_pretrained, bool) and not allow_pretrained and not _rules_disallow_external_data(paths):
+            toggles["ALLOW_PRETRAINED_WEIGHTS"] = True
+            print(
+                "[yellow]plan guardrail[/yellow]: "
+                "modality suggests transfer learning and rules do not ban external data; "
+                "enabling ALLOW_PRETRAINED_WEIGHTS."
+            )
+
+    return guarded
+
+
 def is_high_accuracy_tabular_blend_target(profile: dict[str, object]) -> bool:
     modality = str(profile.get("modality") or "").strip().lower()
     task = str(profile.get("task") or "").strip().lower()
@@ -585,6 +800,172 @@ def _positive_int(value: object) -> int | None:
     if parsed is None or parsed <= 0:
         return None
     return parsed
+
+
+def _force_training_and_validation_toggles(toggles: dict[str, object]) -> None:
+    true_keys = {
+        "ENABLE_TRAINING",
+        "ENABLE_FULL_TRAINING",
+        "ENABLE_REFERENCE_TRAINING",
+        "RUN_VALIDATION_GENERATION",
+        "ENABLE_VALIDATION_GENERATION",
+        "RUN_VALIDATION",
+        "ENABLE_VALIDATION",
+        "SAVE_OOF",
+        "SAVE_VALIDATION_PREDICTIONS",
+    }
+    false_keys = {
+        "FAST_DEV",
+        "SKIP_TRAINING",
+        "DISABLE_TRAINING",
+        "TRAINING_DISABLED",
+        "SKIP_VALIDATION",
+        "DISABLE_VALIDATION",
+        "VALIDATION_DISABLED",
+        "PACKAGING_ONLY",
+        "ADAPTER_PACKAGING_ONLY",
+        "ALLOW_IDENTITY_ADAPTER",
+        "ALLOW_DEBUG_NOOP_ADAPTER",
+        "ALLOW_NOOP_FALLBACK",
+        "ALLOW_UNSCORED_SUBMISSION",
+    }
+    for key in true_keys:
+        if toggles.get(key) is not True:
+            toggles[key] = True
+            print(f"[yellow]plan guardrail[/yellow]: forcing {key}=True.")
+    for key in false_keys:
+        if toggles.get(key) is not False:
+            toggles[key] = False
+            print(f"[yellow]plan guardrail[/yellow]: forcing {key}=False.")
+
+
+def _force_training_and_validation_runtime(runtime_budget: dict[str, object]) -> None:
+    minimum_ints = {
+        "full_training_seeds": 1,
+        "full_training_folds": 1,
+        "validation_generation_max_samples": 64,
+        "validation_generation_max_samples_rtx3060": 64,
+        "validation_generation_max_samples_large_gpu": 256,
+        "max_val_samples": 128,
+        "max_validation_samples": 128,
+        "num_steps_smoke": 10,
+    }
+    for key, minimum in minimum_ints.items():
+        current = _positive_int(runtime_budget.get(key))
+        if current is None or current < minimum:
+            runtime_budget[key] = minimum
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}>={minimum}.")
+    forced_true = {
+        "enable_reference_training",
+        "enable_training",
+        "run_validation_generation",
+        "enable_validation_generation",
+        "run_validation",
+        "enable_validation",
+    }
+    for key in forced_true:
+        if runtime_budget.get(key) is not True:
+            runtime_budget[key] = True
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}=true.")
+    forced_false = {
+        "packaging_only",
+        "adapter_packaging_only",
+        "allow_identity_adapter",
+        "allow_debug_noop_adapter",
+        "allow_noop_fallback",
+        "allow_unscored_submission",
+    }
+    for key in forced_false:
+        if runtime_budget.get(key) is not False:
+            runtime_budget[key] = False
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}=false.")
+
+
+def _normalize_seed_list(value: object) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, int) and item not in seen:
+            normalized.append(item)
+            seen.add(item)
+    return normalized
+
+
+def _should_force_accuracy_first_cv(*, modality: str) -> bool:
+    return not is_heavy_deep_learning_modality(modality)
+
+
+def _should_force_multi_seed_evaluation(*, modality: str, task: str, profile: dict[str, object]) -> bool:
+    if task == "classification":
+        top_class_ratio = _extract_top_class_ratio(profile)
+        if top_class_ratio is not None and top_class_ratio >= 0.98:
+            return True
+    return not is_heavy_deep_learning_modality(modality)
+
+
+def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:
+    payload = load_json_object(paths.dataset_profile_path)
+    return payload or {}
+
+
+def _extract_top_class_ratio(profile: dict[str, object]) -> float | None:
+    target_stats = profile.get("target_stats")
+    if not isinstance(target_stats, dict):
+        return None
+    value = target_stats.get("top_class_ratio")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _adjust_cv_folds_for_imbalance(*, profile: dict[str, object], cv_folds: int) -> int:
+    if cv_folds <= 2:
+        return cv_folds
+    train_rows = profile.get("train_rows")
+    top_class_ratio = _extract_top_class_ratio(profile)
+    if not isinstance(train_rows, int) or train_rows <= 0 or top_class_ratio is None:
+        return cv_folds
+    minority_count = int(round(float(train_rows) * max(0.0, 1.0 - top_class_ratio)))
+    if minority_count <= 0:
+        return cv_folds
+    if minority_count < cv_folds * 2:
+        if minority_count <= 3:
+            return 2
+        return max(2, min(cv_folds, minority_count // 2))
+    return cv_folds
+
+
+def _rules_disallow_external_data(paths: CompetitionPaths) -> bool:
+    context = "\n".join(
+        [
+            _read_text(paths.rules_md_path),
+            _read_text(paths.rules_html_path),
+            _read_text(paths.overview_md_path),
+        ]
+    ).lower()
+    if not context.strip():
+        return False
+    allow_patterns = (
+        r"external data[^.\n]{0,80}allow",
+        r"outside data[^.\n]{0,80}allow",
+    )
+    if any(re.search(pattern, context) for pattern in allow_patterns):
+        return False
+    deny_patterns = (
+        r"external data[^.\n]{0,80}prohibit",
+        r"outside data[^.\n]{0,80}prohibit",
+        r"\bno external data\b",
+        r"external data[^.\n]{0,80}forbidden",
+    )
+    return any(re.search(pattern, context) for pattern in deny_patterns)
+
+
+def _read_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:

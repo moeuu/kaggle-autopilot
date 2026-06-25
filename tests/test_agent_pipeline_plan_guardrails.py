@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kagglebot.orchestrator.agent_pipeline import _write_plan_payload
 from kagglebot.paths import CompetitionPaths
-from kagglebot.plan_policy import validate_plan_payload
+from kagglebot.plan_policy import validate_plan_payload, write_plan_payload
 
 
 def _base_payload() -> dict[str, object]:
@@ -53,7 +52,7 @@ def test_write_plan_payload_applies_imbalance_guardrails(tmp_path: Path) -> None
     )
     paths.rules_md_path.write_text("External data is strictly prohibited.", encoding="utf-8")
 
-    _write_plan_payload(paths, _base_payload())
+    write_plan_payload(paths, _base_payload())
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["score_source"] == "cv"
@@ -72,7 +71,7 @@ def test_write_plan_payload_ignores_invalid_existing_plan(tmp_path: Path) -> Non
     paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
     paths.plan_path.write_text("{", encoding="utf-8")
 
-    _write_plan_payload(paths, _base_payload())
+    write_plan_payload(paths, _base_payload())
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["target_metric"] == "f1"
@@ -98,7 +97,7 @@ def test_write_plan_payload_enables_pretrained_when_rules_allow(tmp_path: Path) 
 
     payload = _base_payload()
     payload["score_source"] = "cv"
-    _write_plan_payload(paths, payload)
+    write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
     assert persisted["toggles"]["ALLOW_PRETRAINED_WEIGHTS"] is True
 
@@ -121,7 +120,7 @@ def test_write_plan_payload_disables_fast_dev_toggle(tmp_path: Path) -> None:
 
     payload = _base_payload()
     payload["toggles"]["FAST_DEV"] = True
-    _write_plan_payload(paths, payload)
+    write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
     assert persisted["toggles"]["FAST_DEV"] is False
     assert persisted["score_source"] == "cv"
@@ -145,7 +144,7 @@ def test_write_plan_payload_caps_long_heavy_runs_to_three_iterations(tmp_path: P
     payload["time_budget_min"] = None
     payload["max_iterations"] = 5
     payload["stop_policy"] = {"max_iterations": 5, "error_fingerprint_abort": True}
-    _write_plan_payload(paths, payload)
+    write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["max_iterations"] == 3
@@ -181,7 +180,7 @@ def test_write_plan_payload_forces_training_and_validation(tmp_path: Path) -> No
         "allow_unscored_submission": True,
     }
 
-    _write_plan_payload(paths, payload)
+    write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     toggles = persisted["toggles"]
@@ -219,7 +218,7 @@ def test_write_plan_payload_forces_cv_for_non_generalizable_score_source(tmp_pat
 
     payload = _base_payload()
     payload["score_source"] = "auto"
-    _write_plan_payload(paths, payload)
+    write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["score_source"] == "cv"
@@ -268,7 +267,7 @@ def test_write_plan_payload_scalarizes_pipeline_key_hyperparameters(tmp_path: Pa
         },
     ]
 
-    _write_plan_payload(paths, payload)
+    write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["pipelines"][0]["key_hyperparameters"] == {
@@ -293,7 +292,7 @@ def test_write_plan_payload_sets_default_winner_target_for_leaderboard(tmp_path:
         encoding="utf-8",
     )
 
-    _write_plan_payload(paths, _base_payload())
+    write_plan_payload(paths, _base_payload())
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
 
     assert persisted["target_medal"] == "winner"
