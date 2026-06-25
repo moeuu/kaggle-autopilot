@@ -276,8 +276,9 @@ The next high-value modernization work is:
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.
    Kernel source preflight error construction now calls `validators.py` directly; `autopilot.py` keeps only the fix loop
    policy. Top1 public-score display formatting now calls `top1_exhaustive.py` directly.
-   Agent plan payload normalization, validation, high-accuracy suite repair, guardrail application, and plan persistence
-   now call `plan_policy.py` directly instead of living inside the agent pipeline.
+   Agent/autopilot plan payload normalization, validation, high-accuracy suite repair, guardrail application, plan
+   persistence, and resolved-plan-to-`PlanConfig` conversion now call `plan_policy.py` directly instead of living inside
+   orchestration modules.
    Agent write-guard policy, snapshots, repairs, and secret prompt checks now live in `write_guard.py`; agent and
    autopilot orchestration import that shared module instead of sharing guard internals through `agent_pipeline.py`.
 
@@ -289,8 +290,8 @@ Recommended extraction order:
 1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization/override,
    metric/direction override policy, plan score-source normalization, evaluation-spec value extraction, local-GPU
    evaluation budget/max-iteration policy, submit/runtime constraint application, planning necessity/resume-skip checks,
-   and competition-specific overrides are already out of the main loop. Leaderboard medal/rank objective resolution is
-   now also in `plan_policy.py`.
+   and competition-specific overrides are already out of the main loop. Leaderboard medal/rank objective resolution,
+   plan file I/O, and resolved-plan config conversion are now also in `plan_policy.py`.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
    submit-policy and submission-gate resolution now also lives there.

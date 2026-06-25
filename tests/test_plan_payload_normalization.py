@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from kagglebot.plan_policy import normalize_plan_payload, repair_plan_payload_for_profile, validate_plan_payload
+from kagglebot.plan_policy import (
+    normalize_plan_payload,
+    plan_config_from_resolved,
+    repair_plan_payload_for_profile,
+    validate_plan_payload,
+)
 
 
 def test_normalize_plan_payload_injects_pipeline_names() -> None:
@@ -220,6 +225,38 @@ def test_repair_plan_payload_for_profile_adds_high_accuracy_suites() -> None:
     ]
     assert "suite_aware_ablations" not in repaired
     assert repaired["toggles"] == {}
+
+
+def test_plan_config_from_resolved_preserves_autopilot_defaults() -> None:
+    plan = plan_config_from_resolved(
+        {
+            "deliverable_mode": "leaderboard",
+            "submit_mode": "file",
+            "target_medal": "gold",
+            "target_rank_percentile": "0.5",
+            "target_metric": "log_loss",
+            "target_direction": "minimize",
+            "score_source": "cv",
+            "internet": "off",
+            "submit_policy": "always",
+            "submission_gate": "none",
+            "rank_force_major_max_percentile": "bad",
+            "rank_force_major_min_teams": "bad",
+        },
+        default_max_iterations=7,
+        default_force_major_rank_max_percentile=2.5,
+        default_force_major_rank_min_teams=100,
+    )
+
+    assert plan.max_iterations == 7
+    assert plan.patience == 2
+    assert plan.min_improvement == 0.0
+    assert plan.readiness_k == 1.0
+    assert plan.ci_alpha == 0.05
+    assert plan.drift_weight == 1.0
+    assert plan.stop_no_improve_patience == 0
+    assert plan.rank_force_major_max_percentile == 2.5
+    assert plan.rank_force_major_min_teams == 100
 
 
 def test_validate_plan_payload_rejects_non_object_key_hyperparameters() -> None:

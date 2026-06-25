@@ -445,6 +445,76 @@ def write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> N
     write_json_object(paths.plan_path, persisted)
 
 
+def load_plan_config(paths: CompetitionPaths) -> PlanConfig:
+    payload = load_json_object(paths.plan_path)
+    if payload is None:
+        return PlanConfig()
+    return PlanConfig.from_dict(payload)
+
+
+def write_plan_config(paths: CompetitionPaths, plan: PlanConfig) -> None:
+    existing = load_json_object(paths.plan_path) or {}
+    payload = apply_plan_guardrails(paths, {**existing, **plan.to_dict()})
+    write_json_object(paths.plan_path, payload)
+
+
+def plan_config_from_resolved(
+    resolved: dict[str, object],
+    *,
+    default_max_iterations: int,
+    default_force_major_rank_max_percentile: float,
+    default_force_major_rank_min_teams: int,
+) -> PlanConfig:
+    target_medal = normalize_target_medal(resolved.get("target_medal"), default=None)
+    return PlanConfig(
+        deliverable_mode=str(resolved.get("deliverable_mode") or "leaderboard"),
+        submit_mode=str(resolved.get("submit_mode") or "file"),
+        target_medal=target_medal,
+        target_rank_percentile=normalize_target_rank_percentile(
+            resolved.get("target_rank_percentile"),
+            medal=target_medal,
+            fallback=None,
+        ),
+        target_metric=resolved.get("target_metric"),  # type: ignore[arg-type]
+        target_direction=str(resolved.get("target_direction") or "auto"),
+        target_score=resolved.get("target_score"),  # type: ignore[arg-type]
+        score_source=str(resolved.get("score_source") or "cv"),
+        holdout_frac=resolved.get("holdout_frac"),  # type: ignore[arg-type]
+        cv_folds=resolved.get("cv_folds"),  # type: ignore[arg-type]
+        split_strategy=resolved.get("split_strategy"),  # type: ignore[arg-type]
+        seed=resolved.get("seed"),  # type: ignore[arg-type]
+        eval_seeds=resolved.get("eval_seeds"),  # type: ignore[arg-type]
+        eval_repeats=resolved.get("eval_repeats"),  # type: ignore[arg-type]
+        time_budget_min=resolved.get("time_budget_min"),  # type: ignore[arg-type]
+        kernel_name=resolved.get("kernel_name"),  # type: ignore[arg-type]
+        internet=str(resolved.get("internet") or "on"),
+        max_iterations=int(resolved.get("max_iterations") or default_max_iterations),
+        max_total_min=resolved.get("max_total_min"),  # type: ignore[arg-type]
+        patience=int(resolved.get("patience") or 2),
+        min_improvement=float(resolved.get("min_improvement") or 0.0),
+        submit_policy=str(resolved.get("submit_policy") or "always"),
+        submission_gate=str(resolved.get("submission_gate") or "always"),
+        readiness_target_score=resolved.get("readiness_target_score"),  # type: ignore[arg-type]
+        readiness_method=str(resolved.get("readiness_method") or "ci_bound"),
+        readiness_k=float(resolved.get("readiness_k") or 1.0),
+        ci_method=str(resolved.get("ci_method") or "normal"),
+        ci_alpha=float(resolved.get("ci_alpha") or 0.05),
+        drift_check=bool(resolved.get("drift_check", False)),
+        drift_weight=float(resolved.get("drift_weight") or 1.0),
+        stop_min_delta=float(resolved.get("stop_min_delta") or 0.0),
+        stop_no_improve_patience=int(resolved.get("stop_no_improve_patience") or 0),
+        stop_same_config_patience=int(resolved.get("stop_same_config_patience") or 0),
+        rank_force_major_max_percentile=normalize_rank_force_percentile(
+            resolved.get("rank_force_major_max_percentile"),
+            fallback=default_force_major_rank_max_percentile,
+        ),
+        rank_force_major_min_teams=normalize_rank_force_min_teams(
+            resolved.get("rank_force_major_min_teams"),
+            fallback=default_force_major_rank_min_teams,
+        ),
+    )
+
+
 def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
     guarded: dict[str, object] = dict(payload)
 
