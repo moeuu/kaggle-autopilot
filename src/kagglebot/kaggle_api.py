@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 import logging
 import math
 import os
@@ -23,6 +22,7 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
 )
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import load_json_object
 from kagglebot.submission.guard import run_kaggle_submit
 from kagglebot.validators import safe_extract_zip
 
@@ -856,9 +856,8 @@ def _kaggle_api_credentials() -> tuple[str, str]:
         return username, api_key
 
     for path in _kaggle_config_file_candidates():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        payload = load_json_object(path)
+        if payload is None:
             continue
         username = str(payload.get("username") or "").strip()
         api_key = str(payload.get("key") or "").strip()

@@ -46,6 +46,23 @@ def test_check_rules_accepted(monkeypatch) -> None:
     assert kaggle_api.check_rules_accepted("missing") is False
 
 
+def test_kaggle_api_credentials_skips_invalid_and_non_object_config_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    array_payload = tmp_path / "array.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    valid = tmp_path / "valid.json"
+    valid.write_text('{"username": "cfg-user", "key": "cfg-key"}', encoding="utf-8")
+    monkeypatch.setattr(kaggle_api, "_kaggle_config_file_candidates", lambda: [invalid, array_payload, valid])
+
+    assert kaggle_api._kaggle_api_credentials() == ("cfg-user", "cfg-key")
+
+
 def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
     captured = {}
 
