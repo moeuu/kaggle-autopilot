@@ -30,6 +30,7 @@ from kagglebot.plan_policy import (
     resolve_eval_budget_policy,
     resolve_heavy_local_gpu_max_iterations,
     resolve_internet_policy,
+    resolve_loop_control_request,
     resolve_plan_max_iterations,
     resolve_plan_score_source,
     resolve_rank_force_policy,
@@ -652,6 +653,41 @@ def test_resolve_runtime_request_uses_plan_then_defaults() -> None:
     assert default_decision.kernel_name is None
     assert default_decision.internet == "on"
     assert default_decision.messages == ()
+
+
+def test_resolve_loop_control_request_prefers_config_plan_and_spec_gate() -> None:
+    spec = extract_evaluation_spec_values({"readiness_rule": {"submission_gate": "readiness_only"}})
+    decision = resolve_loop_control_request(
+        config_max_total_min=120,
+        config_patience=None,
+        config_min_improvement=0.02,
+        config_submit_policy=None,
+        plan=PlanConfig(max_total_min=60, patience=4, min_improvement=0.01, submit_policy="improved"),
+        spec_values=spec,
+    )
+
+    assert decision.max_total_min == 120
+    assert decision.patience == 4
+    assert decision.min_improvement == 0.02
+    assert decision.requested_submit_policy == "improved"
+    assert decision.requested_submission_gate == "readiness_only"
+
+
+def test_resolve_loop_control_request_uses_defaults_and_normalizes_empty_gate() -> None:
+    decision = resolve_loop_control_request(
+        config_max_total_min=None,
+        config_patience=None,
+        config_min_improvement=None,
+        config_submit_policy=None,
+        plan=PlanConfig(submission_gate="  "),
+        spec_values=extract_evaluation_spec_values({}),
+    )
+
+    assert decision.max_total_min is None
+    assert decision.patience == 2
+    assert decision.min_improvement == 0.0
+    assert decision.requested_submit_policy == "always"
+    assert decision.requested_submission_gate is None
 
 
 def test_resolve_time_budget_policy_applies_rule_and_local_caps() -> None:

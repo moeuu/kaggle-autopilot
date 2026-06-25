@@ -3184,13 +3184,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
-    def choose(value, fallback, default):
-        if value is not None:
-            return value
-        if fallback is not None:
-            return fallback
-        return default
-
     eval_spec = _context_load_evaluation_spec(
         slug=config.paths.slug,
         evaluation_spec_path=config.paths.context_dir / "evaluation_spec.json",
@@ -3354,16 +3347,21 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     max_iterations = max_iterations_decision.max_iterations
     for message in max_iterations_decision.messages:
         print(message)
-    max_total_min = choose(config.max_total_min, plan.max_total_min, None)
-    patience = choose(config.patience, plan.patience, 2)
-    min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
-    requested_submit_policy = str(choose(config.submit_policy, plan.submit_policy, "always") or "always")
-    requested_submission_gate_raw = choose(None, plan.submission_gate, spec_values.submission_gate)
-    requested_submission_gate = str(requested_submission_gate_raw or "").strip().lower() or None
+    loop_control_request = _plan_policy.resolve_loop_control_request(
+        config_max_total_min=config.max_total_min,
+        config_patience=config.patience,
+        config_min_improvement=config.min_improvement,
+        config_submit_policy=config.submit_policy,
+        plan=plan,
+        spec_values=spec_values,
+    )
+    max_total_min = loop_control_request.max_total_min
+    patience = loop_control_request.patience
+    min_improvement = loop_control_request.min_improvement
     submit_policy_decision = _submission_policy.resolve_plan_submission_policy(
         config_submit_policy=config.submit_policy,
-        requested_submit_policy=requested_submit_policy,
-        requested_submission_gate=requested_submission_gate,
+        requested_submit_policy=loop_control_request.requested_submit_policy,
+        requested_submission_gate=loop_control_request.requested_submission_gate,
         submission_limit_detected=constraints.submission_limit_detected,
         default_limited_submission_gate=_DEFAULT_LIMITED_SUBMISSION_GATE,
     )

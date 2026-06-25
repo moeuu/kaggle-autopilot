@@ -183,6 +183,15 @@ class RuntimeRequestDecision:
 
 
 @dataclass(frozen=True)
+class LoopControlRequestDecision:
+    max_total_min: object
+    patience: object
+    min_improvement: object
+    requested_submit_policy: str
+    requested_submission_gate: str | None
+
+
+@dataclass(frozen=True)
 class TargetObjectiveDecision:
     target_medal: str | None
     target_rank_percentile: float | None
@@ -1645,6 +1654,28 @@ def resolve_runtime_request(
         kernel_name=_choose(config_kernel_name, plan.kernel_name, None),
         internet=internet_decision.internet,
         messages=internet_decision.messages,
+    )
+
+
+def resolve_loop_control_request(
+    *,
+    config_max_total_min: object,
+    config_patience: object,
+    config_min_improvement: object,
+    config_submit_policy: object,
+    plan: PlanConfig,
+    spec_values: EvaluationSpecValues,
+) -> LoopControlRequestDecision:
+    """Resolve loop-control and submit-policy request values before submission-limit policy."""
+
+    requested_gate_raw = _choose(None, plan.submission_gate, spec_values.submission_gate)
+    requested_gate = str(requested_gate_raw or "").strip().lower() or None
+    return LoopControlRequestDecision(
+        max_total_min=_choose(config_max_total_min, plan.max_total_min, None),
+        patience=_choose(config_patience, plan.patience, 2),
+        min_improvement=_choose(config_min_improvement, plan.min_improvement, 0.0),
+        requested_submit_policy=str(_choose(config_submit_policy, plan.submit_policy, "always") or "always"),
+        requested_submission_gate=requested_gate,
     )
 
 
