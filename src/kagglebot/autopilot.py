@@ -195,7 +195,7 @@ from kagglebot.runtime_policy import (
 )
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.score_utils import should_update_best_score as _update_best_score
-from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
+from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction
 from kagglebot.submission.guard import (
     classify_submit_error,
     compute_error_fingerprint,
@@ -5302,8 +5302,8 @@ def _recompute_metric_from_oof_artifact(
     if oof.empty:
         return None
 
-    y_col = _pick_oof_target_column(oof)
-    pred_col = _pick_oof_prediction_column(oof, metric=target_metric)
+    y_col = _kernel_metrics.pick_oof_target_column(oof)
+    pred_col = _kernel_metrics.pick_oof_prediction_column(oof, metric=target_metric)
     if y_col is None or pred_col is None:
         return None
 
@@ -5329,7 +5329,9 @@ def _recompute_metric_from_oof_artifact(
     std_value = tolerant_finite_float(payload.get("offline_std")) if isinstance(payload, dict) else None
     train_score = tolerant_finite_float(payload.get("train_score")) if isinstance(payload, dict) else None
     val_score = tolerant_finite_float(payload.get("val_score")) if isinstance(payload, dict) else None
-    fold_scores = _extract_numeric_list(payload.get("fold_scores")) if isinstance(payload, dict) else None
+    fold_scores = (
+        _kernel_metrics.extract_numeric_list(payload.get("fold_scores")) if isinstance(payload, dict) else None
+    )
 
     from kagglebot.solver.evaluate import EvaluationResult
 
@@ -5358,50 +5360,6 @@ def _recompute_metric_from_oof_artifact(
     else:
         updated_payload["loop_decision"] = {"source": score_source, "value": metric_value}
     return evaluation, updated_payload
-
-
-def _pick_oof_target_column(frame) -> str | None:  # type: ignore[no-untyped-def]
-    """Return the target column name from an OOF prediction table."""
-    columns = [str(col) for col in frame.columns]
-    normalized = {col.lower().strip(): col for col in columns}
-    for key in ("y", "target", "label", "y_true", "isdefault", "is_default"):
-        if key in normalized:
-            return normalized[key]
-    return None
-
-
-def _pick_oof_prediction_column(frame, *, metric: str) -> str | None:  # type: ignore[no-untyped-def]
-    """Return the most suitable prediction column for the requested metric."""
-    columns = [str(col) for col in frame.columns]
-    normalized = {col.lower().strip(): col for col in columns}
-    is_prob_metric = bool(metric_requires_proba(metric))
-
-    if is_prob_metric:
-        for key in ("oof_proba", "pred_proba", "prediction_proba", "probability", "proba", "score"):
-            if key in normalized:
-                return normalized[key]
-        for col in columns:
-            lowered = col.lower()
-            if "proba" in lowered or "prob" in lowered or "score" in lowered:
-                return col
-    for key in ("oof_pred", "prediction", "pred", "y_pred"):
-        if key in normalized:
-            return normalized[key]
-    if is_prob_metric:
-        return None
-    for col in columns:
-        lowered = col.lower()
-        if any(token in lowered for token in ("pred", "score", "proba", "prob")):
-            return col
-    return None
-
-
-def _extract_numeric_list(value: object) -> list[float] | None:
-    """Return parsed numeric list or None when payload value is not a numeric list."""
-    if not isinstance(value, list):
-        return None
-    parsed = [float(item) for item in value if isinstance(item, (int, float))]
-    return parsed or None
 
 
 def _persist_metric_recheck_payload(*, iter_dir: Path, resolved_metrics_path: Path, payload: dict[str, object]) -> None:

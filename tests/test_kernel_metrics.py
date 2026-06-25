@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from kagglebot.kernel_metrics import (
@@ -10,9 +11,12 @@ from kagglebot.kernel_metrics import (
     extract_baseline_candidates_from_metrics_payload,
     extract_baseline_scores_from_log_text,
     extract_kernel_metric,
+    extract_numeric_list,
     extract_trusted_cv_value_from_metrics_payload,
     extract_validation_scores_from_log_text,
     load_kernel_metrics,
+    pick_oof_prediction_column,
+    pick_oof_target_column,
 )
 
 
@@ -30,6 +34,27 @@ def test_extract_trusted_cv_value_averages_numeric_fold_scores() -> None:
     payload = {"fold_scores": [0.8, "ignored", 1.0, True, None, "0.6", "nan", "inf"]}
 
     assert extract_trusted_cv_value_from_metrics_payload(payload) == pytest.approx(0.8)
+
+
+def test_pick_oof_columns_prefers_probability_for_proba_metrics() -> None:
+    frame = pd.DataFrame(
+        {
+            "row_id": [1, 2],
+            "target": [0, 1],
+            "prediction": [0, 1],
+            "oof_proba": [0.2, 0.8],
+        }
+    )
+
+    assert pick_oof_target_column(frame) == "target"
+    assert pick_oof_prediction_column(frame, metric="roc_auc") == "oof_proba"
+    assert pick_oof_prediction_column(frame, metric="rmse") == "prediction"
+
+
+def test_extract_numeric_list_keeps_numeric_items_only() -> None:
+    assert extract_numeric_list([0.1, "0.2", 3, True, None]) == [0.1, 3.0, 1.0]
+    assert extract_numeric_list(["0.1", None]) is None
+    assert extract_numeric_list("0.1") is None
 
 
 def test_extract_kernel_metric_ignores_non_finite_direct_values() -> None:

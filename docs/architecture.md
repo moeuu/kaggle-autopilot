@@ -265,7 +265,8 @@ The next high-value modernization work is:
    submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
    directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback
    decisions, initial artifact-mode resolution, and kernel push version-label inference now call `submit_notebook.py`
-   directly. Previous-submission history loading now calls `submission_history.py` directly.
+   directly. Previous-submission history loading now calls `submission_history.py` directly. Metric-recheck OOF column
+   selection and fold-score list parsing now call `kernel_metrics.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.
@@ -287,8 +288,9 @@ Recommended extraction order:
    `score_progress.py`.
    Top1 campaign metadata extraction from kernel metrics and validation-redesign preference checks are now in
    `campaign_metrics.py`.
-   Kernel metrics payload parsing, evaluation-result normalization, CV fallback extraction, baseline score extraction,
-   and kernel-log metric scraping are now in `kernel_metrics.py`.
+   Kernel metrics payload parsing, evaluation-result normalization, CV fallback extraction, metric-recheck OOF column
+   helpers, fold-score list parsing, baseline score extraction, and kernel-log metric scraping are now in
+   `kernel_metrics.py`.
    Kernel quality guard constants and payload-level detectors for subgroup collapse, external test-label transfer,
    candidate-selection mismatch, and prediction-distribution collapse are now in `kernel_quality.py`.
    Iteration metrics payload assembly, evaluation-result serialization, evaluation data-cache/fingerprint helpers, and

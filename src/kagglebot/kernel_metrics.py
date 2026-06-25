@@ -9,6 +9,7 @@ from kagglebot.metric_matching import normalize_metric_name
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
 from kagglebot.solver.evaluate import EvaluationResult
+from kagglebot.solver.metrics import metric_requires_proba
 
 
 def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) -> float | None:
@@ -33,6 +34,50 @@ def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) ->
         if fold_scores:
             return float(sum(fold_scores) / len(fold_scores))
     return None
+
+
+def pick_oof_target_column(frame) -> str | None:  # type: ignore[no-untyped-def]
+    """Return the target column name from an OOF prediction table."""
+    columns = [str(col) for col in frame.columns]
+    normalized = {col.lower().strip(): col for col in columns}
+    for key in ("y", "target", "label", "y_true", "isdefault", "is_default"):
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def pick_oof_prediction_column(frame, *, metric: str) -> str | None:  # type: ignore[no-untyped-def]
+    """Return the most suitable prediction column for the requested metric."""
+    columns = [str(col) for col in frame.columns]
+    normalized = {col.lower().strip(): col for col in columns}
+    is_prob_metric = bool(metric_requires_proba(metric))
+
+    if is_prob_metric:
+        for key in ("oof_proba", "pred_proba", "prediction_proba", "probability", "proba", "score"):
+            if key in normalized:
+                return normalized[key]
+        for col in columns:
+            lowered = col.lower()
+            if "proba" in lowered or "prob" in lowered or "score" in lowered:
+                return col
+    for key in ("oof_pred", "prediction", "pred", "y_pred"):
+        if key in normalized:
+            return normalized[key]
+    if is_prob_metric:
+        return None
+    for col in columns:
+        lowered = col.lower()
+        if any(token in lowered for token in ("pred", "score", "proba", "prob")):
+            return col
+    return None
+
+
+def extract_numeric_list(value: object) -> list[float] | None:
+    """Return parsed numeric list or None when payload value is not a numeric list."""
+    if not isinstance(value, list):
+        return None
+    parsed = [float(item) for item in value if isinstance(item, (int, float))]
+    return parsed or None
 
 
 def extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:
