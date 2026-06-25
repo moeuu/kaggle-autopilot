@@ -49,15 +49,6 @@ from kagglebot.agents.identity import (
     render_prompt_identity,
 )
 from kagglebot.agents.strategy_runner import run_strategy
-from kagglebot.autopilot_helpers import (
-    _detect_online_mismatch_signal,
-    _extract_missing_ensemble_signal,
-    _extract_orig_proba_signal,
-    _extract_original_data_unused_signal,
-    _extract_pseudo_label_failure_signal,
-    _extract_same_family_plateau_signal,
-    _requires_tabular_multi_family_policy,
-)
 from kagglebot.autopilot_state import (
     _copy_kernel_support_artifacts_to_iteration_dir,
     _copy_submission_artifact_to_iteration_dir,
@@ -125,6 +116,13 @@ from kagglebot.experiment_graph import (
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
+from kagglebot.iteration_signals import detect_online_mismatch_signal as _detect_online_mismatch_signal
+from kagglebot.iteration_signals import extract_missing_ensemble_signal as _extract_missing_ensemble_signal
+from kagglebot.iteration_signals import extract_orig_proba_signal as _extract_orig_proba_signal
+from kagglebot.iteration_signals import extract_original_data_unused_signal as _extract_original_data_unused_signal
+from kagglebot.iteration_signals import extract_pseudo_label_failure_signal as _extract_pseudo_label_failure_signal
+from kagglebot.iteration_signals import extract_same_family_plateau_signal as _extract_same_family_plateau_signal
+from kagglebot.iteration_signals import requires_tabular_multi_family_policy as _requires_tabular_multi_family_policy
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.json_utils import load_json_object_or_empty as _load_json_object_or_empty
 from kagglebot.json_utils import write_json_object as _write_json_object
