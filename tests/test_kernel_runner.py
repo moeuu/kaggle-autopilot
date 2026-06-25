@@ -645,7 +645,8 @@ def test_wait_for_kernel_timeout_marks_remote_running(
     monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
     monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
 
-    with pytest.raises(KernelStillRunningError, match=f"still {status.lower()}"):
+    expected_status = "queued" if status.endswith("QUEUED") else "running"
+    with pytest.raises(KernelStillRunningError, match=f"still {expected_status}"):
         kernel_runner._wait_for_kernel("user/kernel-slug", "demo", 1, output_dir=tmp_path)  # noqa: SLF001
 
 
@@ -690,7 +691,7 @@ def test_wait_for_kernel_timeout_on_unknown_status_raises_timeout(
     monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
     monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
 
-    with pytest.raises(KernelTimeoutError, match="last status was kernelworkerstatus.unknown"):
+    with pytest.raises(KernelTimeoutError, match="last status was unknown"):
         kernel_runner._wait_for_kernel("user/kernel-slug", "demo", 1, output_dir=tmp_path)  # noqa: SLF001
 
 

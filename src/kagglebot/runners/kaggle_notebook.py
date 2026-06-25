@@ -12,6 +12,7 @@ from rich import print
 from kagglebot import kaggle_cli
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
+from kagglebot.kernel_status import parse_kernel_status
 from kagglebot.runners.base import RunContext, RunResult
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
@@ -629,7 +630,7 @@ def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str, kernel_dir: P
 
     while True:
         output = kaggle_cli.kernels_status(kernel_id, slug=slug)
-        status = _parse_kernel_status(output)
+        status = parse_kernel_status(output)
         if status != last_status:
             print(f"[cyan]kernel status[/cyan]: {status}")
             last_status = status
@@ -644,25 +645,6 @@ def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str, kernel_dir: P
         if time.monotonic() - start > timeout_seconds:
             raise TimeoutError("Timed out waiting for kernel completion.")
         time.sleep(poll_seconds)
-
-
-def _parse_kernel_status(output: str) -> str:
-    text = output.lower()
-    if (
-        "failure message" in text
-        or "your notebook failed" in text
-        or "kernelworkerstatus.error" in text
-        or "kernelworkerstatus.failed" in text
-        or 'status "error"' in text
-        or 'status "failed"' in text
-        or " failed" in text
-    ):
-        return "failed"
-    if "complete" in text or "success" in text:
-        return "complete"
-    if "running" in text or "queued" in text or "pending" in text:
-        return "running"
-    return "unknown"
 
 
 def _stop_failed_kernel_run(

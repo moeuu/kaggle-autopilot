@@ -57,6 +57,13 @@ from kagglebot.kernel_progress import (
     resolve_seed_current,
 )
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config, pipeline_env_suffix
+from kagglebot.kernel_status import (
+    is_kernel_status_complete,
+    is_kernel_status_failed,
+    is_kernel_status_queued,
+    is_kernel_status_running,
+    parse_kernel_status,
+)
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
@@ -5070,27 +5077,9 @@ def _last_pushed_kernel_id(logs_dir: Path, default_kernel_id: str) -> str | None
     return None
 
 
-def _is_kernel_status_running(status: str) -> bool:
-    lowered = status.lower()
-    return "running" in lowered or "queued" in lowered
-
-
-def _is_kernel_status_queued(status: str) -> bool:
-    return "queued" in status.lower()
-
-
-def _is_kernel_status_complete(status: str) -> bool:
-    return "complete" in status.lower()
-
-
-def _is_kernel_status_failed(status: str) -> bool:
-    lowered = status.lower()
-    return "error" in lowered or "fail" in lowered
-
-
 def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
     status = (last_status or "unknown").lower()
-    if _is_kernel_status_running(status):
+    if is_kernel_status_running(status):
         raise KernelStillRunningError(
             f"Kaggle kernel {kernel_id} is still {status} after the local wait budget; "
             "leaving the remote run active and refusing to push a duplicate version."
@@ -5186,20 +5175,20 @@ def _resume_prior_kernel_if_active(
             "refusing to push a duplicate version."
         ) from exc
 
-    status = _parse_kernel_status(output).lower()
-    if _is_kernel_status_failed(status):
+    status = parse_kernel_status(output)
+    if is_kernel_status_failed(status):
         _clear_pending_remote_kernel(preparation.logs_dir)
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel failed ({status}); pushing a new version")
         return None
-    if not (_is_kernel_status_running(status) or _is_kernel_status_complete(status)):
+    if not (is_kernel_status_running(status) or is_kernel_status_complete(status)):
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel status is {status}; pushing a new version")
         return None
 
     initial_queued_since = (
-        _queued_since_from_push_logs(preparation.logs_dir) if _is_kernel_status_queued(status) else None
+        _queued_since_from_push_logs(preparation.logs_dir) if is_kernel_status_queued(status) else None
     )
     if (
-        _is_kernel_status_queued(status)
+        is_kernel_status_queued(status)
         and preparation.supersede_stale_queued
         and _is_remote_kernel_queue_stale(initial_queued_since)
     ):
@@ -5209,7 +5198,7 @@ def _resume_prior_kernel_if_active(
 
     _clear_stale_kernel_output(preparation.output_dir)
     print(f"[yellow]kernel resume[/yellow]: waiting for existing remote kernel {kernel_id} ({status})")
-    if _is_kernel_status_running(status):
+    if is_kernel_status_running(status):
         _wait_for_kernel_and_record_pending(
             preparation=preparation,
             kernel_id=kernel_id,
@@ -5279,12 +5268,12 @@ def _wait_for_kernel(
                 ) from exc
             time.sleep(STATUS_ERROR_SLEEP)
             continue
-        status = _parse_kernel_status(output).lower()
+        status = parse_kernel_status(output)
         if status != last_status:
             print(f"[cyan]kernel status[/cyan]: {status}")
             last_status = status
         now = time.monotonic()
-        if _is_kernel_status_queued(status):
+        if is_kernel_status_queued(status):
             if queued_since is None:
                 queued_since = now
             if queued_timeout_sec is not None and now - queued_since >= queued_timeout_sec:
@@ -5302,7 +5291,7 @@ def _wait_for_kernel(
                 log_failure = truncate_lines(log_failure, max_lines=5)
                 message = f"Kaggle kernel error detected in logs.\n\n--- kernel log tail ---\n{log_failure}"
                 raise KernelFailedError(message)
-        if _is_kernel_status_running(status):
+        if is_kernel_status_running(status):
             if log_state.last_heartbeat == 0.0 or now - log_state.last_heartbeat >= HEARTBEAT_INTERVAL:
                 elapsed = max(0, int(now - started_at))
                 timeout_hint = ""
@@ -5317,9 +5306,9 @@ def _wait_for_kernel(
                         f"(elapsed={elapsed}s{timeout_hint}, no new logs for {since:.0f}s)"
                     )
                 log_state.last_heartbeat = now
-        if _is_kernel_status_complete(status):
+        if is_kernel_status_complete(status):
             return
-        if _is_kernel_status_failed(status):
+        if is_kernel_status_failed(status):
             _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
             log_tail = _collect_log_tail(output_dir)
             message = f"Kaggle kernel failed: {output}"
@@ -5392,13 +5381,6 @@ def _clear_stale_kernel_output(output_dir: Path) -> None:
             path.unlink()
         except OSError:
             continue
-
-
-def _parse_kernel_status(output: str) -> str:
-    match = re.search(r"status\s+\"?([A-Za-z0-9_.-]+)\"?", output)
-    if match:
-        return match.group(1)
-    return output.strip() or "unknown"
 
 
 def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> None:

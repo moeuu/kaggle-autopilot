@@ -7,7 +7,7 @@ import pytest
 
 from kagglebot.kernel_sources import KernelSourceConfig
 from kagglebot.runners import kaggle_notebook
-from kagglebot.runners.kaggle_notebook import _parse_kernel_status, _wait_for_kernel, build_kernel_metadata
+from kagglebot.runners.kaggle_notebook import _wait_for_kernel, build_kernel_metadata
 
 
 def test_build_kernel_metadata_uses_plan_driven_sources() -> None:
@@ -29,19 +29,6 @@ def test_build_kernel_metadata_uses_plan_driven_sources() -> None:
     assert metadata["dataset_sources"] == ["alice/demo-dataset"]
     assert metadata["kernel_sources"] == ["bob/demo-kernel"]
     assert metadata["model_sources"] == ["carol/demo-model/PyTorch/default/1"]
-
-
-@pytest.mark.parametrize(
-    ("output", "expected"),
-    [
-        ('owner/kernel has status "KernelWorkerStatus.RUNNING"', "running"),
-        ('owner/kernel has status "KernelWorkerStatus.COMPLETE"', "complete"),
-        ('owner/kernel has status "KernelWorkerStatus.ERROR"\nFailure message: "Your notebook failed"', "failed"),
-        ('owner/kernel has status "KernelWorkerStatus.FAILED"', "failed"),
-    ],
-)
-def test_parse_kernel_status(output: str, expected: str) -> None:
-    assert _parse_kernel_status(output) == expected
 
 
 def test_wait_for_kernel_pushes_cpu_stop_marker_after_failed_gpu_run(monkeypatch, tmp_path: Path) -> None:
