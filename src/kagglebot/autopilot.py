@@ -5599,10 +5599,11 @@ an ad-hoc repaired copy behind.
                 continue
             raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} autofix step failed.")
 
-        if submit_file_fix_required and not _submit_file_fix_contract_satisfied(
-            run_dir=run_dir,
+        if submit_file_fix_required and not _submit_failure_context.submit_file_fix_contract_satisfied(
+            run_state=_load_run_state(run_dir),
             baseline_path=submit_file_fix_baseline_path,
             baseline_sha256=submit_file_fix_baseline_sha256,
+            sha256_or_none=_sha256_or_none,
         ):
             retry_feedback = (
                 "Submission file repair contract not satisfied.\n"
@@ -6822,20 +6823,6 @@ def _prepare_submit_file_autofix(
         save_repaired_path=save_repaired_path,
     )
     return preparation.path, preparation.summary
-
-
-def _submit_file_fix_contract_satisfied(
-    *,
-    run_dir: Path,
-    baseline_path: Path | None,
-    baseline_sha256: str | None,
-) -> bool:
-    return _submit_failure_context.submit_file_fix_contract_satisfied(
-        run_state=_load_run_state(run_dir),
-        baseline_path=baseline_path,
-        baseline_sha256=baseline_sha256,
-        sha256_or_none=_sha256_or_none,
-    )
 
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
