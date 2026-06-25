@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kagglebot.env_utils import env_flag, env_int, env_truthy
+from kagglebot.env_utils import env_flag, env_int, env_truthy, parse_float_value, parse_int_value
 
 
 def test_env_flag_parses_boolean_values(monkeypatch) -> None:
@@ -38,3 +38,20 @@ def test_env_truthy_checks_true_values(monkeypatch) -> None:
 
     monkeypatch.delenv("KAGGLEBOT_TEST_TRUTHY", raising=False)
     assert env_truthy("KAGGLEBOT_TEST_TRUTHY") is False
+
+
+def test_parse_int_value_supports_explicit_float_mode() -> None:
+    assert parse_int_value("7") == 7
+    assert parse_int_value("7.0") is None
+    assert parse_int_value("7.0", allow_float=True) == 7
+    assert parse_int_value("7.5", allow_float=True) is None
+    assert parse_int_value(True) is None
+    assert parse_int_value("bad") is None
+
+
+def test_parse_float_value_rejects_blank_bool_and_non_finite() -> None:
+    assert parse_float_value("1.5") == 1.5
+    assert parse_float_value("") is None
+    assert parse_float_value(False) is None
+    assert parse_float_value("nan") is None
+    assert parse_float_value("bad") is None
