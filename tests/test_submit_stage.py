@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    build_default_submission_problem_insight,
     build_submission_outcome_error_detail,
     build_submit_stage_success_record,
     classify_submission_outcome,
@@ -21,6 +22,7 @@ from kagglebot.submit_stage import (
     normalize_submission_outcome_status,
     resolve_iteration_submit_phase_state,
     resolve_submission_knowledge_context,
+    resolve_submission_knowledge_iteration,
     resolve_submission_message,
     resolve_submission_rank_payload,
     run_submit_stage_attempt,
@@ -185,6 +187,27 @@ def test_resolve_submission_knowledge_context_rejects_scoreless_result() -> None
         )
         is None
     )
+
+
+def test_build_default_submission_problem_insight_uses_iteration_and_diagnostics() -> None:
+    insight = build_default_submission_problem_insight(
+        iteration=3,
+        diagnostics_text="diagnostic details",
+    )
+
+    assert insight == {
+        "iteration": 3,
+        "why_poor": "diagnostic details",
+        "how_improved": "Submitted iteration 3 result after validation.",
+        "delta_offline": None,
+    }
+
+
+def test_resolve_submission_knowledge_iteration_uses_fallback_for_bad_values() -> None:
+    assert resolve_submission_knowledge_iteration(value="4", fallback_iteration=2) == 4
+    assert resolve_submission_knowledge_iteration(value="", fallback_iteration=2) == 2
+    assert resolve_submission_knowledge_iteration(value="bad", fallback_iteration=2) == 2
+    assert resolve_submission_knowledge_iteration(value=None, fallback_iteration=None) == 1
 
 
 def test_resolve_submission_rank_payload_keeps_reported_rank() -> None:

@@ -199,6 +199,27 @@ def resolve_submission_knowledge_context(
     )
 
 
+def resolve_submission_knowledge_iteration(*, value: object, fallback_iteration: int | None) -> int:
+    try:
+        return int(value or (fallback_iteration or 1))
+    except (TypeError, ValueError):
+        return fallback_iteration or 1
+
+
+def build_default_submission_problem_insight(
+    *,
+    iteration: int | None,
+    diagnostics_text: str,
+) -> dict[str, object]:
+    resolved_iteration = iteration or 1
+    return {
+        "iteration": resolved_iteration,
+        "why_poor": diagnostics_text,
+        "how_improved": f"Submitted iteration {resolved_iteration} result after validation.",
+        "delta_offline": None,
+    }
+
+
 def resolve_submission_rank_payload(
     *,
     slug: str,

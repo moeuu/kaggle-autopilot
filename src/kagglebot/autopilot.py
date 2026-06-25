@@ -6360,18 +6360,16 @@ def _record_submission_knowledge(
             if diagnostics_path.exists():
                 diagnostics_text = diagnostics_path.read_text(encoding="utf-8", errors="ignore")
         pending_problem_insights.append(
-            {
-                "iteration": iteration_value or 1,
-                "why_poor": diagnostics_text,
-                "how_improved": f"Submitted iteration {iteration_value or 1} result after validation.",
-                "delta_offline": None,
-            }
+            _submit_stage.build_default_submission_problem_insight(
+                iteration=iteration_value,
+                diagnostics_text=diagnostics_text,
+            )
         )
     for item in pending_problem_insights:
-        try:
-            iteration = int(item.get("iteration") or (iteration_value or 1))
-        except (TypeError, ValueError):
-            iteration = iteration_value or 1
+        iteration = _submit_stage.resolve_submission_knowledge_iteration(
+            value=item.get("iteration"),
+            fallback_iteration=iteration_value,
+        )
         record_problem_type_insight(
             knowledge_paths=config.knowledge_paths,
             slug=config.slug,
@@ -6385,10 +6383,10 @@ def _record_submission_knowledge(
             submission_score=online_score,
         )
     for item in pending_error_fixes:
-        try:
-            iteration = int(item.get("iteration") or (iteration_value or 1))
-        except (TypeError, ValueError):
-            iteration = iteration_value or 1
+        iteration = _submit_stage.resolve_submission_knowledge_iteration(
+            value=item.get("iteration"),
+            fallback_iteration=iteration_value,
+        )
         record_error_fix_insight(
             knowledge_paths=config.knowledge_paths,
             slug=config.slug,
