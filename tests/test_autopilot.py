@@ -26,7 +26,6 @@ from kagglebot.autopilot import (
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
     _error_strategy_skip_reason,
-    _extract_competition_faithfulness,
     _extract_missing_ensemble_signal,
     _extract_orig_proba_signal,
     _extract_original_data_unused_signal,
@@ -60,9 +59,11 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import SubmissionLedger
+from kagglebot.kernel_quality import extract_competition_faithfulness
 from kagglebot.kernel_runner import KernelRunResult
 from kagglebot.knowledge import resolve_problem_type_insights
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.plan_policy import build_evaluation_contract
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.submission.guard import compute_error_fingerprint
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
@@ -4212,16 +4213,13 @@ def test_run_kernel_fix_includes_subgroup_prompt_context(monkeypatch, tmp_path: 
 
 
 def test_build_evaluation_contract_prefers_competition_metric_override_for_deep_past(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _build_evaluation_contract
-    from kagglebot.paths import CompetitionPaths
-
     paths = CompetitionPaths(
         slug="deep-past-initiative-machine-translation",
         artifacts_dir=tmp_path / "artifacts",
     )
 
-    contract = _build_evaluation_contract(
-        paths=paths,
+    contract = build_evaluation_contract(
+        slug=paths.slug,
         eval_spec={},
         target_metric="accuracy",
         target_direction="maximize",
@@ -5077,8 +5075,9 @@ def test_competition_faithfulness_prefers_metric_name_over_numeric_metric_payloa
         val_score=0.123,
         fold_scores=[0.123],
     )
-    faithfulness = _extract_competition_faithfulness(
-        evaluation=evaluation,
+    faithfulness = extract_competition_faithfulness(
+        evaluation_metric=evaluation.metric,
+        evaluation_score_source=evaluation.score_source,
         kernel_metrics_payload={
             "metric": 0.123,
             "metric_name": "standardized_rmse",
@@ -5087,7 +5086,7 @@ def test_competition_faithfulness_prefers_metric_name_over_numeric_metric_payloa
             "full_dataset_resolved": True,
             "competition_faithful": True,
         },
-        evaluation_report=None,
+        evaluation_report_split_strategy=None,
         evaluation_contract={
             "expected_metric": "standardized_rmse",
             "expected_split_strategy": "timeseries_split",

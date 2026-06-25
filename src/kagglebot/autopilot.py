@@ -3453,8 +3453,8 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         plan.rank_force_major_min_teams,
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
-    evaluation_contract = _build_evaluation_contract(
-        paths=config.paths,
+    evaluation_contract = _plan_policy.build_evaluation_contract(
+        slug=config.paths.slug,
         eval_spec=eval_spec,
         target_metric=str(target_metric) if isinstance(target_metric, str) else None,
         target_direction=str(target_direction) if isinstance(target_direction, str) else None,
@@ -3744,39 +3744,6 @@ def _effective_method_scout_mode(*, config: AutopilotConfig, campaign_mode: str)
     if campaign_mode != "top1" and requested == "auto":
         return "off"
     return requested
-
-
-def _build_evaluation_contract(
-    *,
-    paths: CompetitionPaths,
-    eval_spec: dict[str, object],
-    target_metric: str | None,
-    target_direction: str | None,
-    split_strategy: str | None,
-) -> dict[str, object]:
-    return _plan_policy.build_evaluation_contract(
-        slug=paths.slug,
-        eval_spec=eval_spec,
-        target_metric=target_metric,
-        target_direction=target_direction,
-        split_strategy=split_strategy,
-    )
-
-
-def _extract_competition_faithfulness(
-    *,
-    evaluation: EvaluationResult,
-    kernel_metrics_payload: dict[str, object] | None,
-    evaluation_report: EvaluationReport | None,
-    evaluation_contract: dict[str, object] | None,
-) -> dict[str, object]:
-    return _kernel_quality.extract_competition_faithfulness(
-        evaluation_metric=evaluation.metric,
-        evaluation_score_source=evaluation.score_source,
-        kernel_metrics_payload=kernel_metrics_payload,
-        evaluation_report_split_strategy=evaluation_report.split_strategy if evaluation_report is not None else None,
-        evaluation_contract=evaluation_contract,
-    )
 
 
 def _build_accuracy_potential(
