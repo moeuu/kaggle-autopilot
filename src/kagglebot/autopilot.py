@@ -6226,44 +6226,29 @@ def _abort_submit_for_run(
     )
     prior = _load_run_state(run_dir)
     prior_ok = bool(prior.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
-    abort_payloads = _submit_attempts.build_submit_abort_record_payloads(
+    _submit_failure_context.persist_submit_abort_failure(
+        run_dir=run_dir,
         run_id=run_id,
         submission_ref=submission_ref_text,
         submission_sha256=_sha256_or_none(artifact_path),
-        exit_code=exit_code,
-        fingerprint=fingerprint,
+        artifact_path=artifact_path,
+        artifact_mode=artifact_mode,
         code_fingerprint=code_fingerprint or "",
+        fingerprint=fingerprint,
         error_kind=error_kind,
         reason=reason,
-        stdout=stdout_tail,
-        stderr=stderr_tail,
+        message=message,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
         prior_state=prior,
         prior_submit_ok=prior_ok,
+        submit_attempt_recorder=submit_attempt_recorder,
+        load_latest_submit_attempt=_load_latest_submit_attempt,
+        load_run_state=_load_run_state,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-    )
-    submit_attempt_recorder.record_payloads(abort_payloads)
-    _submit_failure_context.save_submit_failure_context(
-        run_dir,
-        _submit_failure_context.build_submit_failure_context_payload_from_error(
-            now_iso=datetime.now(UTC).isoformat(),
-            submission_ref=submission_ref_text,
-            artifact_path=artifact_path,
-            artifact_sha256=_sha256_or_none(artifact_path),
-            artifact_mode=artifact_mode,
-            code_fingerprint=code_fingerprint or "",
-            fingerprint=fingerprint,
-            error_kind=error_kind,
-            reason=reason,
-            message=message,
-            stdout_tail=stdout_tail,
-            stderr_tail=stderr_tail,
-            exit_code=exit_code,
-            latest_submit_attempt=_load_latest_submit_attempt(run_dir),
-            run_state=_load_run_state(run_dir),
-            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        ),
+        now_iso=datetime.now(UTC).isoformat(),
     )
     knowledge_submission_path = artifact_path or Path(submission_ref_text)
     _record_submit_reason_knowledge(

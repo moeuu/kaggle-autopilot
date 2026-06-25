@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kagglebot.submit_attempts import SubmitAttemptRecorder, load_latest_submit_attempt
 from kagglebot.submit_failure_context import (
     build_submit_failure_context_payload,
     build_submit_failure_context_payload_from_error,
@@ -14,6 +15,7 @@ from kagglebot.submit_failure_context import (
     load_submit_failure_context,
     mark_submit_failure_context_resolved,
     path_from_submit_reference,
+    persist_submit_abort_failure,
     resolve_submit_abort_artifact_path,
     resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
@@ -181,6 +183,53 @@ def test_resolve_submit_abort_artifact_path_uses_path_submission_ref(tmp_path: P
         )
         is None
     )
+
+
+def test_persist_submit_abort_failure_records_attempt_and_context(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_state: dict[str, object] = {"submit_attempts_count": 2, "submit_ok": True}
+    recorder = SubmitAttemptRecorder(
+        run_dir=run_dir,
+        save_run_state=lambda updates: run_state.update(updates),
+    )
+
+    persist_submit_abort_failure(
+        run_dir=run_dir,
+        run_id="run-1",
+        submission_ref=str(tmp_path / "submission.csv"),
+        submission_sha256="sha",
+        artifact_path=tmp_path / "submission.csv",
+        artifact_mode="wrapper",
+        code_fingerprint="code-fp",
+        fingerprint="error-fp",
+        error_kind="validation",
+        reason="submission_poll_status_error",
+        message="Kaggle scoring failed.",
+        stdout_tail="stdout detail",
+        stderr_tail="row count mismatch",
+        exit_code=1,
+        prior_state=dict(run_state),
+        prior_submit_ok=True,
+        submit_attempt_recorder=recorder,
+        load_latest_submit_attempt=load_latest_submit_attempt,
+        load_run_state=lambda _run_dir: dict(run_state),
+        stdout_tail_chars=100,
+        stderr_tail_chars=100,
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+
+    latest = load_latest_submit_attempt(run_dir)
+    context = load_submit_failure_context(run_dir)
+
+    assert latest["ok"] is False
+    assert latest["action_taken"] == "abort"
+    assert latest["sub_sha256"] == "sha"
+    assert run_state["submit_ok"] is True
+    assert run_state["submit_attempts_count"] == 3
+    assert context["ts"] == "2026-06-25T00:00:00+00:00"
+    assert context["latest_submit_attempt"]["fingerprint"] == "error-fp"
+    assert context["run_state_excerpt"]["submit_attempted"] is True
+    assert context["repair_target"] == "submission_artifact"
 
 
 def test_decide_stale_submit_autofix_artifact_returns_context_updates(tmp_path: Path) -> None:

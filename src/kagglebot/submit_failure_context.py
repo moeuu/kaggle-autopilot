@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.submission.guard import normalize_error_text
+from kagglebot.submit_attempts import SubmitAttemptRecorder, build_submit_abort_record_payloads
 from kagglebot.submit_failure_policy import (
     SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT,
     SubmitFailureRepairDecision,
@@ -192,6 +193,72 @@ def resolve_submit_abort_artifact_path(
     if isinstance(submission_ref, Path):
         return submission_ref
     return None
+
+
+def persist_submit_abort_failure(
+    *,
+    run_dir: Path,
+    run_id: str,
+    submission_ref: str,
+    submission_sha256: str | None,
+    artifact_path: Path | None,
+    artifact_mode: str | None,
+    code_fingerprint: str,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    message: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    exit_code: int | None,
+    prior_state: dict[str, object],
+    prior_submit_ok: bool,
+    submit_attempt_recorder: SubmitAttemptRecorder,
+    load_latest_submit_attempt: Callable[[Path], dict[str, object]],
+    load_run_state: Callable[[Path], dict[str, object]],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    now_iso: str,
+) -> None:
+    abort_payloads = build_submit_abort_record_payloads(
+        run_id=run_id,
+        submission_ref=submission_ref,
+        submission_sha256=submission_sha256,
+        exit_code=exit_code,
+        fingerprint=fingerprint,
+        code_fingerprint=code_fingerprint,
+        error_kind=error_kind,
+        reason=reason,
+        stdout=stdout_tail,
+        stderr=stderr_tail,
+        prior_state=prior_state,
+        prior_submit_ok=prior_submit_ok,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+    )
+    submit_attempt_recorder.record_payloads(abort_payloads)
+    save_submit_failure_context(
+        run_dir,
+        build_submit_failure_context_payload_from_error(
+            now_iso=now_iso,
+            submission_ref=submission_ref,
+            artifact_path=artifact_path,
+            artifact_sha256=submission_sha256,
+            artifact_mode=artifact_mode,
+            code_fingerprint=code_fingerprint,
+            fingerprint=fingerprint,
+            error_kind=error_kind,
+            reason=reason,
+            message=message,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+            exit_code=exit_code,
+            latest_submit_attempt=load_latest_submit_attempt(run_dir),
+            run_state=load_run_state(run_dir),
+            stdout_tail_chars=stdout_tail_chars,
+            stderr_tail_chars=stderr_tail_chars,
+        ),
+    )
 
 
 def decide_stale_submit_autofix_artifact(
