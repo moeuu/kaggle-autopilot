@@ -483,7 +483,6 @@ _QUALITY_GUARD_PREDICTION_COUNT_RATIO = _kernel_quality.QUALITY_GUARD_PREDICTION
 _QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 _MODEL_NODE_METRIC_KEY = _kernel_quality.MODEL_NODE_METRIC_KEY
-_FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
 
 
 class _TrainingLiveStdout:
@@ -4578,58 +4577,13 @@ def _build_evaluation_contract(
     target_direction: str | None,
     split_strategy: str | None,
 ) -> dict[str, object]:
-    faithfulness = eval_spec.get("faithfulness") if isinstance(eval_spec.get("faithfulness"), dict) else {}
-    accepted_score_sources = _score_sources.normalize_score_source_list(
-        faithfulness.get("accepted_score_sources") if isinstance(faithfulness, dict) else None
+    return _plan_policy.build_evaluation_contract(
+        slug=paths.slug,
+        eval_spec=eval_spec,
+        target_metric=target_metric,
+        target_direction=target_direction,
+        split_strategy=split_strategy,
     )
-    require_full_dataset_default = paths.slug.strip().lower() in _FULL_DATASET_REQUIRED_COMPETITIONS
-    competition_override = _plan_policy.competition_eval_override(paths.slug)
-    metric_source = (
-        competition_override.get("metric_name") if competition_override.get("metric_name") else target_metric
-    )
-    direction_source = (
-        competition_override.get("direction") if competition_override.get("direction") else target_direction
-    )
-    split_source = (
-        competition_override.get("split_strategy") if competition_override.get("split_strategy") else split_strategy
-    )
-    expected_metric = canonical_metric(metric_source) if isinstance(metric_source, str) and metric_source else None
-    contract = {
-        "expected_metric": expected_metric,
-        "expected_direction": (
-            str(direction_source).strip().lower()
-            if isinstance(direction_source, str) and str(direction_source).strip().lower() in {"minimize", "maximize"}
-            else None
-        ),
-        "expected_split_strategy": _plan_policy.normalize_split_strategy_name(split_source),
-        "accepted_score_sources": accepted_score_sources or list(_score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES),
-        "require_metric_match": (
-            bool(faithfulness.get("require_metric_match"))
-            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_metric_match"), bool)
-            else True
-        ),
-        "require_split_match": (
-            bool(faithfulness.get("require_split_match"))
-            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_split_match"), bool)
-            else True
-        ),
-        "require_trusted_score_source": (
-            bool(faithfulness.get("require_trusted_score_source"))
-            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_trusted_score_source"), bool)
-            else True
-        ),
-        "require_competition_faithful": (
-            bool(faithfulness.get("require_competition_faithful"))
-            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_competition_faithful"), bool)
-            else True
-        ),
-        "require_full_dataset": (
-            bool(faithfulness.get("require_full_dataset"))
-            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_full_dataset"), bool)
-            else require_full_dataset_default
-        ),
-    }
-    return contract
 
 
 def _extract_competition_faithfulness(

@@ -4,6 +4,8 @@ import re
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
+from kagglebot.score_sources import DEFAULT_ACCEPTED_SCORE_SOURCES, normalize_score_source_list
+from kagglebot.solver.metrics import canonical_metric
 from kagglebot.writeup import normalize_deliverable_mode, normalize_submit_mode
 
 SPLIT_STRATEGY_PRIORITY = {
@@ -16,6 +18,7 @@ SPLIT_STRATEGY_PRIORITY = {
 DEFAULT_EVAL_SEEDS = (42, 2024, 777)
 DEFAULT_EVAL_REPEATS = 2
 EVAL_REPEAT_SEED_OFFSET = 1009
+FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
 
 COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
     "deep-past-initiative-machine-translation": {
@@ -79,6 +82,67 @@ def apply_competition_eval_override(
         updated["metric_name"] = override["metric_name"]
         updated["split_strategy"] = override["split_strategy"]
     return updated
+
+
+def build_evaluation_contract(
+    *,
+    slug: str,
+    eval_spec: dict[str, object],
+    target_metric: str | None,
+    target_direction: str | None,
+    split_strategy: str | None,
+) -> dict[str, object]:
+    faithfulness = eval_spec.get("faithfulness") if isinstance(eval_spec.get("faithfulness"), dict) else {}
+    accepted_score_sources = normalize_score_source_list(
+        faithfulness.get("accepted_score_sources") if isinstance(faithfulness, dict) else None
+    )
+    require_full_dataset_default = str(slug).strip().lower() in FULL_DATASET_REQUIRED_COMPETITIONS
+    competition_override = competition_eval_override(slug)
+    metric_source = (
+        competition_override.get("metric_name") if competition_override.get("metric_name") else target_metric
+    )
+    direction_source = (
+        competition_override.get("direction") if competition_override.get("direction") else target_direction
+    )
+    split_source = (
+        competition_override.get("split_strategy") if competition_override.get("split_strategy") else split_strategy
+    )
+    expected_metric = canonical_metric(metric_source) if isinstance(metric_source, str) and metric_source else None
+    return {
+        "expected_metric": expected_metric,
+        "expected_direction": (
+            str(direction_source).strip().lower()
+            if isinstance(direction_source, str) and str(direction_source).strip().lower() in {"minimize", "maximize"}
+            else None
+        ),
+        "expected_split_strategy": normalize_split_strategy_name(split_source),
+        "accepted_score_sources": accepted_score_sources or list(DEFAULT_ACCEPTED_SCORE_SOURCES),
+        "require_metric_match": (
+            bool(faithfulness.get("require_metric_match"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_metric_match"), bool)
+            else True
+        ),
+        "require_split_match": (
+            bool(faithfulness.get("require_split_match"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_split_match"), bool)
+            else True
+        ),
+        "require_trusted_score_source": (
+            bool(faithfulness.get("require_trusted_score_source"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_trusted_score_source"), bool)
+            else True
+        ),
+        "require_competition_faithful": (
+            bool(faithfulness.get("require_competition_faithful"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_competition_faithful"), bool)
+            else True
+        ),
+        "require_full_dataset": (
+            bool(faithfulness.get("require_full_dataset"))
+            if isinstance(faithfulness, dict) and isinstance(faithfulness.get("require_full_dataset"), bool)
+            else require_full_dataset_default
+        ),
+    }
 
 
 def infer_split_strategy_from_hint_text(text: str) -> str | None:

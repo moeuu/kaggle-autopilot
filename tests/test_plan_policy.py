@@ -8,7 +8,9 @@ from kagglebot.plan_policy import (
     DEFAULT_EVAL_REPEATS,
     DEFAULT_EVAL_SEEDS,
     EVAL_REPEAT_SEED_OFFSET,
+    FULL_DATASET_REQUIRED_COMPETITIONS,
     apply_competition_eval_override,
+    build_evaluation_contract,
     competition_eval_override,
     expanded_default_eval_seeds,
     expanded_eval_seeds,
@@ -93,6 +95,50 @@ def test_competition_eval_override_applies_deep_past_contract() -> None:
     assert payload["task"] == "translation"
     assert payload["metric_name"] == override["metric_name"]
     assert payload["split_strategy"] == "group_kfold"
+
+
+def test_build_evaluation_contract_applies_competition_override() -> None:
+    contract = build_evaluation_contract(
+        slug="deep-past-initiative-machine-translation",
+        eval_spec={},
+        target_metric="accuracy",
+        target_direction="maximize",
+        split_strategy="kfold",
+    )
+
+    assert contract["expected_metric"] == "geometric mean of the bleu and the chrf++ scores"
+    assert contract["expected_direction"] == "maximize"
+    assert contract["expected_split_strategy"] == "group_kfold"
+
+
+def test_build_evaluation_contract_uses_faithfulness_overrides_and_full_dataset_defaults() -> None:
+    assert "urban-flood-modelling" in FULL_DATASET_REQUIRED_COMPETITIONS
+
+    contract = build_evaluation_contract(
+        slug="urban-flood-modelling",
+        eval_spec={
+            "faithfulness": {
+                "accepted_score_sources": ["cv"],
+                "require_metric_match": False,
+                "require_full_dataset": False,
+            }
+        },
+        target_metric="rmse",
+        target_direction="minimize",
+        split_strategy="group_kfold",
+    )
+    default_contract = build_evaluation_contract(
+        slug="urban-flood-modelling",
+        eval_spec={},
+        target_metric="rmse",
+        target_direction="minimize",
+        split_strategy="group_kfold",
+    )
+
+    assert contract["accepted_score_sources"] == ["cv"]
+    assert contract["require_metric_match"] is False
+    assert contract["require_full_dataset"] is False
+    assert default_contract["require_full_dataset"] is True
 
 
 def test_normalize_eval_seeds_deduplicates_and_uses_defaults() -> None:
