@@ -971,6 +971,27 @@ def decide_submit_stage_error_action(
     )
 
 
+def decide_submit_stage_error_action_from_classification(
+    *,
+    fingerprint_seen: bool,
+    same_fingerprint_retry_allowed: bool,
+    classification: SubmitStageErrorClassification,
+    attempt: int,
+    max_attempts: int,
+    backoff_seconds: float,
+) -> SubmitStageErrorActionDecision:
+    return decide_submit_stage_error_action(
+        fingerprint_seen=fingerprint_seen,
+        same_fingerprint_retry_allowed=same_fingerprint_retry_allowed,
+        classification_kind=classification.kind,
+        classification_reason=classification.reason,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        retry_after_seconds=classification.retry_after_seconds,
+        backoff_seconds=backoff_seconds,
+    )
+
+
 def classify_submit_stage_error(
     *,
     stdout: str,

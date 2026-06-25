@@ -21,6 +21,7 @@ from kagglebot.submit_stage import (
     decide_notebook_fallback_after_file_submit_error,
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
+    decide_submit_stage_error_action_from_classification,
     ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,
     find_campaign_candidate_for_submission,
@@ -1065,6 +1066,34 @@ def test_decide_submit_stage_error_action_retries_transient_with_allowance_messa
     assert decision.wait_seconds == 5.0
     assert "same fingerprint matched previous failures" in decision.messages[0]
     assert "transient submit error" in decision.messages[1]
+
+
+def test_decide_submit_stage_error_action_from_classification_uses_normalized_values() -> None:
+    classification = classify_submit_stage_error(
+        stdout="",
+        stderr="network down",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "kind": "transient",
+            "reason": "network_or_timeout",
+            "retry_after_seconds": 5.5,
+        },
+    )
+
+    decision = decide_submit_stage_error_action_from_classification(
+        fingerprint_seen=False,
+        same_fingerprint_retry_allowed=False,
+        classification=classification,
+        attempt=1,
+        max_attempts=3,
+        backoff_seconds=2.0,
+    )
+
+    assert decision.action == "retry"
+    assert decision.error_kind == "transient"
+    assert decision.reason == "network_or_timeout"
+    assert decision.wait_seconds == 5.5
 
 
 def test_decide_submit_stage_error_action_aborts_after_retry_budget() -> None:

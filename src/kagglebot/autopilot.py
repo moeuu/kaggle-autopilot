@@ -5253,16 +5253,13 @@ def _attempt_submit(
                 exit_code=exc.exit_code,
                 classify_submit_error=classify_submit_error,
             )
-            classification_stderr = submit_error_classification.stderr
-            classification_kind = submit_error_classification.kind
-            classification_reason = submit_error_classification.reason
             notebook_fallback_decision = _submit_stage.decide_notebook_fallback_after_file_submit_error(
                 notebook_submit_required=notebook_submit_required,
                 notebook_fallback_activated=notebook_fallback_activated,
                 should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback(
-                    reason=classification_reason,
+                    reason=submit_error_classification.reason,
                     stdout=exc.stdout,
-                    stderr=classification_stderr,
+                    stderr=submit_error_classification.stderr,
                 ),
                 resolved_notebook_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode(
                     submit_mode="notebook",
@@ -5299,14 +5296,12 @@ def _attempt_submit(
                 code_fingerprint=submit_code_fingerprint,
                 save_run_state=lambda updates: _save_run_state(run_dir, updates),
             )
-            error_action = _submit_stage.decide_submit_stage_error_action(
+            error_action = _submit_stage.decide_submit_stage_error_action_from_classification(
                 fingerprint_seen=fingerprint_reuse_decision.fingerprint_seen,
                 same_fingerprint_retry_allowed=fingerprint_reuse_decision.same_fingerprint_retry_allowed,
-                classification_kind=classification_kind,
-                classification_reason=classification_reason,
+                classification=submit_error_classification,
                 attempt=attempt,
                 max_attempts=max_attempts,
-                retry_after_seconds=submit_error_classification.retry_after_seconds,
                 backoff_seconds=_submit_retry_policy.compute_submit_backoff(
                     attempt=attempt,
                     base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
@@ -5328,7 +5323,7 @@ def _attempt_submit(
                     reason=error_action.reason,
                     message=error_action.abort_message,
                     stdout_tail=exc.stdout,
-                    stderr_tail=classification_stderr,
+                    stderr_tail=submit_error_classification.stderr,
                     exit_code=exc.exit_code,
                     submit_attempt_recorder=submit_attempt_recorder,
                 )
@@ -5343,7 +5338,7 @@ def _attempt_submit(
                         fingerprint=fingerprint,
                         reason=error_action.reason,
                         stdout=exc.stdout,
-                        stderr=classification_stderr,
+                        stderr=submit_error_classification.stderr,
                         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
                         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
                     )
