@@ -163,6 +163,61 @@ knowledge/
 The main architectural risk is still the size of `src/kagglebot/autopilot.py`. Future updates should keep extracting
 stable, testable orchestration policies out of that file rather than adding new loop branches inline.
 
+### Target Boundaries
+
+The long-term shape should keep four responsibilities separate:
+
+1. **Adapters**: Kaggle CLI/API, filesystem, process execution, and kernel runtimes. These modules translate external
+   side effects into typed results and should not own loop policy.
+2. **Policies**: pure decision modules for plan normalization, score trust, submission gating, retry/abort decisions,
+   rank interpretation, and campaign selection. These modules should be unit-testable without Kaggle credentials or
+   artifact directories.
+3. **State and artifacts**: JSON/JSONL readers, writers, manifests, fingerprints, and durable run/iteration/submission
+   records. These modules should own schema tolerance and migration behavior.
+4. **Orchestration**: `autopilot.py` and `supervisor.py` should compose adapters, policies, and state services. They
+   should avoid direct parsing of CLI text, JSON payload internals, and scalar coercion unless doing one-off wiring.
+
+Dependency direction should be:
+
+```text
+cli/supervisor/autopilot
+  -> services/stages
+    -> policies + state/artifact helpers
+      -> scalar/json/path/hash utilities
+  -> adapters
+```
+
+Policies and state helpers should not import `autopilot.py`, `supervisor.py`, or CLI modules. Adapter modules may import
+shared utilities and exception types, but should not import campaign or submission policy modules.
+
+### Current Modernization Themes
+
+Recent cleanup has started consolidating scalar and environment parsing into `scalar_utils.py` and `env_utils.py`. Keep
+following that pattern: when two modules parse the same external shape, put the tolerant conversion in a shared utility
+and leave call-site wrappers only where they document a local policy choice, such as comma handling or accepting
+integral float strings.
+
+The next high-value modernization work is:
+
+1. **Typed submit service**: move the remaining `_attempt_submit` side-effect choreography into a `SubmitService` or
+   `SubmitStageRunner` that composes `submit_stage`, `submit_attempts`, `submit_notebook`, `submit_failure_context`,
+   and `submission_service`. The loop should receive one typed result with outcome, artifact reference, retry summary,
+   and persistence payloads.
+2. **Plan resolution service**: finish moving `_resolve_plan` into a typed plan-resolution module. The output should be
+   one immutable resolved-plan object consumed by training, evaluation, submission, and prompts instead of a mutable
+   dictionary with repeated ad hoc coercion.
+3. **Kernel/run adapter split**: keep runner implementations behind `runners/` and prevent `kernel_runner.py` from
+   accumulating unrelated hardware, parsing, and local-runtime policy. Shared runtime parsing belongs in small helpers;
+   competition-specific generated code belongs in `kernel_runtime/`.
+4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
+   `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
+   helpers rather than open-coding tolerant dictionary access in orchestration modules.
+5. **Compatibility wrapper retirement**: after call sites move to extracted modules, remove private wrappers in
+   `autopilot.py` and sibling orchestrators instead of preserving multiple names for the same policy.
+
+Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
+small extractions that make import direction clearer over broad refactors that only move code.
+
 Recommended extraction order:
 
 1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization, score-source
