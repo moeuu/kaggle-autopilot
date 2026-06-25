@@ -4578,7 +4578,7 @@ def _rerun_kernel_for_metric_recheck(
         )
         if recomputed is not None:
             evaluation, payload = recomputed
-            _persist_metric_recheck_payload(
+            _kernel_metrics.persist_metric_recheck_payload(
                 iter_dir=iter_dir,
                 resolved_metrics_path=resolved_metrics_path,
                 payload=payload,
@@ -4670,19 +4670,6 @@ def _recompute_metric_from_oof_artifact(
     else:
         updated_payload["loop_decision"] = {"source": score_source, "value": metric_value}
     return evaluation, updated_payload
-
-
-def _persist_metric_recheck_payload(*, iter_dir: Path, resolved_metrics_path: Path, payload: dict[str, object]) -> None:
-    """Persist recomputed metric payload to canonical iteration metrics artifacts."""
-    serialized = json.dumps(payload, indent=2)
-    candidates = [resolved_metrics_path, iter_dir / "metrics.json", iter_dir / "output" / "metrics.json"]
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(serialized, encoding="utf-8")
 
 
 def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception) -> None:

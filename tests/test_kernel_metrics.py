@@ -15,6 +15,7 @@ from kagglebot.kernel_metrics import (
     extract_trusted_cv_value_from_metrics_payload,
     extract_validation_scores_from_log_text,
     load_kernel_metrics,
+    persist_metric_recheck_payload,
     pick_oof_prediction_column,
     pick_oof_target_column,
 )
@@ -55,6 +56,35 @@ def test_extract_numeric_list_keeps_numeric_items_only() -> None:
     assert extract_numeric_list([0.1, "0.2", 3, True, None]) == [0.1, 3.0, 1.0]
     assert extract_numeric_list(["0.1", None]) is None
     assert extract_numeric_list("0.1") is None
+
+
+def test_persist_metric_recheck_payload_writes_canonical_metric_paths(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    resolved_path = iter_dir / "custom" / "metrics.json"
+    payload = {"metric": "auc", "offline_value": 0.9}
+
+    persist_metric_recheck_payload(
+        iter_dir=iter_dir,
+        resolved_metrics_path=resolved_path,
+        payload=payload,
+    )
+
+    for path in (resolved_path, iter_dir / "metrics.json", iter_dir / "output" / "metrics.json"):
+        assert json.loads(path.read_text(encoding="utf-8")) == payload
+
+
+def test_persist_metric_recheck_payload_dedupes_resolved_iter_metrics_path(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    resolved_path = iter_dir / "metrics.json"
+
+    persist_metric_recheck_payload(
+        iter_dir=iter_dir,
+        resolved_metrics_path=resolved_path,
+        payload={"metric": "rmse"},
+    )
+
+    assert json.loads(resolved_path.read_text(encoding="utf-8")) == {"metric": "rmse"}
+    assert json.loads((iter_dir / "output" / "metrics.json").read_text(encoding="utf-8")) == {"metric": "rmse"}
 
 
 def test_extract_kernel_metric_ignores_non_finite_direct_values() -> None:

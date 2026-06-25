@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from statistics import stdev
 
-from kagglebot.json_utils import load_json_object
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.metric_matching import normalize_metric_name
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
@@ -78,6 +78,17 @@ def extract_numeric_list(value: object) -> list[float] | None:
         return None
     parsed = [float(item) for item in value if isinstance(item, (int, float))]
     return parsed or None
+
+
+def persist_metric_recheck_payload(*, iter_dir: Path, resolved_metrics_path: Path, payload: dict[str, object]) -> None:
+    """Persist recomputed metric payload to canonical iteration metrics artifacts."""
+    candidates = [resolved_metrics_path, iter_dir / "metrics.json", iter_dir / "output" / "metrics.json"]
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        write_json_object(path, payload)
 
 
 def extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:
