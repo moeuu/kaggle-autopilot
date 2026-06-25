@@ -4699,9 +4699,19 @@ def _attempt_submit(
     prepared_submission_path = prepared_resolution.prepared_submission_path
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
-    duplicate_sources = _submit_retry_policy.collect_duplicate_submission_sources(
+    duplicate_skip_result = _submit_stage.resolve_duplicate_submission_for_submit(
+        slug=config.slug,
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_path=submission_path,
+        prepared_submission_path=prepared_submission_path,
         prepared_submission_sha=prepared_submission_sha,
+        code_fingerprint=submit_code_fingerprint,
         allow_force=allow_force,
+        prior_state=_load_run_state(run_dir),
+        collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
+        decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
         submission_attempt_sha_seen=lambda submission_sha: _submit_attempts.submit_attempt_sha_seen(
             run_dir=run_dir,
             submission_sha=submission_sha,
@@ -4711,24 +4721,7 @@ def _attempt_submit(
             message=message,
             submission_path=prepared_submission_path,
         ),
-    )
-    duplicate_decision = _submit_retry_policy.decide_duplicate_submission_action(
-        slug=config.slug,
-        prepared_submission_sha=prepared_submission_sha,
-        duplicate_sources=duplicate_sources,
-        allow_force=allow_force,
-        compute_fingerprint=compute_error_fingerprint,
-    )
-    duplicate_skip_result = _submit_stage.apply_duplicate_submission_decision(
-        decision=duplicate_decision,
-        run_id=run_id,
-        message=message,
-        submitted_at=submitted_at,
-        submission_path=submission_path,
-        prepared_submission_path=prepared_submission_path,
-        prepared_submission_sha=prepared_submission_sha,
-        code_fingerprint=submit_code_fingerprint,
-        prior_state=_load_run_state(run_dir),
+        compute_error_fingerprint=compute_error_fingerprint,
         record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
         mark_duplicate_skipped=lambda submission_ref, reason: (
             _submit_failure_context.mark_submit_failure_context_duplicate_skipped(

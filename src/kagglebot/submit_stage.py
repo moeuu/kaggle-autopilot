@@ -504,6 +504,60 @@ def apply_duplicate_submission_decision(
     )
 
 
+def resolve_duplicate_submission_for_submit(
+    *,
+    slug: str,
+    run_id: str,
+    message: str,
+    submitted_at: datetime,
+    submission_path: Path,
+    prepared_submission_path: Path,
+    prepared_submission_sha: str,
+    code_fingerprint: str,
+    allow_force: bool,
+    prior_state: dict[str, object],
+    collect_duplicate_submission_sources: Callable[..., list[str]],
+    decide_duplicate_submission_action: Callable[..., object],
+    submission_attempt_sha_seen: Callable[[str], bool],
+    submission_ledger_duplicate: Callable[[], bool],
+    compute_error_fingerprint: Callable[[str, str], str],
+    record_submit_attempt_payloads: Callable[[object], object],
+    mark_duplicate_skipped: Callable[[str, str], object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> dict[str, object] | None:
+    duplicate_sources = collect_duplicate_submission_sources(
+        prepared_submission_sha=prepared_submission_sha,
+        allow_force=allow_force,
+        submission_attempt_sha_seen=submission_attempt_sha_seen,
+        submission_ledger_duplicate=submission_ledger_duplicate,
+    )
+    duplicate_decision = decide_duplicate_submission_action(
+        slug=slug,
+        prepared_submission_sha=prepared_submission_sha,
+        duplicate_sources=duplicate_sources,
+        allow_force=allow_force,
+        compute_fingerprint=compute_error_fingerprint,
+    )
+    return apply_duplicate_submission_decision(
+        decision=duplicate_decision,
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_path=submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha=prepared_submission_sha,
+        code_fingerprint=code_fingerprint,
+        prior_state=prior_state,
+        record_submit_attempt_payloads=record_submit_attempt_payloads,
+        mark_duplicate_skipped=mark_duplicate_skipped,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+
+
 def submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
     if isinstance(online_score, (int, float)):
         value = float(online_score)

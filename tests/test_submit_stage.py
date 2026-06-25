@@ -45,6 +45,7 @@ from kagglebot.submit_stage import (
     record_submission_knowledge_entries,
     record_submit_stage_retry_attempt,
     record_successful_submit_stage_result,
+    resolve_duplicate_submission_for_submit,
     resolve_initial_submit_stage_runtime_state,
     resolve_iteration_submit_phase_state,
     resolve_kaggle_cli_submit_abort_spec,
@@ -493,6 +494,99 @@ def test_apply_duplicate_submission_decision_ignores_non_skip(tmp_path: Path) ->
         prepared_submission_sha="sha",
         code_fingerprint="code-fp",
         prior_state={},
+        record_submit_attempt_payloads=recorded_payloads.append,
+        mark_duplicate_skipped=lambda submission_ref, reason: marked.append((submission_ref, reason)),
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert result is None
+    assert recorded_payloads == []
+    assert marked == []
+    assert messages == []
+
+
+def test_resolve_duplicate_submission_for_submit_records_skip(tmp_path: Path) -> None:
+    prepared_submission_path = tmp_path / "prepared.csv"
+    prepared_submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    source_submission_path = tmp_path / "iter-6" / "submission.csv"
+    submitted_at = datetime(2026, 6, 25, tzinfo=UTC)
+    recorded_payloads: list[object] = []
+    marked: list[tuple[str, str]] = []
+    messages: list[str] = []
+    collect_calls: list[dict[str, object]] = []
+    decide_calls: list[dict[str, object]] = []
+
+    result = resolve_duplicate_submission_for_submit(
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=submitted_at,
+        submission_path=source_submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        allow_force=False,
+        prior_state={"submit_attempts_count": 2},
+        collect_duplicate_submission_sources=lambda **kwargs: collect_calls.append(kwargs)
+        or ["run_attempts", "submission_ledger"],
+        decide_duplicate_submission_action=lambda **kwargs: decide_calls.append(kwargs)
+        or DuplicateDecisionStub(
+            action="skip",
+            reason="duplicate_submission_sha_seen",
+            message="[yellow]submit skipped[/yellow]: duplicate",
+            fingerprint="fp",
+            duplicate_sources=["run_attempts", "submission_ledger"],
+        ),
+        submission_attempt_sha_seen=lambda submission_sha: True,
+        submission_ledger_duplicate=lambda: True,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        record_submit_attempt_payloads=recorded_payloads.append,
+        mark_duplicate_skipped=lambda submission_ref, reason: marked.append((submission_ref, reason)),
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert collect_calls
+    assert collect_calls[0]["prepared_submission_sha"] == "sha"
+    assert collect_calls[0]["allow_force"] is False
+    assert callable(collect_calls[0]["submission_attempt_sha_seen"])
+    assert callable(collect_calls[0]["submission_ledger_duplicate"])
+    assert decide_calls
+    assert decide_calls[0]["slug"] == "demo"
+    assert decide_calls[0]["duplicate_sources"] == ["run_attempts", "submission_ledger"]
+    assert callable(decide_calls[0]["compute_fingerprint"])
+    assert len(recorded_payloads) == 1
+    assert marked == [(str(prepared_submission_path), "duplicate_submission_sha_seen")]
+    assert messages == ["[yellow]submit skipped[/yellow]: duplicate"]
+    assert result is not None
+    assert result["skipped"] is True
+    assert result["reason"] == "duplicate_submission_sha_seen"
+
+
+def test_resolve_duplicate_submission_for_submit_ignores_non_duplicate(tmp_path: Path) -> None:
+    recorded_payloads: list[object] = []
+    marked: list[tuple[str, str]] = []
+    messages: list[str] = []
+
+    result = resolve_duplicate_submission_for_submit(
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        submission_path=tmp_path / "iter-1" / "submission.csv",
+        prepared_submission_path=tmp_path / "prepared.csv",
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        allow_force=False,
+        prior_state={},
+        collect_duplicate_submission_sources=lambda **kwargs: [],
+        decide_duplicate_submission_action=lambda **kwargs: DuplicateDecisionStub(action="proceed"),
+        submission_attempt_sha_seen=lambda submission_sha: False,
+        submission_ledger_duplicate=lambda: False,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         record_submit_attempt_payloads=recorded_payloads.append,
         mark_duplicate_skipped=lambda submission_ref, reason: marked.append((submission_ref, reason)),
         stdout_tail_chars=20,
