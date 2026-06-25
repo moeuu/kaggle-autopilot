@@ -22,18 +22,13 @@ from kagglebot.kernel_runner import (
     _copy_shared_kernel_runtime_modules,
     _ensure_training_progress_shim,
     _estimate_local_kernel_duration_seconds,
-    _extract_pipeline_done_from_line,
-    _extract_pipeline_start_from_line,
-    _extract_training_stage_from_line,
     _find_intermediate_submission_file,
     _find_output_file,
     _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
     _load_dataset_profile_identity,
     _LocalKernelLogFilterState,
-    _resolve_fold_current,
     _resolve_kernel_slug,
-    _resolve_seed_current,
     _resolve_submit_kernel_slug,
     _run_local_kernel_once,
     _should_suppress_local_kernel_log_line,
@@ -3000,31 +2995,6 @@ def test_run_kernel_local_records_duration_history(tmp_path: Path) -> None:
     estimate, samples = _estimate_local_kernel_duration_seconds(base_dir=tmp_path, slug="demo")
     assert samples == 1
     assert estimate is not None and estimate > 0.0
-
-
-def test_extract_training_stage_from_line() -> None:
-    inline = "[kernel] yolo_ensemble_wbf_geometry: seed=2024 fold=0 imgsz=768 epochs=250"
-    assert _extract_training_stage_from_line(inline) == ("yolo_ensemble_wbf_geometry", 2024, 0)
-
-    path_line = "/tmp/runs/yolo_ensemble_wbf_geometry_seed2024_fold1/weights/best.pt saved"
-    assert _extract_training_stage_from_line(path_line) == ("yolo_ensemble_wbf_geometry", 2024, 1)
-
-
-def test_extract_pipeline_progress_from_line() -> None:
-    assert _extract_pipeline_start_from_line("[kernel] Running pipeline: tri_blend_stack") == "tri_blend_stack"
-    assert _extract_pipeline_start_from_line("Training pipeline: tri_blend_stack") == "tri_blend_stack"
-    assert (
-        _extract_pipeline_done_from_line("[kernel] Pipeline tri_blend_stack: CV=0.125 method=weighted_mean_log")
-        == "tri_blend_stack"
-    )
-
-
-def test_progress_helpers() -> None:
-    assert _resolve_seed_current(seed=2024, expected_seeds=[42, 2024, 777]) == 2
-    assert _resolve_seed_current(seed=999, expected_seeds=[42, 2024, 777]) is None
-    assert _resolve_fold_current(fold_raw=0, expected_folds=5, zero_based=True) == 1
-    assert _resolve_fold_current(fold_raw=2, expected_folds=5, zero_based=True) == 3
-    assert _resolve_fold_current(fold_raw=2, expected_folds=5, zero_based=False) == 2
 
 
 def test_build_local_kernel_progress_tracker_reads_plan(tmp_path: Path) -> None:

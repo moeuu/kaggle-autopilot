@@ -44,6 +44,16 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
+from kagglebot.kernel_progress import (
+    extract_catboost_fallback_reason_from_line,
+    extract_pipeline_done_from_line,
+    extract_pipeline_start_from_line,
+    extract_pipeline_suite_from_line,
+    extract_train_model_start_from_line,
+    extract_training_stage_from_line,
+    resolve_fold_current,
+    resolve_seed_current,
+)
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config, pipeline_env_suffix
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.solution_guard import ensure_solution_path_allowed
@@ -112,16 +122,7 @@ _URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES = frozenset(
     }
 )
 
-_PIPELINE_SEED_FOLD_RE = re.compile(r"(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)_seed(?P<seed>\d+)_fold(?P<fold>\d+)")
-_PIPELINE_SEED_FOLD_INLINE_RE = re.compile(
-    r"\b(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*seed=(?P<seed>\d+)\s+fold=(?P<fold>\d+)\b"
-)
 _INTERMEDIATE_SUBMISSION_RE = re.compile(r"^submission(?:_[A-Za-z0-9_.-]+)?_fold(?P<fold>\d+)\.csv$", re.IGNORECASE)
-_PIPELINE_START_RE = re.compile(r"\b(?:Running|Training)\s+pipeline:\s*(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)")
-_PIPELINE_DONE_RE = re.compile(r"\bPipeline\s+(?P<pipeline>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*:")
-_PIPELINE_SUITE_RE = re.compile(r"\bSuite:\s*(?P<suite>[A-Za-z0-9][A-Za-z0-9_.-]*)")
-_TRAIN_MODEL_START_RE = re.compile(r"\btrain start:\s*model=(?P<model>[A-Za-z0-9][A-Za-z0-9_.-]*)")
-_CATBOOST_FALLBACK_RE = re.compile(r"\bCatBoost GPU failed; retrying on CPU:\s*(?P<reason>.+)")
 _BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
     r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
@@ -2488,32 +2489,32 @@ class _LocalKernelProgressTracker:
             self.lines_seen += 1
             self.last_output_monotonic = now
 
-        started_pipeline = _extract_pipeline_start_from_line(line)
+        started_pipeline = extract_pipeline_start_from_line(line)
         if started_pipeline is not None:
             with self._lock:
                 self.current_pipeline = started_pipeline
 
-        current_suite = _extract_pipeline_suite_from_line(line)
+        current_suite = extract_pipeline_suite_from_line(line)
         if current_suite is not None:
             with self._lock:
                 self.current_suite = current_suite
 
-        current_model = _extract_train_model_start_from_line(line)
+        current_model = extract_train_model_start_from_line(line)
         if current_model is not None:
             with self._lock:
                 self.current_model = current_model
 
-        fallback_reason = _extract_catboost_fallback_reason_from_line(line)
+        fallback_reason = extract_catboost_fallback_reason_from_line(line)
         if fallback_reason is not None:
             with self._lock:
                 self.last_fallback_reason = fallback_reason
 
-        completed_pipeline = _extract_pipeline_done_from_line(line)
+        completed_pipeline = extract_pipeline_done_from_line(line)
         if completed_pipeline is not None:
             with self._lock:
                 self.completed_pipelines.add(completed_pipeline)
 
-        parsed = _extract_training_stage_from_line(line)
+        parsed = extract_training_stage_from_line(line)
         if parsed is None:
             return
         pipeline, seed, fold_raw = parsed
@@ -2524,12 +2525,12 @@ class _LocalKernelProgressTracker:
         if fold_raw == 0:
             self.zero_based_folds = True
 
-        fold_current = _resolve_fold_current(
+        fold_current = resolve_fold_current(
             fold_raw=fold_raw,
             expected_folds=self.expected_folds,
             zero_based=self.zero_based_folds,
         )
-        seed_current = _resolve_seed_current(seed=seed, expected_seeds=self.expected_seeds)
+        seed_current = resolve_seed_current(seed=seed, expected_seeds=self.expected_seeds)
         elapsed_min = max(0.0, (time.monotonic() - self.started_at_monotonic) / 60.0)
 
         seed_part = (
@@ -2691,91 +2692,6 @@ def _detect_local_kernel_stall(
         f"artifacts={artifact_count}, last_artifact={last_artifact_text}, "
         f"pipeline={pipeline}, model={model}."
     )
-
-
-def _extract_training_stage_from_line(line: str) -> tuple[str, int, int] | None:
-    inline_match = _PIPELINE_SEED_FOLD_INLINE_RE.search(line)
-    if inline_match:
-        return _match_to_stage_tuple(inline_match)
-    path_match = _PIPELINE_SEED_FOLD_RE.search(line)
-    if path_match:
-        return _match_to_stage_tuple(path_match)
-    return None
-
-
-def _match_to_stage_tuple(match: re.Match[str]) -> tuple[str, int, int] | None:
-    try:
-        pipeline = str(match.group("pipeline")).strip()
-        seed = int(match.group("seed"))
-        fold = int(match.group("fold"))
-    except Exception:  # noqa: BLE001
-        return None
-    if not pipeline:
-        return None
-    return pipeline, seed, fold
-
-
-def _extract_pipeline_start_from_line(line: str) -> str | None:
-    match = _PIPELINE_START_RE.search(line)
-    if not match:
-        return None
-    pipeline = str(match.group("pipeline")).strip()
-    return pipeline or None
-
-
-def _extract_pipeline_suite_from_line(line: str) -> str | None:
-    match = _PIPELINE_SUITE_RE.search(line)
-    if not match:
-        return None
-    suite = str(match.group("suite")).strip()
-    return suite or None
-
-
-def _extract_pipeline_done_from_line(line: str) -> str | None:
-    match = _PIPELINE_DONE_RE.search(line)
-    if not match:
-        return None
-    pipeline = str(match.group("pipeline")).strip()
-    return pipeline or None
-
-
-def _extract_train_model_start_from_line(line: str) -> str | None:
-    match = _TRAIN_MODEL_START_RE.search(line)
-    if not match:
-        return None
-    model = str(match.group("model")).strip()
-    return model or None
-
-
-def _extract_catboost_fallback_reason_from_line(line: str) -> str | None:
-    match = _CATBOOST_FALLBACK_RE.search(line)
-    if not match:
-        return None
-    reason = str(match.group("reason")).strip()
-    return reason or None
-
-
-def _resolve_seed_current(*, seed: int, expected_seeds: list[int]) -> int | None:
-    if not expected_seeds:
-        return None
-    try:
-        return expected_seeds.index(seed) + 1
-    except ValueError:
-        return None
-
-
-def _resolve_fold_current(*, fold_raw: int, expected_folds: int | None, zero_based: bool) -> int | None:
-    if expected_folds is None:
-        return None
-    if zero_based:
-        value = fold_raw + 1
-        if 1 <= value <= expected_folds:
-            return value
-    if 1 <= fold_raw <= expected_folds:
-        return fold_raw
-    if 0 <= fold_raw < expected_folds:
-        return fold_raw + 1
-    return None
 
 
 def _local_kernel_history_path(*, base_dir: Path, slug: str) -> Path:
