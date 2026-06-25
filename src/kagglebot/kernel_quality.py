@@ -799,6 +799,33 @@ def detect_prediction_distribution_collapse(payload: dict[str, object] | None) -
     return None
 
 
+def build_prediction_distribution_quality_signal(
+    *,
+    payload: dict[str, object] | None,
+    candidate_selection_mismatch: object,
+) -> dict[str, object]:
+    collapse = detect_prediction_distribution_collapse(payload)
+    detected = collapse is not None
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if detected:
+        warnings.append(
+            "prediction_distribution_collapse="
+            f"selected={collapse.get('selected')},"
+            f"selected_mean={collapse.get('selected_test_prediction_mean')},"
+            f"largest_mean_candidate={collapse.get('largest_mean_candidate')},"
+            f"largest_mean={collapse.get('largest_test_prediction_mean')}"
+        )
+        if candidate_selection_mismatch is not None:
+            reasons.append("prediction_distribution_collapse_vs_candidates")
+    return {
+        "detected": detected,
+        "collapse": collapse,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
 def extract_competition_faithfulness(
     *,
     evaluation_metric: object,

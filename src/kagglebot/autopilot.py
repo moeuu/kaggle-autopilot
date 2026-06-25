@@ -320,8 +320,7 @@ _extract_selected_pipeline_name = _kernel_quality.extract_selected_pipeline_name
 _extract_pipeline_candidates = _kernel_quality.extract_pipeline_candidates
 _pipeline_float = _kernel_quality.pipeline_float
 _find_selected_pipeline = _kernel_quality.find_selected_pipeline
-_prediction_count_mean = _kernel_quality.prediction_count_mean
-_detect_prediction_distribution_collapse = _kernel_quality.detect_prediction_distribution_collapse
+_build_prediction_distribution_quality_signal = _kernel_quality.build_prediction_distribution_quality_signal
 _build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
 _build_code_reference_quality_signal = _kernel_quality.build_code_reference_quality_signal
 _build_validation_metric_alignment = _kernel_quality.build_validation_metric_alignment
@@ -4704,19 +4703,20 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
-    prediction_distribution_collapse = _detect_prediction_distribution_collapse(payload)
-    if prediction_distribution_collapse is not None:
-        warnings.append(
-            "prediction_distribution_collapse="
-            f"selected={prediction_distribution_collapse.get('selected')},"
-            f"selected_mean={prediction_distribution_collapse.get('selected_test_prediction_mean')},"
-            f"largest_mean_candidate={prediction_distribution_collapse.get('largest_mean_candidate')},"
-            f"largest_mean={prediction_distribution_collapse.get('largest_test_prediction_mean')}"
-        )
-        if candidate_selection_mismatch is not None:
-            reasons.append("prediction_distribution_collapse_vs_candidates")
-            if not force_submit:
-                block_submit = True
+    prediction_distribution_signal = _build_prediction_distribution_quality_signal(
+        payload=payload,
+        candidate_selection_mismatch=candidate_selection_mismatch,
+    )
+    for reason in prediction_distribution_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in prediction_distribution_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    prediction_distribution_collapse = prediction_distribution_signal.get("collapse")
+    if prediction_distribution_signal.get("reasons"):
+        if not force_submit:
+            block_submit = True
 
     competition_faithfulness = _extract_competition_faithfulness(
         evaluation=evaluation,
@@ -4820,6 +4820,7 @@ def _build_kernel_quality_guard(
         "candidate_selection_mismatch": candidate_selection_mismatch,
         "candidate_selection": candidate_selection_signal,
         "prediction_distribution_collapse": prediction_distribution_collapse,
+        "prediction_distribution": prediction_distribution_signal,
         "code_reference": code_reference_signal,
     }
 

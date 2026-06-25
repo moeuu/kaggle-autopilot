@@ -7,6 +7,7 @@ from kagglebot.kernel_quality import (
     build_code_reference_quality_signal,
     build_external_label_transfer_quality_signal,
     build_oracle_override_signal,
+    build_prediction_distribution_quality_signal,
     build_score_source_quality_signal,
     build_validation_metric_alignment,
     detect_candidate_selection_mismatch,
@@ -459,6 +460,59 @@ def test_detect_prediction_distribution_collapse_compares_candidate_means() -> N
     assert signal is not None
     assert signal["selected"] == "sparse"
     assert signal["largest_mean_candidate"] == "dense"
+
+
+def test_build_prediction_distribution_quality_signal_warns_on_collapse() -> None:
+    payload = {
+        "selected_pipeline": "sparse",
+        "pipelines": [
+            {
+                "name": "dense",
+                "prediction_count_summary": {"test": {"mean": 10.0}},
+            },
+            {
+                "name": "sparse",
+                "prediction_count_summary": {"test": {"mean": 2.0}},
+            },
+        ],
+    }
+
+    signal = build_prediction_distribution_quality_signal(
+        payload=payload,
+        candidate_selection_mismatch=None,
+    )
+
+    assert signal["detected"] is True
+    assert signal["collapse"] is not None
+    assert signal["reasons"] == []
+    assert signal["warnings"] == [
+        "prediction_distribution_collapse="
+        "selected=sparse,selected_mean=2.0,largest_mean_candidate=dense,largest_mean=10.0"
+    ]
+
+
+def test_build_prediction_distribution_quality_signal_blocks_with_candidate_mismatch() -> None:
+    payload = {
+        "selected_pipeline": "sparse",
+        "pipelines": [
+            {
+                "name": "dense",
+                "prediction_count_summary": {"test": {"mean": 10.0}},
+            },
+            {
+                "name": "sparse",
+                "prediction_count_summary": {"test": {"mean": 2.0}},
+            },
+        ],
+    }
+
+    signal = build_prediction_distribution_quality_signal(
+        payload=payload,
+        candidate_selection_mismatch={"selected": "sparse"},
+    )
+
+    assert signal["detected"] is True
+    assert signal["reasons"] == ["prediction_distribution_collapse_vs_candidates"]
 
 
 def test_extract_competition_faithfulness_prefers_metric_name_over_numeric_metric() -> None:
