@@ -45,7 +45,7 @@ def test_normalize_notebook_submit_artifact_mode_defaults_to_wrapper() -> None:
     assert normalize_notebook_submit_artifact_mode(" Inference ") == "inference"
 
 
-def test_build_notebook_submit_reference_prefers_copied_artifact_path() -> None:
+def test_build_notebook_submit_reference_prefers_kernel_output_file_name() -> None:
     reference = build_notebook_submit_reference(
         kernel_id="user/demo",
         submission_artifact_path=Path("/tmp/copied/submission-fixed.csv"),
@@ -55,6 +55,18 @@ def test_build_notebook_submit_reference_prefers_copied_artifact_path() -> None:
 
     assert reference.kernel_ref == "user/demo"
     assert reference.submission_ref == "kernel:user/demo"
+    assert reference.output_file == "submission.csv"
+    assert reference.version == "7"
+
+
+def test_build_notebook_submit_reference_uses_copied_name_when_kernel_output_missing() -> None:
+    reference = build_notebook_submit_reference(
+        kernel_id="user/demo",
+        submission_artifact_path=Path("/tmp/copied/submission-fixed.csv"),
+        kernel_submission_path=None,
+        version_label="7",
+    )
+
     assert reference.output_file == "submission-fixed.csv"
     assert reference.version == "7"
 

@@ -91,7 +91,7 @@ def build_notebook_submit_reference(
     kernel_submission_path: Path | None,
     version_label: str | None,
 ) -> NotebookSubmitReference:
-    output_path = submission_artifact_path or kernel_submission_path
+    output_path = kernel_submission_path or submission_artifact_path
     return NotebookSubmitReference(
         kernel_ref=kernel_id,
         submission_ref=f"kernel:{kernel_id}",
