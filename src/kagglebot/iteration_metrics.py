@@ -238,6 +238,47 @@ def build_regression_guard_payload(
     }
 
 
+def build_final_metrics_payload(
+    *,
+    base_payload: dict[str, object],
+    loop_decision_source: str,
+    loop_decision_value: float,
+    noise_guard: dict[str, object],
+    rank_guard: dict[str, object],
+    top1_tier_offline_decision: bool,
+    top1_tier_by_readiness: bool,
+    top1_tier_by_submission: bool,
+    forced_submit_reason: str | None,
+    online_score: object,
+    campaign_payload: dict[str, object] | None,
+    best_score_guard: dict[str, object] | None,
+    quality_guard: dict[str, object],
+    regression_guard: dict[str, object],
+) -> dict[str, object]:
+    payload = dict(base_payload)
+    payload["loop_decision"] = {
+        "source": loop_decision_source,
+        "value": loop_decision_value,
+    }
+    payload["noise_guard"] = noise_guard
+    payload["rank_guard"] = rank_guard
+    payload["top1_tier"] = {
+        "offline_decision": top1_tier_offline_decision,
+        "offline_readiness": top1_tier_by_readiness,
+        "submission_score": top1_tier_by_submission,
+    }
+    payload["forced_submit_reason"] = forced_submit_reason or ""
+    if isinstance(online_score, (int, float)):
+        payload["submission_score"] = float(online_score)
+    if campaign_payload is not None:
+        payload["campaign"] = campaign_payload
+    if best_score_guard is not None:
+        payload["best_score_guard"] = best_score_guard
+    payload["quality_guard"] = quality_guard
+    payload["regression_guard"] = regression_guard
+    return payload
+
+
 def record_iteration_with_submit_phase_compat(
     *,
     record_iteration: Callable[..., object],

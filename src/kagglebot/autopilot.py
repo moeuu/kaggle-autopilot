@@ -2296,43 +2296,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 else None,
                 accuracy_potential=accuracy_potential,
             )
-            metrics_payload["loop_decision"] = {
-                "source": decision_source,
-                "value": decision_score,
-            }
-            metrics_payload["noise_guard"] = _iteration_metrics.build_noise_guard_payload(
-                delta_srs_vs_prev=delta_srs_vs_prev,
-                noise_threshold=noise_threshold,
-                noise_limited_streak=noise_limited_streak,
-                force_major_overhaul_next=force_major_overhaul_next,
-            )
-            metrics_payload["rank_guard"] = _iteration_metrics.build_rank_guard_payload(
-                target_medal=target_medal,
-                target_rank_percentile=target_rank_percentile,
-                target_rank_met=medal_target_met,
-                minimum_improvement_mode=medal_minimum_improvement_mode,
-                rank=submission_rank,
-                total_teams=submission_total_teams,
-                rank_percentile=submission_rank_percentile,
-                rank_source=submission_rank_source,
-                estimated_rank=submission_rank_estimate,
-                estimated_total_teams=submission_total_teams_estimate,
-                estimated_rank_percentile=submission_rank_percentile_estimate,
-                rank_estimate_source=submission_rank_estimate_source,
-                max_percentile=rank_force_major_max_percentile,
-                min_teams=rank_force_major_min_teams,
-                force_major_overhaul_next=rank_forced_major_overhaul,
-            )
-            metrics_payload["top1_tier"] = {
-                "offline_decision": top1_tier,
-                "offline_readiness": top1_tier_by_readiness,
-                "submission_score": top1_tier_by_submission,
-            }
-            metrics_payload["forced_submit_reason"] = forced_submit_reason or ""
-            if isinstance(online_score, (int, float)):
-                metrics_payload["submission_score"] = float(online_score)
+            campaign_metrics_payload = None
             if campaign_mode == "top1":
-                metrics_payload["campaign"] = {
+                campaign_metrics_payload = {
                     "state_path": str(campaign_state_file),
                     "registry_path": str(campaign_registry_file),
                     "state": campaign_state,
@@ -2350,20 +2316,53 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "allocator_decision": allocator_decision,
                     "graph_execution_report": graph_execution_report,
                 }
-            if best_score_guard is not None:
-                metrics_payload["best_score_guard"] = best_score_guard
-            metrics_payload["quality_guard"] = quality_guard
-            metrics_payload["regression_guard"] = _iteration_metrics.build_regression_guard_payload(
-                best_score_before_iteration=best_score,
-                score_drop_vs_best=score_drop_vs_best,
-                severe_regression_detected=severe_regression_detected,
-                conservative_feature_collapse=conservative_feature_collapse,
-                conservative_regression_detected=conservative_regression_detected,
-                first_iteration_below_code_reference=first_iteration_below_code_reference,
-                code_reference_score=code_reference_score,
-                code_reference_comparison_score=code_reference_comparison_score,
-                code_reference_delta_vs_current=code_reference_delta_vs_current,
-                code_reference_forced_reproduction=code_reference_forced_reproduction,
+            metrics_payload = _iteration_metrics.build_final_metrics_payload(
+                base_payload=metrics_payload,
+                loop_decision_source=decision_source,
+                loop_decision_value=decision_score,
+                noise_guard=_iteration_metrics.build_noise_guard_payload(
+                    delta_srs_vs_prev=delta_srs_vs_prev,
+                    noise_threshold=noise_threshold,
+                    noise_limited_streak=noise_limited_streak,
+                    force_major_overhaul_next=force_major_overhaul_next,
+                ),
+                rank_guard=_iteration_metrics.build_rank_guard_payload(
+                    target_medal=target_medal,
+                    target_rank_percentile=target_rank_percentile,
+                    target_rank_met=medal_target_met,
+                    minimum_improvement_mode=medal_minimum_improvement_mode,
+                    rank=submission_rank,
+                    total_teams=submission_total_teams,
+                    rank_percentile=submission_rank_percentile,
+                    rank_source=submission_rank_source,
+                    estimated_rank=submission_rank_estimate,
+                    estimated_total_teams=submission_total_teams_estimate,
+                    estimated_rank_percentile=submission_rank_percentile_estimate,
+                    rank_estimate_source=submission_rank_estimate_source,
+                    max_percentile=rank_force_major_max_percentile,
+                    min_teams=rank_force_major_min_teams,
+                    force_major_overhaul_next=rank_forced_major_overhaul,
+                ),
+                top1_tier_offline_decision=top1_tier,
+                top1_tier_by_readiness=top1_tier_by_readiness,
+                top1_tier_by_submission=top1_tier_by_submission,
+                forced_submit_reason=forced_submit_reason,
+                online_score=online_score,
+                campaign_payload=campaign_metrics_payload,
+                best_score_guard=best_score_guard,
+                quality_guard=quality_guard,
+                regression_guard=_iteration_metrics.build_regression_guard_payload(
+                    best_score_before_iteration=best_score,
+                    score_drop_vs_best=score_drop_vs_best,
+                    severe_regression_detected=severe_regression_detected,
+                    conservative_feature_collapse=conservative_feature_collapse,
+                    conservative_regression_detected=conservative_regression_detected,
+                    first_iteration_below_code_reference=first_iteration_below_code_reference,
+                    code_reference_score=code_reference_score,
+                    code_reference_comparison_score=code_reference_comparison_score,
+                    code_reference_delta_vs_current=code_reference_delta_vs_current,
+                    code_reference_forced_reproduction=code_reference_forced_reproduction,
+                ),
             )
             _write_json_object(metrics_path, metrics_payload)
 

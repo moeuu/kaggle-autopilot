@@ -6,6 +6,7 @@ from kagglebot.eval import EvaluationReport
 from kagglebot.iteration_metrics import (
     append_run_evaluation_report,
     build_eval_data_cache_fallback,
+    build_final_metrics_payload,
     build_iteration_record_kwargs,
     build_metrics_payload,
     build_noise_guard_payload,
@@ -277,6 +278,66 @@ def test_build_guard_payload_helpers_preserve_expected_keys() -> None:
         "code_reference_delta_vs_current": -0.02,
         "code_reference_forced_reproduction": True,
     }
+
+
+def test_build_final_metrics_payload_adds_optional_sections_without_mutating_base() -> None:
+    base = {"run_id": "run-1", "iter": 2}
+    payload = build_final_metrics_payload(
+        base_payload=base,
+        loop_decision_source="readiness",
+        loop_decision_value=0.81,
+        noise_guard={"streak": 1},
+        rank_guard={"rank": 12},
+        top1_tier_offline_decision=False,
+        top1_tier_by_readiness=True,
+        top1_tier_by_submission=False,
+        forced_submit_reason=None,
+        online_score=0.73,
+        campaign_payload={"state_path": "campaign.json"},
+        best_score_guard={"blocked": False},
+        quality_guard={"allow_submit": True},
+        regression_guard={"severe_regression_detected": False},
+    )
+
+    assert base == {"run_id": "run-1", "iter": 2}
+    assert payload["loop_decision"] == {"source": "readiness", "value": 0.81}
+    assert payload["noise_guard"] == {"streak": 1}
+    assert payload["rank_guard"] == {"rank": 12}
+    assert payload["top1_tier"] == {
+        "offline_decision": False,
+        "offline_readiness": True,
+        "submission_score": False,
+    }
+    assert payload["forced_submit_reason"] == ""
+    assert payload["submission_score"] == 0.73
+    assert payload["campaign"] == {"state_path": "campaign.json"}
+    assert payload["best_score_guard"] == {"blocked": False}
+    assert payload["quality_guard"] == {"allow_submit": True}
+    assert payload["regression_guard"] == {"severe_regression_detected": False}
+
+
+def test_build_final_metrics_payload_omits_absent_optional_sections() -> None:
+    payload = build_final_metrics_payload(
+        base_payload={},
+        loop_decision_source="offline",
+        loop_decision_value=0.5,
+        noise_guard={},
+        rank_guard={},
+        top1_tier_offline_decision=False,
+        top1_tier_by_readiness=False,
+        top1_tier_by_submission=False,
+        forced_submit_reason="manual",
+        online_score=None,
+        campaign_payload=None,
+        best_score_guard=None,
+        quality_guard={},
+        regression_guard={},
+    )
+
+    assert payload["forced_submit_reason"] == "manual"
+    assert "submission_score" not in payload
+    assert "campaign" not in payload
+    assert "best_score_guard" not in payload
 
 
 def test_record_iteration_with_submit_phase_compat_uses_primary_when_supported() -> None:
