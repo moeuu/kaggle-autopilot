@@ -308,7 +308,7 @@ Recommended extraction order:
    submit-policy and submission-gate resolution now also lives there.
    Score progress helpers for official metric overrides, top1 gap classification, code-reference score normalization,
    severe-regression checks, conservative-collapse detection, and best-candidate priority comparison are now in
-   `score_progress.py`.
+   `score_progress.py`. Iteration-level score delta/update policy now also lives there instead of in `autopilot.py`.
    Top1 campaign metadata extraction from kernel metrics and validation-redesign preference checks are now in
    `campaign_metrics.py`.
    Kernel metrics payload parsing, evaluation-result normalization, CV fallback extraction, metric-recheck OOF column

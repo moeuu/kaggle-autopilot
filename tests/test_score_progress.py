@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from kagglebot.score_progress import (
+    IterationPhase,
     classify_improvement_mode,
     effective_best_score_for_progress,
     is_confirmed_first_place,
@@ -14,6 +15,19 @@ from kagglebot.score_progress import (
     score_delta_vs_reference,
     should_update_best_accuracy_candidate,
 )
+
+
+def test_iteration_phase_delta_and_best_update_policy() -> None:
+    minimize = IterationPhase(metric_direction="minimize")
+    maximize = IterationPhase(metric_direction="maximize")
+
+    assert minimize.delta_from_best(None, 0.4) is None
+    assert minimize.delta_from_best(0.5, 0.4) == pytest.approx(0.1)
+    assert maximize.delta_from_best(0.5, 0.6) == pytest.approx(0.1)
+    assert minimize.should_update_best(0.5, 0.4, 0.1)
+    assert not minimize.should_update_best(0.5, 0.41, 0.1)
+    assert maximize.should_update_best(0.5, 0.6, 0.1)
+    assert not maximize.should_update_best(0.5, 0.59, 0.1)
 
 
 def test_resolve_explicit_official_metric_override_accepts_generic_plan_fallback() -> None:

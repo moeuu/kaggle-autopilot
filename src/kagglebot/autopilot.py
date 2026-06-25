@@ -513,21 +513,6 @@ class KnowledgePhase:
 
 
 @dataclass(frozen=True)
-class IterationPhase:
-    metric_direction: str
-
-    def delta_from_best(self, best_score: float | None, current_score: float) -> float | None:
-        if best_score is None:
-            return None
-        if self.metric_direction == "minimize":
-            return best_score - current_score
-        return current_score - best_score
-
-    def should_update_best(self, best_score: float | None, current_score: float, min_improvement: float) -> bool:
-        return _update_best_score(best_score, current_score, self.metric_direction, min_improvement)
-
-
-@dataclass(frozen=True)
 class SubmissionPhase:
     config: AutopilotConfig
     run_id: str
@@ -693,7 +678,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     writeup_bundle_meta: dict[str, object] | None = None
 
     max_iterations = max(1, int(resolved["max_iterations"]))
-    iteration_phase = IterationPhase(metric_direction=metric_direction)
+    iteration_phase = _score_progress.IterationPhase(metric_direction=metric_direction)
     holdout_frac = float(resolved["holdout_frac"])
     cv_folds = int(resolved["cv_folds"])
     split_strategy = str(resolved.get("split_strategy") or "").strip().lower() or None

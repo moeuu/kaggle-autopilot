@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from kagglebot.metric_matching import metrics_equivalent
 from kagglebot.scalar_utils import tolerant_int
 from kagglebot.score_utils import should_update_best_score
@@ -53,6 +55,21 @@ MAXIMIZE_PROBABILITY_LIKE_METRICS = frozenset(
         "r_squared",
     }
 )
+
+
+@dataclass(frozen=True)
+class IterationPhase:
+    metric_direction: str
+
+    def delta_from_best(self, best_score: float | None, current_score: float) -> float | None:
+        if best_score is None:
+            return None
+        if self.metric_direction == "minimize":
+            return best_score - current_score
+        return current_score - best_score
+
+    def should_update_best(self, best_score: float | None, current_score: float, min_improvement: float) -> bool:
+        return should_update_best_score(best_score, current_score, self.metric_direction, min_improvement)
 
 
 def resolve_explicit_official_metric_override(
