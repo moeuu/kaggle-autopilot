@@ -778,12 +778,7 @@ def _format_minutes(value: int) -> str:
 
 
 def _to_float(value: object) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return parse_float_value(value)
 
 
 def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None = None) -> list[EnteredCompetition]:
@@ -1296,12 +1291,7 @@ def _optional_int(value: object) -> int | None:
 
 
 def _optional_float(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return parse_float_value(value)
 
 
 def _aware_datetime(value: datetime | None) -> datetime | None:

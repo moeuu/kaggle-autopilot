@@ -97,6 +97,13 @@ def test_watch_optional_int_rejects_bool_and_fractional_values() -> None:
     assert supervisor._optional_int("4") == 4  # noqa: SLF001
 
 
+def test_watch_optional_float_rejects_bool_and_non_finite_values() -> None:
+    assert supervisor._optional_float(True) is None  # noqa: SLF001
+    assert supervisor._optional_float("nan") is None  # noqa: SLF001
+    assert supervisor._optional_float("inf") is None  # noqa: SLF001
+    assert supervisor._optional_float("0.25") == 0.25  # noqa: SLF001
+
+
 def test_select_next_competition_filters_disabled_and_blocked(monkeypatch, tmp_path: Path) -> None:
     candidates = [
         _competition("disabled", submissions_disabled=True),
