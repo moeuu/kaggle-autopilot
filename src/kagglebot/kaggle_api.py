@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from kagglebot.competition import parse_competition_slug
+from kagglebot.env_utils import parse_float_value, parse_int_value
 from kagglebot.exceptions import (
     KaggleCliError,
     KaggleCliResourceError,
@@ -415,22 +416,13 @@ def _apply_download_pacing(*, min_interval_sec: float, last_request_started_at: 
 
 
 def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw.strip())
-    except ValueError:
-        return default
+    value = parse_int_value(os.getenv(name))
+    return default if value is None else value
 
 
 def _read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw.strip())
-    except ValueError:
+    value = parse_float_value(os.getenv(name))
+    if value is None:
         return default
     if value < 0:
         return default
@@ -1683,12 +1675,8 @@ def _run_kaggle(args: list[str], slug: str | None, *, dry_run: bool) -> str:
 
 
 def _kaggle_cli_memory_limit_mb() -> int | None:
-    raw = os.getenv("KAGGLEBOT_KAGGLE_CLI_MEMORY_LIMIT_MB")
-    if raw is None:
-        return _DEFAULT_KAGGLE_CLI_MEMORY_LIMIT_MB
-    try:
-        value = int(float(raw.strip()))
-    except ValueError:
+    value = parse_int_value(os.getenv("KAGGLEBOT_KAGGLE_CLI_MEMORY_LIMIT_MB"), allow_float=True)
+    if value is None:
         return _DEFAULT_KAGGLE_CLI_MEMORY_LIMIT_MB
     if value <= 0:
         return None

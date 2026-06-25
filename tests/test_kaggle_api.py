@@ -303,6 +303,25 @@ def test_download_rate_limit_attempts_reads_env(monkeypatch) -> None:
     assert kaggle_api._download_rate_limit_attempts() == 3
 
 
+def test_download_env_readers_fallback_for_invalid_and_non_finite(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS", "3.5")
+    assert kaggle_api._download_rate_limit_attempts() == 8
+
+    monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC", "nan")
+    assert kaggle_api._download_min_interval_sec() == 0.0
+
+
+def test_kaggle_cli_memory_limit_env_uses_shared_number_parsing(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_CLI_MEMORY_LIMIT_MB", "1024.0")
+    assert kaggle_api._kaggle_cli_memory_limit_mb() == 1024
+
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_CLI_MEMORY_LIMIT_MB", "0")
+    assert kaggle_api._kaggle_cli_memory_limit_mb() is None
+
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_CLI_MEMORY_LIMIT_MB", "nan")
+    assert kaggle_api._kaggle_cli_memory_limit_mb() == 8192
+
+
 def test_download_single_shot_first_reads_env(monkeypatch) -> None:
     monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST", "0")
     assert kaggle_api._download_single_shot_first_enabled() is False
