@@ -224,7 +224,8 @@ Recommended extraction order:
 1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization, score-source
    normalization, and competition-specific overrides are already out of the main loop.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
-   `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object.
+   `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
+   submit-policy and submission-gate resolution now also lives there.
    Score progress helpers for official metric overrides, top1 gap classification, code-reference score normalization,
    severe-regression checks, conservative-collapse detection, and best-candidate priority comparison are now in
    `score_progress.py`.

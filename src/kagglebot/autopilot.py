@@ -3669,47 +3669,17 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     requested_submit_policy = str(choose(config.submit_policy, plan.submit_policy, "always") or "always")
     requested_submission_gate_raw = choose(None, plan.submission_gate, spec_submission_gate)
     requested_submission_gate = str(requested_submission_gate_raw or "").strip().lower() or None
-    forced_submit_policy = (
-        _submission_policy.normalized_submit_policy(config.submit_policy) if config.submit_policy else None
+    submit_policy_decision = _submission_policy.resolve_plan_submission_policy(
+        config_submit_policy=config.submit_policy,
+        requested_submit_policy=requested_submit_policy,
+        requested_submission_gate=requested_submission_gate,
+        submission_limit_detected=constraints.submission_limit_detected,
+        default_limited_submission_gate=_DEFAULT_LIMITED_SUBMISSION_GATE,
     )
-    if forced_submit_policy == "improved":
-        submit_policy = "improved"
-        submission_gate = "always"
-    elif constraints.submission_limit_detected:
-        submit_policy = _submission_policy.normalized_submit_policy(requested_submit_policy)
-        default_gate = _submission_policy.submission_gate_for_policy(submit_policy)
-        if requested_submission_gate is not None:
-            submission_gate = _submission_policy.normalized_submission_gate(
-                requested_submission_gate,
-                default=default_gate,
-            )
-        else:
-            submission_gate = default_gate
-        if submission_gate == "always" and requested_submission_gate is None and submit_policy == "always":
-            submission_gate = _DEFAULT_LIMITED_SUBMISSION_GATE
-            submit_policy = "readiness_or_final"
-            print(
-                "[yellow]note[/yellow]: submission limit detected in rules; "
-                f"defaulting submission_gate={submission_gate}."
-            )
-    else:
-        submit_policy = "always"
-        submission_gate = "always"
-        if _submission_policy.normalized_submit_policy(requested_submit_policy) != "always":
-            print(
-                "[yellow]note[/yellow]: no submission limit detected; "
-                f"ignoring submit_policy='{requested_submit_policy}'."
-            )
-        normalized_requested_gate = (
-            _submission_policy.normalized_submission_gate(requested_submission_gate, default="always")
-            if requested_submission_gate
-            else "always"
-        )
-        if requested_submission_gate and normalized_requested_gate != "always":
-            print(
-                "[yellow]note[/yellow]: no submission limit detected; "
-                f"ignoring submission_gate='{requested_submission_gate}'."
-            )
+    submit_policy = submit_policy_decision.submit_policy
+    submission_gate = submit_policy_decision.submission_gate
+    for message in submit_policy_decision.messages:
+        print(message)
     readiness_target_score = choose(
         None,
         plan.readiness_target_score,

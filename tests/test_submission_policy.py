@@ -16,6 +16,7 @@ from kagglebot.submission_policy import (
     normalized_submit_policy,
     quality_reasons_allow_initial_submit_probe,
     quality_reasons_allow_spare_submit,
+    resolve_plan_submission_policy,
     should_attempt_submit_for_readiness,
     should_force_initial_submit,
     submission_gate_for_policy,
@@ -39,6 +40,67 @@ def test_submission_policy_normalization() -> None:
     assert normalized_submission_gate("unknown", default="final_only") == "final_only"
     assert submission_gate_for_policy("improved") == "always"
     assert submission_gate_for_policy("final_only") == "final_only"
+
+
+def test_resolve_plan_submission_policy_honors_forced_improved_policy() -> None:
+    decision = resolve_plan_submission_policy(
+        config_submit_policy="improved_only",
+        requested_submit_policy="always",
+        requested_submission_gate="readiness_only",
+        submission_limit_detected=True,
+        default_limited_submission_gate="readiness_or_final",
+    )
+
+    assert decision.submit_policy == "improved"
+    assert decision.submission_gate == "always"
+    assert decision.messages == ()
+
+
+def test_resolve_plan_submission_policy_defaults_limited_rules_to_readiness_or_final() -> None:
+    decision = resolve_plan_submission_policy(
+        config_submit_policy=None,
+        requested_submit_policy="always",
+        requested_submission_gate=None,
+        submission_limit_detected=True,
+        default_limited_submission_gate="readiness_or_final",
+    )
+
+    assert decision.submit_policy == "readiness_or_final"
+    assert decision.submission_gate == "readiness_or_final"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: submission limit detected in rules; defaulting submission_gate=readiness_or_final.",
+    )
+
+
+def test_resolve_plan_submission_policy_keeps_explicit_limited_gate() -> None:
+    decision = resolve_plan_submission_policy(
+        config_submit_policy=None,
+        requested_submit_policy="readiness_only",
+        requested_submission_gate="on_target_only",
+        submission_limit_detected=True,
+        default_limited_submission_gate="readiness_or_final",
+    )
+
+    assert decision.submit_policy == "readiness_only"
+    assert decision.submission_gate == "readiness_only"
+    assert decision.messages == ()
+
+
+def test_resolve_plan_submission_policy_ignores_limited_options_without_limits() -> None:
+    decision = resolve_plan_submission_policy(
+        config_submit_policy=None,
+        requested_submit_policy="readiness_only",
+        requested_submission_gate="final_only",
+        submission_limit_detected=False,
+        default_limited_submission_gate="readiness_or_final",
+    )
+
+    assert decision.submit_policy == "always"
+    assert decision.submission_gate == "always"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: no submission limit detected; ignoring submit_policy='readiness_only'.",
+        "[yellow]note[/yellow]: no submission limit detected; ignoring submission_gate='final_only'.",
+    )
 
 
 def test_spare_slot_and_checkpoint_policy() -> None:

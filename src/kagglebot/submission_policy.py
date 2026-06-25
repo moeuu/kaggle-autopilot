@@ -36,6 +36,13 @@ class LimitedSubmissionHoldbackDecision:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class PlanSubmissionPolicyDecision:
+    submit_policy: str
+    submission_gate: str
+    messages: tuple[str, ...] = ()
+
+
 def meets_target(value: float, target: float, direction: str) -> bool:
     if direction == "minimize":
         return value <= target
@@ -191,6 +198,63 @@ def normalized_submission_gate(gate: str | None, *, default: str) -> str:
     if normalized in {"readiness_or_final", "target_or_final"}:
         return "readiness_or_final"
     return default
+
+
+def resolve_plan_submission_policy(
+    *,
+    config_submit_policy: str | None,
+    requested_submit_policy: str | None,
+    requested_submission_gate: str | None,
+    submission_limit_detected: bool,
+    default_limited_submission_gate: str,
+) -> PlanSubmissionPolicyDecision:
+    """Resolve plan/config submit policy into the runtime policy and gate."""
+
+    forced_submit_policy = normalized_submit_policy(config_submit_policy) if config_submit_policy else None
+    requested_policy = str(requested_submit_policy or "always")
+    requested_gate = str(requested_submission_gate or "").strip().lower() or None
+
+    if forced_submit_policy == "improved":
+        return PlanSubmissionPolicyDecision(submit_policy="improved", submission_gate="always")
+
+    if submission_limit_detected:
+        submit_policy = normalized_submit_policy(requested_policy)
+        default_gate = submission_gate_for_policy(submit_policy)
+        submission_gate = (
+            normalized_submission_gate(requested_gate, default=default_gate)
+            if requested_gate is not None
+            else default_gate
+        )
+        if submission_gate == "always" and requested_gate is None and submit_policy == "always":
+            submission_gate = normalized_submission_gate(default_limited_submission_gate, default="readiness_or_final")
+            submit_policy = "readiness_or_final"
+            return PlanSubmissionPolicyDecision(
+                submit_policy=submit_policy,
+                submission_gate=submission_gate,
+                messages=(
+                    "[yellow]note[/yellow]: submission limit detected in rules; "
+                    f"defaulting submission_gate={submission_gate}.",
+                ),
+            )
+        return PlanSubmissionPolicyDecision(submit_policy=submit_policy, submission_gate=submission_gate)
+
+    messages: list[str] = []
+    if normalized_submit_policy(requested_policy) != "always":
+        messages.append(
+            f"[yellow]note[/yellow]: no submission limit detected; ignoring submit_policy='{requested_policy}'."
+        )
+    normalized_requested_gate = (
+        normalized_submission_gate(requested_gate, default="always") if requested_gate else "always"
+    )
+    if requested_gate and normalized_requested_gate != "always":
+        messages.append(
+            f"[yellow]note[/yellow]: no submission limit detected; ignoring submission_gate='{requested_gate}'."
+        )
+    return PlanSubmissionPolicyDecision(
+        submit_policy="always",
+        submission_gate="always",
+        messages=tuple(messages),
+    )
 
 
 def should_force_initial_submit(
