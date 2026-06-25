@@ -134,7 +134,7 @@ def test_ensure_eval_data_cache_preserves_requested_timeseries_split_on_fallback
     )
 
     monkeypatch.setattr(
-        "kagglebot.autopilot.load_competition_data",
+        "kagglebot.iteration_metrics.load_competition_data",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 

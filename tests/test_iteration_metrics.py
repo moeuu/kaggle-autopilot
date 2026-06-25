@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import numpy as np
+
 from kagglebot.eval import EvaluationReport
 from kagglebot.iteration_metrics import (
     append_run_evaluation_report,
+    build_eval_data_cache_fallback,
     build_metrics_payload,
+    build_split_index_fingerprints,
     evaluation_to_payload,
+    extract_fold_scores_for_report,
     resume_best_readiness_score,
     resume_noise_guard_state,
 )
@@ -122,6 +127,78 @@ def test_build_metrics_payload_includes_readiness_and_offline_sources() -> None:
     assert payload["evaluation_contract"] == {"faithful": True}
     assert payload["competition_faithfulness"] == {"faithful": True}
     assert payload["accuracy_potential"] == {"status": "frontier"}
+
+
+def test_build_eval_data_cache_fallback_normalizes_split() -> None:
+    fallback = build_eval_data_cache_fallback(split_strategy="timeseries_split", cv_folds=5)
+
+    assert fallback == {
+        "split_strategy": "timeseries_split",
+        "n_splits": 5,
+        "split_index_fingerprints": [],
+        "drift_train_x": None,
+        "drift_test_x": None,
+    }
+
+
+def test_extract_fold_scores_for_report_prefers_cv_fold_scores() -> None:
+    evaluation = EvaluationResult(
+        score_source="holdout",
+        metric="auc",
+        direction="maximize",
+        value=0.7,
+        std=None,
+        train_score=None,
+        val_score=0.7,
+        fold_scores=None,
+    )
+    cv = EvaluationResult(
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        value=0.8,
+        std=0.01,
+        train_score=None,
+        val_score=None,
+        fold_scores=[0.79, 0.81],
+    )
+
+    assert extract_fold_scores_for_report(evaluation=evaluation, evaluation_by_source={"cv": cv}) == [0.79, 0.81]
+
+
+def test_build_split_index_fingerprints_are_stable() -> None:
+    class DemoSplitter:
+        name = "kfold"
+
+        @property
+        def splitter(self):
+            return self
+
+        def split(self, x, y):  # noqa: ANN001
+            del x, y
+            yield np.array([0, 1]), np.array([2])
+            yield np.array([2]), np.array([0, 1])
+
+    fingerprints = build_split_index_fingerprints(split=DemoSplitter(), y=np.array([0, 1, 0]), seed=123)
+
+    assert fingerprints == [
+        {
+            "seed": 123,
+            "fold": 0,
+            "train_size": 2,
+            "valid_size": 1,
+            "train_hash": "9d34149fbd1fe777",
+            "valid_hash": "d86e8112f3c4c444",
+        },
+        {
+            "seed": 123,
+            "fold": 1,
+            "train_size": 1,
+            "valid_size": 2,
+            "train_hash": "d86e8112f3c4c444",
+            "valid_hash": "9d34149fbd1fe777",
+        },
+    ]
 
 
 def test_append_run_evaluation_report_recovers_invalid_existing_report(tmp_path) -> None:

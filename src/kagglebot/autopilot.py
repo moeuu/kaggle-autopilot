@@ -105,11 +105,7 @@ from kagglebot.env_utils import env_flag as _env_flag
 from kagglebot.env_utils import env_int as _env_int
 from kagglebot.env_utils import env_truthy as _env_truthy
 from kagglebot.eval import (
-    DriftChecker,
     EvaluationReport,
-    SplitStrategyFactory,
-    SubmissionReadinessScorer,
-    UncertaintyEstimator,
     validate_evaluation_spec,
 )
 from kagglebot.exceptions import (
@@ -201,7 +197,6 @@ from kagglebot.orchestrator.agent_pipeline import (
 )
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
-from kagglebot.solver.io import load_competition_data
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
 from kagglebot.submission.guard import (
     classify_submit_error,
@@ -277,6 +272,12 @@ _effective_best_score_for_progress = _score_progress.effective_best_score_for_pr
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
 _evaluation_to_payload = _iteration_metrics.evaluation_to_payload
 _build_metrics_payload = _iteration_metrics.build_metrics_payload
+_build_iteration_evaluation_report = _iteration_metrics.build_iteration_evaluation_report
+_build_eval_data_cache_fallback = _iteration_metrics.build_eval_data_cache_fallback
+_extract_fold_scores_for_report = _iteration_metrics.extract_fold_scores_for_report
+_ensure_eval_data_cache = _iteration_metrics.ensure_eval_data_cache
+_build_split_index_fingerprints = _iteration_metrics.build_split_index_fingerprints
+_iter_split_indices = _iteration_metrics.iter_split_indices
 _append_run_evaluation_report = _iteration_metrics.append_run_evaluation_report
 _resume_best_readiness_score = _iteration_metrics.resume_best_readiness_score
 _resume_noise_guard_state = _iteration_metrics.resume_noise_guard_state
@@ -5186,221 +5187,6 @@ def _iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationRe
         if isinstance(faithfulness, dict) and isinstance(faithfulness.get("faithful"), bool):
             return bool(faithfulness.get("faithful"))
     return _score_sources.is_trusted_offline_score_source(evaluation.score_source)
-
-
-def _build_iteration_evaluation_report(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    iteration: int,
-    evaluation: EvaluationResult,
-    evaluation_by_source: dict[str, EvaluationResult],
-    metric_direction: str,
-    cv_folds: int,
-    split_strategy: str | None,
-    seed: int,
-    eval_seeds: list[int],
-    eval_repeats: int,
-    score_source: str,
-    ci_method: str,
-    ci_alpha: float,
-    readiness_method: str,
-    readiness_k: float,
-    drift_check_enabled: bool,
-    drift_weight: float,
-    eval_data_cache: dict[str, object] | None,
-) -> tuple[EvaluationReport, dict[str, object], dict[str, object] | None]:
-    cache = _ensure_eval_data_cache(
-        config=config,
-        cv_folds=cv_folds,
-        split_strategy=split_strategy,
-        seed=seed,
-        eval_seeds=eval_seeds,
-        eval_repeats=eval_repeats,
-        score_source=score_source,
-        eval_data_cache=eval_data_cache,
-    )
-    fold_scores = _extract_fold_scores_for_report(evaluation=evaluation, evaluation_by_source=evaluation_by_source)
-
-    ci_method_value = "bootstrap" if str(ci_method).lower() == "bootstrap" else "normal"
-    uncertainty = UncertaintyEstimator.estimate(
-        fold_scores,
-        method=ci_method_value,  # type: ignore[arg-type]
-        alpha=max(1e-6, min(float(ci_alpha), 0.5)),
-        random_state=eval_seeds[0],
-    )
-
-    drift_auc = DriftChecker.adversarial_auc(
-        cache.get("drift_train_x"),  # type: ignore[arg-type]
-        cache.get("drift_test_x"),  # type: ignore[arg-type]
-        enabled=bool(drift_check_enabled),
-        random_state=eval_seeds[0],
-        n_splits=max(2, min(cv_folds, 5)),
-    )
-    readiness_method_value = "mean_std" if str(readiness_method).lower() == "mean_std" else "ci_bound"
-    readiness_score = SubmissionReadinessScorer.compute(
-        direction=metric_direction,  # type: ignore[arg-type]
-        mean_score=uncertainty.mean,
-        std_score=uncertainty.std,
-        ci_low=uncertainty.ci_low,
-        ci_high=uncertainty.ci_high,
-        method=readiness_method_value,  # type: ignore[arg-type]
-        k=float(readiness_k),
-        drift_auc=drift_auc,
-        drift_enabled=bool(drift_check_enabled),
-        drift_weight=float(drift_weight),
-    )
-    report = EvaluationReport(
-        metric_name=evaluation.metric,
-        direction=metric_direction,  # type: ignore[arg-type]
-        split_strategy=str(cache.get("split_strategy") or "kfold"),  # type: ignore[arg-type]
-        n_splits=int(cache.get("n_splits") or max(2, cv_folds)),
-        seeds=list(eval_seeds),
-        repeats=int(eval_repeats),
-        per_fold_scores=[float(item) for item in fold_scores],
-        mean=uncertainty.mean,
-        std=uncertainty.std,
-        ci_low=uncertainty.ci_low,
-        ci_high=uncertainty.ci_high,
-        drift_auc=drift_auc,
-        readiness_score=readiness_score,
-    )
-    payload = report.to_dict()
-    payload.update(
-        {
-            "run_id": run_id,
-            "iteration": iteration,
-            "metric_value": evaluation.value,
-            "score_source": evaluation.score_source,
-            "split_index_fingerprints": cache.get("split_index_fingerprints", []),
-        }
-    )
-    return report, payload, cache
-
-
-def _build_eval_data_cache_fallback(*, split_strategy: str | None, cv_folds: int) -> dict[str, object]:
-    normalized_split = _plan_policy.normalize_split_strategy_name(split_strategy) or "kfold"
-    return {
-        "split_strategy": normalized_split,
-        "n_splits": max(2, int(cv_folds)),
-        "split_index_fingerprints": [],
-        "drift_train_x": None,
-        "drift_test_x": None,
-    }
-
-
-def _extract_fold_scores_for_report(
-    *,
-    evaluation: EvaluationResult,
-    evaluation_by_source: dict[str, EvaluationResult],
-) -> list[float]:
-    cv_eval = evaluation_by_source.get("cv")
-    if cv_eval is not None and cv_eval.fold_scores:
-        return [float(value) for value in cv_eval.fold_scores]
-    if evaluation.fold_scores:
-        return [float(value) for value in evaluation.fold_scores]
-    if evaluation_by_source:
-        return [float(item.value) for item in evaluation_by_source.values()]
-    return [float(evaluation.value)]
-
-
-def _ensure_eval_data_cache(
-    *,
-    config: AutopilotConfig,
-    cv_folds: int,
-    split_strategy: str | None,
-    seed: int,
-    eval_seeds: list[int],
-    eval_repeats: int,
-    score_source: str,
-    eval_data_cache: dict[str, object] | None,
-) -> dict[str, object]:
-    if eval_data_cache is not None:
-        return eval_data_cache
-    fallback = _build_eval_data_cache_fallback(split_strategy=split_strategy, cv_folds=cv_folds)
-    if score_source == "holdout":
-        return fallback
-    try:
-        data = load_competition_data(config.paths.data_dir)
-    except Exception:  # noqa: BLE001
-        return fallback
-    try:
-        y = np.asarray(data.train[data.target_column])
-        expanded_seeds = _expanded_eval_seeds(base_seeds=eval_seeds, repeats=eval_repeats)
-        split = SplitStrategyFactory.create(y=y, strategy=split_strategy, n_splits=cv_folds, seed=seed)
-        fingerprints: list[dict[str, object]] = []
-        for expanded_seed in expanded_seeds:
-            split_for_seed = SplitStrategyFactory.create(
-                y=y,
-                strategy=split_strategy,
-                n_splits=cv_folds,
-                seed=expanded_seed,
-            )
-            fingerprints.extend(_build_split_index_fingerprints(split=split_for_seed, y=y, seed=expanded_seed))
-    except Exception:  # noqa: BLE001
-        return fallback
-    drift_cols_raw = list(data.feature_columns or [])
-    drift_cols: list[str] = []
-    seen_drift_cols: set[str] = set()
-    for col in drift_cols_raw:
-        if col in seen_drift_cols:
-            continue
-        seen_drift_cols.add(col)
-        drift_cols.append(col)
-    try:
-        common_cols = set(data.train.columns).intersection(set(data.test.columns))
-        drift_cols = [col for col in drift_cols if col in common_cols]
-        drift_train_x = data.train.reindex(columns=drift_cols).copy() if drift_cols else None
-        drift_test_x = data.test.reindex(columns=drift_cols).copy() if drift_cols else None
-    except Exception:  # noqa: BLE001
-        drift_train_x = None
-        drift_test_x = None
-    return {
-        "split_strategy": split.name,
-        "n_splits": split.n_splits,
-        "split_index_fingerprints": fingerprints,
-        "drift_train_x": drift_train_x,
-        "drift_test_x": drift_test_x,
-    }
-
-
-def _build_split_index_fingerprints(*, split: object, y: np.ndarray, seed: int) -> list[dict[str, object]]:
-    split_strategy = split  # local alias for readability
-    name = getattr(split_strategy, "name", "kfold")
-    splitter = getattr(split_strategy, "splitter", None)
-    if splitter is None:
-        return []
-    groups = None
-    x_dummy = np.zeros((len(y), 1), dtype=np.float64)
-    records: list[dict[str, object]] = []
-    split_iter = _iter_split_indices(name=name, splitter=splitter, x=x_dummy, y=y, groups=groups)
-    for fold_idx, (train_idx, valid_idx) in enumerate(split_iter):
-        train_arr = np.asarray(train_idx, dtype=np.int64)
-        valid_arr = np.asarray(valid_idx, dtype=np.int64)
-        records.append(
-            {
-                "seed": seed,
-                "fold": fold_idx,
-                "train_size": int(train_arr.size),
-                "valid_size": int(valid_arr.size),
-                "train_hash": hashlib.sha256(train_arr.tobytes()).hexdigest()[:16],
-                "valid_hash": hashlib.sha256(valid_arr.tobytes()).hexdigest()[:16],
-            }
-        )
-    return records
-
-
-def _iter_split_indices(*, name: str, splitter: object, x: np.ndarray, y: np.ndarray, groups: object):
-    if name == "timeseries_split":
-        yield from splitter.split(x)  # type: ignore[union-attr]
-        return
-    if name == "group_kfold" and groups is not None:
-        yield from splitter.split(x, y, groups=groups)  # type: ignore[union-attr]
-        return
-    if name == "stratified_kfold":
-        yield from splitter.split(x, y)  # type: ignore[union-attr]
-        return
-    yield from splitter.split(x, y)  # type: ignore[union-attr]
 
 
 def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) -> int | None:
