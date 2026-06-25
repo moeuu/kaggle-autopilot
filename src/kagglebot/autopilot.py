@@ -3048,27 +3048,19 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         and fallback_submit_blocked_reason is None
     ):
         final_iteration_reached = last_completed_iteration >= max_iterations
-        allow_fallback_submit = True
-        if submit_improved_only and not config.force_submit and best_submitted_score is None:
-            allow_fallback_submit = False
-        if (
-            (require_submit_improvement or submit_improved_only)
-            and not config.force_submit
-            and best_submittable_score is not None
-            and best_submitted_score is not None
-        ):
-            allow_fallback_submit = _update_best_score(
-                best_submitted_score,
-                best_submittable_score,
-                metric_direction,
-                stop_min_delta,
-            )
-            if (not allow_fallback_submit) and final_iteration_reached and not submit_improved_only:
-                print(
-                    "[yellow]submit override[/yellow]: final iteration reached; "
-                    "allowing fallback submit even though offline metric did not improve."
-                )
-                allow_fallback_submit = True
+        fallback_submit_gate = _submit_stage.decide_fallback_submit_gate(
+            submit_improved_only=submit_improved_only,
+            force_submit=config.force_submit,
+            require_submit_improvement=require_submit_improvement,
+            best_submittable_score=best_submittable_score,
+            best_submitted_score=best_submitted_score,
+            direction=metric_direction,
+            min_improvement=stop_min_delta,
+            final_iteration_reached=final_iteration_reached,
+        )
+        allow_fallback_submit = fallback_submit_gate.allow_submit
+        if fallback_submit_gate.message:
+            print(fallback_submit_gate.message)
         if allow_fallback_submit:
             fallback_iteration = _submit_stage.infer_iteration_from_submission_path(best_submittable_submission)
             score_text = (

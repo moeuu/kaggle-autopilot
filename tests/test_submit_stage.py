@@ -25,6 +25,7 @@ from kagglebot.submit_stage import (
     build_submit_stage_success_record,
     classify_submission_outcome,
     classify_submit_stage_error,
+    decide_fallback_submit_gate,
     decide_initial_submit_stage_mode,
     decide_notebook_fallback_after_file_submit_error,
     decide_submission_outcome_abort,
@@ -907,6 +908,70 @@ def test_decide_submitted_tracking_score_update_noops_without_offline_score() ->
     assert decision.tracking_source == "unavailable"
     assert decision.update_best_submitted_score is False
     assert decision.best_submitted_score == 0.7
+
+
+def test_decide_fallback_submit_gate_blocks_improved_policy_without_prior_submission() -> None:
+    decision = decide_fallback_submit_gate(
+        submit_improved_only=True,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submittable_score=0.8,
+        best_submitted_score=None,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration_reached=True,
+    )
+
+    assert decision.allow_submit is False
+    assert decision.message == ""
+
+
+def test_decide_fallback_submit_gate_requires_improvement_when_configured() -> None:
+    decision = decide_fallback_submit_gate(
+        submit_improved_only=False,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submittable_score=0.9,
+        best_submitted_score=0.8,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration_reached=False,
+    )
+
+    assert decision.allow_submit is False
+    assert decision.message == ""
+
+
+def test_decide_fallback_submit_gate_allows_final_iteration_override_for_non_improved_policy() -> None:
+    decision = decide_fallback_submit_gate(
+        submit_improved_only=False,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submittable_score=0.9,
+        best_submitted_score=0.8,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration_reached=True,
+    )
+
+    assert decision.allow_submit is True
+    assert "final iteration reached" in decision.message
+
+
+def test_decide_fallback_submit_gate_allows_force_submit() -> None:
+    decision = decide_fallback_submit_gate(
+        submit_improved_only=True,
+        force_submit=True,
+        require_submit_improvement=True,
+        best_submittable_score=0.9,
+        best_submitted_score=0.8,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration_reached=False,
+    )
+
+    assert decision.allow_submit is True
+    assert decision.message == ""
 
 
 def test_classify_submission_outcome_uses_target_score() -> None:

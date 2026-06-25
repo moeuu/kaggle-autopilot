@@ -71,6 +71,12 @@ class SubmittedTrackingScoreDecision:
 
 
 @dataclass(frozen=True)
+class FallbackSubmitGateDecision:
+    allow_submit: bool
+    message: str
+
+
+@dataclass(frozen=True)
 class SubmitStageErrorClassification:
     classification: dict[str, object]
     stderr: str
@@ -460,6 +466,42 @@ def decide_submitted_tracking_score_update(
         update_best_submitted_score=should_update,
         best_submitted_score=tracking_score if should_update else previous_best_score,
     )
+
+
+def decide_fallback_submit_gate(
+    *,
+    submit_improved_only: bool,
+    force_submit: bool,
+    require_submit_improvement: bool,
+    best_submittable_score: float | None,
+    best_submitted_score: float | None,
+    direction: str,
+    min_improvement: float,
+    final_iteration_reached: bool,
+) -> FallbackSubmitGateDecision:
+    if submit_improved_only and not force_submit and best_submitted_score is None:
+        return FallbackSubmitGateDecision(allow_submit=False, message="")
+
+    if (
+        (require_submit_improvement or submit_improved_only)
+        and not force_submit
+        and best_submittable_score is not None
+        and best_submitted_score is not None
+    ):
+        allow_submit = should_update_best_score(
+            best_submitted_score, best_submittable_score, direction, min_improvement
+        )
+        if (not allow_submit) and final_iteration_reached and not submit_improved_only:
+            return FallbackSubmitGateDecision(
+                allow_submit=True,
+                message=(
+                    "[yellow]submit override[/yellow]: final iteration reached; "
+                    "allowing fallback submit even though offline metric did not improve."
+                ),
+            )
+        return FallbackSubmitGateDecision(allow_submit=allow_submit, message="")
+
+    return FallbackSubmitGateDecision(allow_submit=True, message="")
 
 
 def classify_submission_outcome(
