@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
-from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
+import pytest
+
+from kagglebot.json_utils import load_json_object, load_json_object_or_empty, read_json_object, write_json_object
 
 
 def test_load_json_object_returns_dict_payload(tmp_path) -> None:
@@ -10,6 +12,21 @@ def test_load_json_object_returns_dict_payload(tmp_path) -> None:
     path.write_text('{"ok": true}', encoding="utf-8")
 
     assert load_json_object(path) == {"ok": True}
+
+
+def test_read_json_object_returns_dict_payload(tmp_path) -> None:
+    path = tmp_path / "payload.json"
+    path.write_text('{"ok": true}', encoding="utf-8")
+
+    assert read_json_object(path) == {"ok": True}
+
+
+def test_read_json_object_rejects_non_object_payload(tmp_path) -> None:
+    path = tmp_path / "payload.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        read_json_object(path)
 
 
 def test_load_json_object_rejects_missing_invalid_or_non_object_payload(tmp_path) -> None:

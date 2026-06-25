@@ -1153,6 +1153,32 @@ def test_kernel_metadata_tpu(tmp_path: Path) -> None:
     assert payload["code_file"] == "kernel.py"
 
 
+def test_write_kernel_metadata_ignores_invalid_existing_metadata(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+    (kernel_dir / "kernel-metadata.json").write_text("{", encoding="utf-8")
+
+    kernel_runner._write_kernel_metadata(
+        kernel_dir=kernel_dir,
+        kernel_id="user/demo",
+        title="demo",
+        code_file="kernel.py",
+        kernel_type="script",
+        accelerator="gpu",
+        enable_internet=False,
+        competition_slug="competition",
+    )
+
+    payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert payload["id"] == "user/demo"
+    assert payload["competition_sources"] == ["competition"]
+    assert payload["dataset_sources"] == []
+    assert payload["kernel_sources"] == []
+    assert payload["model_sources"] == []
+
+
 def test_inject_column_fill_shim(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
@@ -2569,6 +2595,33 @@ def test_load_dataset_profile_identity_ignores_missing_invalid_or_non_object_pay
 
     profile_path.write_text(json.dumps({"target_column": "target", "id_column": "id"}), encoding="utf-8")
     assert _load_dataset_profile_identity(context_dir=context_dir) == ("target", "id")
+
+
+def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_non_object_payload(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="must be a JSON object"):
+        kernel_runner._validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+def test_read_pending_remote_kernel_id_ignores_invalid_or_non_object_payload(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    path = logs_dir / kernel_runner.PENDING_REMOTE_KERNEL_FILENAME
+
+    path.write_text("{", encoding="utf-8")
+    assert kernel_runner._read_pending_remote_kernel_id(logs_dir) is None
+
+    path.write_text("[]", encoding="utf-8")
+    assert kernel_runner._read_pending_remote_kernel_id(logs_dir) is None
+
+    kernel_runner._write_pending_remote_kernel(logs_dir, kernel_id="user/kernel", kernel_slug="kernel")
+    assert kernel_runner._read_pending_remote_kernel_id(logs_dir) == "user/kernel"
 
 
 def test_ensure_local_sample_submission_file_expands_placeholder_template(tmp_path: Path) -> None:

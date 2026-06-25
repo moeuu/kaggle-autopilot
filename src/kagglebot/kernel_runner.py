@@ -33,7 +33,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import CommandResult
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, load_json_object_or_empty, read_json_object, write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -264,11 +264,11 @@ def _validate_local_kernel_plan_runtime_hyperparameters(plan_path: Path) -> None
     if not plan_path.exists():
         return
     try:
-        payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = read_json_object(plan_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise KernelFailedError(f"Local kernel staged plan is unreadable: {plan_path} ({exc})") from exc
-    if not isinstance(payload, dict):
-        raise KernelFailedError(f"Local kernel staged plan must be a JSON object: {plan_path}")
+    except ValueError as exc:
+        raise KernelFailedError(f"Local kernel staged plan must be a JSON object: {plan_path}") from exc
 
     pipelines = payload.get("pipelines")
     if not isinstance(pipelines, list):
@@ -647,13 +647,11 @@ def _enforce_competition_kernel_contract(
         errors.append("metrics.json is missing; cannot validate BVS kernel contract.")
     else:
         try:
-            parsed = json.loads(metrics_path.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
-                payload = parsed
-            else:
-                errors.append("metrics.json payload must be a JSON object.")
-        except (OSError, json.JSONDecodeError) as exc:
+            payload = read_json_object(metrics_path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             errors.append(f"metrics.json is unreadable: {exc}")
+        except ValueError:
+            errors.append("metrics.json payload must be a JSON object.")
 
     log_text = _collect_local_kernel_log_text(logs_dir)
     lowered_log = log_text.lower()
@@ -3120,10 +3118,7 @@ def _write_kernel_metadata(
     source_config: KernelSourceConfig | None = None,
 ) -> None:
     meta_path = kernel_dir / "kernel-metadata.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    else:
-        meta = {}
+    meta = load_json_object_or_empty(meta_path)
     dataset_sources, kernel_sources, model_sources = _metadata_source_lists(
         existing_meta=meta,
         source_config=source_config,
@@ -3147,7 +3142,7 @@ def _write_kernel_metadata(
     )
     if meta["enable_gpu"] and meta["enable_tpu"]:
         raise ValueError("kernel-metadata.json cannot enable both GPU and TPU.")
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    write_json_object(meta_path, meta)
 
 
 def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
@@ -3394,8 +3389,7 @@ def _prepare_zero_overlap_drift_guard(*, base_dir: Path, slug: str, context_dir:
     payload["generated_at_epoch"] = int(time.time())
 
     guard_path = context_dir / _ZERO_OVERLAP_DRIFT_GUARD_FILENAME
-    guard_path.parent.mkdir(parents=True, exist_ok=True)
-    guard_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    write_json_object(guard_path, payload)
     return guard_path
 
 
@@ -5148,7 +5142,7 @@ def _write_pending_remote_kernel(logs_dir: Path, *, kernel_id: str, kernel_slug:
         "kernel_slug": kernel_slug,
         "recorded_at_unix": time.time(),
     }
-    _pending_remote_kernel_path(logs_dir).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    write_json_object(_pending_remote_kernel_path(logs_dir), payload)
 
 
 def _clear_pending_remote_kernel(logs_dir: Path) -> None:
@@ -5159,13 +5153,7 @@ def _clear_pending_remote_kernel(logs_dir: Path) -> None:
 
 
 def _read_pending_remote_kernel_id(logs_dir: Path) -> str | None:
-    path = _pending_remote_kernel_path(logs_dir)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    payload = load_json_object(_pending_remote_kernel_path(logs_dir))
     kernel_id = payload.get("kernel_id") if isinstance(payload, dict) else None
     if kernel_id is None:
         return None
