@@ -31,6 +31,7 @@ from kagglebot.plan_policy import (
     resolve_internet_policy,
     resolve_plan_max_iterations,
     resolve_plan_score_source,
+    resolve_rank_force_policy,
     resolve_readiness_stop_policy,
     resolve_split_strategy_from_artifacts,
     resolve_split_strategy_override,
@@ -691,6 +692,32 @@ def test_normalize_rank_force_values() -> None:
     assert normalize_rank_force_percentile(2.0, fallback=0.5) == 0.5
     assert normalize_rank_force_min_teams(10.9, fallback=100) == 10
     assert normalize_rank_force_min_teams(-1, fallback=100) == 1
+
+
+def test_resolve_rank_force_policy_caps_percentile_to_target_rank() -> None:
+    decision = resolve_rank_force_policy(
+        rank_force_major_max_percentile=0.2,
+        rank_force_major_min_teams=10.9,
+        target_rank_percentile=0.05,
+        default_max_percentile=0.5,
+        default_min_teams=100,
+    )
+
+    assert decision.rank_force_major_max_percentile == 0.05
+    assert decision.rank_force_major_min_teams == 10
+
+
+def test_resolve_rank_force_policy_uses_defaults_for_invalid_values() -> None:
+    decision = resolve_rank_force_policy(
+        rank_force_major_max_percentile=2.0,
+        rank_force_major_min_teams=None,
+        target_rank_percentile=None,
+        default_max_percentile=0.5,
+        default_min_teams=100,
+    )
+
+    assert decision.rank_force_major_max_percentile == 0.5
+    assert decision.rank_force_major_min_teams == 100
 
 
 def test_upgrade_improvement_mode_respects_priority() -> None:

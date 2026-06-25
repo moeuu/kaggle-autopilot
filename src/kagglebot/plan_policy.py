@@ -173,6 +173,12 @@ class ReadinessStopPolicyDecision:
     stop_same_config_patience: object
 
 
+@dataclass(frozen=True)
+class RankForcePolicyDecision:
+    rank_force_major_max_percentile: float
+    rank_force_major_min_teams: int
+
+
 def normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     """Normalize agent-produced plan payload shape without applying environment guardrails."""
     normalized = dict(payload)
@@ -1337,6 +1343,32 @@ def resolve_readiness_stop_policy(
             plan.stop_same_config_patience,
             spec_values.stop_same_config_patience if spec_values.stop_same_config_patience is not None else 0,
         ),
+    )
+
+
+def resolve_rank_force_policy(
+    *,
+    rank_force_major_max_percentile: object,
+    rank_force_major_min_teams: object,
+    target_rank_percentile: object,
+    default_max_percentile: float,
+    default_min_teams: int,
+) -> RankForcePolicyDecision:
+    """Resolve rank-based major-overhaul guard thresholds."""
+
+    max_percentile = normalize_rank_force_percentile(
+        rank_force_major_max_percentile,
+        fallback=default_max_percentile,
+    )
+    if isinstance(target_rank_percentile, (int, float)):
+        max_percentile = min(max_percentile, float(target_rank_percentile))
+    min_teams = normalize_rank_force_min_teams(
+        rank_force_major_min_teams,
+        fallback=default_min_teams,
+    )
+    return RankForcePolicyDecision(
+        rank_force_major_max_percentile=max_percentile,
+        rank_force_major_min_teams=min_teams,
     )
 
 
