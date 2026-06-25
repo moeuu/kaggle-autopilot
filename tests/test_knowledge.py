@@ -6,6 +6,7 @@ import json
 import sqlite3
 
 import kagglebot.knowledge as knowledge_mod
+import kagglebot.knowledge_init as knowledge_init_mod
 from kagglebot.knowledge import (
     build_dataset_profile,
     build_plan_and_initial_prompt,
@@ -81,6 +82,18 @@ def test_build_dataset_profile_samples_oversized_tables(tmp_path, monkeypatch) -
     assert sampling["train"] is True
     assert sampling["test"] is True
     assert sampling["sample_submission"] is True
+
+
+def test_profile_max_table_bytes_env_uses_shared_number_parsing(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "nan")
+    assert knowledge_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
+    assert knowledge_init_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
+
+    monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "0")
+    assert knowledge_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
+
+    monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "1024")
+    assert knowledge_mod._profile_max_table_bytes() == 1024  # noqa: SLF001
 
 
 def test_build_dataset_profile_handles_json_list_features(tmp_path) -> None:

@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT
+from kagglebot.env_utils import parse_int_value
 from kagglebot.knowledge.classification import (
     classify_cause_category,
     classify_error_category,
@@ -789,10 +790,8 @@ def _looks_like_march_mania_pairwise_competition(
 
 
 def _profile_max_table_bytes() -> int:
-    raw = str(os.getenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", _PROFILE_MAX_TABLE_BYTES_DEFAULT)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
+    value = parse_int_value(os.getenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES"))
+    if value is None:
         return _PROFILE_MAX_TABLE_BYTES_DEFAULT
     if value <= 0:
         return _PROFILE_MAX_TABLE_BYTES_DEFAULT
