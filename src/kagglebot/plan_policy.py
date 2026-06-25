@@ -125,6 +125,18 @@ class PlanScoreSourceDecision:
 
 
 @dataclass(frozen=True)
+class BaseEvaluationRequestDecision:
+    score_source: str
+    holdout_frac: object
+    cv_folds: object
+    split_strategy: object
+    seed: object
+    eval_seeds: list[int]
+    eval_repeats: int
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SplitStrategyOverrideDecision:
     split_strategy: object
     messages: tuple[str, ...] = ()
@@ -1281,6 +1293,32 @@ def resolve_plan_score_source(score_source: object) -> PlanScoreSourceDecision:
     return PlanScoreSourceDecision(
         score_source="cv",
         messages=("[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",),
+    )
+
+
+def resolve_base_evaluation_request(
+    *,
+    config_score_source: object,
+    config_holdout_frac: object,
+    config_cv_folds: object,
+    config_seed: object,
+    plan: PlanConfig,
+    spec_values: EvaluationSpecValues,
+) -> BaseEvaluationRequestDecision:
+    """Resolve base local-evaluation request values before runtime budget caps."""
+
+    score_source_decision = resolve_plan_score_source(_choose(config_score_source, plan.score_source, "cv"))
+    return BaseEvaluationRequestDecision(
+        score_source=score_source_decision.score_source,
+        holdout_frac=_choose(config_holdout_frac, plan.holdout_frac, 0.2),
+        cv_folds=_choose(
+            config_cv_folds, plan.cv_folds, spec_values.n_splits if spec_values.n_splits is not None else 5
+        ),
+        split_strategy=_choose(None, plan.split_strategy, spec_values.split_strategy),
+        seed=_choose(config_seed, plan.seed, spec_values.seed if spec_values.seed is not None else 42),
+        eval_seeds=normalize_default_eval_seeds(plan.eval_seeds, fallback=list(spec_values.eval_seeds)),
+        eval_repeats=normalize_default_eval_repeats(plan.eval_repeats, fallback=spec_values.repeats),
+        messages=score_source_decision.messages,
     )
 
 

@@ -25,6 +25,7 @@ from kagglebot.plan_policy import (
     normalize_rank_force_min_teams,
     normalize_rank_force_percentile,
     normalize_split_strategy_name,
+    resolve_base_evaluation_request,
     resolve_deliverable_mode,
     resolve_eval_budget_policy,
     resolve_heavy_local_gpu_max_iterations,
@@ -303,6 +304,56 @@ def test_resolve_plan_score_source_forces_non_generalizable_sources_to_cv() -> N
     decision = resolve_plan_score_source("public_lb")
 
     assert decision.score_source == "cv"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",
+    )
+
+
+def test_resolve_base_evaluation_request_prefers_config_plan_and_spec_values() -> None:
+    spec = extract_evaluation_spec_values(
+        {
+            "split_strategy": "stratified_kfold",
+            "n_splits": 7,
+            "seeds": [11, 22],
+            "repeats": 3,
+        }
+    )
+    decision = resolve_base_evaluation_request(
+        config_score_source=None,
+        config_holdout_frac=0.3,
+        config_cv_folds=None,
+        config_seed=None,
+        plan=PlanConfig(score_source="validation", holdout_frac=0.1, cv_folds=5, seed=42),
+        spec_values=spec,
+    )
+
+    assert decision.score_source == "holdout"
+    assert decision.holdout_frac == 0.3
+    assert decision.cv_folds == 5
+    assert decision.split_strategy == "stratified_kfold"
+    assert decision.seed == 42
+    assert decision.eval_seeds == [11, 22]
+    assert decision.eval_repeats == 3
+    assert decision.messages == ()
+
+
+def test_resolve_base_evaluation_request_defaults_and_normalizes_score_source() -> None:
+    decision = resolve_base_evaluation_request(
+        config_score_source="public_lb",
+        config_holdout_frac=None,
+        config_cv_folds=None,
+        config_seed=None,
+        plan=PlanConfig(),
+        spec_values=extract_evaluation_spec_values({}),
+    )
+
+    assert decision.score_source == "cv"
+    assert decision.holdout_frac == 0.2
+    assert decision.cv_folds == 5
+    assert decision.split_strategy is None
+    assert decision.seed == 42
+    assert decision.eval_seeds == [42, 2024, 777]
+    assert decision.eval_repeats == 2
     assert decision.messages == (
         "[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",
     )

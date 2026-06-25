@@ -3196,7 +3196,6 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         evaluation_spec_path=config.paths.context_dir / "evaluation_spec.json",
     )
     spec_values = _plan_policy.extract_evaluation_spec_values(eval_spec)
-    spec_eval_seeds = list(spec_values.eval_seeds)
 
     strict_competition_metric = _env_flag(
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
@@ -3250,13 +3249,20 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     override_split_strategy = metric_direction_decision.override_split_strategy
     for message in metric_direction_decision.messages:
         print(message)
-    score_source_decision = _plan_policy.resolve_plan_score_source(choose(config.score_source, plan.score_source, "cv"))
-    score_source = score_source_decision.score_source
-    for message in score_source_decision.messages:
+    base_evaluation_request = _plan_policy.resolve_base_evaluation_request(
+        config_score_source=config.score_source,
+        config_holdout_frac=config.holdout_frac,
+        config_cv_folds=config.cv_folds,
+        config_seed=config.seed,
+        plan=plan,
+        spec_values=spec_values,
+    )
+    score_source = base_evaluation_request.score_source
+    for message in base_evaluation_request.messages:
         print(message)
-    holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
-    cv_folds = choose(config.cv_folds, plan.cv_folds, spec_values.n_splits if spec_values.n_splits is not None else 5)
-    split_strategy = choose(None, plan.split_strategy, spec_values.split_strategy)
+    holdout_frac = base_evaluation_request.holdout_frac
+    cv_folds = base_evaluation_request.cv_folds
+    split_strategy = base_evaluation_request.split_strategy
     split_strategy, split_strategy_note = _plan_policy.resolve_split_strategy_from_artifacts(
         paths=config.paths,
         split_strategy=split_strategy,
@@ -3276,9 +3282,9 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     )
     profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
     heavy_local_gpu = _is_local_gpu_compute(config.compute) and _is_heavy_deep_learning_modality(profile_modality)
-    seed = choose(config.seed, plan.seed, spec_values.seed if spec_values.seed is not None else 42)
-    eval_seeds = _plan_policy.normalize_default_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
-    eval_repeats = _plan_policy.normalize_default_eval_repeats(plan.eval_repeats, fallback=spec_values.repeats)
+    seed = base_evaluation_request.seed
+    eval_seeds = base_evaluation_request.eval_seeds
+    eval_repeats = base_evaluation_request.eval_repeats
     eval_budget_decision = _plan_policy.resolve_eval_budget_policy(
         heavy_local_gpu=heavy_local_gpu,
         cv_folds=cv_folds,
