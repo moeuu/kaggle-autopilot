@@ -69,6 +69,17 @@ def test_infer_code_competition_from_paths_ignores_invalid_evaluation_spec(tmp_p
     assert infer_code_competition_from_paths(paths) is False
 
 
+def test_infer_code_competition_from_plan_notebook_tiny_public_contract(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(json.dumps({"submit_mode": "notebook"}), encoding="utf-8")
+    paths.data_dir.joinpath("test.csv").write_text("id,text\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    paths.data_dir.joinpath("sample_submission.csv").write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+
+    assert infer_code_competition_from_paths(paths) is True
+
+
 def test_build_writeup_bundle_creates_report_and_metadata(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

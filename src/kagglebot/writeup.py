@@ -230,10 +230,11 @@ def _looks_like_notebook_hidden_test_contract(paths: CompetitionPaths) -> bool:
 
 
 def _evaluation_spec_submit_mode_is_notebook(paths: CompetitionPaths) -> bool:
-    payload = load_json_object(paths.context_dir / "evaluation_spec.json")
-    if payload is None:
-        return False
-    return normalize_submit_mode(payload.get("submit_mode"), default="") == "notebook"
+    for path in (paths.context_dir / "evaluation_spec.json", paths.plan_path):
+        payload = load_json_object(path)
+        if payload is not None and normalize_submit_mode(payload.get("submit_mode"), default="") == "notebook":
+            return True
+    return False
 
 
 def _csv_data_row_count_at_most(path: Path, *, limit: int) -> bool | None:
