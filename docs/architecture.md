@@ -106,8 +106,9 @@ Historical Kaggle submission row normalization, best/latest public-score summary
 detection against historical submissions, and prompt formatting for that history live in
 `src/kagglebot/submission_history.py`; the loop only fetches/cache-persist rows and consumes the resulting summary.
 Notebook submit artifact-mode normalization, tiny public sample hidden-test guards, submit-kernel run kwargs construction,
-kernel output artifact/reference handling, output file selection, Kaggle submit-kernel kwargs construction, ambiguous
-submit retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
+kernel output artifact/reference handling, kernel push version-label inference, output file selection, Kaggle
+submit-kernel kwargs construction, ambiguous submit retry execution, push-error text detection, and CPU fallback
+execution live in `src/kagglebot/submit_notebook.py`.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful submit result normalization,
@@ -263,7 +264,7 @@ The next high-value modernization work is:
    directly. Submit autofix context formatting, stale repaired-artifact decisions, autofix artifact resolution,
    submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
    directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback
-   decisions now call `submit_notebook.py` directly.
+   decisions and kernel push version-label inference now call `submit_notebook.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.

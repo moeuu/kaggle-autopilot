@@ -31,7 +31,6 @@ from kagglebot.autopilot import (
     _extract_pseudo_label_failure_signal,
     _extract_same_family_plateau_signal,
     _format_previous_submission_history_for_prompt,
-    _infer_kernel_submit_version_label,
     _is_submit_abort_autofixable,
     _load_previous_submission_history,
     _load_run_state,
@@ -363,16 +362,6 @@ def test_autopilot_forces_iter1_submit_through_soft_detected_baseline_guard(
     assert marker["submit_allowed_by_gate"] is True
     assert marker["submit_phase_state"] == "submitted"
     assert marker["forced_submit_reason"] == "initial_submit_contract_probe"
-
-
-def test_infer_kernel_submit_version_label_from_push_logs(tmp_path: Path) -> None:
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    (logs_dir / "kernel_push-01.txt").write_text(
-        "Kernel version 7 successfully pushed. check progress ...\n",
-        encoding="utf-8",
-    )
-    assert _infer_kernel_submit_version_label(logs_dir) == "7"
 
 
 @pytest.fixture(autouse=True)

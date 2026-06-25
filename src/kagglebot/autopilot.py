@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import time
 import traceback
@@ -333,7 +332,6 @@ _SUBMIT_MAX_TRANSIENT_RETRIES = 3
 _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
-_KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 _DEFAULT_EVAL_SEEDS = list(_plan_policy.DEFAULT_EVAL_SEEDS)
 _DEFAULT_MAX_ITERATIONS = 5
 _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN = 12 * 60
@@ -6522,7 +6520,7 @@ def _submit_with_notebook_kernel(
     output_reference = _submit_notebook.build_notebook_submit_output_reference(
         kernel_id=kernel_result.kernel_id,
         kernel_submission_path=kernel_result.submission_path,
-        version_label=_infer_kernel_submit_version_label(iter_dir / "logs"),
+        version_label=_submit_notebook.infer_kernel_submit_version_label(iter_dir / "logs"),
         copy_submission_artifact=lambda source: _copy_submission_artifact_to_iteration_dir(
             source=source,
             iter_dir=iter_dir,
@@ -6566,24 +6564,6 @@ def _notebook_kernel_submission_error(exc: Exception) -> SubmissionCliError:
         stdout="",
         stderr=str(exc),
     )
-
-
-def _infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:
-    """Read pushed kernel version from kernel push logs for notebook submit."""
-    if logs_dir is None or not logs_dir.exists():
-        return None
-    candidates = sorted(logs_dir.glob("kernel_push-*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        match = _KERNEL_PUSH_VERSION_RE.search(text)
-        if match:
-            version = str(match.group("version") or "").strip()
-            if version:
-                return version
-    return None
 
 
 def _abort_submit_for_run(

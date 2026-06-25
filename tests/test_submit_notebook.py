@@ -11,6 +11,7 @@ from kagglebot.submit_notebook import (
     decide_notebook_submit_artifact_mode,
     decide_submit_kernel_cpu_fallback,
     decide_submit_kernel_cpu_fallback_for_exception,
+    infer_kernel_submit_version_label,
     is_submit_kernel_push_error,
     is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
@@ -114,6 +115,16 @@ def test_build_notebook_submit_output_reference_handles_missing_submission() -> 
     assert output.submission_artifact_path is None
     assert output.reference.output_file == "submission.csv"
     assert output.reference.version == "1"
+
+
+def test_infer_kernel_submit_version_label_from_push_logs(tmp_path: Path) -> None:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "kernel_push-01.txt").write_text(
+        "Kernel version 7 successfully pushed. check progress ...\n",
+        encoding="utf-8",
+    )
+    assert infer_kernel_submit_version_label(logs_dir) == "7"
 
 
 def test_build_kaggle_submit_kernel_kwargs_uses_reference_fields() -> None:

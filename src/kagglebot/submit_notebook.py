@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
+
+_KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,24 @@ def build_notebook_submit_output_reference(
             version_label=version_label,
         ),
     )
+
+
+def infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:
+    """Read pushed kernel version from kernel push logs for notebook submit."""
+    if logs_dir is None or not logs_dir.exists():
+        return None
+    candidates = sorted(logs_dir.glob("kernel_push-*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        match = _KERNEL_PUSH_VERSION_RE.search(text)
+        if match:
+            version = str(match.group("version") or "").strip()
+            if version:
+                return version
+    return None
 
 
 def build_kaggle_submit_kernel_kwargs(
