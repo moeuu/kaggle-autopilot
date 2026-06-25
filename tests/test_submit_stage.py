@@ -6,6 +6,8 @@ from pathlib import Path
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
     build_default_submission_problem_insight,
+    build_kaggle_credentials_missing_abort_spec,
+    build_rules_not_accepted_abort_spec,
     build_submission_outcome_error_detail,
     build_submit_stage_success_record,
     classify_submission_outcome,
@@ -100,6 +102,39 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
         "[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit",
         "[yellow]submit mode[/yellow]: using notebook submit",
     )
+
+
+def test_build_kaggle_credentials_missing_abort_spec_preserves_error_details() -> None:
+    spec = build_kaggle_credentials_missing_abort_spec(
+        stdout="stdout text",
+        stderr="",
+        output="missing kaggle.json",
+        exit_code=2,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.fingerprint == "fp:stdout text:missing kaggle.json"
+    assert spec.error_kind == "permanent"
+    assert spec.reason == "kaggle_credentials_missing"
+    assert "Kaggle credentials not configured" in spec.message
+    assert spec.stdout_tail == "stdout text"
+    assert spec.stderr_tail == "missing kaggle.json"
+    assert spec.exit_code == 2
+
+
+def test_build_rules_not_accepted_abort_spec_sets_manual_blocker_contract() -> None:
+    spec = build_rules_not_accepted_abort_spec(
+        exit_code=77,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.fingerprint == "fp::rules_not_accepted"
+    assert spec.error_kind == "permanent"
+    assert spec.reason == "rules_not_accepted"
+    assert "Competition rules are not accepted" in spec.message
+    assert spec.stdout_tail == ""
+    assert spec.stderr_tail == "rules_not_accepted"
+    assert spec.exit_code == 77
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:

@@ -5105,36 +5105,47 @@ def _attempt_submit(
         rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)
     except KaggleCliError as exc:
         if _is_missing_kaggle_credentials_error(exc):
+            abort_spec = _submit_stage.build_kaggle_credentials_missing_abort_spec(
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+                output=exc.output,
+                exit_code=exc.exit_code,
+                compute_error_fingerprint=compute_error_fingerprint,
+            )
             return _abort_submit_for_run(
                 config=config,
                 run_id=run_id,
                 problem_types=problem_types,
                 submission_ref=prepared_submission_path,
                 code_fingerprint=submit_code_fingerprint,
-                fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
-                error_kind="permanent",
-                reason="kaggle_credentials_missing",
-                message=("Kaggle credentials not configured. Set ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY."),
-                stdout_tail=exc.stdout,
-                stderr_tail=exc.stderr or exc.output,
-                exit_code=exc.exit_code,
+                fingerprint=abort_spec.fingerprint,
+                error_kind=abort_spec.error_kind,
+                reason=abort_spec.reason,
+                message=abort_spec.message,
+                stdout_tail=abort_spec.stdout_tail,
+                stderr_tail=abort_spec.stderr_tail,
+                exit_code=abort_spec.exit_code,
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         raise
     if not rules_accepted:
+        abort_spec = _submit_stage.build_rules_not_accepted_abort_spec(
+            exit_code=RulesNotAcceptedError.exit_code,
+            compute_error_fingerprint=compute_error_fingerprint,
+        )
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
             submission_ref=prepared_submission_path,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=compute_error_fingerprint("", "rules_not_accepted"),
-            error_kind="permanent",
-            reason="rules_not_accepted",
-            message="Competition rules are not accepted; aborting submit stage for this run.",
-            stdout_tail="",
-            stderr_tail="rules_not_accepted",
-            exit_code=RulesNotAcceptedError.exit_code,
+            fingerprint=abort_spec.fingerprint,
+            error_kind=abort_spec.error_kind,
+            reason=abort_spec.reason,
+            message=abort_spec.message,
+            stdout_tail=abort_spec.stdout_tail,
+            stderr_tail=abort_spec.stderr_tail,
+            exit_code=abort_spec.exit_code,
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
@@ -5372,6 +5383,13 @@ def _attempt_submit(
             )
         except KaggleCliError as exc:
             if _is_missing_kaggle_credentials_error(exc):
+                abort_spec = _submit_stage.build_kaggle_credentials_missing_abort_spec(
+                    stdout=exc.stdout,
+                    stderr=exc.stderr,
+                    output=exc.output,
+                    exit_code=exc.exit_code,
+                    compute_error_fingerprint=compute_error_fingerprint,
+                )
                 return _abort_submit_for_run(
                     config=config,
                     run_id=run_id,
@@ -5380,15 +5398,13 @@ def _attempt_submit(
                     submission_artifact_path=submission_artifact_path,
                     artifact_mode=submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
-                    fingerprint=compute_error_fingerprint(exc.stdout, exc.stderr or exc.output),
-                    error_kind="permanent",
-                    reason="kaggle_credentials_missing",
-                    message=(
-                        "Kaggle credentials not configured. Set ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY."
-                    ),
-                    stdout_tail=exc.stdout,
-                    stderr_tail=exc.stderr or exc.output,
-                    exit_code=exc.exit_code,
+                    fingerprint=abort_spec.fingerprint,
+                    error_kind=abort_spec.error_kind,
+                    reason=abort_spec.reason,
+                    message=abort_spec.message,
+                    stdout_tail=abort_spec.stdout_tail,
+                    stderr_tail=abort_spec.stderr_tail,
+                    exit_code=abort_spec.exit_code,
                     submit_attempt_recorder=submit_attempt_recorder,
                 )
             raise

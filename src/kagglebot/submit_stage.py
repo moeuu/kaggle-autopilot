@@ -89,6 +89,17 @@ class SubmitOutcomeAbortDecision:
 
 
 @dataclass(frozen=True)
+class SubmitAbortSpec:
+    fingerprint: str
+    error_kind: str
+    reason: str
+    message: str
+    stdout_tail: str
+    stderr_tail: str
+    exit_code: int | None
+
+
+@dataclass(frozen=True)
 class SubmissionOutcomePostPollDecision:
     outcome: object
     abort_decision: SubmitOutcomeAbortDecision
@@ -570,6 +581,42 @@ def decide_initial_submit_stage_mode(
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
+    )
+
+
+def build_kaggle_credentials_missing_abort_spec(
+    *,
+    stdout: str,
+    stderr: str,
+    output: str,
+    exit_code: int | None,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec:
+    stderr_tail = stderr or output
+    return SubmitAbortSpec(
+        fingerprint=compute_error_fingerprint(stdout, stderr_tail),
+        error_kind="permanent",
+        reason="kaggle_credentials_missing",
+        message="Kaggle credentials not configured. Set ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY.",
+        stdout_tail=stdout,
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
+    )
+
+
+def build_rules_not_accepted_abort_spec(
+    *,
+    exit_code: int | None,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec:
+    return SubmitAbortSpec(
+        fingerprint=compute_error_fingerprint("", "rules_not_accepted"),
+        error_kind="permanent",
+        reason="rules_not_accepted",
+        message="Competition rules are not accepted; aborting submit stage for this run.",
+        stdout_tail="",
+        stderr_tail="rules_not_accepted",
+        exit_code=exit_code,
     )
 
 
