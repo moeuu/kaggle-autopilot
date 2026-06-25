@@ -489,7 +489,7 @@ class PlanningPhase:
                 detail="GPT is drafting the initial competition plan.",
             )
             _run_plan_and_initial(self.config, self.run_id)
-            return _load_plan(self.config.paths)
+            return _plan_policy.load_plan_config(self.config.paths)
         return plan
 
 
@@ -611,9 +611,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     print(f"[green]run started[/green]: {run_id}")
     planning_phase = PlanningPhase(config=config, run_id=run_id, resume_run=resume_run)
     knowledge_phase = KnowledgePhase(config=config)
-    plan = _load_plan(config.paths)
+    plan = _plan_policy.load_plan_config(config.paths)
     if not config.paths.plan_path.exists():
-        _write_plan(config.paths, plan)
+        _plan_policy.write_plan_config(config.paths, plan)
 
     _update_watch_phase(config, run_id, "leaderboard_fetching")
     print(f"[cyan]fetching leaderboard[/cyan]: {config.slug}")
@@ -677,7 +677,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         default=_DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE,
     )
 
-    _write_plan(config.paths, _resolved_plan(resolved))
+    _plan_policy.write_resolved_plan_config(
+        config.paths,
+        resolved,
+        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
+        default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+        default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+    )
     _update_watch_phase(config, run_id, "initializing_iterations")
     run_payload = _build_run_payload(
         run_id=run_id,
@@ -1300,7 +1306,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     target_metric = official_metric_override
                     resolved["target_metric"] = target_metric
                     resolved["target_direction"] = metric_direction
-                    _write_plan(config.paths, _resolved_plan(resolved))
+                    _plan_policy.write_resolved_plan_config(
+                        config.paths,
+                        resolved,
+                        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
+                        default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+                        default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+                    )
                     from kagglebot.solver.evaluate import EvaluationResult
 
                     evaluation = EvaluationResult(
@@ -1457,7 +1469,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     if isinstance(top1_info, dict) and isinstance(top1_info.get("score"), (int, float)):
                         target_score = float(top1_info["score"])
                         resolved["target_score"] = target_score
-                    _write_plan(config.paths, _resolved_plan(resolved))
+                    _plan_policy.write_resolved_plan_config(
+                        config.paths,
+                        resolved,
+                        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
+                        default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+                        default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+                    )
                     from kagglebot.solver.evaluate import EvaluationResult
 
                     evaluation = EvaluationResult(
@@ -3196,14 +3214,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     _write_json_object(run_dir / "run.json", run_payload)
 
 
-def _load_plan(paths: CompetitionPaths) -> PlanConfig:
-    return _plan_policy.load_plan_config(paths)
-
-
-def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
-    _plan_policy.write_plan_config(paths, plan)
-
-
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
     def choose(value, fallback, default):
         if value is not None:
@@ -3474,15 +3484,6 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "rank_force_major_min_teams": rank_force_major_min_teams,
         "evaluation_contract": evaluation_contract,
     }
-
-
-def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
-    return _plan_policy.plan_config_from_resolved(
-        resolved,
-        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
-        default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
-        default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
-    )
 
 
 def _build_run_payload(

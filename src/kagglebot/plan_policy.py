@@ -515,6 +515,25 @@ def plan_config_from_resolved(
     )
 
 
+def write_resolved_plan_config(
+    paths: CompetitionPaths,
+    resolved: dict[str, object],
+    *,
+    default_max_iterations: int,
+    default_force_major_rank_max_percentile: float,
+    default_force_major_rank_min_teams: int,
+) -> None:
+    write_plan_config(
+        paths,
+        plan_config_from_resolved(
+            resolved,
+            default_max_iterations=default_max_iterations,
+            default_force_major_rank_max_percentile=default_force_major_rank_max_percentile,
+            default_force_major_rank_min_teams=default_force_major_rank_min_teams,
+        ),
+    )
+
+
 def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
     guarded: dict[str, object] = dict(payload)
 

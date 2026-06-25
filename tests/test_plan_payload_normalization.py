@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from kagglebot.paths import CompetitionPaths
 from kagglebot.plan_policy import (
     normalize_plan_payload,
     plan_config_from_resolved,
     repair_plan_payload_for_profile,
     validate_plan_payload,
+    write_resolved_plan_config,
 )
 
 
@@ -257,6 +262,32 @@ def test_plan_config_from_resolved_preserves_autopilot_defaults() -> None:
     assert plan.stop_no_improve_patience == 0
     assert plan.rank_force_major_max_percentile == 2.5
     assert plan.rank_force_major_min_teams == 100
+
+
+def test_write_resolved_plan_config_persists_policy_defaults(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+
+    write_resolved_plan_config(
+        paths,
+        {
+            "target_metric": "log_loss",
+            "target_direction": "minimize",
+            "target_score": 0.5,
+            "score_source": "cv",
+            "internet": "off",
+            "rank_force_major_max_percentile": "bad",
+            "rank_force_major_min_teams": "bad",
+        },
+        default_max_iterations=7,
+        default_force_major_rank_max_percentile=2.5,
+        default_force_major_rank_min_teams=100,
+    )
+
+    payload = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+    assert payload["max_iterations"] == 5
+    assert payload["rank_force_major_max_percentile"] == 2.5
+    assert payload["rank_force_major_min_teams"] == 100
+    assert payload["toggles"]["ENABLE_TRAINING"] is True
 
 
 def test_validate_plan_payload_rejects_non_object_key_hyperparameters() -> None:

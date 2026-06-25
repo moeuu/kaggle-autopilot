@@ -278,7 +278,7 @@ The next high-value modernization work is:
    policy. Top1 public-score display formatting now calls `top1_exhaustive.py` directly.
    Agent/autopilot plan payload normalization, validation, high-accuracy suite repair, guardrail application, plan
    persistence, and resolved-plan-to-`PlanConfig` conversion now call `plan_policy.py` directly instead of living inside
-   orchestration modules.
+   orchestration modules; obsolete autopilot plan load/write/resolved conversion wrappers have been retired.
    Agent write-guard policy, snapshots, repairs, and secret prompt checks now live in `write_guard.py`; agent and
    autopilot orchestration import that shared module instead of sharing guard internals through `agent_pipeline.py`.
 

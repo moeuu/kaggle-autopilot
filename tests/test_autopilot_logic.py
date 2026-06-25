@@ -13,9 +13,9 @@ from kagglebot.autopilot import (
     _should_force_major_overhaul_by_rank,
     _TrainingLiveStdout,
     _update_best_score,
-    _write_plan,
 )
 from kagglebot.paths import CompetitionPaths
+from kagglebot.plan_policy import write_plan_config as _write_plan
 from kagglebot.runtime_fixes import infer_column_mapping
 from kagglebot.score_progress import effective_best_score_for_progress
 from kagglebot.submission_policy import is_top1_tier, meets_target
