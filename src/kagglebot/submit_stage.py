@@ -637,14 +637,27 @@ def classify_submit_stage_error(
     if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and output:
         classification_stderr = "\n".join(part for part in [classification_stderr, output] if part)
         classification = classify_submit_error(stdout, classification_stderr, exit_code)
-    retry_after = classification.get("retry_after_seconds")
     return SubmitStageErrorClassification(
         classification=classification,
         stderr=classification_stderr,
-        kind=str(classification.get("kind") or "unknown"),
-        reason=str(classification.get("reason") or "unclassified_submit_error"),
-        retry_after_seconds=float(retry_after) if isinstance(retry_after, (int, float)) else 0.0,
+        kind=_normalized_submit_error_text(classification.get("kind"), default="unknown"),
+        reason=_normalized_submit_error_text(classification.get("reason"), default="unclassified_submit_error"),
+        retry_after_seconds=_normalized_retry_after_seconds(classification.get("retry_after_seconds")),
     )
+
+
+def _normalized_submit_error_text(value: object, *, default: str) -> str:
+    text = str(value or "").strip()
+    return text or default
+
+
+def _normalized_retry_after_seconds(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    seconds = float(value)
+    if not math.isfinite(seconds):
+        return 0.0
+    return max(seconds, 0.0)
 
 
 def decide_notebook_fallback_after_file_submit_error(

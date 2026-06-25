@@ -584,6 +584,42 @@ def test_classify_submit_stage_error_defaults_unknown_kind_and_reason() -> None:
     assert classification.retry_after_seconds == 0.0
 
 
+def test_classify_submit_stage_error_normalizes_blank_fields_and_bool_retry_after() -> None:
+    classification = classify_submit_stage_error(
+        stdout="",
+        stderr="generic",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "kind": " ",
+            "reason": "",
+            "retry_after_seconds": True,
+        },
+    )
+
+    assert classification.kind == "unknown"
+    assert classification.reason == "unclassified_submit_error"
+    assert classification.retry_after_seconds == 0.0
+
+
+def test_classify_submit_stage_error_clamps_negative_retry_after() -> None:
+    classification = classify_submit_stage_error(
+        stdout="",
+        stderr="generic",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "kind": "transient",
+            "reason": "network_or_timeout",
+            "retry_after_seconds": -3,
+        },
+    )
+
+    assert classification.kind == "transient"
+    assert classification.reason == "network_or_timeout"
+    assert classification.retry_after_seconds == 0.0
+
+
 def test_decide_submit_stage_error_action_aborts_repeated_fingerprint() -> None:
     decision = decide_submit_stage_error_action(
         fingerprint_seen=True,
