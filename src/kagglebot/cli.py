@@ -17,8 +17,7 @@ from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute
 from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
 from kagglebot.eval import EvaluationAdvisor
-from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
-from kagglebot.exec_utils import run_command
+from kagglebot.exceptions import RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.hardware import resolve_hardware_profile
 from kagglebot.history import new_run_id
 from kagglebot.json_utils import load_json_object
@@ -30,6 +29,7 @@ from kagglebot.self_improvement import SelfImprovementConfig, run_self_improveme
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once, run_watch_self_improvement
+from kagglebot.verify_artifacts import run_verify
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
 knowledge_app = typer.Typer(add_completion=False, help="Knowledge base commands.")
@@ -173,7 +173,7 @@ def implement(
 
     run_codex(prompt_path, agent_dir, dry_run=cfg.dry_run)
 
-    _run_verify(verify_cmd, cfg.dry_run)
+    _run_verify(verify_cmd, cfg.dry_run, artifacts_dir=cfg.artifacts_dir)
     print(f"[green]agent logs[/green]: {agent_dir}")
 
 
@@ -1078,14 +1078,8 @@ def _print_download_progress(done_files: int, total_files: int, file_name: str |
     print(f"[cyan]download progress[/cyan]: {done_files}/{total_files} ({percent:.1f}%){detail}")
 
 
-def _run_verify(cmd: str, dry_run: bool) -> None:
-    if dry_run:
-        return
-    import shlex
-
-    result = run_command(shlex.split(cmd))
-    if result.returncode != 0:
-        raise KaggleBotError(f"Verification failed: {result.output}")
+def _run_verify(cmd: str, dry_run: bool, *, artifacts_dir: Path | None = None) -> None:
+    run_verify(cmd, dry_run=dry_run, artifacts_dir=artifacts_dir, repo_root=Path.cwd())
 
 
 def _resolve_accelerator(compute: str, accelerator: str) -> str:
