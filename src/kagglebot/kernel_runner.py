@@ -33,7 +33,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import CommandResult
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -162,11 +162,8 @@ def _normalize_local_kernel_metrics(
     if not _looks_like_urban_flood_flat_full_root(data_dir):
         return metrics_path
 
-    try:
-        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return metrics_path
-    if not isinstance(payload, dict):
+    payload = load_json_object(metrics_path)
+    if payload is None:
         return metrics_path
 
     normalized_payload_source = _normalize_kernel_score_source(payload.get("score_source"))
@@ -186,7 +183,7 @@ def _normalize_local_kernel_metrics(
     payload["data_root_layout"] = "flat_full"
     payload["metrics_normalized_by"] = "kernel_runner.local_full_data_guard"
     try:
-        metrics_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json_object(metrics_path, payload)
     except OSError:
         return metrics_path
     return metrics_path

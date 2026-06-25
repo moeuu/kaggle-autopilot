@@ -2820,6 +2820,41 @@ def test_normalize_local_kernel_metrics_keeps_other_slugs_unchanged(tmp_path: Pa
     assert "full_dataset_resolved" not in payload
 
 
+def test_normalize_local_kernel_metrics_ignores_invalid_or_non_object_metrics(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    data_dir = tmp_path / "urban-flood-modelling" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for name in kernel_runner._URBAN_FLOOD_FLAT_FULL_REQUIRED_FILES:
+        (data_dir / name).write_text("stub\n", encoding="utf-8")
+
+    invalid = tmp_path / "invalid_metrics.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert (
+        kernel_runner._normalize_local_kernel_metrics(
+            slug="urban-flood-modelling",
+            data_dir=data_dir,
+            metrics_path=invalid,
+            score_source="cv",
+        )
+        == invalid
+    )
+    assert invalid.read_text(encoding="utf-8") == "{"
+
+    array_payload = tmp_path / "array_metrics.json"
+    array_payload.write_text("[]", encoding="utf-8")
+    assert (
+        kernel_runner._normalize_local_kernel_metrics(
+            slug="urban-flood-modelling",
+            data_dir=data_dir,
+            metrics_path=array_payload,
+            score_source="cv",
+        )
+        == array_payload
+    )
+    assert array_payload.read_text(encoding="utf-8") == "[]"
+
+
 def test_local_kernel_duration_history_estimate_uses_recent_median(tmp_path: Path) -> None:
     for idx, duration in enumerate([100.0, 120.0, 80.0, 110.0], start=1):
         _append_local_kernel_duration_history(
