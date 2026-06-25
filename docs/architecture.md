@@ -253,7 +253,8 @@ The next high-value modernization work is:
 5. **Compatibility wrapper retirement**: after call sites move to extracted modules, remove private wrappers in
    `autopilot.py` and sibling orchestrators instead of preserving multiple names for the same policy. Obsolete
    autopilot wrappers around kernel capacity/data-tier inference have been removed; new call sites should use
-   `kernel_quality.py` directly.
+   `kernel_quality.py` directly. Autopilot medal/rank normalization wrappers have also been removed; call sites now use
+   `medals.py` directly.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.

@@ -157,7 +157,6 @@ from kagglebot.leaderboard_policy import resume_best_online_submission_score as 
 from kagglebot.leaderboard_policy import should_force_major_overhaul_by_rank as _should_force_major_overhaul_by_rank
 from kagglebot.medals import (
     DEFAULT_TARGET_MEDAL,
-    MEDAL_TARGET_PERCENTILES,
     normalize_target_medal,
     normalize_target_rank_percentile,
 )
@@ -352,7 +351,6 @@ _HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
 _DEFAULT_TARGET_MEDAL = DEFAULT_TARGET_MEDAL
-_MEDAL_TARGET_PERCENTILES = MEDAL_TARGET_PERCENTILES
 _DEFAULT_LIMITED_SUBMISSION_GATE = "readiness_or_final"
 _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
@@ -754,8 +752,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     readiness_k = float(resolved.get("readiness_k") or 1.0)
     ci_method = str(resolved.get("ci_method") or "normal")
     ci_alpha = float(resolved.get("ci_alpha") or 0.05)
-    target_medal = _normalize_target_medal(resolved.get("target_medal"), default=None)
-    target_rank_percentile = _normalize_target_rank_percentile(
+    target_medal = normalize_target_medal(resolved.get("target_medal"), default=None)
+    target_rank_percentile = normalize_target_rank_percentile(
         resolved.get("target_rank_percentile"),
         medal=target_medal,
         fallback=None,
@@ -3502,13 +3500,14 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
 
 
 def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
+    target_medal = normalize_target_medal(resolved.get("target_medal"), default=None)
     return PlanConfig(
         deliverable_mode=str(resolved.get("deliverable_mode") or "leaderboard"),
         submit_mode=str(resolved.get("submit_mode") or "file"),
-        target_medal=_normalize_target_medal(resolved.get("target_medal"), default=None),
-        target_rank_percentile=_normalize_target_rank_percentile(
+        target_medal=target_medal,
+        target_rank_percentile=normalize_target_rank_percentile(
             resolved.get("target_rank_percentile"),
-            medal=_normalize_target_medal(resolved.get("target_medal"), default=None),
+            medal=target_medal,
             fallback=None,
         ),
         target_metric=resolved.get("target_metric"),  # type: ignore[arg-type]
@@ -3632,19 +3631,6 @@ def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
         slug=paths.slug,
         evaluation_spec_path=paths.context_dir / "evaluation_spec.json",
     )
-
-
-def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
-    return normalize_target_medal(value, default=default)
-
-
-def _normalize_target_rank_percentile(
-    value: object,
-    *,
-    medal: str | None = None,
-    fallback: float | None = None,
-) -> float | None:
-    return normalize_target_rank_percentile(value, medal=medal, fallback=fallback)
 
 
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
