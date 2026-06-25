@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from kagglebot.cli import app
 from kagglebot.exceptions import SubmitAbortedError
 from kagglebot.paths import CompetitionPaths
+from kagglebot.submission_service import SubmissionConfig
 
 
 def test_autopilot_uses_preferred_artifacts_dir_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -66,6 +67,44 @@ def test_autopilot_submit_aborted_exits_clean(monkeypatch, tmp_path: Path) -> No
     assert "submit aborted" in result.stdout.lower()
     assert "Local submission validation failed" in result.stdout
     assert "Traceback" not in result.stdout
+
+
+def test_submit_cli_force_submit_allows_side_effect_guard(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    submission = tmp_path / "submission.csv"
+    submission.write_text("id,target\n1,0\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakeSubmissionService:
+        def __init__(self, config: SubmissionConfig) -> None:
+            captured["force_submit"] = config.force_submit
+
+        def submit(self, **kwargs: object) -> None:
+            captured["submit_kwargs"] = kwargs
+
+    monkeypatch.setattr("kagglebot.cli.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.cli.SubmissionService", FakeSubmissionService)
+
+    result = runner.invoke(
+        app,
+        [
+            "--workdir",
+            str(tmp_path),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "submit",
+            "demo",
+            "-f",
+            str(submission),
+            "-m",
+            "manual repair submit",
+            "--force-submit",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["force_submit"] is True
+    assert captured["submit_kwargs"]
 
 
 def test_autopilot_cli_defaults_to_top1_campaign_mode(monkeypatch, tmp_path: Path) -> None:

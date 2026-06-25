@@ -310,7 +310,7 @@ def submit(
     competition: str = typer.Argument(..., help="Competition URL or slug."),
     file: Path = typer.Option(..., "-f", "--file", help="Submission file path."),
     message: str = typer.Option(..., "-m", "--message", help="Submission message."),
-    force_submit: bool = typer.Option(False, "--force-submit", help="Allow duplicate submissions."),
+    force_submit: bool = typer.Option(False, "--force-submit", "--force", help="Allow duplicate submissions."),
     out_of_band: bool = typer.Option(
         False,
         "--out-of-band",
@@ -328,8 +328,8 @@ def submit(
     if not file.exists():
         raise typer.BadParameter(f"Submission file not found: {file}")
 
-    if not cfg.force and not cfg.dry_run:
-        raise typer.BadParameter("Refusing to submit without --force.")
+    if not (cfg.force or force_submit) and not cfg.dry_run:
+        raise typer.BadParameter("Refusing to submit without --force or --force-submit.")
 
     if not check_rules_accepted(slug, dry_run=cfg.dry_run):
         _print_rules(slug)
