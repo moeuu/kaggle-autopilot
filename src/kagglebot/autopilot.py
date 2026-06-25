@@ -4845,20 +4845,17 @@ def _attempt_submit(
             submission_reference = submit_attempt_result.submission_reference
             submission_artifact_path = submit_attempt_result.submission_artifact_path
         except SubmissionCliError as exc:
-            submit_error_classification = _submit_stage.classify_submit_stage_error(
+            submit_error_resolution = _submit_stage.resolve_submit_cli_error(
+                state=submit_stage_state,
                 stdout=exc.stdout,
                 stderr=exc.stderr or "",
                 output=exc.output or "",
                 exit_code=exc.exit_code,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                backoff_base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
                 classify_submit_error=classify_submit_error,
-            )
-            fallback_application = _submit_stage.resolve_notebook_fallback_after_file_submit_error(
-                state=submit_stage_state,
-                should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback(
-                    reason=submit_error_classification.reason,
-                    stdout=exc.stdout,
-                    stderr=submit_error_classification.stderr,
-                ),
+                should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
                 code_competition=code_competition,
                 sample_submission_path=config.paths.sample_submission_path,
                 fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
@@ -4866,32 +4863,24 @@ def _attempt_submit(
                 resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
                 decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
                 count_csv_data_rows=_count_csv_data_rows_capped,
-                on_message=print,
-            )
-            submit_stage_state = fallback_application.state
-            if fallback_application.retry_as_notebook:
-                continue
-            fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
-            fingerprint_reuse_decision = _submit_retry_policy.decide_submit_fingerprint_reuse(
-                fingerprint=fingerprint,
+                compute_error_fingerprint=compute_error_fingerprint,
+                decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
+                compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
                 seen_fingerprints=seen_fingerprints,
                 run_state=run_state,
                 code_fingerprint=submit_code_fingerprint,
                 save_run_state=lambda updates: _save_run_state(run_dir, updates),
+                on_message=print,
             )
-            error_action = _submit_stage.decide_submit_stage_error_action_from_classification(
-                fingerprint_seen=fingerprint_reuse_decision.fingerprint_seen,
-                same_fingerprint_retry_allowed=fingerprint_reuse_decision.same_fingerprint_retry_allowed,
-                classification=submit_error_classification,
-                attempt=attempt,
-                max_attempts=max_attempts,
-                backoff_seconds=_submit_retry_policy.compute_submit_backoff(
-                    attempt=attempt,
-                    base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
-                ),
-            )
-            for action_message in error_action.messages:
-                print(action_message)
+            submit_error_classification = submit_error_resolution.classification
+            fallback_application = submit_error_resolution.fallback_application
+            submit_stage_state = fallback_application.state
+            if fallback_application.retry_as_notebook:
+                continue
+            fingerprint = submit_error_resolution.fingerprint
+            error_action = submit_error_resolution.error_action
+            if error_action is None:
+                raise SubmitAbortedError("Submit error resolution did not produce a retry or abort action.")
             if error_action.action == "abort":
                 abort_spec = _submit_stage.build_submit_stage_error_action_abort_spec(
                     action=error_action,

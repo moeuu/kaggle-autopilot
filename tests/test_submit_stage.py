@@ -56,6 +56,7 @@ from kagglebot.submit_stage import (
     resolve_submission_outcome_after_submit,
     resolve_submission_rank_payload,
     resolve_submission_rank_state,
+    resolve_submit_cli_error,
     run_submit_stage_attempt,
     submission_score_for_tracking,
     update_submit_stage_artifact_mode,
@@ -115,6 +116,12 @@ class DuplicateDecisionStub:
         self.message = message
         self.fingerprint = fingerprint
         self.duplicate_sources = duplicate_sources or []
+
+
+class FingerprintReuseDecisionStub:
+    def __init__(self, *, fingerprint_seen: bool, same_fingerprint_retry_allowed: bool) -> None:
+        self.fingerprint_seen = fingerprint_seen
+        self.same_fingerprint_retry_allowed = same_fingerprint_retry_allowed
 
 
 class ArtifactModeDecisionStub:
@@ -2373,6 +2380,130 @@ def test_resolve_notebook_fallback_after_file_submit_error_keeps_state_when_disa
     assert applied.retry_as_notebook is False
     assert applied.state == state
     assert messages == []
+
+
+def test_resolve_submit_cli_error_retries_via_notebook_fallback(tmp_path: Path) -> None:
+    state = build_submit_stage_runtime_state(
+        decide_initial_submit_stage_mode(
+            requested_notebook_submit=False,
+            notebook_submissions_only=False,
+            notebook_submit_artifact_mode="wrapper",
+            resolved_notebook_artifact_mode=None,
+        )
+    )
+    messages: list[str] = []
+
+    resolution = resolve_submit_cli_error(
+        state=state,
+        stdout="",
+        stderr="notebook submissions only",
+        output="",
+        exit_code=1,
+        attempt=1,
+        max_attempts=2,
+        backoff_base_seconds=1.0,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "kind": "permanent",
+            "reason": "notebook_submit_required",
+        },
+        should_use_notebook_fallback=lambda **kwargs: True,
+        code_competition=True,
+        sample_submission_path=tmp_path / "sample_submission.csv",
+        fallback_sample_submission_path=tmp_path / "data_sample_submission.csv",
+        submission_path=tmp_path / "submission.csv",
+        resolve_notebook_submit_artifact_mode=lambda **kwargs: "inference",
+        decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: ArtifactModeDecisionStub(mode="inference"),
+        count_csv_data_rows=lambda path: 3,
+        compute_error_fingerprint=lambda stdout, stderr: "unused",
+        decide_submit_fingerprint_reuse=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"fingerprint reuse should not be resolved: {kwargs}")
+        ),
+        compute_submit_backoff=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"backoff should not be resolved: {kwargs}")
+        ),
+        seen_fingerprints=set(),
+        run_state={},
+        code_fingerprint="code-fp",
+        save_run_state=lambda updates: None,
+        on_message=messages.append,
+    )
+
+    assert resolution.classification.reason == "notebook_submit_required"
+    assert resolution.fallback_application.retry_as_notebook is True
+    assert resolution.fallback_application.state.submission_artifact_mode == "inference"
+    assert resolution.fingerprint == ""
+    assert resolution.error_action is None
+    assert messages == [
+        "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
+        "retrying via notebook submit automatically."
+    ]
+
+
+def test_resolve_submit_cli_error_builds_retry_action(tmp_path: Path) -> None:
+    state = build_submit_stage_runtime_state(
+        decide_initial_submit_stage_mode(
+            requested_notebook_submit=False,
+            notebook_submissions_only=False,
+            notebook_submit_artifact_mode="wrapper",
+            resolved_notebook_artifact_mode=None,
+        )
+    )
+    messages: list[str] = []
+    fingerprint_calls: list[dict[str, object]] = []
+
+    resolution = resolve_submit_cli_error(
+        state=state,
+        stdout="stdout",
+        stderr="network down",
+        output="",
+        exit_code=1,
+        attempt=1,
+        max_attempts=2,
+        backoff_base_seconds=3.0,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "kind": "transient",
+            "reason": "network_or_timeout",
+        },
+        should_use_notebook_fallback=lambda **kwargs: False,
+        code_competition=False,
+        sample_submission_path=tmp_path / "sample_submission.csv",
+        fallback_sample_submission_path=tmp_path / "data_sample_submission.csv",
+        submission_path=tmp_path / "submission.csv",
+        resolve_notebook_submit_artifact_mode=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"notebook resolver should not be used: {kwargs}")
+        ),
+        decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"artifact resolver should not be used: {kwargs}")
+        ),
+        count_csv_data_rows=lambda path: 3,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        decide_submit_fingerprint_reuse=lambda **kwargs: (
+            fingerprint_calls.append(kwargs)
+            or FingerprintReuseDecisionStub(fingerprint_seen=False, same_fingerprint_retry_allowed=False)
+        ),
+        compute_submit_backoff=lambda **kwargs: 3.25,
+        seen_fingerprints=set(),
+        run_state={"state": "value"},
+        code_fingerprint="code-fp",
+        save_run_state=lambda updates: None,
+        on_message=messages.append,
+    )
+
+    assert resolution.classification.reason == "network_or_timeout"
+    assert resolution.fallback_application.retry_as_notebook is False
+    assert resolution.fingerprint == "fp:stdout:network down"
+    assert resolution.error_action is not None
+    assert resolution.error_action.action == "retry"
+    assert resolution.error_action.wait_seconds == 3.25
+    assert len(fingerprint_calls) == 1
+    assert fingerprint_calls[0]["fingerprint"] == "fp:stdout:network down"
+    assert fingerprint_calls[0]["seen_fingerprints"] == set()
+    assert fingerprint_calls[0]["run_state"] == {"state": "value"}
+    assert fingerprint_calls[0]["code_fingerprint"] == "code-fp"
+    assert callable(fingerprint_calls[0]["save_run_state"])
+    assert messages == [
+        "[yellow]submit retry[/yellow]: transient submit error (reason=network_or_timeout, attempt=1/2, wait=3.2s)"
+    ]
 
 
 def test_decide_notebook_fallback_after_file_submit_error_rejects_already_activated() -> None:

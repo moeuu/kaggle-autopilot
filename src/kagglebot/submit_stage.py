@@ -121,6 +121,14 @@ class SubmitStageErrorActionDecision:
 
 
 @dataclass(frozen=True)
+class SubmitCliErrorResolution:
+    classification: SubmitStageErrorClassification
+    fallback_application: SubmitStageFallbackApplication
+    fingerprint: str
+    error_action: SubmitStageErrorActionDecision | None
+
+
+@dataclass(frozen=True)
 class SubmitStageAttemptResult:
     submission_result: object
     submission_reference: str
@@ -1873,4 +1881,94 @@ def resolve_notebook_fallback_after_file_submit_error(
             )
         ),
         on_message=on_message,
+    )
+
+
+def resolve_submit_cli_error(
+    *,
+    state: SubmitStageRuntimeState,
+    stdout: str,
+    stderr: str,
+    output: str,
+    exit_code: int | None,
+    attempt: int,
+    max_attempts: int,
+    backoff_base_seconds: float,
+    classify_submit_error: Callable[..., dict[str, object]],
+    should_use_notebook_fallback: Callable[..., bool],
+    code_competition: bool,
+    sample_submission_path: Path,
+    fallback_sample_submission_path: Path,
+    submission_path: Path,
+    resolve_notebook_submit_artifact_mode: Callable[..., str],
+    decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
+    count_csv_data_rows: Callable[[Path], int | None],
+    compute_error_fingerprint: Callable[[str, str], str],
+    decide_submit_fingerprint_reuse: Callable[..., object],
+    compute_submit_backoff: Callable[..., float],
+    seen_fingerprints: set[str],
+    run_state: dict[str, object],
+    code_fingerprint: str,
+    save_run_state: Callable[[dict[str, object]], object],
+    on_message: Callable[[str], object],
+) -> SubmitCliErrorResolution:
+    classification = classify_submit_stage_error(
+        stdout=stdout,
+        stderr=stderr,
+        output=output,
+        exit_code=exit_code,
+        classify_submit_error=classify_submit_error,
+    )
+    fallback_application = resolve_notebook_fallback_after_file_submit_error(
+        state=state,
+        should_use_notebook_fallback=should_use_notebook_fallback(
+            reason=classification.reason,
+            stdout=stdout,
+            stderr=classification.stderr,
+        ),
+        code_competition=code_competition,
+        sample_submission_path=sample_submission_path,
+        fallback_sample_submission_path=fallback_sample_submission_path,
+        submission_path=submission_path,
+        resolve_notebook_submit_artifact_mode=resolve_notebook_submit_artifact_mode,
+        decide_notebook_submit_artifact_mode_for_paths=decide_notebook_submit_artifact_mode_for_paths,
+        count_csv_data_rows=count_csv_data_rows,
+        on_message=on_message,
+    )
+    if fallback_application.retry_as_notebook:
+        return SubmitCliErrorResolution(
+            classification=classification,
+            fallback_application=fallback_application,
+            fingerprint="",
+            error_action=None,
+        )
+
+    fingerprint = compute_error_fingerprint(stdout, stderr)
+    fingerprint_reuse_decision = decide_submit_fingerprint_reuse(
+        fingerprint=fingerprint,
+        seen_fingerprints=seen_fingerprints,
+        run_state=run_state,
+        code_fingerprint=code_fingerprint,
+        save_run_state=save_run_state,
+    )
+    error_action = decide_submit_stage_error_action_from_classification(
+        fingerprint_seen=bool(getattr(fingerprint_reuse_decision, "fingerprint_seen", False)),
+        same_fingerprint_retry_allowed=bool(
+            getattr(fingerprint_reuse_decision, "same_fingerprint_retry_allowed", False)
+        ),
+        classification=classification,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        backoff_seconds=compute_submit_backoff(
+            attempt=attempt,
+            base_seconds=backoff_base_seconds,
+        ),
+    )
+    for action_message in error_action.messages:
+        on_message(action_message)
+    return SubmitCliErrorResolution(
+        classification=classification,
+        fallback_application=fallback_application,
+        fingerprint=fingerprint,
+        error_action=error_action,
     )
