@@ -86,6 +86,9 @@ and submit success outcome display/ledger-recording decisions live in `src/kaggl
 now owns `submit_attempts.jsonl` append, duplicate SHA lookup, and tolerant row readers used by resume state and
 self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules centralized instead of
 duplicated across the loop, state helpers, and improvement analysis.
+Historical Kaggle submission row normalization, best/latest public-score summary construction, online-regression
+detection against historical submissions, and prompt formatting for that history live in
+`src/kagglebot/submission_history.py`; the loop only fetches/cache-persist rows and consumes the resulting summary.
 Notebook submit artifact-mode normalization, tiny public sample hidden-test guards, submit-kernel run kwargs construction,
 kernel output artifact/reference handling, output file selection, Kaggle submit-kernel kwargs construction, ambiguous
 submit retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
