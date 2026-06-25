@@ -262,34 +262,6 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
-_extract_cv_breakdown_by_model_node = _kernel_quality.extract_cv_breakdown_by_model_node
-_detect_subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal
-_iter_payload_mappings = _kernel_quality.iter_payload_mappings
-_as_guard_bool = _kernel_quality.as_guard_bool
-_first_nested_value = _kernel_quality.first_nested_value
-_max_nested_float = _kernel_quality.max_nested_float
-_max_nested_int = _kernel_quality.max_nested_int
-_min_nested_int = _kernel_quality.min_nested_int
-_any_nested_bool = _kernel_quality.any_nested_bool
-_nested_text = _kernel_quality.nested_text
-_merge_quality_signal_messages = _kernel_quality.merge_quality_signal_messages
-_quality_signal_blocks_submit = _kernel_quality.quality_signal_blocks_submit
-_build_external_label_transfer_quality_signal = _kernel_quality.build_external_label_transfer_quality_signal
-_build_metric_mismatch_quality_signal = _kernel_quality.build_metric_mismatch_quality_signal
-_build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
-_build_subgroup_collapse_quality_signal = _kernel_quality.build_subgroup_collapse_quality_signal
-_build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
-_build_candidate_selection_quality_signal = _kernel_quality.build_candidate_selection_quality_signal
-_pipeline_name_from_payload = _kernel_quality.pipeline_name_from_payload
-_extract_selected_pipeline_name = _kernel_quality.extract_selected_pipeline_name
-_extract_pipeline_candidates = _kernel_quality.extract_pipeline_candidates
-_pipeline_float = _kernel_quality.pipeline_float
-_find_selected_pipeline = _kernel_quality.find_selected_pipeline
-_build_prediction_distribution_quality_signal = _kernel_quality.build_prediction_distribution_quality_signal
-_build_competition_faithfulness_quality_signal = _kernel_quality.build_competition_faithfulness_quality_signal
-_build_baseline_regression_quality_signal = _kernel_quality.build_baseline_regression_quality_signal
-_build_code_reference_regression_quality_signal = _kernel_quality.build_code_reference_regression_quality_signal
-_build_validation_stability_quality_signal = _kernel_quality.build_validation_stability_quality_signal
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
 _capture_best_kernel_snapshot = _kernel_snapshot.capture_best_kernel_snapshot
@@ -2609,7 +2581,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 if competition_policy.repair.same_family_plateau_signal
                 else None
             )
-            subgroup_collapse_signal = _detect_subgroup_collapse_signal(
+            subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal(
                 kernel_metrics_payload=kernel_metrics_payload,
                 direction=metric_direction,
             )
@@ -4468,7 +4440,7 @@ def _build_kernel_quality_guard(
 
     def merge_signal_messages(signal: dict[str, object], *, dedupe: bool = False) -> None:
         nonlocal reasons, warnings
-        merged = _merge_quality_signal_messages(
+        merged = _kernel_quality.merge_quality_signal_messages(
             reasons=reasons,
             warnings=warnings,
             signal=signal,
@@ -4477,37 +4449,41 @@ def _build_kernel_quality_guard(
         reasons = merged["reasons"]
         warnings = merged["warnings"]
 
-    score_source_signal = _build_score_source_quality_signal(evaluation.score_source)
+    score_source_signal = _kernel_quality.build_score_source_quality_signal(evaluation.score_source)
     merge_signal_messages(score_source_signal)
-    if _quality_signal_blocks_submit(score_source_signal, force_submit=force_submit):
+    if _kernel_quality.quality_signal_blocks_submit(score_source_signal, force_submit=force_submit):
         block_submit = True
 
-    oracle_signal = _build_oracle_override_signal(payload)
+    oracle_signal = _kernel_quality.build_oracle_override_signal(payload)
     merge_signal_messages(oracle_signal)
-    if _quality_signal_blocks_submit(oracle_signal, force_submit=force_submit):
+    if _kernel_quality.quality_signal_blocks_submit(oracle_signal, force_submit=force_submit):
         block_submit = True
 
-    external_label_transfer_signal = _build_external_label_transfer_quality_signal(payload)
+    external_label_transfer_signal = _kernel_quality.build_external_label_transfer_quality_signal(payload)
     merge_signal_messages(external_label_transfer_signal)
-    if _quality_signal_blocks_submit(external_label_transfer_signal, force_submit=force_submit, forceable=False):
+    if _kernel_quality.quality_signal_blocks_submit(
+        external_label_transfer_signal, force_submit=force_submit, forceable=False
+    ):
         block_submit = True
 
-    candidate_selection_signal = _build_candidate_selection_quality_signal(payload=payload, direction=direction)
+    candidate_selection_signal = _kernel_quality.build_candidate_selection_quality_signal(
+        payload=payload, direction=direction
+    )
     merge_signal_messages(candidate_selection_signal)
     candidate_selection_mismatch = candidate_selection_signal.get("mismatch")
-    if _quality_signal_blocks_submit(candidate_selection_signal, force_submit=force_submit):
+    if _kernel_quality.quality_signal_blocks_submit(candidate_selection_signal, force_submit=force_submit):
         block_submit = True
 
-    prediction_distribution_signal = _build_prediction_distribution_quality_signal(
+    prediction_distribution_signal = _kernel_quality.build_prediction_distribution_quality_signal(
         payload=payload,
         candidate_selection_mismatch=candidate_selection_mismatch,
     )
     merge_signal_messages(prediction_distribution_signal)
     prediction_distribution_collapse = prediction_distribution_signal.get("collapse")
-    if _quality_signal_blocks_submit(prediction_distribution_signal, force_submit=force_submit):
+    if _kernel_quality.quality_signal_blocks_submit(prediction_distribution_signal, force_submit=force_submit):
         block_submit = True
 
-    competition_faithfulness_signal = _build_competition_faithfulness_quality_signal(
+    competition_faithfulness_signal = _kernel_quality.build_competition_faithfulness_quality_signal(
         evaluation_metric=evaluation.metric,
         evaluation_score_source=evaluation.score_source,
         kernel_metrics_payload=payload,
@@ -4519,7 +4495,9 @@ def _build_kernel_quality_guard(
     if not isinstance(competition_faithfulness, dict):
         competition_faithfulness = {}
     merge_signal_messages(competition_faithfulness_signal, dedupe=True)
-    if _quality_signal_blocks_submit(competition_faithfulness_signal, force_submit=force_submit, forceable=False):
+    if _kernel_quality.quality_signal_blocks_submit(
+        competition_faithfulness_signal, force_submit=force_submit, forceable=False
+    ):
         block_submit = True
 
     baseline_candidates = _kernel_metrics.extract_baseline_candidates_from_metrics_payload(payload)
@@ -4528,7 +4506,7 @@ def _build_kernel_quality_guard(
     for index, score in enumerate(baseline_from_logs):
         baseline_candidates.append((f"logs:baseline[{index}]", float(score)))
 
-    baseline_regression_signal = _build_baseline_regression_quality_signal(
+    baseline_regression_signal = _kernel_quality.build_baseline_regression_quality_signal(
         current_value=float(evaluation.value),
         baseline_candidates=baseline_candidates,
         direction=direction,
@@ -4539,11 +4517,13 @@ def _build_kernel_quality_guard(
     if not isinstance(baseline_signal, dict):
         baseline_signal = {}
     merge_signal_messages(baseline_regression_signal)
-    if _quality_signal_blocks_submit(baseline_regression_signal, force_submit=force_submit, forceable=False):
+    if _kernel_quality.quality_signal_blocks_submit(
+        baseline_regression_signal, force_submit=force_submit, forceable=False
+    ):
         block_submit = True
 
     validation_scores = _kernel_metrics.extract_validation_scores_from_log_text(log_text, evaluation.metric)
-    validation_stability_signal = _build_validation_stability_quality_signal(
+    validation_stability_signal = _kernel_quality.build_validation_stability_quality_signal(
         current_value=float(evaluation.value),
         validation_scores=validation_scores,
         payload=payload,
@@ -4558,10 +4538,12 @@ def _build_kernel_quality_guard(
     if not isinstance(step_bucket_signal, dict):
         step_bucket_signal = {}
     merge_signal_messages(validation_stability_signal)
-    if _quality_signal_blocks_submit(validation_stability_signal, force_submit=force_submit, forceable=False):
+    if _kernel_quality.quality_signal_blocks_submit(
+        validation_stability_signal, force_submit=force_submit, forceable=False
+    ):
         block_submit = True
 
-    subgroup_collapse_quality_signal = _build_subgroup_collapse_quality_signal(
+    subgroup_collapse_quality_signal = _kernel_quality.build_subgroup_collapse_quality_signal(
         kernel_metrics_payload=payload,
         direction=direction,
     )
@@ -4570,16 +4552,16 @@ def _build_kernel_quality_guard(
         subgroup_collapse_signal = None
     merge_signal_messages(subgroup_collapse_quality_signal)
 
-    metric_mismatch_signal = _build_metric_mismatch_quality_signal(
+    metric_mismatch_signal = _kernel_quality.build_metric_mismatch_quality_signal(
         detected=metric_mismatch_detected,
         reason=metric_mismatch_reason,
         force_submit=force_submit,
     )
     merge_signal_messages(metric_mismatch_signal)
-    if _quality_signal_blocks_submit(metric_mismatch_signal, force_submit=force_submit, forceable=False):
+    if _kernel_quality.quality_signal_blocks_submit(metric_mismatch_signal, force_submit=force_submit, forceable=False):
         block_submit = True
 
-    code_reference_regression_signal = _build_code_reference_regression_quality_signal(
+    code_reference_regression_signal = _kernel_quality.build_code_reference_regression_quality_signal(
         current_value=float(evaluation.value),
         metric=evaluation.metric,
         code_reference_score=code_reference_score,
@@ -4591,7 +4573,9 @@ def _build_kernel_quality_guard(
     if not isinstance(code_reference_signal, dict):
         code_reference_signal = {}
     merge_signal_messages(code_reference_regression_signal)
-    if _quality_signal_blocks_submit(code_reference_regression_signal, force_submit=force_submit, forceable=False):
+    if _kernel_quality.quality_signal_blocks_submit(
+        code_reference_regression_signal, force_submit=force_submit, forceable=False
+    ):
         block_submit = True
 
     allow_submit = not block_submit
@@ -5547,7 +5531,7 @@ def _run_kernel_fix(
     )
     subgroup_metrics_path = iter_dir / "output" / "metrics.json"
     subgroup_payload = _load_json_object(subgroup_metrics_path) if subgroup_metrics_path.exists() else {}
-    subgroup_collapse_signal = _detect_subgroup_collapse_signal(
+    subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal(
         kernel_metrics_payload=subgroup_payload if isinstance(subgroup_payload, dict) else None,
         direction="minimize",
     )
