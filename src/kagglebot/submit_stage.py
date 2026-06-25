@@ -107,6 +107,18 @@ class SubmitAbortSpec:
     exit_code: int | None
 
 
+def build_submit_abort_spec_kwargs(spec: SubmitAbortSpec) -> dict[str, object]:
+    return {
+        "fingerprint": spec.fingerprint,
+        "error_kind": spec.error_kind,
+        "reason": spec.reason,
+        "message": spec.message,
+        "stdout_tail": spec.stdout_tail,
+        "stderr_tail": spec.stderr_tail,
+        "exit_code": spec.exit_code,
+    }
+
+
 @dataclass(frozen=True)
 class SubmissionOutcomePostPollDecision:
     outcome: object

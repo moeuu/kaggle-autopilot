@@ -5040,13 +5040,7 @@ def _attempt_submit(
             problem_types=problem_types,
             submission_ref=input_submission_path,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=abort_spec.fingerprint,
-            error_kind=abort_spec.error_kind,
-            reason=abort_spec.reason,
-            message=abort_spec.message,
-            stdout_tail=abort_spec.stdout_tail,
-            stderr_tail=abort_spec.stderr_tail,
-            exit_code=abort_spec.exit_code,
+            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
@@ -5121,13 +5115,7 @@ def _attempt_submit(
                 problem_types=problem_types,
                 submission_ref=prepared_submission_path,
                 code_fingerprint=submit_code_fingerprint,
-                fingerprint=abort_spec.fingerprint,
-                error_kind=abort_spec.error_kind,
-                reason=abort_spec.reason,
-                message=abort_spec.message,
-                stdout_tail=abort_spec.stdout_tail,
-                stderr_tail=abort_spec.stderr_tail,
-                exit_code=abort_spec.exit_code,
+                **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         raise
@@ -5142,13 +5130,7 @@ def _attempt_submit(
             problem_types=problem_types,
             submission_ref=prepared_submission_path,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=abort_spec.fingerprint,
-            error_kind=abort_spec.error_kind,
-            reason=abort_spec.reason,
-            message=abort_spec.message,
-            stdout_tail=abort_spec.stdout_tail,
-            stderr_tail=abort_spec.stderr_tail,
-            exit_code=abort_spec.exit_code,
+            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
@@ -5366,13 +5348,7 @@ def _attempt_submit(
                 submission_ref=submission_reference,
                 submission_artifact_path=submission_artifact_path,
                 code_fingerprint=submit_code_fingerprint,
-                fingerprint=abort_spec.fingerprint,
-                error_kind=abort_spec.error_kind,
-                reason=abort_spec.reason,
-                message=abort_spec.message,
-                stdout_tail=abort_spec.stdout_tail,
-                stderr_tail=abort_spec.stderr_tail,
-                exit_code=abort_spec.exit_code,
+                **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         except KaggleCliError as exc:
@@ -5392,13 +5368,7 @@ def _attempt_submit(
                     submission_artifact_path=submission_artifact_path,
                     artifact_mode=submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
-                    fingerprint=abort_spec.fingerprint,
-                    error_kind=abort_spec.error_kind,
-                    reason=abort_spec.reason,
-                    message=abort_spec.message,
-                    stdout_tail=abort_spec.stdout_tail,
-                    stderr_tail=abort_spec.stderr_tail,
-                    exit_code=abort_spec.exit_code,
+                    **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
                     submit_attempt_recorder=submit_attempt_recorder,
                 )
             raise
@@ -5452,13 +5422,7 @@ def _attempt_submit(
             submission_artifact_path=submission_for_submit_path,
             artifact_mode=submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=abort_spec.fingerprint,
-            error_kind=abort_spec.error_kind,
-            reason=abort_spec.reason,
-            message=abort_spec.message,
-            stdout_tail=abort_spec.stdout_tail,
-            stderr_tail=abort_spec.stderr_tail,
-            exit_code=abort_spec.exit_code,
+            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
@@ -5486,13 +5450,7 @@ def _attempt_submit(
             submission_artifact_path=submission_for_submit_path,
             artifact_mode=submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=abort_spec.fingerprint,
-            error_kind=abort_spec.error_kind,
-            reason=abort_spec.reason,
-            message=abort_spec.message,
-            stdout_tail=abort_spec.stdout_tail,
-            stderr_tail=abort_spec.stderr_tail,
-            exit_code=abort_spec.exit_code,
+            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
 

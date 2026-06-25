@@ -14,6 +14,7 @@ from kagglebot.submit_stage import (
     build_submission_outcome_abort_spec,
     build_submission_outcome_error_detail,
     build_submission_polling_error_abort_spec,
+    build_submit_abort_spec_kwargs,
     build_submit_stage_success_record,
     classify_submission_outcome,
     classify_submit_stage_error,
@@ -173,6 +174,24 @@ def test_build_local_submission_validation_abort_spec_sets_validation_contract()
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "row count mismatch"
     assert spec.exit_code == 65
+
+
+def test_build_submit_abort_spec_kwargs_maps_abort_spec_fields() -> None:
+    spec = build_local_submission_validation_abort_spec(
+        error=ValueError("bad rows"),
+        exit_code=65,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert build_submit_abort_spec_kwargs(spec) == {
+        "fingerprint": "fp::bad rows",
+        "error_kind": "validation",
+        "reason": "local_submission_validation_failed",
+        "message": "Local submission validation failed; Kaggle CLI submit is skipped.",
+        "stdout_tail": "",
+        "stderr_tail": "bad rows",
+        "exit_code": 65,
+    }
 
 
 def test_build_submission_polling_error_abort_spec_sets_transient_contract() -> None:
