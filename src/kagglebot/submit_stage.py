@@ -811,6 +811,52 @@ def build_submit_stage_error_action_abort_spec(
     )
 
 
+def record_submit_stage_retry_attempt(
+    *,
+    submit_attempt_recorder: object,
+    run_id: str,
+    slug: str,
+    problem_types: list[str],
+    submission_ref: str,
+    submission_artifact_path: Path | None,
+    fallback_submission_path: Path,
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    exit_code: int | None,
+    fingerprint: str,
+    action: SubmitStageErrorActionDecision,
+    stdout: str,
+    stderr: str,
+    attempt: int,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    knowledge_paths: object,
+    normalize_detail: Callable[..., str],
+    record_error_fix_insight: Callable[..., object],
+) -> bool:
+    return _submit_attempts.record_submit_retry_attempt_and_knowledge(
+        submit_attempt_recorder=submit_attempt_recorder,
+        run_id=run_id,
+        slug=slug,
+        problem_types=problem_types,
+        submission_ref=submission_ref,
+        submission_path=submission_artifact_path or fallback_submission_path,
+        submission_sha256=compute_submission_sha256(submission_artifact_path),
+        exit_code=exit_code,
+        fingerprint=fingerprint,
+        reason=action.reason,
+        stdout=stdout,
+        stderr=stderr,
+        attempt=attempt,
+        wait_seconds=action.wait_seconds,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        knowledge_paths=knowledge_paths,
+        infer_iteration=infer_iteration_from_submission_path,
+        normalize_detail=normalize_detail,
+        record_error_fix_insight=record_error_fix_insight,
+    )
+
+
 def decide_submission_outcome_abort(
     *,
     outcome_status: str,

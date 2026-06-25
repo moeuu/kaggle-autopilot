@@ -37,6 +37,7 @@ from kagglebot.submit_stage import (
     normalize_submission_outcome_status,
     record_submission_knowledge,
     record_submission_knowledge_entries,
+    record_submit_stage_retry_attempt,
     record_successful_submit_stage_result,
     resolve_iteration_submit_phase_state,
     resolve_submission_knowledge_context,
@@ -86,6 +87,14 @@ class SamePathDecisionStub:
         self.reason = reason
         self.message = message
         self.fingerprint = fingerprint
+
+
+class SubmitAttemptRecorderStub:
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, object]] = []
+
+    def append(self, payload: dict[str, object]) -> None:
+        self.payloads.append(payload)
 
 
 def test_decide_initial_submit_stage_mode_keeps_file_submit() -> None:
@@ -380,6 +389,65 @@ def test_build_submit_stage_error_action_abort_spec_maps_action_contract() -> No
     assert spec.stdout_tail == "stdout text"
     assert spec.stderr_tail == "stderr text"
     assert spec.exit_code == 1
+
+
+def test_record_submit_stage_retry_attempt_records_attempt_and_knowledge(tmp_path: Path) -> None:
+    recorder = SubmitAttemptRecorderStub()
+    calls: list[dict[str, object]] = []
+    artifact_path = tmp_path / "iter-4" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    action = decide_submit_stage_error_action(
+        fingerprint_seen=False,
+        same_fingerprint_retry_allowed=False,
+        classification_kind="transient",
+        classification_reason="network_or_timeout",
+        attempt=1,
+        max_attempts=2,
+        retry_after_seconds=0.0,
+        backoff_seconds=3.25,
+    )
+
+    recorded = record_submit_stage_retry_attempt(
+        submit_attempt_recorder=recorder,
+        run_id="run-1",
+        slug="demo",
+        problem_types=["tabular"],
+        submission_ref="submission.csv",
+        submission_artifact_path=artifact_path,
+        fallback_submission_path=tmp_path / "fallback.csv",
+        compute_submission_sha256=lambda path: "sha" if path == artifact_path else None,
+        exit_code=1,
+        fingerprint="fp",
+        action=action,
+        stdout="abcdef",
+        stderr="uvwxyz",
+        attempt=1,
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+        knowledge_paths=object(),
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert recorded is True
+    assert recorder.payloads == [
+        {
+            "run_id": "run-1",
+            "sub_path": "submission.csv",
+            "sub_sha256": "sha",
+            "exit_code": 1,
+            "ok": False,
+            "fingerprint": "fp",
+            "error_kind": "transient",
+            "action_taken": "retry",
+            "reason": "network_or_timeout",
+            "stdout_tail": "def",
+            "stderr_tail": "wxyz",
+        }
+    ]
+    assert calls[0]["iteration"] == 4
+    assert calls[0]["fix_summary"] == "submit_action=retry; detail=attempt=1; wait=3.2s"
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
