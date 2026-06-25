@@ -110,6 +110,15 @@ class TargetMetricDirectionDecision:
 
 
 @dataclass(frozen=True)
+class TargetRequestDecision:
+    target_metric: object
+    target_score: object
+    target_direction: object
+    explicit_target_metric: bool
+    explicit_target_direction: bool
+
+
+@dataclass(frozen=True)
 class PlanScoreSourceDecision:
     score_source: str
     messages: tuple[str, ...] = ()
@@ -1129,6 +1138,25 @@ def needs_planning(
     if target_metric is None or target_score is None:
         return True
     return target_direction in (None, "auto")
+
+
+def resolve_target_request(
+    *,
+    config_target_metric: object,
+    config_target_score: object,
+    config_target_direction: object,
+    plan: PlanConfig,
+    spec_values: EvaluationSpecValues,
+) -> TargetRequestDecision:
+    """Resolve raw target metric/score/direction before competition metric overrides."""
+
+    return TargetRequestDecision(
+        target_metric=_choose(config_target_metric, plan.target_metric, spec_values.metric_name),
+        target_score=_choose(config_target_score, plan.target_score, spec_values.readiness_target_score),
+        target_direction=_choose(config_target_direction, plan.target_direction, spec_values.direction or "auto"),
+        explicit_target_metric=config_target_metric is not None or plan.target_metric is not None,
+        explicit_target_direction=config_target_direction is not None or plan.target_direction is not None,
+    )
 
 
 def should_skip_planning_on_resume(*, resume_run: bool, plan_path: Path, kernel_path: Path) -> bool:

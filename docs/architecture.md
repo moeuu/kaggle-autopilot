@@ -279,7 +279,8 @@ The next high-value modernization work is:
    Agent/autopilot plan payload normalization, validation, high-accuracy suite repair, guardrail application, plan
    persistence, and resolved-plan-to-`PlanConfig` conversion now call `plan_policy.py` directly instead of living inside
    orchestration modules; obsolete autopilot plan load/write/resolved conversion wrappers have been retired.
-   Readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in `plan_policy.py`.
+   Target request selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also
+   live in `plan_policy.py`.
    Agent write-guard policy, snapshots, repairs, and secret prompt checks now live in `write_guard.py`; agent and
    autopilot orchestration import that shared module instead of sharing guard internals through `agent_pipeline.py`.
    Watch-state phase updates now live in `watch_state.py`; autopilot orchestration reports phase transitions without
@@ -293,11 +294,11 @@ small extractions that make import direction clearer over broad refactors that o
 Recommended extraction order:
 
 1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization/override,
-   metric/direction override policy, plan score-source normalization, evaluation-spec value extraction, local-GPU
-   evaluation budget/max-iteration policy, submit/runtime constraint application, planning necessity/resume-skip checks,
-   readiness/stop-policy resolution, rank-force threshold resolution, and competition-specific overrides are already out
-   of the main loop. Leaderboard medal/rank objective resolution, plan file I/O, and resolved-plan config conversion are
-   now also in `plan_policy.py`.
+   target request selection, metric/direction override policy, plan score-source normalization, evaluation-spec value
+   extraction, local-GPU evaluation budget/max-iteration policy, submit/runtime constraint application, planning
+   necessity/resume-skip checks, readiness/stop-policy resolution, rank-force threshold resolution, and
+   competition-specific overrides are already out of the main loop. Leaderboard medal/rank objective resolution, plan
+   file I/O, and resolved-plan config conversion are now also in `plan_policy.py`.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
    submit-policy and submission-gate resolution now also lives there.

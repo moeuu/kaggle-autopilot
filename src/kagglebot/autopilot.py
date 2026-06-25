@@ -3224,19 +3224,24 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     )
     target_medal = target_objective.target_medal
     target_rank_percentile = target_objective.target_rank_percentile
-    explicit_target_metric = config.target_metric is not None or plan.target_metric is not None
-    explicit_target_direction = config.target_direction is not None or plan.target_direction is not None
-    target_metric = choose(config.target_metric, plan.target_metric, spec_values.metric_name)
-    target_score = choose(config.target_score, plan.target_score, spec_values.readiness_target_score)
-    target_direction = choose(config.target_direction, plan.target_direction, spec_values.direction or "auto")
+    target_request = _plan_policy.resolve_target_request(
+        config_target_metric=config.target_metric,
+        config_target_score=config.target_score,
+        config_target_direction=config.target_direction,
+        plan=plan,
+        spec_values=spec_values,
+    )
+    target_metric = target_request.target_metric
+    target_score = target_request.target_score
+    target_direction = target_request.target_direction
     competition_override = _plan_policy.competition_eval_override(config.paths.slug)
     metric_direction_decision = _plan_policy.resolve_target_metric_direction(
         target_metric=target_metric,
         target_direction=target_direction,
         spec_metric=spec_values.metric_name,
         spec_direction=spec_values.direction,
-        explicit_target_metric=explicit_target_metric,
-        explicit_target_direction=explicit_target_direction,
+        explicit_target_metric=target_request.explicit_target_metric,
+        explicit_target_direction=target_request.explicit_target_direction,
         strict_competition_metric=strict_competition_metric,
         competition_override=competition_override,
     )

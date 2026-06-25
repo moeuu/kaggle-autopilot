@@ -39,6 +39,7 @@ from kagglebot.plan_policy import (
     resolve_submit_mode_constraints,
     resolve_target_metric_direction,
     resolve_target_objective,
+    resolve_target_request,
     resolve_time_budget_policy,
     should_skip_planning_on_resume,
     upgrade_improvement_mode,
@@ -155,6 +156,60 @@ def test_needs_planning_requires_complete_metric_contract() -> None:
         )
         is True
     )
+
+
+def test_resolve_target_request_prefers_config_then_plan_then_spec() -> None:
+    spec = extract_evaluation_spec_values(
+        {
+            "metric_name": "rmse",
+            "direction": "minimize",
+            "readiness_rule": {"target_score": 0.4},
+        }
+    )
+
+    plan_only = resolve_target_request(
+        config_target_metric=None,
+        config_target_score=None,
+        config_target_direction=None,
+        plan=PlanConfig(target_metric="auc", target_score=0.8, target_direction="maximize"),
+        spec_values=spec,
+    )
+    assert plan_only.target_metric == "auc"
+    assert plan_only.target_score == 0.8
+    assert plan_only.target_direction == "maximize"
+    assert plan_only.explicit_target_metric is True
+    assert plan_only.explicit_target_direction is True
+
+    config_override = resolve_target_request(
+        config_target_metric="log_loss",
+        config_target_score=0.2,
+        config_target_direction="minimize",
+        plan=PlanConfig(target_metric="auc", target_score=0.8, target_direction="maximize"),
+        spec_values=spec,
+    )
+    assert config_override.target_metric == "log_loss"
+    assert config_override.target_score == 0.2
+    assert config_override.target_direction == "minimize"
+    assert config_override.explicit_target_metric is True
+    assert config_override.explicit_target_direction is True
+
+
+def test_resolve_target_request_falls_back_to_spec_and_auto_direction() -> None:
+    spec = extract_evaluation_spec_values({"metric_name": "rmse", "readiness_rule": {"target_score": 0.4}})
+
+    decision = resolve_target_request(
+        config_target_metric=None,
+        config_target_score=None,
+        config_target_direction=None,
+        plan=PlanConfig(target_direction=None),  # type: ignore[arg-type]
+        spec_values=spec,
+    )
+
+    assert decision.target_metric == "rmse"
+    assert decision.target_score == 0.4
+    assert decision.target_direction == "auto"
+    assert decision.explicit_target_metric is False
+    assert decision.explicit_target_direction is False
 
 
 def test_should_skip_planning_on_resume_requires_plan_and_kernel(tmp_path: Path) -> None:
