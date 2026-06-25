@@ -257,8 +257,8 @@ The next high-value modernization work is:
    `medals.py` directly. Dataset-profile/evaluation-spec wrapper reads in `autopilot.py` have also been retired in
    favor of direct `context_artifacts.py` calls. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, and same-fingerprint retry allowance now calls
-   `submit_retry_policy.py` directly. Autopilot scalar parsing wrappers have also been removed in favor of public
-   tolerant parsers in `scalar_utils.py`.
+   `submit_retry_policy.py` directly. Autopilot, iteration metrics, kernel quality, and autopilot state scalar parsing
+   wrappers have also been removed in favor of public tolerant parsers in `scalar_utils.py`.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.

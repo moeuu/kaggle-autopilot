@@ -11,7 +11,7 @@ from rich import print
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.json_utils import write_json_object
-from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
@@ -97,7 +97,7 @@ def _load_submit_phase_completed_iterations(
     for payload in _submit_attempts.load_submit_attempt_rows(run_dir):
         if not _is_legacy_submit_attempt_complete(payload):
             continue
-        iteration = _to_int(payload.get("iteration"))
+        iteration = tolerant_int(payload.get("iteration"))
         if iteration is None:
             sub_path = str(payload.get("sub_path") or "").strip()
             if sub_path:
@@ -118,7 +118,7 @@ def _is_legacy_submit_attempt_complete(payload: dict[str, object]) -> bool:
 
 
 def _infer_iteration_from_submit_attempt(payload: dict[str, object]) -> int | None:
-    iteration = _to_int(payload.get("iteration"))
+    iteration = tolerant_int(payload.get("iteration"))
     if iteration is not None and iteration > 0:
         return iteration
     sub_path = str(payload.get("sub_path") or "").strip()
@@ -131,7 +131,7 @@ def _infer_iteration_from_submit_attempt(payload: dict[str, object]) -> int | No
     for part in parts:
         if not part.startswith("iter-"):
             continue
-        parsed = _to_int(part.split("-", 1)[1])
+        parsed = tolerant_int(part.split("-", 1)[1])
         if parsed is not None and parsed > 0:
             return parsed
     return None
@@ -153,14 +153,14 @@ def _load_submitted_iteration_tracking_score(
 ) -> float | None:
     payload = _load_json_object(metrics_path)
     if isinstance(payload, dict):
-        submission_score = _to_float(payload.get("submission_score"))
+        submission_score = tolerant_finite_float(payload.get("submission_score"))
         if isinstance(submission_score, float) and math.isfinite(submission_score):
             return float(submission_score)
         loop_decision = payload.get("loop_decision")
         if isinstance(loop_decision, dict):
             source = str(loop_decision.get("source") or "").strip().lower()
             if source.startswith("submission"):
-                loop_value = _to_float(loop_decision.get("value"))
+                loop_value = tolerant_finite_float(loop_decision.get("value"))
                 if isinstance(loop_value, float) and math.isfinite(loop_value):
                     return float(loop_value)
     evaluation = load_kernel_metrics(metrics_path, metric_direction, target_metric)
@@ -605,11 +605,3 @@ def _load_submit_fingerprints(run_dir: Path) -> list[str]:
 
 def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
     return _submit_attempts.load_latest_submit_attempt(run_dir)
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)
-
-
-def _to_int(value: object) -> int | None:
-    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)

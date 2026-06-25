@@ -16,7 +16,7 @@ from kagglebot.eval import (
     UncertaintyEstimator,
 )
 from kagglebot.json_utils import load_json_object, write_json_object
-from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.score_utils import should_update_best_score
 from kagglebot.solver.io import load_competition_data
 
@@ -364,10 +364,10 @@ def resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations
     history = _evaluation_history(payload)
     best: float | None = None
     for item in history:
-        iteration = _to_int(item.get("iteration"))
+        iteration = tolerant_int(item.get("iteration"))
         if iteration is not None and iteration > max_iterations:
             continue
-        score = _to_float(item.get("readiness_score"))
+        score = tolerant_finite_float(item.get("readiness_score"))
         if score is None:
             continue
         if should_update_best_score(best, score, direction, 0.0):
@@ -381,18 +381,18 @@ def resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[flo
         return None, 0
     rows: list[dict[str, object]] = []
     for item in _evaluation_history(payload):
-        iteration = _to_int(item.get("iteration"))
+        iteration = tolerant_int(item.get("iteration"))
         if iteration is None or iteration > max_iterations:
             continue
         rows.append(item)
     if not rows:
         return None, 0
-    rows.sort(key=lambda item: int(_to_int(item.get("iteration")) or 0))
+    rows.sort(key=lambda item: int(tolerant_int(item.get("iteration")) or 0))
     streak = 0
     prev_score: float | None = None
     for item in rows:
-        score = _to_float(item.get("readiness_score"))
-        std = _to_float(item.get("std"))
+        score = tolerant_finite_float(item.get("readiness_score"))
+        std = tolerant_finite_float(item.get("std"))
         if score is None:
             continue
         if prev_score is not None and std is not None:
@@ -411,11 +411,3 @@ def _evaluation_history(payload: dict[str, object]) -> list[dict[str, object]]:
         latest = payload.get("latest")
         history = [latest] if isinstance(latest, dict) else []
     return [item for item in history if isinstance(item, dict)]
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)
-
-
-def _to_int(value: object) -> int | None:
-    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)

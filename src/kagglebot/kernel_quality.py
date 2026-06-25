@@ -5,7 +5,7 @@ from collections.abc import Iterator
 
 from kagglebot import plan_policy, score_progress, score_sources
 from kagglebot.metric_matching import metrics_equivalent
-from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 
 QUALITY_GUARD_BASELINE_REL_MARGIN = 0.01
 QUALITY_GUARD_BASELINE_ABS_MARGIN = 1e-6
@@ -51,14 +51,6 @@ HIGH_CAPACITY_MARKERS = (
     "stack",
 )
 EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)
-
-
-def _to_int(value: object) -> int | None:
-    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
 
 
 def is_significantly_worse(
@@ -165,7 +157,7 @@ def extract_cv_breakdown_by_model_node(payload: dict[str, object] | None) -> dic
         match = MODEL_NODE_METRIC_KEY.match(key.strip())
         if match is None:
             continue
-        parsed = _to_float(value)
+        parsed = tolerant_finite_float(value)
         if parsed is None:
             continue
         out[(int(match.group("model_id")), int(match.group("node_type")))] = float(parsed)
@@ -220,7 +212,7 @@ def detect_subgroup_collapse_signal(
         for key, value in step_buckets.items():
             if not isinstance(key, str):
                 continue
-            parsed = _to_float(value)
+            parsed = tolerant_finite_float(value)
             if parsed is None:
                 continue
             parsed_buckets.append((key, float(parsed)))
@@ -287,7 +279,7 @@ def detect_step_bucket_collapse_signal(
     step_bucket_scores: list[float] = []
     if isinstance(step_bucket_payload, dict):
         for value in step_bucket_payload.values():
-            parsed = _to_float(value)
+            parsed = tolerant_finite_float(value)
             if parsed is not None:
                 step_bucket_scores.append(float(parsed))
     step_bucket_collapse = False
@@ -566,7 +558,7 @@ def max_nested_float(payload: dict[str, object], keys: tuple[str, ...]) -> float
         for key, value in node.items():
             if str(key).strip().lower() not in normalized_keys:
                 continue
-            parsed = _to_float(value)
+            parsed = tolerant_finite_float(value)
             if parsed is not None:
                 values.append(float(parsed))
     return max(values) if values else None
@@ -579,7 +571,7 @@ def max_nested_int(payload: dict[str, object], keys: tuple[str, ...]) -> int | N
         for key, value in node.items():
             if str(key).strip().lower() not in normalized_keys:
                 continue
-            parsed = _to_int(value)
+            parsed = tolerant_int(value)
             if parsed is not None:
                 values.append(int(parsed))
     return max(values) if values else None
@@ -592,7 +584,7 @@ def min_nested_int(payload: dict[str, object], keys: tuple[str, ...]) -> int | N
         for key, value in node.items():
             if str(key).strip().lower() not in normalized_keys:
                 continue
-            parsed = _to_int(value)
+            parsed = tolerant_int(value)
             if parsed is not None:
                 values.append(int(parsed))
     return min(values) if values else None
@@ -788,7 +780,7 @@ def extract_pipeline_candidates(payload: dict[str, object]) -> list[dict[str, ob
 
 def pipeline_float(pipeline: dict[str, object], keys: tuple[str, ...]) -> float | None:
     for key in keys:
-        parsed = _to_float(pipeline.get(key))
+        parsed = tolerant_finite_float(pipeline.get(key))
         if parsed is not None:
             return float(parsed)
     return None
@@ -932,10 +924,10 @@ def prediction_count_mean(pipeline: dict[str, object]) -> float | None:
     for split in ("test", "submission", "val", "holdout"):
         split_summary = summary.get(split)
         if isinstance(split_summary, dict):
-            parsed = _to_float(split_summary.get("mean"))
+            parsed = tolerant_finite_float(split_summary.get("mean"))
             if parsed is not None:
                 return float(parsed)
-    parsed = _to_float(summary.get("mean"))
+    parsed = tolerant_finite_float(summary.get("mean"))
     if parsed is not None:
         return float(parsed)
     return None
