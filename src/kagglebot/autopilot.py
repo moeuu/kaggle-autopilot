@@ -5528,9 +5528,7 @@ def _attempt_submit(
             outcome=ledger_outcome,
         ),
     )
-    _submit_failure_context.mark_submit_failure_context_resolved(
-        run_dir=run_dir, resolution="submitted", submission_ref=submission_ref
-    )
+    _submit_failure_context.mark_submit_failure_context_submitted(run_dir=run_dir, submission_ref=submission_ref)
     return _submit_attempts.build_successful_submit_result_payload(
         message=message,
         submission_ref=submission_ref,

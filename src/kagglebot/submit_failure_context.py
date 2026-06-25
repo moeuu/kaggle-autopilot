@@ -70,6 +70,14 @@ def mark_submit_failure_context_resolved(
     save_submit_failure_context(run_dir, payload)
 
 
+def mark_submit_failure_context_submitted(*, run_dir: Path, submission_ref: str) -> None:
+    mark_submit_failure_context_resolved(
+        run_dir=run_dir,
+        resolution="submitted",
+        submission_ref=submission_ref,
+    )
+
+
 def build_submit_failure_context_payload(
     *,
     now_iso: str,
