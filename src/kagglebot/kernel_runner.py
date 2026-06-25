@@ -21,12 +21,12 @@ from pathlib import Path
 import psutil
 from rich import print
 
+from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot.compute import detect_local_gpu
 from kagglebot.env_utils import parse_float_value, parse_int_value
 from kagglebot.exceptions import (
     KaggleCliError,
     KaggleNetworkError,
-    KernelCapacityError,
     KernelFailedError,
     KernelStillRunningError,
     KernelTimeoutError,
@@ -95,8 +95,6 @@ _LOCAL_KERNEL_DEFAULT_STALL_SEC = 900.0
 _LOCAL_KERNEL_MEMORY_CAP_RATIO = 0.80
 _LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
-_REMOTE_KERNEL_QUEUED_TIMEOUT_ENV = "KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC"
-_REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC = 1800.0
 _SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
 _ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
 _ZERO_OVERLAP_DRIFT_MIN_ABS_CORR = 0.08
@@ -1279,7 +1277,9 @@ class KernelJobMonitor:
         _clear_stale_kernel_output(preparation.output_dir)
         push_attempt = 1
         kernel_id = preparation.kernel_id
-        pending_kernel_id = _read_pending_remote_kernel_id(preparation.logs_dir) or _last_pushed_kernel_id(
+        pending_kernel_id = _remote_kernel_state.read_pending_remote_kernel_id(
+            preparation.logs_dir
+        ) or _remote_kernel_state.last_pushed_kernel_id(
             preparation.logs_dir,
             kernel_id,
         )
@@ -1297,7 +1297,7 @@ class KernelJobMonitor:
         push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
         _write_push_log(preparation.logs_dir, push_attempt, push_output)
         _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
-        pushed_kernel_id = _extract_kernel_id_from_push(push_output)
+        pushed_kernel_id = _remote_kernel_state.extract_kernel_id_from_push(push_output)
         if pushed_kernel_id and pushed_kernel_id != kernel_id:
             print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
             kernel_id = pushed_kernel_id
@@ -1309,7 +1309,7 @@ class KernelJobMonitor:
             push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
             _write_push_log(preparation.logs_dir, push_attempt, push_output)
             _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
-            pushed_kernel_id = _extract_kernel_id_from_push(push_output)
+            pushed_kernel_id = _remote_kernel_state.extract_kernel_id_from_push(push_output)
             if pushed_kernel_id and pushed_kernel_id != kernel_id:
                 print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
                 kernel_id = pushed_kernel_id
@@ -1328,7 +1328,7 @@ class KernelJobMonitor:
             slug=slug,
             timeout_minutes=timeout_minutes,
         )
-        _clear_pending_remote_kernel(preparation.logs_dir)
+        _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
         print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
         kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
         return kernel_id
@@ -1344,27 +1344,6 @@ class KernelLogParser:
 def sanitize_kernel_slug(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
     return cleaned[:50]
-
-
-_KERNEL_URL_RE = re.compile(
-    r"https?://(?:www\.)?kaggle\.com/(?:code/)?(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)"
-)
-_KERNEL_ID_RE = re.compile(r"(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)")
-
-
-def _extract_kernel_id_from_push(output: str) -> str | None:
-    if not output:
-        return None
-    match = _KERNEL_URL_RE.search(output)
-    if match:
-        return f"{match.group('user')}/{match.group('slug')}"
-    for line in output.splitlines():
-        if "kernel" not in line.lower():
-            continue
-        match = _KERNEL_ID_RE.search(line)
-        if match:
-            return f"{match.group('user')}/{match.group('slug')}"
-    return None
 
 
 def _extract_invalid_kernel_push_sources(output: str) -> dict[str, list[str]]:
@@ -5031,50 +5010,6 @@ STATUS_ERROR_SLEEP = 10.0
 MAX_STATUS_ERRORS = 6
 KERNEL_REGISTER_RETRIES = 24
 KERNEL_REGISTER_SLEEP = 5.0
-PENDING_REMOTE_KERNEL_FILENAME = "remote_kernel_pending.json"
-
-
-def _pending_remote_kernel_path(logs_dir: Path) -> Path:
-    return logs_dir / PENDING_REMOTE_KERNEL_FILENAME
-
-
-def _write_pending_remote_kernel(logs_dir: Path, *, kernel_id: str, kernel_slug: str) -> None:
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "kernel_id": kernel_id,
-        "kernel_slug": kernel_slug,
-        "recorded_at_unix": time.time(),
-    }
-    write_json_object(_pending_remote_kernel_path(logs_dir), payload)
-
-
-def _clear_pending_remote_kernel(logs_dir: Path) -> None:
-    try:
-        _pending_remote_kernel_path(logs_dir).unlink()
-    except FileNotFoundError:
-        return
-
-
-def _read_pending_remote_kernel_id(logs_dir: Path) -> str | None:
-    payload = load_json_object(_pending_remote_kernel_path(logs_dir))
-    kernel_id = payload.get("kernel_id") if isinstance(payload, dict) else None
-    if kernel_id is None:
-        return None
-    return str(kernel_id).strip() or None
-
-
-def _last_pushed_kernel_id(logs_dir: Path, default_kernel_id: str) -> str | None:
-    for path in sorted(logs_dir.glob("kernel_push-*.txt"), reverse=True):
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        pushed_kernel_id = _extract_kernel_id_from_push(text)
-        if pushed_kernel_id:
-            return pushed_kernel_id
-        if "successfully pushed" in text.lower():
-            return default_kernel_id
-    return None
 
 
 def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
@@ -5087,55 +5022,6 @@ def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
     raise KernelTimeoutError(
         f"Kaggle kernel {kernel_id} did not complete within the local wait budget; last status was {status}."
     )
-
-
-def _remote_kernel_queued_timeout_sec() -> float | None:
-    raw = os.getenv(_REMOTE_KERNEL_QUEUED_TIMEOUT_ENV)
-    if raw is None or raw.strip() == "":
-        return _REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC
-    try:
-        value = float(raw)
-    except ValueError:
-        return _REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC
-    if value <= 0:
-        return None
-    return value
-
-
-def _raise_kernel_queued_timeout(kernel_id: str, elapsed_sec: float, timeout_sec: float) -> None:
-    raise KernelCapacityError(
-        f"Kaggle kernel {kernel_id} stayed queued for {int(elapsed_sec)}s "
-        f"(queue timeout {int(timeout_sec)}s). Kaggle workers are not starting this run.",
-        output=f"KernelWorkerStatus.QUEUED elapsed={int(elapsed_sec)} timeout={int(timeout_sec)}",
-    )
-
-
-def _last_kernel_push_wall_time(logs_dir: Path) -> float | None:
-    latest: float | None = None
-    for path in logs_dir.glob("kernel_push-*.txt"):
-        try:
-            timestamp = path.stat().st_mtime
-        except OSError:
-            continue
-        if latest is None or timestamp > latest:
-            latest = timestamp
-    return latest
-
-
-def _queued_since_from_push_logs(logs_dir: Path) -> float | None:
-    pushed_at = _last_kernel_push_wall_time(logs_dir)
-    if pushed_at is None:
-        return None
-    elapsed = max(0.0, time.time() - pushed_at)
-    return time.monotonic() - elapsed
-
-
-def _is_remote_kernel_queue_stale(queued_since: float | None, now: float | None = None) -> bool:
-    timeout_sec = _remote_kernel_queued_timeout_sec()
-    if queued_since is None or timeout_sec is None:
-        return False
-    current = time.monotonic() if now is None else now
-    return current - queued_since >= timeout_sec
 
 
 def _wait_for_kernel_and_record_pending(
@@ -5155,7 +5041,11 @@ def _wait_for_kernel_and_record_pending(
             initial_queued_since=initial_queued_since,
         )
     except KernelStillRunningError:
-        _write_pending_remote_kernel(preparation.logs_dir, kernel_id=kernel_id, kernel_slug=preparation.kernel_slug)
+        _remote_kernel_state.write_pending_remote_kernel(
+            preparation.logs_dir,
+            kernel_id=kernel_id,
+            kernel_slug=preparation.kernel_slug,
+        )
         raise
 
 
@@ -5169,7 +5059,11 @@ def _resume_prior_kernel_if_active(
     try:
         output = kernels_status(kernel_id, slug=slug, dry_run=False)
     except KaggleCliError as exc:
-        _write_pending_remote_kernel(preparation.logs_dir, kernel_id=kernel_id, kernel_slug=preparation.kernel_slug)
+        _remote_kernel_state.write_pending_remote_kernel(
+            preparation.logs_dir,
+            kernel_id=kernel_id,
+            kernel_slug=preparation.kernel_slug,
+        )
         raise KernelStillRunningError(
             f"Kaggle kernel {kernel_id} has a prior push record, but its status could not be verified; "
             "refusing to push a duplicate version."
@@ -5177,7 +5071,7 @@ def _resume_prior_kernel_if_active(
 
     status = parse_kernel_status(output)
     if is_kernel_status_failed(status):
-        _clear_pending_remote_kernel(preparation.logs_dir)
+        _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel failed ({status}); pushing a new version")
         return None
     if not (is_kernel_status_running(status) or is_kernel_status_complete(status)):
@@ -5185,14 +5079,16 @@ def _resume_prior_kernel_if_active(
         return None
 
     initial_queued_since = (
-        _queued_since_from_push_logs(preparation.logs_dir) if is_kernel_status_queued(status) else None
+        _remote_kernel_state.queued_since_from_push_logs(preparation.logs_dir)
+        if is_kernel_status_queued(status)
+        else None
     )
     if (
         is_kernel_status_queued(status)
         and preparation.supersede_stale_queued
-        and _is_remote_kernel_queue_stale(initial_queued_since)
+        and _remote_kernel_state.is_remote_kernel_queue_stale(initial_queued_since)
     ):
-        _clear_pending_remote_kernel(preparation.logs_dir)
+        _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel is stale queued ({status}); pushing a new version")
         return None
 
@@ -5206,7 +5102,7 @@ def _resume_prior_kernel_if_active(
             timeout_minutes=timeout_minutes,
             initial_queued_since=initial_queued_since,
         )
-    _clear_pending_remote_kernel(preparation.logs_dir)
+    _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
     print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
     kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
     return kernel_id
@@ -5229,7 +5125,7 @@ def _wait_for_kernel(
     log_state = _KernelLogState()
     status_errors = 0
     queued_since = initial_queued_since
-    queued_timeout_sec = _remote_kernel_queued_timeout_sec()
+    queued_timeout_sec = _remote_kernel_state.remote_kernel_queued_timeout_sec()
     while True:
         try:
             output = kernels_status(kernel_id, slug=slug, dry_run=False)
@@ -5277,7 +5173,7 @@ def _wait_for_kernel(
             if queued_since is None:
                 queued_since = now
             if queued_timeout_sec is not None and now - queued_since >= queued_timeout_sec:
-                _raise_kernel_queued_timeout(kernel_id, now - queued_since, queued_timeout_sec)
+                _remote_kernel_state.raise_kernel_queued_timeout(kernel_id, now - queued_since, queued_timeout_sec)
         else:
             queued_since = None
         if now - last_log_fetch >= LOG_POLL_INTERVAL:

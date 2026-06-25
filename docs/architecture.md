@@ -279,7 +279,8 @@ Recommended extraction order:
    side-effect orchestration into a typed service that coordinates the existing `submit_attempts`, `submit_stage`,
    `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
-   objects and shared `kaggle_cli_errors.py` / `kernel_status.py` predicates rather than raw CLI stdout/stderr parsing.
+   objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
+   CLI stdout/stderr parsing or ad hoc pending-run files.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` so agent plan guardrails and
    autopilot execution cannot drift on workload classification.
 7. Agent I/O helpers: keep prompt/response transcript display, response-file reads, capacity-error detection, and retry

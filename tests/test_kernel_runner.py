@@ -2506,23 +2506,6 @@ def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_non_object_p
         kernel_runner._validate_local_kernel_plan_runtime_hyperparameters(plan_path)
 
 
-def test_read_pending_remote_kernel_id_ignores_invalid_or_non_object_payload(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
-    logs_dir = tmp_path / "logs"
-    logs_dir.mkdir()
-    path = logs_dir / kernel_runner.PENDING_REMOTE_KERNEL_FILENAME
-
-    path.write_text("{", encoding="utf-8")
-    assert kernel_runner._read_pending_remote_kernel_id(logs_dir) is None
-
-    path.write_text("[]", encoding="utf-8")
-    assert kernel_runner._read_pending_remote_kernel_id(logs_dir) is None
-
-    kernel_runner._write_pending_remote_kernel(logs_dir, kernel_id="user/kernel", kernel_slug="kernel")
-    assert kernel_runner._read_pending_remote_kernel_id(logs_dir) == "user/kernel"
-
-
 def test_ensure_local_sample_submission_file_expands_placeholder_template(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
