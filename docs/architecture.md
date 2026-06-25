@@ -79,8 +79,9 @@ Split-strategy policy, evaluation seed/repeat normalization, rank-force threshol
 competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
 toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
 incrementally.
-Submit-gate normalization, target/top1 checks, quality reason soft overrides, daily-limit row counting, and slot spacing live in
-`src/kagglebot/submission_policy.py`, leaving Kaggle API quota lookup and ledger side effects in the orchestration layer.
+Submit-gate normalization, target/top1 checks, quality reason soft overrides, daily-limit row counting, daily quota
+fallback policy, and slot spacing live in `src/kagglebot/submission_policy.py`; the loop supplies the Kaggle fetch
+adapter and ledger fallback count.
 Explicit submit decision objects such as `QualitySubmitOverrideDecision`, `InitialSubmitProbeDecision`, and
 `LimitedSubmissionHoldbackDecision` now carry soft override/probe/holdback results back to the loop instead of spreading
 that state across several booleans.
@@ -267,6 +268,7 @@ The next high-value modernization work is:
    decisions, initial artifact-mode resolution, and kernel push version-label inference now call `submit_notebook.py`
    directly. Previous-submission history loading now calls `submission_history.py` directly. Metric-recheck OOF column
    selection and fold-score list parsing now call `kernel_metrics.py` directly.
+   Daily quota count/fallback decisions now call `submission_policy.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.

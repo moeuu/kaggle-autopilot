@@ -47,7 +47,6 @@ from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot_state import (
     _copy_kernel_support_artifacts_to_iteration_dir,
     _copy_submission_artifact_to_iteration_dir,
-    _count_successful_submit_attempts,
     _has_successful_submit_attempt,
     _load_latest_submit_attempt,
     _load_run_state,
@@ -1631,11 +1630,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submission_limit_per_day=submission_limit_per_day,
             )
             is_final_iteration = iteration >= max_iterations
-            successful_submit_count = _submission_count_for_daily_limit(
+            successful_submit_count = _submission_policy.submission_count_for_daily_limit(
                 slug=config.slug,
-                run_dir=run_dir,
+                fallback_count=_submit_attempts.count_successful_submit_attempts(run_dir),
                 submission_limit_per_day=submission_limit_per_day,
                 dry_run=config.dry_run,
+                fetch_submission_rows=lambda current_slug, dry_run: list_competition_submissions(
+                    current_slug,
+                    dry_run=dry_run,
+                ),
+                on_warning=print,
             )
             spare_daily_submission_slot = _submission_policy.has_spare_daily_submission_slot(
                 submission_limit_per_day=submission_limit_per_day,
@@ -3952,38 +3956,6 @@ def _build_kernel_quality_guard(
         "code_reference": code_reference_signal,
         "code_reference_regression": code_reference_regression_signal,
     }
-
-
-def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) -> int | None:
-    if dry_run:
-        return 0
-    try:
-        rows = list_competition_submissions(slug, dry_run=dry_run)
-    except Exception as exc:  # noqa: BLE001 - quota lookup must not fail a training iteration.
-        print(f"[yellow]submit quota warning[/yellow]: could not fetch today's Kaggle submissions ({exc}).")
-        return None
-    now = datetime.now(UTC)
-    return max(
-        _submission_policy.count_submission_rows_on_utc_day(rows, now=now),
-        _submission_policy.count_submission_rows_in_recent_window(rows, now=now),
-    )
-
-
-def _submission_count_for_daily_limit(
-    *,
-    slug: str,
-    run_dir: Path,
-    submission_limit_per_day: int | None,
-    dry_run: bool = False,
-) -> int:
-    fallback_count = _count_successful_submit_attempts(run_dir)
-    if not isinstance(submission_limit_per_day, int) or submission_limit_per_day <= 0:
-        return fallback_count
-
-    daily_count = _count_daily_competition_submissions(slug, dry_run=dry_run)
-    if daily_count is None:
-        return fallback_count
-    return max(0, int(daily_count))
 
 
 def _kernel_source_preflight_error(*, config: AutopilotConfig) -> str | None:

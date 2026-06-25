@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -450,3 +451,51 @@ def count_submission_rows_in_recent_window(
         if ts is not None and window_start <= ts <= now_utc:
             count += 1
     return count
+
+
+def count_daily_competition_submissions(
+    slug: str,
+    *,
+    dry_run: bool = False,
+    fetch_submission_rows: Callable[[str, bool], list[dict[str, str]]],
+    now: datetime | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> int | None:
+    if dry_run:
+        return 0
+    try:
+        rows = fetch_submission_rows(slug, dry_run)
+    except Exception as exc:  # noqa: BLE001 - quota lookup must not fail a training iteration.
+        if on_warning is not None:
+            on_warning(f"[yellow]submit quota warning[/yellow]: could not fetch today's Kaggle submissions ({exc}).")
+        return None
+    now_utc = now or datetime.now(UTC)
+    return max(
+        count_submission_rows_on_utc_day(rows, now=now_utc),
+        count_submission_rows_in_recent_window(rows, now=now_utc),
+    )
+
+
+def submission_count_for_daily_limit(
+    *,
+    slug: str,
+    fallback_count: int,
+    submission_limit_per_day: int | None,
+    dry_run: bool = False,
+    fetch_submission_rows: Callable[[str, bool], list[dict[str, str]]],
+    now: datetime | None = None,
+    on_warning: Callable[[str], None] | None = None,
+) -> int:
+    if not isinstance(submission_limit_per_day, int) or submission_limit_per_day <= 0:
+        return max(0, int(fallback_count))
+
+    daily_count = count_daily_competition_submissions(
+        slug,
+        dry_run=dry_run,
+        fetch_submission_rows=fetch_submission_rows,
+        now=now,
+        on_warning=on_warning,
+    )
+    if daily_count is None:
+        return max(0, int(fallback_count))
+    return max(0, int(daily_count))

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from kagglebot.submission_policy import (
+    count_daily_competition_submissions,
     count_submission_rows_in_recent_window,
     count_submission_rows_on_utc_day,
     decide_initial_submit_probe,
@@ -19,6 +20,7 @@ from kagglebot.submission_policy import (
     resolve_plan_submission_policy,
     should_attempt_submit_for_readiness,
     should_force_initial_submit,
+    submission_count_for_daily_limit,
     submission_gate_for_policy,
 )
 
@@ -353,3 +355,48 @@ def test_submission_row_counts_use_kaggle_cli_dates() -> None:
 
     assert count_submission_rows_on_utc_day(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
     assert count_submission_rows_in_recent_window(rows, now=datetime(2026, 5, 9, 16, tzinfo=UTC)) == 2
+
+
+def test_count_daily_competition_submissions_uses_max_of_utc_day_and_recent_window() -> None:
+    rows = [
+        {"date": "2026-05-09 06:16:21.527000", "status": "COMPLETE"},
+        {"date": "2026-05-08 22:44:27.263000", "status": "COMPLETE"},
+        {"date": "not-a-date", "status": "COMPLETE"},
+    ]
+
+    count = count_daily_competition_submissions(
+        "demo",
+        fetch_submission_rows=lambda slug, dry_run: rows,
+        now=datetime(2026, 5, 9, 16, tzinfo=UTC),
+    )
+
+    assert count == 2
+
+
+def test_submission_count_for_daily_limit_falls_back_without_limit_or_fetch() -> None:
+    assert (
+        submission_count_for_daily_limit(
+            slug="demo",
+            fallback_count=3,
+            submission_limit_per_day=None,
+            fetch_submission_rows=lambda slug, dry_run: [],
+        )
+        == 3
+    )
+
+    warnings: list[str] = []
+
+    def fail_fetch(slug: str, dry_run: bool) -> list[dict[str, str]]:
+        raise RuntimeError(f"boom {slug} {dry_run}")
+
+    assert (
+        submission_count_for_daily_limit(
+            slug="demo",
+            fallback_count=2,
+            submission_limit_per_day=5,
+            fetch_submission_rows=fail_fetch,
+            on_warning=warnings.append,
+        )
+        == 2
+    )
+    assert warnings

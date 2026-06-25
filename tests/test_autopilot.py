@@ -3477,7 +3477,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.25})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.autopilot._build_kernel_quality_guard", fake_quality_guard)
-    monkeypatch.setattr("kagglebot.autopilot._submission_count_for_daily_limit", lambda **kwargs: 1)
+    monkeypatch.setattr("kagglebot.submission_policy.submission_count_for_daily_limit", lambda **kwargs: 1)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.autopilot._wait_for_submission_outcome", lambda **kwargs: None)
     monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
