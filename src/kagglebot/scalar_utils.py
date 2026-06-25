@@ -35,3 +35,41 @@ def optional_int(value: object) -> int | None:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def parse_finite_float(value: object, *, allow_commas: bool = False) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if allow_commas:
+        text = text.replace(",", "")
+    if not text:
+        return None
+    return finite_float(text)
+
+
+def parse_int(
+    value: object,
+    *,
+    allow_commas: bool = False,
+    allow_float: bool = False,
+    require_integral_float: bool = True,
+) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if allow_commas:
+        text = text.replace(",", "")
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        if not allow_float:
+            return None
+    parsed = finite_float(text)
+    if parsed is None:
+        return None
+    if require_integral_float and not parsed.is_integer():
+        return None
+    return int(parsed)

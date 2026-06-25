@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from kagglebot.scalar_utils import parse_finite_float, parse_int
+
 _RANK_PAIR_RE = re.compile(r"(?P<rank>\d+)\s*/\s*(?P<total>\d+)")
 _TERMINAL_SUBMISSION_STATUSES = {"complete", "completed", "error", "failed", "cancelled", "canceled"}
 
@@ -282,27 +284,8 @@ class SubmissionOutcomeService:
 
     @staticmethod
     def _to_float(value: object) -> float | None:
-        if value is None:
-            return None
-        text = str(value).strip().replace(",", "")
-        if not text:
-            return None
-        try:
-            return float(text)
-        except ValueError:
-            return None
+        return parse_finite_float(value, allow_commas=True)
 
     @staticmethod
     def _to_int(value: object) -> int | None:
-        if value is None:
-            return None
-        text = str(value).strip().replace(",", "")
-        if not text:
-            return None
-        try:
-            return int(text)
-        except ValueError:
-            try:
-                return int(float(text))
-            except ValueError:
-                return None
+        return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)

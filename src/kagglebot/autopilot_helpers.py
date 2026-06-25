@@ -5,33 +5,15 @@ import re
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
+from kagglebot.scalar_utils import parse_finite_float, parse_int
 
 
 def _to_float(value: object) -> float | None:
-    if value is None:
-        return None
-    text = str(value).strip().replace(",", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    return parse_finite_float(value, allow_commas=True)
 
 
 def _to_int(value: object) -> int | None:
-    if value is None:
-        return None
-    text = str(value).strip().replace(",", "")
-    if not text:
-        return None
-    try:
-        return int(text)
-    except ValueError:
-        try:
-            return int(float(text))
-        except ValueError:
-            return None
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
 
 
 def _update_best_score(best: float | None, current: float, direction: str, min_improvement: float) -> bool:

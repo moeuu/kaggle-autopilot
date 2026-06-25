@@ -16,6 +16,7 @@ from kagglebot.campaign import (
     normalize_campaign_mode,
 )
 from kagglebot.json_utils import load_json_object
+from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.submission.outcome_service import SubmissionOutcomeService
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 
@@ -301,34 +302,11 @@ def _meets_target(value: float, target: float, direction: str) -> bool:
 
 
 def _to_float(value: object) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        parsed = float(value)
-    elif isinstance(value, str):
-        try:
-            parsed = float(value.strip())
-        except ValueError:
-            return None
-    else:
-        return None
-    return parsed if math.isfinite(parsed) else None
+    return parse_finite_float(value)
 
 
 def _to_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if math.isfinite(value) and value.is_integer() else None
-    if isinstance(value, str):
-        try:
-            parsed = float(value.strip())
-        except ValueError:
-            return None
-        return int(parsed) if math.isfinite(parsed) and parsed.is_integer() else None
-    return None
+    return parse_int(value, allow_float=True)
 
 
 def find_campaign_candidate_for_submission(
