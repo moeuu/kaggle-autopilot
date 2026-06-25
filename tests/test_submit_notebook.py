@@ -20,6 +20,7 @@ from kagglebot.submit_notebook import (
     notebook_kernel_submission_error,
     resolve_notebook_submit_artifact_mode,
     run_kaggle_submit_kernel_with_retry,
+    run_notebook_kernel_submission,
     run_submit_kernel_with_cpu_fallback,
 )
 
@@ -427,6 +428,81 @@ def test_run_submit_kernel_with_cpu_fallback_wraps_retry_failure() -> None:
         assert isinstance(exc.__cause__, SubmitKernelError)
     else:  # pragma: no cover
         raise AssertionError("expected wrapped retry failure")
+
+
+def test_run_notebook_kernel_submission_runs_kernel_and_submits_reference(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-2" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "kernel_push-001.txt").write_text("Kernel version 8 successfully pushed.\n", encoding="utf-8")
+
+    captured_kernel_kwargs: dict[str, object] = {}
+    captured_submit_kwargs: dict[str, object] = {}
+    messages: list[str] = []
+    copied_submission = tmp_path / "copied" / "submission.csv"
+
+    def run_submit_kernel(**kwargs):  # noqa: ANN003
+        captured_kernel_kwargs.update(kwargs)
+        kernel_submission = tmp_path / "kernel-output" / "submission.csv"
+        kernel_submission.parent.mkdir(parents=True)
+        kernel_submission.write_text("id,target\n1,0.2\n", encoding="utf-8")
+        return type(
+            "KernelResult",
+            (),
+            {"kernel_id": "user/demo-submit", "submission_path": kernel_submission},
+        )()
+
+    def copy_submission(source: Path) -> Path:
+        copied_submission.parent.mkdir(parents=True)
+        copied_submission.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        return copied_submission
+
+    def run_kaggle_submit_kernel(**kwargs):  # noqa: ANN003
+        captured_submit_kwargs.update(kwargs)
+        return type("SubmitResult", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    result, submission_ref, artifact_path = run_notebook_kernel_submission(
+        slug="demo",
+        run_id="run-1",
+        iteration=2,
+        iter_logs_dir=logs_dir,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name="submit-kernel",
+        accelerator="gpu",
+        strict_accelerator=False,
+        submission_path=submission_path,
+        message="submit message",
+        artifact_mode="inference",
+        dry_run=False,
+        timeout_minutes=60,
+        run_submit_kernel=run_submit_kernel,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        copy_submission_artifact=copy_submission,
+        classify_submit_error=lambda stdout, stderr, exit_code: {"reason": "unclassified_submit_error"},
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: False,
+        sleep=lambda seconds: None,
+        on_message=messages.append,
+        is_capacity_error=lambda exc: False,
+        is_push_error=lambda exc: False,
+    )
+
+    assert result.returncode == 0
+    assert submission_ref == "kernel:user/demo-submit"
+    assert artifact_path == copied_submission
+    assert captured_kernel_kwargs["enable_internet"] is False
+    assert captured_kernel_kwargs["mode"] == "inference"
+    assert captured_submit_kwargs == {
+        "slug": "demo",
+        "kernel": "user/demo-submit",
+        "message": "submit message",
+        "output_file": "submission.csv",
+        "version": "8",
+        "dry_run": False,
+    }
+    assert messages == ["[cyan]submit notebook[/cyan]: user/demo-submit"]
 
 
 def test_notebook_kernel_submission_error_preserves_kaggle_cli_details() -> None:

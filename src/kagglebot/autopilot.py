@@ -5523,7 +5523,7 @@ def _submit_with_notebook_kernel(
     iteration = _submit_stage.infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = config.paths.iter_dir(run_id, iteration)
     kaggle_user = resolve_kaggle_username(config.kaggle_username)
-    submit_kernel_kwargs = _submit_notebook.build_submit_kernel_run_kwargs(
+    return _submit_notebook.run_notebook_kernel_submission(
         slug=config.slug,
         run_id=run_id,
         iteration=iteration,
@@ -5531,55 +5531,26 @@ def _submit_with_notebook_kernel(
         kaggle_username=kaggle_user,
         kernel_name=config.kernel_name,
         accelerator=config.accelerator,
-        enable_internet=False,
+        strict_accelerator=config.strict_accelerator,
         submission_path=submission_path,
+        message=message,
         artifact_mode=artifact_mode,
         dry_run=config.dry_run,
         timeout_minutes=config.time_budget_min,
-    )
-    kernel_result = _submit_notebook.run_submit_kernel_with_cpu_fallback(
-        submit_kernel_kwargs=submit_kernel_kwargs,
         run_submit_kernel=run_submit_kernel,
-        decide_cpu_fallback=lambda exc: _submit_notebook.decide_submit_kernel_cpu_fallback_for_exception(
-            accelerator=config.accelerator,
-            strict_accelerator=config.strict_accelerator,
-            exc=exc,
-            is_capacity_error=lambda candidate: isinstance(candidate, KernelCapacityError),
-            is_push_error=lambda candidate: isinstance(candidate, KaggleCliError)
-            and _submit_notebook.is_submit_kernel_push_error(candidate),
-        ),
-        is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
-        wrap_error=_submit_notebook.notebook_kernel_submission_error,
-        on_message=print,
-    )
-
-    output_reference = _submit_notebook.build_notebook_submit_output_reference(
-        kernel_id=kernel_result.kernel_id,
-        kernel_submission_path=kernel_result.submission_path,
-        version_label=_submit_notebook.infer_kernel_submit_version_label(iter_dir / "logs"),
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
         copy_submission_artifact=lambda source: _copy_submission_artifact_to_iteration_dir(
             source=source,
             iter_dir=iter_dir,
         ),
-    )
-    submit_reference = output_reference.reference
-    print(f"[cyan]submit notebook[/cyan]: {submit_reference.kernel_ref}")
-    submit_kwargs = _submit_notebook.build_kaggle_submit_kernel_kwargs(
-        slug=config.slug,
-        reference=submit_reference,
-        message=message,
-        dry_run=config.dry_run,
-    )
-    submit_result = _submit_notebook.run_kaggle_submit_kernel_with_retry(
-        submit_kwargs=submit_kwargs,
-        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
-        submit_error_types=SubmissionCliError,
         classify_submit_error=classify_submit_error,
         should_retry_ambiguous=_submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
         sleep=time.sleep,
         on_message=print,
+        is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
+        is_push_error=lambda exc: isinstance(exc, KaggleCliError) and _submit_notebook.is_submit_kernel_push_error(exc),
+        iter_logs_dir=iter_dir / "logs",
     )
-    return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
 
 
 def _abort_submit_for_run(

@@ -219,6 +219,88 @@ def build_submit_kernel_run_kwargs(
     }
 
 
+def run_notebook_kernel_submission(
+    *,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    iter_logs_dir: Path,
+    base_dir: Path,
+    kaggle_username: str,
+    kernel_name: str | None,
+    accelerator: str,
+    strict_accelerator: bool,
+    submission_path: Path,
+    message: str,
+    artifact_mode: str | None,
+    dry_run: bool,
+    timeout_minutes: int | None,
+    run_submit_kernel: Callable[..., object],
+    run_kaggle_submit_kernel: Callable[..., object],
+    copy_submission_artifact: Callable[[Path], Path],
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
+    should_retry_ambiguous: Callable[..., bool],
+    sleep: Callable[[float], None],
+    on_message: Callable[[str], None],
+    is_capacity_error: Callable[[BaseException], bool],
+    is_push_error: Callable[[BaseException], bool],
+) -> tuple[object, str, Path | None]:
+    """Run the submit notebook and submit its Kaggle output reference."""
+    submit_kernel_kwargs = build_submit_kernel_run_kwargs(
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        base_dir=base_dir,
+        kaggle_username=kaggle_username,
+        kernel_name=kernel_name,
+        accelerator=accelerator,
+        enable_internet=False,
+        submission_path=submission_path,
+        artifact_mode=artifact_mode,
+        dry_run=dry_run,
+        timeout_minutes=timeout_minutes,
+    )
+    kernel_result = run_submit_kernel_with_cpu_fallback(
+        submit_kernel_kwargs=submit_kernel_kwargs,
+        run_submit_kernel=run_submit_kernel,
+        decide_cpu_fallback=lambda exc: decide_submit_kernel_cpu_fallback_for_exception(
+            accelerator=accelerator,
+            strict_accelerator=strict_accelerator,
+            exc=exc,
+            is_capacity_error=is_capacity_error,
+            is_push_error=is_push_error,
+        ),
+        is_capacity_error=is_capacity_error,
+        wrap_error=notebook_kernel_submission_error,
+        on_message=on_message,
+    )
+
+    output_reference = build_notebook_submit_output_reference(
+        kernel_id=str(getattr(kernel_result, "kernel_id")),
+        kernel_submission_path=getattr(kernel_result, "submission_path", None),
+        version_label=infer_kernel_submit_version_label(iter_logs_dir),
+        copy_submission_artifact=copy_submission_artifact,
+    )
+    submit_reference = output_reference.reference
+    on_message(f"[cyan]submit notebook[/cyan]: {submit_reference.kernel_ref}")
+    submit_kwargs = build_kaggle_submit_kernel_kwargs(
+        slug=slug,
+        reference=submit_reference,
+        message=message,
+        dry_run=dry_run,
+    )
+    submit_result = run_kaggle_submit_kernel_with_retry(
+        submit_kwargs=submit_kwargs,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        submit_error_types=SubmissionCliError,
+        classify_submit_error=classify_submit_error,
+        should_retry_ambiguous=should_retry_ambiguous,
+        sleep=sleep,
+        on_message=on_message,
+    )
+    return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
+
+
 def run_submit_kernel_with_cpu_fallback(
     *,
     submit_kernel_kwargs: dict[str, object],
