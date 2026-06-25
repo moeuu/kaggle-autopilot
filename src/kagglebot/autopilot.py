@@ -5435,10 +5435,15 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         latest_submit_attempt = _load_latest_submit_attempt(run_dir)
         submit_file_fix_required = _submit_autofix.submit_file_fix_required_for_attempt(latest_submit_attempt)
         if submit_file_fix_required:
-            submit_file_fix_baseline_path = _resolve_submit_autofix_submission_artifact(
-                config=config,
-                run_id=run_id,
-                run_dir=run_dir,
+            max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
+            submit_file_fix_baseline_path = _submit_failure_context.resolve_submit_autofix_submission_artifact(
+                run_state=_load_run_state(run_dir),
+                latest_submit_attempt=_load_latest_submit_attempt(run_dir),
+                failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
+                fallback_iteration_dirs=(
+                    config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
+                ),
+                resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
             )
             submit_file_fix_baseline_sha256 = _sha256_or_none(submit_file_fix_baseline_path)
         _prepared_submission_path, prepared_submission_summary = _prepare_submit_file_autofix(
@@ -6778,19 +6783,6 @@ def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path
     _submit_failure_context.save_submit_failure_context(run_dir, failure_context)
 
 
-def _resolve_submit_autofix_submission_artifact(*, config: AutopilotConfig, run_id: str, run_dir: Path) -> Path | None:
-    max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
-    return _submit_failure_context.resolve_submit_autofix_submission_artifact(
-        run_state=_load_run_state(run_dir),
-        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
-        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-        fallback_iteration_dirs=(
-            config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
-        ),
-        resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
-    )
-
-
 def _prepare_submit_file_autofix(
     *,
     config: AutopilotConfig,
@@ -6811,7 +6803,16 @@ def _prepare_submit_file_autofix(
     )
 
     def resolve_source() -> Path | None:
-        return _resolve_submit_autofix_submission_artifact(config=config, run_id=run_id, run_dir=run_dir)
+        max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
+        return _submit_failure_context.resolve_submit_autofix_submission_artifact(
+            run_state=_load_run_state(run_dir),
+            latest_submit_attempt=_load_latest_submit_attempt(run_dir),
+            failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
+            fallback_iteration_dirs=(
+                config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
+            ),
+            resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
+        )
 
     def save_repaired_path(fixed: Path) -> None:
         _save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
