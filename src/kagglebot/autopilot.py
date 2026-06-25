@@ -314,12 +314,12 @@ _nested_text = _kernel_quality.nested_text
 _build_external_label_transfer_quality_signal = _kernel_quality.build_external_label_transfer_quality_signal
 _build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
 _build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
+_build_candidate_selection_quality_signal = _kernel_quality.build_candidate_selection_quality_signal
 _pipeline_name_from_payload = _kernel_quality.pipeline_name_from_payload
 _extract_selected_pipeline_name = _kernel_quality.extract_selected_pipeline_name
 _extract_pipeline_candidates = _kernel_quality.extract_pipeline_candidates
 _pipeline_float = _kernel_quality.pipeline_float
 _find_selected_pipeline = _kernel_quality.find_selected_pipeline
-_detect_candidate_selection_mismatch = _kernel_quality.detect_candidate_selection_mismatch
 _prediction_count_mean = _kernel_quality.prediction_count_mean
 _detect_prediction_distribution_collapse = _kernel_quality.detect_prediction_distribution_collapse
 _build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
@@ -4692,16 +4692,15 @@ def _build_kernel_quality_guard(
     if bool(external_label_transfer_signal.get("hard_block")):
         block_submit = True
 
-    candidate_selection_mismatch = _detect_candidate_selection_mismatch(payload=payload, direction=direction)
-    if candidate_selection_mismatch is not None:
-        reasons.append("selected_pipeline_validation_mismatch")
-        warnings.append(
-            "candidate_selection_mismatch="
-            f"selected={candidate_selection_mismatch.get('selected')},"
-            f"selected_secondary={candidate_selection_mismatch.get('selected_secondary_score')},"
-            f"best_secondary_candidate={candidate_selection_mismatch.get('best_secondary_candidate')},"
-            f"best_secondary={candidate_selection_mismatch.get('best_secondary_score')}"
-        )
+    candidate_selection_signal = _build_candidate_selection_quality_signal(payload=payload, direction=direction)
+    for reason in candidate_selection_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in candidate_selection_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    candidate_selection_mismatch = candidate_selection_signal.get("mismatch")
+    if bool(candidate_selection_signal.get("detected")):
         if not force_submit:
             block_submit = True
 
@@ -4819,6 +4818,7 @@ def _build_kernel_quality_guard(
         "external_label_transfer": external_label_transfer_signal.get("transfer"),
         "external_label_transfer_signal": external_label_transfer_signal,
         "candidate_selection_mismatch": candidate_selection_mismatch,
+        "candidate_selection": candidate_selection_signal,
         "prediction_distribution_collapse": prediction_distribution_collapse,
         "code_reference": code_reference_signal,
     }

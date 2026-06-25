@@ -3,6 +3,7 @@ from __future__ import annotations
 from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_baseline_quality_signal,
+    build_candidate_selection_quality_signal,
     build_code_reference_quality_signal,
     build_external_label_transfer_quality_signal,
     build_oracle_override_signal,
@@ -377,6 +378,65 @@ def test_detect_candidate_selection_mismatch_reports_better_holdout_candidate() 
     assert mismatch is not None
     assert mismatch["selected"] == "cv_only_sparse"
     assert mismatch["best_secondary_candidate"] == "public_like_reference"
+
+
+def test_build_candidate_selection_quality_signal_reports_warning_and_reason() -> None:
+    signal = build_candidate_selection_quality_signal(
+        payload={
+            "chosen_pipeline": "cv_only_sparse",
+            "pipelines": [
+                {
+                    "name": "public_like_reference",
+                    "cv_score": 0.0497,
+                    "holdout_score": 0.0384,
+                },
+                {
+                    "name": "cv_only_sparse",
+                    "cv_score": 0.0752,
+                    "holdout_score": 0.0200,
+                },
+            ],
+        },
+        direction="maximize",
+    )
+
+    assert signal["detected"] is True
+    assert signal["reasons"] == ["selected_pipeline_validation_mismatch"]
+    assert signal["warnings"] == [
+        "candidate_selection_mismatch=selected=cv_only_sparse,"
+        "selected_secondary=0.02,best_secondary_candidate=public_like_reference,best_secondary=0.0384"
+    ]
+    mismatch = signal["mismatch"]
+    assert isinstance(mismatch, dict)
+    assert mismatch["best_secondary_candidate"] == "public_like_reference"
+
+
+def test_build_candidate_selection_quality_signal_allows_matching_selection() -> None:
+    signal = build_candidate_selection_quality_signal(
+        payload={
+            "chosen_pipeline": "public_like_reference",
+            "pipelines": [
+                {
+                    "name": "public_like_reference",
+                    "cv_score": 0.0497,
+                    "holdout_score": 0.0384,
+                },
+                {
+                    "name": "cv_only_sparse",
+                    "cv_score": 0.0752,
+                    "holdout_score": 0.0200,
+                },
+            ],
+        },
+        direction="maximize",
+    )
+
+    assert signal == {
+        "detected": False,
+        "mismatch": None,
+        "reasons": [],
+        "warnings": [],
+    }
 
 
 def test_detect_prediction_distribution_collapse_compares_candidate_means() -> None:

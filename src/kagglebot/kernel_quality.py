@@ -721,6 +721,32 @@ def detect_candidate_selection_mismatch(
     }
 
 
+def build_candidate_selection_quality_signal(
+    *,
+    payload: dict[str, object] | None,
+    direction: str,
+) -> dict[str, object]:
+    mismatch = detect_candidate_selection_mismatch(payload=payload, direction=direction)
+    detected = mismatch is not None
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if detected:
+        reasons.append("selected_pipeline_validation_mismatch")
+        warnings.append(
+            "candidate_selection_mismatch="
+            f"selected={mismatch.get('selected')},"
+            f"selected_secondary={mismatch.get('selected_secondary_score')},"
+            f"best_secondary_candidate={mismatch.get('best_secondary_candidate')},"
+            f"best_secondary={mismatch.get('best_secondary_score')}"
+        )
+    return {
+        "detected": detected,
+        "mismatch": mismatch,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
 def prediction_count_mean(pipeline: dict[str, object]) -> float | None:
     summary = pipeline.get("prediction_count_summary")
     if not isinstance(summary, dict):
