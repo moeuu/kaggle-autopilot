@@ -2175,72 +2175,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 leaderboard_rank_for_score=leaderboard_rank_for_score,
                             )
                             if rank_payload:
-                                outcome_payload.update(rank_payload)
-                                submission_rank = tolerant_int(rank_payload.get("rank"))
-                                submission_total_teams = tolerant_int(rank_payload.get("total_teams"))
-                                submission_rank_percentile = tolerant_finite_float(rank_payload.get("rank_percentile"))
-                                submission_rank_estimate = tolerant_int(rank_payload.get("estimated_rank"))
-                                submission_total_teams_estimate = tolerant_int(
-                                    rank_payload.get("estimated_total_teams")
+                                rank_state = _submit_stage.resolve_submission_rank_state(
+                                    rank_payload=rank_payload,
+                                    rank_force_major_max_percentile=rank_force_major_max_percentile,
+                                    rank_force_major_min_teams=rank_force_major_min_teams,
+                                    should_force_major_overhaul_by_rank=_should_force_major_overhaul_by_rank,
                                 )
-                                submission_rank_percentile_estimate = tolerant_finite_float(
-                                    rank_payload.get("estimated_rank_percentile")
-                                )
-                                estimate_source_raw = rank_payload.get("rank_estimate_source")
-                                if isinstance(estimate_source_raw, str) and estimate_source_raw.strip():
-                                    submission_rank_estimate_source = estimate_source_raw.strip()
-                                source_raw = rank_payload.get("rank_source")
-                                if source_raw is not None:
-                                    submission_rank_source = str(source_raw)
-                                if (
-                                    submission_rank is not None
-                                    and submission_total_teams is not None
-                                    and submission_total_teams > 0
-                                ):
-                                    if submission_rank_percentile is None:
-                                        submission_rank_percentile = submission_rank / submission_total_teams
-                                    print(
-                                        _submit_stage.format_submission_rank_message(
-                                            rank=submission_rank,
-                                            total_teams=submission_total_teams,
-                                            rank_percentile=submission_rank_percentile,
-                                            source=submission_rank_source,
-                                        )
-                                    )
-                                    rank_forced_major_overhaul = _should_force_major_overhaul_by_rank(
-                                        rank=submission_rank,
-                                        total_teams=submission_total_teams,
-                                        max_percentile=rank_force_major_max_percentile,
-                                        min_teams=rank_force_major_min_teams,
-                                    )
-                                    if rank_forced_major_overhaul:
-                                        rank_force_reason = _submit_stage.format_rank_force_reason(
-                                            rank=submission_rank,
-                                            total_teams=submission_total_teams,
-                                            rank_percentile=submission_rank_percentile,
-                                            max_percentile=rank_force_major_max_percentile,
-                                            min_teams=rank_force_major_min_teams,
-                                            source=submission_rank_source,
-                                        )
-                                        print(f"[yellow]rank guard[/yellow]: {rank_force_reason}")
-                                elif (
-                                    submission_rank_estimate is not None
-                                    and submission_total_teams_estimate is not None
-                                    and submission_total_teams_estimate > 0
-                                ):
-                                    if submission_rank_percentile_estimate is None:
-                                        submission_rank_percentile_estimate = (
-                                            submission_rank_estimate / submission_total_teams_estimate
-                                        )
-                                    print(
-                                        _submit_stage.format_submission_rank_message(
-                                            rank=submission_rank_estimate,
-                                            total_teams=submission_total_teams_estimate,
-                                            rank_percentile=submission_rank_percentile_estimate,
-                                            source=submission_rank_estimate_source,
-                                            estimated=True,
-                                        )
-                                    )
+                                outcome_payload.update(rank_state.rank_payload)
+                                submission_rank = rank_state.rank
+                                submission_total_teams = rank_state.total_teams
+                                submission_rank_percentile = rank_state.rank_percentile
+                                submission_rank_source = rank_state.rank_source
+                                submission_rank_estimate = rank_state.estimated_rank
+                                submission_total_teams_estimate = rank_state.estimated_total_teams
+                                submission_rank_percentile_estimate = rank_state.estimated_rank_percentile
+                                submission_rank_estimate_source = rank_state.rank_estimate_source
+                                rank_forced_major_overhaul = rank_state.force_major_overhaul
+                                rank_force_reason = rank_state.force_reason
+                                for message in rank_state.messages:
+                                    print(message)
                         submitted_tracking_score, submitted_tracking_source = (
                             _submit_stage.submission_score_for_tracking(
                                 offline_score=decision_score,

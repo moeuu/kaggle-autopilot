@@ -53,6 +53,7 @@ from kagglebot.submit_stage import (
     resolve_submission_message,
     resolve_submission_outcome_after_submit,
     resolve_submission_rank_payload,
+    resolve_submission_rank_state,
     run_submit_stage_attempt,
     submission_score_for_tracking,
     update_submit_stage_artifact_mode,
@@ -1399,6 +1400,71 @@ def test_format_submission_rank_message_formats_observed_and_estimated_rank() ->
     assert observed == "[cyan]submission rank[/cyan]: 12/100 (percentile=12.00%) source=submission_row"
     assert estimated == (
         "[yellow]submission rank estimate[/yellow]: 20/200 (percentile=10.00%) source=leaderboard_score_estimate"
+    )
+
+
+def test_resolve_submission_rank_state_formats_observed_rank_and_guard() -> None:
+    calls: list[dict[str, object]] = []
+
+    def force_by_rank(**kwargs: object) -> bool:
+        calls.append(kwargs)
+        return True
+
+    state = resolve_submission_rank_state(
+        rank_payload={"rank": "120", "total_teams": "1000", "rank_source": "submission_row"},
+        rank_force_major_max_percentile=0.01,
+        rank_force_major_min_teams=200,
+        should_force_major_overhaul_by_rank=force_by_rank,
+    )
+
+    assert state.rank == 120
+    assert state.total_teams == 1000
+    assert state.rank_percentile == 0.12
+    assert state.rank_source == "submission_row"
+    assert state.force_major_overhaul is True
+    assert state.force_reason == (
+        "Leaderboard rank indicates large headroom for improvement: "
+        "120/1000 (percentile=12.00%, threshold=1.00%, min_teams=200). source=submission_row"
+    )
+    assert state.messages == (
+        "[cyan]submission rank[/cyan]: 120/1000 (percentile=12.00%) source=submission_row",
+        "[yellow]rank guard[/yellow]: "
+        "Leaderboard rank indicates large headroom for improvement: "
+        "120/1000 (percentile=12.00%, threshold=1.00%, min_teams=200). source=submission_row",
+    )
+    assert calls == [
+        {
+            "rank": 120,
+            "total_teams": 1000,
+            "max_percentile": 0.01,
+            "min_teams": 200,
+        }
+    ]
+
+
+def test_resolve_submission_rank_state_formats_estimated_rank_without_guard() -> None:
+    def force_by_rank(**kwargs: object) -> bool:
+        raise AssertionError("estimated rank should not trigger observed-rank guard")
+
+    state = resolve_submission_rank_state(
+        rank_payload={
+            "estimated_rank": "20",
+            "estimated_total_teams": "200",
+            "rank_estimate_source": "leaderboard_score_estimate",
+        },
+        rank_force_major_max_percentile=0.01,
+        rank_force_major_min_teams=200,
+        should_force_major_overhaul_by_rank=force_by_rank,
+    )
+
+    assert state.rank is None
+    assert state.estimated_rank == 20
+    assert state.estimated_total_teams == 200
+    assert state.estimated_rank_percentile == 0.1
+    assert state.rank_estimate_source == "leaderboard_score_estimate"
+    assert state.force_major_overhaul is False
+    assert state.messages == (
+        "[yellow]submission rank estimate[/yellow]: 20/200 (percentile=10.00%) source=leaderboard_score_estimate",
     )
 
 

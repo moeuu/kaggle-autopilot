@@ -360,7 +360,7 @@ Recommended extraction order:
    manual local validation/submit-blocker abort specs,
    submission polling/outcome abort specs, submission outcome
    classification and poll-result post-processing decisions, rank
-   payload/guard/display normalization, iteration submit-status formatting,
+   payload/guard/display/state normalization, iteration submit-status formatting,
    campaign-aware submission message resolution, submission iteration inference, iteration/fallback submit improvement
    gate decisions, tracking score selection/update, submission knowledge orchestration/context/default-insight
    preparation/record dispatch resolution, successful submit attempt/outcome/failure-context recording orchestration,

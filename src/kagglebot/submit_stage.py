@@ -71,6 +71,22 @@ class SubmittedTrackingScoreDecision:
 
 
 @dataclass(frozen=True)
+class SubmissionRankState:
+    rank_payload: dict[str, object]
+    rank: int | None
+    total_teams: int | None
+    rank_percentile: float | None
+    rank_source: str | None
+    estimated_rank: int | None
+    estimated_total_teams: int | None
+    estimated_rank_percentile: float | None
+    rank_estimate_source: str | None
+    force_major_overhaul: bool
+    force_reason: str | None
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class FallbackSubmitGateDecision:
     allow_submit: bool
     message: str
@@ -858,6 +874,90 @@ def format_submission_rank_message(
     source_text = f" source={source}" if source else ""
     prefix = "[yellow]submission rank estimate[/yellow]" if estimated else "[cyan]submission rank[/cyan]"
     return f"{prefix}: {rank}/{total_teams} (percentile={percentile_text}){source_text}"
+
+
+def resolve_submission_rank_state(
+    *,
+    rank_payload: dict[str, object],
+    rank_force_major_max_percentile: float,
+    rank_force_major_min_teams: int,
+    should_force_major_overhaul_by_rank: Callable[..., bool],
+) -> SubmissionRankState:
+    submission_rank = _to_int(rank_payload.get("rank"))
+    submission_total_teams = _to_int(rank_payload.get("total_teams"))
+    submission_rank_percentile = _to_float(rank_payload.get("rank_percentile"))
+    submission_rank_estimate = _to_int(rank_payload.get("estimated_rank"))
+    submission_total_teams_estimate = _to_int(rank_payload.get("estimated_total_teams"))
+    submission_rank_percentile_estimate = _to_float(rank_payload.get("estimated_rank_percentile"))
+
+    estimate_source_raw = rank_payload.get("rank_estimate_source")
+    submission_rank_estimate_source = (
+        estimate_source_raw.strip() if isinstance(estimate_source_raw, str) and estimate_source_raw.strip() else None
+    )
+    source_raw = rank_payload.get("rank_source")
+    submission_rank_source = str(source_raw) if source_raw is not None else None
+
+    messages: list[str] = []
+    rank_forced_major_overhaul = False
+    rank_force_reason: str | None = None
+    if submission_rank is not None and submission_total_teams is not None and submission_total_teams > 0:
+        if submission_rank_percentile is None:
+            submission_rank_percentile = submission_rank / submission_total_teams
+        messages.append(
+            format_submission_rank_message(
+                rank=submission_rank,
+                total_teams=submission_total_teams,
+                rank_percentile=submission_rank_percentile,
+                source=submission_rank_source,
+            )
+        )
+        rank_forced_major_overhaul = should_force_major_overhaul_by_rank(
+            rank=submission_rank,
+            total_teams=submission_total_teams,
+            max_percentile=rank_force_major_max_percentile,
+            min_teams=rank_force_major_min_teams,
+        )
+        if rank_forced_major_overhaul:
+            rank_force_reason = format_rank_force_reason(
+                rank=submission_rank,
+                total_teams=submission_total_teams,
+                rank_percentile=submission_rank_percentile,
+                max_percentile=rank_force_major_max_percentile,
+                min_teams=rank_force_major_min_teams,
+                source=submission_rank_source,
+            )
+            messages.append(f"[yellow]rank guard[/yellow]: {rank_force_reason}")
+    elif (
+        submission_rank_estimate is not None
+        and submission_total_teams_estimate is not None
+        and submission_total_teams_estimate > 0
+    ):
+        if submission_rank_percentile_estimate is None:
+            submission_rank_percentile_estimate = submission_rank_estimate / submission_total_teams_estimate
+        messages.append(
+            format_submission_rank_message(
+                rank=submission_rank_estimate,
+                total_teams=submission_total_teams_estimate,
+                rank_percentile=submission_rank_percentile_estimate,
+                source=submission_rank_estimate_source,
+                estimated=True,
+            )
+        )
+
+    return SubmissionRankState(
+        rank_payload=rank_payload,
+        rank=submission_rank,
+        total_teams=submission_total_teams,
+        rank_percentile=submission_rank_percentile,
+        rank_source=submission_rank_source,
+        estimated_rank=submission_rank_estimate,
+        estimated_total_teams=submission_total_teams_estimate,
+        estimated_rank_percentile=submission_rank_percentile_estimate,
+        rank_estimate_source=submission_rank_estimate_source,
+        force_major_overhaul=rank_forced_major_overhaul,
+        force_reason=rank_force_reason,
+        messages=tuple(messages),
+    )
 
 
 def format_iteration_submit_status_message(
