@@ -12,6 +12,7 @@ from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.exec_utils import run_command
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.scalar_utils import parse_finite_float as _to_float
 from kagglebot.submit_attempts import load_submit_attempt_rows
 
 
@@ -913,16 +914,6 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
         if isinstance(payload, dict):
             records.append(payload)
     return records
-
-
-def _to_float(value: object) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
 
 
 def _string_list(value: object) -> list[str]:

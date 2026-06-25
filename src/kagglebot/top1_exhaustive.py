@@ -13,6 +13,7 @@ from kagglebot.campaign import (
     list_candidates,
 )
 from kagglebot.json_utils import write_json_object
+from kagglebot.scalar_utils import non_nan_float as _to_float
 
 WIN_CONTRACT_FILENAME = "win_contract.json"
 PRIVATE_ROBUSTNESS_REPORT_FILENAME = "private_robustness_report.json"
@@ -472,13 +473,3 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]
-
-
-def _to_float(value: object) -> float | None:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if parsed != parsed:
-        return None
-    return parsed

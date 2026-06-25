@@ -6,6 +6,7 @@ from pathlib import Path
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
+from kagglebot.scalar_utils import parse_finite_float
 
 CODE_REFERENCE_IMPL_MARKER_PREFIX = "# KAGGLEBOT_CODE_REFERENCE_IMPLEMENTED:"
 CODE_SCORE_RE = re.compile(r"(?<!\d)(0\.\d{3,6})(?!\d)")
@@ -181,17 +182,4 @@ def _optional_string(value: object) -> str | None:
 
 
 def _to_float(value: object) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        parsed = float(value)
-    elif isinstance(value, str):
-        try:
-            parsed = float(value.strip())
-        except ValueError:
-            return None
-    else:
-        return None
-    if parsed != parsed:
-        return None
-    return parsed
+    return parse_finite_float(value)
