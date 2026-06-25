@@ -7,6 +7,7 @@ from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate
 from kagglebot.submit_stage import (
     build_default_submission_problem_insight,
     build_kaggle_credentials_missing_abort_spec,
+    build_local_submission_guardrail_abort_spec,
     build_rules_not_accepted_abort_spec,
     build_submission_outcome_error_detail,
     build_submit_stage_success_record,
@@ -135,6 +136,22 @@ def test_build_rules_not_accepted_abort_spec_sets_manual_blocker_contract() -> N
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "rules_not_accepted"
     assert spec.exit_code == 77
+
+
+def test_build_local_submission_guardrail_abort_spec_sets_local_blocker_contract() -> None:
+    spec = build_local_submission_guardrail_abort_spec(
+        error=RuntimeError("duplicate submission sha"),
+        exit_code=9,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.fingerprint == "fp::duplicate submission sha"
+    assert spec.error_kind == "permanent"
+    assert spec.reason == "local_submission_guardrail"
+    assert spec.message == "Local submission guardrail blocked submit: duplicate submission sha"
+    assert spec.stdout_tail == ""
+    assert spec.stderr_tail == "duplicate submission sha"
+    assert spec.exit_code == 9
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:

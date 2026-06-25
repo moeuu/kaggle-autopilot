@@ -5364,7 +5364,11 @@ def _attempt_submit(
                 time.sleep(error_action.wait_seconds)
                 continue
         except (DuplicateSubmissionError, SubmissionRateLimitError) as exc:
-            fingerprint = compute_error_fingerprint("", str(exc))
+            abort_spec = _submit_stage.build_local_submission_guardrail_abort_spec(
+                error=exc,
+                exit_code=getattr(exc, "exit_code", 1),
+                compute_error_fingerprint=compute_error_fingerprint,
+            )
             return _abort_submit_for_run(
                 config=config,
                 run_id=run_id,
@@ -5372,13 +5376,13 @@ def _attempt_submit(
                 submission_ref=submission_reference,
                 submission_artifact_path=submission_artifact_path,
                 code_fingerprint=submit_code_fingerprint,
-                fingerprint=fingerprint,
-                error_kind="permanent",
-                reason="local_submission_guardrail",
-                message=f"Local submission guardrail blocked submit: {exc}",
-                stdout_tail="",
-                stderr_tail=str(exc),
-                exit_code=getattr(exc, "exit_code", 1),
+                fingerprint=abort_spec.fingerprint,
+                error_kind=abort_spec.error_kind,
+                reason=abort_spec.reason,
+                message=abort_spec.message,
+                stdout_tail=abort_spec.stdout_tail,
+                stderr_tail=abort_spec.stderr_tail,
+                exit_code=abort_spec.exit_code,
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         except KaggleCliError as exc:

@@ -620,6 +620,24 @@ def build_rules_not_accepted_abort_spec(
     )
 
 
+def build_local_submission_guardrail_abort_spec(
+    *,
+    error: object,
+    exit_code: int | None,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec:
+    stderr_tail = str(error)
+    return SubmitAbortSpec(
+        fingerprint=compute_error_fingerprint("", stderr_tail),
+        error_kind="permanent",
+        reason="local_submission_guardrail",
+        message=f"Local submission guardrail blocked submit: {stderr_tail}",
+        stdout_tail="",
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
+    )
+
+
 def decide_submission_outcome_abort(
     *,
     outcome_status: str,
