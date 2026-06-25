@@ -288,6 +288,8 @@ The next high-value modernization work is:
    owning the state-file environment lookup or JSON update details.
    Initial `run.json` payload construction and final run summary payload construction now live in `autopilot_state.py`,
    keeping run-state schema assembly with the rest of the state/artifact helpers.
+   Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
+   solver and kernel-runtime submission writers share one row-count contract.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.
