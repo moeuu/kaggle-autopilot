@@ -18,15 +18,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import psutil
 from rich import print
 
 from kagglebot import kernel_logs as _kernel_logs
 from kagglebot import kernel_metadata as _kernel_metadata
 from kagglebot import local_kernel_duration as _local_kernel_duration
+from kagglebot import local_kernel_limits as _local_kernel_limits
 from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot.compute import detect_local_gpu
-from kagglebot.env_utils import parse_float_value, parse_int_value
 from kagglebot.exceptions import (
     KaggleCliError,
     KaggleNetworkError,
@@ -97,10 +96,6 @@ _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
 _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
 _LOCAL_KERNEL_EXIT_PIPE_DRAIN_SEC = 1.0
-_LOCAL_KERNEL_MEMORY_CAP_ENV = "KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB"
-_LOCAL_KERNEL_STALL_ENV = "KAGGLEBOT_LOCAL_KERNEL_STALL_SEC"
-_LOCAL_KERNEL_DEFAULT_STALL_SEC = 900.0
-_LOCAL_KERNEL_MEMORY_CAP_RATIO = 0.80
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 _SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
 _ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
@@ -305,59 +300,6 @@ def _validate_local_kernel_plan_runtime_hyperparameters(plan_path: Path) -> None
             )
 
 
-def _resolve_local_kernel_memory_cap_bytes(env: dict[str, str]) -> int | None:
-    override_raw = env.get(_LOCAL_KERNEL_MEMORY_CAP_ENV)
-    if override_raw is not None and str(override_raw).strip():
-        override_mb = parse_int_value(override_raw)
-        if override_mb is None:
-            raise KernelFailedError(f"{_LOCAL_KERNEL_MEMORY_CAP_ENV} must be a positive integer number of MiB.")
-        if override_mb <= 0:
-            raise KernelFailedError(f"{_LOCAL_KERNEL_MEMORY_CAP_ENV} must be a positive integer number of MiB.")
-        return override_mb * 1024 * 1024
-
-    available_bytes = int(psutil.virtual_memory().available)
-    if available_bytes <= 0:
-        return None
-    return max(512 * 1024 * 1024, int(available_bytes * _LOCAL_KERNEL_MEMORY_CAP_RATIO))
-
-
-def _resolve_local_kernel_stall_timeout_sec(env: dict[str, str]) -> float | None:
-    raw = str(env.get(_LOCAL_KERNEL_STALL_ENV, str(int(_LOCAL_KERNEL_DEFAULT_STALL_SEC)))).strip()
-    if not raw:
-        return _LOCAL_KERNEL_DEFAULT_STALL_SEC
-    value = parse_float_value(raw)
-    if value is None:
-        raise KernelFailedError(f"{_LOCAL_KERNEL_STALL_ENV} must be a positive number of seconds.")
-    if value <= 0:
-        return None
-    return max(5.0, value)
-
-
-def _local_kernel_process_tree_rss_bytes(pid: int) -> int:
-    try:
-        root = psutil.Process(pid)
-    except psutil.Error:
-        return 0
-
-    total = 0
-    seen: set[int] = set()
-    processes = [root]
-    try:
-        processes.extend(root.children(recursive=True))
-    except psutil.Error:
-        pass
-
-    for proc in processes:
-        if proc.pid in seen:
-            continue
-        seen.add(proc.pid)
-        try:
-            total += int(proc.memory_info().rss)
-        except psutil.Error:
-            continue
-    return total
-
-
 def _terminate_local_kernel_process(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
@@ -431,7 +373,7 @@ def _run_local_kernel_once(
         start_new_session=os.name != "nt",
     )
 
-    memory_cap_bytes = _resolve_local_kernel_memory_cap_bytes(current_env)
+    memory_cap_bytes = _local_kernel_limits.resolve_memory_cap_bytes(current_env)
     memory_state = {
         "peak_rss_bytes": 0,
         "killed_for_memory": False,
@@ -441,14 +383,14 @@ def _run_local_kernel_once(
         "killed_for_stall": False,
         "stall_kill_message": None,
     }
-    stall_timeout_sec = _resolve_local_kernel_stall_timeout_sec(current_env)
+    stall_timeout_sec = _local_kernel_limits.resolve_stall_timeout_sec(current_env)
     memory_stop = threading.Event()
 
     def _watch_memory() -> None:
         while not memory_stop.wait(_LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC):
             if proc.poll() is not None:
                 break
-            rss_bytes = _local_kernel_process_tree_rss_bytes(proc.pid)
+            rss_bytes = _local_kernel_limits.process_tree_rss_bytes(proc.pid)
             memory_state["peak_rss_bytes"] = max(memory_state["peak_rss_bytes"], rss_bytes)
             if memory_cap_bytes is None or rss_bytes <= memory_cap_bytes:
                 continue
@@ -607,7 +549,7 @@ def _run_local_kernel_once(
         memory_stop.set()
         memory_thread.join(timeout=1.0)
         memory_state["peak_rss_bytes"] = max(
-            memory_state["peak_rss_bytes"], _local_kernel_process_tree_rss_bytes(proc.pid)
+            memory_state["peak_rss_bytes"], _local_kernel_limits.process_tree_rss_bytes(proc.pid)
         )
 
     duration = time.monotonic() - start
@@ -761,7 +703,7 @@ def _apply_local_runtime_env_defaults(
     env.setdefault("KAGGLEBOT_NUM_WORKERS", "0")
     env.setdefault("KAGGLEBOT_TORCH_SHARING_STRATEGY", "file_system")
     env.setdefault("KAGGLEBOT_LOCAL_NOFILE", "4096")
-    env.setdefault(_LOCAL_KERNEL_STALL_ENV, str(int(_LOCAL_KERNEL_DEFAULT_STALL_SEC)))
+    env.setdefault(_local_kernel_limits.STALL_ENV, str(int(_local_kernel_limits.DEFAULT_STALL_SEC)))
     env.setdefault("PYTHONUNBUFFERED", "1")
     env["KAGGLEBOT_DO_TRAIN"] = "1"
     env["KAGGLEBOT_FORCE_TRAIN"] = "1"
@@ -771,7 +713,7 @@ def _apply_local_runtime_env_defaults(
     notes.append(f"defaulting KAGGLEBOT_NUM_WORKERS={env['KAGGLEBOT_NUM_WORKERS']} for local kernels")
     notes.append(f"defaulting KAGGLEBOT_TORCH_SHARING_STRATEGY={env['KAGGLEBOT_TORCH_SHARING_STRATEGY']}")
     notes.append(f"defaulting KAGGLEBOT_LOCAL_NOFILE={env['KAGGLEBOT_LOCAL_NOFILE']}")
-    notes.append(f"defaulting {_LOCAL_KERNEL_STALL_ENV}={env[_LOCAL_KERNEL_STALL_ENV]}")
+    notes.append(f"defaulting {_local_kernel_limits.STALL_ENV}={env[_local_kernel_limits.STALL_ENV]}")
     notes.append(f"defaulting PYTHONUNBUFFERED={env['PYTHONUNBUFFERED']}")
 
     if not _module_available("xgboost"):
@@ -1726,7 +1668,7 @@ def run_kernel_local(
     )
     for note in env_notes:
         print(f"[yellow]kernel local[/yellow]: {note}")
-    memory_cap_bytes = _resolve_local_kernel_memory_cap_bytes(env)
+    memory_cap_bytes = _local_kernel_limits.resolve_memory_cap_bytes(env)
     if memory_cap_bytes is not None:
         print(f"[yellow]kernel local[/yellow]: host memory guard active at {memory_cap_bytes // (1024 * 1024)} MiB RSS")
 

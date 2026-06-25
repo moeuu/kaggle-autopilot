@@ -227,8 +227,9 @@ The next high-value modernization work is:
    local training-progress parsing is now in `kernel_progress.py`, and kernel output/submission discovery is now in
    `kernel_outputs.py`; local artifact resolution/copying is now also in `kernel_outputs.py`; kernel log
    tailing/JSON-log formatting is now in `kernel_logs.py`; local duration-history estimation is now in
-   `local_kernel_duration.py`; kernel slug/metadata construction is now in `kernel_metadata.py`;
-   competition-specific generated code belongs in `kernel_runtime/`.
+   `local_kernel_duration.py`; local memory/stall guard policy is now in `local_kernel_limits.py`; kernel
+   slug/metadata construction is now in `kernel_metadata.py`; competition-specific generated code belongs in
+   `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
    helpers rather than open-coding tolerant dictionary access in orchestration modules.

@@ -2202,35 +2202,6 @@ def test_run_kernel_local_host_memory_watchdog_kills_memory_hog(
     assert stdout_log.exists()
 
 
-def test_local_kernel_memory_cap_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kagglebot import kernel_runner
-
-    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB", "64")
-    cap_bytes = kernel_runner._resolve_local_kernel_memory_cap_bytes(dict(os.environ))  # noqa: SLF001
-    assert cap_bytes == 64 * 1024 * 1024
-
-
-def test_local_kernel_memory_cap_env_rejects_invalid_override() -> None:
-    from kagglebot import kernel_runner
-
-    with pytest.raises(KernelFailedError, match="positive integer number of MiB"):
-        kernel_runner._resolve_local_kernel_memory_cap_bytes({"KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB": "64.5"})  # noqa: SLF001
-
-
-def test_local_kernel_stall_timeout_env_uses_minimum_and_disable() -> None:
-    from kagglebot import kernel_runner
-
-    assert kernel_runner._resolve_local_kernel_stall_timeout_sec({"KAGGLEBOT_LOCAL_KERNEL_STALL_SEC": "1"}) == 5.0  # noqa: SLF001
-    assert kernel_runner._resolve_local_kernel_stall_timeout_sec({"KAGGLEBOT_LOCAL_KERNEL_STALL_SEC": "0"}) is None  # noqa: SLF001
-
-
-def test_local_kernel_stall_timeout_env_rejects_invalid_override() -> None:
-    from kagglebot import kernel_runner
-
-    with pytest.raises(KernelFailedError, match="positive number of seconds"):
-        kernel_runner._resolve_local_kernel_stall_timeout_sec({"KAGGLEBOT_LOCAL_KERNEL_STALL_SEC": "nan"})  # noqa: SLF001
-
-
 def test_run_kernel_local_finds_artifacts_in_parent_outputs(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
