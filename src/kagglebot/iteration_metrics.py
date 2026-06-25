@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from kagglebot import kernel_quality, plan_policy, score_sources
-from kagglebot.autopilot_helpers import _update_best_score
 from kagglebot.eval import (
     DriftChecker,
     EvaluationReport,
@@ -18,6 +17,7 @@ from kagglebot.eval import (
 )
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.score_utils import should_update_best_score
 from kagglebot.solver.io import load_competition_data
 
 if TYPE_CHECKING:
@@ -370,7 +370,7 @@ def resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations
         score = _to_float(item.get("readiness_score"))
         if score is None:
             continue
-        if _update_best_score(best, score, direction, 0.0):
+        if should_update_best_score(best, score, direction, 0.0):
             best = score
     return best
 
