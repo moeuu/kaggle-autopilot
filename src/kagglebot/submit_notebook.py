@@ -4,6 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.submit_error_classification import normalize_submit_error_classification
+
 
 @dataclass(frozen=True)
 class NotebookSubmitReference:
@@ -231,12 +233,13 @@ def decide_ambiguous_notebook_submit_retry(
     if str(classification.get("reason") or "unclassified_submit_error") == "unclassified_submit_error" and output:
         classification_stderr = "\n".join(part for part in [classification_stderr, output] if part)
         classification = classify_submit_error(stdout, classification_stderr, exit_code)
+    normalized = normalize_submit_error_classification(classification, default_retry_after_seconds=3.0)
     retry = should_retry_ambiguous(
-        reason=str(classification.get("reason") or ""),
+        reason=normalized.reason,
         stdout=stdout,
         stderr=classification_stderr,
     )
-    wait_seconds = float(classification.get("retry_after_seconds") or 3.0) if retry else 0.0
+    wait_seconds = normalized.retry_after_seconds if retry else 0.0
     message = (
         "[yellow]submit retry[/yellow]: notebook submit returned an ambiguous 400; "
         f"retrying same kernel submit in {wait_seconds:.1f}s."

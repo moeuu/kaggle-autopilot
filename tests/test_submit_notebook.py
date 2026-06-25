@@ -224,6 +224,40 @@ def test_decide_ambiguous_notebook_submit_retry_uses_output_fallback() -> None:
     assert calls == ["", "400 Client Error\nkernel must be specified as <owner>/<notebook>"]
 
 
+def test_decide_ambiguous_notebook_submit_retry_normalizes_retry_after() -> None:
+    decision = decide_ambiguous_notebook_submit_retry(
+        stdout="",
+        stderr="kernel must be specified",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "reason": "ambiguous_notebook_bad_request",
+            "retry_after_seconds": True,
+        },
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: reason == "ambiguous_notebook_bad_request",
+    )
+
+    assert decision.retry is True
+    assert decision.wait_seconds == 3.0
+
+
+def test_decide_ambiguous_notebook_submit_retry_clamps_negative_retry_after() -> None:
+    decision = decide_ambiguous_notebook_submit_retry(
+        stdout="",
+        stderr="kernel must be specified",
+        output="",
+        exit_code=1,
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "reason": "ambiguous_notebook_bad_request",
+            "retry_after_seconds": -4,
+        },
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: reason == "ambiguous_notebook_bad_request",
+    )
+
+    assert decision.retry is True
+    assert decision.wait_seconds == 0.0
+
+
 def test_decide_ambiguous_notebook_submit_retry_rejects_generic_error() -> None:
     decision = decide_ambiguous_notebook_submit_retry(
         stdout="",
