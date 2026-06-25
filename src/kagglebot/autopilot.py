@@ -5329,34 +5329,24 @@ def _attempt_submit(
                 )
             seen_fingerprints.add(fingerprint)
             if error_action.action == "retry":
-                submit_attempt_recorder.append(
-                    _submit_attempts.build_submit_retry_attempt_payload(
-                        run_id=run_id,
-                        submission_ref=submission_reference,
-                        submission_sha256=_sha256_or_none(submission_artifact_path),
-                        exit_code=exc.exit_code,
-                        fingerprint=fingerprint,
-                        reason=error_action.reason,
-                        stdout=exc.stdout,
-                        stderr=submit_error_classification.stderr,
-                        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-                        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-                    )
-                )
-                _submit_attempts.record_submit_reason_knowledge(
-                    knowledge_paths=config.knowledge_paths,
-                    slug=config.slug,
+                _submit_attempts.record_submit_retry_attempt_and_knowledge(
+                    submit_attempt_recorder=submit_attempt_recorder,
                     run_id=run_id,
+                    slug=config.slug,
                     problem_types=problem_types,
+                    submission_ref=submission_reference,
                     submission_path=submission_artifact_path or prepared_submission_path,
-                    error_kind="transient",
-                    reason=error_action.reason,
-                    action_taken="retry",
+                    submission_sha256=_sha256_or_none(submission_artifact_path),
+                    exit_code=exc.exit_code,
                     fingerprint=fingerprint,
-                    details=_submit_attempts.format_submit_retry_knowledge_details(
-                        attempt=attempt,
-                        wait_seconds=error_action.wait_seconds,
-                    ),
+                    reason=error_action.reason,
+                    stdout=exc.stdout,
+                    stderr=submit_error_classification.stderr,
+                    attempt=attempt,
+                    wait_seconds=error_action.wait_seconds,
+                    stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+                    stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+                    knowledge_paths=config.knowledge_paths,
                     infer_iteration=_submit_stage.infer_iteration_from_submission_path,
                     normalize_detail=normalize_error_text,
                     record_error_fix_insight=record_error_fix_insight,

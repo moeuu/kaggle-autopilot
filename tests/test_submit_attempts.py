@@ -32,6 +32,7 @@ from kagglebot.submit_attempts import (
     load_submit_fingerprints,
     record_submit_outcome_if_available,
     record_submit_reason_knowledge,
+    record_submit_retry_attempt_and_knowledge,
     submit_attempt_sha_seen,
 )
 
@@ -568,6 +569,46 @@ def test_record_submit_reason_knowledge_suppresses_record_errors() -> None:
     )
 
     assert recorded is False
+
+
+def test_record_submit_retry_attempt_and_knowledge_appends_attempt_and_records_knowledge(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+    run_dir = tmp_path / "run"
+    recorder = SubmitAttemptRecorder(run_dir=run_dir, save_run_state=lambda updates: None)
+    knowledge_paths = object()
+
+    recorded = record_submit_retry_attempt_and_knowledge(
+        submit_attempt_recorder=recorder,
+        run_id="run-1",
+        slug="demo",
+        problem_types=["tabular"],
+        submission_ref="submission.csv",
+        submission_path=Path("runs/run-1/iter-2/submission.csv"),
+        submission_sha256="sha",
+        exit_code=1,
+        fingerprint="fp",
+        reason="network_or_timeout",
+        stdout="abcdef",
+        stderr="uvwxyz",
+        attempt=2,
+        wait_seconds=3.456,
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+        knowledge_paths=knowledge_paths,
+        infer_iteration=lambda path: 2 if "iter-2" in path.as_posix() else None,
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **kwargs: calls.append(kwargs),
+    )
+
+    rows = load_submit_attempt_rows(run_dir)
+    assert recorded is True
+    assert len(rows) == 1
+    assert rows[0]["action_taken"] == "retry"
+    assert rows[0]["error_kind"] == "transient"
+    assert rows[0]["stdout_tail"] == "def"
+    assert rows[0]["stderr_tail"] == "wxyz"
+    assert calls[0]["iteration"] == 2
+    assert calls[0]["fix_summary"] == "submit_action=retry; detail=attempt=2; wait=3.5s"
 
 
 def test_build_submit_result_payload_for_success_includes_outcome() -> None:

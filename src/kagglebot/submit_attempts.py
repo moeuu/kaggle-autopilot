@@ -514,6 +514,63 @@ def record_submit_reason_knowledge(
     return True
 
 
+def record_submit_retry_attempt_and_knowledge(
+    *,
+    submit_attempt_recorder: SubmitAttemptRecorder,
+    run_id: str,
+    slug: str,
+    problem_types: list[str],
+    submission_ref: str,
+    submission_path: Path,
+    submission_sha256: str | None,
+    exit_code: int | None,
+    fingerprint: str,
+    reason: str,
+    stdout: str,
+    stderr: str,
+    attempt: int,
+    wait_seconds: float,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    knowledge_paths: object,
+    infer_iteration: Callable[[Path], int | None],
+    normalize_detail: Callable[..., str],
+    record_error_fix_insight: Callable[..., object],
+) -> bool:
+    submit_attempt_recorder.append(
+        build_submit_retry_attempt_payload(
+            run_id=run_id,
+            submission_ref=submission_ref,
+            submission_sha256=submission_sha256,
+            exit_code=exit_code,
+            fingerprint=fingerprint,
+            reason=reason,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_tail_chars=stdout_tail_chars,
+            stderr_tail_chars=stderr_tail_chars,
+        )
+    )
+    return record_submit_reason_knowledge(
+        knowledge_paths=knowledge_paths,
+        slug=slug,
+        run_id=run_id,
+        problem_types=problem_types,
+        submission_path=submission_path,
+        error_kind="transient",
+        reason=reason,
+        action_taken="retry",
+        fingerprint=fingerprint,
+        details=format_submit_retry_knowledge_details(
+            attempt=attempt,
+            wait_seconds=wait_seconds,
+        ),
+        infer_iteration=infer_iteration,
+        normalize_detail=normalize_detail,
+        record_error_fix_insight=record_error_fix_insight,
+    )
+
+
 def build_submit_result_payload(
     *,
     message: str,
