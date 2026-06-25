@@ -2948,6 +2948,21 @@ def test_build_local_kernel_progress_tracker_reads_plan(tmp_path: Path) -> None:
     assert tracker.expected_seeds == [42, 2024, 777]
 
 
+def test_build_local_kernel_progress_tracker_ignores_invalid_or_non_object_plan(tmp_path: Path) -> None:
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plan_path.write_text("{", encoding="utf-8")
+    invalid_tracker = _build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo")
+    assert invalid_tracker.expected_folds is None
+    assert invalid_tracker.expected_seeds == []
+
+    plan_path.write_text("[]", encoding="utf-8")
+    array_tracker = _build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo")
+    assert array_tracker.expected_folds is None
+    assert array_tracker.expected_seeds == []
+
+
 def test_progress_tracker_reports_generic_activity(tmp_path: Path) -> None:
     plan_path = tmp_path / "demo" / "plan.json"
     plan_path.parent.mkdir(parents=True, exist_ok=True)

@@ -2638,11 +2638,8 @@ def _build_local_kernel_progress_tracker(
     expected_folds: int | None = None
     expected_seeds: list[int] = []
     plan_path = base_dir / slug / "plan.json"
-    if plan_path.exists():
-        try:
-            payload = json.loads(plan_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            payload = {}
+    payload = load_json_object(plan_path)
+    if payload is not None:
         raw_folds = payload.get("cv_folds")
         if isinstance(raw_folds, int) and raw_folds > 0:
             expected_folds = raw_folds
