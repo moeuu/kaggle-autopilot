@@ -34,6 +34,7 @@ from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import knowledge_context as _knowledge_context
 from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
+from kagglebot import metric_matching as _metric_matching
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import runtime_policy as _runtime_policy
@@ -104,7 +105,6 @@ from kagglebot.experiment_graph import (
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
-from kagglebot.iteration_signals import requires_tabular_multi_family_policy as _requires_tabular_multi_family_policy
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     leaderboard_rank_for_score,
@@ -130,12 +130,6 @@ from kagglebot.method_scout import (
     normalize_research_scout_mode,
     render_method_registry_for_prompt,
     run_method_scout,
-)
-from kagglebot.metric_matching import (
-    infer_metric_direction_for_mismatch as _infer_metric_direction_for_mismatch,
-)
-from kagglebot.metric_matching import (
-    metrics_equivalent as _metrics_equivalent,
 )
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
@@ -1129,8 +1123,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             metric_mismatch_reason: str | None = None
             metric_fix_attempts = 0
             metric_recheck_attempted = False
-            while evaluation.metric and target_metric and (not _metrics_equivalent(evaluation.metric, target_metric)):
-                corrected_direction, confident = _infer_metric_direction_for_mismatch(
+            while (
+                evaluation.metric
+                and target_metric
+                and (not _metric_matching.metrics_equivalent(evaluation.metric, target_metric))
+            ):
+                corrected_direction, confident = _metric_matching.infer_metric_direction_for_mismatch(
                     evaluation.metric,
                     metric_direction,
                 )
@@ -1141,7 +1139,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     evaluation_metric=evaluation.metric,
                 )
                 if official_metric_override:
-                    metric_direction, _ = _infer_metric_direction_for_mismatch(
+                    metric_direction, _ = _metric_matching.infer_metric_direction_for_mismatch(
                         official_metric_override,
                         corrected_direction,
                     )
@@ -1254,7 +1252,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     metric_still_mismatched = bool(
                         evaluation.metric
                         and target_metric
-                        and (not _metrics_equivalent(evaluation.metric, target_metric))
+                        and (not _metric_matching.metrics_equivalent(evaluation.metric, target_metric))
                     )
                     if metric_still_mismatched and (not config.dry_run) and (not config.compute.startswith("kaggle_")):
                         print(
@@ -3251,7 +3249,7 @@ def _run_improvement(
             "- Until this leaderboard percentile is reached, keep search breadth high and "
             "avoid same-family-only tweaks.\n"
         )
-    if _requires_tabular_multi_family_policy(
+    if _iteration_signals.requires_tabular_multi_family_policy(
         _context_artifacts.load_dataset_profile(
             slug=config.paths.slug,
             dataset_profile_path=config.paths.dataset_profile_path,
@@ -4137,7 +4135,10 @@ def _rerun_kernel_for_metric_recheck(
 
     resolved_metrics_path, payload, evaluation = selected_candidate
     metric_mismatch = bool(
-        target_metric and evaluation and evaluation.metric and not _metrics_equivalent(evaluation.metric, target_metric)
+        target_metric
+        and evaluation
+        and evaluation.metric
+        and not _metric_matching.metrics_equivalent(evaluation.metric, target_metric)
     )
     needs_recompute = evaluation is None or metric_mismatch
     if needs_recompute:
