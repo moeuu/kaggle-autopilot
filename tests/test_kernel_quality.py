@@ -526,6 +526,7 @@ def test_build_external_label_transfer_quality_signal_hard_blocks_detected_trans
 
     assert signal["detected"] is True
     assert signal["hard_block"] is True
+    assert signal["block_submit"] is True
     assert signal["reasons"] == ["external_test_label_transfer_detected"]
     assert signal["warnings"] == [
         "external_test_label_transfer=rows=6872,uncovered=0,method=official_multiview_overlap_mapping"
@@ -547,6 +548,7 @@ def test_build_external_label_transfer_quality_signal_allows_benign_external_dat
     assert signal == {
         "detected": False,
         "hard_block": False,
+        "block_submit": False,
         "transfer": None,
         "reasons": [],
         "warnings": [],

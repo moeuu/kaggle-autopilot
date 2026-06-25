@@ -721,6 +721,7 @@ def build_external_label_transfer_quality_signal(payload: dict[str, object] | No
     return {
         "detected": detected,
         "hard_block": detected,
+        "block_submit": detected,
         "transfer": transfer,
         "reasons": reasons,
         "warnings": warnings,

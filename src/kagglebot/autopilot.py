@@ -4686,7 +4686,7 @@ def _build_kernel_quality_guard(
 
     external_label_transfer_signal = _build_external_label_transfer_quality_signal(payload)
     merge_signal_messages(external_label_transfer_signal)
-    if bool(external_label_transfer_signal.get("hard_block")):
+    if bool(external_label_transfer_signal.get("block_submit")):
         block_submit = True
 
     candidate_selection_signal = _build_candidate_selection_quality_signal(payload=payload, direction=direction)
