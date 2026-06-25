@@ -18,6 +18,24 @@ class RunnerSelection:
     accelerator: str
 
 
+def resolve_accelerator(compute: str | Compute, accelerator: str) -> str:
+    compute_value = compute.value if isinstance(compute, Compute) else str(compute)
+    if accelerator == "auto":
+        if compute_value == "local_gpu":
+            return "gpu"
+        if compute_value == "kaggle_gpu":
+            return "gpu"
+        if compute_value == "kaggle_tpu":
+            return "tpu"
+    if compute_value == "local_gpu" and accelerator not in {"gpu"}:
+        raise ValueError("--accelerator must be gpu for local_gpu.")
+    if compute_value == "kaggle_gpu" and accelerator not in {"gpu"}:
+        raise ValueError("--accelerator must be gpu for kaggle_gpu.")
+    if compute_value == "kaggle_tpu" and accelerator not in {"tpu"}:
+        raise ValueError("--accelerator must be tpu for kaggle_tpu.")
+    return accelerator
+
+
 def compute_to_runner_and_accelerator(compute: Compute) -> RunnerSelection:
     if compute == Compute.local_gpu:
         return RunnerSelection(runner="local_kernel", accelerator="gpu")

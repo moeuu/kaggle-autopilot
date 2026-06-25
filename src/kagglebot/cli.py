@@ -14,7 +14,7 @@ from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.competition import parse_competition_slug
 from kagglebot.competition_submission_formats import crawl_submission_formats
-from kagglebot.compute import Compute
+from kagglebot.compute import Compute, resolve_accelerator
 from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import RulesNotAcceptedError, SubmitAbortedError
@@ -1083,20 +1083,10 @@ def _run_verify(cmd: str, dry_run: bool, *, artifacts_dir: Path | None = None) -
 
 
 def _resolve_accelerator(compute: str, accelerator: str) -> str:
-    if accelerator == "auto":
-        if compute == "local_gpu":
-            return "gpu"
-        if compute == "kaggle_gpu":
-            return "gpu"
-        if compute == "kaggle_tpu":
-            return "tpu"
-    if compute == "local_gpu" and accelerator not in {"gpu"}:
-        raise typer.BadParameter("--accelerator must be gpu for local_gpu.")
-    if compute == "kaggle_gpu" and accelerator not in {"gpu"}:
-        raise typer.BadParameter("--accelerator must be gpu for kaggle_gpu.")
-    if compute == "kaggle_tpu" and accelerator not in {"tpu"}:
-        raise typer.BadParameter("--accelerator must be tpu for kaggle_tpu.")
-    return accelerator
+    try:
+        return resolve_accelerator(compute, accelerator)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--accelerator") from exc
 
 
 def _resolve_resume_run_id(

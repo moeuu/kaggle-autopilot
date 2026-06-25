@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kagglebot.compute import Compute, compute_to_runner_and_accelerator, detect_local_gpu
+from kagglebot.compute import Compute, compute_to_runner_and_accelerator, detect_local_gpu, resolve_accelerator
 
 
 @pytest.mark.parametrize(
@@ -21,6 +21,31 @@ def test_compute_mapping(compute: Compute, runner: str, accelerator: str) -> Non
     selection = compute_to_runner_and_accelerator(compute)
     assert selection.runner == runner
     assert selection.accelerator == accelerator
+
+
+@pytest.mark.parametrize(
+    ("compute", "expected"),
+    [
+        (Compute.local_gpu, "gpu"),
+        (Compute.kaggle_gpu, "gpu"),
+        (Compute.kaggle_tpu, "tpu"),
+    ],
+)
+def test_resolve_accelerator_auto(compute: Compute, expected: str) -> None:
+    assert resolve_accelerator(compute, "auto") == expected
+
+
+@pytest.mark.parametrize(
+    ("compute", "accelerator"),
+    [
+        (Compute.local_gpu, "tpu"),
+        (Compute.kaggle_gpu, "tpu"),
+        (Compute.kaggle_tpu, "gpu"),
+    ],
+)
+def test_resolve_accelerator_rejects_incompatible_values(compute: Compute, accelerator: str) -> None:
+    with pytest.raises(ValueError, match="--accelerator"):
+        resolve_accelerator(compute, accelerator)
 
 
 def test_detect_local_gpu_with_torch(monkeypatch: pytest.MonkeyPatch) -> None:

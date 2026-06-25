@@ -71,6 +71,8 @@ loop maps those typed predicates to submit abort reasons instead of parsing cred
 Shared runtime policy such as `local_gpu` compute detection, heavy deep-learning modality classification, and local GPU
 time-budget environment parsing live in `src/kagglebot/runtime_policy.py`; plan guardrails and autopilot execution use
 the same definitions.
+Compute-to-runner and compute-compatible accelerator resolution live in `src/kagglebot/compute.py`; CLI commands only
+translate policy errors into CLI parameter errors.
 Loop-control decisions such as explicit `max_total_min` wall-clock stops, no-improvement patience, repeated same-config
 counter updates/stops, no-improve major-overhaul escalation, first-place stops, and max-iteration completion live in
 `src/kagglebot/loop_control.py`, keeping budget stops and runaway-loop guards testable outside the main orchestration.
@@ -395,8 +397,8 @@ Recommended extraction order:
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files.
-6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` so agent plan guardrails and
-   autopilot execution cannot drift on workload classification.
+6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
+   compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
 7. Agent I/O helpers: keep prompt/response transcript display, response-file reads, Codex sandbox-fallback logging,
    capacity-error detection, retry feedback prompt construction, and live stdout rendering in `agent_io.py`;
    orchestration code should pass identity/path context only.
