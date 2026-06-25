@@ -42,7 +42,6 @@ from kagglebot.autopilot import (
     _resume_iteration_state,
     _run_autofix,
     _run_kernel_fix,
-    _should_defer_submit_abort_to_next_iteration,
     _should_skip_planning,
     _submit_with_notebook_kernel,
     _write_iteration_state_marker,
@@ -3751,34 +3750,6 @@ def test_attempt_submit_persists_submit_failure_context_for_validation_abort(mon
     assert context["reason"] == "local_submission_validation_failed"
     assert context["submission_artifact_path"] == str(submission_path)
     assert "prediction column contains NaN" in str(context["summary"])
-
-
-def test_should_defer_nonfinal_kaggle_gpu_submit_abort_to_next_iteration(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / "submit_failure_context.json").write_text(
-        json.dumps({"active": True, "repairable": True, "reason": "local_submission_validation_failed"}),
-        encoding="utf-8",
-    )
-
-    assert _should_defer_submit_abort_to_next_iteration(
-        compute="kaggle_gpu",
-        run_dir=run_dir,
-        iteration=1,
-        max_iterations=3,
-    )
-    assert not _should_defer_submit_abort_to_next_iteration(
-        compute="kaggle_gpu",
-        run_dir=run_dir,
-        iteration=3,
-        max_iterations=3,
-    )
-    assert not _should_defer_submit_abort_to_next_iteration(
-        compute="local_gpu",
-        run_dir=run_dir,
-        iteration=1,
-        max_iterations=3,
-    )
 
 
 def test_attempt_submit_persists_manual_submit_failure_context_for_rules_block(monkeypatch, tmp_path: Path) -> None:

@@ -2172,9 +2172,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         best_score=decision_score,
                     )
                 except SubmitAbortedError:
-                    if _should_defer_submit_abort_to_next_iteration(
+                    if _submit_failure_context.should_defer_submit_abort_to_next_iteration(
                         compute=config.compute,
-                        run_dir=run_dir,
+                        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
                         iteration=iteration,
                         max_iterations=max_iterations,
                     ):
@@ -6843,21 +6843,6 @@ def _compute_submit_code_fingerprint(config: AutopilotConfig) -> str:
         src_root=Path(__file__).resolve().parent,
         kernel_source_dir=config.paths.kernel_source_dir,
         sha256_or_none=_sha256_or_none,
-    )
-
-
-def _should_defer_submit_abort_to_next_iteration(
-    *,
-    compute: str,
-    run_dir: Path,
-    iteration: int,
-    max_iterations: int,
-) -> bool:
-    return _submit_failure_context.should_defer_submit_abort_to_next_iteration(
-        compute=compute,
-        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-        iteration=iteration,
-        max_iterations=max_iterations,
     )
 
 
