@@ -2230,16 +2230,17 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             met_target = _submission_policy.meets_target(decision_score, target_score, metric_direction)
             top1_tier = _submission_policy.is_top1_tier(decision_score, top1_score, metric_direction)
             top1_tier_by_readiness = _submission_policy.is_top1_tier(readiness_score, top1_score, metric_direction)
-            delta_srs_vs_prev: float | None = None
-            noise_threshold = 0.5 * max(float(report.std), 0.0)
-            if previous_readiness_score is not None:
-                delta_srs_vs_prev = abs(readiness_score - previous_readiness_score)
-                if delta_srs_vs_prev < noise_threshold:
-                    noise_limited_streak += 1
-                else:
-                    noise_limited_streak = 0
-            previous_readiness_score = readiness_score
-            noise_forced_major_overhaul = noise_limited_streak >= 2
+            noise_guard_decision = _loop_control.update_readiness_noise_guard(
+                previous_readiness_score=previous_readiness_score,
+                readiness_score=readiness_score,
+                report_std=report.std,
+                noise_limited_streak=noise_limited_streak,
+            )
+            previous_readiness_score = noise_guard_decision.previous_readiness_score
+            delta_srs_vs_prev = noise_guard_decision.delta_srs_vs_prev
+            noise_threshold = noise_guard_decision.noise_threshold
+            noise_limited_streak = noise_guard_decision.noise_limited_streak
+            noise_forced_major_overhaul = noise_guard_decision.force_major_overhaul
             code_reference_forced_reproduction = bool(
                 first_iteration_below_code_reference or conservative_regression_detected
             )

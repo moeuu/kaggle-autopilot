@@ -8,6 +8,7 @@ from kagglebot.loop_control import (
     decide_stagnation_stop,
     decide_terminal_iteration_stop,
     select_stagnation_track,
+    update_readiness_noise_guard,
     update_same_config_streak,
 )
 
@@ -121,6 +122,48 @@ def test_decide_iteration_score_update_increments_streak_without_regression_rest
     assert decision.best_score == 0.8
     assert decision.no_improve_streak == 2
     assert decision.restore_regression_snapshot is False
+
+
+def test_update_readiness_noise_guard_initializes_without_delta() -> None:
+    decision = update_readiness_noise_guard(
+        previous_readiness_score=None,
+        readiness_score=0.8,
+        report_std=0.04,
+        noise_limited_streak=5,
+    )
+
+    assert decision.previous_readiness_score == 0.8
+    assert decision.delta_srs_vs_prev is None
+    assert decision.noise_threshold == 0.02
+    assert decision.noise_limited_streak == 5
+    assert decision.force_major_overhaul is True
+
+
+def test_update_readiness_noise_guard_increments_and_forces_on_small_delta() -> None:
+    decision = update_readiness_noise_guard(
+        previous_readiness_score=0.8,
+        readiness_score=0.81,
+        report_std=0.04,
+        noise_limited_streak=1,
+    )
+
+    assert round(float(decision.delta_srs_vs_prev or 0.0), 6) == 0.01
+    assert decision.noise_threshold == 0.02
+    assert decision.noise_limited_streak == 2
+    assert decision.force_major_overhaul is True
+
+
+def test_update_readiness_noise_guard_resets_on_large_delta() -> None:
+    decision = update_readiness_noise_guard(
+        previous_readiness_score=0.8,
+        readiness_score=0.83,
+        report_std=0.04,
+        noise_limited_streak=1,
+    )
+
+    assert round(float(decision.delta_srs_vs_prev or 0.0), 6) == 0.03
+    assert decision.noise_limited_streak == 0
+    assert decision.force_major_overhaul is False
 
 
 def test_decide_stagnation_stop_stops_on_no_improvement_patience() -> None:

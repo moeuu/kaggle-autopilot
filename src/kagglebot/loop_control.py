@@ -37,6 +37,15 @@ class IterationScoreUpdateDecision:
 
 
 @dataclass(frozen=True)
+class ReadinessNoiseGuardDecision:
+    previous_readiness_score: float
+    delta_srs_vs_prev: float | None
+    noise_threshold: float
+    noise_limited_streak: int
+    force_major_overhaul: bool
+
+
+@dataclass(frozen=True)
 class ConfigStreakState:
     same_config_streak: int
     last_config_hash: str
@@ -117,6 +126,32 @@ def decide_iteration_score_update(
         no_improve_streak=no_improve_streak + 1,
         capture_best_snapshot=False,
         restore_regression_snapshot=bool(conservative_regression_detected),
+    )
+
+
+def update_readiness_noise_guard(
+    *,
+    previous_readiness_score: float | None,
+    readiness_score: float,
+    report_std: float | None,
+    noise_limited_streak: int,
+    force_threshold_streak: int = 2,
+) -> ReadinessNoiseGuardDecision:
+    delta_srs_vs_prev: float | None = None
+    noise_threshold = 0.5 * max(float(report_std or 0.0), 0.0)
+    updated_streak = int(noise_limited_streak)
+    if previous_readiness_score is not None:
+        delta_srs_vs_prev = abs(float(readiness_score) - float(previous_readiness_score))
+        if delta_srs_vs_prev < noise_threshold:
+            updated_streak += 1
+        else:
+            updated_streak = 0
+    return ReadinessNoiseGuardDecision(
+        previous_readiness_score=float(readiness_score),
+        delta_srs_vs_prev=delta_srs_vs_prev,
+        noise_threshold=noise_threshold,
+        noise_limited_streak=updated_streak,
+        force_major_overhaul=updated_streak >= int(force_threshold_streak),
     )
 
 
