@@ -189,15 +189,6 @@ from kagglebot.writeup import (
     normalize_submit_mode,
 )
 
-
-# Backward-compatible symbol for tests/extensions.
-# Runtime no longer uses the legacy src local trainer path.
-def train_evaluate_and_predict(*args, **kwargs):  # type: ignore[no-untyped-def]
-    raise RuntimeError(
-        "Legacy src local trainer was removed. Use artifacts/<slug>/kernel/kernel.py via autopilot/train commands."
-    )
-
-
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
     from kagglebot.solver.evaluate import EvaluationResult
