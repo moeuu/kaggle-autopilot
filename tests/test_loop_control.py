@@ -4,6 +4,7 @@ from kagglebot.loop_control import (
     append_policy_reason,
     decide_no_improve_major_overhaul,
     decide_stagnation_stop,
+    decide_terminal_iteration_stop,
     select_stagnation_track,
     update_same_config_streak,
 )
@@ -96,6 +97,46 @@ def test_decide_stagnation_stop_keeps_existing_submit_enabled_behavior() -> None
 
     assert decision.should_stop is False
     assert decision.reason == ""
+
+
+def test_decide_terminal_iteration_stop_prefers_confirmed_first_place() -> None:
+    decision = decide_terminal_iteration_stop(
+        confirmed_first_place=True,
+        iteration=3,
+        max_iterations=3,
+        submitted=True,
+    )
+
+    assert decision.should_stop is True
+    assert decision.status == "submitted"
+    assert decision.stop_reason == "submission_rank_1"
+    assert "rank reached #1" in decision.message
+
+
+def test_decide_terminal_iteration_stop_handles_max_iterations_without_reason() -> None:
+    decision = decide_terminal_iteration_stop(
+        confirmed_first_place=False,
+        iteration=3,
+        max_iterations=3,
+        submitted=False,
+    )
+
+    assert decision.should_stop is True
+    assert decision.status == "completed"
+    assert decision.stop_reason == ""
+    assert decision.message == ""
+
+
+def test_decide_terminal_iteration_stop_can_defer_max_iteration_check() -> None:
+    decision = decide_terminal_iteration_stop(
+        confirmed_first_place=False,
+        iteration=3,
+        max_iterations=3,
+        submitted=False,
+        allow_max_iteration_stop=False,
+    )
+
+    assert decision.should_stop is False
 
 
 def test_decide_no_improve_major_overhaul_forces_when_enabled_and_not_improved() -> None:

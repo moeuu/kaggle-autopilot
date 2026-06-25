@@ -10,6 +10,14 @@ class LoopStopDecision:
 
 
 @dataclass(frozen=True)
+class LoopTerminalDecision:
+    should_stop: bool
+    status: str
+    stop_reason: str
+    message: str
+
+
+@dataclass(frozen=True)
 class NoImproveMajorOverhaulDecision:
     force_major_overhaul: bool
     reason: str
@@ -84,6 +92,32 @@ def decide_stagnation_stop(
         )
 
     return LoopStopDecision(should_stop=False, reason="")
+
+
+def decide_terminal_iteration_stop(
+    *,
+    confirmed_first_place: bool,
+    iteration: int,
+    max_iterations: int,
+    submitted: bool,
+    allow_max_iteration_stop: bool = True,
+) -> LoopTerminalDecision:
+    completed_status = "submitted" if submitted else "completed"
+    if confirmed_first_place:
+        return LoopTerminalDecision(
+            should_stop=True,
+            status=completed_status,
+            stop_reason="submission_rank_1",
+            message="[green]stop[/green]: submission rank reached #1",
+        )
+    if allow_max_iteration_stop and iteration >= max_iterations:
+        return LoopTerminalDecision(
+            should_stop=True,
+            status=completed_status,
+            stop_reason="",
+            message="",
+        )
+    return LoopTerminalDecision(should_stop=False, status="", stop_reason="", message="")
 
 
 def decide_no_improve_major_overhaul(

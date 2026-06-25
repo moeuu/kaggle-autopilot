@@ -2954,17 +2954,35 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 
-            if _score_progress.is_confirmed_first_place(submission_rank, submission_rank_source):
-                run_payload["status"] = "submitted" if submitted else "completed"
-                run_payload["stop_reason"] = "submission_rank_1"
-                print("[green]stop[/green]: submission rank reached #1")
+            terminal_stop = _loop_control.decide_terminal_iteration_stop(
+                confirmed_first_place=_score_progress.is_confirmed_first_place(
+                    submission_rank,
+                    submission_rank_source,
+                ),
+                iteration=iteration,
+                max_iterations=max_iterations,
+                submitted=submitted,
+                allow_max_iteration_stop=False,
+            )
+            if terminal_stop.should_stop:
+                run_payload["status"] = terminal_stop.status
+                if terminal_stop.stop_reason:
+                    run_payload["stop_reason"] = terminal_stop.stop_reason
+                if terminal_stop.message:
+                    print(terminal_stop.message)
                 break
 
             if top1_tier:
                 print("[yellow]note[/yellow]: offline top1-tier reached; awaiting submission-score confirmation")
 
-            if iteration >= max_iterations:
-                run_payload["status"] = "submitted" if submitted else "completed"
+            terminal_stop = _loop_control.decide_terminal_iteration_stop(
+                confirmed_first_place=False,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                submitted=submitted,
+            )
+            if terminal_stop.should_stop:
+                run_payload["status"] = terminal_stop.status
                 break
 
             print("[cyan]improve[/cyan]: generating next iteration plan")
