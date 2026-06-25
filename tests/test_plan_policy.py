@@ -31,6 +31,7 @@ from kagglebot.plan_policy import (
     resolve_internet_policy,
     resolve_plan_max_iterations,
     resolve_plan_score_source,
+    resolve_readiness_stop_policy,
     resolve_split_strategy_from_artifacts,
     resolve_split_strategy_override,
     resolve_submit_mode,
@@ -41,6 +42,7 @@ from kagglebot.plan_policy import (
     should_skip_planning_on_resume,
     upgrade_improvement_mode,
 )
+from kagglebot.types import PlanConfig
 
 
 def test_normalize_split_strategy_name_handles_aliases() -> None:
@@ -385,6 +387,62 @@ def test_resolve_plan_max_iterations_uses_cli_plan_or_default() -> None:
     )
     assert invalid.max_iterations == 7
     assert invalid.messages == ("[yellow]note[/yellow]: invalid plan max_iterations (0); using default 7.",)
+
+
+def test_resolve_readiness_stop_policy_prefers_plan_then_spec_then_defaults() -> None:
+    spec = extract_evaluation_spec_values(
+        {
+            "readiness_rule": {
+                "method": "mean_std",
+                "k": 1.5,
+                "target_score": 0.4,
+                "submission_gate": "readiness_only",
+            },
+            "ci_method": "bootstrap",
+            "ci_alpha": 0.2,
+            "drift_check": {"enabled": True, "drift_weight": 0.3},
+            "stop_policy": {"min_delta": 0.01, "no_improve_patience": 4, "same_config_patience": 2},
+        }
+    )
+    decision = resolve_readiness_stop_policy(
+        plan=PlanConfig(readiness_method="ci_bound", drift_check=False, stop_no_improve_patience=7),
+        spec_values=spec,
+        target_score=0.9,
+        min_improvement=0.05,
+        patience=3,
+    )
+
+    assert decision.readiness_target_score == 0.4
+    assert decision.readiness_method == "ci_bound"
+    assert decision.readiness_k == 1.5
+    assert decision.ci_method == "bootstrap"
+    assert decision.ci_alpha == 0.2
+    assert decision.drift_check is False
+    assert decision.drift_weight == 0.3
+    assert decision.stop_min_delta == 0.01
+    assert decision.stop_no_improve_patience == 7
+    assert decision.stop_same_config_patience == 2
+
+
+def test_resolve_readiness_stop_policy_defaults_to_loop_values() -> None:
+    decision = resolve_readiness_stop_policy(
+        plan=PlanConfig(),
+        spec_values=extract_evaluation_spec_values({}),
+        target_score=0.8,
+        min_improvement=0.02,
+        patience=5,
+    )
+
+    assert decision.readiness_target_score == 0.8
+    assert decision.readiness_method == "ci_bound"
+    assert decision.readiness_k == 1.0
+    assert decision.ci_method == "normal"
+    assert decision.ci_alpha == 0.05
+    assert decision.drift_check is False
+    assert decision.drift_weight == 1.0
+    assert decision.stop_min_delta == 0.02
+    assert decision.stop_no_improve_patience == 5
+    assert decision.stop_same_config_patience == 0
 
 
 def test_resolve_heavy_local_gpu_max_iterations_caps_long_runs() -> None:

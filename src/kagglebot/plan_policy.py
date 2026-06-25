@@ -159,6 +159,20 @@ class TargetObjectiveDecision:
     target_rank_percentile: float | None
 
 
+@dataclass(frozen=True)
+class ReadinessStopPolicyDecision:
+    readiness_target_score: object
+    readiness_method: object
+    readiness_k: object
+    ci_method: object
+    ci_alpha: object
+    drift_check: bool
+    drift_weight: object
+    stop_min_delta: object
+    stop_no_improve_patience: object
+    stop_same_config_patience: object
+
+
 def normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     """Normalize agent-produced plan payload shape without applying environment guardrails."""
     normalized = dict(payload)
@@ -1131,6 +1145,14 @@ def _number_or_none(value: object) -> int | float | None:
     return value if isinstance(value, (int, float)) else None
 
 
+def _choose(value: object, fallback: object, default: object) -> object:
+    if value is not None:
+        return value
+    if fallback is not None:
+        return fallback
+    return default
+
+
 def resolve_target_metric_direction(
     *,
     target_metric: object,
@@ -1263,6 +1285,58 @@ def resolve_target_objective(
     return TargetObjectiveDecision(
         target_medal=target_medal,
         target_rank_percentile=target_rank_percentile,
+    )
+
+
+def resolve_readiness_stop_policy(
+    *,
+    plan: PlanConfig,
+    spec_values: EvaluationSpecValues,
+    target_score: object,
+    min_improvement: object,
+    patience: object,
+) -> ReadinessStopPolicyDecision:
+    """Resolve readiness, drift, and no-improvement stop policy values."""
+
+    return ReadinessStopPolicyDecision(
+        readiness_target_score=_choose(
+            None,
+            plan.readiness_target_score,
+            spec_values.readiness_target_score if spec_values.readiness_target_score is not None else target_score,
+        ),
+        readiness_method=_choose(None, plan.readiness_method, spec_values.readiness_method or "ci_bound"),
+        readiness_k=_choose(
+            None, plan.readiness_k, spec_values.readiness_k if spec_values.readiness_k is not None else 1.0
+        ),
+        ci_method=_choose(None, plan.ci_method, spec_values.ci_method or "normal"),
+        ci_alpha=_choose(None, plan.ci_alpha, spec_values.ci_alpha if spec_values.ci_alpha is not None else 0.05),
+        drift_check=bool(
+            _choose(
+                None,
+                plan.drift_check,
+                spec_values.drift_enabled if spec_values.drift_enabled is not None else False,
+            )
+        ),
+        drift_weight=_choose(
+            None,
+            plan.drift_weight,
+            spec_values.drift_weight if spec_values.drift_weight is not None else 1.0,
+        ),
+        stop_min_delta=_choose(
+            None,
+            plan.stop_min_delta,
+            spec_values.stop_min_delta if spec_values.stop_min_delta is not None else min_improvement,
+        ),
+        stop_no_improve_patience=_choose(
+            None,
+            plan.stop_no_improve_patience,
+            spec_values.stop_no_improve_patience if spec_values.stop_no_improve_patience is not None else patience,
+        ),
+        stop_same_config_patience=_choose(
+            None,
+            plan.stop_same_config_patience,
+            spec_values.stop_same_config_patience if spec_values.stop_same_config_patience is not None else 0,
+        ),
     )
 
 

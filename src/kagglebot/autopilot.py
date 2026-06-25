@@ -3357,42 +3357,23 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     submission_gate = submit_policy_decision.submission_gate
     for message in submit_policy_decision.messages:
         print(message)
-    readiness_target_score = choose(
-        None,
-        plan.readiness_target_score,
-        spec_values.readiness_target_score if spec_values.readiness_target_score is not None else target_score,
+    readiness_stop_policy = _plan_policy.resolve_readiness_stop_policy(
+        plan=plan,
+        spec_values=spec_values,
+        target_score=target_score,
+        min_improvement=min_improvement,
+        patience=patience,
     )
-    readiness_method = choose(None, plan.readiness_method, spec_values.readiness_method or "ci_bound")
-    readiness_k = choose(
-        None, plan.readiness_k, spec_values.readiness_k if spec_values.readiness_k is not None else 1.0
-    )
-    ci_method = choose(None, plan.ci_method, spec_values.ci_method or "normal")
-    ci_alpha = choose(None, plan.ci_alpha, spec_values.ci_alpha if spec_values.ci_alpha is not None else 0.05)
-    drift_check = bool(
-        choose(
-            None,
-            plan.drift_check,
-            spec_values.drift_enabled if spec_values.drift_enabled is not None else False,
-        )
-    )
-    drift_weight = choose(
-        None, plan.drift_weight, spec_values.drift_weight if spec_values.drift_weight is not None else 1.0
-    )
-    stop_min_delta = choose(
-        None,
-        plan.stop_min_delta,
-        spec_values.stop_min_delta if spec_values.stop_min_delta is not None else min_improvement,
-    )
-    stop_no_improve_patience = choose(
-        None,
-        plan.stop_no_improve_patience,
-        spec_values.stop_no_improve_patience if spec_values.stop_no_improve_patience is not None else patience,
-    )
-    stop_same_config_patience = choose(
-        None,
-        plan.stop_same_config_patience,
-        spec_values.stop_same_config_patience if spec_values.stop_same_config_patience is not None else 0,
-    )
+    readiness_target_score = readiness_stop_policy.readiness_target_score
+    readiness_method = readiness_stop_policy.readiness_method
+    readiness_k = readiness_stop_policy.readiness_k
+    ci_method = readiness_stop_policy.ci_method
+    ci_alpha = readiness_stop_policy.ci_alpha
+    drift_check = readiness_stop_policy.drift_check
+    drift_weight = readiness_stop_policy.drift_weight
+    stop_min_delta = readiness_stop_policy.stop_min_delta
+    stop_no_improve_patience = readiness_stop_policy.stop_no_improve_patience
+    stop_same_config_patience = readiness_stop_policy.stop_same_config_patience
     rank_force_major_max_percentile = _plan_policy.normalize_rank_force_percentile(
         plan.rank_force_major_max_percentile,
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
