@@ -223,6 +223,42 @@ def apply_notebook_fallback_retry_state(
     )
 
 
+def apply_same_submission_path_decision(
+    *,
+    decision: object,
+    run_id: str,
+    submission_path: Path,
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    record_submit_attempt: Callable[[dict[str, object]], object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> bool:
+    action = str(getattr(decision, "action", "") or "").strip().lower()
+    message = str(getattr(decision, "message", "") or "").strip()
+    if action == "retry":
+        if message:
+            on_message(message)
+        return False
+    if action != "skip":
+        return False
+
+    if message:
+        on_message(message)
+    record_submit_attempt(
+        _submit_attempts.build_same_submission_path_skip_attempt_payload(
+            run_id=run_id,
+            submission_ref=str(submission_path),
+            submission_sha256=compute_submission_sha256(submission_path),
+            fingerprint=str(getattr(decision, "fingerprint", "") or ""),
+            reason=str(getattr(decision, "reason", "") or ""),
+            stdout_tail_chars=stdout_tail_chars,
+            stderr_tail_chars=stderr_tail_chars,
+        )
+    )
+    return True
+
+
 def submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
     if isinstance(online_score, (int, float)):
         value = float(online_score)

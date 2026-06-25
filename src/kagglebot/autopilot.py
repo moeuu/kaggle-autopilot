@@ -5179,21 +5179,16 @@ def _attempt_submit(
             allow_force=allow_force,
             notebook_submit_required=submit_stage_state.notebook_submit_required,
         )
-        if same_path_decision.action == "retry":
-            print(same_path_decision.message)
-        elif same_path_decision.action == "skip":
-            print(same_path_decision.message)
-            submit_attempt_recorder.append(
-                _submit_attempts.build_same_submission_path_skip_attempt_payload(
-                    run_id=run_id,
-                    submission_ref=str(prepared_submission_path),
-                    submission_sha256=_sha256_or_none(prepared_submission_path),
-                    fingerprint=same_path_decision.fingerprint,
-                    reason=same_path_decision.reason,
-                    stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-                    stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-                )
-            )
+        if _submit_stage.apply_same_submission_path_decision(
+            decision=same_path_decision,
+            run_id=run_id,
+            submission_path=prepared_submission_path,
+            compute_submission_sha256=_sha256_or_none,
+            record_submit_attempt=submit_attempt_recorder.append,
+            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+            on_message=print,
+        ):
             return None
 
     seen_fingerprints = _submit_attempts.build_seen_submit_fingerprint_set(

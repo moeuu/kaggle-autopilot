@@ -6,6 +6,7 @@ from pathlib import Path
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
     apply_notebook_fallback_retry_state,
+    apply_same_submission_path_decision,
     build_default_submission_problem_insight,
     build_kaggle_credentials_missing_abort_spec,
     build_local_submission_guardrail_abort_spec,
@@ -69,6 +70,21 @@ class SubmitResultStub:
             self.exit_code = exit_code
         if returncode is not None:
             self.returncode = returncode
+
+
+class SamePathDecisionStub:
+    def __init__(
+        self,
+        *,
+        action: str,
+        reason: str = "",
+        message: str = "",
+        fingerprint: str = "",
+    ) -> None:
+        self.action = action
+        self.reason = reason
+        self.message = message
+        self.fingerprint = fingerprint
 
 
 def test_decide_initial_submit_stage_mode_keeps_file_submit() -> None:
@@ -151,6 +167,67 @@ def test_submit_stage_runtime_state_tracks_initial_artifact_and_fallback_updates
     assert state.notebook_submit_required is True
     assert state.notebook_fallback_activated is True
     assert state.submission_artifact_mode == "wrapper"
+
+
+def test_apply_same_submission_path_decision_records_skip_payload(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    recorded: list[dict[str, object]] = []
+    messages: list[str] = []
+
+    skipped = apply_same_submission_path_decision(
+        decision=SamePathDecisionStub(
+            action="skip",
+            reason="same_submission_path_reused_in_run",
+            message="[yellow]submit skipped[/yellow]: same submission file already attempted in this run",
+            fingerprint="known-fp",
+        ),
+        run_id="run-1",
+        submission_path=submission_path,
+        compute_submission_sha256=lambda path: "sha" if path == submission_path else None,
+        record_submit_attempt=recorded.append,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert skipped is True
+    assert messages == ["[yellow]submit skipped[/yellow]: same submission file already attempted in this run"]
+    assert recorded == [
+        {
+            "run_id": "run-1",
+            "sub_path": str(submission_path),
+            "sub_sha256": "sha",
+            "exit_code": None,
+            "ok": False,
+            "fingerprint": "known-fp",
+            "error_kind": "unknown",
+            "action_taken": "skip",
+            "reason": "same_submission_path_reused_in_run",
+            "stdout_tail": "",
+            "stderr_tail": "",
+        }
+    ]
+
+
+def test_apply_same_submission_path_decision_reports_retry_without_recording(tmp_path: Path) -> None:
+    recorded: list[dict[str, object]] = []
+    messages: list[str] = []
+
+    skipped = apply_same_submission_path_decision(
+        decision=SamePathDecisionStub(action="retry", message="[yellow]submit retry[/yellow]: retrying"),
+        run_id="run-1",
+        submission_path=tmp_path / "submission.csv",
+        compute_submission_sha256=lambda path: "sha",
+        record_submit_attempt=recorded.append,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert skipped is False
+    assert messages == ["[yellow]submit retry[/yellow]: retrying"]
+    assert recorded == []
 
 
 def test_build_kaggle_credentials_missing_abort_spec_preserves_error_details() -> None:
