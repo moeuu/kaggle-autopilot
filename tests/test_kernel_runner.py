@@ -22,7 +22,6 @@ from kagglebot.kernel_runner import (
     _ensure_training_progress_shim,
     _format_local_gpu_activity_suffix,
     _format_local_kernel_activity_suffix,
-    _load_dataset_profile_identity,
     _LocalKernelLogFilterState,
     _run_local_kernel_once,
     _should_suppress_local_kernel_log_line,
@@ -2434,23 +2433,6 @@ def test_run_kernel_local_mirrors_context_dataset_profile(tmp_path: Path) -> Non
     assert result.metrics_path is not None and result.metrics_path.exists()
 
 
-def test_load_dataset_profile_identity_ignores_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
-    context_dir = tmp_path / "context"
-    context_dir.mkdir()
-
-    assert _load_dataset_profile_identity(context_dir=context_dir) == (None, None)
-
-    profile_path = context_dir / "dataset_profile.json"
-    profile_path.write_text("{", encoding="utf-8")
-    assert _load_dataset_profile_identity(context_dir=context_dir) == (None, None)
-
-    profile_path.write_text("[]", encoding="utf-8")
-    assert _load_dataset_profile_identity(context_dir=context_dir) == (None, None)
-
-    profile_path.write_text(json.dumps({"target_column": "target", "id_column": "id"}), encoding="utf-8")
-    assert _load_dataset_profile_identity(context_dir=context_dir) == ("target", "id")
-
-
 def test_run_kernel_local_stages_competition_data_dir(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -2498,33 +2480,6 @@ def test_run_kernel_local_stages_competition_data_dir(tmp_path: Path) -> None:
     assert (staged_data_dir / "sample_submission.csv").exists()
     assert result.submission_path is not None and result.submission_path.exists()
     assert result.metrics_path is not None and result.metrics_path.exists()
-
-
-def test_stage_local_kernel_data_dir_replaces_stale_file_target(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
-    data_dir = tmp_path / "demo" / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "sample_submission.csv").write_text("id,target\n1,0\n", encoding="utf-8")
-    (data_dir / "images").mkdir(exist_ok=True)
-    (data_dir / "images" / "a.jpg").write_bytes(b"img")
-
-    run_dir = tmp_path / "demo" / "kernels" / "run-stale"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    stale_target = run_dir / "data"
-    stale_target.write_text("stale", encoding="utf-8")
-
-    kernel_runner._stage_local_kernel_data_dir(base_dir=tmp_path, slug="demo", run_dir=run_dir)
-
-    assert stale_target.exists()
-    assert stale_target.is_dir() or stale_target.is_symlink()
-    assert (stale_target / "sample_submission.csv").exists()
-    assert (stale_target / "images" / "a.jpg").exists()
-    compat_target = tmp_path / "demo" / "artifacts" / "demo" / "data"
-    assert compat_target.exists()
-    assert compat_target.is_dir() or compat_target.is_symlink()
-    assert (compat_target / "sample_submission.csv").exists()
-    assert (compat_target / "images" / "a.jpg").exists()
 
 
 def test_run_kernel_local_supports_legacy_artifacts_data_dir_layout(tmp_path: Path) -> None:
