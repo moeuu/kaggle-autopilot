@@ -160,6 +160,8 @@ def test_extract_cv_breakdown_by_model_node_filters_invalid_entries() -> None:
     payload = {
         "cv_breakdown_by_model_node": {
             "model_2_node_type_1": "0.42",
+            "model_2_node_type_2": float("nan"),
+            "model_2_node_type_3": float("inf"),
             "bad": 0.1,
             "model_3_node_type_4": True,
         }

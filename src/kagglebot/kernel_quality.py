@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Iterator
 
@@ -159,7 +158,7 @@ def extract_cv_breakdown_by_model_node(payload: dict[str, object] | None) -> dic
         if match is None:
             continue
         parsed = _to_float(value)
-        if parsed is None or (not math.isfinite(parsed)):
+        if parsed is None:
             continue
         out[(int(match.group("model_id")), int(match.group("node_type")))] = float(parsed)
     return out
@@ -214,7 +213,7 @@ def detect_subgroup_collapse_signal(
             if not isinstance(key, str):
                 continue
             parsed = _to_float(value)
-            if parsed is None or (not math.isfinite(parsed)):
+            if parsed is None:
                 continue
             parsed_buckets.append((key, float(parsed)))
         if parsed_buckets:
@@ -560,7 +559,7 @@ def max_nested_float(payload: dict[str, object], keys: tuple[str, ...]) -> float
             if str(key).strip().lower() not in normalized_keys:
                 continue
             parsed = _to_float(value)
-            if parsed is not None and math.isfinite(parsed):
+            if parsed is not None:
                 values.append(float(parsed))
     return max(values) if values else None
 
@@ -782,7 +781,7 @@ def extract_pipeline_candidates(payload: dict[str, object]) -> list[dict[str, ob
 def pipeline_float(pipeline: dict[str, object], keys: tuple[str, ...]) -> float | None:
     for key in keys:
         parsed = _to_float(pipeline.get(key))
-        if parsed is not None and math.isfinite(parsed):
+        if parsed is not None:
             return float(parsed)
     return None
 
@@ -926,10 +925,10 @@ def prediction_count_mean(pipeline: dict[str, object]) -> float | None:
         split_summary = summary.get(split)
         if isinstance(split_summary, dict):
             parsed = _to_float(split_summary.get("mean"))
-            if parsed is not None and math.isfinite(parsed):
+            if parsed is not None:
                 return float(parsed)
     parsed = _to_float(summary.get("mean"))
-    if parsed is not None and math.isfinite(parsed):
+    if parsed is not None:
         return float(parsed)
     return None
 
