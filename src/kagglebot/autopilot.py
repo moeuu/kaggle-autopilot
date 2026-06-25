@@ -200,7 +200,7 @@ from kagglebot.submission.guard import (
     normalize_error_text,
     run_kaggle_submit_kernel,
 )
-from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
+from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
 from kagglebot.submission_history import (
     detect_online_regression_vs_submission_history as _detect_online_regression_vs_submission_history,
 )
@@ -6028,10 +6028,14 @@ def _attempt_submit(
     submit_attempt_recorder.record_payloads(submit_success_payloads)
     print("[green]submission recorded[/green]")
     try:
-        outcome = _wait_for_submission_outcome(
+        outcome = _submit_stage.wait_for_submission_outcome(
             slug=config.slug,
             message=message,
             submitted_at=submitted_at,
+            fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
+            max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
+            poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
+            max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
         )
     except SubmissionOutcomePollingError as exc:
         detail = normalize_error_text(exc.detail or str(exc), max_chars=1200)
@@ -6431,28 +6435,6 @@ def _record_submit_reason_knowledge(
     except Exception:  # noqa: BLE001
         # Knowledge recording must not block submit abort/retry control.
         return
-
-
-def _wait_for_submission_outcome(
-    *,
-    slug: str,
-    message: str,
-    submitted_at: datetime,
-    max_attempts: int | None = _SUBMISSION_POLL_MAX_ATTEMPTS,
-    poll_interval_sec: float = _SUBMISSION_POLL_INTERVAL_SEC,
-) -> dict[str, object] | None:
-    print(f"[cyan]submission polling[/cyan]: waiting for result (interval={poll_interval_sec:.0f}s)")
-    service = SubmissionOutcomeService(
-        fetch_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
-        max_attempts=max_attempts,
-        poll_interval_sec=poll_interval_sec,
-        max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
-    )
-    return service.wait_for_outcome(
-        slug=slug,
-        message=message,
-        submitted_at=submitted_at,
-    )
 
 
 def _record_submission_knowledge(

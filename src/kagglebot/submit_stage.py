@@ -450,6 +450,30 @@ def decide_submission_outcome_abort(
     return SubmitOutcomeAbortDecision(should_abort=False)
 
 
+def wait_for_submission_outcome(
+    *,
+    slug: str,
+    message: str,
+    submitted_at: datetime,
+    fetch_submission_rows: Callable[[str], list[dict[str, str]]],
+    max_attempts: int | None,
+    poll_interval_sec: float,
+    max_fetch_errors: int,
+) -> dict[str, object] | None:
+    print(f"[cyan]submission polling[/cyan]: waiting for result (interval={poll_interval_sec:.0f}s)")
+    service = SubmissionOutcomeService(
+        fetch_rows=fetch_submission_rows,
+        max_attempts=max_attempts,
+        poll_interval_sec=poll_interval_sec,
+        max_fetch_errors=max_fetch_errors,
+    )
+    return service.wait_for_outcome(
+        slug=slug,
+        message=message,
+        submitted_at=submitted_at,
+    )
+
+
 def build_submission_outcome_error_detail(
     *,
     slug: str,

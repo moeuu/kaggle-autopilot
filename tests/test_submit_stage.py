@@ -24,6 +24,7 @@ from kagglebot.submit_stage import (
     resolve_submission_rank_payload,
     run_submit_stage_attempt,
     submission_score_for_tracking,
+    wait_for_submission_outcome,
 )
 
 
@@ -97,6 +98,32 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
     assert normalize_submission_outcome_status("SubmissionStatus.COMPLETE") == "complete"
     assert normalize_submission_outcome_status("") == "unknown"
+
+
+def test_wait_for_submission_outcome_uses_fetch_adapter() -> None:
+    submitted_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    outcome = wait_for_submission_outcome(
+        slug="demo",
+        message="submission message",
+        submitted_at=submitted_at,
+        fetch_submission_rows=lambda slug: [
+            {
+                "description": "submission message",
+                "date": "2026-01-01T00:01:00Z",
+                "status": "SubmissionStatus.COMPLETE",
+                "publicScore": "0.123",
+            }
+        ],
+        max_attempts=1,
+        poll_interval_sec=0.0,
+        max_fetch_errors=1,
+    )
+
+    assert outcome is not None
+    assert outcome["status"] == "complete"
+    assert outcome["score"] == 0.123
+    assert outcome["raw"]["description"] == "submission message"
 
 
 def test_infer_iteration_from_submission_path_reads_iter_parent() -> None:

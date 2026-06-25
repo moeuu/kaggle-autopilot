@@ -333,9 +333,10 @@ Recommended extraction order:
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, submission
    outcome abort/classification decisions, rank payload/guard/display normalization, iteration submit-status formatting,
    campaign-aware submission message resolution, submission iteration inference, tracking score selection, and
-   file-submit-to-notebook fallback decisions are now in `submit_stage.py`. Next, move the remaining `_attempt_submit`
-   side-effect orchestration into a typed service that coordinates the existing `submit_attempts`, `submit_stage`,
-   `submit_notebook`, and `submit_failure_context` modules rather than adding more private wrappers in `autopilot.py`.
+   file-submit-to-notebook fallback decisions, and submission outcome polling orchestration are now in `submit_stage.py`.
+   Next, move the remaining `_attempt_submit` side-effect orchestration into a typed service that coordinates the
+   existing `submit_attempts`, `submit_stage`, `submit_notebook`, and `submit_failure_context` modules rather than
+   adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files.
