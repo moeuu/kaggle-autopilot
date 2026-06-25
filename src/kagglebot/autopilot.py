@@ -3803,28 +3803,6 @@ def _extract_competition_faithfulness(
     )
 
 
-def _infer_capacity_tier(
-    *,
-    kernel_metrics_payload: dict[str, object] | None,
-    model_summary: dict[str, object] | None,
-) -> str:
-    return _kernel_quality.infer_capacity_tier(
-        kernel_metrics_payload=kernel_metrics_payload,
-        model_summary=model_summary,
-    )
-
-
-def _infer_data_tier(
-    *,
-    competition_faithfulness: dict[str, object] | None,
-    evaluation_contract: dict[str, object] | None,
-) -> str:
-    return _kernel_quality.infer_data_tier(
-        competition_faithfulness=competition_faithfulness,
-        evaluation_contract=evaluation_contract,
-    )
-
-
 def _build_accuracy_potential(
     *,
     evaluation: EvaluationResult,

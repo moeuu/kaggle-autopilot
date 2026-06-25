@@ -251,7 +251,9 @@ The next high-value modernization work is:
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
    helpers rather than open-coding tolerant dictionary access in orchestration modules.
 5. **Compatibility wrapper retirement**: after call sites move to extracted modules, remove private wrappers in
-   `autopilot.py` and sibling orchestrators instead of preserving multiple names for the same policy.
+   `autopilot.py` and sibling orchestrators instead of preserving multiple names for the same policy. Obsolete
+   autopilot wrappers around kernel capacity/data-tier inference have been removed; new call sites should use
+   `kernel_quality.py` directly.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.
