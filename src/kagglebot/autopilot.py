@@ -5291,18 +5291,16 @@ def _attempt_submit(
                     print(artifact_mode_decision.message)
                 continue
             fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
-            fingerprint_seen = fingerprint in seen_fingerprints
-            same_fingerprint_retry_allowed = False
-            if fingerprint_seen:
-                same_fingerprint_retry_allowed = _submit_retry_policy.consume_same_submit_fingerprint_retry_allowance(
-                    run_state=run_state,
-                    fingerprint=fingerprint,
-                    code_fingerprint=submit_code_fingerprint,
-                    save_run_state=lambda updates: _save_run_state(run_dir, updates),
-                )
+            fingerprint_reuse_decision = _submit_retry_policy.decide_submit_fingerprint_reuse(
+                fingerprint=fingerprint,
+                seen_fingerprints=seen_fingerprints,
+                run_state=run_state,
+                code_fingerprint=submit_code_fingerprint,
+                save_run_state=lambda updates: _save_run_state(run_dir, updates),
+            )
             error_action = _submit_stage.decide_submit_stage_error_action(
-                fingerprint_seen=fingerprint_seen,
-                same_fingerprint_retry_allowed=same_fingerprint_retry_allowed,
+                fingerprint_seen=fingerprint_reuse_decision.fingerprint_seen,
+                same_fingerprint_retry_allowed=fingerprint_reuse_decision.same_fingerprint_retry_allowed,
                 classification_kind=classification_kind,
                 classification_reason=classification_reason,
                 attempt=attempt,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +22,12 @@ class DuplicateSubmissionDecision:
     message: str
     fingerprint: str
     duplicate_sources: list[str]
+
+
+@dataclass(frozen=True)
+class SubmitFingerprintReuseDecision:
+    fingerprint_seen: bool
+    same_fingerprint_retry_allowed: bool
 
 
 def compute_submit_code_fingerprint(
@@ -215,6 +221,29 @@ def consume_same_submit_fingerprint_retry_allowance(
         save_run_state=save_run_state,
     )
     return True
+
+
+def decide_submit_fingerprint_reuse(
+    *,
+    fingerprint: str,
+    seen_fingerprints: Container[str],
+    run_state: dict[str, object],
+    code_fingerprint: str,
+    save_run_state: Callable[[dict[str, object]], None],
+) -> SubmitFingerprintReuseDecision:
+    fingerprint_seen = fingerprint in seen_fingerprints
+    same_fingerprint_retry_allowed = False
+    if fingerprint_seen:
+        same_fingerprint_retry_allowed = consume_same_submit_fingerprint_retry_allowance(
+            run_state=run_state,
+            fingerprint=fingerprint,
+            code_fingerprint=code_fingerprint,
+            save_run_state=save_run_state,
+        )
+    return SubmitFingerprintReuseDecision(
+        fingerprint_seen=fingerprint_seen,
+        same_fingerprint_retry_allowed=same_fingerprint_retry_allowed,
+    )
 
 
 def _record_same_fingerprint_allowance(

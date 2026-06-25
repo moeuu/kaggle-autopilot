@@ -10,6 +10,7 @@ from kagglebot.submit_retry_policy import (
     consume_same_submit_fingerprint_retry_allowance,
     decide_duplicate_submission_action,
     decide_same_submission_path_action,
+    decide_submit_fingerprint_reuse,
 )
 
 
@@ -142,6 +143,52 @@ def test_consume_same_submit_fingerprint_retry_allowance_allows_legacy_state_onc
 
     assert allowed is True
     assert saved
+
+
+def test_decide_submit_fingerprint_reuse_ignores_unseen_fingerprint() -> None:
+    run_state: dict[str, object] = {
+        "last_submit_fingerprint": "error-fp",
+        "last_submit_code_fingerprint": "old-code",
+    }
+    saved: list[dict[str, object]] = []
+
+    decision = decide_submit_fingerprint_reuse(
+        fingerprint="new-error-fp",
+        seen_fingerprints={"error-fp"},
+        run_state=run_state,
+        code_fingerprint="new-code",
+        save_run_state=saved.append,
+    )
+
+    assert decision.fingerprint_seen is False
+    assert decision.same_fingerprint_retry_allowed is False
+    assert saved == []
+    assert "same_fp_allowance_code_fingerprint" not in run_state
+
+
+def test_decide_submit_fingerprint_reuse_consumes_allowance_for_seen_changed_code() -> None:
+    run_state: dict[str, object] = {
+        "last_submit_fingerprint": "error-fp",
+        "last_submit_code_fingerprint": "old-code",
+    }
+    saved: list[dict[str, object]] = []
+
+    decision = decide_submit_fingerprint_reuse(
+        fingerprint="error-fp",
+        seen_fingerprints={"error-fp"},
+        run_state=run_state,
+        code_fingerprint="new-code",
+        save_run_state=saved.append,
+    )
+
+    assert decision.fingerprint_seen is True
+    assert decision.same_fingerprint_retry_allowed is True
+    assert saved == [
+        {
+            "same_fp_allowance_code_fingerprint": "new-code",
+            "same_fp_allowance_error_fingerprint": "error-fp",
+        }
+    ]
 
 
 def test_decide_same_submission_path_action_proceeds_when_path_differs(tmp_path: Path) -> None:
