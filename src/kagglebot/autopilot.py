@@ -5150,24 +5150,21 @@ def _attempt_submit(
         notebook_submit_artifact_mode=notebook_submit_artifact_mode,
         resolved_notebook_artifact_mode=resolved_notebook_artifact_mode,
     )
-    submit_stage_state = _submit_stage.build_submit_stage_runtime_state(submit_stage_mode)
-    for mode_message in submit_stage_mode.messages:
-        print(mode_message)
-    artifact_mode_decision = _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
-        requested_mode=submit_stage_state.submission_artifact_mode,
-        notebook_submit_required=submit_stage_state.notebook_submit_required,
-        code_competition=code_competition,
-        sample_submission_path=config.paths.sample_submission_path,
-        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-        submission_path=prepared_submission_path,
-        count_csv_data_rows=_count_csv_data_rows_capped,
+    submit_stage_state = _submit_stage.apply_initial_submit_stage_artifact_mode(
+        mode_decision=submit_stage_mode,
+        resolve_artifact_mode=lambda requested_mode, notebook_required: (
+            _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
+                requested_mode=requested_mode,
+                notebook_submit_required=notebook_required,
+                code_competition=code_competition,
+                sample_submission_path=config.paths.sample_submission_path,
+                fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+                submission_path=prepared_submission_path,
+                count_csv_data_rows=_count_csv_data_rows_capped,
+            )
+        ),
+        on_message=print,
     )
-    submit_stage_state = _submit_stage.update_submit_stage_artifact_mode(
-        submit_stage_state,
-        submission_artifact_mode=artifact_mode_decision.mode,
-    )
-    if artifact_mode_decision.message:
-        print(artifact_mode_decision.message)
 
     if not submit_stage_state.notebook_submit_required:
         same_path_decision = _submit_retry_policy.decide_same_submission_path_action(

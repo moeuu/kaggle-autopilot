@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    apply_initial_submit_stage_artifact_mode,
     apply_notebook_fallback_decision,
     apply_notebook_fallback_retry_state,
     apply_same_submission_path_decision,
@@ -184,6 +185,38 @@ def test_submit_stage_runtime_state_tracks_initial_artifact_and_fallback_updates
     assert state.notebook_submit_required is True
     assert state.notebook_fallback_activated is True
     assert state.submission_artifact_mode == "wrapper"
+
+
+def test_apply_initial_submit_stage_artifact_mode_emits_messages_and_updates_state() -> None:
+    decision = decide_initial_submit_stage_mode(
+        requested_notebook_submit=True,
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="wrapper",
+        resolved_notebook_artifact_mode="inference",
+    )
+    calls: list[tuple[str, bool]] = []
+    messages: list[str] = []
+
+    state = apply_initial_submit_stage_artifact_mode(
+        mode_decision=decision,
+        resolve_artifact_mode=lambda mode, required: (
+            calls.append((mode, required))
+            or ArtifactModeDecisionStub(
+                mode="inference",
+                message="[yellow]submit mode[/yellow]: using inference artifact",
+            )
+        ),
+        on_message=messages.append,
+    )
+
+    assert state.notebook_submit_required is True
+    assert state.notebook_fallback_activated is True
+    assert state.submission_artifact_mode == "inference"
+    assert calls == [("inference", True)]
+    assert messages == [
+        "[yellow]submit mode[/yellow]: using notebook submit",
+        "[yellow]submit mode[/yellow]: using inference artifact",
+    ]
 
 
 def test_apply_same_submission_path_decision_records_skip_payload(tmp_path: Path) -> None:

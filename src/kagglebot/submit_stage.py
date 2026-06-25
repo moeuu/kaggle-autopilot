@@ -229,6 +229,30 @@ def apply_notebook_fallback_retry_state(
     )
 
 
+def apply_initial_submit_stage_artifact_mode(
+    *,
+    mode_decision: SubmitStageModeDecision,
+    resolve_artifact_mode: Callable[[str, bool], object],
+    on_message: Callable[[str], object],
+) -> SubmitStageRuntimeState:
+    state = build_submit_stage_runtime_state(mode_decision)
+    for mode_message in mode_decision.messages:
+        on_message(mode_message)
+
+    artifact_mode_decision = resolve_artifact_mode(
+        state.submission_artifact_mode,
+        state.notebook_submit_required,
+    )
+    state = update_submit_stage_artifact_mode(
+        state,
+        submission_artifact_mode=str(getattr(artifact_mode_decision, "mode", "") or state.submission_artifact_mode),
+    )
+    artifact_message = str(getattr(artifact_mode_decision, "message", "") or "").strip()
+    if artifact_message:
+        on_message(artifact_message)
+    return state
+
+
 def apply_same_submission_path_decision(
     *,
     decision: object,
