@@ -141,15 +141,17 @@ from kagglebot.kaggle_cli_errors import is_missing_kaggle_credentials_error as _
 from kagglebot.kernel_logs import collect_log_tail as _collect_log_tail
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local, run_submit_kernel
 from kagglebot.knowledge import (
-    ensure_taxonomy,
     record_error_fix_insight,
     record_improvement,
     record_iteration,
     record_problem_type_insight,
     record_run,
-    resolve_similar_improvements,
 )
-from kagglebot.knowledge_context import load_problem_type_knowledge_text, resolve_problem_types_from_profile
+from kagglebot.knowledge_context import (
+    load_problem_type_knowledge_text,
+    refresh_knowledge_hints,
+    resolve_problem_types_from_profile,
+)
 from kagglebot.leaderboard_policy import build_medal_target_reason as _build_medal_target_reason
 from kagglebot.leaderboard_policy import meets_rank_percentile_target as _meets_rank_percentile_target
 from kagglebot.leaderboard_policy import resume_best_online_submission_score as _resume_best_online_submission_score
@@ -498,7 +500,7 @@ class KnowledgePhase:
     config: AutopilotConfig
 
     def refresh(self) -> None:
-        _refresh_knowledge_hints(self.config)
+        refresh_knowledge_hints(paths=self.config.paths, knowledge_paths=self.config.knowledge_paths)
 
     def load_dataset_profile(self) -> dict[str, object]:
         return _context_load_dataset_profile(
@@ -3427,51 +3429,6 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "rank_force_major_min_teams": rank_force_major_min_teams,
         "evaluation_contract": evaluation_contract,
     }
-
-
-def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
-    from kagglebot.self_improvement import load_self_improvement_context
-
-    profile = _context_load_dataset_profile(
-        slug=config.paths.slug,
-        dataset_profile_path=config.paths.dataset_profile_path,
-    )
-    raw_tags = profile.get("tags", []) if isinstance(profile, dict) else []
-    tags = [str(tag).strip() for tag in raw_tags if isinstance(tag, str) and str(tag).strip()]
-
-    lines = ["# Knowledge Hints", ""]
-    try:
-        if not tags:
-            lines.append("No dataset tags available yet; knowledge suggestions pending dataset profiling.")
-        else:
-            taxonomy = ensure_taxonomy(config.knowledge_paths)
-            similar = resolve_similar_improvements(
-                knowledge_paths=config.knowledge_paths,
-                taxonomy=taxonomy,
-                tags=tags,
-            )
-            if not similar:
-                lines.append("No similar competitions found in knowledge base.")
-            else:
-                lines.append("Similar competitions and what improved score:")
-                lines.append("")
-                for item in similar:
-                    slug = item.get("slug", "unknown")
-                    overlap = item.get("overlap", 0)
-                    summary = item.get("summary", "No summary recorded.")
-                    lines.append(f"- {slug} ({overlap} tag overlap): {summary}")
-    except Exception as exc:  # noqa: BLE001
-        lines.append(f"Knowledge lookup failed: {exc}")
-
-    lines.extend(["", "## System Self-Improvement Context"])
-    context = load_self_improvement_context(config.paths.artifacts_dir)
-    if context:
-        lines.append(context)
-    else:
-        lines.append("No self-improvement context available yet.")
-
-    config.paths.context_dir.mkdir(parents=True, exist_ok=True)
-    config.paths.knowledge_hints_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5) -> str:

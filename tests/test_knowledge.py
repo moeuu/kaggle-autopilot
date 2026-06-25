@@ -21,12 +21,17 @@ from kagglebot.knowledge import (
     record_iteration,
     record_problem_type_insight,
     record_research_artifacts,
+    record_run,
     resolve_error_fix_insights,
     resolve_problem_type_insights,
 )
 from kagglebot.knowledge.repositories import InsightRepository
-from kagglebot.knowledge_context import load_problem_type_knowledge_text, resolve_problem_types_from_profile
-from kagglebot.paths import KnowledgePaths
+from kagglebot.knowledge_context import (
+    load_problem_type_knowledge_text,
+    refresh_knowledge_hints,
+    resolve_problem_types_from_profile,
+)
+from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 
 def test_knowledge_search_orders_by_overlap(tmp_path) -> None:
@@ -365,6 +370,45 @@ def test_resolve_problem_types_from_profile_handles_invalid_profile(tmp_path) ->
     profile_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
 
     assert resolve_problem_types_from_profile(dataset_profile_path=profile_path) == ["unknown"]
+
+
+def test_refresh_knowledge_hints_writes_similar_competition_context(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    knowledge_paths = KnowledgePaths(workdir=tmp_path / "knowledge")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(json.dumps({"tags": ["tabular", "binary"]}), encoding="utf-8")
+    taxonomy = ensure_taxonomy(knowledge_paths)
+    record_competition_profile(
+        knowledge_paths=knowledge_paths,
+        taxonomy=taxonomy,
+        slug="prior-comp",
+        competition_url=None,
+        profile={"tags": ["tabular", "binary"], "metric": "auc"},
+    )
+    record_run(
+        knowledge_paths=knowledge_paths,
+        run_id="run-1",
+        slug="prior-comp",
+        compute="local",
+        goal_metric="auc",
+        goal_score=0.8,
+        direction="maximize",
+    )
+    record_improvement(
+        knowledge_paths=knowledge_paths,
+        run_id="run-1",
+        iteration=1,
+        summary="Stratified folds improved public score.",
+        delta_offline=0.02,
+    )
+
+    refresh_knowledge_hints(paths=paths, knowledge_paths=knowledge_paths)
+
+    hints = paths.knowledge_hints_path.read_text(encoding="utf-8")
+    assert "Similar competitions and what improved score" in hints
+    assert "prior-comp" in hints
+    assert "Stratified folds improved public score." in hints
+    assert "No self-improvement context available yet." in hints
 
 
 def test_knowledge_classifies_external_signal_and_online_mismatch(tmp_path) -> None:
