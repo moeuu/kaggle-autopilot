@@ -18,6 +18,7 @@ from kagglebot.agents.identity import (
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.knowledge import (
     derive_problem_types,
     format_error_fix_insights,
@@ -498,11 +499,8 @@ def _run_codex_kernel_implementation(
         },
     )
     if paths.method_registry_path.exists():
-        try:
-            registry = json.loads(paths.method_registry_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            registry = {}
-        if isinstance(registry, dict):
+        registry = load_json_object(paths.method_registry_path)
+        if registry is not None:
             method_text = render_method_registry_for_prompt(registry, max_methods=8)
             if method_text.strip():
                 prompt_text += (
@@ -567,7 +565,7 @@ def _ensure_context_materials(paths: CompetitionPaths) -> None:
         from kagglebot.knowledge import build_dataset_profile
 
         profile = build_dataset_profile(paths.data_dir)
-        paths.dataset_profile_path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+        write_json_object(paths.dataset_profile_path, profile)
 
     if not paths.overview_md_path.exists():
         paths.overview_md_path.write_text(f"Overview not available. See {rules_url}\n", encoding="utf-8")
@@ -1164,16 +1162,11 @@ def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obj
 
 def _write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> None:
     payload = _normalize_plan_payload(_apply_plan_guardrails(paths, payload))
-    existing: dict[str, object] = {}
-    if paths.plan_path.exists():
-        try:
-            existing = json.loads(paths.plan_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing = {}
+    existing = load_json_object(paths.plan_path) or {}
     merged = _normalize_plan_payload({**existing, **payload})
     defaults = PlanConfig.from_dict(merged).to_dict()
     persisted = _normalize_plan_payload({**merged, **defaults})
-    paths.plan_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+    write_json_object(paths.plan_path, persisted)
 
 
 def _apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
@@ -1635,7 +1628,7 @@ def _write_strategy_outputs(
             research_summary_text=research_summary_text,
         )
         info_path = paths.context_dir / "research_storage.json"
-        info_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+        write_json_object(info_path, persisted)
     profile = _load_dataset_profile_payload(paths)
     if method_scout_mode != "off" and research_sources_text.strip():
         method_registry = run_method_scout(
@@ -1869,13 +1862,8 @@ def _append_problem_type_knowledge_with_budget(prompt_text: str, knowledge_text:
 
 
 def _append_method_registry_with_budget(prompt_text: str, *, paths: CompetitionPaths, compact: bool) -> str:
-    if not paths.method_registry_path.exists():
-        return prompt_text
-    try:
-        registry = json.loads(paths.method_registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return prompt_text
-    if not isinstance(registry, dict):
+    registry = load_json_object(paths.method_registry_path)
+    if registry is None:
         return prompt_text
     clean = render_method_registry_for_prompt(registry, max_methods=5 if compact else 8).strip()
     if not clean:
@@ -2365,12 +2353,8 @@ def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
 
 
 def _load_profile_metric(paths: CompetitionPaths) -> str | None:
-    profile_path = paths.dataset_profile_path
-    if not profile_path.exists():
-        return None
-    try:
-        payload = json.loads(profile_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    payload = load_json_object(paths.dataset_profile_path)
+    if payload is None:
         return None
     metric = payload.get("metric")
     if isinstance(metric, str) and metric.strip():
@@ -2379,11 +2363,8 @@ def _load_profile_metric(paths: CompetitionPaths) -> str | None:
 
 
 def _load_top1_score(paths: CompetitionPaths) -> float | None:
-    if not paths.top1_public_path.exists():
-        return None
-    try:
-        payload = json.loads(paths.top1_public_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    payload = load_json_object(paths.top1_public_path)
+    if payload is None:
         return None
     score = payload.get("score")
     if isinstance(score, (int, float)):

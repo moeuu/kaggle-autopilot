@@ -65,6 +65,19 @@ def test_write_plan_payload_applies_imbalance_guardrails(tmp_path: Path) -> None
     assert persisted["toggles"]["ALLOW_PRETRAINED_WEIGHTS"] is False
 
 
+def test_write_plan_payload_ignores_invalid_existing_plan(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text("{", encoding="utf-8")
+
+    _write_plan_payload(paths, _base_payload())
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["target_metric"] == "f1"
+    assert persisted["max_iterations"] == 5
+
+
 def test_write_plan_payload_enables_pretrained_when_rules_allow(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
