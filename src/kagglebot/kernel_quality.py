@@ -339,6 +339,30 @@ def build_baseline_quality_signal(
     }
 
 
+def build_baseline_regression_quality_signal(
+    *,
+    current_value: float,
+    baseline_candidates: list[tuple[str, float]],
+    direction: str,
+    is_final_iteration: bool,
+    force_submit: bool,
+) -> dict[str, object]:
+    baseline = build_baseline_quality_signal(
+        current_value=current_value,
+        baseline_candidates=baseline_candidates,
+        direction=direction,
+    )
+    reasons: list[str] = []
+    if bool(baseline.get("selected_worse_than_baseline")):
+        reasons.append("selected_worse_than_detected_baseline")
+    return {
+        "baseline": baseline,
+        "reasons": reasons,
+        "warnings": [],
+        "block_submit": bool(reasons) and not is_final_iteration and not force_submit,
+    }
+
+
 def build_code_reference_quality_signal(
     *,
     current_value: float,

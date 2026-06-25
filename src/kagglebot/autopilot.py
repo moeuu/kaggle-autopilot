@@ -322,7 +322,7 @@ _pipeline_float = _kernel_quality.pipeline_float
 _find_selected_pipeline = _kernel_quality.find_selected_pipeline
 _build_prediction_distribution_quality_signal = _kernel_quality.build_prediction_distribution_quality_signal
 _build_competition_faithfulness_quality_signal = _kernel_quality.build_competition_faithfulness_quality_signal
-_build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
+_build_baseline_regression_quality_signal = _kernel_quality.build_baseline_regression_quality_signal
 _build_code_reference_quality_signal = _kernel_quality.build_code_reference_quality_signal
 _build_validation_stability_quality_signal = _kernel_quality.build_validation_stability_quality_signal
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
@@ -4745,15 +4745,24 @@ def _build_kernel_quality_guard(
     for index, score in enumerate(baseline_from_logs):
         baseline_candidates.append((f"logs:baseline[{index}]", float(score)))
 
-    baseline_signal = _build_baseline_quality_signal(
+    baseline_regression_signal = _build_baseline_regression_quality_signal(
         current_value=float(evaluation.value),
         baseline_candidates=baseline_candidates,
         direction=direction,
+        is_final_iteration=is_final_iteration,
+        force_submit=force_submit,
     )
-    if bool(baseline_signal.get("selected_worse_than_baseline")):
-        reasons.append("selected_worse_than_detected_baseline")
-        if not is_final_iteration and not force_submit:
-            block_submit = True
+    baseline_signal = baseline_regression_signal.get("baseline")
+    if not isinstance(baseline_signal, dict):
+        baseline_signal = {}
+    for reason in baseline_regression_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in baseline_regression_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    if bool(baseline_regression_signal.get("block_submit")):
+        block_submit = True
 
     validation_scores = _extract_validation_scores_from_log_text(log_text, evaluation.metric)
     validation_stability_signal = _build_validation_stability_quality_signal(
@@ -4820,6 +4829,7 @@ def _build_kernel_quality_guard(
         "competition_faithfulness": competition_faithfulness,
         "competition_faithfulness_signal": competition_faithfulness_signal,
         "baseline": baseline_signal,
+        "baseline_regression": baseline_regression_signal,
         "metric_alignment": metric_alignment,
         "validation_stability": validation_stability_signal,
         "step_bucket": {

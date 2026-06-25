@@ -3,6 +3,7 @@ from __future__ import annotations
 from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_baseline_quality_signal,
+    build_baseline_regression_quality_signal,
     build_candidate_selection_quality_signal,
     build_code_reference_quality_signal,
     build_competition_faithfulness_quality_signal,
@@ -277,6 +278,34 @@ def test_build_baseline_quality_signal_handles_no_candidates() -> None:
         "candidate_count": 0,
         "selected_worse_than_baseline": False,
     }
+
+
+def test_build_baseline_regression_quality_signal_blocks_nonfinal_iteration() -> None:
+    signal = build_baseline_regression_quality_signal(
+        current_value=0.54,
+        baseline_candidates=[("ridge", 0.50)],
+        direction="minimize",
+        is_final_iteration=False,
+        force_submit=False,
+    )
+
+    assert signal["block_submit"] is True
+    assert signal["reasons"] == ["selected_worse_than_detected_baseline"]
+    assert signal["warnings"] == []
+    assert signal["baseline"]["selected_worse_than_baseline"] is True
+
+
+def test_build_baseline_regression_quality_signal_allows_final_iteration() -> None:
+    signal = build_baseline_regression_quality_signal(
+        current_value=0.54,
+        baseline_candidates=[("ridge", 0.50)],
+        direction="minimize",
+        is_final_iteration=True,
+        force_submit=False,
+    )
+
+    assert signal["reasons"] == ["selected_worse_than_detected_baseline"]
+    assert signal["block_submit"] is False
 
 
 def test_build_code_reference_quality_signal_flags_below_reference() -> None:
