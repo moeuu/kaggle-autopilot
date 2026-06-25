@@ -131,6 +131,8 @@ from kagglebot.hardware import render_hardware_constraints, resolve_hardware_pro
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
 from kagglebot.json_utils import load_json_object as _load_json_object
+from kagglebot.json_utils import load_json_object_or_empty as _load_json_object_or_empty
+from kagglebot.json_utils import write_json_object as _write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     leaderboard_rank_for_score,
@@ -617,12 +619,7 @@ def _update_watch_phase(
     if not state_raw:
         return
     state_path = Path(state_raw)
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _load_json_object_or_empty(state_path)
     active_slug = str(payload.get("active_slug") or "").strip()
     active_run_id = str(payload.get("active_run_id") or "").strip()
     if active_slug and active_slug != config.slug:
@@ -646,8 +643,7 @@ def _update_watch_phase(
     if iteration is not None:
         payload["iteration"] = iteration
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        _write_json_object(state_path, payload, sort_keys=True)
     except OSError:
         return
 
@@ -690,7 +686,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         dry_run=config.dry_run,
         metric_hint=metric_hint,
     )
-    config.paths.top1_public_path.write_text(json.dumps(top1_info, indent=2), encoding="utf-8")
+    _write_json_object(config.paths.top1_public_path, top1_info)
     _print_top1_info(top1_info)
     _update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()
@@ -707,7 +703,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             resolved=resolved,
             status="missing_target",
         )
-        (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+        _write_json_object(run_dir / "run.json", run_payload)
         return
 
     metric_direction = infer_direction(target_metric, resolved["target_direction"])
@@ -751,7 +747,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         resolved=resolved,
         status="running",
     )
-    (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+    _write_json_object(run_dir / "run.json", run_payload)
     _ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
     record_run(
@@ -1547,7 +1543,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             _append_run_evaluation_report(run_dir=run_dir, iteration=iteration, payload=report_payload)
             evaluation_report_path = iter_dir / "evaluation_report.json"
-            evaluation_report_path.write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
+            _write_json_object(evaluation_report_path, report_payload)
 
             readiness_score = report.readiness_score
             print(
@@ -6335,35 +6331,26 @@ def _iter_split_indices(*, name: str, splitter: object, x: np.ndarray, y: np.nda
 def _append_run_evaluation_report(*, run_dir: Path, iteration: int, payload: dict[str, object]) -> None:
     path = run_dir / "evaluation_report.json"
     state: dict[str, object] = {"latest_iteration": iteration, "latest": payload, "history": [payload]}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                history_raw = existing.get("history", [])
-                if isinstance(history_raw, list):
-                    history = [item for item in history_raw if isinstance(item, dict)]
-                else:
-                    history = []
-                history = [item for item in history if item.get("iteration") != iteration]
-                history.append(payload)
-                history.sort(key=lambda item: int(item.get("iteration", 0)))
-                state["history"] = history
-        except json.JSONDecodeError:
-            pass
+    existing = _load_json_object(path)
+    if existing is not None:
+        history_raw = existing.get("history", [])
+        if isinstance(history_raw, list):
+            history = [item for item in history_raw if isinstance(item, dict)]
+        else:
+            history = []
+        history = [item for item in history if item.get("iteration") != iteration]
+        history.append(payload)
+        history.sort(key=lambda item: int(item.get("iteration", 0)))
+        state["history"] = history
     state["latest_iteration"] = iteration
     state["latest"] = payload
-    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    _write_json_object(path, state)
 
 
 def _resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations: int) -> float | None:
     path = run_dir / "evaluation_report.json"
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
+    payload = _load_json_object(path)
+    if payload is None:
         return None
     history = payload.get("history")
     if not isinstance(history, list):
@@ -6386,13 +6373,8 @@ def _resume_best_readiness_score(*, run_dir: Path, direction: str, max_iteration
 
 def _resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[float | None, int]:
     path = run_dir / "evaluation_report.json"
-    if not path.exists():
-        return None, 0
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None, 0
-    if not isinstance(payload, dict):
+    payload = _load_json_object(path)
+    if payload is None:
         return None, 0
     history = payload.get("history")
     if not isinstance(history, list):
