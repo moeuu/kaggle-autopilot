@@ -20,15 +20,10 @@ from kagglebot.hardware import render_hardware_constraints, resolve_hardware_pro
 from kagglebot.json_utils import load_json_array, load_json_object, write_json_object
 from kagglebot.knowledge import (
     derive_problem_types,
-    format_error_fix_insights,
-    format_problem_type_insights,
-    format_research_artifacts,
     record_research_artifacts,
-    resolve_error_fix_insights,
-    resolve_problem_type_insights,
-    resolve_research_artifacts,
     resolve_research_paths_for_slug,
 )
+from kagglebot.knowledge_context import load_problem_type_knowledge_text
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.method_scout import render_method_registry_for_prompt, run_method_scout
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -985,38 +980,13 @@ def _append_method_registry_with_budget(prompt_text: str, *, paths: CompetitionP
 
 
 def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Path, limit: int = 5) -> str:
-    try:
-        profile_text = _read_text(paths.dataset_profile_path)
-        profile = json.loads(profile_text) if profile_text else {}
-        if not isinstance(profile, dict):
-            profile = {}
-        problem_types = derive_problem_types(profile)
-        knowledge_paths = KnowledgePaths(workdir=repo_root)
-        insights = resolve_problem_type_insights(
-            knowledge_paths,
-            problem_types,
-            limit=limit,
-        )
-        error_insights = resolve_error_fix_insights(
-            knowledge_paths,
-            problem_types,
-            limit=limit,
-        )
-        research_rows = resolve_research_artifacts(
-            knowledge_paths=knowledge_paths,
-            problem_types=problem_types,
-            limit=limit,
-        )
-        sections = [
-            format_problem_type_insights(insights, limit=limit),
-            "",
-            format_error_fix_insights(error_insights, limit=limit),
-            "",
-            format_research_artifacts(research_rows, limit=limit),
-        ]
-        return "\n".join(section for section in sections if section is not None)
-    except Exception:  # noqa: BLE001
-        return "No prior problem-type insights available."
+    return load_problem_type_knowledge_text(
+        dataset_profile_path=paths.dataset_profile_path,
+        knowledge_paths=KnowledgePaths(workdir=repo_root),
+        limit=limit,
+        include_research=True,
+        unavailable_message="No prior problem-type insights available.",
+    )
 
 
 def _should_use_fallback_strategy(stdout: str, stderr: str) -> bool:

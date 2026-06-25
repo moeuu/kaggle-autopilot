@@ -144,17 +144,14 @@ from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_ker
 from kagglebot.knowledge import (
     derive_problem_types,
     ensure_taxonomy,
-    format_error_fix_insights,
-    format_problem_type_insights,
     record_error_fix_insight,
     record_improvement,
     record_iteration,
     record_problem_type_insight,
     record_run,
-    resolve_error_fix_insights,
-    resolve_problem_type_insights,
     resolve_similar_improvements,
 )
+from kagglebot.knowledge_context import load_problem_type_knowledge_text
 from kagglebot.leaderboard_policy import build_medal_target_reason as _build_medal_target_reason
 from kagglebot.leaderboard_policy import meets_rank_percentile_target as _meets_rank_percentile_target
 from kagglebot.leaderboard_policy import resume_best_online_submission_score as _resume_best_online_submission_score
@@ -3503,22 +3500,13 @@ def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
 
 
 def _load_problem_type_knowledge_text(config: AutopilotConfig, *, limit: int = 5) -> str:
-    profile = _context_load_dataset_profile(
-        slug=config.paths.slug,
+    return load_problem_type_knowledge_text(
         dataset_profile_path=config.paths.dataset_profile_path,
+        knowledge_paths=config.knowledge_paths,
+        limit=limit,
+        include_research=False,
+        unavailable_message="Problem-type knowledge unavailable: {error}",
     )
-    problem_types = derive_problem_types(profile)
-    try:
-        insights = resolve_problem_type_insights(config.knowledge_paths, problem_types, limit=limit)
-        error_insights = resolve_error_fix_insights(config.knowledge_paths, problem_types, limit=limit)
-    except Exception as exc:  # noqa: BLE001
-        return f"Problem-type knowledge unavailable: {exc}"
-    sections = [
-        format_problem_type_insights(insights, limit=limit),
-        "",
-        format_error_fix_insights(error_insights, limit=limit),
-    ]
-    return "\n".join(section for section in sections if section is not None)
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:

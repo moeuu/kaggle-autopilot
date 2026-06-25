@@ -20,10 +20,12 @@ from kagglebot.knowledge import (
     record_improvement,
     record_iteration,
     record_problem_type_insight,
+    record_research_artifacts,
     resolve_error_fix_insights,
     resolve_problem_type_insights,
 )
 from kagglebot.knowledge.repositories import InsightRepository
+from kagglebot.knowledge_context import load_problem_type_knowledge_text
 from kagglebot.paths import KnowledgePaths
 
 
@@ -277,6 +279,74 @@ def test_error_fix_insight_record_and_resolve(tmp_path) -> None:
     rendered = format_error_fix_insights(insights, limit=5)
     assert "dependency_missing" in rendered
     assert "featurewiz" in rendered
+
+
+def test_load_problem_type_knowledge_text_renders_shared_context(tmp_path) -> None:
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    profile_path = tmp_path / "dataset_profile.json"
+    profile_path.write_text(
+        json.dumps({"modality": "tabular", "task": "binary", "tags": ["classification"]}),
+        encoding="utf-8",
+    )
+    problem_types = ["tabular:binary", "tabular", "binary", "classification"]
+    record_problem_type_insight(
+        knowledge_paths=knowledge_paths,
+        slug="comp-a",
+        run_id="run-1",
+        iteration=1,
+        problem_types=problem_types,
+        why_poor="Validation did not match public leaderboard.",
+        how_improved="Use stratified folds and check prediction distribution.",
+        delta_offline=0.012,
+        outcome_bucket="high",
+        submission_score=0.88,
+    )
+    record_error_fix_insight(
+        knowledge_paths=knowledge_paths,
+        slug="comp-a",
+        run_id="run-1",
+        iteration=1,
+        problem_types=problem_types,
+        error_message="Submission Scoring Error: incorrect format",
+        fix_summary="Align columns and ids to sample_submission.",
+        resolved=True,
+        outcome_bucket="high",
+        submission_score=0.88,
+    )
+    record_research_artifacts(
+        knowledge_paths=knowledge_paths,
+        slug="comp-a",
+        problem_types=problem_types,
+        research_sources_jsonl='{"url":"https://example.com"}',
+        research_summary_md="Research summary.",
+    )
+
+    text = load_problem_type_knowledge_text(
+        dataset_profile_path=profile_path,
+        knowledge_paths=knowledge_paths,
+        include_research=True,
+    )
+
+    assert "Problem-type knowledge" in text
+    assert "Error-fix knowledge" in text
+    assert "Cross-competition research artifacts" in text
+    assert "Submission Scoring Error" in text
+
+
+def test_load_problem_type_knowledge_text_can_skip_research(tmp_path) -> None:
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    profile_path = tmp_path / "dataset_profile.json"
+    profile_path.write_text(json.dumps({"modality": "tabular", "task": "binary"}), encoding="utf-8")
+
+    text = load_problem_type_knowledge_text(
+        dataset_profile_path=profile_path,
+        knowledge_paths=knowledge_paths,
+        include_research=False,
+    )
+
+    assert "No prior problem-type insights available." in text
+    assert "No prior error-fix insights available." in text
+    assert "Cross-competition research artifacts" not in text
 
 
 def test_knowledge_classifies_external_signal_and_online_mismatch(tmp_path) -> None:
