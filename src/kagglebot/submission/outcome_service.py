@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 
 _RANK_PAIR_RE = re.compile(r"(?P<rank>\d+)\s*/\s*(?P<total>\d+)")
 _TERMINAL_SUBMISSION_STATUSES = {"complete", "completed", "error", "failed", "cancelled", "canceled"}
@@ -164,7 +164,7 @@ class SubmissionOutcomeService:
     def _extract_submission_score(row: dict[str, str]) -> float | None:
         for key in ("publicScore", "public_score", "score", "privateScore", "private_score"):
             value = SubmissionOutcomeService._get_row_value_ci(row, key)
-            parsed = SubmissionOutcomeService._to_float(value)
+            parsed = tolerant_finite_float(value)
             if parsed is not None:
                 return parsed
         return None
@@ -206,7 +206,7 @@ class SubmissionOutcomeService:
 
         for key in total_keys:
             value = SubmissionOutcomeService._get_row_value_ci(row, key)
-            parsed_total = SubmissionOutcomeService._to_int(value)
+            parsed_total = tolerant_int(value)
             if parsed_total is not None:
                 total_teams = parsed_total
                 break
@@ -234,7 +234,7 @@ class SubmissionOutcomeService:
 
     @staticmethod
     def _parse_rank_value(value: object) -> tuple[int | None, int | None]:
-        parsed_int = SubmissionOutcomeService._to_int(value)
+        parsed_int = tolerant_int(value)
         if parsed_int is not None:
             return parsed_int, None
         if value is None:
@@ -245,8 +245,8 @@ class SubmissionOutcomeService:
         match = _RANK_PAIR_RE.search(text)
         if match is None:
             return None, None
-        rank = SubmissionOutcomeService._to_int(match.group("rank"))
-        total = SubmissionOutcomeService._to_int(match.group("total"))
+        rank = tolerant_int(match.group("rank"))
+        total = tolerant_int(match.group("total"))
         return rank, total
 
     @staticmethod
@@ -281,11 +281,3 @@ class SubmissionOutcomeService:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(UTC)
-
-    @staticmethod
-    def _to_float(value: object) -> float | None:
-        return parse_finite_float(value, allow_commas=True)
-
-    @staticmethod
-    def _to_int(value: object) -> int | None:
-        return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)

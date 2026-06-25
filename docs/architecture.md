@@ -258,8 +258,8 @@ The next high-value modernization work is:
    favor of direct `context_artifacts.py` calls. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, and same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly. Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
-   submission history, iteration signals, score progress, and kernel metrics scalar parsing wrappers have also been
-   removed in favor of public tolerant parsers in `scalar_utils.py`.
+   submission history, iteration signals, score progress, kernel metrics, and submission outcome scalar parsing wrappers
+   have also been removed in favor of public tolerant parsers in `scalar_utils.py`.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.
