@@ -176,6 +176,8 @@ Recommended extraction order:
    `campaign_metrics.py`.
    Kernel metrics payload parsing, CV fallback extraction, baseline score extraction, and kernel-log metric scraping are
    now in `kernel_metrics.py`.
+   Kernel quality guard constants and payload-level detectors for subgroup collapse, external test-label transfer,
+   candidate-selection mismatch, and prediction-distribution collapse are now in `kernel_quality.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.

@@ -1,0 +1,543 @@
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Iterator
+
+from kagglebot.autopilot_helpers import _to_float, _to_int
+
+QUALITY_GUARD_BASELINE_REL_MARGIN = 0.01
+QUALITY_GUARD_BASELINE_ABS_MARGIN = 1e-6
+QUALITY_GUARD_MISMATCH_REL_MARGIN_MINIMIZE = 2.0
+QUALITY_GUARD_MISMATCH_REL_MARGIN_MAXIMIZE = 0.30
+QUALITY_GUARD_MISMATCH_ABS_MARGIN = 0.05
+QUALITY_GUARD_STEP_BUCKET_RATIO = 2.5
+QUALITY_GUARD_SUBGROUP_RATIO = 2.5
+QUALITY_GUARD_SUBGROUP_ABS_MARGIN = 0.05
+QUALITY_GUARD_CODE_REF_REL_MARGIN = 0.0
+QUALITY_GUARD_CODE_REF_ABS_MARGIN = 0.02
+QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN = 0.20
+QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = 0.01
+QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
+QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
+MODEL_NODE_METRIC_KEY = re.compile(r"^model_(?P<model_id>\d+)_node_type_(?P<node_type>\d+)$")
+
+
+def is_significantly_worse(
+    *,
+    current: float,
+    reference: float,
+    direction: str,
+    rel_margin: float,
+    abs_margin: float,
+) -> bool:
+    margin = max(abs(reference) * max(rel_margin, 0.0), max(abs_margin, 0.0))
+    if direction == "minimize":
+        return (current - reference) > margin
+    return (reference - current) > margin
+
+
+def extract_cv_breakdown_by_model_node(payload: dict[str, object] | None) -> dict[tuple[int, int], float]:
+    if not isinstance(payload, dict):
+        return {}
+    raw = payload.get("cv_breakdown_by_model_node")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[tuple[int, int], float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        match = MODEL_NODE_METRIC_KEY.match(key.strip())
+        if match is None:
+            continue
+        parsed = _to_float(value)
+        if parsed is None or (not math.isfinite(parsed)):
+            continue
+        out[(int(match.group("model_id")), int(match.group("node_type")))] = float(parsed)
+    return out
+
+
+def detect_subgroup_collapse_signal(
+    *, kernel_metrics_payload: dict[str, object] | None, direction: str
+) -> dict[str, object] | None:
+    if direction != "minimize":
+        return None
+    scores = extract_cv_breakdown_by_model_node(kernel_metrics_payload)
+    if len(scores) < 2:
+        return None
+
+    worst_key, worst_score = max(scores.items(), key=lambda item: item[1])
+    best_key, best_score = min(scores.items(), key=lambda item: item[1])
+    if best_score <= 0.0:
+        ratio = float("inf") if worst_score > 0.0 else 1.0
+    else:
+        ratio = worst_score / best_score
+
+    same_model_peers = {key: score for key, score in scores.items() if key[0] == worst_key[0] and key != worst_key}
+    peer_key: tuple[int, int] | None = None
+    peer_score: float | None = None
+    peer_ratio: float | None = None
+    if same_model_peers:
+        peer_key, peer_score = min(same_model_peers.items(), key=lambda item: item[1])
+        if peer_score <= 0.0:
+            peer_ratio = float("inf") if worst_score > 0.0 else 1.0
+        else:
+            peer_ratio = worst_score / peer_score
+
+    collapsed_vs_global = worst_score > max(
+        best_score * QUALITY_GUARD_SUBGROUP_RATIO,
+        best_score + QUALITY_GUARD_SUBGROUP_ABS_MARGIN,
+    )
+    collapsed_vs_peer = False
+    if peer_score is not None:
+        collapsed_vs_peer = worst_score > max(
+            peer_score * QUALITY_GUARD_SUBGROUP_RATIO,
+            peer_score + QUALITY_GUARD_SUBGROUP_ABS_MARGIN,
+        )
+    if not collapsed_vs_global and not collapsed_vs_peer:
+        return None
+
+    worst_bucket_label: str | None = None
+    worst_bucket_score: float | None = None
+    step_buckets = kernel_metrics_payload.get("cv_step_buckets") if isinstance(kernel_metrics_payload, dict) else None
+    if isinstance(step_buckets, dict):
+        parsed_buckets: list[tuple[str, float]] = []
+        for key, value in step_buckets.items():
+            if not isinstance(key, str):
+                continue
+            parsed = _to_float(value)
+            if parsed is None or (not math.isfinite(parsed)):
+                continue
+            parsed_buckets.append((key, float(parsed)))
+        if parsed_buckets:
+            worst_bucket_label, worst_bucket_score = max(parsed_buckets, key=lambda item: item[1])
+
+    note_parts = [
+        "Subgroup collapse detected:",
+        f"model={worst_key[0]} node_type={worst_key[1]} score={worst_score:.6f}",
+    ]
+    if peer_key is not None and peer_score is not None and peer_ratio is not None:
+        note_parts.append(
+            "same-model peer "
+            f"model={peer_key[0]} node_type={peer_key[1]} score={peer_score:.6f} "
+            f"ratio={peer_ratio:.2f}x"
+        )
+    note_parts.append(f"best subgroup score={best_score:.6f} ratio={ratio:.2f}x")
+    if worst_bucket_label is not None and worst_bucket_score is not None:
+        note_parts.append(f"worst step bucket={worst_bucket_label} score={worst_bucket_score:.6f}")
+    note_parts.append("Next iteration must use subgroup-aware selection/fallbacks at (model_id,node_type) granularity.")
+
+    return {
+        "note": "; ".join(note_parts),
+        "model_id": int(worst_key[0]),
+        "node_type": int(worst_key[1]),
+        "worst_key": f"model_{worst_key[0]}_node_type_{worst_key[1]}",
+        "worst_score": float(worst_score),
+        "best_key": f"model_{best_key[0]}_node_type_{best_key[1]}",
+        "best_score": float(best_score),
+        "ratio_vs_best": float(ratio),
+        "peer_key": (f"model_{peer_key[0]}_node_type_{peer_key[1]}" if peer_key is not None else None),
+        "peer_score": float(peer_score) if peer_score is not None else None,
+        "ratio_vs_peer": float(peer_ratio) if peer_ratio is not None else None,
+        "worst_step_bucket": worst_bucket_label,
+        "worst_step_bucket_score": float(worst_bucket_score) if worst_bucket_score is not None else None,
+    }
+
+
+def iter_payload_mappings(payload: object) -> Iterator[dict[object, object]]:
+    if isinstance(payload, dict):
+        yield payload
+        for value in payload.values():
+            yield from iter_payload_mappings(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from iter_payload_mappings(item)
+
+
+def as_guard_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
+def first_nested_value(payload: dict[str, object], keys: tuple[str, ...]) -> object | None:
+    normalized_keys = {key.lower() for key in keys}
+    for node in iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() in normalized_keys:
+                return value
+    return None
+
+
+def max_nested_float(payload: dict[str, object], keys: tuple[str, ...]) -> float | None:
+    normalized_keys = {key.lower() for key in keys}
+    values: list[float] = []
+    for node in iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _to_float(value)
+            if parsed is not None and math.isfinite(parsed):
+                values.append(float(parsed))
+    return max(values) if values else None
+
+
+def max_nested_int(payload: dict[str, object], keys: tuple[str, ...]) -> int | None:
+    normalized_keys = {key.lower() for key in keys}
+    values: list[int] = []
+    for node in iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _to_int(value)
+            if parsed is not None:
+                values.append(int(parsed))
+    return max(values) if values else None
+
+
+def min_nested_int(payload: dict[str, object], keys: tuple[str, ...]) -> int | None:
+    normalized_keys = {key.lower() for key in keys}
+    values: list[int] = []
+    for node in iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = _to_int(value)
+            if parsed is not None:
+                values.append(int(parsed))
+    return min(values) if values else None
+
+
+def any_nested_bool(payload: dict[str, object], keys: tuple[str, ...]) -> bool:
+    normalized_keys = {key.lower() for key in keys}
+    for node in iter_payload_mappings(payload):
+        for key, value in node.items():
+            if str(key).strip().lower() not in normalized_keys:
+                continue
+            parsed = as_guard_bool(value)
+            if parsed is True:
+                return True
+    return False
+
+
+def nested_text(payload: dict[str, object], *, limit: int = 20000) -> str:
+    parts: list[str] = []
+    total = 0
+    for node in iter_payload_mappings(payload):
+        for key, value in node.items():
+            if isinstance(value, (str, int, float, bool)):
+                fragment = f"{key}={value}".lower()
+                parts.append(fragment)
+                total += len(fragment)
+                if total >= limit:
+                    return "\n".join(parts)
+    return "\n".join(parts)
+
+
+def detect_external_test_label_transfer_signal(payload: dict[str, object] | None) -> dict[str, object] | None:
+    """Detect submissions built by copying hidden test labels from labeled external overlaps.
+
+    External data can be legitimate for pretraining or representation learning. This guard targets a narrower
+    failure mode: all or most competition test rows are matched to a labeled external dataset by exact/near-exact
+    identifiers, image hashes, or bounding boxes, and those external labels become the submission predictions.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return None
+
+    explicit = any_nested_bool(
+        payload,
+        (
+            "external_test_label_transfer",
+            "test_label_transfer",
+            "test_label_leakage",
+            "external_label_transfer_detected",
+        ),
+    )
+    external_trusted = any_nested_bool(
+        payload,
+        (
+            "external_overlap_trusted",
+            "external_data_allowed",
+            "external_overlap_used",
+            "external_labels_used",
+        ),
+    )
+    exact_coverage = any_nested_bool(
+        payload,
+        (
+            "exact_coverage_pass",
+            "external_require_full_exact_coverage",
+            "sha1_equal",
+        ),
+    )
+    text = nested_text(payload)
+    method_or_manifest_mentions_transfer = (
+        "external_test_label_transfer" in text
+        or "test_label_transfer" in text
+        or "official_multiview_overlap_mapping" in text
+        or ("external" in text and "overlap" in text and "mapping" in text)
+        or ("external_row_id" in text and "predicted_class" in text)
+        or ("match_type_counts" in text and "exact_sha1" in text and "test_selected" in text)
+    )
+
+    test_selected_rows = max_nested_int(payload, ("test_selected_row_count", "test_override_rows"))
+    submission_rows = max_nested_int(payload, ("submission_rows", "submission_row_count", "test_row_count"))
+    uncovered_test_rows = min_nested_int(payload, ("uncovered_test_row_count",))
+    exact_test_image_count = max_nested_int(
+        payload,
+        ("test_exact_sha1_matched_image_count", "test_selected_exact_sha1_image_count"),
+    )
+    max_image_distance = max_nested_float(
+        payload,
+        ("max_selected_image_distance", "test_max_selected_image_distance"),
+    )
+    max_bbox_distance = max_nested_float(
+        payload,
+        ("max_selected_bbox_distance", "test_max_selected_bbox_distance"),
+    )
+    final_method = first_nested_value(payload, ("final_selected_method", "name"))
+    external_root = first_nested_value(payload, ("external_root_path", "external_root"))
+
+    full_or_near_full_test_coverage = False
+    if test_selected_rows is not None and test_selected_rows > 0:
+        if uncovered_test_rows == 0:
+            full_or_near_full_test_coverage = True
+        elif submission_rows is not None and submission_rows > 0 and test_selected_rows >= int(0.95 * submission_rows):
+            full_or_near_full_test_coverage = True
+
+    exact_or_near_exact = bool(exact_coverage)
+    if max_image_distance is not None and max_bbox_distance is not None:
+        exact_or_near_exact = exact_or_near_exact or (max_image_distance <= 1e-12 and max_bbox_distance <= 1e-12)
+    if exact_test_image_count is not None and exact_test_image_count > 0:
+        exact_or_near_exact = True
+
+    if not explicit and not (
+        external_trusted
+        and full_or_near_full_test_coverage
+        and exact_or_near_exact
+        and method_or_manifest_mentions_transfer
+    ):
+        return None
+
+    return {
+        "detected": True,
+        "reason": "external labeled data appears to directly determine competition test predictions",
+        "test_selected_row_count": test_selected_rows,
+        "submission_rows": submission_rows,
+        "uncovered_test_row_count": uncovered_test_rows,
+        "test_exact_sha1_image_count": exact_test_image_count,
+        "max_selected_image_distance": max_image_distance,
+        "max_selected_bbox_distance": max_bbox_distance,
+        "final_selected_method": str(final_method) if final_method is not None else None,
+        "external_root": str(external_root) if external_root is not None else None,
+    }
+
+
+def pipeline_name_from_payload(pipeline: dict[str, object]) -> str | None:
+    for key in ("name", "pipeline", "pipeline_name", "method", "model_name"):
+        value = pipeline.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def extract_selected_pipeline_name(payload: dict[str, object]) -> str | None:
+    selected = payload.get("selected")
+    if isinstance(selected, dict):
+        name = pipeline_name_from_payload(selected)
+        if name:
+            return name
+    for key in (
+        "chosen_pipeline",
+        "selected_pipeline",
+        "selected_method",
+        "final_pipeline",
+        "final_method",
+        "best_pipeline",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def extract_pipeline_candidates(payload: dict[str, object]) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for key in ("pipelines", "candidates", "leaderboard", "models"):
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                candidates.append(item)
+    return candidates
+
+
+def pipeline_float(pipeline: dict[str, object], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        parsed = _to_float(pipeline.get(key))
+        if parsed is not None and math.isfinite(parsed):
+            return float(parsed)
+    return None
+
+
+def find_selected_pipeline(
+    *,
+    payload: dict[str, object],
+    candidates: list[dict[str, object]],
+) -> dict[str, object] | None:
+    selected_name = extract_selected_pipeline_name(payload)
+    if selected_name:
+        selected_norm = selected_name.strip().lower()
+        for candidate in candidates:
+            name = pipeline_name_from_payload(candidate)
+            if name and name.strip().lower() == selected_norm:
+                return candidate
+    selected = payload.get("selected")
+    if isinstance(selected, dict):
+        return selected
+    return None
+
+
+def detect_candidate_selection_mismatch(
+    *,
+    payload: dict[str, object] | None,
+    direction: str,
+) -> dict[str, object] | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    candidates = extract_pipeline_candidates(payload)
+    if len(candidates) < 2:
+        return None
+    selected = find_selected_pipeline(payload=payload, candidates=candidates)
+    if selected is None:
+        return None
+
+    secondary_keys = (
+        "holdout_score",
+        "holdout_value",
+        "holdout_f1",
+        "val_score",
+        "validation_score",
+        "val_f1",
+        "secondary_score",
+    )
+    selected_secondary = pipeline_float(selected, secondary_keys)
+    if selected_secondary is None:
+        return None
+
+    scored_candidates = [
+        (candidate, score)
+        for candidate in candidates
+        if (score := pipeline_float(candidate, secondary_keys)) is not None
+    ]
+    if len(scored_candidates) < 2:
+        return None
+    best_candidate, best_secondary = (
+        min(scored_candidates, key=lambda item: item[1])
+        if direction == "minimize"
+        else max(scored_candidates, key=lambda item: item[1])
+    )
+    if best_candidate is selected:
+        return None
+    if not is_significantly_worse(
+        current=float(selected_secondary),
+        reference=float(best_secondary),
+        direction=direction,
+        rel_margin=QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN,
+        abs_margin=QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN,
+    ):
+        return None
+
+    selected_primary = pipeline_float(
+        selected,
+        (
+            "cv_score",
+            "offline_value",
+            "value",
+            "score",
+            "oof_score",
+            "oof_f1",
+            "mean_cv",
+        ),
+    )
+    best_primary = pipeline_float(
+        best_candidate,
+        (
+            "cv_score",
+            "offline_value",
+            "value",
+            "score",
+            "oof_score",
+            "oof_f1",
+            "mean_cv",
+        ),
+    )
+    return {
+        "selected": pipeline_name_from_payload(selected) or extract_selected_pipeline_name(payload) or "unknown",
+        "selected_secondary_score": float(selected_secondary),
+        "selected_primary_score": selected_primary,
+        "best_secondary_candidate": pipeline_name_from_payload(best_candidate) or "unknown",
+        "best_secondary_score": float(best_secondary),
+        "best_secondary_primary_score": best_primary,
+        "direction": direction,
+        "candidate_count": len(scored_candidates),
+    }
+
+
+def prediction_count_mean(pipeline: dict[str, object]) -> float | None:
+    summary = pipeline.get("prediction_count_summary")
+    if not isinstance(summary, dict):
+        return None
+    for split in ("test", "submission", "val", "holdout"):
+        split_summary = summary.get(split)
+        if isinstance(split_summary, dict):
+            parsed = _to_float(split_summary.get("mean"))
+            if parsed is not None and math.isfinite(parsed):
+                return float(parsed)
+    parsed = _to_float(summary.get("mean"))
+    if parsed is not None and math.isfinite(parsed):
+        return float(parsed)
+    return None
+
+
+def detect_prediction_distribution_collapse(payload: dict[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(payload, dict) or not payload:
+        return None
+    candidates = extract_pipeline_candidates(payload)
+    if len(candidates) < 2:
+        return None
+    selected = find_selected_pipeline(payload=payload, candidates=candidates)
+    if selected is None:
+        return None
+    selected_mean = prediction_count_mean(selected)
+    if selected_mean is None:
+        return None
+    candidate_means = [
+        (pipeline_name_from_payload(candidate) or "unknown", mean)
+        for candidate in candidates
+        if (mean := prediction_count_mean(candidate)) is not None
+    ]
+    if len(candidate_means) < 2:
+        return None
+    max_name, max_mean = max(candidate_means, key=lambda item: item[1])
+    if max_mean < 3.0:
+        return None
+    if (
+        selected_mean <= max_mean * QUALITY_GUARD_PREDICTION_COUNT_RATIO
+        and (max_mean - selected_mean) >= QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN
+    ):
+        return {
+            "selected": pipeline_name_from_payload(selected) or extract_selected_pipeline_name(payload) or "unknown",
+            "selected_test_prediction_mean": float(selected_mean),
+            "largest_mean_candidate": max_name,
+            "largest_test_prediction_mean": float(max_mean),
+            "candidate_count": len(candidate_means),
+        }
+    return None
