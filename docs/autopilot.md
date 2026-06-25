@@ -126,7 +126,7 @@ Submission behavior:
 --compute local_gpu|kaggle_gpu|kaggle_tpu   (required)
 --accelerator auto|gpu|tpu
 --hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2
---score-source auto|holdout|cv|test
+--score-source holdout|cv
 --holdout-frac FLOAT
 --cv-folds INT
 --max-iterations INT

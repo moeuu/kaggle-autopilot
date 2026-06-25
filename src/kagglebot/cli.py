@@ -28,6 +28,7 @@ from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_ker
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.method_scout import normalize_method_scout_mode, normalize_research_scout_mode
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
+from kagglebot.score_sources import normalize_generalizable_score_source
 from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
@@ -528,13 +529,10 @@ def autopilot(
         )
 
     if score_source is not None:
-        normalized_score_source = score_source.strip().lower()
-        if normalized_score_source not in {"holdout", "cv"}:
-            raise typer.BadParameter(
-                "Invalid --score-source. Allowed values: holdout, cv.",
-                param_hint="--score-source",
-            )
-        score_source = normalized_score_source
+        try:
+            score_source = normalize_generalizable_score_source(score_source)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--score-source") from exc
     try:
         normalized_campaign_mode = normalize_campaign_mode(campaign_mode, deliverable_mode="leaderboard")
     except ValueError as exc:

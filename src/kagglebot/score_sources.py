@@ -2,6 +2,7 @@ from __future__ import annotations
 
 TRUSTED_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
 DEFAULT_ACCEPTED_SCORE_SOURCES = ("cv", "holdout")
+GENERALIZABLE_SCORE_SOURCES = frozenset({"cv", "holdout"})
 
 
 def normalize_score_source_name(value: object) -> str:
@@ -22,6 +23,23 @@ def normalize_score_source_name(value: object) -> str:
 def is_trusted_offline_score_source(score_source: object) -> bool:
     """Return whether score source is trusted for offline model-selection decisions."""
     return normalize_score_source_name(score_source) in TRUSTED_SCORE_SOURCES
+
+
+def normalize_generalizable_score_source(value: object) -> str:
+    """Normalize a user-selectable offline score source.
+
+    Trust checks can include broader labels such as consensus, but score-source
+    selection is intentionally restricted to direct offline validation modes.
+    """
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"Unknown score source: {value}. Allowed values: holdout, cv.")
+    normalized = normalize_score_source_name(text)
+    if normalized in {"auto", "test"}:
+        raise ValueError("score-source auto/test is removed; use holdout or cv.")
+    if normalized in GENERALIZABLE_SCORE_SOURCES:
+        return normalized
+    raise ValueError(f"Unknown score source: {value}. Allowed values: holdout, cv.")
 
 
 def normalize_score_source_list(value: object) -> list[str]:

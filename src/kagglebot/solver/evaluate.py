@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from kagglebot.score_sources import normalize_generalizable_score_source
 from kagglebot.solver.metrics import Direction
 
 
@@ -37,9 +38,4 @@ def select_score_source(
 ) -> ScoreSelection:
     """Return score source selection restricted to generalizable offline modes."""
     del plan_score_source, data_dir, train, test, target_col, id_col
-    normalized = str(score_source or "").strip().lower()
-    if normalized in {"auto", "test"}:
-        raise ValueError("score-source auto/test is removed; use holdout or cv.")
-    if normalized in {"holdout", "cv"}:
-        return ScoreSelection(source=normalized)
-    raise ValueError(f"Unknown score source: {score_source}. Allowed values: holdout, cv.")
+    return ScoreSelection(source=normalize_generalizable_score_source(score_source))

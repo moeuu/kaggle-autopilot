@@ -40,7 +40,7 @@ uv run kagglebot autopilot <competition> --compute local_gpu
 Useful options:
 - `--max-iterations N`
 - `--force-submit`
-- `--score-source auto|holdout|cv|test`
+- `--score-source holdout|cv`
 
 ## Notes
 

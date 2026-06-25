@@ -21,7 +21,7 @@ Key points:
 
 Common options:
 - `--accelerator auto|gpu|tpu`
-- `--score-source auto|holdout|cv|test`
+- `--score-source holdout|cv`
 - `--holdout-frac`, `--cv-folds`, `--seed`
 - `--max-iterations`, `--patience`, `--min-improvement`, `--max-total-min`
 - `--internet auto|off|on`

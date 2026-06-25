@@ -59,8 +59,9 @@ and iteration-signal policy helpers live in `src/kagglebot/score_utils.py`, `src
 `src/kagglebot/iteration_signals.py`, so the main file stays focused on orchestration.
 Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the loop calls that public module directly
 instead of carrying private rule-parsing aliases in `autopilot.py`.
-Offline score-source normalization and trust checks live in `src/kagglebot/score_sources.py` for the same reason:
-the loop should consume normalized policy answers rather than own every parsing rule inline.
+Offline score-source normalization, user-selectable score-source validation, and trust checks live in
+`src/kagglebot/score_sources.py` for the same reason: the loop should consume normalized policy answers rather than own
+every parsing rule inline.
 Campaign mode normalization lives in `src/kagglebot/campaign.py`; CLI commands and the loop share the same aliases and
 validation instead of keeping separate option parsers.
 Method-scout, research-scout, portfolio-execution, validation-lab, and top1-submit policy normalization similarly stay
