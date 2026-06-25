@@ -355,7 +355,7 @@ Recommended extraction order:
    autopilot execution cannot drift on workload classification.
 7. Agent I/O helpers: keep prompt/response transcript display, response-file reads, capacity-error detection, and retry
    feedback prompt construction in `agent_io.py`; orchestration code should pass identity/path context only.
-   Strategy, improvement, error-repair, and mandatory code-reference repair prompt rendering now lives in
+   Strategy, improvement, autofix, error-repair, and mandatory code-reference repair prompt rendering now lives in
    `agent_prompts.py`, keeping long prompt templates out of `autopilot.py`.
    Strategy prompt file persistence, runner invocation, response loading, and failed/empty fallback handling now lives in
    `agent_strategy.py`; orchestration wrappers should only supply stage-specific labels and fallback messages.

@@ -117,6 +117,89 @@ Return concise, actionable instructions for {IMPLEMENTATION_AGENT.display_name}:
 """
 
 
+def build_autofix_prompt(
+    *,
+    slug: str,
+    run_id: str,
+    attempt: int,
+    compute: str,
+    accelerator: str,
+    error_text: str,
+    error_path: Path,
+    repo_root: Path,
+    run_dir: Path,
+    kernel_dir: Path,
+    context_dir: Path,
+    data_dir: Path,
+    prompts_dir: Path,
+    autopilot_path: Path,
+    allowed_prefixes: list[Path],
+    denied_prefixes: list[Path],
+    submit_context: str = "",
+) -> str:
+    allowed_list = "\n".join(f"- {path}" for path in allowed_prefixes)
+    denied_list = "\n".join(f"- {path}" for path in denied_prefixes)
+    submit_context_block = ""
+    if submit_context:
+        submit_context_block = (
+            "\n## Submit Context\n\n"
+            "This is a submit-stage failure. Use `repair_target` to decide whether to fix the submission artifact, "
+            "submit mode/kernel path, or a platform/manual blocker.\n"
+            "This run must fix the submission contract before further model changes.\n"
+            "If the error is competition-specific, edit only authoritative `kernel.py`.\n"
+            "Do not leave iter2 with the same Kaggle row/column/evaluation exception.\n\n"
+            "```\n"
+            f"{submit_context}\n"
+            "```\n"
+        )
+    return f"""\
+# Kagglebot {IMPLEMENTATION_AGENT.display_name}: Auto-Fix
+
+## Context
+
+Competition: {slug}
+Run ID: {run_id}
+Attempt: {attempt}
+Compute: {compute} ({accelerator})
+
+## Error
+
+```
+{error_text}
+```
+
+Error log file: {error_path}
+{submit_context_block}
+
+## Relevant Paths
+
+- repo_root: {repo_root}
+- run_dir: {run_dir}
+- kernel_dir: {kernel_dir}
+- context_dir: {context_dir}
+- data_dir: {data_dir}
+- prompts_dir: {prompts_dir}
+- autopilot: {autopilot_path}
+
+## Allowed Edit Scope
+
+{allowed_list}
+
+## Forbidden Edit Scope
+
+{denied_list or "- None"}
+
+## Task
+
+1) Identify root cause of the failure.
+2) Apply minimal, targeted fixes so autopilot can continue.
+3) Do not touch datasets or credentials.
+   Prefer already-installed dependencies; add new dependencies only with clear justification.
+   If a dependency must be added, use `uv add <package>` and keep `pyproject.toml` + `uv.lock` consistent.
+4) Explain what you changed in your response.
+"""
+
+
 def build_code_reference_repair_prompt(
     *,
     base_prompt_text: str,

@@ -4729,13 +4729,23 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
 
     allowed_prefixes = _autofix_allowed_prefixes(config)
-    prompt_text = _build_autofix_prompt(
-        config=config,
+    prompt_text = _agent_prompts.build_autofix_prompt(
+        slug=config.slug,
         run_id=run_id,
         attempt=attempt,
+        compute=config.compute,
+        accelerator=config.accelerator,
         error_text=error_text,
         error_path=error_path,
-        allowed_prefixes=allowed_prefixes,
+        repo_root=config.paths.repo_root,
+        run_dir=config.paths.run_dir(run_id),
+        kernel_dir=config.paths.kernel_source_dir,
+        context_dir=config.paths.context_dir,
+        data_dir=config.paths.data_dir,
+        prompts_dir=config.paths.prompts_dir,
+        autopilot_path=Path(__file__).resolve(),
+        allowed_prefixes=allowed_prefixes.allowed_prefixes,
+        denied_prefixes=allowed_prefixes.denied_prefixes,
         submit_context=submit_context,
     )
     if submit_file_fix_required:
@@ -4922,79 +4932,6 @@ def _log_codex_sandbox_fallback(*, stage_label: str, result: object) -> None:
     excerpt = str(getattr(result, "sandbox_failure_excerpt", "")).strip()
     detail = f": {excerpt}" if excerpt else ""
     print(f"[yellow]{stage_label}[/yellow]: codex sandbox fallback used{detail}")
-
-
-def _build_autofix_prompt(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    attempt: int,
-    error_text: str,
-    error_path: Path,
-    allowed_prefixes: WriteGuardPolicy,
-    submit_context: str = "",
-) -> str:
-    allowed_list = "\n".join(f"- {path}" for path in allowed_prefixes.allowed_prefixes)
-    denied_list = "\n".join(f"- {path}" for path in allowed_prefixes.denied_prefixes)
-    submit_context_block = ""
-    if submit_context:
-        submit_context_block = (
-            "\n## Submit Context\n\n"
-            "This is a submit-stage failure. Use `repair_target` to decide whether to fix the submission artifact, "
-            "submit mode/kernel path, or a platform/manual blocker.\n"
-            "This run must fix the submission contract before further model changes.\n"
-            "If the error is competition-specific, edit only authoritative `kernel.py`.\n"
-            "Do not leave iter2 with the same Kaggle row/column/evaluation exception.\n\n"
-            "```\n"
-            f"{submit_context}\n"
-            "```\n"
-        )
-    return f"""\
-# Kagglebot {IMPLEMENTATION_AGENT.display_name}: Auto-Fix
-
-## Context
-
-Competition: {config.slug}
-Run ID: {run_id}
-Attempt: {attempt}
-Compute: {config.compute} ({config.accelerator})
-
-## Error
-
-```
-{error_text}
-```
-
-Error log file: {error_path}
-{submit_context_block}
-
-## Relevant Paths
-
-- repo_root: {config.paths.repo_root}
-- run_dir: {config.paths.run_dir(run_id)}
-- kernel_dir: {config.paths.kernel_source_dir}
-- context_dir: {config.paths.context_dir}
-- data_dir: {config.paths.data_dir}
-- prompts_dir: {config.paths.prompts_dir}
-- autopilot: {Path(__file__).resolve()}
-
-## Allowed Edit Scope
-
-{allowed_list}
-
-## Forbidden Edit Scope
-
-{denied_list or "- None"}
-
-## Task
-
-1) Identify root cause of the failure.
-2) Apply minimal, targeted fixes so autopilot can continue.
-3) Do not touch datasets or credentials.
-   Prefer already-installed dependencies; add new dependencies only with clear justification.
-   If a dependency must be added, use `uv add <package>` and keep `pyproject.toml` + `uv.lock` consistent.
-4) Explain what you changed in your response.
-"""
 
 
 def _run_error_strategy(

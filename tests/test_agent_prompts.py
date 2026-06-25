@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kagglebot.agent_prompts import (
+    build_autofix_prompt,
     build_code_reference_repair_prompt,
     build_error_strategy_prompt,
     build_improvement_strategy_prompt,
@@ -61,6 +62,40 @@ def test_build_error_strategy_prompt_renders_failure_context() -> None:
     assert "CUDA out of memory" in text
     assert "repair training loop" in text
     assert "Root cause hypothesis." in text
+
+
+def test_build_autofix_prompt_renders_submit_context_and_scope(tmp_path: Path) -> None:
+    text = build_autofix_prompt(
+        slug="demo-comp",
+        run_id="run-1",
+        attempt=2,
+        compute="kaggle_gpu",
+        accelerator="gpu",
+        error_text="Submission Scoring Error: incorrect format",
+        error_path=tmp_path / "error-02.txt",
+        repo_root=tmp_path,
+        run_dir=tmp_path / "runs" / "run-1",
+        kernel_dir=tmp_path / "kernel",
+        context_dir=tmp_path / "context",
+        data_dir=tmp_path / "data",
+        prompts_dir=tmp_path / "prompts",
+        autopilot_path=tmp_path / "src" / "kagglebot" / "autopilot.py",
+        allowed_prefixes=[tmp_path / "src", tmp_path / "artifacts" / "demo-comp"],
+        denied_prefixes=[tmp_path / "data"],
+        submit_context="repair_target: submission_artifact",
+    )
+
+    assert "# Kagglebot" in text
+    assert "Competition: demo-comp" in text
+    assert "Run ID: run-1" in text
+    assert "Attempt: 2" in text
+    assert "Compute: kaggle_gpu (gpu)" in text
+    assert "Submission Scoring Error" in text
+    assert "## Submit Context" in text
+    assert "repair_target: submission_artifact" in text
+    assert f"- {tmp_path / 'src'}" in text
+    assert f"- {tmp_path / 'data'}" in text
+    assert "Do not touch datasets or credentials." in text
 
 
 def test_build_code_reference_repair_prompt_includes_marker_and_tabicl_requirement() -> None:
