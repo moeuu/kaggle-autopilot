@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import runpy
 from pathlib import Path
 
 import pytest
 
 from kagglebot.kernel_sources import KernelSourceConfig
 from kagglebot.runners import kaggle_notebook
-from kagglebot.runners.kaggle_notebook import _wait_for_kernel, build_kernel_metadata
+from kagglebot.runners.kaggle_notebook import KERNEL_TEMPLATE, _wait_for_kernel, build_kernel_metadata
 
 
 def test_build_kernel_metadata_uses_plan_driven_sources() -> None:
@@ -79,3 +80,43 @@ def test_wait_for_kernel_pushes_cpu_stop_marker_after_failed_gpu_run(monkeypatch
     assert metadata["enable_tpu"] is False
     assert metadata["enable_internet"] is False
     assert (logs_dir / "kernel_stop.log").exists()
+
+
+def test_generated_kernel_expands_tiny_public_sample_to_test_ids(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+
+    input_root = tmp_path / "input"
+    data_dir = input_root / "demo"
+    working_dir = tmp_path / "working"
+    data_dir.mkdir(parents=True)
+    working_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id": range(20),
+            "feature": [float(idx) for idx in range(20)],
+            "target": [idx % 2 for idx in range(20)],
+        }
+    ).to_csv(data_dir / "train.csv", index=False)
+    pd.DataFrame({"id": [100, 101, 102, 103, 104], "feature": [1.0, 2.0, 3.0, 4.0, 5.0]}).to_csv(
+        data_dir / "test.csv",
+        index=False,
+    )
+    pd.DataFrame({"id": [100, 101, 102], "target": [0, 0, 0]}).to_csv(
+        data_dir / "sample_submission.csv",
+        index=False,
+    )
+
+    script = (
+        KERNEL_TEMPLATE.replace("__COMPETITION_SLUG__", "demo")
+        .replace("__ACCELERATOR__", "none")
+        .replace('Path("/kaggle/input")', f'Path("{input_root}")')
+        .replace('Path("/kaggle/working")', f'Path("{working_dir}")')
+    )
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(script, encoding="utf-8")
+
+    runpy.run_path(str(kernel_path), run_name="__main__")
+
+    submission = pd.read_csv(working_dir / "submission.csv")
+    assert submission["id"].tolist() == [100, 101, 102, 103, 104]
+    assert list(submission.columns) == ["id", "target"]

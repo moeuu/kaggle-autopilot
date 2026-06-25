@@ -27,6 +27,7 @@ from kagglebot import env_utils as _env_utils
 from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import iteration_signals as _iteration_signals
 from kagglebot import json_utils as _json_utils
+from kagglebot import kaggle_cli_errors as _kaggle_cli_errors
 from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
@@ -49,6 +50,7 @@ from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot import submit_notebook as _submit_notebook
 from kagglebot import submit_retry_policy as _submit_retry_policy
 from kagglebot import submit_stage as _submit_stage
+from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
@@ -111,7 +113,6 @@ from kagglebot.kaggle_api import (
     leaderboard_top1,
     list_competition_submissions,
 )
-from kagglebot.kaggle_cli_errors import is_missing_kaggle_credentials_error as _is_missing_kaggle_credentials_error
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local, run_submit_kernel
 from kagglebot.knowledge import (
     record_error_fix_insight,
@@ -165,7 +166,6 @@ from kagglebot.top1_exhaustive import (
 from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
 from kagglebot.validators import kernel_source_preflight_error
-from kagglebot.verify_artifacts import run_verify as _verify_run_verify
 from kagglebot.write_guard import (
     _backup_guarded_files,
     _diff_snapshots,
@@ -2998,7 +2998,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
-    _verify_run_verify(
+    _verify_artifacts.run_verify(
         verify_cmd,
         dry_run=dry_run,
         artifacts_dir=artifacts_dir,
@@ -4650,7 +4650,7 @@ def _attempt_submit(
     rules_resolution = _submit_stage.resolve_rules_acceptance_for_submit(
         check_rules_accepted=lambda: check_rules_accepted(config.slug, dry_run=config.dry_run),
         cli_error_types=(KaggleCliError,),
-        is_missing_credentials_error=_is_missing_kaggle_credentials_error,
+        is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
         rules_not_accepted_exit_code=RulesNotAcceptedError.exit_code,
         compute_error_fingerprint=compute_error_fingerprint,
     )
@@ -4829,7 +4829,7 @@ def _attempt_submit(
         except KaggleCliError as exc:
             abort_spec = _submit_stage.resolve_kaggle_cli_submit_abort_spec(
                 error=exc,
-                is_missing_credentials_error=_is_missing_kaggle_credentials_error,
+                is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
                 compute_error_fingerprint=compute_error_fingerprint,
             )
             if abort_spec is None:

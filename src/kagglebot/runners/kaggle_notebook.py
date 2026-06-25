@@ -130,6 +130,36 @@ def infer_task(y: pd.Series) -> str:
     return "regression"
 
 
+def sample_column_default(sample: pd.DataFrame, column: str):
+    if column not in sample.columns or sample.empty:
+        return 0.0
+    non_null = sample[column].dropna()
+    if non_null.empty:
+        return 0.0
+    numeric = pd.to_numeric(non_null, errors="coerce").dropna()
+    if not numeric.empty:
+        return float(numeric.mean())
+    return non_null.iloc[0]
+
+
+def build_submission_template(sample: pd.DataFrame, test: pd.DataFrame, id_col: str | None) -> pd.DataFrame:
+    if (
+        id_col
+        and id_col in sample.columns
+        and id_col in test.columns
+        and 0 < len(sample) <= 10
+        and len(test) > len(sample)
+        and not sample[id_col].duplicated().any()
+        and not test[id_col].duplicated().any()
+    ):
+        expanded = pd.DataFrame({id_col: test[id_col].to_numpy()})
+        for col in sample.columns:
+            if col != id_col:
+                expanded[col] = sample_column_default(sample, col)
+        return expanded[list(sample.columns)]
+    return sample.copy()
+
+
 def build_preprocessor(feature_cols: list[str], train: pd.DataFrame) -> ColumnTransformer:
     cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
     num_cols = [c for c in feature_cols if c not in cat_cols]
@@ -391,7 +421,7 @@ def main() -> None:
     ):
         preds = label_encoder.inverse_transform(np.asarray(preds, dtype=int))
 
-    submission = sample.copy()
+    submission = build_submission_template(sample, test, id_col)
     if id_col and id_col in test.columns and id_col in submission.columns:
         mapping = pd.Series(preds, index=test[id_col])
         submission[target_col] = submission[id_col].map(mapping)
