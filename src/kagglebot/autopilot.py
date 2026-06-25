@@ -17,6 +17,7 @@ from kagglebot import agent_io as _agent_io
 from kagglebot import agent_prompts as _agent_prompts
 from kagglebot import agent_strategy as _agent_strategy
 from kagglebot import autofix_restart as _autofix_restart
+from kagglebot import autopilot_state as _autopilot_state
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
@@ -61,12 +62,9 @@ from kagglebot.autopilot_state import (
     _copy_submission_artifact_to_iteration_dir,
     _has_successful_submit_attempt,
     _load_latest_submit_attempt,
-    _load_run_state,
     _load_submit_fingerprints,
     _resolve_iteration_artifact,
-    _resolve_iteration_submission_artifact,
     _save_run_state,
-    _write_iteration_state_marker,
 )
 from kagglebot.autopilot_state import (
     _build_run_payload as _state_build_run_payload,
@@ -419,7 +417,9 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 )
                 run_dir = config.paths.run_dir(run_id)
                 if (not _has_successful_submit_attempt(run_dir)) or (
-                    _submit_failure_context.should_force_resubmit_after_submit_abort(_load_run_state(run_dir))
+                    _submit_failure_context.should_force_resubmit_after_submit_abort(
+                        _autopilot_state._load_run_state(run_dir)
+                    )
                 ):
                     os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
                     submit_force_override = True
@@ -2100,7 +2100,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "graph_execution_report": graph_execution_report,
                 }
             _write_json_object(metrics_path, pre_submit_metrics_payload)
-            _write_iteration_state_marker(
+            _autopilot_state._write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
                 iteration=iteration,
@@ -2536,7 +2536,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 iteration_record_kwargs=iteration_record_kwargs,
                 submit_phase_finished=submit_phase_completion.submit_phase_finished,
             )
-            _write_iteration_state_marker(
+            _autopilot_state._write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
                 iteration=iteration,
@@ -4155,7 +4155,7 @@ def _rerun_kernel_for_metric_recheck(
 
     rechecked_submission_path = submission_path
     if not rechecked_submission_path.exists():
-        resolved_submission = _resolve_iteration_submission_artifact(iter_dir)
+        resolved_submission = _autopilot_state._resolve_iteration_submission_artifact(iter_dir)
         if resolved_submission is None:
             raise RuntimeError(
                 "Metric recheck failed: submission artifact is missing for same-iteration metric-only recheck."
@@ -4274,7 +4274,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     if submit_autofix:
         submit_context = _submit_failure_context.format_submit_autofix_context(
             failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-            run_state=_load_run_state(run_dir),
+            run_state=_autopilot_state._load_run_state(run_dir),
             latest_submit_attempt=_load_latest_submit_attempt(run_dir),
         )
         latest_submit_attempt = _load_latest_submit_attempt(run_dir)
@@ -4282,13 +4282,13 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         if submit_file_fix_required:
             max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
             submit_file_fix_baseline_path = _submit_failure_context.resolve_submit_autofix_submission_artifact(
-                run_state=_load_run_state(run_dir),
+                run_state=_autopilot_state._load_run_state(run_dir),
                 latest_submit_attempt=_load_latest_submit_attempt(run_dir),
                 failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
                 fallback_iteration_dirs=(
                     config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
                 ),
-                resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
+                resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
             )
             submit_file_fix_baseline_sha256 = _sha256_or_none(submit_file_fix_baseline_path)
         _prepared_submission_path, prepared_submission_summary = _prepare_submit_file_autofix(
@@ -4456,7 +4456,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} autofix step failed.")
 
         if submit_file_fix_required and not _submit_failure_context.submit_file_fix_contract_satisfied(
-            run_state=_load_run_state(run_dir),
+            run_state=_autopilot_state._load_run_state(run_dir),
             baseline_path=submit_file_fix_baseline_path,
             baseline_sha256=submit_file_fix_baseline_sha256,
             sha256_or_none=_sha256_or_none,
@@ -4641,7 +4641,7 @@ def _attempt_submit(
     autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_attempt(
         run_dir=run_dir,
         submission_path=submission_path,
-        load_run_state=_load_run_state,
+        load_run_state=_autopilot_state._load_run_state,
         load_latest_submit_attempt=_load_latest_submit_attempt,
         save_run_state=lambda updates: _save_run_state(run_dir, updates),
         now_iso=datetime.now(UTC).isoformat(),
@@ -4714,7 +4714,7 @@ def _attempt_submit(
         prepared_submission_sha=prepared_submission_sha,
         code_fingerprint=submit_code_fingerprint,
         allow_force=allow_force,
-        prior_state=_load_run_state(run_dir),
+        prior_state=_autopilot_state._load_run_state(run_dir),
         collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
         decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
         submission_attempt_sha_seen=lambda submission_sha: _submit_attempts.submit_attempt_sha_seen(
@@ -4988,7 +4988,7 @@ def _attempt_submit(
         submission_artifact_path=submission_for_submit_path,
         outcome=outcome,
         code_fingerprint=submit_code_fingerprint,
-        prior_state=_load_run_state(run_dir),
+        prior_state=_autopilot_state._load_run_state(run_dir),
         compute_error_fingerprint=compute_error_fingerprint,
         compute_submission_sha256=_sha256_or_none,
         record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
@@ -5079,7 +5079,7 @@ def _abort_submit_for_run(
         submission_ref=submission_ref,
         submission_artifact_path=submission_artifact_path,
     )
-    prior = _load_run_state(run_dir)
+    prior = _autopilot_state._load_run_state(run_dir)
     prior_ok = bool(prior.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
     _submit_failure_context.persist_submit_abort_failure(
         run_dir=run_dir,
@@ -5100,7 +5100,7 @@ def _abort_submit_for_run(
         prior_submit_ok=prior_ok,
         submit_attempt_recorder=submit_attempt_recorder,
         load_latest_submit_attempt=_load_latest_submit_attempt,
-        load_run_state=_load_run_state,
+        load_run_state=_autopilot_state._load_run_state,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         now_iso=datetime.now(UTC).isoformat(),
@@ -5147,13 +5147,13 @@ def _prepare_submit_file_autofix(
     def resolve_source() -> Path | None:
         max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
         return _submit_failure_context.resolve_submit_autofix_submission_artifact(
-            run_state=_load_run_state(run_dir),
+            run_state=_autopilot_state._load_run_state(run_dir),
             latest_submit_attempt=_load_latest_submit_attempt(run_dir),
             failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
             fallback_iteration_dirs=(
                 config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
             ),
-            resolve_iteration_submission_artifact=_resolve_iteration_submission_artifact,
+            resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
         )
 
     def save_repaired_path(fixed: Path) -> None:
@@ -5171,7 +5171,7 @@ def _prepare_submit_file_autofix(
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
     run_dir = config.paths.run_dir(run_id)
     failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
-    state = _load_run_state(run_dir)
+    state = _autopilot_state._load_run_state(run_dir)
     decision = _submit_failure_context.decide_submit_abort_autofixability(
         failure_context=failure_context,
         run_state=state,
