@@ -34,6 +34,7 @@ from kagglebot.plan_policy import (
     resolve_plan_score_source,
     resolve_rank_force_policy,
     resolve_readiness_stop_policy,
+    resolve_runtime_request,
     resolve_split_strategy_from_artifacts,
     resolve_split_strategy_override,
     resolve_submit_mode,
@@ -610,6 +611,47 @@ def test_resolve_internet_policy_defaults_auto_and_enforces_rules() -> None:
 
     assert decision.internet == "off"
     assert decision.messages == ("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.",)
+
+
+def test_resolve_runtime_request_prefers_config_and_enforces_internet_rules() -> None:
+    decision = resolve_runtime_request(
+        config_time_budget_min=30,
+        config_kernel_name="cli-kernel",
+        config_internet="on",
+        plan=PlanConfig(time_budget_min=60, kernel_name="plan-kernel", internet="off"),
+        internet_must_be_off=True,
+    )
+
+    assert decision.time_budget_min == 30
+    assert decision.kernel_name == "cli-kernel"
+    assert decision.internet == "off"
+    assert decision.messages == ("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.",)
+
+
+def test_resolve_runtime_request_uses_plan_then_defaults() -> None:
+    plan_decision = resolve_runtime_request(
+        config_time_budget_min=None,
+        config_kernel_name=None,
+        config_internet=None,
+        plan=PlanConfig(time_budget_min=60, kernel_name="plan-kernel", internet="auto"),
+        internet_must_be_off=False,
+    )
+    default_decision = resolve_runtime_request(
+        config_time_budget_min=None,
+        config_kernel_name=None,
+        config_internet=None,
+        plan=PlanConfig(time_budget_min=None, kernel_name=None, internet=None),  # type: ignore[arg-type]
+        internet_must_be_off=False,
+    )
+
+    assert plan_decision.time_budget_min == 60
+    assert plan_decision.kernel_name == "plan-kernel"
+    assert plan_decision.internet == "on"
+    assert plan_decision.messages == ()
+    assert default_decision.time_budget_min is None
+    assert default_decision.kernel_name is None
+    assert default_decision.internet == "on"
+    assert default_decision.messages == ()
 
 
 def test_resolve_time_budget_policy_applies_rule_and_local_caps() -> None:

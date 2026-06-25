@@ -175,6 +175,14 @@ class TimeBudgetDecision:
 
 
 @dataclass(frozen=True)
+class RuntimeRequestDecision:
+    time_budget_min: object
+    kernel_name: object
+    internet: object
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TargetObjectiveDecision:
     target_medal: str | None
     target_rank_percentile: float | None
@@ -1616,6 +1624,28 @@ def resolve_internet_policy(*, internet: object, internet_must_be_off: bool) -> 
             messages=("[yellow]note[/yellow]: rules require internet disabled; forcing internet=off.",),
         )
     return InternetDecision(internet=resolved)
+
+
+def resolve_runtime_request(
+    *,
+    config_time_budget_min: object,
+    config_kernel_name: object,
+    config_internet: object,
+    plan: PlanConfig,
+    internet_must_be_off: bool,
+) -> RuntimeRequestDecision:
+    """Resolve runtime request values before runtime-limit and local-budget caps."""
+
+    internet_decision = resolve_internet_policy(
+        internet=_choose(config_internet, plan.internet, "on"),
+        internet_must_be_off=internet_must_be_off,
+    )
+    return RuntimeRequestDecision(
+        time_budget_min=_choose(config_time_budget_min, plan.time_budget_min, None),
+        kernel_name=_choose(config_kernel_name, plan.kernel_name, None),
+        internet=internet_decision.internet,
+        messages=internet_decision.messages,
+    )
 
 
 def resolve_time_budget_policy(

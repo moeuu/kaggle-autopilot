@@ -3313,15 +3313,17 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         submit_mode=submit_mode,
         code_competition=code_competition,
     )
-    time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
-    kernel_name = choose(config.kernel_name, plan.kernel_name, None)
-    internet = choose(config.internet, plan.internet, "on")
-    internet_decision = _plan_policy.resolve_internet_policy(
-        internet=internet,
+    runtime_request = _plan_policy.resolve_runtime_request(
+        config_time_budget_min=config.time_budget_min,
+        config_kernel_name=config.kernel_name,
+        config_internet=config.internet,
+        plan=plan,
         internet_must_be_off=constraints.internet_must_be_off,
     )
-    internet = internet_decision.internet
-    for message in internet_decision.messages:
+    time_budget_min = runtime_request.time_budget_min
+    kernel_name = runtime_request.kernel_name
+    internet = runtime_request.internet
+    for message in runtime_request.messages:
         print(message)
     runtime_limit_min = _competition_rules.runtime_limit_for_compute(constraints=constraints, compute=config.compute)
     is_local_gpu_compute = _is_local_gpu_compute(config.compute)
