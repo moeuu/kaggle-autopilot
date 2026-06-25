@@ -139,7 +139,6 @@ from kagglebot.kaggle_api import (
     list_competition_submissions,
 )
 from kagglebot.kaggle_cli_errors import is_missing_kaggle_credentials_error as _is_missing_kaggle_credentials_error
-from kagglebot.kernel_logs import collect_log_tail as _collect_log_tail
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local, run_submit_kernel
 from kagglebot.knowledge import (
     record_error_fix_insight,
@@ -298,7 +297,6 @@ class AutopilotConfig:
 
 
 MAX_KERNEL_FIX_ATTEMPTS: int | None = 8
-MAX_SAME_KERNEL_ERROR_REPEATS = 2
 MAX_KERNEL_CAPACITY_RETRIES = 3
 KERNEL_CAPACITY_RETRY_SLEEP = 30.0
 MAX_KERNEL_CAPACITY_REPEAT = 6
@@ -1007,7 +1005,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     except KaggleNetworkError as exc:
                         kernel_attempts += 1
                         error_text = _kernel_errors.format_kernel_error(exc)
-                        _record_kernel_error(
+                        _kernel_errors.record_kernel_error(
                             logs_dir=logs_dir,
                             attempt=kernel_attempts,
                             error_text=error_text,
@@ -1038,7 +1036,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     except KernelCapacityError as exc:
                         kernel_attempts += 1
                         error_text = _kernel_errors.format_kernel_error(exc)
-                        _record_kernel_error(
+                        _kernel_errors.record_kernel_error(
                             logs_dir=logs_dir,
                             attempt=kernel_attempts,
                             error_text=error_text,
@@ -1070,7 +1068,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         if _kernel_errors.is_kernel_registration_error(exc):
                             kernel_attempts += 1
                             error_text = _kernel_errors.format_kernel_error(exc)
-                            _record_kernel_error(
+                            _kernel_errors.record_kernel_error(
                                 logs_dir=logs_dir,
                                 attempt=kernel_attempts,
                                 error_text=error_text,
@@ -1089,7 +1087,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         kernel_attempts += 1
                         error_text = _kernel_errors.format_kernel_error(exc)
                         try:
-                            _record_kernel_error(
+                            _kernel_errors.record_kernel_error(
                                 logs_dir=logs_dir,
                                 attempt=kernel_attempts,
                                 error_text=error_text,
@@ -1182,7 +1180,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         kernel_attempts += 1
                         error_text = _kernel_errors.format_kernel_error(exc)
                         try:
-                            _record_kernel_error(
+                            _kernel_errors.record_kernel_error(
                                 logs_dir=logs_dir,
                                 attempt=kernel_attempts,
                                 error_text=error_text,
@@ -3517,38 +3515,6 @@ def _run_kernel_source_preflight_fixes(
             attempt=attempt,
             pending_error_fixes=pending_error_fixes,
         )
-
-
-def _record_kernel_error(
-    *,
-    logs_dir: Path,
-    attempt: int,
-    error_text: str,
-    error_fingerprints: dict[str, int],
-    max_repeats: int | None = None,
-    output_dir: Path | None = None,
-) -> None:
-    enriched_error = error_text
-    if output_dir is not None and output_dir.exists():
-        log_tail = _collect_log_tail(output_dir, max_lines=200)
-        if log_tail and log_tail not in enriched_error:
-            enriched_error = f"{enriched_error}\n\n--- kernel log tail ---\n{log_tail}"
-    fingerprint = _kernel_errors.fingerprint_error(enriched_error)
-    error_fingerprints[fingerprint] = error_fingerprints.get(fingerprint, 0) + 1
-    repeat_limit = MAX_SAME_KERNEL_ERROR_REPEATS if max_repeats is None else max_repeats
-    if repeat_limit is not None and error_fingerprints[fingerprint] > repeat_limit:
-        raise KernelFailedError(
-            "Kernel failure repeated with the same error; aborting auto-fix loop to avoid an infinite retry."
-        )
-    attempt_tag = f"{attempt:02d}"
-    header = (
-        f"kernel_attempt: {attempt}\n"
-        f"error_fingerprint: {fingerprint}\n"
-        f"error_repeat: {error_fingerprints[fingerprint]}\n"
-    )
-    numbered_path = logs_dir / f"kernel_error-{attempt_tag}.txt"
-    numbered_path.write_text(header + enriched_error + "\n", encoding="utf-8")
-    (logs_dir / "kernel_error.txt").write_text(header + enriched_error + "\n", encoding="utf-8")
 
 
 def _run_improvement(

@@ -365,9 +365,9 @@ Recommended extraction order:
 9. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment
    isolation, and competition-specific compatibility shims in `verify_artifacts.py`; avoid adding generated shim strings
    or pytest-specific execution rules back into `autopilot.py`.
-10. Kernel error policy: keep exception formatting, same-error fingerprinting, and pushed-kernel registration failure
-   classification in `kernel_errors.py`; `autopilot.py` should only decide how many repeats are allowed and where logs
-   are persisted.
+10. Kernel error policy: keep exception formatting, same-error fingerprinting, pushed-kernel registration failure
+   classification, kernel-error artifact writing, and repeated-error abort policy in `kernel_errors.py`; `autopilot.py`
+   should only decide when to invoke that policy.
 11. Artifact serialization: keep JSON object reads/writes for durable artifacts behind `json_utils` helpers. New modules
    should avoid ad hoc `json.dumps(...).write_text(...)` for artifact files unless they need non-object JSON, JSONL, or
    generated kernel code that runs outside the package.
