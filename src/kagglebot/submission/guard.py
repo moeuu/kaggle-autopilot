@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from re import Pattern
 
+from kagglebot.env_utils import parse_float_value
 from kagglebot.exceptions import SubmissionCliError
 
 _DEFAULT_SUBMIT_TIMEOUT_SEC = 300.0
@@ -285,12 +286,8 @@ def run_kaggle_submit_kernel(
 
 
 def _submit_timeout_seconds() -> float:
-    raw = os.getenv("KAGGLEBOT_SUBMIT_TIMEOUT_SEC", "").strip()
-    if not raw:
-        return _DEFAULT_SUBMIT_TIMEOUT_SEC
-    try:
-        value = float(raw)
-    except ValueError:
+    value = parse_float_value(os.getenv("KAGGLEBOT_SUBMIT_TIMEOUT_SEC"))
+    if value is None:
         return _DEFAULT_SUBMIT_TIMEOUT_SEC
     return max(1.0, value)
 

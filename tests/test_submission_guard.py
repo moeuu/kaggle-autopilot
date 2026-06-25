@@ -548,6 +548,29 @@ def test_run_kaggle_submit_captures_stdout_stderr(monkeypatch) -> None:
     assert captured["timeout"] == 300.0
 
 
+def test_run_kaggle_submit_timeout_env_uses_shared_number_parsing(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_subprocess_run(*args, **kwargs):  # noqa: ARG001
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=["kaggle", "competitions", "submit"],
+            returncode=0,
+            stdout="submit ok",
+            stderr="",
+        )
+
+    monkeypatch.setattr("kagglebot.submission.guard.subprocess.run", fake_subprocess_run)
+
+    monkeypatch.setenv("KAGGLEBOT_SUBMIT_TIMEOUT_SEC", "0")
+    run_kaggle_submit(slug="demo", submission_file=Path("submission.csv"), message="m")
+    assert captured["timeout"] == 1.0
+
+    monkeypatch.setenv("KAGGLEBOT_SUBMIT_TIMEOUT_SEC", "nan")
+    run_kaggle_submit(slug="demo", submission_file=Path("submission.csv"), message="m")
+    assert captured["timeout"] == 300.0
+
+
 def test_run_kaggle_submit_failure_includes_tails_and_returncode(monkeypatch) -> None:
     long_stdout = "X" * 8000
     long_stderr = "\n".join(f"stderr line {idx}" for idx in range(300))
