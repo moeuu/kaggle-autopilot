@@ -172,7 +172,8 @@ Recommended extraction order:
    Score progress helpers for official metric overrides, top1 gap classification, code-reference score normalization,
    severe-regression checks, conservative-collapse detection, and best-candidate priority comparison are now in
    `score_progress.py`.
-   Top1 campaign metadata extraction from kernel metrics is now in `campaign_metrics.py`.
+   Top1 campaign metadata extraction from kernel metrics and validation-redesign preference checks are now in
+   `campaign_metrics.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.

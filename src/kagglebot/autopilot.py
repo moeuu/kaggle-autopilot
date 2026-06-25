@@ -283,6 +283,7 @@ _extract_campaign_prediction_correlation = _campaign_metrics.extract_campaign_pr
 _extract_campaign_artifact_path = _campaign_metrics.extract_campaign_artifact_path
 _extract_campaign_method_id = _campaign_metrics.extract_campaign_method_id
 _extract_campaign_validation_profile_id = _campaign_metrics.extract_campaign_validation_profile_id
+_campaign_prefers_validation_redesign = _campaign_metrics.campaign_prefers_validation_redesign
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
 _capture_best_kernel_snapshot = _kernel_snapshot.capture_best_kernel_snapshot
@@ -9742,25 +9743,6 @@ def _format_method_registry_for_prompt(paths: CompetitionPaths) -> str:
     if payload is None:
         return ""
     return render_method_registry_for_prompt(payload, max_methods=8)
-
-
-def _campaign_prefers_validation_redesign(
-    campaign_state: dict[str, object],
-    method_registry: dict[str, object] | None,
-) -> bool:
-    if isinstance(method_registry, dict) and bool(method_registry.get("validation_priority")):
-        return True
-    corr = _to_float(campaign_state.get("offline_online_correlation"))
-    if corr is not None and corr < 0.25:
-        return True
-    latest = _to_float(campaign_state.get("latest_submission_score"))
-    champion = _to_float(campaign_state.get("champion_score") or campaign_state.get("historical_best_score"))
-    if latest is None or champion is None:
-        return False
-    direction = str(campaign_state.get("direction") or "minimize").strip().lower()
-    if direction == "maximize":
-        return latest < champion
-    return latest > champion
 
 
 def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:

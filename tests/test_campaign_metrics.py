@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kagglebot.campaign_metrics import (
+    campaign_prefers_validation_redesign,
     extract_campaign_artifact_path,
     extract_campaign_fold_scores,
     extract_campaign_method_id,
@@ -71,3 +72,26 @@ def test_extract_campaign_method_and_validation_profile_ids() -> None:
     assert extract_campaign_validation_profile_id({"split_profile_id": " split-a "}) == "split-a"
     assert extract_campaign_validation_profile_id({"readiness": {"split_strategy": "group-kfold"}}) == "group-kfold"
     assert extract_campaign_validation_profile_id({}) is None
+
+
+def test_campaign_prefers_validation_redesign_from_registry_priority() -> None:
+    assert campaign_prefers_validation_redesign({}, {"validation_priority": True})
+
+
+def test_campaign_prefers_validation_redesign_from_low_offline_online_correlation() -> None:
+    assert campaign_prefers_validation_redesign({"offline_online_correlation": "0.12"}, None)
+
+
+def test_campaign_prefers_validation_redesign_from_online_regression_by_direction() -> None:
+    assert campaign_prefers_validation_redesign(
+        {"direction": "minimize", "latest_submission_score": 1.2, "champion_score": 1.0},
+        None,
+    )
+    assert campaign_prefers_validation_redesign(
+        {"direction": "maximize", "latest_submission_score": 0.7, "historical_best_score": 0.8},
+        None,
+    )
+    assert not campaign_prefers_validation_redesign(
+        {"direction": "maximize", "latest_submission_score": 0.85, "historical_best_score": 0.8},
+        None,
+    )

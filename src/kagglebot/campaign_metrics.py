@@ -117,3 +117,22 @@ def extract_campaign_validation_profile_id(kernel_metrics_payload: dict[str, obj
         if value is not None and str(value).strip():
             return str(value).strip()
     return None
+
+
+def campaign_prefers_validation_redesign(
+    campaign_state: dict[str, object],
+    method_registry: dict[str, object] | None,
+) -> bool:
+    if isinstance(method_registry, dict) and bool(method_registry.get("validation_priority")):
+        return True
+    corr = _to_float(campaign_state.get("offline_online_correlation"))
+    if corr is not None and corr < 0.25:
+        return True
+    latest = _to_float(campaign_state.get("latest_submission_score"))
+    champion = _to_float(campaign_state.get("champion_score") or campaign_state.get("historical_best_score"))
+    if latest is None or champion is None:
+        return False
+    direction = str(campaign_state.get("direction") or "minimize").strip().lower()
+    if direction == "maximize":
+        return latest < champion
+    return latest > champion
