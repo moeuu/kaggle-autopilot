@@ -333,6 +333,8 @@ Recommended extraction order:
    are now in `kernel_quality.py`.
    Iteration metrics payload assembly, evaluation-result serialization, evaluation data-cache/fingerprint helpers, and
    iteration submit eligibility, plus run evaluation-report resume/persistence, are now in `iteration_metrics.py`.
+   Iteration repair-signal extraction and next-iteration policy/knowledge payload assembly are now in
+   `iteration_signals.py`.
    Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file

@@ -22,6 +22,7 @@ from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import diagnostics as _diagnostics
 from kagglebot import iteration_metrics as _iteration_metrics
+from kagglebot import iteration_signals as _iteration_signals
 from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
@@ -2468,217 +2469,39 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     experiment_graph=experiment_graph,
                 )
 
-            extra_policy_notes: list[str] = []
-            minimum_improvement_mode_next = medal_minimum_improvement_mode
-            minimum_improvement_reason_next = medal_policy_reason
-            forced_validation_redesign_reason: str | None = None
-            loop_signal_errors: list[dict[str, object]] = []
-            loop_signal_problems: list[dict[str, object]] = []
-            if orig_proba_signal is not None:
-                extra_policy_notes.append(str(orig_proba_signal["note"]))
-                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
-                    minimum_improvement_mode_next or "minor_tuning",
-                    "moderate_update",
-                )
-                minimum_improvement_reason_next = (
-                    f"{minimum_improvement_reason_next} {orig_proba_signal['note']}".strip()
-                    if minimum_improvement_reason_next
-                    else str(orig_proba_signal["note"])
-                )
-                loop_signal_errors.append(
-                    {
-                        "iteration": iteration,
-                        "error_message": (
-                            "ORIG_proba external signal fell back to constants because original data was unavailable."
-                        ),
-                        "fix_summary": str(orig_proba_signal["note"]),
-                        "resolved": False,
-                        "outcome_bucket": "unknown",
-                    }
-                )
-            if original_data_unused_signal is not None:
-                extra_policy_notes.append(str(original_data_unused_signal["note"]))
-                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
-                    minimum_improvement_mode_next or "minor_tuning",
-                    "moderate_update",
-                )
-                minimum_improvement_reason_next = (
-                    f"{minimum_improvement_reason_next} {original_data_unused_signal['note']}".strip()
-                    if minimum_improvement_reason_next
-                    else str(original_data_unused_signal["note"])
-                )
-                loop_signal_errors.append(
-                    {
-                        "iteration": iteration,
-                        "error_message": "Original/reference datasets were staged but never consumed by the kernel.",
-                        "fix_summary": str(original_data_unused_signal["note"]),
-                        "resolved": False,
-                        "outcome_bucket": "unknown",
-                    }
-                )
-            if pseudo_label_signal is not None:
-                extra_policy_notes.append(str(pseudo_label_signal["note"]))
-                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
-                    minimum_improvement_mode_next or "minor_tuning",
-                    "moderate_update",
-                )
-                minimum_improvement_reason_next = (
-                    f"{minimum_improvement_reason_next} {pseudo_label_signal['note']}".strip()
-                    if minimum_improvement_reason_next
-                    else str(pseudo_label_signal["note"])
-                )
-                loop_signal_errors.append(
-                    {
-                        "iteration": iteration,
-                        "error_message": (
-                            f"Pseudo-labeling yielded {int(pseudo_label_signal['accepted'])}/"
-                            f"{int(pseudo_label_signal['total'])} accepted folds or candidates."
-                        ),
-                        "fix_summary": str(pseudo_label_signal["note"]),
-                        "resolved": False,
-                        "outcome_bucket": "unknown",
-                    }
-                )
-            if missing_ensemble_signal is not None:
-                extra_policy_notes.append(str(missing_ensemble_signal["note"]))
-                force_major_overhaul_next = True
-                forced_major_overhaul_reason = (
-                    f"{forced_major_overhaul_reason} {missing_ensemble_signal['note']}".strip()
-                    if forced_major_overhaul_reason
-                    else str(missing_ensemble_signal["note"])
-                )
-                loop_signal_problems.append(
-                    {
-                        "iteration": iteration,
-                        "why_poor": str(missing_ensemble_signal["note"]),
-                        "how_improved": "Keep heterogeneous families and emit at least one weighted/rank OOF blend.",
-                        "delta_offline": None,
-                        "outcome_bucket": "low",
-                    }
-                )
-            if same_family_plateau_signal is not None:
-                extra_policy_notes.append(str(same_family_plateau_signal["note"]))
-                force_major_overhaul_next = True
-                forced_major_overhaul_reason = (
-                    f"{forced_major_overhaul_reason} {same_family_plateau_signal['note']}".strip()
-                    if forced_major_overhaul_reason
-                    else str(same_family_plateau_signal["note"])
-                )
-                loop_signal_problems.append(
-                    {
-                        "iteration": iteration,
-                        "why_poor": str(same_family_plateau_signal["note"]),
-                        "how_improved": "Add an orthogonal family instead of repeating same-family tuning.",
-                        "delta_offline": None,
-                        "outcome_bucket": "low",
-                    }
-                )
-            if subgroup_collapse_signal is not None:
-                extra_policy_notes.append(str(subgroup_collapse_signal["note"]))
-                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
-                    minimum_improvement_mode_next or "minor_tuning",
-                    "moderate_update",
-                )
-                minimum_improvement_reason_next = (
-                    f"{minimum_improvement_reason_next} {subgroup_collapse_signal['note']}".strip()
-                    if minimum_improvement_reason_next
-                    else str(subgroup_collapse_signal["note"])
-                )
-                loop_signal_problems.append(
-                    {
-                        "iteration": iteration,
-                        "why_poor": str(subgroup_collapse_signal["note"]),
-                        "how_improved": (
-                            "Make pipeline and fallback selection subgroup-aware at (model_id,node_type) granularity, "
-                            "and target the collapsed slice before broad model-family tuning."
-                        ),
-                        "delta_offline": None,
-                        "outcome_bucket": "low",
-                    }
-                )
-            if online_mismatch_signal is not None:
-                extra_policy_notes.append(str(online_mismatch_signal["note"]))
-                if campaign_mode == "top1" and _campaign_metrics.campaign_prefers_validation_redesign(
-                    campaign_state, method_registry
-                ):
-                    minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
-                        minimum_improvement_mode_next or "minor_tuning",
-                        "validation_redesign",
-                    )
-                    forced_validation_redesign_reason = str(online_mismatch_signal["note"])
-                else:
-                    force_major_overhaul_next = True
-                    forced_major_overhaul_reason = (
-                        f"{forced_major_overhaul_reason} {online_mismatch_signal['note']}".strip()
-                        if forced_major_overhaul_reason
-                        else str(online_mismatch_signal["note"])
-                    )
-                loop_signal_problems.append(
-                    {
-                        "iteration": iteration,
-                        "why_poor": str(online_mismatch_signal["note"]),
-                        "how_improved": (
-                            "Ban same-family-only tuning after an online mismatch and require model-family "
-                            "diversification plus OOF blending."
-                        ),
-                        "delta_offline": None,
-                        "outcome_bucket": "low",
-                    }
-                )
-            if online_history_regression_signal is not None:
-                extra_policy_notes.append(str(online_history_regression_signal["note"]))
-                if campaign_mode == "top1" and _campaign_metrics.campaign_prefers_validation_redesign(
-                    campaign_state, method_registry
-                ):
-                    minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
-                        minimum_improvement_mode_next or "minor_tuning",
-                        "validation_redesign",
-                    )
-                    forced_validation_redesign_reason = str(online_history_regression_signal["note"])
-                else:
-                    force_major_overhaul_next = True
-                    forced_major_overhaul_reason = (
-                        f"{forced_major_overhaul_reason} {online_history_regression_signal['note']}".strip()
-                        if forced_major_overhaul_reason
-                        else str(online_history_regression_signal["note"])
-                    )
-                loop_signal_problems.append(
-                    {
-                        "iteration": iteration,
-                        "why_poor": forced_major_overhaul_reason or str(online_history_regression_signal["note"]),
-                        "how_improved": (
-                            "Use the best historical public-score submission as the baseline and require a different "
-                            "model/feature/blend path before submitting another regressed artifact."
-                        ),
-                        "delta_offline": None,
-                        "outcome_bucket": "low",
-                    }
-                )
-            if extra_policy_notes:
-                metrics_payload["repair_signals"] = {
-                    "orig_proba_constant_fallback": orig_proba_signal,
-                    "original_data_unused": original_data_unused_signal,
-                    "pseudo_label_failure": pseudo_label_signal,
-                    "missing_ensemble": missing_ensemble_signal,
-                    "same_family_plateau": same_family_plateau_signal,
-                    "subgroup_collapse": subgroup_collapse_signal,
-                    "online_mismatch": online_mismatch_signal,
-                    "online_history_regression": online_history_regression_signal,
-                }
+            prefer_validation_redesign = (
+                campaign_mode == "top1"
+                and _campaign_metrics.campaign_prefers_validation_redesign(campaign_state, method_registry)
+            )
+            repair_signal_policy = _iteration_signals.apply_iteration_repair_signal_policy(
+                iteration=iteration,
+                orig_proba_signal=orig_proba_signal,
+                original_data_unused_signal=original_data_unused_signal,
+                pseudo_label_signal=pseudo_label_signal,
+                missing_ensemble_signal=missing_ensemble_signal,
+                same_family_plateau_signal=same_family_plateau_signal,
+                subgroup_collapse_signal=subgroup_collapse_signal,
+                online_mismatch_signal=online_mismatch_signal,
+                online_history_regression_signal=online_history_regression_signal,
+                minimum_improvement_mode=medal_minimum_improvement_mode,
+                minimum_improvement_reason=medal_policy_reason,
+                force_major_overhaul=force_major_overhaul_next,
+                forced_major_overhaul_reason=forced_major_overhaul_reason,
+                prefer_validation_redesign=prefer_validation_redesign,
+                upgrade_improvement_mode=_plan_policy.upgrade_improvement_mode,
+            )
+            extra_policy_notes = repair_signal_policy.extra_policy_notes
+            minimum_improvement_mode_next = repair_signal_policy.minimum_improvement_mode
+            minimum_improvement_reason_next = repair_signal_policy.minimum_improvement_reason
+            force_major_overhaul_next = repair_signal_policy.force_major_overhaul
+            forced_major_overhaul_reason = repair_signal_policy.forced_major_overhaul_reason
+            forced_validation_redesign_reason = repair_signal_policy.forced_validation_redesign_reason
+            loop_signal_errors = repair_signal_policy.loop_signal_errors
+            loop_signal_problems = repair_signal_policy.loop_signal_problems
+            if repair_signal_policy.repair_signals is not None:
+                metrics_payload["repair_signals"] = repair_signal_policy.repair_signals
             metrics_payload["previous_submission_history"] = previous_submission_history
-            metrics_payload["next_iteration_policy"] = {
-                "minimum_improvement_mode": minimum_improvement_mode_next,
-                "minimum_improvement_reason": minimum_improvement_reason_next,
-                "forced_improvement_mode": (
-                    "validation_redesign"
-                    if forced_validation_redesign_reason and not force_major_overhaul_next
-                    else "major_overhaul"
-                    if force_major_overhaul_next
-                    else None
-                ),
-                "forced_improvement_reason": forced_major_overhaul_reason or forced_validation_redesign_reason,
-                "extra_policy_notes": extra_policy_notes,
-            }
+            metrics_payload["next_iteration_policy"] = repair_signal_policy.next_iteration_policy
             _write_json_object(metrics_path, metrics_payload)
 
             for issue in loop_signal_errors:

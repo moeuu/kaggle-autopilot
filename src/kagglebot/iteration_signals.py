@@ -2,9 +2,25 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from kagglebot.scalar_utils import tolerant_int
 from kagglebot.score_utils import should_update_best_score
+
+
+@dataclass(frozen=True)
+class IterationRepairSignalPolicyDecision:
+    extra_policy_notes: list[str]
+    minimum_improvement_mode: str | None
+    minimum_improvement_reason: str | None
+    force_major_overhaul: bool
+    forced_major_overhaul_reason: str | None
+    forced_validation_redesign_reason: str | None
+    loop_signal_errors: list[dict[str, object]]
+    loop_signal_problems: list[dict[str, object]]
+    repair_signals: dict[str, object] | None
+    next_iteration_policy: dict[str, object]
 
 
 def extract_orig_proba_signal(kernel_metrics_payload: dict[str, object] | None) -> dict[str, object] | None:
@@ -249,6 +265,223 @@ def detect_online_mismatch_signal(
             "model-family diversification plus OOF blend exploration."
         ),
     }
+
+
+def apply_iteration_repair_signal_policy(
+    *,
+    iteration: int,
+    orig_proba_signal: dict[str, object] | None,
+    original_data_unused_signal: dict[str, object] | None,
+    pseudo_label_signal: dict[str, object] | None,
+    missing_ensemble_signal: dict[str, object] | None,
+    same_family_plateau_signal: dict[str, object] | None,
+    subgroup_collapse_signal: dict[str, object] | None,
+    online_mismatch_signal: dict[str, object] | None,
+    online_history_regression_signal: dict[str, object] | None,
+    minimum_improvement_mode: str | None,
+    minimum_improvement_reason: str | None,
+    force_major_overhaul: bool,
+    forced_major_overhaul_reason: str | None,
+    prefer_validation_redesign: bool,
+    upgrade_improvement_mode: Callable[[str, str], str],
+) -> IterationRepairSignalPolicyDecision:
+    extra_policy_notes: list[str] = []
+    minimum_improvement_mode_next = minimum_improvement_mode
+    minimum_improvement_reason_next = minimum_improvement_reason
+    forced_validation_redesign_reason: str | None = None
+    loop_signal_errors: list[dict[str, object]] = []
+    loop_signal_problems: list[dict[str, object]] = []
+
+    def _append_note_reason(note: object) -> None:
+        nonlocal minimum_improvement_reason_next
+        minimum_improvement_reason_next = (
+            f"{minimum_improvement_reason_next} {note}".strip() if minimum_improvement_reason_next else str(note)
+        )
+
+    def _upgrade_to(mode: str) -> None:
+        nonlocal minimum_improvement_mode_next
+        minimum_improvement_mode_next = upgrade_improvement_mode(
+            minimum_improvement_mode_next or "minor_tuning",
+            mode,
+        )
+
+    def _append_major_reason(note: object) -> None:
+        nonlocal force_major_overhaul, forced_major_overhaul_reason
+        force_major_overhaul = True
+        forced_major_overhaul_reason = (
+            f"{forced_major_overhaul_reason} {note}".strip() if forced_major_overhaul_reason else str(note)
+        )
+
+    if orig_proba_signal is not None:
+        note = str(orig_proba_signal["note"])
+        extra_policy_notes.append(note)
+        _upgrade_to("moderate_update")
+        _append_note_reason(note)
+        loop_signal_errors.append(
+            {
+                "iteration": iteration,
+                "error_message": (
+                    "ORIG_proba external signal fell back to constants because original data was unavailable."
+                ),
+                "fix_summary": note,
+                "resolved": False,
+                "outcome_bucket": "unknown",
+            }
+        )
+    if original_data_unused_signal is not None:
+        note = str(original_data_unused_signal["note"])
+        extra_policy_notes.append(note)
+        _upgrade_to("moderate_update")
+        _append_note_reason(note)
+        loop_signal_errors.append(
+            {
+                "iteration": iteration,
+                "error_message": "Original/reference datasets were staged but never consumed by the kernel.",
+                "fix_summary": note,
+                "resolved": False,
+                "outcome_bucket": "unknown",
+            }
+        )
+    if pseudo_label_signal is not None:
+        note = str(pseudo_label_signal["note"])
+        extra_policy_notes.append(note)
+        _upgrade_to("moderate_update")
+        _append_note_reason(note)
+        loop_signal_errors.append(
+            {
+                "iteration": iteration,
+                "error_message": (
+                    f"Pseudo-labeling yielded {int(pseudo_label_signal['accepted'])}/"
+                    f"{int(pseudo_label_signal['total'])} accepted folds or candidates."
+                ),
+                "fix_summary": note,
+                "resolved": False,
+                "outcome_bucket": "unknown",
+            }
+        )
+    if missing_ensemble_signal is not None:
+        note = str(missing_ensemble_signal["note"])
+        extra_policy_notes.append(note)
+        _append_major_reason(note)
+        loop_signal_problems.append(
+            {
+                "iteration": iteration,
+                "why_poor": note,
+                "how_improved": "Keep heterogeneous families and emit at least one weighted/rank OOF blend.",
+                "delta_offline": None,
+                "outcome_bucket": "low",
+            }
+        )
+    if same_family_plateau_signal is not None:
+        note = str(same_family_plateau_signal["note"])
+        extra_policy_notes.append(note)
+        _append_major_reason(note)
+        loop_signal_problems.append(
+            {
+                "iteration": iteration,
+                "why_poor": note,
+                "how_improved": "Add an orthogonal family instead of repeating same-family tuning.",
+                "delta_offline": None,
+                "outcome_bucket": "low",
+            }
+        )
+    if subgroup_collapse_signal is not None:
+        note = str(subgroup_collapse_signal["note"])
+        extra_policy_notes.append(note)
+        _upgrade_to("moderate_update")
+        _append_note_reason(note)
+        loop_signal_problems.append(
+            {
+                "iteration": iteration,
+                "why_poor": note,
+                "how_improved": (
+                    "Make pipeline and fallback selection subgroup-aware at (model_id,node_type) granularity, "
+                    "and target the collapsed slice before broad model-family tuning."
+                ),
+                "delta_offline": None,
+                "outcome_bucket": "low",
+            }
+        )
+    if online_mismatch_signal is not None:
+        note = str(online_mismatch_signal["note"])
+        extra_policy_notes.append(note)
+        if prefer_validation_redesign:
+            _upgrade_to("validation_redesign")
+            forced_validation_redesign_reason = note
+        else:
+            _append_major_reason(note)
+        loop_signal_problems.append(
+            {
+                "iteration": iteration,
+                "why_poor": note,
+                "how_improved": (
+                    "Ban same-family-only tuning after an online mismatch and require model-family "
+                    "diversification plus OOF blending."
+                ),
+                "delta_offline": None,
+                "outcome_bucket": "low",
+            }
+        )
+    if online_history_regression_signal is not None:
+        note = str(online_history_regression_signal["note"])
+        extra_policy_notes.append(note)
+        if prefer_validation_redesign:
+            _upgrade_to("validation_redesign")
+            forced_validation_redesign_reason = note
+        else:
+            _append_major_reason(note)
+        loop_signal_problems.append(
+            {
+                "iteration": iteration,
+                "why_poor": forced_major_overhaul_reason or note,
+                "how_improved": (
+                    "Use the best historical public-score submission as the baseline and require a different "
+                    "model/feature/blend path before submitting another regressed artifact."
+                ),
+                "delta_offline": None,
+                "outcome_bucket": "low",
+            }
+        )
+
+    repair_signals = (
+        {
+            "orig_proba_constant_fallback": orig_proba_signal,
+            "original_data_unused": original_data_unused_signal,
+            "pseudo_label_failure": pseudo_label_signal,
+            "missing_ensemble": missing_ensemble_signal,
+            "same_family_plateau": same_family_plateau_signal,
+            "subgroup_collapse": subgroup_collapse_signal,
+            "online_mismatch": online_mismatch_signal,
+            "online_history_regression": online_history_regression_signal,
+        }
+        if extra_policy_notes
+        else None
+    )
+    next_iteration_policy = {
+        "minimum_improvement_mode": minimum_improvement_mode_next,
+        "minimum_improvement_reason": minimum_improvement_reason_next,
+        "forced_improvement_mode": (
+            "validation_redesign"
+            if forced_validation_redesign_reason and not force_major_overhaul
+            else "major_overhaul"
+            if force_major_overhaul
+            else None
+        ),
+        "forced_improvement_reason": forced_major_overhaul_reason or forced_validation_redesign_reason,
+        "extra_policy_notes": extra_policy_notes,
+    }
+    return IterationRepairSignalPolicyDecision(
+        extra_policy_notes=extra_policy_notes,
+        minimum_improvement_mode=minimum_improvement_mode_next,
+        minimum_improvement_reason=minimum_improvement_reason_next,
+        force_major_overhaul=force_major_overhaul,
+        forced_major_overhaul_reason=forced_major_overhaul_reason,
+        forced_validation_redesign_reason=forced_validation_redesign_reason,
+        loop_signal_errors=loop_signal_errors,
+        loop_signal_problems=loop_signal_problems,
+        repair_signals=repair_signals,
+        next_iteration_policy=next_iteration_policy,
+    )
 
 
 def requires_tabular_multi_family_policy(dataset_profile: dict[str, object] | None) -> bool:
