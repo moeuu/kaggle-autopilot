@@ -95,6 +95,28 @@ def decide_notebook_submit_artifact_mode(
     return _artifact_mode_decision(mode)
 
 
+def decide_notebook_submit_artifact_mode_for_paths(
+    *,
+    requested_mode: str | None,
+    notebook_submit_required: bool,
+    code_competition: bool,
+    sample_submission_path: Path,
+    fallback_sample_submission_path: Path,
+    submission_path: Path,
+    count_csv_data_rows: Callable[[Path], int | None],
+) -> NotebookSubmitArtifactModeDecision:
+    sample_rows = count_csv_data_rows(sample_submission_path)
+    if sample_rows is None:
+        sample_rows = count_csv_data_rows(fallback_sample_submission_path)
+    return decide_notebook_submit_artifact_mode(
+        requested_mode=requested_mode,
+        notebook_submit_required=notebook_submit_required,
+        code_competition=code_competition if notebook_submit_required else False,
+        sample_data_rows=sample_rows,
+        submission_data_rows=count_csv_data_rows(submission_path),
+    )
+
+
 def build_notebook_submit_reference(
     *,
     kernel_id: str,

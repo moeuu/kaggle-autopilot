@@ -9,6 +9,7 @@ from kagglebot.submit_notebook import (
     build_submit_kernel_run_kwargs,
     decide_ambiguous_notebook_submit_retry,
     decide_notebook_submit_artifact_mode,
+    decide_notebook_submit_artifact_mode_for_paths,
     decide_submit_kernel_cpu_fallback,
     decide_submit_kernel_cpu_fallback_for_exception,
     infer_kernel_submit_version_label,
@@ -243,6 +244,33 @@ def test_decide_notebook_submit_artifact_mode_forces_inference_for_tiny_public_c
     assert decision.mode == "inference"
     assert decision.reason == "tiny_public_sample_notebook_contract"
     assert "hidden-test row mismatch" in decision.message
+
+
+def test_decide_notebook_submit_artifact_mode_for_paths_detects_tiny_contract(tmp_path: Path) -> None:
+    sample_path = tmp_path / "context" / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data" / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_sample_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_path.write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+    fallback_sample_path.write_text("id,target\n1,0\n2,0\n3,0\n4,0\n", encoding="utf-8")
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
+
+    def count_rows(path: Path) -> int | None:
+        return max(0, len(path.read_text(encoding="utf-8").splitlines()) - 1) if path.exists() else None
+
+    decision = decide_notebook_submit_artifact_mode_for_paths(
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        code_competition=False,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        submission_path=submission_path,
+        count_csv_data_rows=count_rows,
+    )
+
+    assert decision.mode == "inference"
+    assert decision.reason == "tiny_public_sample_notebook_contract"
 
 
 def test_decide_notebook_submit_artifact_mode_forces_inference_for_empty_tiny_artifact() -> None:

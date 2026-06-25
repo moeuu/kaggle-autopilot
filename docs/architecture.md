@@ -106,10 +106,10 @@ duplicated across the loop, state helpers, and improvement analysis.
 Historical Kaggle submission row normalization, best/latest public-score summary construction, online-regression
 detection against historical submissions, history fetch/cache fallback, and prompt formatting for that history live in
 `src/kagglebot/submission_history.py`; the loop supplies the Kaggle fetch adapter and consumes the resulting summary.
-Notebook submit artifact-mode normalization, initial artifact-mode resolution, tiny public sample hidden-test guards,
-submit-kernel run kwargs construction, kernel output artifact/reference handling, kernel push version-label inference,
-output file selection, Kaggle submit-kernel kwargs construction, ambiguous submit retry execution, push-error text
-detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
+Notebook submit artifact-mode normalization, initial artifact-mode resolution, path-based artifact-mode decisions, tiny
+public sample hidden-test guards, submit-kernel run kwargs construction, kernel output artifact/reference handling,
+kernel push version-label inference, output file selection, Kaggle submit-kernel kwargs construction, ambiguous submit
+retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
 Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and state modules do not reimplement
 permissive artifact reads.
 Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful submit result normalization,
@@ -266,8 +266,9 @@ The next high-value modernization work is:
    directly. Submit autofix context formatting, stale repaired-artifact decisions, autofix artifact resolution,
    submit-failure improvement context, and submit-file repair contract checks now call `submit_failure_context.py`
    directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly. Submit-kernel CPU fallback
-   decisions, initial artifact-mode resolution, and kernel push version-label inference now call `submit_notebook.py`
-   directly. Previous-submission history loading now calls `submission_history.py` directly. Metric-recheck OOF column
+   decisions, initial/path-based artifact-mode resolution, and kernel push version-label inference now call
+   `submit_notebook.py` directly. Previous-submission history loading now calls `submission_history.py` directly.
+   Metric-recheck OOF column
    selection and fold-score list parsing now call `kernel_metrics.py` directly.
    Daily quota count/fallback decisions now call `submission_policy.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,

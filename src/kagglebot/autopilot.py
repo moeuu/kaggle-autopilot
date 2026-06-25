@@ -3207,26 +3207,6 @@ def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
     _write_json_object(paths.plan_path, payload)
 
 
-def _decide_notebook_submit_artifact_mode_for_submission(
-    *,
-    paths: CompetitionPaths,
-    requested_mode: str | None,
-    notebook_submit_required: bool,
-    submission_path: Path,
-) -> _submit_notebook.NotebookSubmitArtifactModeDecision:
-    code_competition = infer_code_competition_from_paths(paths) if notebook_submit_required else False
-    sample_rows = _count_csv_data_rows_capped(paths.sample_submission_path)
-    if sample_rows is None:
-        sample_rows = _count_csv_data_rows_capped(paths.data_dir / "sample_submission.csv")
-    return _submit_notebook.decide_notebook_submit_artifact_mode(
-        requested_mode=requested_mode,
-        notebook_submit_required=notebook_submit_required,
-        code_competition=code_competition,
-        sample_data_rows=sample_rows,
-        submission_data_rows=_count_csv_data_rows_capped(submission_path),
-    )
-
-
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
     def choose(value, fallback, default):
         if value is not None:
@@ -5968,11 +5948,14 @@ def _attempt_submit(
     submission_artifact_mode = submit_stage_mode.submission_artifact_mode
     for mode_message in submit_stage_mode.messages:
         print(mode_message)
-    artifact_mode_decision = _decide_notebook_submit_artifact_mode_for_submission(
-        paths=config.paths,
+    artifact_mode_decision = _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
         requested_mode=submission_artifact_mode,
         notebook_submit_required=notebook_submit_required,
+        code_competition=code_competition,
+        sample_submission_path=config.paths.sample_submission_path,
+        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
         submission_path=prepared_submission_path,
+        count_csv_data_rows=_count_csv_data_rows_capped,
     )
     submission_artifact_mode = artifact_mode_decision.mode
     if artifact_mode_decision.message:
@@ -6066,11 +6049,14 @@ def _attempt_submit(
                 notebook_submit_required = notebook_fallback_decision.notebook_submit_required
                 notebook_fallback_activated = notebook_fallback_decision.notebook_fallback_activated
                 submission_artifact_mode = notebook_fallback_decision.submission_artifact_mode
-                artifact_mode_decision = _decide_notebook_submit_artifact_mode_for_submission(
-                    paths=config.paths,
+                artifact_mode_decision = _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
                     requested_mode=submission_artifact_mode,
                     notebook_submit_required=notebook_submit_required,
+                    code_competition=code_competition,
+                    sample_submission_path=config.paths.sample_submission_path,
+                    fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
                     submission_path=prepared_submission_path,
+                    count_csv_data_rows=_count_csv_data_rows_capped,
                 )
                 submission_artifact_mode = artifact_mode_decision.mode
                 for mode_message in notebook_fallback_decision.messages:
