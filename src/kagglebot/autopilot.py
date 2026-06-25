@@ -5095,14 +5095,14 @@ def _attempt_submit(
             resolution=reason,
             submission_ref=str(prepared_submission_path),
         )
-        return _submit_attempts.build_submit_result_payload(
+        return _submit_attempts.build_duplicate_submit_skip_result_payload(
             message=message,
             submission_ref=str(prepared_submission_path),
-            submitted_at_iso=submitted_at.isoformat(),
-            iteration=_submit_stage.infer_iteration_from_submission_path(submission_path),
-            skipped=True,
+            submitted_at=submitted_at,
+            submission_path=submission_path,
             reason=reason,
             duplicate_sources=duplicate_sources,
+            infer_iteration=_submit_stage.infer_iteration_from_submission_path,
         )
 
     try:

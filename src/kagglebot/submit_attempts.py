@@ -532,6 +532,27 @@ def build_successful_submit_result_payload(
     )
 
 
+def build_duplicate_submit_skip_result_payload(
+    *,
+    message: str,
+    submission_ref: str,
+    submitted_at: datetime,
+    submission_path: Path,
+    reason: str,
+    duplicate_sources: list[str],
+    infer_iteration: Callable[[Path], int | None],
+) -> dict[str, object]:
+    return build_submit_result_payload(
+        message=message,
+        submission_ref=submission_ref,
+        submitted_at_iso=submitted_at.isoformat(),
+        iteration=infer_iteration(submission_path),
+        skipped=True,
+        reason=reason,
+        duplicate_sources=duplicate_sources,
+    )
+
+
 def decide_submit_outcome_recording(
     *,
     outcome: object,

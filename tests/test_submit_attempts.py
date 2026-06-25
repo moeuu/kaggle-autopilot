@@ -8,6 +8,7 @@ from kagglebot.submit_attempts import (
     SubmitAttemptRecorder,
     SubmitAttemptStatePayloads,
     append_submit_attempt,
+    build_duplicate_submit_skip_result_payload,
     build_same_submission_path_skip_attempt_payload,
     build_seen_submit_fingerprint_set,
     build_submit_abort_record_payloads,
@@ -600,6 +601,28 @@ def test_build_submit_result_payload_for_duplicate_skip_omits_outcome() -> None:
         "skipped": True,
         "reason": "duplicate_submission_sha_seen",
         "duplicate_sources": ["run_attempts"],
+    }
+
+
+def test_build_duplicate_submit_skip_result_payload_resolves_time_iteration_and_sources() -> None:
+    payload = build_duplicate_submit_skip_result_payload(
+        message="submit message",
+        submission_ref="submission.csv",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        submission_path=Path("runs/run-1/iter-5/submission.csv"),
+        reason="duplicate_submission_sha_seen",
+        duplicate_sources=["run_attempts", "submission_ledger"],
+        infer_iteration=lambda path: 5 if "iter-5" in path.as_posix() else None,
+    )
+
+    assert payload == {
+        "message": "submit message",
+        "submission_path": "submission.csv",
+        "submitted_at": "2026-06-25T00:00:00+00:00",
+        "iteration": 5,
+        "skipped": True,
+        "reason": "duplicate_submission_sha_seen",
+        "duplicate_sources": ["run_attempts", "submission_ledger"],
     }
 
 
