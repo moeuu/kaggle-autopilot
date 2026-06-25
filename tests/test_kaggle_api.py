@@ -63,6 +63,52 @@ def test_kaggle_api_credentials_skips_invalid_and_non_object_config_candidates(
     assert kaggle_api._kaggle_api_credentials() == ("cfg-user", "cfg-key")
 
 
+def test_entered_competition_optional_int_fields_reject_bool_and_fractional_values() -> None:
+    class Competition:
+        slug = "demo"
+        title = "Demo"
+        url = "https://www.kaggle.com/competitions/demo"
+        category = "Playground"
+        reward = ""
+        evaluation_metric = "auc"
+        deadline = None
+        enabled_date = None
+        new_entrant_deadline = None
+        merger_deadline = None
+        team_count = True
+        max_daily_submissions = 3.5
+        is_kernels_submissions_only = False
+        submissions_disabled = False
+
+    entered = kaggle_api._entered_competition_from_api(Competition())
+
+    assert entered.team_count is None
+    assert entered.max_daily_submissions is None
+
+
+def test_entered_competition_optional_int_fields_accept_integral_float_values() -> None:
+    class Competition:
+        slug = "demo"
+        title = "Demo"
+        url = "https://www.kaggle.com/competitions/demo"
+        category = "Playground"
+        reward = ""
+        evaluation_metric = "auc"
+        deadline = None
+        enabled_date = None
+        new_entrant_deadline = None
+        merger_deadline = None
+        team_count = 12.0
+        max_daily_submissions = "5"
+        is_kernels_submissions_only = False
+        submissions_disabled = False
+
+    entered = kaggle_api._entered_competition_from_api(Competition())
+
+    assert entered.team_count == 12
+    assert entered.max_daily_submissions == 5
+
+
 def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
     captured = {}
 

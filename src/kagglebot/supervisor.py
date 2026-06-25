@@ -1292,12 +1292,7 @@ def _load_metric_direction(paths: CompetitionPaths) -> str | None:
 
 
 def _optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return parse_int_value(value, allow_float=True)
 
 
 def _optional_float(value: object) -> float | None:

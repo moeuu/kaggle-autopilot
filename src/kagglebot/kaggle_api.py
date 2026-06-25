@@ -1125,12 +1125,7 @@ def _competition_slug_from_api_value(value: str) -> str:
 
 
 def _optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return parse_int_value(value, allow_float=True)
 
 
 def _optional_datetime(value: object) -> datetime | None:

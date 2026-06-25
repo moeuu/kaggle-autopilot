@@ -90,6 +90,13 @@ def _config(tmp_path: Path, **overrides: object) -> WatchConfig:
     return base.__class__(**{**base.__dict__, **overrides})
 
 
+def test_watch_optional_int_rejects_bool_and_fractional_values() -> None:
+    assert supervisor._optional_int(True) is None  # noqa: SLF001
+    assert supervisor._optional_int("3.5") is None  # noqa: SLF001
+    assert supervisor._optional_int(3.0) == 3  # noqa: SLF001
+    assert supervisor._optional_int("4") == 4  # noqa: SLF001
+
+
 def test_select_next_competition_filters_disabled_and_blocked(monkeypatch, tmp_path: Path) -> None:
     candidates = [
         _competition("disabled", submissions_disabled=True),
