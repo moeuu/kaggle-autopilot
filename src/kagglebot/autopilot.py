@@ -160,7 +160,7 @@ from kagglebot.medals import (
     normalize_target_rank_percentile,
 )
 from kagglebot.method_scout import (
-    normalize_method_scout_mode,
+    effective_method_scout_mode,
     normalize_research_scout_mode,
     render_method_registry_for_prompt,
     run_method_scout,
@@ -833,7 +833,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submission_history=previous_submission_history,
         )
         print(f"[cyan]campaign[/cyan]: top1 mode active; state={campaign_state_file}")
-    effective_method_scout = _effective_method_scout_mode(config=config, campaign_mode=campaign_mode)
+    effective_method_scout = effective_method_scout_mode(
+        requested_mode=config.method_scout,
+        campaign_mode=campaign_mode,
+    )
     method_registry: dict[str, object] = {}
     source_registry: dict[str, object] = {}
     validation_lab_report: dict[str, object] | None = None
@@ -3715,7 +3718,10 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         run_id=run_id,
         dry_run=config.dry_run,
         repo_root=config.paths.repo_root,
-        method_scout=_effective_method_scout_mode(config=config, campaign_mode=planning_campaign_mode),
+        method_scout=effective_method_scout_mode(
+            requested_mode=config.method_scout,
+            campaign_mode=planning_campaign_mode,
+        ),
         method_scout_max_sources=int(config.method_scout_max_sources or 12),
         hardware_profile=config.hardware_profile,
         time_budget_min=config.time_budget_min,
@@ -3733,13 +3739,6 @@ def _print_top1_info(top1_info: dict[str, object]) -> None:
         return
     suffix = f" (source: {source})" if source else ""
     print(f"[cyan]top1 public score[/cyan]: {score}{suffix}")
-
-
-def _effective_method_scout_mode(*, config: AutopilotConfig, campaign_mode: str) -> str:
-    requested = normalize_method_scout_mode(config.method_scout)
-    if campaign_mode != "top1" and requested == "auto":
-        return "off"
-    return requested
 
 
 def _build_accuracy_potential(

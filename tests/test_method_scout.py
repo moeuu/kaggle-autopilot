@@ -8,6 +8,7 @@ from kagglebot.method_scout import (
     build_method_scout_queries,
     build_validation_registry,
     classify_source,
+    effective_method_scout_mode,
     method_registry_path,
     render_method_registry_for_prompt,
     run_method_scout,
@@ -36,6 +37,13 @@ def test_query_builder_uses_modality_metric_and_validation_regression() -> None:
     assert "image" in query_text
     assert "accuracy" in query_text
     assert any(item["purpose"] == "validation_redesign" for item in queries)
+
+
+def test_effective_method_scout_mode_disables_auto_outside_top1() -> None:
+    assert effective_method_scout_mode(requested_mode="auto", campaign_mode="standard") == "off"
+    assert effective_method_scout_mode(requested_mode="auto", campaign_mode="top1") == "auto"
+    assert effective_method_scout_mode(requested_mode="refresh", campaign_mode="standard") == "refresh"
+    assert effective_method_scout_mode(requested_mode="off", campaign_mode="top1") == "off"
 
 
 def test_source_quality_blocks_unsafe_leaderboard_proxy_method() -> None:

@@ -94,6 +94,13 @@ def normalize_method_scout_mode(value: str | None) -> MethodScoutMode:
     raise ValueError("method_scout must be one of: auto, off, refresh")
 
 
+def effective_method_scout_mode(*, requested_mode: str | None, campaign_mode: str) -> MethodScoutMode:
+    requested = normalize_method_scout_mode(requested_mode)
+    if campaign_mode != "top1" and requested == "auto":
+        return "off"
+    return requested
+
+
 def normalize_research_scout_mode(value: str | None) -> ResearchScoutMode:
     normalized = str(value or "auto").strip().lower()
     if normalized in {"auto", "off", "refresh"}:
