@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot import agent_io as _agent_io
+from kagglebot import agent_prompts as _agent_prompts
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
@@ -3891,7 +3892,7 @@ def _run_improvement(
         unavailable_message="Problem-type knowledge unavailable: {error}",
     )
     hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
-    strategy_prompt = _build_improvement_strategy_prompt(
+    strategy_prompt = _agent_prompts.build_improvement_strategy_prompt(
         slug=config.slug,
         run_id=run_id,
         iteration=iteration,
@@ -4043,7 +4044,7 @@ def _run_improvement(
                 f"{IMPLEMENTATION_AGENT.log_alias} with strict repair prompt."
             )
             repair_prompt_path = agent_dir / f"code_reference_repair_prompt-{iteration:02d}.md"
-            repair_prompt_text = _build_code_reference_repair_prompt(
+            repair_prompt_text = _agent_prompts.build_code_reference_repair_prompt(
                 base_prompt_text=base_prompt_text,
                 reference=required_reference_notebook,
                 issues=implementation_issues,
@@ -4091,68 +4092,6 @@ def _run_improvement(
             "delta_offline": delta_offline,
         }
     )
-
-
-def _build_improvement_strategy_prompt(
-    *,
-    slug: str,
-    run_id: str,
-    iteration: int,
-    metric: str,
-    direction: str,
-    current_score: float,
-    current_score_source: str,
-    target_score: float,
-    top1_score: float | None,
-    top1_source: str,
-    top1_gap: float | None,
-    delta_offline: float | None,
-    improvement_mode: str,
-    hardware_constraints: str,
-    codex_prompt: str,
-    problem_type_knowledge: str,
-) -> str:
-    return f"""\
-# Kagglebot Improvement Strategy
-
-You are {STRATEGY_AGENT.display_name} in extra-high reasoning mode.
-Design a concrete improvement prompt for {IMPLEMENTATION_AGENT.display_name} (extra-high), which will implement changes.
-
-Competition: {slug}
-Run ID: {run_id}
-Iteration: {iteration}
-Metric: {metric} ({direction})
-Current score: {current_score:.6f} (source: {current_score_source})
-Target score: {target_score:.6f}
-Top1 score: {"unavailable" if top1_score is None else f"{top1_score:.6f}"}
-Top1 source: {top1_source}
-Top1 gap: {"unavailable" if top1_gap is None else f"{top1_gap:.6f}"}
-Delta vs previous best: {"unavailable" if delta_offline is None else f"{delta_offline:.6f}"}
-Improvement mode: {improvement_mode}
-
-Hardware execution budget:
-{hardware_constraints}
-
-## Existing {IMPLEMENTATION_AGENT.display_name} Improvement Prompt Draft
-
-```
-{codex_prompt}
-```
-
-## Problem-Type Knowledge (Past Causes and Fixes)
-
-{problem_type_knowledge}
-
-## Required Output
-
-Return concise, actionable implementation instructions for {IMPLEMENTATION_AGENT.display_name}:
-1) What to change and why (root-cause hypothesis of current gap).
-2) Exact file-level edits and model/training changes.
-3) Validation checks after edits (what metrics/logs to confirm).
-4) Fallback if the first plan fails.
-
-Do not include chain-of-thought.
-"""
 
 
 def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bool) -> str:
@@ -4287,7 +4226,7 @@ def _run_kernel_fix(
             detail="GPT is analyzing the kernel failure and drafting a fix strategy.",
             iteration=iteration,
         )
-        strategy_prompt = _build_error_strategy_prompt(
+        strategy_prompt = _agent_prompts.build_error_strategy_prompt(
             stage="kernel_fix",
             slug=config.slug,
             run_id=run_id,
@@ -4824,7 +4763,7 @@ an ad-hoc repaired copy behind.
         thinking_phase,
         detail=f"GPT is analyzing the {strategy_label} failure and drafting a fix strategy.",
     )
-    strategy_prompt = _build_error_strategy_prompt(
+    strategy_prompt = _agent_prompts.build_error_strategy_prompt(
         stage=strategy_stage,
         slug=config.slug,
         run_id=run_id,
@@ -5055,55 +4994,6 @@ Error log file: {error_path}
    Prefer already-installed dependencies; add new dependencies only with clear justification.
    If a dependency must be added, use `uv add <package>` and keep `pyproject.toml` + `uv.lock` consistent.
 4) Explain what you changed in your response.
-"""
-
-
-def _build_error_strategy_prompt(
-    *,
-    stage: str,
-    slug: str,
-    run_id: str,
-    attempt: int,
-    compute: str,
-    accelerator: str,
-    hardware_constraints: str,
-    error_text: str,
-    codex_prompt: str,
-) -> str:
-    return f"""\
-# Kagglebot {STRATEGY_AGENT.display_name} Error Strategy
-
-You are {STRATEGY_AGENT.display_name} in xhigh reasoning mode.
-Think through the failure and produce a concrete fix strategy for
-{IMPLEMENTATION_AGENT.display_name} (xhigh), which will apply edits.
-
-Stage: {stage}
-Competition: {slug}
-Run ID: {run_id}
-Attempt: {attempt}
-Compute: {compute} ({accelerator})
-Hardware execution budget:
-{hardware_constraints}
-
-## Error
-
-```
-{error_text}
-```
-
-## {IMPLEMENTATION_AGENT.display_name} Fix Prompt (current)
-
-```
-{codex_prompt}
-```
-
-## Required Output
-
-Return concise, actionable instructions for {IMPLEMENTATION_AGENT.display_name}:
-1) Root cause hypothesis.
-2) Minimal file edits (paths + what to change).
-3) Safety checks to run after edits.
-4) Fallback if the first fix does not work.
 """
 
 
@@ -6005,32 +5895,3 @@ def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> boo
     if decision.message:
         print(decision.message)
     return decision.autofixable
-
-
-def _build_code_reference_repair_prompt(
-    *,
-    base_prompt_text: str,
-    reference: _code_reference.CodeReferenceNotebook,
-    issues: list[str],
-    kernel_path: Path,
-) -> str:
-    issues_text = ", ".join(issues) if issues else "unknown"
-    tabicl_required = _code_reference.reference_requires_tabicl(reference)
-    tabicl_line = (
-        "- This reference appears to be TabICL-based. You MUST include a real TabICL path in kernel.py."
-        if tabicl_required
-        else "- TabICL path is optional for this reference notebook."
-    )
-    return (
-        f"# {IMPLEMENTATION_AGENT.display_name} Improvement Repair: Mandatory Code Reference Implementation\n\n"
-        "The previous change did not satisfy mandatory code-reference implementation requirements.\n\n"
-        f"- Failed checks: {issues_text}\n"
-        f"- Required notebook: {reference.kernel_id} ({reference.title})\n"
-        f"- Kernel path: {kernel_path}\n"
-        f"- Required marker: `{_code_reference.code_reference_marker(reference)}`\n"
-        f"{tabicl_line}\n\n"
-        "Make minimal edits to kernel.py so all checks pass.\n"
-        "Do not weaken the model by collapsing to tiny conservative feature subsets that reduce offline score.\n\n"
-        "## Original Improvement Context\n\n"
-        f"{base_prompt_text}\n"
-    )
