@@ -5,6 +5,7 @@ from kagglebot.kernel_quality import (
     build_baseline_quality_signal,
     build_candidate_selection_quality_signal,
     build_code_reference_quality_signal,
+    build_competition_faithfulness_quality_signal,
     build_external_label_transfer_quality_signal,
     build_oracle_override_signal,
     build_prediction_distribution_quality_signal,
@@ -567,6 +568,53 @@ def test_extract_competition_faithfulness_flags_sample_score_source_and_data_mod
     assert "competition_split_mismatch" in faithfulness["reasons"]
     assert "competition_evaluation_unfaithful" in faithfulness["reasons"]
     assert "missing_competitive_data" in faithfulness["reasons"]
+
+
+def test_build_competition_faithfulness_quality_signal_blocks_contract_mismatch() -> None:
+    signal = build_competition_faithfulness_quality_signal(
+        evaluation_metric="logloss",
+        evaluation_score_source="sample_cv",
+        kernel_metrics_payload={"dataset_mode": "sample"},
+        evaluation_report_split_strategy="kfold",
+        evaluation_contract={
+            "expected_metric": "logloss",
+            "expected_split_strategy": "stratified_kfold",
+            "accepted_score_sources": ["cv", "holdout"],
+            "require_metric_match": True,
+            "require_split_match": True,
+            "require_trusted_score_source": True,
+            "require_competition_faithful": True,
+            "require_full_dataset": True,
+        },
+        force_submit=False,
+    )
+
+    assert signal["block_submit"] is True
+    assert signal["reasons"] == [
+        "competition_split_mismatch",
+        "competition_score_source_mismatch",
+        "competition_evaluation_unfaithful",
+        "missing_competitive_data",
+    ]
+    assert signal["faithfulness"]["faithful"] is False
+
+
+def test_build_competition_faithfulness_quality_signal_respects_force_submit() -> None:
+    signal = build_competition_faithfulness_quality_signal(
+        evaluation_metric="logloss",
+        evaluation_score_source="sample_cv",
+        kernel_metrics_payload={"dataset_mode": "sample"},
+        evaluation_report_split_strategy="stratified_kfold",
+        evaluation_contract={
+            "expected_metric": "logloss",
+            "accepted_score_sources": ["cv"],
+            "require_trusted_score_source": True,
+        },
+        force_submit=True,
+    )
+
+    assert signal["reasons"] == ["competition_score_source_mismatch"]
+    assert signal["block_submit"] is False
 
 
 def test_infer_capacity_tier_uses_pipeline_and_model_summary_hints() -> None:

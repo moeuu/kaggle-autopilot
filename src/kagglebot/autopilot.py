@@ -321,6 +321,7 @@ _extract_pipeline_candidates = _kernel_quality.extract_pipeline_candidates
 _pipeline_float = _kernel_quality.pipeline_float
 _find_selected_pipeline = _kernel_quality.find_selected_pipeline
 _build_prediction_distribution_quality_signal = _kernel_quality.build_prediction_distribution_quality_signal
+_build_competition_faithfulness_quality_signal = _kernel_quality.build_competition_faithfulness_quality_signal
 _build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
 _build_code_reference_quality_signal = _kernel_quality.build_code_reference_quality_signal
 _build_validation_metric_alignment = _kernel_quality.build_validation_metric_alignment
@@ -4718,20 +4719,25 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
-    competition_faithfulness = _extract_competition_faithfulness(
-        evaluation=evaluation,
+    competition_faithfulness_signal = _build_competition_faithfulness_quality_signal(
+        evaluation_metric=evaluation.metric,
+        evaluation_score_source=evaluation.score_source,
         kernel_metrics_payload=payload,
-        evaluation_report=evaluation_report,
+        evaluation_report_split_strategy=evaluation_report.split_strategy if evaluation_report is not None else None,
         evaluation_contract=evaluation_contract,
+        force_submit=force_submit,
     )
-    for reason in competition_faithfulness.get("reasons", []):
+    competition_faithfulness = competition_faithfulness_signal.get("faithfulness")
+    if not isinstance(competition_faithfulness, dict):
+        competition_faithfulness = {}
+    for reason in competition_faithfulness_signal.get("reasons", []):
         if isinstance(reason, str) and reason not in reasons:
             reasons.append(reason)
-            if not force_submit:
-                block_submit = True
-    for warning in competition_faithfulness.get("warnings", []):
+    for warning in competition_faithfulness_signal.get("warnings", []):
         if isinstance(warning, str) and warning not in warnings:
             warnings.append(warning)
+    if bool(competition_faithfulness_signal.get("block_submit")):
+        block_submit = True
 
     baseline_candidates = _extract_baseline_candidates_from_metrics_payload(payload)
     log_text = _collect_kernel_log_text(logs_dir)
@@ -4808,6 +4814,7 @@ def _build_kernel_quality_guard(
         "score_source": score_source_signal,
         "oracle": oracle_signal,
         "competition_faithfulness": competition_faithfulness,
+        "competition_faithfulness_signal": competition_faithfulness_signal,
         "baseline": baseline_signal,
         "metric_alignment": metric_alignment,
         "step_bucket": {

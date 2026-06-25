@@ -948,6 +948,36 @@ def extract_competition_faithfulness(
     }
 
 
+def build_competition_faithfulness_quality_signal(
+    *,
+    evaluation_metric: object,
+    evaluation_score_source: object,
+    kernel_metrics_payload: dict[str, object] | None,
+    evaluation_report_split_strategy: object | None,
+    evaluation_contract: dict[str, object] | None,
+    force_submit: bool,
+) -> dict[str, object]:
+    faithfulness = extract_competition_faithfulness(
+        evaluation_metric=evaluation_metric,
+        evaluation_score_source=evaluation_score_source,
+        kernel_metrics_payload=kernel_metrics_payload,
+        evaluation_report_split_strategy=evaluation_report_split_strategy,
+        evaluation_contract=evaluation_contract,
+    )
+    reasons_raw = faithfulness.get("reasons")
+    warnings_raw = faithfulness.get("warnings")
+    reasons = [reason for reason in reasons_raw if isinstance(reason, str)] if isinstance(reasons_raw, list) else []
+    warnings = (
+        [warning for warning in warnings_raw if isinstance(warning, str)] if isinstance(warnings_raw, list) else []
+    )
+    return {
+        "faithfulness": faithfulness,
+        "reasons": reasons,
+        "warnings": warnings,
+        "block_submit": bool(reasons) and not force_submit,
+    }
+
+
 def infer_capacity_tier(
     *,
     kernel_metrics_payload: dict[str, object] | None,
