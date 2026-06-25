@@ -3,8 +3,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from kagglebot.autopilot_helpers import _to_float
 from kagglebot.metric_matching import normalize_metric_name
+from kagglebot.scalar_utils import parse_finite_float
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
 
 
 def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) -> float | None:
@@ -25,7 +29,7 @@ def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) ->
 
     fold_scores_raw = payload.get("fold_scores")
     if isinstance(fold_scores_raw, list):
-        fold_scores = [float(item) for item in fold_scores_raw if isinstance(item, (int, float))]
+        fold_scores = [float(parsed) for item in fold_scores_raw if (parsed := _to_float(item)) is not None]
         if fold_scores:
             return float(sum(fold_scores) / len(fold_scores))
     return None
@@ -33,10 +37,6 @@ def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) ->
 
 def extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:
     def as_number(value: object) -> float | None:
-        if value is None or isinstance(value, bool):
-            return None
-        if isinstance(value, (int, float)):
-            return float(value)
         return _to_float(value)
 
     def normalize(text: str) -> str:

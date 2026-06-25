@@ -25,9 +25,19 @@ def test_extract_trusted_cv_value_prefers_named_cv_score() -> None:
 
 
 def test_extract_trusted_cv_value_averages_numeric_fold_scores() -> None:
-    payload = {"fold_scores": [0.8, "ignored", 1.0, True, None]}
+    payload = {"fold_scores": [0.8, "ignored", 1.0, True, None, "0.6", "nan", "inf"]}
 
-    assert extract_trusted_cv_value_from_metrics_payload(payload) == pytest.approx(0.9333333333333332)
+    assert extract_trusted_cv_value_from_metrics_payload(payload) == pytest.approx(0.8)
+
+
+def test_extract_kernel_metric_ignores_non_finite_direct_values() -> None:
+    payload = {
+        "metric": "rmse",
+        "score": float("inf"),
+        "rmse": "0.42",
+    }
+
+    assert extract_kernel_metric(payload, "rmse") == ("rmse", 0.42)
 
 
 def test_extract_kernel_metric_from_selected_combined_score_schema() -> None:
