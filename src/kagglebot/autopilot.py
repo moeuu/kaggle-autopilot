@@ -351,7 +351,6 @@ _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 _DEFAULT_EVAL_SEEDS = list(_plan_policy.DEFAULT_EVAL_SEEDS)
-_DEFAULT_EVAL_REPEATS = _plan_policy.DEFAULT_EVAL_REPEATS
 _DEFAULT_MAX_ITERATIONS = 5
 _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN = 12 * 60
 _LONG_LOCAL_GPU_MAX_ITERATIONS = 3
@@ -366,14 +365,7 @@ _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
 _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
 _KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
-_QUALITY_GUARD_SUBGROUP_RATIO = _kernel_quality.QUALITY_GUARD_SUBGROUP_RATIO
-_QUALITY_GUARD_SUBGROUP_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_SUBGROUP_ABS_MARGIN
-_QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN
-_QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN
-_QUALITY_GUARD_PREDICTION_COUNT_RATIO = _kernel_quality.QUALITY_GUARD_PREDICTION_COUNT_RATIO
-_QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
-_MODEL_NODE_METRIC_KEY = _kernel_quality.MODEL_NODE_METRIC_KEY
 
 
 class _TrainingLiveStdout:
@@ -745,7 +737,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     seed = int(resolved["seed"])
     eval_seeds = _plan_policy.normalize_default_eval_seeds(resolved.get("eval_seeds"), fallback=[seed])
     eval_repeats = _plan_policy.normalize_default_eval_repeats(
-        resolved.get("eval_repeats"), fallback=_DEFAULT_EVAL_REPEATS
+        resolved.get("eval_repeats"), fallback=_plan_policy.DEFAULT_EVAL_REPEATS
     )
     score_source = str(resolved["score_source"] or "cv")
     max_total_min_raw = resolved.get("max_total_min")
