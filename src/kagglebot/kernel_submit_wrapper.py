@@ -64,8 +64,44 @@ def _candidate_sample_paths() -> list[Path]:
     return ordered
 
 
+def _candidate_test_paths() -> list[Path]:
+    root = Path(os.environ.get("KAGGLEBOT_INPUT_ROOT", KAGGLE_INPUT_ROOT))
+    slug = os.environ.get("KAGGLEBOT_COMPETITION_SLUG") or os.environ.get("KAGGLEBOT_SLUG") or ""
+    slug_variants = [slug, slug.replace("-", "_")] if slug else []
+    candidates: list[Path] = []
+    for item in slug_variants:
+        if not item:
+            continue
+        candidates.extend(
+            [
+                root / item / "test.csv",
+                root / "competitions" / item / "test.csv",
+            ]
+        )
+    candidates.append(root / "test.csv")
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            ordered.append(candidate)
+            seen.add(candidate)
+    if root.exists():
+        for candidate in sorted(root.rglob("test.csv")):
+            if candidate.is_file() and candidate not in seen:
+                ordered.append(candidate)
+                seen.add(candidate)
+    return ordered
+
+
 def _find_sample_submission() -> Path | None:
     for candidate in _candidate_sample_paths():
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_test_csv() -> Path | None:
+    for candidate in _candidate_test_paths():
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
@@ -102,6 +138,36 @@ def _normalize_probability_rows(values):
     return clipped.div(row_sums, axis=0)
 
 
+def _alignment_template(sample, id_col: str):
+    sample_ids = sample[id_col].astype(str)
+    test_path = _find_test_csv()
+    if test_path is None:
+        return sample.copy(), sample_ids
+    try:
+        import pandas as pd
+
+        test = pd.read_csv(test_path)
+    except Exception as exc:
+        print(f"Runtime test alignment skipped: {exc}")
+        return sample.copy(), sample_ids
+    if (
+        id_col not in test.columns
+        or len(sample) <= 0
+        or len(sample) > 10
+        or len(test) <= len(sample)
+        or sample[id_col].duplicated().any()
+        or test[id_col].duplicated().any()
+    ):
+        return sample.copy(), sample_ids
+    out = pd.DataFrame({id_col: test[id_col].to_numpy()})
+    for col in sample.columns:
+        if col == id_col:
+            continue
+        non_null = sample[col].dropna()
+        out[col] = non_null.iloc[0] if len(non_null) else ""
+    return out[[str(col) for col in sample.columns]], out[id_col].astype(str)
+
+
 def _aligned_submission_bytes(payload: bytes) -> bytes:
     sample_path = _find_sample_submission()
     if sample_path is None:
@@ -129,13 +195,12 @@ def _aligned_submission_bytes(payload: bytes) -> bytes:
             return out.to_csv(index=False).encode("utf-8")
         return payload
 
-    out = sample.copy()
+    out, output_ids = _alignment_template(sample, id_col)
     common_targets = [col for col in target_cols if col in submission.columns]
     if not common_targets:
         return payload
 
     submission_ids = submission[id_col].astype(str)
-    sample_ids = sample[id_col].astype(str)
     sub_targets = submission[common_targets].copy()
     numeric_targets = _numeric_frame(sub_targets)
     all_numeric = bool(numeric_targets.notna().any().all())
@@ -152,7 +217,7 @@ def _aligned_submission_bytes(payload: bytes) -> bytes:
             for idx, key in enumerate(submission_ids)
             if idx < len(lookup_values) and lookup_values.iloc[idx].notna().all()
         }
-        aligned_rows = [lookup.get(key, fallback) for key in sample_ids]
+        aligned_rows = [lookup.get(key, fallback) for key in output_ids]
         aligned = pd.DataFrame(aligned_rows, columns=common_targets).reset_index(drop=True)
         for col in common_targets:
             out[col] = aligned[col].astype(float).to_numpy()
@@ -170,7 +235,7 @@ def _aligned_submission_bytes(payload: bytes) -> bytes:
             for idx, key in enumerate(submission_ids)
             if idx < len(submission)
         }
-        aligned_rows = [lookup.get(key, fallback_values) for key in sample_ids]
+        aligned_rows = [lookup.get(key, fallback_values) for key in output_ids]
         aligned = pd.DataFrame(aligned_rows, columns=common_targets).reset_index(drop=True)
         for col in common_targets:
             out[col] = aligned[col].to_numpy()
