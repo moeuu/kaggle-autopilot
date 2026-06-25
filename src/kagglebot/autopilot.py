@@ -135,13 +135,8 @@ from kagglebot.kaggle_api import (
     list_competition_submissions,
 )
 from kagglebot.kaggle_cli_errors import is_missing_kaggle_credentials_error as _is_missing_kaggle_credentials_error
-from kagglebot.kernel_runner import (
-    _collect_log_tail,
-    resolve_kaggle_username,
-    run_kernel,
-    run_kernel_local,
-    run_submit_kernel,
-)
+from kagglebot.kernel_logs import collect_log_tail as _collect_log_tail
+from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local, run_submit_kernel
 from kagglebot.knowledge import (
     derive_problem_types,
     ensure_taxonomy,

@@ -21,6 +21,7 @@ from pathlib import Path
 import psutil
 from rich import print
 
+from kagglebot import kernel_logs as _kernel_logs
 from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot.compute import detect_local_gpu
@@ -1338,7 +1339,7 @@ class KernelJobMonitor:
 class KernelLogParser:
     @staticmethod
     def collect_tail(output_dir: Path, max_lines: int = 50) -> str | None:
-        return _collect_log_tail(output_dir, max_lines=max_lines)
+        return _kernel_logs.collect_log_tail(output_dir, max_lines=max_lines)
 
 
 def sanitize_kernel_slug(value: str) -> str:
@@ -5072,7 +5073,7 @@ def _wait_for_kernel(
     started_at = time.monotonic()
     last_status = None
     last_log_fetch = 0.0
-    log_state = _KernelLogState()
+    log_state = _kernel_logs.KernelLogState()
     status_errors = 0
     queued_since = initial_queued_since
     queued_timeout_sec = _remote_kernel_state.remote_kernel_queued_timeout_sec()
@@ -5128,11 +5129,11 @@ def _wait_for_kernel(
             queued_since = None
         if now - last_log_fetch >= LOG_POLL_INTERVAL:
             _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
-            had_logs = _print_kernel_logs(output_dir, log_state)
+            had_logs = _kernel_logs.print_kernel_logs(output_dir, log_state)
             if had_logs:
                 log_state.last_log_at = now
             last_log_fetch = now
-            log_failure = _detect_failure_in_logs(output_dir)
+            log_failure = _kernel_logs.detect_failure_in_logs(output_dir)
             if log_failure:
                 log_failure = truncate_lines(log_failure, max_lines=5)
                 message = f"Kaggle kernel error detected in logs.\n\n--- kernel log tail ---\n{log_failure}"
@@ -5156,7 +5157,7 @@ def _wait_for_kernel(
             return
         if is_kernel_status_failed(status):
             _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
-            log_tail = _collect_log_tail(output_dir)
+            log_tail = _kernel_logs.collect_log_tail(output_dir)
             message = f"Kaggle kernel failed: {output}"
             if log_tail:
                 log_tail = truncate_lines(log_tail, max_lines=5)
@@ -5165,15 +5166,6 @@ def _wait_for_kernel(
         time.sleep(STATUS_ERROR_SLEEP)
         if deadline is not None and time.monotonic() > deadline:
             _raise_kernel_timeout(kernel_id, last_status)
-
-
-@dataclass
-class _KernelLogState:
-    seen_lines: dict[Path, int] = field(default_factory=dict)
-    seen_json: dict[Path, int] = field(default_factory=dict)
-    seen_size: dict[Path, int] = field(default_factory=dict)
-    last_log_at: float | None = None
-    last_heartbeat: float = 0.0
 
 
 def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | None:
@@ -5234,170 +5226,3 @@ def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> 
         kernels_output(kernel_id, output_dir, slug=slug, dry_run=False, force=True, quiet=True)
     except KaggleCliError:
         return
-
-
-def _log_candidates(output_dir: Path) -> list[Path]:
-    candidates = []
-    for name in ("stdout.txt", "stderr.txt", "output.log", "log.txt", "logs.txt"):
-        path = output_dir / name
-        if path.exists():
-            candidates.append(path)
-    candidates.extend(sorted(output_dir.rglob("*.log")))
-    return candidates
-
-
-def _print_kernel_logs(output_dir: Path, state: _KernelLogState) -> bool:
-    printed = False
-    for path in _log_candidates(output_dir):
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        size = len(text)
-        prev_size = state.seen_size.get(path, 0)
-        if size < prev_size:
-            state.seen_lines[path] = 0
-            state.seen_json[path] = 0
-        state.seen_size[path] = size
-
-        json_events = _parse_json_log(text)
-        if json_events is not None:
-            last = state.seen_json.get(path, 0)
-            if len(json_events) <= last:
-                continue
-            new_events = json_events[last:]
-            state.seen_json[path] = len(json_events)
-            formatted = _format_log_events(new_events)
-            if not formatted:
-                continue
-            print(f"[cyan]kernel log[/cyan]: {path.name}")
-            print(truncate_lines("\n".join(formatted), max_lines=5))
-            printed = True
-            continue
-
-        lines = text.splitlines()
-        last = state.seen_lines.get(path, 0)
-        if len(lines) <= last:
-            continue
-        new_lines = lines[last:]
-        state.seen_lines[path] = len(lines)
-        print(f"[cyan]kernel log[/cyan]: {path.name}")
-        print(truncate_lines("\n".join(new_lines), max_lines=5))
-        printed = True
-    return printed
-
-
-def _detect_failure_in_logs(output_dir: Path) -> str | None:
-    for path in _log_candidates(output_dir):
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if "Traceback (most recent call last)" not in text:
-            continue
-        tail = _collect_log_tail_from_text(path, text)
-        if tail:
-            return tail
-        return f"{path.name}\nTraceback detected"
-    return None
-
-
-def _collect_log_tail(output_dir: Path, max_lines: int = 50) -> str | None:
-    candidates = _log_candidates(output_dir)
-    if not candidates:
-        return None
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if "Traceback (most recent call last)" in text:
-            return _collect_log_tail_from_text(path, text, max_lines=max_lines)
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if "Error" in text or "Exception" in text:
-            return _collect_log_tail_from_text(path, text, max_lines=max_lines)
-    for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        tail = _collect_log_tail_from_text(path, text, max_lines=max_lines)
-        if tail:
-            return tail
-    return None
-
-
-def _collect_log_tail_from_text(path: Path, text: str, max_lines: int = 50) -> str | None:
-    json_events = _parse_json_log(text)
-    if json_events is not None:
-        formatted = _format_log_events(json_events)
-        if not formatted:
-            return None
-        start = _find_error_marker_index(formatted)
-        if start is None:
-            start = max(len(formatted) - max_lines, 0)
-        else:
-            if len(formatted) - start > max_lines:
-                start = max(len(formatted) - max_lines, start)
-        tail = "\n".join(formatted[start:])
-        return f"{path.name}\n{tail}".strip()
-    lines = text.splitlines()
-    if not lines:
-        return None
-    start = _find_error_marker_index(lines)
-    if start is None:
-        start = max(len(lines) - max_lines, 0)
-    else:
-        if len(lines) - start > max_lines:
-            start = max(len(lines) - max_lines, start)
-    tail = "\n".join(lines[start:])
-    return f"{path.name}\n{tail}".strip()
-
-
-def _find_error_marker_index(lines: list[str]) -> int | None:
-    markers = ("Traceback", "Error", "Exception")
-    for idx in range(len(lines) - 1, -1, -1):
-        line = lines[idx]
-        if any(marker in line for marker in markers):
-            return idx
-    return None
-
-
-def _parse_json_log(text: str) -> list[dict[str, object]] | None:
-    stripped = text.lstrip()
-    if not stripped:
-        return None
-    if stripped.startswith("["):
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        return None
-    if stripped.startswith("{"):
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(payload, dict) and isinstance(payload.get("logs"), list):
-            return [item for item in payload["logs"] if isinstance(item, dict)]
-        return None
-    return None
-
-
-def _format_log_events(events: list[dict[str, object]]) -> list[str]:
-    lines: list[str] = []
-    for event in events:
-        data = event.get("data")
-        if not isinstance(data, str) or not data:
-            continue
-        stream = event.get("stream_name")
-        prefix = f"[{stream}] " if isinstance(stream, str) and stream else ""
-        for line in data.splitlines():
-            lines.append(f"{prefix}{line}")
-    return lines

@@ -558,7 +558,7 @@ def test_kernel_push_resumes_prior_running_kernel_without_new_push(
     monkeypatch.setattr(kernel_runner, "kernels_status", lambda *args, **kwargs: next(statuses))
     monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
-    monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
+    monkeypatch.setattr(kernel_runner._kernel_logs, "print_kernel_logs", lambda *args, **kwargs: False)
     monkeypatch.setattr(kernel_runner, "kernels_push", lambda *args, **kwargs: pytest.fail("unexpected push"))
     output_calls: list[str] = []
     monkeypatch.setattr(
@@ -640,7 +640,7 @@ def test_wait_for_kernel_timeout_marks_remote_running(
         lambda *args, **kwargs: f'user/kernel-slug has status "{status}"',
     )
     monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
-    monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
+    monkeypatch.setattr(kernel_runner._kernel_logs, "print_kernel_logs", lambda *args, **kwargs: False)
     monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
 
     expected_status = "queued" if status.endswith("QUEUED") else "running"
@@ -686,7 +686,7 @@ def test_wait_for_kernel_timeout_on_unknown_status_raises_timeout(
         lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.UNKNOWN"',
     )
     monkeypatch.setattr(kernel_runner, "_try_fetch_kernel_output", lambda *args, **kwargs: None)
-    monkeypatch.setattr(kernel_runner, "_print_kernel_logs", lambda *args, **kwargs: False)
+    monkeypatch.setattr(kernel_runner._kernel_logs, "print_kernel_logs", lambda *args, **kwargs: False)
     monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(KernelTimeoutError, match="last status was unknown"):
