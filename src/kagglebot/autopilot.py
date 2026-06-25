@@ -6020,7 +6020,19 @@ def _attempt_submit(
         run_dir=run_dir,
         save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
-    _clear_stale_submit_autofix_artifact(run_dir=run_dir, submission_path=submission_path)
+    stale_autofix_state = _load_run_state(run_dir)
+    stale_autofix_context = _submit_failure_context.load_submit_failure_context(run_dir)
+    stale_autofix_decision = _submit_failure_context.decide_stale_submit_autofix_artifact(
+        run_state=stale_autofix_state,
+        failure_context=stale_autofix_context,
+        submission_path=submission_path,
+        now_iso=datetime.now(UTC).isoformat(),
+    )
+    if stale_autofix_decision is not None:
+        if stale_autofix_decision.clear_repaired_path:
+            _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
+        stale_autofix_context.update(stale_autofix_decision.failure_context_updates)
+        _submit_failure_context.save_submit_failure_context(run_dir, stale_autofix_context)
     run_state = _load_run_state(run_dir)
     submit_failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
     latest_submit_attempt = _load_latest_submit_attempt(run_dir)
@@ -6764,23 +6776,6 @@ def _build_submit_failure_context_payload(
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
     )
-
-
-def _clear_stale_submit_autofix_artifact(*, run_dir: Path, submission_path: Path) -> None:
-    state = _load_run_state(run_dir)
-    failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
-    decision = _submit_failure_context.decide_stale_submit_autofix_artifact(
-        run_state=state,
-        failure_context=failure_context,
-        submission_path=submission_path,
-        now_iso=datetime.now(UTC).isoformat(),
-    )
-    if decision is None:
-        return
-    if decision.clear_repaired_path:
-        _save_run_state(run_dir, {"submit_autofix_submission_path": ""})
-    failure_context.update(decision.failure_context_updates)
-    _submit_failure_context.save_submit_failure_context(run_dir, failure_context)
 
 
 def _prepare_submit_file_autofix(
