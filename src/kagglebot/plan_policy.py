@@ -217,6 +217,92 @@ class RankForcePolicyDecision:
     rank_force_major_min_teams: int
 
 
+@dataclass(frozen=True)
+class ResolvedPlan:
+    deliverable_mode: str
+    submit_mode: str
+    code_competition: bool
+    notebook_submit_artifact_mode: str
+    target_medal: str | None
+    target_rank_percentile: object
+    target_metric: object
+    target_score: object
+    target_direction: object
+    score_source: object
+    holdout_frac: object
+    cv_folds: object
+    split_strategy: object
+    seed: object
+    eval_seeds: list[int]
+    eval_repeats: int
+    time_budget_min: object
+    kernel_name: object
+    internet: object
+    max_iterations: int
+    max_total_min: object
+    patience: object
+    min_improvement: object
+    submit_policy: str
+    submission_gate: str
+    submission_limit_per_day: int | None
+    readiness_target_score: object
+    readiness_method: object
+    readiness_k: object
+    ci_method: object
+    ci_alpha: object
+    drift_check: object
+    drift_weight: object
+    stop_min_delta: object
+    stop_no_improve_patience: object
+    stop_same_config_patience: object
+    rank_force_major_max_percentile: float
+    rank_force_major_min_teams: int
+    evaluation_contract: dict[str, object]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "deliverable_mode": self.deliverable_mode,
+            "submit_mode": self.submit_mode,
+            "code_competition": self.code_competition,
+            "notebook_submit_artifact_mode": self.notebook_submit_artifact_mode,
+            "target_medal": self.target_medal,
+            "target_rank_percentile": self.target_rank_percentile,
+            "target_metric": self.target_metric,
+            "target_score": self.target_score,
+            "target_direction": self.target_direction,
+            "score_source": self.score_source,
+            "holdout_frac": self.holdout_frac,
+            "cv_folds": self.cv_folds,
+            "split_strategy": self.split_strategy,
+            "seed": self.seed,
+            "eval_seeds": self.eval_seeds,
+            "eval_repeats": self.eval_repeats,
+            "time_budget_min": self.time_budget_min,
+            "kernel_name": self.kernel_name,
+            "internet": self.internet,
+            "max_iterations": self.max_iterations,
+            "max_total_min": self.max_total_min,
+            "patience": self.patience,
+            "min_improvement": self.min_improvement,
+            "submit_policy": self.submit_policy,
+            "submission_gate": self.submission_gate,
+            "submission_limit_per_day": self.submission_limit_per_day,
+            "readiness_target_score": self.readiness_target_score,
+            "readiness_method": self.readiness_method,
+            "readiness_k": self.readiness_k,
+            "ci_method": self.ci_method,
+            "ci_alpha": self.ci_alpha,
+            "drift_check": self.drift_check,
+            "drift_weight": self.drift_weight,
+            "stop_min_delta": self.stop_min_delta,
+            "stop_no_improve_patience": self.stop_no_improve_patience,
+            "stop_same_config_patience": self.stop_same_config_patience,
+            "rank_force_major_max_percentile": self.rank_force_major_max_percentile,
+            "rank_force_major_min_teams": self.rank_force_major_min_teams,
+            "evaluation_contract": self.evaluation_contract,
+        }
+
+
 def normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
     """Normalize agent-produced plan payload shape without applying environment guardrails."""
     normalized = dict(payload)

@@ -281,7 +281,8 @@ The next high-value modernization work is:
    orchestration modules; obsolete autopilot plan load/write/resolved conversion wrappers have been retired.
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
-   `plan_policy.py`.
+   `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the
+   loop to orchestrate policy calls instead of owning the final artifact shape.
    Agent write-guard policy, repair edit-scope construction, snapshots, repairs, and secret prompt checks now live in
    `write_guard.py`; agent and autopilot orchestration import that shared module instead of sharing guard internals
    through `agent_pipeline.py`.
