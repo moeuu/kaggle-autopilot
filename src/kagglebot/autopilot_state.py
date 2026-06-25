@@ -140,6 +140,24 @@ def _apply_run_status(
     return payload
 
 
+def _apply_final_run_status(
+    payload: dict[str, object],
+    *,
+    submitted: bool,
+    has_submission_result: bool,
+    writeup_mode: bool,
+    writeup_bundle_meta: dict[str, object] | None,
+) -> dict[str, object]:
+    if submitted and has_submission_result:
+        return _apply_run_status(payload, status="submitted")
+    if writeup_mode and writeup_bundle_meta:
+        payload["writeup_bundle"] = writeup_bundle_meta
+        return _apply_run_status(payload, status="manual_finalization_required")
+    if payload.get("status") not in {"interrupted", "submit_failed"}:
+        return _apply_run_status(payload, status="completed")
+    return payload
+
+
 def _write_iteration_state_marker(
     *,
     iter_dir: Path,

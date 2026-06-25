@@ -50,6 +50,7 @@ from kagglebot.agents.identity import (
 )
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot_state import (
+    _apply_final_run_status,
     _apply_run_status,
     _copy_kernel_support_artifacts_to_iteration_dir,
     _copy_submission_artifact_to_iteration_dir,
@@ -3158,12 +3159,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             record_problem_type_insight=record_problem_type_insight,
             record_error_fix_insight=record_error_fix_insight,
         )
-        run_payload["status"] = "submitted"
-    elif writeup_mode and writeup_bundle_meta:
-        run_payload["status"] = "manual_finalization_required"
-        run_payload["writeup_bundle"] = writeup_bundle_meta
-    elif run_payload.get("status") not in {"interrupted", "submit_failed"}:
-        run_payload["status"] = "completed"
+    _apply_final_run_status(
+        run_payload,
+        submitted=submitted,
+        has_submission_result=bool(last_submission_result),
+        writeup_mode=writeup_mode,
+        writeup_bundle_meta=writeup_bundle_meta,
+    )
 
     run_payload["summary"] = _state_build_run_summary_payload(
         best_score=best_score,

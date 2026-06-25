@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kagglebot.autopilot_state import (
+    _apply_final_run_status,
     _apply_run_status,
     _build_run_payload,
     _build_run_summary_payload,
@@ -69,6 +70,67 @@ def test_apply_run_status_omits_empty_stop_reason() -> None:
     _apply_run_status(payload, status="completed", stop_reason="")
 
     assert payload == {"run_id": "run-1", "status": "completed"}
+
+
+def test_apply_final_run_status_marks_submitted_when_submission_result_exists() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+
+    _apply_final_run_status(
+        payload,
+        submitted=True,
+        has_submission_result=True,
+        writeup_mode=False,
+        writeup_bundle_meta=None,
+    )
+
+    assert payload["status"] == "submitted"
+
+
+def test_apply_final_run_status_marks_manual_finalization_for_writeup_bundle() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+    bundle = {"path": "writeup.md"}
+
+    _apply_final_run_status(
+        payload,
+        submitted=False,
+        has_submission_result=False,
+        writeup_mode=True,
+        writeup_bundle_meta=bundle,
+    )
+
+    assert payload["status"] == "manual_finalization_required"
+    assert payload["writeup_bundle"] == bundle
+
+
+def test_apply_final_run_status_preserves_terminal_failure_states() -> None:
+    interrupted: dict[str, object] = {"status": "interrupted"}
+    submit_failed: dict[str, object] = {"status": "submit_failed"}
+
+    for payload in (interrupted, submit_failed):
+        _apply_final_run_status(
+            payload,
+            submitted=False,
+            has_submission_result=False,
+            writeup_mode=False,
+            writeup_bundle_meta=None,
+        )
+
+    assert interrupted["status"] == "interrupted"
+    assert submit_failed["status"] == "submit_failed"
+
+
+def test_apply_final_run_status_defaults_to_completed() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+
+    _apply_final_run_status(
+        payload,
+        submitted=False,
+        has_submission_result=False,
+        writeup_mode=False,
+        writeup_bundle_meta=None,
+    )
+
+    assert payload["status"] == "completed"
 
 
 def test_build_run_summary_payload_stringifies_paths(tmp_path: Path) -> None:
