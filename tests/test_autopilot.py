@@ -12,11 +12,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
 from kagglebot.autopilot import (
     _DEFAULT_MAX_ITERATIONS,
     AutopilotConfig,
     SubmissionPhase,
-    _agent_failure_detail,
     _attempt_submit,
     _build_accuracy_potential,
     _build_kernel_quality_guard,
@@ -34,7 +34,6 @@ from kagglebot.autopilot import (
     _extract_same_family_plateau_signal,
     _format_previous_submission_history_for_prompt,
     _infer_kernel_submit_version_label,
-    _is_agent_capacity_failure,
     _is_submit_abort_autofixable,
     _load_previous_submission_history,
     _load_run_state,
@@ -6169,8 +6168,8 @@ def test_agent_capacity_failure_detection_and_detail() -> None:
         stdout = '{"type":"error","message":"Selected model is at capacity. Please try a different model."}'
         stderr = "stderr text"
 
-    assert _is_agent_capacity_failure(DummyResult(), "stale success text")
-    detail = _agent_failure_detail(DummyResult(), "stale success text")
+    assert is_agent_capacity_failure(DummyResult(), "stale success text")
+    detail = agent_failure_detail(DummyResult(), "stale success text")
     assert "returncode=1" in detail
     assert "stderr=stderr text" in detail
     assert "response=stale success text" in detail

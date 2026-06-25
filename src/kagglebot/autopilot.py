@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import builtins
 import json
 import math
 import os
@@ -17,6 +16,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from rich import print
 
+from kagglebot import agent_io as _agent_io
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
@@ -3791,90 +3791,11 @@ def _print_top1_info(top1_info: dict[str, object]) -> None:
     print(f"[cyan]top1 public score[/cyan]: {score}{suffix}")
 
 
-def _print_agent_prompt(prompt_path: Path, prompt_text: str) -> None:
-    print(f"[cyan]{IMPLEMENTATION_AGENT.log_alias} prompt[/cyan]: {prompt_path}")
-    builtins.print(prompt_text.rstrip())
-    builtins.print("")
-
-
-def _read_agent_response(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return path.read_text(encoding="utf-8").rstrip()
-
-
-def _print_agent_response(response_path: Path, response_text: str) -> None:
-    print(f"[cyan]{IMPLEMENTATION_AGENT.log_alias} response[/cyan]: {response_path}")
-    builtins.print(response_text)
-    builtins.print("")
-
-
 def _effective_method_scout_mode(*, config: AutopilotConfig, campaign_mode: str) -> str:
     requested = normalize_method_scout_mode(config.method_scout)
     if campaign_mode != "top1" and requested == "auto":
         return "off"
     return requested
-
-
-def _tail_for_prompt(text: str, *, max_chars: int = 6000) -> str:
-    normalized = (text or "").replace("\r", "\n").strip()
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[-max_chars:]
-
-
-_AGENT_CAPACITY_MARKERS = (
-    "selected model is at capacity",
-    "model is at capacity",
-    "please try a different model",
-)
-
-
-def _is_agent_capacity_failure(result: object, response: str) -> bool:
-    haystack = "\n".join(
-        str(part or "")
-        for part in (
-            getattr(result, "stdout", ""),
-            getattr(result, "stderr", ""),
-            response,
-        )
-    ).lower()
-    return any(marker in haystack for marker in _AGENT_CAPACITY_MARKERS)
-
-
-def _agent_failure_detail(result: object, response: str) -> str:
-    detail = "\n".join(
-        part
-        for part in (
-            f"returncode={getattr(result, 'returncode', 'unknown')}",
-            f"stderr={getattr(result, 'stderr', '')}",
-            f"response={response}",
-            f"transcript_tail={str(getattr(result, 'stdout', ''))[-6000:]}",
-        )
-        if part
-    )
-    return _tail_for_prompt(detail, max_chars=8000)
-
-
-def _append_fix_retry_feedback(
-    *,
-    base_prompt: str,
-    stage_label: str,
-    codex_pass: int,
-    failure_text: str,
-) -> str:
-    clipped = _tail_for_prompt(failure_text, max_chars=6000)
-    if not clipped:
-        return base_prompt
-    return (
-        f"{base_prompt}\n\n"
-        f"## Retry Feedback (pass {codex_pass})\n\n"
-        f"The previous {stage_label} pass did not fully resolve the issue.\n"
-        "Apply additional minimal edits focused on the remaining failure below.\n\n"
-        "```\n"
-        f"{clipped}\n"
-        "```\n"
-    )
 
 
 def _finite_float_or_none(value: object) -> float | None:
@@ -4750,7 +4671,11 @@ def _run_improvement(
         )
 
     prompt_path.write_text(prompt_text, encoding="utf-8")
-    _print_agent_prompt(prompt_path, prompt_text)
+    _agent_io.print_agent_prompt(
+        log_alias=IMPLEMENTATION_AGENT.log_alias,
+        prompt_path=prompt_path,
+        prompt_text=prompt_text,
+    )
 
     print(f"[cyan]improve[/cyan]: running {IMPLEMENTATION_AGENT.log_alias} implementer")
     _update_watch_phase(
@@ -4800,14 +4725,18 @@ def _run_improvement(
                 guard_snapshot=guard_snapshot,
                 auto_repair=True,
             )
-            response = _read_agent_response(result.last_message_path)
-            _print_agent_response(result.last_message_path, response)
+            response = _agent_io.read_agent_response(result.last_message_path)
+            _agent_io.print_agent_response(
+                log_alias=IMPLEMENTATION_AGENT.log_alias,
+                response_path=result.last_message_path,
+                response_text=response,
+            )
             _log_codex_sandbox_fallback(stage_label="improve", result=result)
             if result.returncode == 0:
                 return response, result.last_message_path
 
-            detail = _agent_failure_detail(result, response)
-            if _is_agent_capacity_failure(result, response):
+            detail = _agent_io.agent_failure_detail(result, response)
+            if _agent_io.is_agent_capacity_failure(result, response):
                 if capacity_attempt < capacity_attempts:
                     wait_seconds = AGENT_CAPACITY_RETRY_SLEEP * capacity_attempt
                     print(
@@ -4853,7 +4782,11 @@ def _run_improvement(
                 kernel_path=kernel_path,
             )
             repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
-            _print_agent_prompt(repair_prompt_path, repair_prompt_text)
+            _agent_io.print_agent_prompt(
+                log_alias=IMPLEMENTATION_AGENT.log_alias,
+                prompt_path=repair_prompt_path,
+                prompt_text=repair_prompt_text,
+            )
             repair_response, _ = _run_improve_codex_pass(
                 current_prompt_path=repair_prompt_path,
                 stage_suffix="_code_reference_repair",
@@ -4960,7 +4893,7 @@ def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bo
     prompt_path.write_text(prompt_text, encoding="utf-8")
     print("[cyan]improve[/cyan]: gpt drafting improvement prompt")
     result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
-    strategy_text = _read_agent_response(result.last_message_path).strip()
+    strategy_text = _agent_io.read_agent_response(result.last_message_path).strip()
     if result.returncode != 0:
         print(
             f"[yellow]improve[/yellow]: gpt improvement strategy failed, "
@@ -5204,7 +5137,11 @@ def _run_kernel_fix(
     prompt_path.write_text(base_prompt_text, encoding="utf-8")
     attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
     attempt_path.write_text(base_prompt_text, encoding="utf-8")
-    _print_agent_prompt(prompt_path, base_prompt_text)
+    _agent_io.print_agent_prompt(
+        log_alias=IMPLEMENTATION_AGENT.log_alias,
+        prompt_path=prompt_path,
+        prompt_text=base_prompt_text,
+    )
 
     allowed_prefixes = _repair_allowed_prefixes(config)
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
@@ -5215,7 +5152,7 @@ def _run_kernel_fix(
         pass_prompt_text = (
             base_prompt_text
             if not retry_feedback
-            else _append_fix_retry_feedback(
+            else _agent_io.append_fix_retry_feedback(
                 base_prompt=base_prompt_text,
                 stage_label="kernel_fix",
                 codex_pass=codex_pass - 1,
@@ -5270,8 +5207,12 @@ def _run_kernel_fix(
                 changed=changed,
                 stage=f"kernel_fix_attempt_{attempt}",
             )
-        response_text = _read_agent_response(result.last_message_path)
-        _print_agent_response(result.last_message_path, response_text)
+        response_text = _agent_io.read_agent_response(result.last_message_path)
+        _agent_io.print_agent_response(
+            log_alias=IMPLEMENTATION_AGENT.log_alias,
+            response_path=result.last_message_path,
+            response_text=response_text,
+        )
         _log_codex_sandbox_fallback(stage_label="kernel fix", result=result)
         last_response_text = response_text
         if result.returncode != 0:
@@ -5767,14 +5708,18 @@ an ad-hoc repaired copy behind.
         )
     prompt_path = autofix_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
-    _print_agent_prompt(prompt_path, prompt_text)
+    _agent_io.print_agent_prompt(
+        log_alias=IMPLEMENTATION_AGENT.log_alias,
+        prompt_path=prompt_path,
+        prompt_text=prompt_text,
+    )
 
     retry_feedback = ""
     for codex_pass in range(1, MAX_AUTOFIX_CODEX_PASSES + 1):
         pass_prompt_text = (
             prompt_text
             if not retry_feedback
-            else _append_fix_retry_feedback(
+            else _agent_io.append_fix_retry_feedback(
                 base_prompt=prompt_text,
                 stage_label="autofix",
                 codex_pass=codex_pass - 1,
@@ -5816,8 +5761,12 @@ an ad-hoc repaired copy behind.
             changed=changed,
             stage=f"autofix_attempt_{attempt}",
         )
-        response_text = _read_agent_response(result.last_message_path)
-        _print_agent_response(result.last_message_path, response_text)
+        response_text = _agent_io.read_agent_response(result.last_message_path)
+        _agent_io.print_agent_response(
+            log_alias=IMPLEMENTATION_AGENT.log_alias,
+            response_path=result.last_message_path,
+            response_text=response_text,
+        )
         _log_codex_sandbox_fallback(stage_label=strategy_label, result=result)
         if result.returncode != 0:
             retry_feedback = (
@@ -6023,7 +5972,7 @@ def _run_error_strategy(
         f"reasoning={_ERROR_STRATEGY_REASONING_EFFORT}"
     )
     result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
-    strategy_text = _read_agent_response(result.last_message_path).strip()
+    strategy_text = _agent_io.read_agent_response(result.last_message_path).strip()
     if result.returncode != 0:
         print(
             f"[yellow]{stage_label}[/yellow]: gpt strategy failed, "
