@@ -222,6 +222,7 @@ from kagglebot.top1_exhaustive import (
     build_private_robustness_report,
     build_top1_exhaustion_report,
     build_win_contract,
+    format_top1_public_score_message,
     normalize_top1_submit_policy,
 )
 from kagglebot.types import PlanConfig
@@ -623,7 +624,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         metric_hint=metric_hint,
     )
     _write_json_object(config.paths.top1_public_path, top1_info)
-    _print_top1_info(top1_info)
+    print(format_top1_public_score_message(top1_info))
     _update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()
     plan = planning_phase.execute(plan)
@@ -3705,16 +3706,6 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
     run_agent_pipeline(paths=config.paths, config=pipeline_config)
     _update_watch_phase(config, run_id, "verifying", detail="Verifying the generated plan and kernel scaffold.")
     _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
-
-
-def _print_top1_info(top1_info: dict[str, object]) -> None:
-    score = top1_info.get("score") if isinstance(top1_info, dict) else None
-    source = top1_info.get("source") if isinstance(top1_info, dict) else None
-    if score is None:
-        print("[yellow]top1 public score[/yellow]: unavailable")
-        return
-    suffix = f" (source: {source})" if source else ""
-    print(f"[cyan]top1 public score[/cyan]: {score}{suffix}")
 
 
 def _build_accuracy_potential(

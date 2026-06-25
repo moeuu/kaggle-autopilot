@@ -55,6 +55,15 @@ def top1_exhaustion_report_path(context_dir: Path) -> Path:
     return context_dir / TOP1_EXHAUSTION_REPORT_FILENAME
 
 
+def format_top1_public_score_message(top1_info: dict[str, object] | None) -> str:
+    score = top1_info.get("score") if isinstance(top1_info, dict) else None
+    source = top1_info.get("source") if isinstance(top1_info, dict) else None
+    if score is None:
+        return "[yellow]top1 public score[/yellow]: unavailable"
+    suffix = f" (source: {source})" if source else ""
+    return f"[cyan]top1 public score[/cyan]: {score}{suffix}"
+
+
 def build_win_contract(
     *,
     context_dir: Path,

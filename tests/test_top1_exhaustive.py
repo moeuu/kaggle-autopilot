@@ -9,12 +9,21 @@ from kagglebot.top1_exhaustive import (
     build_private_robustness_report,
     build_top1_exhaustion_report,
     build_win_contract,
+    format_top1_public_score_message,
     normalize_top1_submit_policy,
     portfolio_optimizer_report_path,
     private_robustness_report_path,
     top1_exhaustion_report_path,
     win_contract_path,
 )
+
+
+def test_format_top1_public_score_message() -> None:
+    assert format_top1_public_score_message({"score": 0.123, "source": "leaderboard"}) == (
+        "[cyan]top1 public score[/cyan]: 0.123 (source: leaderboard)"
+    )
+    assert format_top1_public_score_message({"score": None}) == "[yellow]top1 public score[/yellow]: unavailable"
+    assert format_top1_public_score_message(None) == "[yellow]top1 public score[/yellow]: unavailable"
 
 
 def test_win_contract_records_baselines_sources_and_guardrails(tmp_path: Path) -> None:
