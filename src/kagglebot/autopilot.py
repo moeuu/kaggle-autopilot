@@ -5517,12 +5517,13 @@ def _attempt_submit(
     _submit_failure_context.mark_submit_failure_context_resolved(
         run_dir=run_dir, resolution="submitted", submission_ref=submission_ref
     )
-    return _submit_attempts.build_submit_result_payload(
+    return _submit_attempts.build_successful_submit_result_payload(
         message=message,
         submission_ref=submission_ref,
-        submitted_at_iso=submitted_at.isoformat(),
-        iteration=_submit_stage.infer_iteration_from_submission_path(submission_path),
+        submitted_at=submitted_at,
+        submission_path=submission_path,
         outcome=outcome,
+        infer_iteration=_submit_stage.infer_iteration_from_submission_path,
     )
 
 

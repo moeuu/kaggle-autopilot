@@ -99,9 +99,9 @@ Submit code fingerprinting, same-error-fingerprint reuse/allowance decisions, du
 and skip decisions, and same-submission-path retry/skip decisions live in `src/kagglebot/submit_retry_policy.py`; the
 loop supplies paths, hashing, and state persistence callbacks.
 Submit attempt payloads, submit run-state updates, submit knowledge-record message/fix summaries, retry knowledge detail
-formatting, submit result payloads, and submit success outcome display/ledger-recording decisions live in
-`src/kagglebot/submit_attempts.py`. The same module now owns `submit_attempts.jsonl` append, duplicate SHA lookup,
-seen-fingerprint set assembly, and tolerant row readers
+formatting, submit result payload construction, and submit success outcome display/ledger-recording decisions live in
+`src/kagglebot/submit_attempts.py`. The same module now owns successful result timestamp/iteration wiring,
+`submit_attempts.jsonl` append, duplicate SHA lookup, seen-fingerprint set assembly, and tolerant row readers
 used by resume state and self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules
 centralized instead of duplicated across the loop, state helpers, and improvement analysis.
 Historical Kaggle submission row normalization, best/latest public-score summary construction, online-regression

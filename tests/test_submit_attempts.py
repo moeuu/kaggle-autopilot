@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.submit_attempts import (
@@ -18,6 +19,7 @@ from kagglebot.submit_attempts import (
     build_submit_skip_attempt_payload,
     build_submit_skip_record_payloads,
     build_submit_success_record_payloads,
+    build_successful_submit_result_payload,
     count_successful_submit_attempts,
     decide_submit_outcome_recording,
     format_submit_retry_knowledge_details,
@@ -556,6 +558,25 @@ def test_build_submit_result_payload_for_success_includes_outcome() -> None:
         "submitted_at": "2026-06-25T00:00:00+00:00",
         "iteration": 2,
         "outcome": {"status": "complete", "score": 0.42},
+    }
+
+
+def test_build_successful_submit_result_payload_resolves_time_and_iteration() -> None:
+    payload = build_successful_submit_result_payload(
+        message="submit message",
+        submission_ref="kernel:user/demo",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        submission_path=Path("runs/run-1/iter-4/submission.csv"),
+        outcome={"status": "complete"},
+        infer_iteration=lambda path: 4 if "iter-4" in path.as_posix() else None,
+    )
+
+    assert payload == {
+        "message": "submit message",
+        "submission_path": "kernel:user/demo",
+        "submitted_at": "2026-06-25T00:00:00+00:00",
+        "iteration": 4,
+        "outcome": {"status": "complete"},
     }
 
 
