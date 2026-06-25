@@ -24,6 +24,7 @@ from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
+from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
@@ -274,6 +275,8 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
+_evaluation_to_payload = _iteration_metrics.evaluation_to_payload
+_build_metrics_payload = _iteration_metrics.build_metrics_payload
 _infer_campaign_candidate_category = _campaign_metrics.infer_campaign_candidate_category
 _infer_campaign_model_family = _campaign_metrics.infer_campaign_model_family
 _infer_campaign_feature_set = _campaign_metrics.infer_campaign_feature_set
@@ -3318,23 +3321,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     _write_json_object(run_dir / "run.json", run_payload)
 
 
-def _evaluation_to_payload(evaluation: EvaluationResult) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "score_source": evaluation.score_source,
-        "metric": evaluation.metric,
-        "direction": evaluation.direction,
-        "value": evaluation.value,
-        "std": evaluation.std,
-    }
-    if evaluation.fold_scores is not None:
-        payload["fold_scores"] = list(evaluation.fold_scores)
-    if evaluation.train_score is not None:
-        payload["train_score"] = evaluation.train_score
-    if evaluation.val_score is not None:
-        payload["val_score"] = evaluation.val_score
-    return payload
-
-
 def _load_plan(paths: CompetitionPaths) -> PlanConfig:
     payload = _load_json_object(paths.plan_path)
     if payload is None:
@@ -5197,72 +5183,6 @@ def _iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationRe
         if isinstance(faithfulness, dict) and isinstance(faithfulness.get("faithful"), bool):
             return bool(faithfulness.get("faithful"))
     return _score_sources.is_trusted_offline_score_source(evaluation.score_source)
-
-
-def _build_metrics_payload(
-    *,
-    run_id: str,
-    iteration: int,
-    evaluation: EvaluationResult,
-    target_score: float,
-    met_target: bool,
-    top1_info: dict[str, object],
-    compute: str,
-    accelerator: str,
-    holdout_frac: float,
-    cv_folds: int,
-    seed: int,
-    evaluation_by_source: dict[str, EvaluationResult] | None = None,
-    evaluation_report: EvaluationReport | None = None,
-    readiness_target: float | None = None,
-    evaluation_contract: dict[str, object] | None = None,
-    competition_faithfulness: dict[str, object] | None = None,
-    accuracy_potential: dict[str, object] | None = None,
-) -> dict[str, object]:
-    payload = {
-        "run_id": run_id,
-        "iter": iteration,
-        "metric": evaluation.metric,
-        "direction": evaluation.direction,
-        "score_source": evaluation.score_source,
-        "offline_value": evaluation.value,
-        "offline_std": evaluation.std,
-        "target_score": target_score,
-        "met_target": met_target,
-        "top1_public_score": top1_info.get("score"),
-        "top1_public_timestamp": top1_info.get("timestamp"),
-        "compute": compute,
-        "accelerator": accelerator,
-        "timestamp": int(datetime.now(UTC).timestamp()),
-        "folds": cv_folds if evaluation.score_source in {"cv", "consensus"} else None,
-        "holdout_frac": holdout_frac if evaluation.score_source in {"holdout", "consensus"} else None,
-        "seed": seed,
-    }
-    if evaluation_by_source:
-        payload["offline_by_source"] = {
-            source: _evaluation_to_payload(result) for source, result in evaluation_by_source.items()
-        }
-    if evaluation_report is not None:
-        payload["readiness"] = {
-            "score": evaluation_report.readiness_score,
-            "mean": evaluation_report.mean,
-            "std": evaluation_report.std,
-            "ci_low": evaluation_report.ci_low,
-            "ci_high": evaluation_report.ci_high,
-            "target": readiness_target,
-            "split_strategy": evaluation_report.split_strategy,
-            "n_splits": evaluation_report.n_splits,
-            "seeds": evaluation_report.seeds,
-            "repeats": evaluation_report.repeats,
-            "drift_auc": evaluation_report.drift_auc,
-        }
-    if evaluation_contract:
-        payload["evaluation_contract"] = evaluation_contract
-    if competition_faithfulness:
-        payload["competition_faithfulness"] = competition_faithfulness
-    if accuracy_potential:
-        payload["accuracy_potential"] = accuracy_potential
-    return payload
 
 
 def _build_iteration_evaluation_report(
