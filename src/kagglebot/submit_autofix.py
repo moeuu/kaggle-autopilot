@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from kagglebot.exceptions import SubmissionValidationError
+from kagglebot.submit_failure_context import resolve_submit_autofix_submission_artifact
 from kagglebot.submit_failure_policy import submit_error_requires_file_fix
 
 
@@ -84,4 +85,33 @@ def prepare_submit_file_autofix(
             f"- fixed_submission_path: {fixed}"
         ),
         file_fix_required=True,
+    )
+
+
+def prepare_submit_file_autofix_for_run(
+    *,
+    latest_submit_attempt: dict[str, object],
+    run_state: dict[str, object],
+    failure_context: dict[str, object],
+    fallback_iteration_dirs: Callable[[], Iterable[Path]],
+    resolve_iteration_submission_artifact: Callable[[Path], Path | None],
+    validate_and_prepare: Callable[[Path], Path],
+    save_repaired_path: Callable[[Path], None],
+) -> SubmitFileAutofixPreparation:
+    """Prepare deterministic submit-file repair using current run artifacts."""
+
+    def resolve_source() -> Path | None:
+        return resolve_submit_autofix_submission_artifact(
+            run_state=run_state,
+            latest_submit_attempt=latest_submit_attempt,
+            failure_context=failure_context,
+            fallback_iteration_dirs=fallback_iteration_dirs(),
+            resolve_iteration_submission_artifact=resolve_iteration_submission_artifact,
+        )
+
+    return prepare_submit_file_autofix(
+        latest_submit_attempt=latest_submit_attempt,
+        resolve_source=resolve_source,
+        validate_and_prepare=validate_and_prepare,
+        save_repaired_path=save_repaired_path,
     )

@@ -4164,30 +4164,53 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         if error.output:
             error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
     if submit_autofix:
-        submit_context = _submit_failure_context.format_submit_autofix_context(
-            failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-            run_state=_autopilot_state._load_run_state(run_dir),
-            latest_submit_attempt=_submit_attempts.load_latest_submit_attempt(run_dir),
-        )
+        failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
+        run_state = _autopilot_state._load_run_state(run_dir)
         latest_submit_attempt = _submit_attempts.load_latest_submit_attempt(run_dir)
+        submit_context = _submit_failure_context.format_submit_autofix_context(
+            failure_context=failure_context,
+            run_state=run_state,
+            latest_submit_attempt=latest_submit_attempt,
+        )
         submit_file_fix_required = _submit_autofix.submit_file_fix_required_for_attempt(latest_submit_attempt)
+        max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
+
+        def fallback_iteration_dirs():
+            return (config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1))
+
+        def save_repaired_submit_path(fixed: Path) -> None:
+            _autopilot_state._save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
+
         if submit_file_fix_required:
-            max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
             submit_file_fix_baseline_path = _submit_failure_context.resolve_submit_autofix_submission_artifact(
-                run_state=_autopilot_state._load_run_state(run_dir),
-                latest_submit_attempt=_submit_attempts.load_latest_submit_attempt(run_dir),
-                failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-                fallback_iteration_dirs=(
-                    config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
-                ),
+                run_state=run_state,
+                latest_submit_attempt=latest_submit_attempt,
+                failure_context=failure_context,
+                fallback_iteration_dirs=fallback_iteration_dirs(),
                 resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
             )
             submit_file_fix_baseline_sha256 = _sha256_or_none(submit_file_fix_baseline_path)
-        _prepared_submission_path, prepared_submission_summary = _prepare_submit_file_autofix(
-            config=config,
-            run_id=run_id,
-            run_dir=run_dir,
+        repair_service = SubmissionService(
+            SubmissionConfig(
+                slug=config.slug,
+                data_dir=config.paths.data_dir,
+                sample_submission_path=config.paths.sample_submission_path,
+                submission_ledger_path=config.paths.submission_ledger_path,
+                dry_run=True,
+                force_submit=True,
+                bypass_rate_limit=True,
+            )
         )
+        preparation = _submit_autofix.prepare_submit_file_autofix_for_run(
+            latest_submit_attempt=latest_submit_attempt,
+            run_state=run_state,
+            failure_context=failure_context,
+            fallback_iteration_dirs=fallback_iteration_dirs,
+            resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
+            validate_and_prepare=repair_service.validate_and_prepare_submission,
+            save_repaired_path=save_repaired_submit_path,
+        )
+        _prepared_submission_path, prepared_submission_summary = preparation.path, preparation.summary
         if prepared_submission_summary:
             submit_context = (
                 f"{submit_context}\n\ndeterministic_submit_file_autofix:\n{prepared_submission_summary}".strip()
@@ -5015,49 +5038,6 @@ def _abort_submit_for_run(
     )
     print(f"[red]submit aborted[/red]: {message}")
     raise SubmitAbortedError(message)
-
-
-def _prepare_submit_file_autofix(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    run_dir: Path,
-) -> tuple[Path | None, str]:
-    latest = _submit_attempts.load_latest_submit_attempt(run_dir)
-    service = SubmissionService(
-        SubmissionConfig(
-            slug=config.slug,
-            data_dir=config.paths.data_dir,
-            sample_submission_path=config.paths.sample_submission_path,
-            submission_ledger_path=config.paths.submission_ledger_path,
-            dry_run=True,
-            force_submit=True,
-            bypass_rate_limit=True,
-        )
-    )
-
-    def resolve_source() -> Path | None:
-        max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
-        return _submit_failure_context.resolve_submit_autofix_submission_artifact(
-            run_state=_autopilot_state._load_run_state(run_dir),
-            latest_submit_attempt=_submit_attempts.load_latest_submit_attempt(run_dir),
-            failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-            fallback_iteration_dirs=(
-                config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1)
-            ),
-            resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
-        )
-
-    def save_repaired_path(fixed: Path) -> None:
-        _autopilot_state._save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
-
-    preparation = _submit_autofix.prepare_submit_file_autofix(
-        latest_submit_attempt=latest,
-        resolve_source=resolve_source,
-        validate_and_prepare=service.validate_and_prepare_submission,
-        save_repaired_path=save_repaired_path,
-    )
-    return preparation.path, preparation.summary
 
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:

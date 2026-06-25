@@ -75,6 +75,7 @@ from kagglebot.submission_policy import (
     should_attempt_submit_for_readiness,
     should_force_initial_submit,
 )
+from kagglebot.submit_autofix import SubmitFileAutofixPreparation
 from kagglebot.submit_failure_context import load_submit_failure_context
 from kagglebot.submit_stage import (
     infer_iteration_from_submission_path,
@@ -3679,14 +3680,18 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
     monkeypatch.setattr("kagglebot.runtime_fixes.maybe_write_device_coerce", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.runtime_fixes.maybe_write_column_map", lambda *args, **kwargs: True)
 
-    def fake_prepare_submit_file_autofix(*, config: AutopilotConfig, run_id: str, run_dir: Path):  # noqa: ARG001
+    def fake_prepare_submit_file_autofix_for_run(**kwargs: object) -> SubmitFileAutofixPreparation:
         fixed_submission = config.paths.iter_dir(run_id, 1) / "output" / "submission-fixed.csv"
         fixed_submission.parent.mkdir(parents=True, exist_ok=True)
         fixed_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
-        state = json.loads((run_dir / "run_state.json").read_text(encoding="utf-8"))
-        state["submit_autofix_submission_path"] = str(fixed_submission)
-        (run_dir / "run_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
-        return fixed_submission, f"fixed_submission_path: {fixed_submission}"
+        save_repaired_path = kwargs["save_repaired_path"]
+        assert callable(save_repaired_path)
+        save_repaired_path(fixed_submission)
+        return SubmitFileAutofixPreparation(
+            path=fixed_submission,
+            summary=f"fixed_submission_path: {fixed_submission}",
+            file_fix_required=True,
+        )
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool):  # noqa: ARG001
         calls["strategy"] += 1
@@ -3707,7 +3712,10 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
 
     monkeypatch.setattr("kagglebot.autopilot.run_strategy", fake_run_strategy)
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._prepare_submit_file_autofix", fake_prepare_submit_file_autofix)
+    monkeypatch.setattr(
+        "kagglebot.submit_autofix.prepare_submit_file_autofix_for_run",
+        fake_prepare_submit_file_autofix_for_run,
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", fail_if_called)
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})

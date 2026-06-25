@@ -296,6 +296,8 @@ The next high-value modernization work is:
    Agent/autopilot plan payload normalization, validation, high-accuracy suite repair, guardrail application, plan
    persistence, and resolved-plan-to-`PlanConfig` conversion now call `plan_policy.py` directly instead of living inside
    orchestration modules; obsolete autopilot plan load/write/resolved conversion wrappers have been retired.
+   Submit-file autofix source resolution and deterministic repair preparation now call `submit_autofix.py` directly,
+   leaving `autopilot.py` to provide run-specific services and state callbacks.
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the

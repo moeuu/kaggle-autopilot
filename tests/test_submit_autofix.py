@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from kagglebot.exceptions import SubmissionValidationError
-from kagglebot.submit_autofix import prepare_submit_file_autofix, submit_file_fix_required_for_attempt
+from kagglebot.submit_autofix import (
+    prepare_submit_file_autofix,
+    prepare_submit_file_autofix_for_run,
+    submit_file_fix_required_for_attempt,
+)
 
 
 def _file_fix_attempt() -> dict[str, object]:
@@ -88,3 +92,27 @@ def test_prepare_submit_file_autofix_reports_validation_failure(tmp_path: Path) 
     assert result.path is None
     assert "prediction column contains NaN" in result.summary
     assert result.file_fix_required is True
+
+
+def test_prepare_submit_file_autofix_for_run_resolves_iteration_fallback(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    source = iter_dir / "submission.csv"
+    fixed = iter_dir / "submission-fixed.csv"
+    source.parent.mkdir(parents=True)
+    source.write_text("id,target\n1,bad\n", encoding="utf-8")
+    fixed.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    saved: list[Path] = []
+
+    result = prepare_submit_file_autofix_for_run(
+        latest_submit_attempt=_file_fix_attempt(),
+        run_state={},
+        failure_context={},
+        fallback_iteration_dirs=lambda: [iter_dir],
+        resolve_iteration_submission_artifact=lambda path: path / "submission.csv",
+        validate_and_prepare=lambda path: fixed if path == source else path,
+        save_repaired_path=saved.append,
+    )
+
+    assert result.path == fixed
+    assert "fixed_submission_path" in result.summary
+    assert saved == [fixed]
