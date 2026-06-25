@@ -8,6 +8,7 @@ from kagglebot.submit_stage import (
     build_default_submission_problem_insight,
     build_kaggle_credentials_missing_abort_spec,
     build_local_submission_guardrail_abort_spec,
+    build_local_submission_validation_abort_spec,
     build_rules_not_accepted_abort_spec,
     build_submission_outcome_error_detail,
     build_submit_stage_success_record,
@@ -152,6 +153,22 @@ def test_build_local_submission_guardrail_abort_spec_sets_local_blocker_contract
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "duplicate submission sha"
     assert spec.exit_code == 9
+
+
+def test_build_local_submission_validation_abort_spec_sets_validation_contract() -> None:
+    spec = build_local_submission_validation_abort_spec(
+        error=ValueError("row count mismatch"),
+        exit_code=65,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.fingerprint == "fp::row count mismatch"
+    assert spec.error_kind == "validation"
+    assert spec.reason == "local_submission_validation_failed"
+    assert spec.message == "Local submission validation failed; Kaggle CLI submit is skipped."
+    assert spec.stdout_tail == ""
+    assert spec.stderr_tail == "row count mismatch"
+    assert spec.exit_code == 65
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:

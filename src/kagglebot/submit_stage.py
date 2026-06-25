@@ -638,6 +638,24 @@ def build_local_submission_guardrail_abort_spec(
     )
 
 
+def build_local_submission_validation_abort_spec(
+    *,
+    error: object,
+    exit_code: int | None,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec:
+    stderr_tail = str(error)
+    return SubmitAbortSpec(
+        fingerprint=compute_error_fingerprint("", stderr_tail),
+        error_kind="validation",
+        reason="local_submission_validation_failed",
+        message="Local submission validation failed; Kaggle CLI submit is skipped.",
+        stdout_tail="",
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
+    )
+
+
 def decide_submission_outcome_abort(
     *,
     outcome_status: str,

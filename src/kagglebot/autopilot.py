@@ -5029,20 +5029,24 @@ def _attempt_submit(
     try:
         prepared_submission_path = submission_service.validate_and_prepare_submission(input_submission_path)
     except SubmissionValidationError as exc:
-        fingerprint = compute_error_fingerprint("", str(exc))
+        abort_spec = _submit_stage.build_local_submission_validation_abort_spec(
+            error=exc,
+            exit_code=SubmissionValidationError.exit_code,
+            compute_error_fingerprint=compute_error_fingerprint,
+        )
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
             submission_ref=input_submission_path,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=fingerprint,
-            error_kind="validation",
-            reason="local_submission_validation_failed",
-            message="Local submission validation failed; Kaggle CLI submit is skipped.",
-            stdout_tail="",
-            stderr_tail=str(exc),
-            exit_code=SubmissionValidationError.exit_code,
+            fingerprint=abort_spec.fingerprint,
+            error_kind=abort_spec.error_kind,
+            reason=abort_spec.reason,
+            message=abort_spec.message,
+            stdout_tail=abort_spec.stdout_tail,
+            stderr_tail=abort_spec.stderr_tail,
+            exit_code=abort_spec.exit_code,
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
