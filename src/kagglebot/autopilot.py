@@ -2205,7 +2205,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "allocator_decision": allocator_decision,
                     "graph_execution_report": graph_execution_report,
                 }
-            metrics_path.write_text(json.dumps(pre_submit_metrics_payload, indent=2), encoding="utf-8")
+            _write_json_object(metrics_path, pre_submit_metrics_payload)
             _write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
@@ -2258,7 +2258,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                     else:
                         run_payload["status"] = "submit_failed"
-                        (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+                        _write_json_object(run_dir / "run.json", run_payload)
                         raise
                 if submission_result:
                     if bool(submission_result.get("skipped")):
@@ -2550,7 +2550,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "code_reference_delta_vs_current": code_reference_delta_vs_current,
                 "code_reference_forced_reproduction": code_reference_forced_reproduction,
             }
-            metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+            _write_json_object(metrics_path, metrics_payload)
 
             diff_summary = "Diff tracking disabled (git integration removed)."
             diagnostics = _build_diagnostics(
@@ -2861,7 +2861,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 "forced_improvement_reason": forced_major_overhaul_reason or forced_validation_redesign_reason,
                 "extra_policy_notes": extra_policy_notes,
             }
-            metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+            _write_json_object(metrics_path, metrics_payload)
 
             for issue in loop_signal_errors:
                 try:
@@ -2908,7 +2908,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
                 metrics_payload["deliverable_mode"] = "writeup"
                 metrics_payload["writeup_bundle"] = writeup_bundle_meta
-                metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
+                _write_json_object(metrics_path, metrics_payload)
 
             submit_allowed_by_gate = submit_enabled and allow_submit
             submit_phase_finished = (
@@ -3089,7 +3089,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
-        (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+        _write_json_object(run_dir / "run.json", run_payload)
         print("[yellow]run interrupted[/yellow]")
         return
 
@@ -3152,7 +3152,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             except SubmitAbortedError:
                 run_payload["status"] = "submit_failed"
-                (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+                _write_json_object(run_dir / "run.json", run_payload)
                 raise
             if fallback_result:
                 if bool(fallback_result.get("skipped")):
@@ -3235,7 +3235,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         "fallback_submit_blocked_reason": fallback_submit_blocked_reason,
     }
 
-    (run_dir / "run.json").write_text(json.dumps(run_payload, indent=2), encoding="utf-8")
+    _write_json_object(run_dir / "run.json", run_payload)
 
 
 def _evaluation_to_payload(evaluation: EvaluationResult) -> dict[str, object]:
@@ -3256,26 +3256,16 @@ def _evaluation_to_payload(evaluation: EvaluationResult) -> dict[str, object]:
 
 
 def _load_plan(paths: CompetitionPaths) -> PlanConfig:
-    if not paths.plan_path.exists():
-        return PlanConfig()
-    try:
-        payload = json.loads(paths.plan_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    payload = _load_json_object(paths.plan_path)
+    if payload is None:
         return PlanConfig()
     return PlanConfig.from_dict(payload)
 
 
 def _write_plan(paths: CompetitionPaths, plan: PlanConfig) -> None:
-    existing: dict[str, object] = {}
-    if paths.plan_path.exists():
-        try:
-            loaded = json.loads(paths.plan_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        except json.JSONDecodeError:
-            existing = {}
+    existing = _load_json_object_or_empty(paths.plan_path)
     payload = _apply_plan_guardrails(paths, {**existing, **plan.to_dict()})
-    paths.plan_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_object(paths.plan_path, payload)
 
 
 def _needs_planning(plan: PlanConfig, config: AutopilotConfig) -> bool:
@@ -8460,14 +8450,7 @@ def _maybe_write_column_fill(config: AutopilotConfig, error_text: str) -> bool:
 
     context_dir = config.paths.context_dir
     fill_path = context_dir / _COLUMN_FILL_FILENAME
-    payload: dict[str, object] = {}
-    if fill_path.exists():
-        try:
-            loaded = json.loads(fill_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                payload = loaded
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+    payload = _load_json_object_or_empty(fill_path)
 
     changed = not fill_path.exists()
     files_payload = payload.get("files")
@@ -8532,8 +8515,7 @@ def _maybe_write_column_fill(config: AutopilotConfig, error_text: str) -> bool:
     payload["updated_at"] = datetime.now(UTC).isoformat()
     if "missing_columns" not in payload:
         payload["missing_columns"] = []
-    context_dir.mkdir(parents=True, exist_ok=True)
-    fill_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_object(fill_path, payload)
     return True
 
 
@@ -8550,8 +8532,7 @@ def _maybe_write_object_coerce(config: AutopilotConfig, error_text: str) -> bool
         "enabled": True,
         "reason": "numpy.object_ conversion error",
     }
-    context_dir.mkdir(parents=True, exist_ok=True)
-    coerce_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_object(coerce_path, payload)
     return True
 
 
@@ -8569,8 +8550,7 @@ def _maybe_write_device_coerce(config: AutopilotConfig, error_text: str) -> bool
         "prefer": "cuda",
         "reason": "torch device mismatch error",
     }
-    context_dir.mkdir(parents=True, exist_ok=True)
-    coerce_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_object(coerce_path, payload)
     return True
 
 
@@ -8613,8 +8593,7 @@ def _maybe_write_column_map(config: AutopilotConfig, error_text: str) -> bool:
         "candidates": candidate_groups,
         "files": columns_by_file,
     }
-    context_dir.mkdir(parents=True, exist_ok=True)
-    map_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_object(map_path, payload)
     return True
 
 
@@ -8781,7 +8760,7 @@ def _maybe_regenerate_kernel_sources_once(
         "iteration": int(iteration),
         "run_id": run_id,
     }
-    marker_path.write_text(json.dumps(marker_payload, indent=2), encoding="utf-8")
+    _write_json_object(marker_path, marker_payload)
     print(
         "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
         "regenerating kernel sources once before retry."
