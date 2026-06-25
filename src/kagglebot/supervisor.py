@@ -25,7 +25,7 @@ from kagglebot.exceptions import (
     SubmitAbortedError,
 )
 from kagglebot.history import new_run_id
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import append_jsonl_record, load_json_object, write_json_object
 from kagglebot.kaggle_api import (
     EnteredCompetition,
     competition_total_size_bytes,
@@ -152,8 +152,7 @@ class WatchLedger:
             "event": event,
             **payload,
         }
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        append_jsonl_record(self.path, record, sort_keys=True)
 
     def records(self) -> list[dict[str, object]]:
         if not self.path.exists():

@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from kagglebot.hashing import sha256_file
+from kagglebot.json_utils import append_jsonl_record
 
 
 def new_run_id() -> str:
@@ -102,8 +103,7 @@ class SubmissionLedger:
             "source_run_id": source_run_id,
             "source_iteration": source_iteration,
         }
-        with self.ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        append_jsonl_record(self.ledger_path, record)
 
     def record_outcome(
         self,
@@ -133,8 +133,7 @@ class SubmissionLedger:
             "source_run_id": source_run_id,
             "source_iteration": source_iteration,
         }
-        with self.ledger_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        append_jsonl_record(self.ledger_path, record)
 
     def last_submission_time(self) -> datetime | None:
         last_ts = None

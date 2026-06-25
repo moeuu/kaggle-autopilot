@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 
@@ -65,7 +66,7 @@ def write_json_array(
 
 
 def jsonl_record_text(
-    payload: dict[str, object],
+    payload: Mapping[str, object],
     *,
     ensure_ascii: bool = True,
     sort_keys: bool = False,
@@ -75,7 +76,7 @@ def jsonl_record_text(
 
 def write_jsonl_records(
     path: Path,
-    records: list[dict[str, object]],
+    records: Iterable[Mapping[str, object]],
     *,
     ensure_ascii: bool = True,
     sort_keys: bool = False,
@@ -89,7 +90,7 @@ def write_jsonl_records(
 
 def append_jsonl_record(
     path: Path,
-    payload: dict[str, object],
+    payload: Mapping[str, object],
     *,
     ensure_ascii: bool = True,
     sort_keys: bool = False,

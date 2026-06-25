@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from kagglebot.campaign import CampaignCandidate, SubmissionAllocation
-from kagglebot.json_utils import write_json_object
+from kagglebot.json_utils import append_jsonl_record, write_json_object
 from kagglebot.scalar_utils import non_nan_float as _to_float
 from kagglebot.scalar_utils import optional_str as _optional_str
 
@@ -257,8 +256,7 @@ def append_campaign_outcome(
         "top1_gap": campaign_state.get("top1_gap"),
     }
     context_dir.mkdir(parents=True, exist_ok=True)
-    with (context_dir / CAMPAIGN_OUTCOMES_FILENAME).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    append_jsonl_record(context_dir / CAMPAIGN_OUTCOMES_FILENAME, payload, ensure_ascii=True)
     return payload
 
 

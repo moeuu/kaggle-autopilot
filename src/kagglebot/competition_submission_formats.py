@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 from kagglebot.exec_utils import run_command
-from kagglebot.json_utils import write_json_object
+from kagglebot.json_utils import append_jsonl_record, write_json_object, write_jsonl_records
 from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_BUNDLE,
     ARTIFACT_CLASS_MULTI_FILE_ZIP,
@@ -709,16 +709,11 @@ def truncate_text(text: str, limit: int) -> str:
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+    append_jsonl_record(path, row, ensure_ascii=True)
 
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+    write_jsonl_records(path, rows, ensure_ascii=True)
 
 
 def load_processed_slugs(path: Path) -> set[str]:

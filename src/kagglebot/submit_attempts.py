@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kagglebot.json_utils import append_jsonl_record
+
 
 @dataclass(frozen=True)
 class SubmitKnowledgePayload:
@@ -56,9 +58,7 @@ def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso:
         **payload,
     }
     attempts_path = run_dir / "submit_attempts.jsonl"
-    attempts_path.parent.mkdir(parents=True, exist_ok=True)
-    with attempts_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+    append_jsonl_record(attempts_path, record, ensure_ascii=True)
 
 
 def load_submit_attempt_rows(run_dir: Path) -> list[dict[str, object]]:

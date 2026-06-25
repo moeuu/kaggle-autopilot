@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+from kagglebot.json_utils import append_jsonl_record
+
 LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 
 
@@ -56,5 +58,4 @@ def append_local_kernel_duration_history(
         "duration_sec": float(duration_sec),
         "recorded_at": int(time.time()),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    append_jsonl_record(path, payload, ensure_ascii=True)
