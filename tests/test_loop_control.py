@@ -1,6 +1,56 @@
 from __future__ import annotations
 
-from kagglebot.loop_control import append_policy_reason, decide_no_improve_major_overhaul, decide_stagnation_stop
+from kagglebot.loop_control import (
+    append_policy_reason,
+    decide_no_improve_major_overhaul,
+    decide_stagnation_stop,
+    select_stagnation_track,
+    update_same_config_streak,
+)
+
+
+def test_update_same_config_streak_increments_matching_hash() -> None:
+    state = update_same_config_streak(
+        current_config_hash="abc",
+        last_config_hash="abc",
+        same_config_streak=2,
+    )
+
+    assert state.same_config_streak == 3
+    assert state.last_config_hash == "abc"
+
+
+def test_update_same_config_streak_resets_on_new_hash() -> None:
+    state = update_same_config_streak(
+        current_config_hash="new",
+        last_config_hash="old",
+        same_config_streak=2,
+    )
+
+    assert state.same_config_streak == 0
+    assert state.last_config_hash == "new"
+
+
+def test_select_stagnation_track_prefers_accuracy_frontier_after_candidate_exists() -> None:
+    track = select_stagnation_track(
+        best_high_potential_score=0.81,
+        no_improve_streak=5,
+        frontier_no_improve_streak=2,
+    )
+
+    assert track.no_improve_streak == 2
+    assert track.label == "accuracy frontier"
+
+
+def test_select_stagnation_track_uses_offline_metric_without_frontier_candidate() -> None:
+    track = select_stagnation_track(
+        best_high_potential_score=None,
+        no_improve_streak=5,
+        frontier_no_improve_streak=2,
+    )
+
+    assert track.no_improve_streak == 5
+    assert track.label == "offline metric"
 
 
 def test_decide_stagnation_stop_stops_on_no_improvement_patience() -> None:

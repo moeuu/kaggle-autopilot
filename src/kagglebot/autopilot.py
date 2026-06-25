@@ -2926,22 +2926,25 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metric=evaluation.metric,
                 accelerator=accelerator_used,
             )
-            if current_config_hash == last_config_hash:
-                same_config_streak += 1
-            else:
-                same_config_streak = 0
-            last_config_hash = current_config_hash
-
-            effective_no_improve_streak = (
-                frontier_no_improve_streak if best_high_potential_score is not None else no_improve_streak
+            config_streak = _loop_control.update_same_config_streak(
+                current_config_hash=current_config_hash,
+                last_config_hash=last_config_hash,
+                same_config_streak=same_config_streak,
             )
-            effective_track_label = "accuracy frontier" if best_high_potential_score is not None else "offline metric"
+            same_config_streak = config_streak.same_config_streak
+            last_config_hash = config_streak.last_config_hash
+
+            stagnation_track = _loop_control.select_stagnation_track(
+                best_high_potential_score=best_high_potential_score,
+                no_improve_streak=no_improve_streak,
+                frontier_no_improve_streak=frontier_no_improve_streak,
+            )
             stagnation_stop = _loop_control.decide_stagnation_stop(
                 stop_allowed=not submit_enabled,
-                no_improve_streak=effective_no_improve_streak,
+                no_improve_streak=stagnation_track.no_improve_streak,
                 no_improve_patience=stop_no_improve_patience,
                 stop_min_delta=stop_min_delta,
-                track_label=effective_track_label,
+                track_label=stagnation_track.label,
                 same_config_streak=same_config_streak,
                 same_config_patience=stop_same_config_patience,
             )

@@ -71,9 +71,9 @@ loop maps those typed predicates to submit abort reasons instead of parsing cred
 Shared runtime policy such as `local_gpu` compute detection, heavy deep-learning modality classification, and local GPU
 time-budget environment parsing live in `src/kagglebot/runtime_policy.py`; plan guardrails and autopilot execution use
 the same definitions.
-Bug-like loop stagnation decisions such as no-improvement patience, repeated same-config stops, and no-improve
-major-overhaul escalation live in `src/kagglebot/loop_control.py`, keeping wall-clock budget policy separate from
-runaway-loop guards.
+Bug-like loop stagnation decisions such as no-improvement patience, repeated same-config counter updates/stops, and
+no-improve major-overhaul escalation live in `src/kagglebot/loop_control.py`, keeping wall-clock budget policy separate
+from runaway-loop guards.
 Agent prompt/response file I/O, capacity-error detection, failure detail formatting, and retry-feedback prompt appending
 live in `src/kagglebot/agent_io.py`; the loop supplies agent identity and paths but does not own transcript formatting.
 Context artifact reads such as dataset profile loading, evaluation-spec validation/override application, and capped CSV
@@ -279,8 +279,8 @@ The next high-value modernization work is:
    Metric-recheck OOF column
    selection and fold-score list parsing now call `kernel_metrics.py` directly.
    Daily quota count/fallback decisions now call `submission_policy.py` directly.
-   Loop stagnation stop-reason construction and no-improve major-overhaul escalation now call `loop_control.py`
-   directly.
+   Loop stagnation track selection, same-config counter updates, stop-reason construction, and no-improve
+   major-overhaul escalation now call `loop_control.py` directly.
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.

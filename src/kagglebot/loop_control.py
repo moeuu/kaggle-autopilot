@@ -16,6 +16,43 @@ class NoImproveMajorOverhaulDecision:
     skip_message: str
 
 
+@dataclass(frozen=True)
+class ConfigStreakState:
+    same_config_streak: int
+    last_config_hash: str
+
+
+@dataclass(frozen=True)
+class StagnationTrack:
+    no_improve_streak: int
+    label: str
+
+
+def update_same_config_streak(
+    *,
+    current_config_hash: str,
+    last_config_hash: str | None,
+    same_config_streak: int,
+) -> ConfigStreakState:
+    if current_config_hash == last_config_hash:
+        return ConfigStreakState(
+            same_config_streak=same_config_streak + 1,
+            last_config_hash=current_config_hash,
+        )
+    return ConfigStreakState(same_config_streak=0, last_config_hash=current_config_hash)
+
+
+def select_stagnation_track(
+    *,
+    best_high_potential_score: float | None,
+    no_improve_streak: int,
+    frontier_no_improve_streak: int,
+) -> StagnationTrack:
+    if best_high_potential_score is not None:
+        return StagnationTrack(no_improve_streak=frontier_no_improve_streak, label="accuracy frontier")
+    return StagnationTrack(no_improve_streak=no_improve_streak, label="offline metric")
+
+
 def decide_stagnation_stop(
     *,
     stop_allowed: bool,
