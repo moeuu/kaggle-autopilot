@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    apply_notebook_fallback_decision,
     apply_notebook_fallback_retry_state,
     apply_same_submission_path_decision,
     build_default_submission_problem_insight,
@@ -87,6 +88,12 @@ class SamePathDecisionStub:
         self.reason = reason
         self.message = message
         self.fingerprint = fingerprint
+
+
+class ArtifactModeDecisionStub:
+    def __init__(self, *, mode: str, message: str = "") -> None:
+        self.mode = mode
+        self.message = message
 
 
 class SubmitAttemptRecorderStub:
@@ -1532,6 +1539,80 @@ def test_build_notebook_fallback_retry_state_combines_artifact_mode_and_messages
         "retrying via notebook submit automatically.",
         "[yellow]submit mode[/yellow]: using inference artifact",
     )
+
+
+def test_apply_notebook_fallback_decision_resolves_artifact_and_updates_state() -> None:
+    state = build_submit_stage_runtime_state(
+        decide_initial_submit_stage_mode(
+            requested_notebook_submit=False,
+            notebook_submissions_only=False,
+            notebook_submit_artifact_mode="wrapper",
+            resolved_notebook_artifact_mode="inference",
+        )
+    )
+    decision = decide_notebook_fallback_after_file_submit_error(
+        notebook_submit_required=False,
+        notebook_fallback_activated=False,
+        should_use_notebook_fallback=True,
+        resolved_notebook_artifact_mode="wrapper",
+        current_submission_artifact_mode=state.submission_artifact_mode,
+    )
+    calls: list[tuple[str, bool]] = []
+    messages: list[str] = []
+
+    applied = apply_notebook_fallback_decision(
+        state=state,
+        fallback_decision=decision,
+        resolve_artifact_mode=lambda mode, required: (
+            calls.append((mode, required))
+            or ArtifactModeDecisionStub(
+                mode="inference",
+                message="[yellow]submit mode[/yellow]: using inference artifact",
+            )
+        ),
+        on_message=messages.append,
+    )
+
+    assert applied.retry_as_notebook is True
+    assert applied.state.notebook_submit_required is True
+    assert applied.state.notebook_fallback_activated is True
+    assert applied.state.submission_artifact_mode == "inference"
+    assert calls == [("wrapper", True)]
+    assert messages == [
+        "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
+        "retrying via notebook submit automatically.",
+        "[yellow]submit mode[/yellow]: using inference artifact",
+    ]
+
+
+def test_apply_notebook_fallback_decision_keeps_state_when_not_retrying() -> None:
+    state = build_submit_stage_runtime_state(
+        decide_initial_submit_stage_mode(
+            requested_notebook_submit=False,
+            notebook_submissions_only=False,
+            notebook_submit_artifact_mode="wrapper",
+            resolved_notebook_artifact_mode="inference",
+        )
+    )
+    decision = decide_notebook_fallback_after_file_submit_error(
+        notebook_submit_required=False,
+        notebook_fallback_activated=False,
+        should_use_notebook_fallback=False,
+        resolved_notebook_artifact_mode="wrapper",
+        current_submission_artifact_mode=state.submission_artifact_mode,
+    )
+    messages: list[str] = []
+
+    applied = apply_notebook_fallback_decision(
+        state=state,
+        fallback_decision=decision,
+        resolve_artifact_mode=lambda mode, required: (_ for _ in ()).throw(AssertionError("not used")),
+        on_message=messages.append,
+    )
+
+    assert applied.retry_as_notebook is False
+    assert applied.state == state
+    assert messages == []
 
 
 def test_decide_notebook_fallback_after_file_submit_error_rejects_already_activated() -> None:

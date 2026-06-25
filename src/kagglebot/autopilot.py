@@ -5244,24 +5244,24 @@ def _attempt_submit(
                 ),
                 current_submission_artifact_mode=submit_stage_state.submission_artifact_mode,
             )
-            if notebook_fallback_decision.retry_as_notebook:
-                artifact_mode_decision = _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
-                    requested_mode=notebook_fallback_decision.submission_artifact_mode,
-                    notebook_submit_required=notebook_fallback_decision.notebook_submit_required,
-                    code_competition=code_competition,
-                    sample_submission_path=config.paths.sample_submission_path,
-                    fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-                    submission_path=prepared_submission_path,
-                    count_csv_data_rows=_count_csv_data_rows_capped,
-                )
-                fallback_retry_state = _submit_stage.build_notebook_fallback_retry_state(
-                    fallback_decision=notebook_fallback_decision,
-                    artifact_mode=artifact_mode_decision.mode,
-                    artifact_message=artifact_mode_decision.message,
-                )
-                submit_stage_state = _submit_stage.apply_notebook_fallback_retry_state(fallback_retry_state)
-                for mode_message in fallback_retry_state.messages:
-                    print(mode_message)
+            fallback_application = _submit_stage.apply_notebook_fallback_decision(
+                state=submit_stage_state,
+                fallback_decision=notebook_fallback_decision,
+                resolve_artifact_mode=lambda requested_mode, notebook_required: (
+                    _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
+                        requested_mode=requested_mode,
+                        notebook_submit_required=notebook_required,
+                        code_competition=code_competition,
+                        sample_submission_path=config.paths.sample_submission_path,
+                        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+                        submission_path=prepared_submission_path,
+                        count_csv_data_rows=_count_csv_data_rows_capped,
+                    )
+                ),
+                on_message=print,
+            )
+            submit_stage_state = fallback_application.state
+            if fallback_application.retry_as_notebook:
                 continue
             fingerprint = compute_error_fingerprint(exc.stdout, exc.stderr)
             fingerprint_reuse_decision = _submit_retry_policy.decide_submit_fingerprint_reuse(

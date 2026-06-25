@@ -55,6 +55,12 @@ class SubmitStageNotebookFallbackRetryState:
 
 
 @dataclass(frozen=True)
+class SubmitStageFallbackApplication:
+    retry_as_notebook: bool
+    state: SubmitStageRuntimeState
+
+
+@dataclass(frozen=True)
 class SubmitStageErrorClassification:
     classification: dict[str, object]
     stderr: str
@@ -1330,4 +1336,31 @@ def build_notebook_fallback_retry_state(
         notebook_fallback_activated=fallback_decision.notebook_fallback_activated,
         submission_artifact_mode=artifact_mode,
         messages=tuple(messages),
+    )
+
+
+def apply_notebook_fallback_decision(
+    *,
+    state: SubmitStageRuntimeState,
+    fallback_decision: SubmitStageNotebookFallbackDecision,
+    resolve_artifact_mode: Callable[[str, bool], object],
+    on_message: Callable[[str], object],
+) -> SubmitStageFallbackApplication:
+    if not fallback_decision.retry_as_notebook:
+        return SubmitStageFallbackApplication(retry_as_notebook=False, state=state)
+
+    artifact_mode_decision = resolve_artifact_mode(
+        fallback_decision.submission_artifact_mode,
+        fallback_decision.notebook_submit_required,
+    )
+    fallback_retry_state = build_notebook_fallback_retry_state(
+        fallback_decision=fallback_decision,
+        artifact_mode=str(getattr(artifact_mode_decision, "mode", "") or fallback_decision.submission_artifact_mode),
+        artifact_message=str(getattr(artifact_mode_decision, "message", "") or ""),
+    )
+    for mode_message in fallback_retry_state.messages:
+        on_message(mode_message)
+    return SubmitStageFallbackApplication(
+        retry_as_notebook=True,
+        state=apply_notebook_fallback_retry_state(fallback_retry_state),
     )
