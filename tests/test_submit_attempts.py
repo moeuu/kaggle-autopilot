@@ -20,6 +20,7 @@ from kagglebot.submit_attempts import (
     build_submit_success_record_payloads,
     count_successful_submit_attempts,
     decide_submit_outcome_recording,
+    format_submit_retry_knowledge_details,
     has_submit_attempt_records,
     has_successful_submit_attempt,
     load_latest_submit_attempt,
@@ -474,6 +475,10 @@ def test_build_submit_knowledge_payload_preserves_explicit_iteration() -> None:
     )
 
     assert payload.iteration == 3
+
+
+def test_format_submit_retry_knowledge_details_formats_attempt_and_wait() -> None:
+    assert format_submit_retry_knowledge_details(attempt=2, wait_seconds=3.456) == "attempt=2; wait=3.5s"
 
 
 def test_record_submit_reason_knowledge_records_payload() -> None:

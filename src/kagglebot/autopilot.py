@@ -5357,7 +5357,10 @@ def _attempt_submit(
                     reason=error_action.reason,
                     action_taken="retry",
                     fingerprint=fingerprint,
-                    details=f"attempt={attempt}; wait={error_action.wait_seconds:.1f}s",
+                    details=_submit_attempts.format_submit_retry_knowledge_details(
+                        attempt=attempt,
+                        wait_seconds=error_action.wait_seconds,
+                    ),
                     infer_iteration=_submit_stage.infer_iteration_from_submission_path,
                     normalize_detail=normalize_error_text,
                     record_error_fix_insight=record_error_fix_insight,

@@ -439,6 +439,10 @@ def build_submit_knowledge_payload(
     )
 
 
+def format_submit_retry_knowledge_details(*, attempt: int, wait_seconds: float) -> str:
+    return f"attempt={int(attempt)}; wait={float(wait_seconds):.1f}s"
+
+
 def record_submit_reason_knowledge(
     *,
     knowledge_paths: object,
