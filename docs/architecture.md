@@ -255,7 +255,8 @@ The next high-value modernization work is:
    autopilot wrappers around kernel capacity/data-tier inference have been removed; new call sites should use
    `kernel_quality.py` directly. Autopilot medal/rank normalization wrappers have also been removed; call sites now use
    `medals.py` directly. Dataset-profile/evaluation-spec wrapper reads in `autopilot.py` have also been retired in
-   favor of direct `context_artifacts.py` calls. Submit retry backoff and force-resubmit checks now call
+   favor of direct `context_artifacts.py` calls. Method-registry prompt formatting now reads the public path and
+   renderer directly. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
    Submit autofix context formatting, stale repaired-artifact decisions, autofix artifact resolution, and submit-file

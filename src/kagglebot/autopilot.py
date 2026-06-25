@@ -161,7 +161,6 @@ from kagglebot.medals import (
     normalize_target_rank_percentile,
 )
 from kagglebot.method_scout import (
-    method_registry_path,
     normalize_method_scout_mode,
     normalize_research_scout_mode,
     render_method_registry_for_prompt,
@@ -4337,7 +4336,12 @@ def _run_improvement(
     history_prompt = _format_previous_submission_history_for_prompt(previous_submission_history)
     if history_prompt:
         base_prompt_text += "\n\nPrevious Kaggle Submission Results:\n" + history_prompt + "\n"
-    method_prompt = _format_method_registry_for_prompt(config.paths)
+    method_registry_payload = _load_json_object(config.paths.method_registry_path)
+    method_prompt = (
+        render_method_registry_for_prompt(method_registry_payload, max_methods=8)
+        if isinstance(method_registry_payload, dict)
+        else ""
+    )
     if method_prompt:
         base_prompt_text += "\n\nCompetition-Specific Method Scout:\n" + method_prompt + "\n"
     if extra_policy_notes:
@@ -6968,14 +6972,6 @@ def _load_previous_submission_history(
     payload["cache_path"] = str(history_path)
     _write_json_object(history_path, payload)
     return payload
-
-
-def _format_method_registry_for_prompt(paths: CompetitionPaths) -> str:
-    registry_path = method_registry_path(paths.context_dir)
-    payload = _load_json_object(registry_path)
-    if payload is None:
-        return ""
-    return render_method_registry_for_prompt(payload, max_methods=8)
 
 
 def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:
