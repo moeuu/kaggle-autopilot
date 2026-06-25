@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from kagglebot.json_utils import load_json_object
 from kagglebot.metric_matching import canonical_metric_name_for_match, metrics_equivalent
 from kagglebot.paths import CompetitionPaths
-from kagglebot.score_sources import DEFAULT_ACCEPTED_SCORE_SOURCES, normalize_score_source_list
+from kagglebot.score_sources import (
+    DEFAULT_ACCEPTED_SCORE_SOURCES,
+    normalize_score_source_list,
+    normalize_score_source_name,
+)
 from kagglebot.solver.metrics import canonical_metric
 from kagglebot.writeup import normalize_deliverable_mode, normalize_submit_mode
 
@@ -59,6 +63,18 @@ class TargetMetricDirectionDecision:
     target_metric: object
     target_direction: object
     override_split_strategy: str
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanScoreSourceDecision:
+    score_source: str
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SplitStrategyOverrideDecision:
+    split_strategy: object
     messages: tuple[str, ...] = ()
 
 
@@ -190,6 +206,41 @@ def resolve_target_metric_direction(
         target_direction=resolved_direction,
         override_split_strategy=override_split_strategy,
         messages=tuple(messages),
+    )
+
+
+def resolve_plan_score_source(score_source: object) -> PlanScoreSourceDecision:
+    """Restrict plan score source to generalizable local evaluation sources."""
+
+    normalized = normalize_score_source_name(score_source)
+    if normalized in {"cv", "holdout"}:
+        return PlanScoreSourceDecision(score_source=normalized)
+    return PlanScoreSourceDecision(
+        score_source="cv",
+        messages=("[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",),
+    )
+
+
+def resolve_split_strategy_override(
+    *,
+    split_strategy: object,
+    override_split_strategy: str | None,
+) -> SplitStrategyOverrideDecision:
+    """Apply competition split-strategy override after artifact/profile hints."""
+
+    if not override_split_strategy:
+        return SplitStrategyOverrideDecision(split_strategy=split_strategy)
+
+    normalized_override = normalize_split_strategy_name(override_split_strategy)
+    if normalized_override is None or split_strategy == normalized_override:
+        return SplitStrategyOverrideDecision(split_strategy=split_strategy)
+
+    return SplitStrategyOverrideDecision(
+        split_strategy=normalized_override,
+        messages=(
+            "[yellow]note[/yellow]: competition override is active; "
+            f"forcing split_strategy '{split_strategy or 'auto'}' -> '{normalized_override}'.",
+        ),
     )
 
 

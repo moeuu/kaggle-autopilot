@@ -3448,11 +3448,10 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     override_split_strategy = metric_direction_decision.override_split_strategy
     for message in metric_direction_decision.messages:
         print(message)
-    score_source = str(choose(config.score_source, plan.score_source, "cv") or "cv")
-    normalized_score_source = _score_sources.normalize_score_source_name(score_source)
-    if normalized_score_source not in {"cv", "holdout"}:
-        print("[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.")
-        score_source = "cv"
+    score_source_decision = _plan_policy.resolve_plan_score_source(choose(config.score_source, plan.score_source, "cv"))
+    score_source = score_source_decision.score_source
+    for message in score_source_decision.messages:
+        print(message)
     holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
     cv_folds = choose(config.cv_folds, plan.cv_folds, spec_values.n_splits if spec_values.n_splits is not None else 5)
     split_strategy = choose(None, plan.split_strategy, spec_values.split_strategy)
@@ -3460,14 +3459,13 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         paths=config.paths,
         split_strategy=split_strategy,
     )
-    if override_split_strategy:
-        normalized_override_split = _plan_policy.normalize_split_strategy_name(override_split_strategy)
-        if normalized_override_split is not None and split_strategy != normalized_override_split:
-            print(
-                "[yellow]note[/yellow]: competition override is active; "
-                f"forcing split_strategy '{split_strategy or 'auto'}' -> '{normalized_override_split}'."
-            )
-            split_strategy = normalized_override_split
+    split_override_decision = _plan_policy.resolve_split_strategy_override(
+        split_strategy=split_strategy,
+        override_split_strategy=override_split_strategy,
+    )
+    split_strategy = split_override_decision.split_strategy
+    for message in split_override_decision.messages:
+        print(message)
     if split_strategy_note:
         print(f"[yellow]note[/yellow]: {split_strategy_note}")
     dataset_profile = _load_dataset_profile(config.paths)

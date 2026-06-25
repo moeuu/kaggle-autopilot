@@ -25,7 +25,9 @@ from kagglebot.plan_policy import (
     normalize_rank_force_percentile,
     normalize_split_strategy_name,
     resolve_deliverable_mode,
+    resolve_plan_score_source,
     resolve_split_strategy_from_artifacts,
+    resolve_split_strategy_override,
     resolve_submit_mode,
     resolve_target_metric_direction,
     upgrade_improvement_mode,
@@ -171,6 +173,46 @@ def test_resolve_target_metric_direction_strict_mode_keeps_explicit_values() -> 
         "[yellow]note[/yellow]: strict competition metric mode is enabled, "
         "but keeping explicit target_direction 'maximize' over evaluation_spec direction 'minimize'.",
     )
+
+
+def test_resolve_plan_score_source_allows_generalizable_sources() -> None:
+    assert resolve_plan_score_source("cross validation").score_source == "cv"
+    assert resolve_plan_score_source("validation").score_source == "holdout"
+
+
+def test_resolve_plan_score_source_forces_non_generalizable_sources_to_cv() -> None:
+    decision = resolve_plan_score_source("public_lb")
+
+    assert decision.score_source == "cv"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.",
+    )
+
+
+def test_resolve_split_strategy_override_applies_valid_competition_override() -> None:
+    decision = resolve_split_strategy_override(
+        split_strategy="stratified_kfold",
+        override_split_strategy="group_kfold",
+    )
+
+    assert decision.split_strategy == "group_kfold"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: competition override is active; "
+        "forcing split_strategy 'stratified_kfold' -> 'group_kfold'.",
+    )
+
+
+def test_resolve_split_strategy_override_ignores_missing_invalid_or_same_override() -> None:
+    assert (
+        resolve_split_strategy_override(split_strategy="kfold", override_split_strategy=None).split_strategy == "kfold"
+    )
+    assert (
+        resolve_split_strategy_override(split_strategy="kfold", override_split_strategy="unknown").split_strategy
+        == "kfold"
+    )
+    same = resolve_split_strategy_override(split_strategy="group_kfold", override_split_strategy="groupkfold")
+    assert same.split_strategy == "group_kfold"
+    assert same.messages == ()
 
 
 def test_infer_split_strategy_from_hint_text_handles_natural_language() -> None:
