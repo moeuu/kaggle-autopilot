@@ -20,6 +20,7 @@ from kagglebot.submit_stage import (
     format_submission_rank_message,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
+    record_submission_knowledge_entries,
     resolve_iteration_submit_phase_state,
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
@@ -208,6 +209,64 @@ def test_resolve_submission_knowledge_iteration_uses_fallback_for_bad_values() -
     assert resolve_submission_knowledge_iteration(value="", fallback_iteration=2) == 2
     assert resolve_submission_knowledge_iteration(value="bad", fallback_iteration=2) == 2
     assert resolve_submission_knowledge_iteration(value=None, fallback_iteration=None) == 1
+
+
+def test_record_submission_knowledge_entries_records_problem_and_error_items() -> None:
+    problem_calls: list[dict[str, object]] = []
+    error_calls: list[dict[str, object]] = []
+    knowledge_paths = object()
+    context = resolve_submission_knowledge_context(
+        submission_result={"outcome": {"score": "0.42"}, "iteration": 3},
+        metric_direction="minimize",
+        target_score=0.5,
+        top1_score=None,
+    )
+    assert context is not None
+
+    record_submission_knowledge_entries(
+        knowledge_paths=knowledge_paths,
+        slug="demo",
+        run_id="run-1",
+        problem_types=["tabular"],
+        pending_problem_insights=[
+            {"iteration": "", "why_poor": "too high", "how_improved": "tuned", "delta_offline": 0.1}
+        ],
+        pending_error_fixes=[
+            {"iteration": "4", "error_message": "bad csv", "fix_summary": "fixed columns", "resolved": False}
+        ],
+        knowledge_context=context,
+        record_problem_type_insight=lambda **kwargs: problem_calls.append(kwargs),
+        record_error_fix_insight=lambda **kwargs: error_calls.append(kwargs),
+    )
+
+    assert problem_calls == [
+        {
+            "knowledge_paths": knowledge_paths,
+            "slug": "demo",
+            "run_id": "run-1",
+            "iteration": 3,
+            "problem_types": ["tabular"],
+            "why_poor": "too high",
+            "how_improved": "tuned",
+            "delta_offline": 0.1,
+            "outcome_bucket": "good",
+            "submission_score": 0.42,
+        }
+    ]
+    assert error_calls == [
+        {
+            "knowledge_paths": knowledge_paths,
+            "slug": "demo",
+            "run_id": "run-1",
+            "iteration": 4,
+            "problem_types": ["tabular"],
+            "error_message": "bad csv",
+            "fix_summary": "fixed columns",
+            "resolved": False,
+            "outcome_bucket": "good",
+            "submission_score": 0.42,
+        }
+    ]
 
 
 def test_resolve_submission_rank_payload_keeps_reported_rank() -> None:

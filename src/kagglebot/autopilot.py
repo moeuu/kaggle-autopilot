@@ -6350,8 +6350,6 @@ def _record_submission_knowledge(
     )
     if knowledge_context is None:
         return
-    online_score = knowledge_context.online_score
-    outcome_bucket = knowledge_context.outcome_bucket
     iteration_value = knowledge_context.iteration
     if not pending_problem_insights:
         diagnostics_text = ""
@@ -6365,40 +6363,17 @@ def _record_submission_knowledge(
                 diagnostics_text=diagnostics_text,
             )
         )
-    for item in pending_problem_insights:
-        iteration = _submit_stage.resolve_submission_knowledge_iteration(
-            value=item.get("iteration"),
-            fallback_iteration=iteration_value,
-        )
-        record_problem_type_insight(
-            knowledge_paths=config.knowledge_paths,
-            slug=config.slug,
-            run_id=run_id,
-            iteration=iteration,
-            problem_types=problem_types,
-            why_poor=str(item.get("why_poor") or ""),
-            how_improved=str(item.get("how_improved") or ""),
-            delta_offline=item.get("delta_offline") if isinstance(item.get("delta_offline"), (int, float)) else None,
-            outcome_bucket=outcome_bucket,
-            submission_score=online_score,
-        )
-    for item in pending_error_fixes:
-        iteration = _submit_stage.resolve_submission_knowledge_iteration(
-            value=item.get("iteration"),
-            fallback_iteration=iteration_value,
-        )
-        record_error_fix_insight(
-            knowledge_paths=config.knowledge_paths,
-            slug=config.slug,
-            run_id=run_id,
-            iteration=iteration,
-            problem_types=problem_types,
-            error_message=str(item.get("error_message") or ""),
-            fix_summary=str(item.get("fix_summary") or ""),
-            resolved=bool(item.get("resolved", True)),
-            outcome_bucket=outcome_bucket,
-            submission_score=online_score,
-        )
+    _submit_stage.record_submission_knowledge_entries(
+        knowledge_paths=config.knowledge_paths,
+        slug=config.slug,
+        run_id=run_id,
+        problem_types=problem_types,
+        pending_problem_insights=pending_problem_insights,
+        pending_error_fixes=pending_error_fixes,
+        knowledge_context=knowledge_context,
+        record_problem_type_insight=record_problem_type_insight,
+        record_error_fix_insight=record_error_fix_insight,
+    )
 
 
 def _build_code_reference_repair_prompt(

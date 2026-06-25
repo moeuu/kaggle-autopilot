@@ -220,6 +220,54 @@ def build_default_submission_problem_insight(
     }
 
 
+def record_submission_knowledge_entries(
+    *,
+    knowledge_paths: object,
+    slug: str,
+    run_id: str,
+    problem_types: list[str],
+    pending_problem_insights: list[dict[str, object]],
+    pending_error_fixes: list[dict[str, object]],
+    knowledge_context: SubmissionKnowledgeContext,
+    record_problem_type_insight: Callable[..., object],
+    record_error_fix_insight: Callable[..., object],
+) -> None:
+    for item in pending_problem_insights:
+        iteration = resolve_submission_knowledge_iteration(
+            value=item.get("iteration"),
+            fallback_iteration=knowledge_context.iteration,
+        )
+        record_problem_type_insight(
+            knowledge_paths=knowledge_paths,
+            slug=slug,
+            run_id=run_id,
+            iteration=iteration,
+            problem_types=problem_types,
+            why_poor=str(item.get("why_poor") or ""),
+            how_improved=str(item.get("how_improved") or ""),
+            delta_offline=item.get("delta_offline") if isinstance(item.get("delta_offline"), (int, float)) else None,
+            outcome_bucket=knowledge_context.outcome_bucket,
+            submission_score=knowledge_context.online_score,
+        )
+    for item in pending_error_fixes:
+        iteration = resolve_submission_knowledge_iteration(
+            value=item.get("iteration"),
+            fallback_iteration=knowledge_context.iteration,
+        )
+        record_error_fix_insight(
+            knowledge_paths=knowledge_paths,
+            slug=slug,
+            run_id=run_id,
+            iteration=iteration,
+            problem_types=problem_types,
+            error_message=str(item.get("error_message") or ""),
+            fix_summary=str(item.get("fix_summary") or ""),
+            resolved=bool(item.get("resolved", True)),
+            outcome_bucket=knowledge_context.outcome_bucket,
+            submission_score=knowledge_context.online_score,
+        )
+
+
 def resolve_submission_rank_payload(
     *,
     slug: str,
