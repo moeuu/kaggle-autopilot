@@ -314,56 +314,6 @@ _KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 
 
-class _TrainingLiveStdout:
-    """Render a single carriage-return live line while preserving regular log lines."""
-
-    def __init__(self, base_stream) -> None:
-        self._base_stream = base_stream
-        self._last_live_text = ""
-        self._live_active = False
-
-    def render_live(self, text: str) -> None:
-        self._last_live_text = text
-        self._base_stream.write(f"\r{text}")
-        self._live_active = True
-
-    def finish_live(self, text: str) -> None:
-        self._last_live_text = text
-        self._base_stream.write(f"\r{text}\n")
-        self._live_active = False
-
-    def write(self, s: str) -> int:
-        if not s:
-            return 0
-        interrupted = False
-        if self._live_active and any(ch not in "\r" for ch in s):
-            self._base_stream.write("\n")
-            self._live_active = False
-            interrupted = True
-        written = self._base_stream.write(s)
-        if interrupted and s.endswith("\n") and self._last_live_text:
-            self._base_stream.write(f"\r{self._last_live_text}")
-            self._live_active = True
-        return written
-
-    def flush(self) -> None:
-        self._base_stream.flush()
-
-    def isatty(self) -> bool:
-        return bool(getattr(self._base_stream, "isatty", lambda: False)())
-
-    @property
-    def encoding(self) -> str | None:
-        return getattr(self._base_stream, "encoding", None)
-
-    @property
-    def errors(self) -> str | None:
-        return getattr(self._base_stream, "errors", None)
-
-    def fileno(self) -> int:
-        return self._base_stream.fileno()
-
-
 def run_autopilot(config: AutopilotConfig) -> None:
     resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
     resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")

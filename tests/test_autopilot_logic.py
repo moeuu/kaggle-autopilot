@@ -8,9 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kagglebot.autopilot import (
-    _TrainingLiveStdout,
-)
+from kagglebot.agent_io import TrainingLiveStdout
 from kagglebot.leaderboard_policy import (
     resume_best_online_submission_score,
     should_force_major_overhaul_by_rank,
@@ -299,7 +297,7 @@ def test_infer_column_mapping_handles_non_string_group_tokens() -> None:
 
 def test_training_live_stdout_separates_live_line_and_logs() -> None:
     buf = io.StringIO()
-    stream = _TrainingLiveStdout(buf)
+    stream = TrainingLiveStdout(buf)
 
     stream.render_live("Training: local_gpu 10s")
     stream.write("[local train] candidate=logreg source=holdout training\n")
@@ -312,7 +310,7 @@ def test_training_live_stdout_separates_live_line_and_logs() -> None:
 
 def test_training_live_stdout_keeps_regular_output_without_live_line() -> None:
     buf = io.StringIO()
-    stream = _TrainingLiveStdout(buf)
+    stream = TrainingLiveStdout(buf)
     stream.write("plain log line\n")
     assert buf.getvalue() == "plain log line\n"
 

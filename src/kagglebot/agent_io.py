@@ -12,6 +12,56 @@ _AGENT_CAPACITY_MARKERS = (
 )
 
 
+class TrainingLiveStdout:
+    """Render a single carriage-return live line while preserving regular log lines."""
+
+    def __init__(self, base_stream) -> None:
+        self._base_stream = base_stream
+        self._last_live_text = ""
+        self._live_active = False
+
+    def render_live(self, text: str) -> None:
+        self._last_live_text = text
+        self._base_stream.write(f"\r{text}")
+        self._live_active = True
+
+    def finish_live(self, text: str) -> None:
+        self._last_live_text = text
+        self._base_stream.write(f"\r{text}\n")
+        self._live_active = False
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        interrupted = False
+        if self._live_active and any(ch not in "\r" for ch in s):
+            self._base_stream.write("\n")
+            self._live_active = False
+            interrupted = True
+        written = self._base_stream.write(s)
+        if interrupted and s.endswith("\n") and self._last_live_text:
+            self._base_stream.write(f"\r{self._last_live_text}")
+            self._live_active = True
+        return written
+
+    def flush(self) -> None:
+        self._base_stream.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._base_stream, "isatty", lambda: False)())
+
+    @property
+    def encoding(self) -> str | None:
+        return getattr(self._base_stream, "encoding", None)
+
+    @property
+    def errors(self) -> str | None:
+        return getattr(self._base_stream, "errors", None)
+
+    def fileno(self) -> int:
+        return self._base_stream.fileno()
+
+
 def print_agent_prompt(*, log_alias: str, prompt_path: Path, prompt_text: str) -> None:
     print(f"[cyan]{log_alias} prompt[/cyan]: {prompt_path}")
     builtins.print(prompt_text.rstrip())
