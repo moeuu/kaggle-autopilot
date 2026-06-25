@@ -35,6 +35,7 @@ from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import knowledge_context as _knowledge_context
 from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
+from kagglebot import method_scout as _method_scout
 from kagglebot import metric_matching as _metric_matching
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
@@ -115,12 +116,6 @@ from kagglebot.medals import (
     normalize_target_medal,
     normalize_target_rank_percentile,
 )
-from kagglebot.method_scout import (
-    effective_method_scout_mode,
-    normalize_research_scout_mode,
-    render_method_registry_for_prompt,
-    run_method_scout,
-)
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
     run_agent_pipeline,
@@ -135,7 +130,6 @@ from kagglebot.submission.guard import (
     normalize_error_text,
     run_kaggle_submit_kernel,
 )
-from kagglebot.submission_history import load_previous_submission_history
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.top1_campaign import (
     build_blend_report,
@@ -470,7 +464,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     campaign_mode = normalize_campaign_mode(config.campaign_mode, deliverable_mode=deliverable_mode)
     portfolio_execution = normalize_portfolio_execution(config.portfolio_execution)
     validation_lab_mode = normalize_validation_lab_mode(config.validation_lab)
-    research_scout_mode = normalize_research_scout_mode(config.research_scout)
+    research_scout_mode = _method_scout.normalize_research_scout_mode(config.research_scout)
     top1_submit_policy = normalize_top1_submit_policy(config.top1_submit_policy)
     resolved["campaign_mode"] = campaign_mode
     resolved["portfolio_execution"] = portfolio_execution
@@ -638,7 +632,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         direction=metric_direction,
         max_iterations=max_iterations,
     )
-    previous_submission_history = load_previous_submission_history(
+    previous_submission_history = _submission_history.load_previous_submission_history(
         slug=config.slug,
         history_path=config.paths.context_dir / "submission_history.json",
         direction=metric_direction,
@@ -680,7 +674,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submission_history=previous_submission_history,
         )
         print(f"[cyan]campaign[/cyan]: top1 mode active; state={campaign_state_file}")
-    effective_method_scout = effective_method_scout_mode(
+    effective_method_scout = _method_scout.effective_method_scout_mode(
         requested_mode=config.method_scout,
         campaign_mode=campaign_mode,
     )
@@ -689,7 +683,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     validation_lab_report: dict[str, object] | None = None
     win_contract: dict[str, object] | None = None
     if effective_method_scout != "off":
-        method_registry = run_method_scout(
+        method_registry = _method_scout.run_method_scout(
             paths=config.paths,
             slug=config.slug,
             problem_types=problem_types,
@@ -3018,7 +3012,7 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         run_id=run_id,
         dry_run=config.dry_run,
         repo_root=config.paths.repo_root,
-        method_scout=effective_method_scout_mode(
+        method_scout=_method_scout.effective_method_scout_mode(
             requested_mode=config.method_scout,
             campaign_mode=planning_campaign_mode,
         ),
@@ -3344,7 +3338,7 @@ def _run_improvement(
         base_prompt_text += "\n\nPrevious Kaggle Submission Results:\n" + history_prompt + "\n"
     method_registry_payload = _json_utils.load_json_object(config.paths.method_registry_path)
     method_prompt = (
-        render_method_registry_for_prompt(method_registry_payload, max_methods=8)
+        _method_scout.render_method_registry_for_prompt(method_registry_payload, max_methods=8)
         if isinstance(method_registry_payload, dict)
         else ""
     )
