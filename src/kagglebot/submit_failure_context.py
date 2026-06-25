@@ -10,6 +10,7 @@ from kagglebot.submission.guard import normalize_error_text
 from kagglebot.submit_failure_policy import (
     SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT,
     SubmitFailureRepairDecision,
+    classify_submit_failure_repair,
     normalize_loaded_submit_failure_context,
     submit_error_requires_file_fix,
 )
@@ -121,6 +122,54 @@ def build_submit_failure_context_payload(
             "submit_autofix_submission_path": run_state.get("submit_autofix_submission_path"),
         },
     }
+
+
+def build_submit_failure_context_payload_from_error(
+    *,
+    now_iso: str,
+    submission_ref: str,
+    artifact_path: Path | None,
+    artifact_sha256: str | None,
+    artifact_mode: str | None,
+    code_fingerprint: str,
+    fingerprint: str,
+    error_kind: str,
+    reason: str,
+    message: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    exit_code: int | None,
+    latest_submit_attempt: dict[str, object],
+    run_state: dict[str, object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+) -> dict[str, object]:
+    detail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
+    repair_decision = classify_submit_failure_repair(
+        reason=reason,
+        error_kind=error_kind,
+        detail=detail,
+    )
+    return build_submit_failure_context_payload(
+        now_iso=now_iso,
+        submission_ref=submission_ref,
+        artifact_path=artifact_path,
+        artifact_sha256=artifact_sha256,
+        artifact_mode=artifact_mode,
+        code_fingerprint=code_fingerprint,
+        fingerprint=fingerprint,
+        error_kind=error_kind,
+        reason=reason,
+        message=message,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        exit_code=exit_code,
+        repair_decision=repair_decision,
+        latest_submit_attempt=latest_submit_attempt,
+        run_state=run_state,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+    )
 
 
 def path_from_submit_reference(value: object) -> Path | None:

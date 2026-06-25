@@ -6248,10 +6248,11 @@ def _abort_submit_for_run(
     submit_attempt_recorder.record_payloads(abort_payloads)
     _submit_failure_context.save_submit_failure_context(
         run_dir,
-        _build_submit_failure_context_payload(
-            run_dir=run_dir,
+        _submit_failure_context.build_submit_failure_context_payload_from_error(
+            now_iso=datetime.now(UTC).isoformat(),
             submission_ref=submission_ref_text,
             artifact_path=artifact_path,
+            artifact_sha256=_sha256_or_none(artifact_path),
             artifact_mode=artifact_mode,
             code_fingerprint=code_fingerprint or "",
             fingerprint=fingerprint,
@@ -6261,6 +6262,10 @@ def _abort_submit_for_run(
             stdout_tail=stdout_tail,
             stderr_tail=stderr_tail,
             exit_code=exit_code,
+            latest_submit_attempt=_load_latest_submit_attempt(run_dir),
+            run_state=_load_run_state(run_dir),
+            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         ),
     )
     knowledge_submission_path = artifact_path or Path(submission_ref_text)
@@ -6277,49 +6282,6 @@ def _abort_submit_for_run(
     )
     print(f"[red]submit aborted[/red]: {message}")
     raise SubmitAbortedError(message)
-
-
-def _build_submit_failure_context_payload(
-    *,
-    run_dir: Path,
-    submission_ref: str,
-    artifact_path: Path | None,
-    artifact_mode: str | None,
-    code_fingerprint: str,
-    fingerprint: str,
-    error_kind: str,
-    reason: str,
-    message: str,
-    stdout_tail: str,
-    stderr_tail: str,
-    exit_code: int | None,
-) -> dict[str, object]:
-    detail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
-    repair_decision = _submit_failure_policy.classify_submit_failure_repair(
-        reason=reason,
-        error_kind=error_kind,
-        detail=detail,
-    )
-    return _submit_failure_context.build_submit_failure_context_payload(
-        now_iso=datetime.now(UTC).isoformat(),
-        submission_ref=submission_ref,
-        artifact_path=artifact_path,
-        artifact_sha256=_sha256_or_none(artifact_path),
-        artifact_mode=artifact_mode,
-        code_fingerprint=code_fingerprint,
-        fingerprint=fingerprint,
-        error_kind=error_kind,
-        reason=reason,
-        message=message,
-        stdout_tail=stdout_tail,
-        stderr_tail=stderr_tail,
-        exit_code=exit_code,
-        repair_decision=repair_decision,
-        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
-        run_state=_load_run_state(run_dir),
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-    )
 
 
 def _prepare_submit_file_autofix(

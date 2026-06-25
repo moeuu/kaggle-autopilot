@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.submit_failure_context import (
     build_submit_failure_context_payload,
+    build_submit_failure_context_payload_from_error,
     build_submit_failure_improvement_context,
     decide_stale_submit_autofix_artifact,
     decide_submit_abort_autofixability,
@@ -113,6 +114,35 @@ def test_build_submit_failure_context_payload_centralizes_record_shape(tmp_path:
     assert payload["latest_submit_attempt"] == {"reason": "previous"}
     assert payload["run_state_excerpt"]["submit_autofix_submission_path"] == "/tmp/fixed.csv"
     assert "Kaggle scoring failed" in str(payload["summary"])
+
+
+def test_build_submit_failure_context_payload_from_error_classifies_repair_target(tmp_path: Path) -> None:
+    artifact = tmp_path / "submission.csv"
+    payload = build_submit_failure_context_payload_from_error(
+        now_iso="2026-06-25T00:00:00+00:00",
+        submission_ref=str(artifact),
+        artifact_path=artifact,
+        artifact_sha256="sha",
+        artifact_mode="wrapper",
+        code_fingerprint="code-fp",
+        fingerprint="error-fp",
+        error_kind="validation",
+        reason="submission_poll_status_error",
+        message="Kaggle scoring failed.",
+        stdout_tail="",
+        stderr_tail="row count mismatch",
+        exit_code=1,
+        latest_submit_attempt={"reason": "previous"},
+        run_state={"submit_attempted": True, "submit_ok": False},
+        stdout_tail_chars=100,
+        stderr_tail_chars=100,
+    )
+
+    assert payload["submit_mode"] == "file"
+    assert payload["repair_target"] == "submission_artifact"
+    assert payload["repairable"] is True
+    assert payload["submission_artifact_sha256"] == "sha"
+    assert "row count mismatch" in str(payload["summary"])
 
 
 def test_path_from_submit_reference_ignores_kernel_references() -> None:
