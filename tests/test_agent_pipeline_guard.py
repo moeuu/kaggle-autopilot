@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from kagglebot import write_guard
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.orchestrator import agent_pipeline
 from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig
@@ -113,14 +114,14 @@ def test_guard_restores_other_competition_kernel(tmp_path: Path) -> None:
     other_kernel_path.write_text(original, encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     # Simulate an unauthorized edit outside the allowlist.
     other_kernel_path.write_text("print('changed')\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -148,13 +149,13 @@ def test_guard_restores_other_competition_submission_ledger(tmp_path: Path) -> N
     ledger_path.write_text(original, encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     ledger_path.write_text('{"run_id":"r2","hash":"def"}\n', encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -182,13 +183,13 @@ def test_guard_restores_other_competition_data_sample_submission(tmp_path: Path)
     sample_path.write_text(original, encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     sample_path.write_text("Id,Category\nval_1.tif,Rust\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -219,21 +220,21 @@ def test_guard_restores_oversized_data_sample_submission_from_context(tmp_path: 
     context_sample.write_text(context_content, encoding="utf-8")
 
     row = "val_1.tif,Healthy\n"
-    repeat = (agent_pipeline._MAX_GUARD_FILE_BYTES // len(row)) + 1_000
+    repeat = (write_guard._MAX_GUARD_FILE_BYTES // len(row)) + 1_000
     oversized_content = "Id,Category\n" + (row * repeat)
     data_sample.write_text(oversized_content, encoding="utf-8")
-    assert data_sample.stat().st_size > agent_pipeline._MAX_GUARD_FILE_BYTES
+    assert data_sample.stat().st_size > write_guard._MAX_GUARD_FILE_BYTES
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
     sample_rel = data_sample.relative_to(repo_root).as_posix()
     assert sample_rel in guard_snapshot.oversized
-    before = agent_pipeline._snapshot_tree(repo_root)
+    before = write_guard._snapshot_tree(repo_root)
 
     data_sample.write_text("Id,Category\nval_1.tif,Rust\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -259,13 +260,13 @@ def test_guard_ignores_kagglebot_cache_churn(tmp_path: Path) -> None:
     cache_file.write_text("id,target\n1,0\n", encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     cache_file.write_text("id,target\n1,1\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -306,17 +307,17 @@ def test_guard_restores_competition_control_files(tmp_path: Path) -> None:
     kb_path.write_bytes(kb_original)
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     meta_path.write_text('{"slug":"changed"}\n', encoding="utf-8")
     plan_path.write_text('{"pipelines":["oops"]}\n', encoding="utf-8")
     prompts_path.write_text("# changed prompt\n", encoding="utf-8")
     kb_path.write_bytes(b"changed-bytes")
 
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -351,15 +352,15 @@ def test_guard_restores_knowledge_research_artifacts(tmp_path: Path) -> None:
     summary_path.write_text(summary_original, encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     sources_path.write_text('{"url":"https://bad.example","title":"Changed"}\n', encoding="utf-8")
     summary_path.write_text("# Research\n\nChanged summary.\n", encoding="utf-8")
 
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -386,13 +387,13 @@ def test_guard_ignores_generated_kernel_staging_tree(tmp_path: Path) -> None:
     staged_kernel.write_text("print('original')\n", encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     staged_kernel.write_text("print('changed')\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -418,13 +419,13 @@ def test_guard_ignores_historical_run_submission_compact_csv_churn(tmp_path: Pat
     compact_submission.write_text("id,target\n1,0\n", encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     compact_submission.write_text("id,target\n1,1\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -454,14 +455,14 @@ def test_guard_ignores_venv_churn_and_restores_uv_lock(tmp_path: Path) -> None:
     venv_entrypoint.write_text("#!/usr/bin/env python\n", encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     uv_lock.write_text("lock-version = 999\n", encoding="utf-8")
     venv_entrypoint.write_text("# changed\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -489,14 +490,14 @@ def test_guard_allows_explicit_dependency_file_edits(tmp_path: Path) -> None:
     uv_lock_path.write_text("lock-version = 1\n", encoding="utf-8")
 
     allowed_prefixes = [allowed_kernel, pyproject_path, uv_lock_path]
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, allowed_prefixes)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
 
     pyproject_path.write_text("[project]\nname='demo'\ndependencies=['albumentations']\n", encoding="utf-8")
     uv_lock_path.write_text("lock-version = 2\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -522,19 +523,19 @@ def test_repo_root_write_policy_allows_src_but_restores_data_and_generated_kerne
     data_path.write_text("id,target\n1,0\n", encoding="utf-8")
     staged_kernel_path.write_text("print('original')\n", encoding="utf-8")
 
-    policy = agent_pipeline._repo_root_write_policy(
+    policy = write_guard._repo_root_write_policy(
         repo_root=repo_root,
         denied_prefixes=[repo_root / "artifacts" / "demo" / "data", repo_root / "artifacts" / "demo" / "kernels"],
     )
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, policy)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, policy)
+    before = write_guard._snapshot_tree(repo_root)
 
     src_path.write_text("VALUE = 2\n", encoding="utf-8")
     data_path.write_text("id,target\n1,1\n", encoding="utf-8")
     staged_kernel_path.write_text("print('changed')\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -553,17 +554,17 @@ def test_repo_root_write_policy_rejects_sensitive_repo_files(tmp_path: Path) -> 
     repo_root = tmp_path
     env_path = repo_root / ".env.local"
     env_path.write_text("TOKEN=old\n", encoding="utf-8")
-    policy = agent_pipeline._repo_root_write_policy(
+    policy = write_guard._repo_root_write_policy(
         repo_root=repo_root,
         denied_prefixes=[repo_root / "artifacts" / "demo" / "data", repo_root / "artifacts" / "demo" / "kernels"],
     )
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, policy)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, policy)
+    before = write_guard._snapshot_tree(repo_root)
 
     env_path.write_text("TOKEN=new\n", encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
-    agent_pipeline._enforce_allowlist_changes(
+    write_guard._enforce_allowlist_changes(
         root=repo_root,
         before=before,
         after=after,
@@ -586,18 +587,18 @@ def test_guard_rejects_external_sensitive_path_edits(tmp_path: Path) -> None:
     external_path.parent.mkdir(parents=True, exist_ok=True)
     external_path.write_text('{"username":"demo"}\n', encoding="utf-8")
 
-    policy = agent_pipeline.WriteGuardPolicy(
+    policy = write_guard.WriteGuardPolicy(
         allowed_prefixes=(repo_root,),
         external_guard_paths=(external_path,),
     )
-    guard_snapshot = agent_pipeline._backup_guarded_files(repo_root, policy)
-    before = agent_pipeline._snapshot_tree(repo_root)
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, policy)
+    before = write_guard._snapshot_tree(repo_root)
 
     external_path.write_text('{"username":"changed"}\n', encoding="utf-8")
-    after = agent_pipeline._snapshot_tree(repo_root)
+    after = write_guard._snapshot_tree(repo_root)
 
     try:
-        agent_pipeline._enforce_allowlist_changes(
+        write_guard._enforce_allowlist_changes(
             root=repo_root,
             before=before,
             after=after,

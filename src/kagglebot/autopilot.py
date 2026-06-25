@@ -172,12 +172,6 @@ from kagglebot.metric_matching import (
 )
 from kagglebot.orchestrator.agent_pipeline import (
     AgentPipelineConfig,
-    WriteGuardPolicy,
-    _backup_guarded_files,
-    _diff_snapshots,
-    _enforce_allowlist_changes,
-    _repo_root_write_policy,
-    _snapshot_tree,
     run_agent_pipeline,
 )
 from kagglebot.plan_policy import apply_plan_guardrails as _apply_plan_guardrails
@@ -229,6 +223,14 @@ from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
 from kagglebot.validators import kernel_source_preflight_error
 from kagglebot.verify_artifacts import run_verify as _verify_run_verify
+from kagglebot.write_guard import (
+    WriteGuardPolicy,
+    _backup_guarded_files,
+    _diff_snapshots,
+    _enforce_allowlist_changes,
+    _repo_root_write_policy,
+    _snapshot_tree,
+)
 from kagglebot.writeup import (
     build_writeup_bundle,
     infer_code_competition_from_paths,
