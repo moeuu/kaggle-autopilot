@@ -75,6 +75,18 @@ def parse_int(
     return int(parsed)
 
 
+def tolerant_finite_float(value: object) -> float | None:
+    """Parse externally sourced numeric text, allowing thousands separators."""
+
+    return parse_finite_float(value, allow_commas=True)
+
+
+def tolerant_int(value: object) -> int | None:
+    """Parse externally sourced integer-like text, allowing commas and truncating floats."""
+
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
+
+
 def non_negative_finite_float(
     value: object,
     *,

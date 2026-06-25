@@ -8,6 +8,8 @@ from kagglebot.scalar_utils import (
     optional_str,
     parse_finite_float,
     parse_int,
+    tolerant_finite_float,
+    tolerant_int,
 )
 
 
@@ -59,6 +61,14 @@ def test_parse_int_controls_float_and_comma_handling() -> None:
     assert parse_int("12.9", allow_float=True) is None
     assert parse_int("12.9", allow_float=True, require_integral_float=False) == 12
     assert parse_int("inf", allow_float=True, require_integral_float=False) is None
+
+
+def test_tolerant_scalar_parsers_handle_external_metric_shapes() -> None:
+    assert tolerant_finite_float("1,234.5") == 1234.5
+    assert tolerant_finite_float("nan") is None
+    assert tolerant_int("1,234") == 1234
+    assert tolerant_int("12.9") == 12
+    assert tolerant_int(True) is None
 
 
 def test_non_negative_finite_float_clamps_and_defaults_values() -> None:

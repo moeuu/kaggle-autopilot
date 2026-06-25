@@ -195,7 +195,7 @@ from kagglebot.runtime_policy import (
 from kagglebot.runtime_policy import (
     local_gpu_time_budget_limit_min as _local_gpu_time_budget_limit_min,
 )
-from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.score_utils import should_update_best_score as _update_best_score
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
 from kagglebot.submission.guard import (
@@ -241,14 +241,6 @@ from kagglebot.writeup import (
     normalize_deliverable_mode,
     normalize_submit_mode,
 )
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)
-
-
-def _to_int(value: object) -> int | None:
-    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
 
 
 # Backward-compatible symbol for tests/extensions.
@@ -815,7 +807,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         direction=metric_direction,
         dry_run=config.dry_run,
     )
-    historical_best_submission_score = _to_float(previous_submission_history.get("best_score"))
+    historical_best_submission_score = tolerant_finite_float(previous_submission_history.get("best_score"))
     if historical_best_submission_score is not None:
         if _update_best_score(best_submitted_score, historical_best_submission_score, metric_direction, 0.0):
             best_submitted_score = historical_best_submission_score
@@ -1670,7 +1662,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     kernel_metrics_payload=kernel_metrics_payload,
                     quality_reasons=quality_reasons,
                 )
-                candidate_offline_std = _to_float(evaluation.std)
+                candidate_offline_std = tolerant_finite_float(evaluation.std)
                 campaign_candidate = build_campaign_candidate(
                     run_id=run_id,
                     iteration=iteration,
@@ -1940,8 +1932,8 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             "score did not improve over previous submitted checkpoint."
                         )
             if submit_enabled and isinstance(best_high_potential_meta, dict):
-                current_priority = _to_int(accuracy_potential.get("frontier_priority")) or 0
-                best_priority = _to_int(best_high_potential_meta.get("frontier_priority")) or 0
+                current_priority = tolerant_int(accuracy_potential.get("frontier_priority")) or 0
+                best_priority = tolerant_int(best_high_potential_meta.get("frontier_priority")) or 0
                 if (
                     best_high_potential_submission is not None
                     and best_high_potential_submission != submission_path
@@ -2206,7 +2198,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         last_submission_result = submission_result
                         outcome_payload = submission_result.get("outcome")
                         if isinstance(outcome_payload, dict):
-                            online_score = _to_float(outcome_payload.get("score"))
+                            online_score = tolerant_finite_float(outcome_payload.get("score"))
                             if online_score is not None:
                                 print(f"[cyan]submission score[/cyan]: {online_score:.6f}")
                                 if isinstance(top1_score, (int, float)):
@@ -2225,12 +2217,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             )
                             if rank_payload:
                                 outcome_payload.update(rank_payload)
-                                submission_rank = _to_int(rank_payload.get("rank"))
-                                submission_total_teams = _to_int(rank_payload.get("total_teams"))
-                                submission_rank_percentile = _to_float(rank_payload.get("rank_percentile"))
-                                submission_rank_estimate = _to_int(rank_payload.get("estimated_rank"))
-                                submission_total_teams_estimate = _to_int(rank_payload.get("estimated_total_teams"))
-                                submission_rank_percentile_estimate = _to_float(
+                                submission_rank = tolerant_int(rank_payload.get("rank"))
+                                submission_total_teams = tolerant_int(rank_payload.get("total_teams"))
+                                submission_rank_percentile = tolerant_finite_float(rank_payload.get("rank_percentile"))
+                                submission_rank_estimate = tolerant_int(rank_payload.get("estimated_rank"))
+                                submission_total_teams_estimate = tolerant_int(
+                                    rank_payload.get("estimated_total_teams")
+                                )
+                                submission_rank_percentile_estimate = tolerant_finite_float(
                                     rank_payload.get("estimated_rank_percentile")
                                 )
                                 estimate_source_raw = rank_payload.get("rank_estimate_source")
@@ -3108,7 +3102,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     fallback_online_score: float | None = None
                     outcome_payload = fallback_result.get("outcome")
                     if isinstance(outcome_payload, dict):
-                        fallback_online_score = _to_float(outcome_payload.get("score"))
+                        fallback_online_score = tolerant_finite_float(outcome_payload.get("score"))
                     if best_submittable_score is not None:
                         submitted_tracking_score, _submitted_tracking_source = (
                             _submit_stage.submission_score_for_tracking(
@@ -5359,9 +5353,9 @@ def _recompute_metric_from_oof_artifact(
     score_source = (
         str(score_source_raw).strip() if isinstance(score_source_raw, str) and str(score_source_raw).strip() else "cv"
     )
-    std_value = _to_float(payload.get("offline_std")) if isinstance(payload, dict) else None
-    train_score = _to_float(payload.get("train_score")) if isinstance(payload, dict) else None
-    val_score = _to_float(payload.get("val_score")) if isinstance(payload, dict) else None
+    std_value = tolerant_finite_float(payload.get("offline_std")) if isinstance(payload, dict) else None
+    train_score = tolerant_finite_float(payload.get("train_score")) if isinstance(payload, dict) else None
+    val_score = tolerant_finite_float(payload.get("val_score")) if isinstance(payload, dict) else None
     fold_scores = _extract_numeric_list(payload.get("fold_scores")) if isinstance(payload, dict) else None
 
     from kagglebot.solver.evaluate import EvaluationResult
@@ -7089,7 +7083,7 @@ def _record_submission_knowledge(
     outcome_payload = submission_result.get("outcome")
     if not isinstance(outcome_payload, dict):
         return
-    online_score = _to_float(outcome_payload.get("score"))
+    online_score = tolerant_finite_float(outcome_payload.get("score"))
     if online_score is None:
         return
     outcome_bucket = _submit_stage.classify_submission_outcome(
