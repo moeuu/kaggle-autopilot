@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_sources
+from kagglebot.validators import ensure_kernel_sources_valid, kernel_source_preflight_error, validate_kernel_sources
 
 
 def _write_kernel(path: Path, text: str) -> None:
@@ -12,6 +12,32 @@ def _write_kernel(path: Path, text: str) -> None:
 def test_kernel_source_validation_flags_missing_kernel(tmp_path: Path) -> None:
     issues = validate_kernel_sources(tmp_path / "kernel")
     assert issues
+
+
+def test_kernel_source_preflight_error_reports_missing_kernel(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+
+    error = kernel_source_preflight_error(kernel_dir)
+
+    assert error is not None
+    assert "requires kernel.py" in error
+    assert str(kernel_dir / "kernel.py") in error
+
+
+def test_kernel_source_preflight_error_uses_formatter(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(kernel_dir / "kernel.py", "OUT1 = '/kaggle/working/submission.csv'\n")
+
+    error = kernel_source_preflight_error(
+        kernel_dir,
+        require_kaggle_input=False,
+        format_error=lambda exc: f"formatted: {exc}",
+    )
+
+    assert error is not None
+    assert error.startswith("formatted: Kernel source validation failed:")
+    assert "metrics.json" in error
 
 
 def test_kernel_source_validation_requires_outputs(tmp_path: Path) -> None:

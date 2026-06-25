@@ -4,6 +4,7 @@ import py_compile
 import re
 import shutil
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
@@ -170,3 +171,26 @@ def ensure_kernel_sources_valid(kernel_dir: Path, *, require_kaggle_input: bool 
     if issues:
         detail = "\n".join(f"- {issue}" for issue in issues)
         raise ValueError(f"Kernel source validation failed:\n{detail}")
+
+
+def kernel_source_preflight_error(
+    kernel_dir: Path,
+    *,
+    require_kaggle_input: bool = True,
+    format_error: Callable[[Exception], str] | None = None,
+) -> str | None:
+    """Return kernel source preflight error text, or None when sources are launch-ready."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return (
+            "RuntimeError: Local autopilot requires kernel.py, but "
+            f"{kernel_path} was not found. "
+            "Run planning/implement to generate kernel.py first."
+        )
+    try:
+        ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=require_kaggle_input)
+    except Exception as exc:  # noqa: BLE001
+        if format_error is not None:
+            return format_error(exc)
+        return f"{exc.__class__.__name__}: {exc}".strip()
+    return None

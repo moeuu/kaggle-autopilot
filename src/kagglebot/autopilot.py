@@ -226,7 +226,7 @@ from kagglebot.top1_exhaustive import (
 )
 from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
-from kagglebot.validators import ensure_kernel_sources_valid
+from kagglebot.validators import kernel_source_preflight_error
 from kagglebot.verify_artifacts import run_verify as _verify_run_verify
 from kagglebot.writeup import (
     build_writeup_bundle,
@@ -3930,23 +3930,6 @@ def _build_kernel_quality_guard(
     }
 
 
-def _kernel_source_preflight_error(*, config: AutopilotConfig) -> str | None:
-    """Return source contract validation error text, or None when ready."""
-    kernel_dir = config.paths.kernel_source_dir
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return (
-            "RuntimeError: Local autopilot requires kernel.py, but "
-            f"{kernel_path} was not found. "
-            "Run planning/implement to generate kernel.py first."
-        )
-    try:
-        ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=False)
-    except Exception as exc:  # noqa: BLE001
-        return _kernel_errors.format_kernel_error(exc)
-    return None
-
-
 def _run_kernel_source_preflight_fixes(
     *,
     config: AutopilotConfig,
@@ -3958,7 +3941,11 @@ def _run_kernel_source_preflight_fixes(
     """Fix deterministic kernel source issues before launching a kernel run."""
     attempt = 0
     while True:
-        preflight_error = _kernel_source_preflight_error(config=config)
+        preflight_error = kernel_source_preflight_error(
+            config.paths.kernel_source_dir,
+            require_kaggle_input=False,
+            format_error=_kernel_errors.format_kernel_error,
+        )
         if preflight_error is None:
             return
         lowered = preflight_error.lower()
