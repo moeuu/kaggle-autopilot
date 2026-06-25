@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from kagglebot.exceptions import KernelFailedError
+from kagglebot.local_kernel_drift_guard import ZERO_OVERLAP_DRIFT_GUARD_FILENAME
 
 COLUMN_MAP_FILENAME = "column_map.json"
 COLUMN_MAP_SHIM_MARKER = "# kagglebot: column-map-shim"
@@ -13,6 +14,7 @@ OBJECT_COERCE_FILENAME = "object_coerce.json"
 OBJECT_COERCE_SHIM_MARKER = "# kagglebot: object-coerce-shim"
 DEVICE_COERCE_FILENAME = "device_coerce.json"
 DEVICE_COERCE_SHIM_MARKER = "# kagglebot: device-coerce-shim"
+ZERO_OVERLAP_DRIFT_SHIM_MARKER = "# kagglebot: zero-overlap-drift-shim"
 KAGGLE_WORKING_REDIRECT_SHIM_MARKER = "# kagglebot: kaggle-working-redirect-shim"
 LGBM_GPU_GUARD_SHIM_MARKER = "# kagglebot: lgbm-gpu-guard-shim"
 TORCH_RUNTIME_GUARD_SHIM_MARKER = "# kagglebot: torch-runtime-guard-shim"
@@ -388,6 +390,80 @@ def inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
         "",
     ]
     append_sitecustomize_shim(kernel_dir, DEVICE_COERCE_SHIM_MARKER, shim)
+
+
+def inject_zero_overlap_drift_shim(kernel_dir: Path, context_dir: Path) -> None:
+    guard_path = context_dir / ZERO_OVERLAP_DRIFT_GUARD_FILENAME
+    if not guard_path.exists():
+        return
+    kernel_guard_path = kernel_dir / ZERO_OVERLAP_DRIFT_GUARD_FILENAME
+    shutil.copy2(guard_path, kernel_guard_path)
+    shim = [
+        ZERO_OVERLAP_DRIFT_SHIM_MARKER,
+        "import json",
+        "from pathlib import Path",
+        "",
+        "def _kb_load_zero_overlap_drift_guard() -> dict:",
+        "    candidates = [",
+        f"        Path(__file__).with_name('{ZERO_OVERLAP_DRIFT_GUARD_FILENAME}'),",
+        f"        Path('/kaggle/working/{ZERO_OVERLAP_DRIFT_GUARD_FILENAME}'),",
+        "    ]",
+        "    for path in candidates:",
+        "        if not path.exists():",
+        "            continue",
+        "        try:",
+        "            payload = json.loads(path.read_text(encoding='utf-8'))",
+        "        except Exception:",
+        "            continue",
+        "        if isinstance(payload, dict):",
+        "            return payload",
+        "    return {}",
+        "",
+        "def _kb_is_train_or_test_csv(path_value: object) -> bool:",
+        "    try:",
+        "        name = Path(str(path_value)).name.lower()",
+        "    except Exception:",
+        "        return False",
+        "    return name in {'train.csv', 'test.csv'}",
+        "",
+        "def _kb_patch_zero_overlap_drift_drop() -> None:",
+        "    try:",
+        "        import pandas as _pd",
+        "    except Exception:",
+        "        return",
+        "    guard = _kb_load_zero_overlap_drift_guard()",
+        "    if not guard or not bool(guard.get('enabled')):",
+        "        return",
+        "    raw_cols = guard.get('drop_columns')",
+        "    if not isinstance(raw_cols, list):",
+        "        return",
+        "    drop_columns = [str(col) for col in raw_cols if str(col).strip()]",
+        "    if not drop_columns:",
+        "        return",
+        "    _orig = _pd.read_csv",
+        "",
+        "    def _patched(*args, **kwargs):",
+        "        df = _orig(*args, **kwargs)",
+        "        path_value = args[0] if args else kwargs.get('filepath_or_buffer')",
+        "        if not _kb_is_train_or_test_csv(path_value):",
+        "            return df",
+        "        try:",
+        "            cols = [col for col in drop_columns if col in df.columns]",
+        "        except Exception:",
+        "            cols = []",
+        "        if not cols:",
+        "            return df",
+        "        try:",
+        "            return df.drop(columns=cols)",
+        "        except Exception:",
+        "            return df",
+        "",
+        "    _pd.read_csv = _patched",
+        "",
+        "_kb_patch_zero_overlap_drift_drop()",
+        "",
+    ]
+    append_sitecustomize_shim(kernel_dir, ZERO_OVERLAP_DRIFT_SHIM_MARKER, shim)
 
 
 def inject_kaggle_working_redirect_shim(kernel_dir: Path) -> None:

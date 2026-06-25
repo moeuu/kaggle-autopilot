@@ -76,7 +76,6 @@ from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 from kagglebot.writeup import infer_code_competition_from_paths
 
-_ZERO_OVERLAP_DRIFT_SHIM_MARKER = "# kagglebot: zero-overlap-drift-shim"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
 _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
@@ -1065,7 +1064,7 @@ class KernelPackageBuilder:
             slug=config.slug,
             context_dir=context_dir,
         )
-        _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+        _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_dir, context_dir)
         _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
         _kernel_bootstrap.inject_force_train_env(kernel_dir)
         _local_kernel_shims.ensure_training_progress_shim(kernel_dir)
@@ -1166,7 +1165,7 @@ class KernelSubmitPackageBuilder:
                 slug=config.slug,
                 context_dir=context_dir,
             )
-            _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+            _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_dir, context_dir)
             _kernel_bootstrap.inject_submit_inference_env(kernel_dir)
             _sanitize_submit_inference_output_roots(kernel_dir)
             _validate_inference_submit_kernel(kernel_dir)
@@ -1552,7 +1551,7 @@ def run_kernel_local(
     _local_kernel_shims.inject_training_progress_shim(kernel_stage_dir)
     _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_stage_dir)
     _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
-    _inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
+    _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
     _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
     _kernel_bootstrap.inject_force_train_env(kernel_stage_dir)
     _local_kernel_shims.ensure_training_progress_shim(kernel_stage_dir)
@@ -2013,87 +2012,6 @@ def _inject_pipeline_cfg_fallback(kernel_dir: Path) -> None:
     if text.endswith("\n"):
         updated += "\n"
     kernel_path.write_text(updated, encoding="utf-8")
-
-
-def _inject_zero_overlap_drift_shim(kernel_dir: Path, context_dir: Path) -> None:
-    guard_path = context_dir / _local_kernel_drift_guard.ZERO_OVERLAP_DRIFT_GUARD_FILENAME
-    if not guard_path.exists():
-        return
-    kernel_guard_path = kernel_dir / _local_kernel_drift_guard.ZERO_OVERLAP_DRIFT_GUARD_FILENAME
-    shutil.copy2(guard_path, kernel_guard_path)
-    site_path = kernel_dir / "sitecustomize.py"
-    shim = [
-        _ZERO_OVERLAP_DRIFT_SHIM_MARKER,
-        "import json",
-        "from pathlib import Path",
-        "",
-        "def _kb_load_zero_overlap_drift_guard() -> dict:",
-        "    candidates = [",
-        f"        Path(__file__).with_name('{_local_kernel_drift_guard.ZERO_OVERLAP_DRIFT_GUARD_FILENAME}'),",
-        f"        Path('/kaggle/working/{_local_kernel_drift_guard.ZERO_OVERLAP_DRIFT_GUARD_FILENAME}'),",
-        "    ]",
-        "    for path in candidates:",
-        "        if not path.exists():",
-        "            continue",
-        "        try:",
-        "            payload = json.loads(path.read_text(encoding='utf-8'))",
-        "        except Exception:",
-        "            continue",
-        "        if isinstance(payload, dict):",
-        "            return payload",
-        "    return {}",
-        "",
-        "def _kb_is_train_or_test_csv(path_value: object) -> bool:",
-        "    try:",
-        "        name = Path(str(path_value)).name.lower()",
-        "    except Exception:",
-        "        return False",
-        "    return name in {'train.csv', 'test.csv'}",
-        "",
-        "def _kb_patch_zero_overlap_drift_drop() -> None:",
-        "    try:",
-        "        import pandas as _pd",
-        "    except Exception:",
-        "        return",
-        "    guard = _kb_load_zero_overlap_drift_guard()",
-        "    if not guard or not bool(guard.get('enabled')):",
-        "        return",
-        "    raw_cols = guard.get('drop_columns')",
-        "    if not isinstance(raw_cols, list):",
-        "        return",
-        "    drop_columns = [str(col) for col in raw_cols if str(col).strip()]",
-        "    if not drop_columns:",
-        "        return",
-        "    _orig = _pd.read_csv",
-        "",
-        "    def _patched(*args, **kwargs):",
-        "        df = _orig(*args, **kwargs)",
-        "        path_value = args[0] if args else kwargs.get('filepath_or_buffer')",
-        "        if not _kb_is_train_or_test_csv(path_value):",
-        "            return df",
-        "        try:",
-        "            cols = [col for col in drop_columns if col in df.columns]",
-        "        except Exception:",
-        "            cols = []",
-        "        if not cols:",
-        "            return df",
-        "        try:",
-        "            return df.drop(columns=cols)",
-        "        except Exception:",
-        "            return df",
-        "",
-        "    _pd.read_csv = _patched",
-        "",
-        "_kb_patch_zero_overlap_drift_drop()",
-        "",
-    ]
-    if site_path.exists():
-        text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _ZERO_OVERLAP_DRIFT_SHIM_MARKER in text:
-            return
-        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
-        return
-    site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
 LOG_POLL_INTERVAL = 2.0

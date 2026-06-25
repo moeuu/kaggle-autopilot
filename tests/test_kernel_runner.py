@@ -40,6 +40,7 @@ from kagglebot.local_kernel_shims import (
     inject_object_coerce_shim,
     inject_training_progress_shim,
     inject_transformers_eval_strategy_shim,
+    inject_zero_overlap_drift_shim,
 )
 
 pytestmark = pytest.mark.slow
@@ -1158,8 +1159,6 @@ def test_prepare_zero_overlap_drift_guard_detects_high_risk_zero_overlap_feature
 
 
 def test_inject_zero_overlap_drift_shim(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
@@ -1168,8 +1167,8 @@ def test_inject_zero_overlap_drift_shim(tmp_path: Path) -> None:
     payload = {"enabled": True, "drop_columns": ["risk_cat"]}
     (context_dir / "zero_overlap_drift_guard.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    kernel_runner._inject_zero_overlap_drift_shim(kernel_dir, context_dir)
-    kernel_runner._inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+    inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+    inject_zero_overlap_drift_shim(kernel_dir, context_dir)
 
     site_path = kernel_dir / "sitecustomize.py"
     assert site_path.exists()
