@@ -10,7 +10,9 @@ from kagglebot.submit_stage import (
     build_local_submission_guardrail_abort_spec,
     build_local_submission_validation_abort_spec,
     build_rules_not_accepted_abort_spec,
+    build_submission_outcome_abort_spec,
     build_submission_outcome_error_detail,
+    build_submission_polling_error_abort_spec,
     build_submit_stage_success_record,
     classify_submission_outcome,
     classify_submit_stage_error,
@@ -169,6 +171,45 @@ def test_build_local_submission_validation_abort_spec_sets_validation_contract()
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "row count mismatch"
     assert spec.exit_code == 65
+
+
+def test_build_submission_polling_error_abort_spec_sets_transient_contract() -> None:
+    spec = build_submission_polling_error_abort_spec(
+        error=RuntimeError("poll failed"),
+        detail="  timeout while polling  ",
+        normalize_detail=lambda text: " ".join(text.split()),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.fingerprint == "fp::timeout while polling"
+    assert spec.error_kind == "transient"
+    assert spec.reason == "submission_polling_error"
+    assert spec.message == "Submission outcome polling failed; aborting submit stage for this run."
+    assert spec.stdout_tail == ""
+    assert spec.stderr_tail == "timeout while polling"
+    assert spec.exit_code is None
+
+
+def test_build_submission_outcome_abort_spec_maps_decision_contract() -> None:
+    decision = decide_submission_outcome_abort(
+        outcome_status="error",
+        outcome_score=None,
+        deliverable_mode="leaderboard",
+        raw_detail="bad submission row",
+    )
+
+    spec = build_submission_outcome_abort_spec(
+        decision=decision,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.fingerprint == "fp::bad submission row"
+    assert spec.error_kind == "validation"
+    assert spec.reason == "submission_poll_status_error"
+    assert "Submission finished with error status" in spec.message
+    assert spec.stdout_tail == ""
+    assert spec.stderr_tail == "bad submission row"
+    assert spec.exit_code is None
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:

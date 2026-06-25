@@ -344,7 +344,8 @@ Recommended extraction order:
    submit-kernel error wrapping, and notebook submit exception/retry orchestration are extracted. Initial submit-stage mode
    decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, manual
-   and local validation/submit-blocker abort specs, submission outcome abort/classification and poll-result post-processing decisions, rank
+   local validation/submit-blocker abort specs, submission polling/outcome abort specs, submission outcome
+   classification and poll-result post-processing decisions, rank
    payload/guard/display normalization, iteration submit-status formatting,
    campaign-aware submission message resolution, submission iteration inference, tracking score selection, submission
    knowledge orchestration/context/default-insight preparation/record dispatch resolution, file-submit-to-notebook

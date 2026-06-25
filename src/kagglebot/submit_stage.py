@@ -656,6 +656,42 @@ def build_local_submission_validation_abort_spec(
     )
 
 
+def build_submission_polling_error_abort_spec(
+    *,
+    error: object,
+    detail: object,
+    normalize_detail: Callable[[str], str],
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec:
+    normalized_detail = normalize_detail(str(detail or error))
+    stderr_tail = normalized_detail or str(error)
+    return SubmitAbortSpec(
+        fingerprint=compute_error_fingerprint("", stderr_tail),
+        error_kind="transient",
+        reason="submission_polling_error",
+        message="Submission outcome polling failed; aborting submit stage for this run.",
+        stdout_tail="",
+        stderr_tail=stderr_tail,
+        exit_code=None,
+    )
+
+
+def build_submission_outcome_abort_spec(
+    *,
+    decision: SubmitOutcomeAbortDecision,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec:
+    return SubmitAbortSpec(
+        fingerprint=compute_error_fingerprint("", decision.detail),
+        error_kind=decision.error_kind,
+        reason=decision.reason,
+        message=decision.message,
+        stdout_tail="",
+        stderr_tail=decision.detail,
+        exit_code=None,
+    )
+
+
 def decide_submission_outcome_abort(
     *,
     outcome_status: str,

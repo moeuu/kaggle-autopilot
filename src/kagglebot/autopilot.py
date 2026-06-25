@@ -5452,7 +5452,12 @@ def _attempt_submit(
             max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
         )
     except SubmissionOutcomePollingError as exc:
-        detail = normalize_error_text(exc.detail or str(exc), max_chars=1200)
+        abort_spec = _submit_stage.build_submission_polling_error_abort_spec(
+            error=exc,
+            detail=exc.detail,
+            normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
+            compute_error_fingerprint=compute_error_fingerprint,
+        )
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
@@ -5461,13 +5466,13 @@ def _attempt_submit(
             submission_artifact_path=submission_for_submit_path,
             artifact_mode=submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=compute_error_fingerprint("", detail or str(exc)),
-            error_kind="transient",
-            reason="submission_polling_error",
-            message="Submission outcome polling failed; aborting submit stage for this run.",
-            stdout_tail="",
-            stderr_tail=detail or str(exc),
-            exit_code=None,
+            fingerprint=abort_spec.fingerprint,
+            error_kind=abort_spec.error_kind,
+            reason=abort_spec.reason,
+            message=abort_spec.message,
+            stdout_tail=abort_spec.stdout_tail,
+            stderr_tail=abort_spec.stderr_tail,
+            exit_code=abort_spec.exit_code,
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
@@ -5483,6 +5488,10 @@ def _attempt_submit(
     outcome = outcome_post_poll.outcome
     outcome_abort_decision = outcome_post_poll.abort_decision
     if outcome_abort_decision.should_abort:
+        abort_spec = _submit_stage.build_submission_outcome_abort_spec(
+            decision=outcome_abort_decision,
+            compute_error_fingerprint=compute_error_fingerprint,
+        )
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
@@ -5491,13 +5500,13 @@ def _attempt_submit(
             submission_artifact_path=submission_for_submit_path,
             artifact_mode=submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
-            fingerprint=compute_error_fingerprint("", outcome_abort_decision.detail),
-            error_kind=outcome_abort_decision.error_kind,
-            reason=outcome_abort_decision.reason,
-            message=outcome_abort_decision.message,
-            stdout_tail="",
-            stderr_tail=outcome_abort_decision.detail,
-            exit_code=None,
+            fingerprint=abort_spec.fingerprint,
+            error_kind=abort_spec.error_kind,
+            reason=abort_spec.reason,
+            message=abort_spec.message,
+            stdout_tail=abort_spec.stdout_tail,
+            stderr_tail=abort_spec.stderr_tail,
+            exit_code=abort_spec.exit_code,
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
