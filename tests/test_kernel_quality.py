@@ -6,6 +6,7 @@ from kagglebot.kernel_quality import (
     detect_external_test_label_transfer_signal,
     detect_prediction_distribution_collapse,
     detect_subgroup_collapse_signal,
+    extract_competition_faithfulness,
     extract_cv_breakdown_by_model_node,
     infer_capacity_tier,
     infer_data_tier,
@@ -149,6 +150,60 @@ def test_detect_prediction_distribution_collapse_compares_candidate_means() -> N
     assert signal is not None
     assert signal["selected"] == "sparse"
     assert signal["largest_mean_candidate"] == "dense"
+
+
+def test_extract_competition_faithfulness_prefers_metric_name_over_numeric_metric() -> None:
+    faithfulness = extract_competition_faithfulness(
+        evaluation_metric="rmse",
+        evaluation_score_source="cv",
+        kernel_metrics_payload={
+            "metric": 0.123,
+            "metric_name": "standardized_rmse",
+            "score_source": "cv",
+            "split_strategy": "timeseries_split",
+            "full_dataset_resolved": True,
+            "competition_faithful": True,
+        },
+        evaluation_report_split_strategy=None,
+        evaluation_contract={
+            "expected_metric": "standardized_rmse",
+            "expected_split_strategy": "timeseries_split",
+            "accepted_score_sources": ["cv", "holdout"],
+            "require_metric_match": True,
+            "require_split_match": True,
+            "require_trusted_score_source": True,
+            "require_competition_faithful": True,
+            "require_full_dataset": True,
+        },
+    )
+
+    assert faithfulness["actual_metric"] == "standardized_rmse"
+    assert faithfulness["metric_match"] is True
+    assert faithfulness["reasons"] == []
+
+
+def test_extract_competition_faithfulness_flags_sample_score_source_and_data_mode() -> None:
+    faithfulness = extract_competition_faithfulness(
+        evaluation_metric="logloss",
+        evaluation_score_source="sample_cv",
+        kernel_metrics_payload={"dataset_mode": "sample"},
+        evaluation_report_split_strategy="kfold",
+        evaluation_contract={
+            "expected_metric": "logloss",
+            "expected_split_strategy": "stratified_kfold",
+            "accepted_score_sources": ["cv", "holdout"],
+            "require_metric_match": True,
+            "require_split_match": True,
+            "require_trusted_score_source": True,
+            "require_competition_faithful": True,
+            "require_full_dataset": True,
+        },
+    )
+
+    assert "competition_score_source_mismatch" in faithfulness["reasons"]
+    assert "competition_split_mismatch" in faithfulness["reasons"]
+    assert "competition_evaluation_unfaithful" in faithfulness["reasons"]
+    assert "missing_competitive_data" in faithfulness["reasons"]
 
 
 def test_infer_capacity_tier_uses_pipeline_and_model_summary_hints() -> None:

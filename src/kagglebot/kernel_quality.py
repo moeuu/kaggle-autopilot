@@ -4,8 +4,9 @@ import math
 import re
 from collections.abc import Iterator
 
-from kagglebot import score_sources
+from kagglebot import plan_policy, score_sources
 from kagglebot.autopilot_helpers import _to_float, _to_int
+from kagglebot.metric_matching import metrics_equivalent
 
 QUALITY_GUARD_BASELINE_REL_MARGIN = 0.01
 QUALITY_GUARD_BASELINE_ABS_MARGIN = 1e-6
@@ -23,6 +24,13 @@ QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
 QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
 MODEL_NODE_METRIC_KEY = re.compile(r"^model_(?P<model_id>\d+)_node_type_(?P<node_type>\d+)$")
 HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
+COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
+    "sample",
+    "smoke",
+    "surrogate",
+    "oracle",
+    "proxy",
+)
 CAPACITY_TIER_PRIORITY = {
     "low": 0,
     "medium": 1,
@@ -564,6 +572,128 @@ def detect_prediction_distribution_collapse(payload: dict[str, object] | None) -
             "candidate_count": len(candidate_means),
         }
     return None
+
+
+def extract_competition_faithfulness(
+    *,
+    evaluation_metric: object,
+    evaluation_score_source: object,
+    kernel_metrics_payload: dict[str, object] | None,
+    evaluation_report_split_strategy: object | None,
+    evaluation_contract: dict[str, object] | None,
+) -> dict[str, object]:
+    payload = kernel_metrics_payload or {}
+    contract = evaluation_contract or {}
+    accepted_score_sources = score_sources.normalize_score_source_list(contract.get("accepted_score_sources"))
+    if not accepted_score_sources:
+        accepted_score_sources = list(score_sources.DEFAULT_ACCEPTED_SCORE_SOURCES)
+
+    expected_metric = str(contract.get("expected_metric") or "").strip() or None
+    actual_metric = None
+    metric_name_raw = payload.get("metric_name")
+    if isinstance(metric_name_raw, str) and metric_name_raw.strip():
+        actual_metric = metric_name_raw.strip()
+    else:
+        metric_raw = payload.get("metric")
+        if isinstance(metric_raw, str) and metric_raw.strip():
+            actual_metric = metric_raw.strip()
+        else:
+            actual_metric = str(evaluation_metric or "").strip() or None
+    expected_split = plan_policy.normalize_split_strategy_name(contract.get("expected_split_strategy"))
+    actual_split = plan_policy.normalize_split_strategy_name(payload.get("split_strategy"))
+    readiness_payload = payload.get("readiness")
+    if actual_split is None and isinstance(readiness_payload, dict):
+        actual_split = plan_policy.normalize_split_strategy_name(readiness_payload.get("split_strategy"))
+    if actual_split is None:
+        actual_split = plan_policy.normalize_split_strategy_name(evaluation_report_split_strategy)
+
+    score_source = score_sources.normalize_score_source_name(payload.get("score_source") or evaluation_score_source)
+    score_source_mismatch = score_source not in accepted_score_sources
+    derived_noncompetitive = any(token in score_source for token in COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS)
+
+    dataset_mode_raw = payload.get("dataset_mode")
+    if dataset_mode_raw is None:
+        dataset_mode_raw = payload.get("data_mode")
+    if dataset_mode_raw is None:
+        data_resolution = payload.get("data_resolution")
+        if isinstance(data_resolution, dict):
+            dataset_mode_raw = data_resolution.get("mode")
+    dataset_mode = str(dataset_mode_raw).strip().lower() if isinstance(dataset_mode_raw, str) else None
+
+    full_dataset_resolved_raw = payload.get("full_dataset_resolved")
+    if full_dataset_resolved_raw is None:
+        data_resolution = payload.get("data_resolution")
+        if isinstance(data_resolution, dict):
+            full_dataset_resolved_raw = data_resolution.get("full_dataset_resolved")
+    full_dataset_resolved = bool(full_dataset_resolved_raw) if isinstance(full_dataset_resolved_raw, bool) else None
+
+    competition_faithful_raw = payload.get("competition_faithful")
+    if isinstance(competition_faithful_raw, bool):
+        competition_faithful = competition_faithful_raw
+    elif isinstance(payload.get("noncompetitive"), bool):
+        competition_faithful = not bool(payload.get("noncompetitive"))
+    elif derived_noncompetitive:
+        competition_faithful = False
+    else:
+        competition_faithful = None
+
+    if full_dataset_resolved is None and dataset_mode is not None:
+        full_dataset_resolved = dataset_mode in {"full", "competitive", "complete"}
+    elif full_dataset_resolved is None and derived_noncompetitive:
+        full_dataset_resolved = False
+
+    metric_match = True
+    if expected_metric:
+        metric_match = metrics_equivalent(expected_metric, actual_metric)
+
+    split_match = True
+    if expected_split:
+        split_match = actual_split == expected_split
+
+    data_faithful = True
+    if bool(contract.get("require_full_dataset")) and full_dataset_resolved is False:
+        data_faithful = False
+    if bool(contract.get("require_competition_faithful")) and competition_faithful is False:
+        data_faithful = False
+
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if bool(contract.get("require_metric_match")) and expected_metric and not metric_match:
+        reasons.append("competition_metric_mismatch")
+        warnings.append(f"expected_metric={expected_metric},actual_metric={actual_metric or 'unknown'}")
+    if bool(contract.get("require_split_match")) and expected_split and not split_match:
+        reasons.append("competition_split_mismatch")
+        warnings.append(f"expected_split={expected_split},actual_split={actual_split or 'unknown'}")
+    if bool(contract.get("require_trusted_score_source")) and score_source_mismatch:
+        reasons.append("competition_score_source_mismatch")
+        warnings.append(
+            f"accepted_score_sources={','.join(accepted_score_sources)},actual_score_source={score_source or 'unknown'}"
+        )
+    if bool(contract.get("require_competition_faithful")) and competition_faithful is False:
+        reasons.append("competition_evaluation_unfaithful")
+        warnings.append("competition_faithful=false")
+    if bool(contract.get("require_full_dataset")) and full_dataset_resolved is False:
+        reasons.append("missing_competitive_data")
+        warnings.append(f"dataset_mode={dataset_mode or 'unknown'}")
+
+    faithful = not reasons
+    return {
+        "faithful": faithful,
+        "expected_metric": expected_metric,
+        "actual_metric": actual_metric,
+        "expected_split_strategy": expected_split,
+        "actual_split_strategy": actual_split,
+        "score_source": score_source,
+        "accepted_score_sources": accepted_score_sources,
+        "competition_faithful": competition_faithful,
+        "dataset_mode": dataset_mode,
+        "full_dataset_resolved": full_dataset_resolved,
+        "metric_match": metric_match,
+        "split_match": split_match,
+        "data_faithful": data_faithful,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
 
 
 def infer_capacity_tier(
