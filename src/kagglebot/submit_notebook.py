@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
+from kagglebot.writeup import normalize_submit_mode
 
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 
@@ -49,6 +50,13 @@ class NotebookSubmitArtifactModeDecision:
 
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:
     return str(value or "wrapper").strip().lower() or "wrapper"
+
+
+def resolve_notebook_submit_artifact_mode(*, submit_mode: object, code_competition: bool) -> str:
+    normalized_submit_mode = normalize_submit_mode(submit_mode, default="file")
+    if normalized_submit_mode != "notebook":
+        return "wrapper"
+    return "inference" if code_competition else "wrapper"
 
 
 def decide_notebook_submit_artifact_mode(

@@ -15,6 +15,7 @@ from kagglebot.submit_notebook import (
     is_submit_kernel_push_error,
     is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
+    resolve_notebook_submit_artifact_mode,
     run_kaggle_submit_kernel_with_retry,
     run_submit_kernel_with_cpu_fallback,
 )
@@ -44,6 +45,40 @@ def test_normalize_notebook_submit_artifact_mode_defaults_to_wrapper() -> None:
     assert normalize_notebook_submit_artifact_mode(None) == "wrapper"
     assert normalize_notebook_submit_artifact_mode("") == "wrapper"
     assert normalize_notebook_submit_artifact_mode(" Inference ") == "inference"
+
+
+def test_resolve_notebook_submit_artifact_mode_uses_inference_for_code_competition_notebooks() -> None:
+    assert (
+        resolve_notebook_submit_artifact_mode(
+            submit_mode="notebook",
+            code_competition=True,
+        )
+        == "inference"
+    )
+    assert (
+        resolve_notebook_submit_artifact_mode(
+            submit_mode="kernel",
+            code_competition=True,
+        )
+        == "inference"
+    )
+    assert (
+        resolve_notebook_submit_artifact_mode(
+            submit_mode="file",
+            code_competition=True,
+        )
+        == "wrapper"
+    )
+
+
+def test_resolve_notebook_submit_artifact_mode_keeps_wrapper_for_regular_notebooks() -> None:
+    assert (
+        resolve_notebook_submit_artifact_mode(
+            submit_mode="notebook",
+            code_competition=False,
+        )
+        == "wrapper"
+    )
 
 
 def test_build_notebook_submit_reference_prefers_kernel_output_file_name() -> None:

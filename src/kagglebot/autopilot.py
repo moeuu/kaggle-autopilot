@@ -3208,13 +3208,6 @@ def _should_skip_planning(*, resume_run: bool, paths: CompetitionPaths) -> bool:
     return kernel_path.exists()
 
 
-def _resolve_notebook_submit_artifact_mode(*, paths: CompetitionPaths, submit_mode: str) -> str:
-    normalized_submit_mode = normalize_submit_mode(submit_mode, default="file")
-    if normalized_submit_mode != "notebook":
-        return "wrapper"
-    return "inference" if infer_code_competition_from_paths(paths) else "wrapper"
-
-
 def _decide_notebook_submit_artifact_mode_for_submission(
     *,
     paths: CompetitionPaths,
@@ -3350,9 +3343,9 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     submit_mode = submit_mode_decision.submit_mode
     for message in submit_mode_decision.messages:
         print(message)
-    notebook_submit_artifact_mode = _resolve_notebook_submit_artifact_mode(
-        paths=config.paths,
+    notebook_submit_artifact_mode = _submit_notebook.resolve_notebook_submit_artifact_mode(
         submit_mode=submit_mode,
+        code_competition=code_competition,
     )
     time_budget_min = choose(config.time_budget_min, plan.time_budget_min, None)
     kernel_name = choose(config.kernel_name, plan.kernel_name, None)
@@ -6119,8 +6112,12 @@ def _attempt_submit(
 
     constraints = _competition_rules.load_competition_rule_constraints(config.paths)
     requested_notebook_submit = normalize_submit_mode(submit_mode, default="file") == "notebook"
+    code_competition = infer_code_competition_from_paths(config.paths)
     resolved_notebook_artifact_mode = (
-        _resolve_notebook_submit_artifact_mode(paths=config.paths, submit_mode="notebook")
+        _submit_notebook.resolve_notebook_submit_artifact_mode(
+            submit_mode="notebook",
+            code_competition=code_competition,
+        )
         if requested_notebook_submit or constraints.notebook_submissions_only
         else None
     )
@@ -6223,9 +6220,9 @@ def _attempt_submit(
                     stdout=exc.stdout,
                     stderr=classification_stderr,
                 ),
-                resolved_notebook_artifact_mode=_resolve_notebook_submit_artifact_mode(
-                    paths=config.paths,
+                resolved_notebook_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode(
                     submit_mode="notebook",
+                    code_competition=code_competition,
                 ),
                 current_submission_artifact_mode=submission_artifact_mode,
             )
