@@ -466,6 +466,27 @@ def build_code_reference_regression_quality_signal(
     }
 
 
+def build_metric_mismatch_quality_signal(
+    *,
+    detected: bool,
+    reason: str | None,
+    force_submit: bool,
+) -> dict[str, object]:
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if detected:
+        reasons.append("competition_metric_mismatch")
+        if reason:
+            warnings.append(f"metric_mismatch_detail={reason}")
+    return {
+        "detected": detected,
+        "detail": reason,
+        "reasons": reasons,
+        "warnings": warnings,
+        "block_submit": detected and not force_submit,
+    }
+
+
 def iter_payload_mappings(payload: object) -> Iterator[dict[object, object]]:
     if isinstance(payload, dict):
         yield payload

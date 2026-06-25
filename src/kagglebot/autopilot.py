@@ -313,6 +313,7 @@ _any_nested_bool = _kernel_quality.any_nested_bool
 _nested_text = _kernel_quality.nested_text
 _merge_quality_signal_messages = _kernel_quality.merge_quality_signal_messages
 _build_external_label_transfer_quality_signal = _kernel_quality.build_external_label_transfer_quality_signal
+_build_metric_mismatch_quality_signal = _kernel_quality.build_metric_mismatch_quality_signal
 _build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
 _build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
 _build_candidate_selection_quality_signal = _kernel_quality.build_candidate_selection_quality_signal
@@ -4767,12 +4768,14 @@ def _build_kernel_quality_guard(
     if subgroup_collapse_signal is not None:
         warnings.append("cv_subgroup_collapse_detected")
 
-    if metric_mismatch_detected:
-        reasons.append("competition_metric_mismatch")
-        if metric_mismatch_reason:
-            warnings.append(f"metric_mismatch_detail={metric_mismatch_reason}")
-        if not force_submit:
-            block_submit = True
+    metric_mismatch_signal = _build_metric_mismatch_quality_signal(
+        detected=metric_mismatch_detected,
+        reason=metric_mismatch_reason,
+        force_submit=force_submit,
+    )
+    merge_signal_messages(metric_mismatch_signal)
+    if bool(metric_mismatch_signal.get("block_submit")):
+        block_submit = True
 
     code_reference_regression_signal = _build_code_reference_regression_quality_signal(
         current_value=float(evaluation.value),
@@ -4815,6 +4818,7 @@ def _build_kernel_quality_guard(
         "candidate_selection": candidate_selection_signal,
         "prediction_distribution_collapse": prediction_distribution_collapse,
         "prediction_distribution": prediction_distribution_signal,
+        "metric_mismatch": metric_mismatch_signal,
         "code_reference": code_reference_signal,
         "code_reference_regression": code_reference_regression_signal,
     }

@@ -9,6 +9,7 @@ from kagglebot.kernel_quality import (
     build_code_reference_regression_quality_signal,
     build_competition_faithfulness_quality_signal,
     build_external_label_transfer_quality_signal,
+    build_metric_mismatch_quality_signal,
     build_oracle_override_signal,
     build_prediction_distribution_quality_signal,
     build_score_source_quality_signal,
@@ -395,6 +396,34 @@ def test_build_code_reference_regression_quality_signal_respects_force_submit() 
     )
 
     assert signal["reasons"] == ["below_code_reference_baseline"]
+    assert signal["block_submit"] is False
+
+
+def test_build_metric_mismatch_quality_signal_blocks_detected_mismatch() -> None:
+    signal = build_metric_mismatch_quality_signal(
+        detected=True,
+        reason="expected rmse but kernel reported accuracy",
+        force_submit=False,
+    )
+
+    assert signal == {
+        "detected": True,
+        "detail": "expected rmse but kernel reported accuracy",
+        "reasons": ["competition_metric_mismatch"],
+        "warnings": ["metric_mismatch_detail=expected rmse but kernel reported accuracy"],
+        "block_submit": True,
+    }
+
+
+def test_build_metric_mismatch_quality_signal_respects_force_submit() -> None:
+    signal = build_metric_mismatch_quality_signal(
+        detected=True,
+        reason=None,
+        force_submit=True,
+    )
+
+    assert signal["reasons"] == ["competition_metric_mismatch"]
+    assert signal["warnings"] == []
     assert signal["block_submit"] is False
 
 
