@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from kagglebot.kernel_metrics import (
+    collect_kernel_log_text,
+    extract_baseline_candidates_from_metrics_payload,
+    extract_baseline_scores_from_log_text,
+    extract_kernel_metric,
+    extract_trusted_cv_value_from_metrics_payload,
+    extract_validation_scores_from_log_text,
+)
+
+
+def test_extract_trusted_cv_value_prefers_named_cv_score() -> None:
+    payload = {
+        "score": 0.7,
+        "cv_mean": "0.42",
+        "fold_scores": [0.3, 0.4],
+    }
+
+    assert extract_trusted_cv_value_from_metrics_payload(payload) == 0.42
+
+
+def test_extract_trusted_cv_value_averages_numeric_fold_scores() -> None:
+    payload = {"fold_scores": [0.8, "ignored", 1.0, True, None]}
+
+    assert extract_trusted_cv_value_from_metrics_payload(payload) == pytest.approx(0.9333333333333332)
+
+
+def test_extract_kernel_metric_from_selected_combined_score_schema() -> None:
+    payload = {
+        "primary_metric": "0.5*mAP@[0.5:0.95] + 0.5*F1",
+        "selected": {
+            "name": "yolo11m_kfold_wbf_geom_rp",
+            "mean_map": 0.6698263357562932,
+            "oof_f1": 0.6666666666666666,
+            "combined_score": 0.66824650121148,
+        },
+    }
+
+    metric, value = extract_kernel_metric(payload, "0.5*mAP@[0.5:0.95] + 0.5*F1")
+
+    assert metric == "0.5*mAP@[0.5:0.95] + 0.5*F1"
+    assert value == 0.66824650121148
+
+
+def test_extract_kernel_metric_from_oof_dict_respects_selected_key() -> None:
+    payload = {
+        "oof_rmse": {
+            "lgb": 8.75,
+            "catboost": 8.79,
+            "xgboost": 8.84,
+            "stacked": 8.76,
+            "average": 8.77,
+            "selected": 8.76,
+        },
+        "selection": "selected",
+    }
+
+    metric, value = extract_kernel_metric(payload, "rmse")
+
+    assert metric == "rmse"
+    assert value == 8.76
+
+
+def test_extract_baseline_candidates_from_metrics_payload() -> None:
+    payload = {
+        "pipelines": [
+            {"name": "candidate", "cv_mean": 0.5},
+            {"name": "class_prior_baseline", "cv_mean": 0.33},
+        ],
+        "persistence_scores": [0.4, {"score": 0.38}],
+        "baseline_nested": {"mean": 0.37},
+    }
+
+    candidates = extract_baseline_candidates_from_metrics_payload(payload)
+
+    assert candidates == [
+        ("pipelines:class_prior_baseline", 0.33),
+        ("metrics:persistence_scores[0]", 0.4),
+        ("metrics:persistence_scores[1]", 0.38),
+        ("metrics:baseline_nested.mean", 0.37),
+    ]
+
+
+def test_collect_kernel_log_text_reads_only_kernel_like_logs(tmp_path: Path) -> None:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "kernel.log").write_text("kernel text", encoding="utf-8")
+    (logs_dir / "stdout.log").write_text("stdout text", encoding="utf-8")
+    (logs_dir / "notes.log").write_text("ignored", encoding="utf-8")
+    (logs_dir / "kernel.txt").write_text("ignored extension", encoding="utf-8")
+
+    text = collect_kernel_log_text(logs_dir)
+
+    assert "kernel text" in text
+    assert "stdout text" in text
+    assert "ignored" not in text
+
+
+def test_extract_validation_scores_from_log_text_filters_metric_name() -> None:
+    log_text = "\n".join(
+        [
+            "fold 0 val_rmse = 0.45",
+            "fold 0 val_mae = 0.25",
+            "fold 1 val_rmse=4.2e-1",
+        ]
+    )
+
+    assert extract_validation_scores_from_log_text(log_text, "rmse") == [0.45, 0.42]
+
+
+def test_extract_baseline_scores_from_log_text_skips_fold_lines() -> None:
+    log_text = "\n".join(
+        [
+            "baseline_rmse=0.50",
+            "fold=1 baseline_rmse=0.48",
+            "persistence_auc = 0.61",
+            "candidate_rmse=0.44",
+        ]
+    )
+
+    assert extract_baseline_scores_from_log_text(log_text) == [0.5, 0.61]
