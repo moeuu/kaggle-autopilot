@@ -4694,9 +4694,10 @@ def _attempt_submit(
             **_submit_stage.build_submit_abort_spec_kwargs(prepared_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
-    if prepared_resolution.prepared_submission_path is None:
-        raise SubmitAbortedError("Submit validation did not produce a prepared submission path.")
-    prepared_submission_path = prepared_resolution.prepared_submission_path
+    prepared_submission_path = _submit_stage.require_prepared_submission_path(
+        prepared_resolution,
+        build_error=SubmitAbortedError,
+    )
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
     duplicate_skip_result = _submit_stage.resolve_duplicate_submission_for_submit(

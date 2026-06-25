@@ -363,7 +363,8 @@ Recommended extraction order:
    submit-error classification normalization, submit CLI error resolution, classification-driven retry/abort decisions,
    submit-error action abort specs,
    submit-retry attempt/knowledge recording orchestration, abort-spec kwargs mapping,
-   duplicate-submit resolution/decision application, local validation resolution, rules-acceptance blocker resolution,
+   duplicate-submit resolution/decision application, local validation/prepared-path resolution,
+   rules-acceptance blocker resolution,
    local/Kaggle submit blocker abort-spec resolution,
    same-submission-path resolution/decision application, notebook fallback runtime-state resolution and decision
    application/state/message assembly,

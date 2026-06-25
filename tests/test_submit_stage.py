@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    SubmitPreparedSubmissionResolution,
     apply_duplicate_submission_decision,
     apply_initial_submit_stage_artifact_mode,
     apply_notebook_fallback_decision,
@@ -45,6 +46,7 @@ from kagglebot.submit_stage import (
     record_submission_knowledge_entries,
     record_submit_stage_retry_attempt,
     record_successful_submit_stage_result,
+    require_prepared_submission_path,
     resolve_duplicate_submission_for_submit,
     resolve_initial_submit_stage_runtime_state,
     resolve_iteration_submit_phase_state,
@@ -870,6 +872,30 @@ def test_resolve_prepared_submission_for_submit_returns_prepared_path(tmp_path: 
 
     assert resolution.prepared_submission_path == prepared_path
     assert resolution.abort_spec is None
+
+
+def test_require_prepared_submission_path_returns_path(tmp_path: Path) -> None:
+    prepared_path = tmp_path / "prepared.csv"
+
+    assert (
+        require_prepared_submission_path(
+            SubmitPreparedSubmissionResolution(prepared_submission_path=prepared_path),
+            build_error=RuntimeError,
+        )
+        == prepared_path
+    )
+
+
+def test_require_prepared_submission_path_raises_factory_error() -> None:
+    try:
+        require_prepared_submission_path(
+            SubmitPreparedSubmissionResolution(prepared_submission_path=None),
+            build_error=RuntimeError,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "Submit validation did not produce a prepared submission path."
+    else:
+        raise AssertionError("RuntimeError was not raised")
 
 
 def test_resolve_prepared_submission_for_submit_maps_validation_error_to_abort(tmp_path: Path) -> None:

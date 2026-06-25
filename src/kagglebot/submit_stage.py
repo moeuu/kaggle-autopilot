@@ -215,6 +215,16 @@ def resolve_prepared_submission_for_submit(
         )
 
 
+def require_prepared_submission_path(
+    resolution: SubmitPreparedSubmissionResolution,
+    *,
+    build_error: Callable[[str], BaseException],
+) -> Path:
+    if resolution.prepared_submission_path is None:
+        raise build_error("Submit validation did not produce a prepared submission path.")
+    return resolution.prepared_submission_path
+
+
 def resolve_rules_acceptance_for_submit(
     *,
     check_rules_accepted: Callable[[], bool],
