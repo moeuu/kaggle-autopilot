@@ -1655,7 +1655,7 @@ def test_run_kernel_local_dry_run_stages_required_seq2seq_models(tmp_path: Path)
 
 
 def test_stage_resolved_model_hints_rejects_artem_alias_pointing_to_google_large(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
+    from kagglebot.local_kernel_models import stage_resolved_model_hints
 
     google_dir = tmp_path / "models--google--byt5-large" / "snapshots" / "abc123"
     google_dir.mkdir(parents=True, exist_ok=True)
@@ -1664,7 +1664,7 @@ def test_stage_resolved_model_hints_rejects_artem_alias_pointing_to_google_large
     alias_dir = tmp_path / "artemgoncarov_dpc_byt5_large"
     alias_dir.symlink_to(google_dir, target_is_directory=True)
 
-    staged = kernel_runner._stage_resolved_model_hints(
+    staged = stage_resolved_model_hints(
         hints=["artemgoncarov/dpc-byt5-large"],
         candidate_dirs=[alias_dir, google_dir],
         staged_root=tmp_path / "staged-models",
@@ -1674,7 +1674,7 @@ def test_stage_resolved_model_hints_rejects_artem_alias_pointing_to_google_large
 
 
 def test_stage_resolved_model_hints_rejects_mattia_alias_pointing_to_assiaben(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
+    from kagglebot.local_kernel_models import stage_resolved_model_hints
 
     assiaben_dir = tmp_path / "dataset__assiaben__final-byt5" / "byt5-akkadian-optimized-34x"
     assiaben_dir.mkdir(parents=True, exist_ok=True)
@@ -1683,7 +1683,7 @@ def test_stage_resolved_model_hints_rejects_mattia_alias_pointing_to_assiaben(tm
     alias_dir = tmp_path / "mattiaangeli_byt5_akkadian_mbr_pytorch_default_6"
     alias_dir.symlink_to(assiaben_dir, target_is_directory=True)
 
-    staged = kernel_runner._stage_resolved_model_hints(
+    staged = stage_resolved_model_hints(
         hints=["mattiaangeli/byt5-akkadian-mbr/PyTorch/default/6"],
         candidate_dirs=[alias_dir, assiaben_dir],
         staged_root=tmp_path / "staged-models",
