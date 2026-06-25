@@ -68,6 +68,22 @@ def is_significantly_worse(
     return (reference - current) > margin
 
 
+def build_score_source_quality_signal(score_source: str | None) -> dict[str, object]:
+    normalized = score_sources.normalize_score_source_name(score_source)
+    trusted = score_sources.is_trusted_offline_score_source(normalized)
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if not trusted:
+        reasons.append("untrusted_score_source")
+        warnings.append(f"score_source={normalized}")
+    return {
+        "normalized_score_source": normalized,
+        "trusted": trusted,
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
 def extract_cv_breakdown_by_model_node(payload: dict[str, object] | None) -> dict[tuple[int, int], float]:
     if not isinstance(payload, dict):
         return {}

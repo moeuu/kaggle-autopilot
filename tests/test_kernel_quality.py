@@ -4,6 +4,7 @@ from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_baseline_quality_signal,
     build_code_reference_quality_signal,
+    build_score_source_quality_signal,
     build_validation_metric_alignment,
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
@@ -40,6 +41,28 @@ def test_is_significantly_worse_respects_direction_and_margins() -> None:
         rel_margin=0.1,
         abs_margin=0.01,
     )
+
+
+def test_build_score_source_quality_signal_flags_untrusted_sources() -> None:
+    signal = build_score_source_quality_signal("sample_cv")
+
+    assert signal == {
+        "normalized_score_source": "sample_cv",
+        "trusted": False,
+        "reasons": ["untrusted_score_source"],
+        "warnings": ["score_source=sample_cv"],
+    }
+
+
+def test_build_score_source_quality_signal_allows_trusted_sources() -> None:
+    signal = build_score_source_quality_signal("CV")
+
+    assert signal == {
+        "normalized_score_source": "cv",
+        "trusted": True,
+        "reasons": [],
+        "warnings": [],
+    }
 
 
 def test_extract_cv_breakdown_by_model_node_filters_invalid_entries() -> None:

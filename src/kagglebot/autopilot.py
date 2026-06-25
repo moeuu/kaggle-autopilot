@@ -311,6 +311,7 @@ _max_nested_int = _kernel_quality.max_nested_int
 _min_nested_int = _kernel_quality.min_nested_int
 _any_nested_bool = _kernel_quality.any_nested_bool
 _nested_text = _kernel_quality.nested_text
+_build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
 _detect_external_test_label_transfer_signal = _kernel_quality.detect_external_test_label_transfer_signal
 _pipeline_name_from_payload = _kernel_quality.pipeline_name_from_payload
 _extract_selected_pipeline_name = _kernel_quality.extract_selected_pipeline_name
@@ -4658,10 +4659,14 @@ def _build_kernel_quality_guard(
     is_final_iteration = iteration >= max_iterations
     payload = kernel_metrics_payload or {}
 
-    normalized_score_source = _score_sources.normalize_score_source_name(evaluation.score_source)
-    if not _score_sources.is_trusted_offline_score_source(normalized_score_source):
-        reasons.append("untrusted_score_source")
-        warnings.append(f"score_source={normalized_score_source}")
+    score_source_signal = _build_score_source_quality_signal(evaluation.score_source)
+    for reason in score_source_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in score_source_signal.get("warnings", []):
+        if isinstance(warning, str):
+            warnings.append(warning)
+    if not bool(score_source_signal.get("trusted")):
         if not force_submit:
             block_submit = True
 
@@ -4800,6 +4805,7 @@ def _build_kernel_quality_guard(
         "is_final_iteration": is_final_iteration,
         "reasons": reasons,
         "warnings": warnings,
+        "score_source": score_source_signal,
         "competition_faithfulness": competition_faithfulness,
         "baseline": baseline_signal,
         "metric_alignment": metric_alignment,
