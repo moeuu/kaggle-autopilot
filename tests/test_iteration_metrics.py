@@ -281,6 +281,15 @@ def test_resume_best_readiness_score_honors_direction_and_max_iteration(tmp_path
     assert resume_best_readiness_score(run_dir=run_dir, direction="maximize", max_iterations=2) == 0.50
 
 
+def test_resume_best_readiness_score_ignores_non_finite_scores(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    append_run_evaluation_report(run_dir=run_dir, iteration=1, payload={"iteration": 1, "readiness_score": "nan"})
+    append_run_evaluation_report(run_dir=run_dir, iteration=2, payload={"iteration": 2, "readiness_score": "0.45"})
+
+    assert resume_best_readiness_score(run_dir=run_dir, direction="maximize", max_iterations=2) == 0.45
+
+
 def test_resume_noise_guard_state_counts_small_changes(tmp_path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()

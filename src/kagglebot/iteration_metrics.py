@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from kagglebot import kernel_quality, plan_policy, score_sources
-from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
+from kagglebot.autopilot_helpers import _update_best_score
 from kagglebot.eval import (
     DriftChecker,
     EvaluationReport,
@@ -17,6 +17,7 @@ from kagglebot.eval import (
     UncertaintyEstimator,
 )
 from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.solver.io import load_competition_data
 
 if TYPE_CHECKING:
@@ -410,3 +411,11 @@ def _evaluation_history(payload: dict[str, object]) -> list[dict[str, object]]:
         latest = payload.get("latest")
         history = [latest] if isinstance(latest, dict) else []
     return [item for item in history if isinstance(item, dict)]
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
+
+
+def _to_int(value: object) -> int | None:
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
