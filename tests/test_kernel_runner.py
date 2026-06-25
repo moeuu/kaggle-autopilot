@@ -84,10 +84,15 @@ def test_resolve_kaggle_username_reads_kaggle_config_file_path(tmp_path: Path, m
     assert resolve_kaggle_username(None) == "cfg-file-user"
 
 
-def test_resolve_kaggle_username_skips_invalid_json_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_kaggle_username_skips_invalid_or_non_object_json_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path))
     (tmp_path / "kaggle.json").write_text("{invalid", encoding="utf-8")
+    (tmp_path / "kaggle" / "kaggle.json").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "kaggle" / "kaggle.json").write_text("[]", encoding="utf-8")
     home = tmp_path / "home"
     (home / ".kaggle").mkdir(parents=True, exist_ok=True)
     (home / ".kaggle" / "kaggle.json").write_text(json.dumps({"username": "home-user", "key": "x"}), encoding="utf-8")

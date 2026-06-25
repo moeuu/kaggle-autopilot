@@ -33,6 +33,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import CommandResult
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
+from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -1447,11 +1448,8 @@ def resolve_kaggle_username(explicit: str | None) -> str:
     candidates = list(dict.fromkeys(candidates))
 
     for kaggle_json in candidates:
-        if not kaggle_json.exists() or not kaggle_json.is_file():
-            continue
-        try:
-            data = json.loads(kaggle_json.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        data = load_json_object(kaggle_json)
+        if data is None:
             continue
         username = data.get("username")
         if username:
