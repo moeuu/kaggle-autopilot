@@ -262,21 +262,6 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
-_pipeline_config_hash = _diagnostics.pipeline_config_hash
-_diagnostics_json_default = _diagnostics.diagnostics_json_default
-_build_diagnostics = _diagnostics.build_diagnostics
-_evaluation_to_payload = _iteration_metrics.evaluation_to_payload
-_build_metrics_payload = _iteration_metrics.build_metrics_payload
-_build_iteration_evaluation_report = _iteration_metrics.build_iteration_evaluation_report
-_build_eval_data_cache_fallback = _iteration_metrics.build_eval_data_cache_fallback
-_extract_fold_scores_for_report = _iteration_metrics.extract_fold_scores_for_report
-_ensure_eval_data_cache = _iteration_metrics.ensure_eval_data_cache
-_build_split_index_fingerprints = _iteration_metrics.build_split_index_fingerprints
-_iter_split_indices = _iteration_metrics.iter_split_indices
-_iteration_metrics_allow_submit = _iteration_metrics.iteration_metrics_allow_submit
-_append_run_evaluation_report = _iteration_metrics.append_run_evaluation_report
-_resume_best_readiness_score = _iteration_metrics.resume_best_readiness_score
-_resume_noise_guard_state = _iteration_metrics.resume_noise_guard_state
 _infer_campaign_candidate_category = _campaign_metrics.infer_campaign_candidate_category
 _infer_campaign_model_family = _campaign_metrics.infer_campaign_model_family
 _infer_campaign_feature_set = _campaign_metrics.infer_campaign_feature_set
@@ -897,7 +882,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     same_config_streak = 0
     last_config_hash: str | None = None
     eval_data_cache: dict[str, object] | None = None
-    previous_readiness_score, noise_limited_streak = _resume_noise_guard_state(
+    previous_readiness_score, noise_limited_streak = _iteration_metrics.resume_noise_guard_state(
         run_dir=config.paths.run_dir(run_id),
         max_iterations=max_iterations,
     )
@@ -1012,7 +997,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             validation_registry=validation_registry_for_contract,
             submission_limit_per_day=submission_limit_per_day,
         )
-    resumed_best_readiness = _resume_best_readiness_score(
+    resumed_best_readiness = _iteration_metrics.resume_best_readiness_score(
         run_dir=config.paths.run_dir(run_id),
         direction=metric_direction,
         max_iterations=max_iterations,
@@ -1573,7 +1558,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         fold_scores=evaluation.fold_scores,
                     )
             _update_watch_phase(config, run_id, "evaluating_iteration", iteration=iteration)
-            report, report_payload, eval_data_cache = _build_iteration_evaluation_report(
+            report, report_payload, eval_data_cache = _iteration_metrics.build_iteration_evaluation_report(
                 config=config,
                 run_id=run_id,
                 iteration=iteration,
@@ -1594,7 +1579,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 drift_weight=drift_weight,
                 eval_data_cache=eval_data_cache,
             )
-            _append_run_evaluation_report(run_dir=run_dir, iteration=iteration, payload=report_payload)
+            _iteration_metrics.append_run_evaluation_report(
+                run_dir=run_dir, iteration=iteration, payload=report_payload
+            )
             evaluation_report_path = iter_dir / "evaluation_report.json"
             _write_json_object(evaluation_report_path, report_payload)
 
@@ -2210,7 +2197,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
             if submit_status_message:
                 print(submit_status_message)
-            pre_submit_metrics_payload = _build_metrics_payload(
+            pre_submit_metrics_payload = _iteration_metrics.build_metrics_payload(
                 run_id=run_id,
                 iteration=iteration,
                 evaluation=evaluation,
@@ -2497,7 +2484,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 " ".join(forced_major_overhaul_reasons) if forced_major_overhaul_reasons else None
             )
 
-            metrics_payload = _build_metrics_payload(
+            metrics_payload = _iteration_metrics.build_metrics_payload(
                 run_id=run_id,
                 iteration=iteration,
                 evaluation=evaluation,
@@ -2590,7 +2577,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             _write_json_object(metrics_path, metrics_payload)
 
             diff_summary = "Diff tracking disabled (git integration removed)."
-            diagnostics = _build_diagnostics(
+            diagnostics = _diagnostics.build_diagnostics(
                 evaluation=evaluation,
                 model_summary=model_summary,
                 best_score=best_score,
@@ -3041,7 +3028,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         else regression_reason
                     )
 
-            current_config_hash = _pipeline_config_hash(
+            current_config_hash = _diagnostics.pipeline_config_hash(
                 model_summary=model_summary,
                 metric=evaluation.metric,
                 accelerator=accelerator_used,
@@ -6607,7 +6594,7 @@ def _resume_best_submittable_iteration_state(
         target_metric=target_metric,
         max_iterations=max_iterations,
         load_kernel_metrics=_load_kernel_metrics,
-        iteration_metrics_allow_submit=_iteration_metrics_allow_submit,
+        iteration_metrics_allow_submit=_iteration_metrics.iteration_metrics_allow_submit,
     )
 
 

@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from kagglebot.autopilot import AutopilotConfig, _ensure_eval_data_cache
+from kagglebot.autopilot import AutopilotConfig
+from kagglebot.iteration_metrics import ensure_eval_data_cache
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 
@@ -81,7 +82,7 @@ def test_ensure_eval_data_cache_drift_selection_avoids_strict_getitem(monkeypatc
 
     monkeypatch.setattr(pd.DataFrame, "__getitem__", flaky_getitem)
 
-    cache = _ensure_eval_data_cache(
+    cache = ensure_eval_data_cache(
         config=config,
         cv_folds=2,
         split_strategy="kfold",
@@ -138,7 +139,7 @@ def test_ensure_eval_data_cache_preserves_requested_timeseries_split_on_fallback
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    cache = _ensure_eval_data_cache(
+    cache = ensure_eval_data_cache(
         config=config,
         cv_folds=5,
         split_strategy="timeseries_split",

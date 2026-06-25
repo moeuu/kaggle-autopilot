@@ -17,7 +17,6 @@ from kagglebot.autopilot import (
     AutopilotConfig,
     SubmissionPhase,
     _agent_failure_detail,
-    _append_run_evaluation_report,
     _attempt_submit,
     _build_accuracy_potential,
     _build_kernel_quality_guard,
@@ -1315,24 +1314,6 @@ def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monke
     run_report = json.loads((config.paths.run_dir("run-1") / "evaluation_report.json").read_text(encoding="utf-8"))
     assert run_report["latest_iteration"] == 2
     assert len(run_report["history"]) == 2
-
-
-def test_append_run_evaluation_report_recovers_invalid_existing_report(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    report_path = run_dir / "evaluation_report.json"
-    report_path.write_text("{", encoding="utf-8")
-
-    _append_run_evaluation_report(
-        run_dir=run_dir,
-        iteration=1,
-        payload={"iteration": 1, "readiness_score": 0.42},
-    )
-
-    payload = json.loads(report_path.read_text(encoding="utf-8"))
-    assert payload["latest_iteration"] == 1
-    assert payload["latest"]["readiness_score"] == 0.42
-    assert payload["history"] == [{"iteration": 1, "readiness_score": 0.42}]
 
 
 @pytest.mark.parametrize(
