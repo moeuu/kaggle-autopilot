@@ -301,7 +301,6 @@ _extract_baseline_candidates_from_metrics_payload = _kernel_metrics.extract_base
 _collect_kernel_log_text = _kernel_metrics.collect_kernel_log_text
 _extract_validation_scores_from_log_text = _kernel_metrics.extract_validation_scores_from_log_text
 _extract_baseline_scores_from_log_text = _kernel_metrics.extract_baseline_scores_from_log_text
-_is_significantly_worse = _kernel_quality.is_significantly_worse
 _extract_cv_breakdown_by_model_node = _kernel_quality.extract_cv_breakdown_by_model_node
 _detect_subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal
 _iter_payload_mappings = _kernel_quality.iter_payload_mappings
@@ -322,6 +321,7 @@ _detect_candidate_selection_mismatch = _kernel_quality.detect_candidate_selectio
 _prediction_count_mean = _kernel_quality.prediction_count_mean
 _detect_prediction_distribution_collapse = _kernel_quality.detect_prediction_distribution_collapse
 _build_baseline_quality_signal = _kernel_quality.build_baseline_quality_signal
+_build_code_reference_quality_signal = _kernel_quality.build_code_reference_quality_signal
 _build_validation_metric_alignment = _kernel_quality.build_validation_metric_alignment
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
@@ -471,8 +471,6 @@ _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
 _KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
 _QUALITY_GUARD_SUBGROUP_RATIO = _kernel_quality.QUALITY_GUARD_SUBGROUP_RATIO
 _QUALITY_GUARD_SUBGROUP_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_SUBGROUP_ABS_MARGIN
-_QUALITY_GUARD_CODE_REF_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CODE_REF_REL_MARGIN
-_QUALITY_GUARD_CODE_REF_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_CODE_REF_ABS_MARGIN
 _QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN = _kernel_quality.QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN
 _QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = _kernel_quality.QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN
 _QUALITY_GUARD_PREDICTION_COUNT_RATIO = _kernel_quality.QUALITY_GUARD_PREDICTION_COUNT_RATIO
@@ -4780,37 +4778,20 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
-    below_code_reference = False
-    code_delta: float | None = None
-    code_reference_comparison_score = _normalize_code_reference_score_for_comparison(
-        current=float(evaluation.value),
-        reference=code_reference_score,
+    code_reference_signal = _build_code_reference_quality_signal(
+        current_value=float(evaluation.value),
         metric=evaluation.metric,
+        code_reference_score=code_reference_score,
+        code_reference_source=code_reference_source,
+        direction=direction,
     )
-    if code_reference_score is not None:
-        reference_for_comparison = (
-            float(code_reference_comparison_score)
-            if code_reference_comparison_score is not None
-            else float(code_reference_score)
-        )
-        code_delta = _score_delta_vs_reference(float(evaluation.value), reference_for_comparison, direction)
-        below_code_reference = _is_significantly_worse(
-            current=float(evaluation.value),
-            reference=reference_for_comparison,
-            direction=direction,
-            rel_margin=_QUALITY_GUARD_CODE_REF_REL_MARGIN,
-            abs_margin=_QUALITY_GUARD_CODE_REF_ABS_MARGIN,
-        )
-        if below_code_reference:
-            reasons.append("below_code_reference_baseline")
-            warnings.append(
-                "code_reference_score="
-                f"{float(code_reference_score):.6f},current={float(evaluation.value):.6f},"
-                f"comparison_score={reference_for_comparison:.6f},"
-                f"delta={code_delta:+.6f},source={code_reference_source or 'unknown'}"
-            )
-            if not force_submit:
-                block_submit = True
+    if bool(code_reference_signal.get("below_reference")):
+        reasons.append("below_code_reference_baseline")
+        warning = code_reference_signal.get("warning")
+        if isinstance(warning, str) and warning:
+            warnings.append(warning)
+        if not force_submit:
+            block_submit = True
 
     allow_submit = not block_submit
     return {
@@ -4830,15 +4811,7 @@ def _build_kernel_quality_guard(
         "external_label_transfer": external_label_transfer,
         "candidate_selection_mismatch": candidate_selection_mismatch,
         "prediction_distribution_collapse": prediction_distribution_collapse,
-        "code_reference": {
-            "score": code_reference_score,
-            "comparison_score": code_reference_comparison_score,
-            "source": code_reference_source,
-            "delta_vs_current": code_delta,
-            "below_reference": below_code_reference,
-            "abs_margin": _QUALITY_GUARD_CODE_REF_ABS_MARGIN,
-            "rel_margin": _QUALITY_GUARD_CODE_REF_REL_MARGIN,
-        },
+        "code_reference": code_reference_signal,
     }
 
 

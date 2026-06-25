@@ -4,7 +4,7 @@ import math
 import re
 from collections.abc import Iterator
 
-from kagglebot import plan_policy, score_sources
+from kagglebot import plan_policy, score_progress, score_sources
 from kagglebot.autopilot_helpers import _to_float, _to_int
 from kagglebot.metric_matching import metrics_equivalent
 
@@ -263,6 +263,53 @@ def build_baseline_quality_signal(
         "best_score": best_score,
         "candidate_count": len(baseline_candidates),
         "selected_worse_than_baseline": selected_worse,
+    }
+
+
+def build_code_reference_quality_signal(
+    *,
+    current_value: float,
+    metric: str,
+    code_reference_score: float | None,
+    code_reference_source: str | None,
+    direction: str,
+) -> dict[str, object]:
+    comparison_score = score_progress.normalize_code_reference_score_for_comparison(
+        current=float(current_value),
+        reference=code_reference_score,
+        metric=metric,
+    )
+    delta: float | None = None
+    below_reference = False
+    warning: str | None = None
+    if code_reference_score is not None:
+        reference_for_comparison = (
+            float(comparison_score) if comparison_score is not None else float(code_reference_score)
+        )
+        delta = score_progress.score_delta_vs_reference(float(current_value), reference_for_comparison, direction)
+        below_reference = is_significantly_worse(
+            current=float(current_value),
+            reference=reference_for_comparison,
+            direction=direction,
+            rel_margin=QUALITY_GUARD_CODE_REF_REL_MARGIN,
+            abs_margin=QUALITY_GUARD_CODE_REF_ABS_MARGIN,
+        )
+        if below_reference:
+            warning = (
+                "code_reference_score="
+                f"{float(code_reference_score):.6f},current={float(current_value):.6f},"
+                f"comparison_score={reference_for_comparison:.6f},"
+                f"delta={delta:+.6f},source={code_reference_source or 'unknown'}"
+            )
+    return {
+        "score": code_reference_score,
+        "comparison_score": comparison_score,
+        "source": code_reference_source,
+        "delta_vs_current": delta,
+        "below_reference": below_reference,
+        "abs_margin": QUALITY_GUARD_CODE_REF_ABS_MARGIN,
+        "rel_margin": QUALITY_GUARD_CODE_REF_REL_MARGIN,
+        "warning": warning,
     }
 
 

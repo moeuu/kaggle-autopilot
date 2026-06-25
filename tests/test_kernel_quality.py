@@ -3,6 +3,7 @@ from __future__ import annotations
 from kagglebot.kernel_quality import (
     build_accuracy_potential,
     build_baseline_quality_signal,
+    build_code_reference_quality_signal,
     build_validation_metric_alignment,
     detect_candidate_selection_mismatch,
     detect_external_test_label_transfer_signal,
@@ -172,6 +173,39 @@ def test_build_baseline_quality_signal_handles_no_candidates() -> None:
         "candidate_count": 0,
         "selected_worse_than_baseline": False,
     }
+
+
+def test_build_code_reference_quality_signal_flags_below_reference() -> None:
+    signal = build_code_reference_quality_signal(
+        current_value=0.70,
+        metric="accuracy",
+        code_reference_score=0.76,
+        code_reference_source="code_index:user/ref",
+        direction="maximize",
+    )
+
+    assert signal["score"] == 0.76
+    assert signal["comparison_score"] == 0.76
+    assert signal["source"] == "code_index:user/ref"
+    assert round(float(signal["delta_vs_current"]), 6) == -0.06
+    assert signal["below_reference"] is True
+    assert "code_reference_score=0.760000" in str(signal["warning"])
+
+
+def test_build_code_reference_quality_signal_normalizes_percent_accuracy_reference() -> None:
+    signal = build_code_reference_quality_signal(
+        current_value=0.989,
+        metric="accuracy",
+        code_reference_score=98.9,
+        code_reference_source="code_index:user/ref",
+        direction="maximize",
+    )
+
+    assert signal["score"] == 98.9
+    assert round(float(signal["comparison_score"]), 6) == 0.989
+    assert round(float(signal["delta_vs_current"]), 6) == 0.0
+    assert signal["below_reference"] is False
+    assert signal["warning"] is None
 
 
 def test_detect_external_test_label_transfer_signal_requires_specific_leak_pattern() -> None:
