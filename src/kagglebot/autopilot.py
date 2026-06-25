@@ -277,6 +277,9 @@ _effective_best_score_for_progress = _score_progress.effective_best_score_for_pr
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
 _evaluation_to_payload = _iteration_metrics.evaluation_to_payload
 _build_metrics_payload = _iteration_metrics.build_metrics_payload
+_append_run_evaluation_report = _iteration_metrics.append_run_evaluation_report
+_resume_best_readiness_score = _iteration_metrics.resume_best_readiness_score
+_resume_noise_guard_state = _iteration_metrics.resume_noise_guard_state
 _infer_campaign_candidate_category = _campaign_metrics.infer_campaign_candidate_category
 _infer_campaign_model_family = _campaign_metrics.infer_campaign_model_family
 _infer_campaign_feature_set = _campaign_metrics.infer_campaign_feature_set
@@ -5398,86 +5401,6 @@ def _iter_split_indices(*, name: str, splitter: object, x: np.ndarray, y: np.nda
         yield from splitter.split(x, y)  # type: ignore[union-attr]
         return
     yield from splitter.split(x, y)  # type: ignore[union-attr]
-
-
-def _append_run_evaluation_report(*, run_dir: Path, iteration: int, payload: dict[str, object]) -> None:
-    path = run_dir / "evaluation_report.json"
-    state: dict[str, object] = {"latest_iteration": iteration, "latest": payload, "history": [payload]}
-    existing = _load_json_object(path)
-    if existing is not None:
-        history_raw = existing.get("history", [])
-        if isinstance(history_raw, list):
-            history = [item for item in history_raw if isinstance(item, dict)]
-        else:
-            history = []
-        history = [item for item in history if item.get("iteration") != iteration]
-        history.append(payload)
-        history.sort(key=lambda item: int(item.get("iteration", 0)))
-        state["history"] = history
-    state["latest_iteration"] = iteration
-    state["latest"] = payload
-    _write_json_object(path, state)
-
-
-def _resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations: int) -> float | None:
-    path = run_dir / "evaluation_report.json"
-    payload = _load_json_object(path)
-    if payload is None:
-        return None
-    history = payload.get("history")
-    if not isinstance(history, list):
-        latest = payload.get("latest")
-        history = [latest] if isinstance(latest, dict) else []
-    best: float | None = None
-    for item in history:
-        if not isinstance(item, dict):
-            continue
-        iteration = _to_int(item.get("iteration"))
-        if iteration is not None and iteration > max_iterations:
-            continue
-        score = _to_float(item.get("readiness_score"))
-        if score is None:
-            continue
-        if _update_best_score(best, score, direction, 0.0):
-            best = score
-    return best
-
-
-def _resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[float | None, int]:
-    path = run_dir / "evaluation_report.json"
-    payload = _load_json_object(path)
-    if payload is None:
-        return None, 0
-    history = payload.get("history")
-    if not isinstance(history, list):
-        latest = payload.get("latest")
-        history = [latest] if isinstance(latest, dict) else []
-    rows: list[dict[str, object]] = []
-    for item in history:
-        if not isinstance(item, dict):
-            continue
-        iteration = _to_int(item.get("iteration"))
-        if iteration is None or iteration > max_iterations:
-            continue
-        rows.append(item)
-    if not rows:
-        return None, 0
-    rows.sort(key=lambda item: int(_to_int(item.get("iteration")) or 0))
-    streak = 0
-    prev_score: float | None = None
-    for item in rows:
-        score = _to_float(item.get("readiness_score"))
-        std = _to_float(item.get("std"))
-        if score is None:
-            continue
-        if prev_score is not None and std is not None:
-            threshold = 0.5 * max(std, 0.0)
-            if abs(score - prev_score) < threshold:
-                streak += 1
-            else:
-                streak = 0
-        prev_score = score
-    return prev_score, streak
 
 
 def _count_daily_competition_submissions(slug: str, *, dry_run: bool = False) -> int | None:

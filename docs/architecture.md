@@ -178,7 +178,8 @@ Recommended extraction order:
    now in `kernel_metrics.py`.
    Kernel quality guard constants and payload-level detectors for subgroup collapse, external test-label transfer,
    candidate-selection mismatch, and prediction-distribution collapse are now in `kernel_quality.py`.
-   Iteration metrics payload assembly and evaluation-result serialization are now in `iteration_metrics.py`.
+   Iteration metrics payload assembly, evaluation-result serialization, and run evaluation-report resume/persistence are
+   now in `iteration_metrics.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, artifact resolution, deterministic file repair preparation, same-fingerprint retry allowance, and
    submit retry decisions are now extracted.

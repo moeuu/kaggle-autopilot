@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from kagglebot.eval import EvaluationReport
-from kagglebot.iteration_metrics import build_metrics_payload, evaluation_to_payload
+from kagglebot.iteration_metrics import (
+    append_run_evaluation_report,
+    build_metrics_payload,
+    evaluation_to_payload,
+    resume_best_readiness_score,
+    resume_noise_guard_state,
+)
 from kagglebot.solver.evaluate import EvaluationResult
 
 
@@ -116,3 +122,53 @@ def test_build_metrics_payload_includes_readiness_and_offline_sources() -> None:
     assert payload["evaluation_contract"] == {"faithful": True}
     assert payload["competition_faithfulness"] == {"faithful": True}
     assert payload["accuracy_potential"] == {"status": "frontier"}
+
+
+def test_append_run_evaluation_report_recovers_invalid_existing_report(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    report_path = run_dir / "evaluation_report.json"
+    report_path.write_text("{", encoding="utf-8")
+
+    append_run_evaluation_report(
+        run_dir=run_dir,
+        iteration=1,
+        payload={"iteration": 1, "readiness_score": 0.42},
+    )
+
+    assert report_path.read_text(encoding="utf-8").strip().startswith("{")
+    best = resume_best_readiness_score(run_dir=run_dir, direction="maximize", max_iterations=1)
+    assert best == 0.42
+
+
+def test_resume_best_readiness_score_honors_direction_and_max_iteration(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    append_run_evaluation_report(run_dir=run_dir, iteration=1, payload={"iteration": 1, "readiness_score": 0.50})
+    append_run_evaluation_report(run_dir=run_dir, iteration=2, payload={"iteration": 2, "readiness_score": 0.40})
+    append_run_evaluation_report(run_dir=run_dir, iteration=3, payload={"iteration": 3, "readiness_score": 0.30})
+
+    assert resume_best_readiness_score(run_dir=run_dir, direction="minimize", max_iterations=2) == 0.40
+    assert resume_best_readiness_score(run_dir=run_dir, direction="maximize", max_iterations=2) == 0.50
+
+
+def test_resume_noise_guard_state_counts_small_changes(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    append_run_evaluation_report(
+        run_dir=run_dir,
+        iteration=1,
+        payload={"iteration": 1, "readiness_score": 0.500, "std": 0.02},
+    )
+    append_run_evaluation_report(
+        run_dir=run_dir,
+        iteration=2,
+        payload={"iteration": 2, "readiness_score": 0.505, "std": 0.02},
+    )
+    append_run_evaluation_report(
+        run_dir=run_dir,
+        iteration=3,
+        payload={"iteration": 3, "readiness_score": 0.508, "std": 0.02},
+    )
+
+    assert resume_noise_guard_state(run_dir=run_dir, max_iterations=3) == (0.508, 2)

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
+from kagglebot.json_utils import load_json_object, write_json_object
 
 if TYPE_CHECKING:
     from kagglebot.eval import EvaluationReport
@@ -90,3 +94,78 @@ def build_metrics_payload(
     if accuracy_potential:
         payload["accuracy_potential"] = accuracy_potential
     return payload
+
+
+def append_run_evaluation_report(*, run_dir: Path, iteration: int, payload: dict[str, object]) -> None:
+    path = run_dir / "evaluation_report.json"
+    state: dict[str, object] = {"latest_iteration": iteration, "latest": payload, "history": [payload]}
+    existing = load_json_object(path)
+    if existing is not None:
+        history_raw = existing.get("history", [])
+        if isinstance(history_raw, list):
+            history = [item for item in history_raw if isinstance(item, dict)]
+        else:
+            history = []
+        history = [item for item in history if item.get("iteration") != iteration]
+        history.append(payload)
+        history.sort(key=lambda item: int(item.get("iteration", 0)))
+        state["history"] = history
+    state["latest_iteration"] = iteration
+    state["latest"] = payload
+    write_json_object(path, state)
+
+
+def resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations: int) -> float | None:
+    payload = load_json_object(run_dir / "evaluation_report.json")
+    if payload is None:
+        return None
+    history = _evaluation_history(payload)
+    best: float | None = None
+    for item in history:
+        iteration = _to_int(item.get("iteration"))
+        if iteration is not None and iteration > max_iterations:
+            continue
+        score = _to_float(item.get("readiness_score"))
+        if score is None:
+            continue
+        if _update_best_score(best, score, direction, 0.0):
+            best = score
+    return best
+
+
+def resume_noise_guard_state(*, run_dir: Path, max_iterations: int) -> tuple[float | None, int]:
+    payload = load_json_object(run_dir / "evaluation_report.json")
+    if payload is None:
+        return None, 0
+    rows: list[dict[str, object]] = []
+    for item in _evaluation_history(payload):
+        iteration = _to_int(item.get("iteration"))
+        if iteration is None or iteration > max_iterations:
+            continue
+        rows.append(item)
+    if not rows:
+        return None, 0
+    rows.sort(key=lambda item: int(_to_int(item.get("iteration")) or 0))
+    streak = 0
+    prev_score: float | None = None
+    for item in rows:
+        score = _to_float(item.get("readiness_score"))
+        std = _to_float(item.get("std"))
+        if score is None:
+            continue
+        if prev_score is not None and std is not None:
+            threshold = 0.5 * max(std, 0.0)
+            if abs(score - prev_score) < threshold:
+                streak += 1
+            else:
+                streak = 0
+        prev_score = score
+    return prev_score, streak
+
+
+def _evaluation_history(payload: dict[str, object]) -> list[dict[str, object]]:
+    history = payload.get("history")
+    if not isinstance(history, list):
+        latest = payload.get("latest")
+        history = [latest] if isinstance(latest, dict) else []
+    return [item for item in history if isinstance(item, dict)]
