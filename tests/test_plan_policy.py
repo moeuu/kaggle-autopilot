@@ -27,6 +27,7 @@ from kagglebot.plan_policy import (
     resolve_deliverable_mode,
     resolve_split_strategy_from_artifacts,
     resolve_submit_mode,
+    resolve_target_metric_direction,
     upgrade_improvement_mode,
 )
 
@@ -101,6 +102,75 @@ def test_extract_evaluation_spec_values_ignores_wrong_shapes() -> None:
     assert values.readiness_method is None
     assert values.drift_enabled is None
     assert values.stop_no_improve_patience is None
+
+
+def test_resolve_target_metric_direction_applies_competition_override() -> None:
+    decision = resolve_target_metric_direction(
+        target_metric="accuracy",
+        target_direction="maximize",
+        spec_metric="accuracy",
+        spec_direction="maximize",
+        explicit_target_metric=False,
+        explicit_target_direction=False,
+        strict_competition_metric=True,
+        competition_override={
+            "metric_name": "Geometric Mean of the BLEU and the chrF++ scores",
+            "direction": "maximize",
+            "split_strategy": "group_kfold",
+        },
+    )
+
+    assert decision.target_metric == "Geometric Mean of the BLEU and the chrF++ scores"
+    assert decision.target_direction == "maximize"
+    assert decision.override_split_strategy == "group_kfold"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: competition override is active; "
+        "forcing target_metric 'accuracy' -> 'Geometric Mean of the BLEU and the chrF++ scores'.",
+    )
+
+
+def test_resolve_target_metric_direction_strict_mode_uses_spec_when_not_explicit() -> None:
+    decision = resolve_target_metric_direction(
+        target_metric="accuracy",
+        target_direction="maximize",
+        spec_metric="rmse",
+        spec_direction="minimize",
+        explicit_target_metric=False,
+        explicit_target_direction=False,
+        strict_competition_metric=True,
+        competition_override={},
+    )
+
+    assert decision.target_metric == "rmse"
+    assert decision.target_direction == "minimize"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: strict competition metric mode is enabled; "
+        "overriding target_metric 'accuracy' -> 'rmse'.",
+        "[yellow]note[/yellow]: strict competition metric mode is enabled; "
+        "overriding target_direction 'maximize' -> 'minimize'.",
+    )
+
+
+def test_resolve_target_metric_direction_strict_mode_keeps_explicit_values() -> None:
+    decision = resolve_target_metric_direction(
+        target_metric="balanced_accuracy",
+        target_direction="maximize",
+        spec_metric="accuracy",
+        spec_direction="minimize",
+        explicit_target_metric=True,
+        explicit_target_direction=True,
+        strict_competition_metric=True,
+        competition_override={},
+    )
+
+    assert decision.target_metric == "balanced_accuracy"
+    assert decision.target_direction == "maximize"
+    assert decision.messages == (
+        "[yellow]note[/yellow]: strict competition metric mode is enabled, "
+        "but keeping explicit target_metric 'balanced_accuracy' over evaluation_spec metric 'accuracy'.",
+        "[yellow]note[/yellow]: strict competition metric mode is enabled, "
+        "but keeping explicit target_direction 'maximize' over evaluation_spec direction 'minimize'.",
+    )
 
 
 def test_infer_split_strategy_from_hint_text_handles_natural_language() -> None:

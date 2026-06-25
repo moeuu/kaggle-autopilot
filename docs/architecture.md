@@ -221,8 +221,9 @@ small extractions that make import direction clearer over broad refactors that o
 
 Recommended extraction order:
 
-1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization, score-source
-   normalization, evaluation-spec value extraction, and competition-specific overrides are already out of the main loop.
+1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization,
+   metric/direction override policy, score-source normalization, evaluation-spec value extraction, and
+   competition-specific overrides are already out of the main loop.
 2. Submission decision policy: keep moving candidate quality holdback, forced-submit reasons, and submit deferral into
    `submission_policy.py` until the loop consumes one explicit end-to-end submit decision object. Plan-level
    submit-policy and submission-gate resolution now also lives there.

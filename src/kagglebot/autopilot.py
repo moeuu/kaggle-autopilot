@@ -171,9 +171,6 @@ from kagglebot.method_scout import (
     run_method_scout,
 )
 from kagglebot.metric_matching import (
-    canonical_metric_name_for_match as _canonical_metric_name_for_match,
-)
-from kagglebot.metric_matching import (
     infer_metric_direction_for_mismatch as _infer_metric_direction_for_mismatch,
 )
 from kagglebot.metric_matching import (
@@ -3436,61 +3433,21 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     target_score = choose(config.target_score, plan.target_score, spec_values.readiness_target_score)
     target_direction = choose(config.target_direction, plan.target_direction, spec_values.direction or "auto")
     competition_override = _plan_policy.competition_eval_override(config.paths.slug)
-    override_metric = str(competition_override.get("metric_name") or "").strip()
-    override_direction = str(competition_override.get("direction") or "").strip().lower()
-    override_split_strategy = str(competition_override.get("split_strategy") or "").strip()
-    if override_metric:
-        requested_metric = str(target_metric or "").strip()
-        if requested_metric and not _metrics_equivalent(requested_metric, override_metric):
-            print(
-                "[yellow]note[/yellow]: competition override is active; "
-                f"forcing target_metric '{requested_metric}' -> '{override_metric}'."
-            )
-        target_metric = override_metric
-    if override_direction in {"minimize", "maximize"}:
-        requested_direction = str(target_direction or "").strip().lower()
-        if requested_direction and requested_direction != override_direction:
-            print(
-                "[yellow]note[/yellow]: competition override is active; "
-                f"forcing target_direction '{requested_direction}' -> '{override_direction}'."
-            )
-        target_direction = override_direction
-    # Competition-specific overrides are authoritative and must not be undone by a stale
-    # evaluation_spec.json contract from an earlier iteration.
-    if strict_competition_metric and spec_values.metric_name and not competition_override:
-        requested_metric = target_metric if isinstance(target_metric, str) else None
-        requested_metric_norm = _canonical_metric_name_for_match(requested_metric)
-        spec_metric_norm = _canonical_metric_name_for_match(spec_values.metric_name)
-        if requested_metric_norm != spec_metric_norm:
-            if explicit_target_metric and requested_metric:
-                print(
-                    "[yellow]note[/yellow]: strict competition metric mode is enabled, "
-                    "but keeping explicit target_metric "
-                    f"'{requested_metric}' over evaluation_spec metric '{spec_values.metric_name}'."
-                )
-            elif requested_metric:
-                print(
-                    "[yellow]note[/yellow]: strict competition metric mode is enabled; "
-                    f"overriding target_metric '{requested_metric}' -> '{spec_values.metric_name}'."
-                )
-                target_metric = spec_values.metric_name
-            else:
-                target_metric = spec_values.metric_name
-        if spec_values.direction in {"minimize", "maximize"}:
-            requested_direction = str(target_direction or "").strip().lower()
-            if requested_direction != spec_values.direction:
-                if explicit_target_direction and requested_direction:
-                    print(
-                        "[yellow]note[/yellow]: strict competition metric mode is enabled, "
-                        "but keeping explicit target_direction "
-                        f"'{requested_direction}' over evaluation_spec direction '{spec_values.direction}'."
-                    )
-                else:
-                    print(
-                        "[yellow]note[/yellow]: strict competition metric mode is enabled; "
-                        f"overriding target_direction '{requested_direction or 'auto'}' -> '{spec_values.direction}'."
-                    )
-                    target_direction = spec_values.direction
+    metric_direction_decision = _plan_policy.resolve_target_metric_direction(
+        target_metric=target_metric,
+        target_direction=target_direction,
+        spec_metric=spec_values.metric_name,
+        spec_direction=spec_values.direction,
+        explicit_target_metric=explicit_target_metric,
+        explicit_target_direction=explicit_target_direction,
+        strict_competition_metric=strict_competition_metric,
+        competition_override=competition_override,
+    )
+    target_metric = metric_direction_decision.target_metric
+    target_direction = metric_direction_decision.target_direction
+    override_split_strategy = metric_direction_decision.override_split_strategy
+    for message in metric_direction_decision.messages:
+        print(message)
     score_source = str(choose(config.score_source, plan.score_source, "cv") or "cv")
     normalized_score_source = _score_sources.normalize_score_source_name(score_source)
     if normalized_score_source not in {"cv", "holdout"}:

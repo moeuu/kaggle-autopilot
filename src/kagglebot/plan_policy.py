@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 
 from kagglebot.json_utils import load_json_object
+from kagglebot.metric_matching import canonical_metric_name_for_match, metrics_equivalent
 from kagglebot.paths import CompetitionPaths
 from kagglebot.score_sources import DEFAULT_ACCEPTED_SCORE_SOURCES, normalize_score_source_list
 from kagglebot.solver.metrics import canonical_metric
@@ -53,6 +54,14 @@ class EvaluationSpecValues:
     stop_same_config_patience: int | None = None
 
 
+@dataclass(frozen=True)
+class TargetMetricDirectionDecision:
+    target_metric: object
+    target_direction: object
+    override_split_strategy: str
+    messages: tuple[str, ...] = ()
+
+
 def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:
     """Extract typed values from the persisted evaluation spec contract."""
 
@@ -97,6 +106,91 @@ def _int_or_none(value: object) -> int | None:
 
 def _number_or_none(value: object) -> int | float | None:
     return value if isinstance(value, (int, float)) else None
+
+
+def resolve_target_metric_direction(
+    *,
+    target_metric: object,
+    target_direction: object,
+    spec_metric: str | None,
+    spec_direction: str | None,
+    explicit_target_metric: bool,
+    explicit_target_direction: bool,
+    strict_competition_metric: bool,
+    competition_override: dict[str, str],
+) -> TargetMetricDirectionDecision:
+    """Apply competition and evaluation-spec metric/direction policy."""
+
+    resolved_metric = target_metric
+    resolved_direction = target_direction
+    messages: list[str] = []
+
+    override_metric = str(competition_override.get("metric_name") or "").strip()
+    override_direction = str(competition_override.get("direction") or "").strip().lower()
+    override_split_strategy = str(competition_override.get("split_strategy") or "").strip()
+
+    if override_metric:
+        requested_metric = str(resolved_metric or "").strip()
+        if requested_metric and not metrics_equivalent(requested_metric, override_metric):
+            messages.append(
+                "[yellow]note[/yellow]: competition override is active; "
+                f"forcing target_metric '{requested_metric}' -> '{override_metric}'."
+            )
+        resolved_metric = override_metric
+
+    if override_direction in {"minimize", "maximize"}:
+        requested_direction = str(resolved_direction or "").strip().lower()
+        if requested_direction and requested_direction != override_direction:
+            messages.append(
+                "[yellow]note[/yellow]: competition override is active; "
+                f"forcing target_direction '{requested_direction}' -> '{override_direction}'."
+            )
+        resolved_direction = override_direction
+
+    # Competition-specific overrides are authoritative and must not be undone by a stale
+    # evaluation_spec.json contract from an earlier iteration.
+    if strict_competition_metric and spec_metric and not competition_override:
+        requested_metric = resolved_metric if isinstance(resolved_metric, str) else None
+        requested_metric_norm = canonical_metric_name_for_match(requested_metric)
+        spec_metric_norm = canonical_metric_name_for_match(spec_metric)
+        if requested_metric_norm != spec_metric_norm:
+            if explicit_target_metric and requested_metric:
+                messages.append(
+                    "[yellow]note[/yellow]: strict competition metric mode is enabled, "
+                    "but keeping explicit target_metric "
+                    f"'{requested_metric}' over evaluation_spec metric '{spec_metric}'."
+                )
+            elif requested_metric:
+                messages.append(
+                    "[yellow]note[/yellow]: strict competition metric mode is enabled; "
+                    f"overriding target_metric '{requested_metric}' -> '{spec_metric}'."
+                )
+                resolved_metric = spec_metric
+            else:
+                resolved_metric = spec_metric
+
+        if spec_direction in {"minimize", "maximize"}:
+            requested_direction = str(resolved_direction or "").strip().lower()
+            if requested_direction != spec_direction:
+                if explicit_target_direction and requested_direction:
+                    messages.append(
+                        "[yellow]note[/yellow]: strict competition metric mode is enabled, "
+                        "but keeping explicit target_direction "
+                        f"'{requested_direction}' over evaluation_spec direction '{spec_direction}'."
+                    )
+                else:
+                    messages.append(
+                        "[yellow]note[/yellow]: strict competition metric mode is enabled; "
+                        f"overriding target_direction '{requested_direction or 'auto'}' -> '{spec_direction}'."
+                    )
+                    resolved_direction = spec_direction
+
+    return TargetMetricDirectionDecision(
+        target_metric=resolved_metric,
+        target_direction=resolved_direction,
+        override_split_strategy=override_split_strategy,
+        messages=tuple(messages),
+    )
 
 
 def normalize_split_strategy_name(value: object) -> str | None:
