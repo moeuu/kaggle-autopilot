@@ -26,6 +26,7 @@ from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import plan_policy as _plan_policy
+from kagglebot import score_progress as _score_progress
 from kagglebot import score_sources as _score_sources
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
@@ -257,6 +258,24 @@ _load_ensemble_reference_notebook = _code_reference.load_ensemble_reference_note
 _load_required_reference_notebook = _code_reference.load_required_reference_notebook
 _reference_requires_tabicl = _code_reference.reference_requires_tabicl
 _validate_code_reference_implementation = _code_reference.validate_code_reference_implementation
+MAJOR_TOP1_GAP = _score_progress.MAJOR_TOP1_GAP
+MODERATE_TOP1_GAP = _score_progress.MODERATE_TOP1_GAP
+_BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = _score_progress.BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN
+_BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = _score_progress.BEST_SCORE_OUTLIER_TOP1_REL_MARGIN
+_REGRESSION_GUARD_ABS_DROP_PROB = _score_progress.REGRESSION_GUARD_ABS_DROP_PROB
+_REGRESSION_GUARD_ABS_DROP_DEFAULT = _score_progress.REGRESSION_GUARD_ABS_DROP_DEFAULT
+_CONSERVATIVE_COLLAPSE_MAX_FEATURES = _score_progress.CONSERVATIVE_COLLAPSE_MAX_FEATURES
+_resolve_explicit_official_metric_override = _score_progress.resolve_explicit_official_metric_override
+_is_confirmed_first_place = _score_progress.is_confirmed_first_place
+_classify_improvement_mode = _score_progress.classify_improvement_mode
+_score_delta_vs_reference = _score_progress.score_delta_vs_reference
+_normalize_code_reference_score_for_comparison = _score_progress.normalize_code_reference_score_for_comparison
+_score_drop_vs_best = _score_progress.score_drop_vs_best
+_regression_drop_threshold = _score_progress.regression_drop_threshold
+_is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
+_is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
+_effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
+_should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
 
 
 def _classify_submit_failure_repair(
@@ -346,8 +365,6 @@ MAX_KERNEL_FIX_CODEX_PASSES = 3
 MAX_AGENT_CAPACITY_ATTEMPTS = 3
 AGENT_CAPACITY_RETRY_SLEEP = 5.0
 _WATCH_STATE_ENV = "KAGGLEBOT_WATCH_STATE_PATH"
-MAJOR_TOP1_GAP = 0.03
-MODERATE_TOP1_GAP = 0.01
 _ERROR_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
 _ERROR_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
 _ERROR_STRATEGY_MODEL = STRATEGY_AGENT.model
@@ -400,11 +417,6 @@ _QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = 0.01
 _QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
 _QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
 _HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
-_BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = 0.02
-_BEST_SCORE_OUTLIER_TOP1_REL_MARGIN = 0.01
-_REGRESSION_GUARD_ABS_DROP_PROB = 0.03
-_REGRESSION_GUARD_ABS_DROP_DEFAULT = 0.10
-_CONSERVATIVE_COLLAPSE_MAX_FEATURES = 5
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 _COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
     "sample",
@@ -10289,140 +10301,6 @@ def _record_submission_knowledge(
         )
 
 
-def _resolve_explicit_official_metric_override(
-    payload: dict[str, object] | None,
-    *,
-    target_metric: str | None,
-    evaluation_metric: str | None,
-) -> str | None:
-    """Trust an explicitly declared official kernel metric over a stale generic fallback target."""
-    if not isinstance(payload, dict):
-        return None
-    raw_official = payload.get("official_metric")
-    if not isinstance(raw_official, str) or not raw_official.strip():
-        return None
-    official_metric = raw_official.strip()
-    if not evaluation_metric or not _metrics_equivalent(official_metric, evaluation_metric):
-        return None
-    if not target_metric or _metrics_equivalent(official_metric, target_metric):
-        return None
-    generic_fallback_metrics = {
-        "accuracy",
-        "auc",
-        "average_precision",
-        "brier_score",
-        "f1",
-        "logloss",
-        "mae",
-        "mape",
-        "mse",
-        "precision",
-        "r2",
-        "recall",
-        "rmse",
-        "rmsle",
-    }
-    if canonical_metric(target_metric) not in generic_fallback_metrics:
-        return None
-    return official_metric
-
-
-def _is_confirmed_first_place(rank: int | None, source: str | None) -> bool:
-    if rank != 1:
-        return False
-    if source is None:
-        return True
-    normalized = source.strip().lower()
-    return normalized not in {"leaderboard_score_estimate", "score_estimate"}
-
-
-def _classify_improvement_mode(value: float, top1_score: float | None, direction: str) -> tuple[str, float | None]:
-    if top1_score is None:
-        return "major_overhaul", None
-    gap = top1_score - value if direction == "maximize" else value - top1_score
-    if gap >= MAJOR_TOP1_GAP:
-        return "major_overhaul", gap
-    if gap >= MODERATE_TOP1_GAP:
-        return "moderate_update", gap
-    return "minor_tuning", gap
-
-
-def _score_delta_vs_reference(current: float, reference: float, direction: str) -> float:
-    """Return signed delta where positive means current is better than reference."""
-    if direction == "minimize":
-        return reference - current
-    return current - reference
-
-
-def _normalize_code_reference_score_for_comparison(
-    *,
-    current: float,
-    reference: float | None,
-    metric: str,
-) -> float | None:
-    if reference is None:
-        return None
-    metric_name = canonical_metric(metric)
-    bounded_classification_metrics = {
-        "accuracy",
-        "auc",
-        "f1",
-        "precision",
-        "recall",
-        "average_precision",
-    }
-    current_value = float(current)
-    reference_value = float(reference)
-    if metric_name in bounded_classification_metrics and 0.0 <= current_value <= 1.0 and 1.0 < reference_value <= 100.0:
-        return reference_value / 100.0
-    return reference_value
-
-
-def _score_drop_vs_best(*, best_score: float | None, current_score: float, direction: str) -> float | None:
-    if best_score is None:
-        return None
-    if direction == "maximize":
-        return float(best_score) - float(current_score)
-    return float(current_score) - float(best_score)
-
-
-def _regression_drop_threshold(*, metric: str, direction: str) -> float:
-    if direction == "maximize":
-        metric_name = canonical_metric(metric)
-        if metric_name in {"auc", "accuracy", "f1", "precision", "recall", "average_precision", "r2", "r_squared"}:
-            return _REGRESSION_GUARD_ABS_DROP_PROB
-    return _REGRESSION_GUARD_ABS_DROP_DEFAULT
-
-
-def _is_severe_regression_vs_best(
-    *, metric: str, direction: str, best_score: float | None, current_score: float
-) -> bool:
-    drop = _score_drop_vs_best(best_score=best_score, current_score=current_score, direction=direction)
-    if drop is None:
-        return False
-    threshold = _regression_drop_threshold(metric=metric, direction=direction)
-    return drop > threshold
-
-
-def _is_conservative_feature_collapse(payload: dict[str, object] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    robust_subset_payload = payload.get("robust_subset_report")
-    if not isinstance(robust_subset_payload, dict):
-        return False
-    selected_feature_count_raw = payload.get("selected_feature_count")
-    selected_feature_count = (
-        int(selected_feature_count_raw) if isinstance(selected_feature_count_raw, (int, float)) else None
-    )
-    selected_features = robust_subset_payload.get("selected_features")
-    selected_subset_size = len(selected_features) if isinstance(selected_features, list) else None
-    if selected_feature_count is not None and selected_feature_count <= _CONSERVATIVE_COLLAPSE_MAX_FEATURES:
-        return True
-    if selected_subset_size is not None and selected_subset_size <= _CONSERVATIVE_COLLAPSE_MAX_FEATURES:
-        return True
-    return False
-
-
 def _best_kernel_snapshot_path(run_dir: Path) -> Path:
     return run_dir / _BEST_KERNEL_SNAPSHOT_FILENAME
 
@@ -10459,50 +10337,6 @@ def _restore_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> 
     return True
 
 
-def _effective_best_score_for_progress(
-    *,
-    prev_best: float | None,
-    current_score: float,
-    top1_score: float | None,
-    direction: str,
-) -> tuple[float | None, dict[str, object] | None]:
-    """
-    Clamp an implausible previous best into a top1-proximate band before no-improve checks.
-
-    This avoids driving improvement-mode escalation from a stale outlier best score.
-    """
-    if prev_best is None or top1_score is None:
-        return prev_best, None
-
-    margin = _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN + (
-        _BEST_SCORE_OUTLIER_TOP1_REL_MARGIN * max(abs(float(top1_score)), 1.0)
-    )
-    if direction == "maximize":
-        cap = float(top1_score) + margin
-        if float(prev_best) > cap and float(current_score) <= cap:
-            return cap, {
-                "applied": True,
-                "reason": "clip_prev_best_above_top1_band",
-                "prev_best": float(prev_best),
-                "effective_best": cap,
-                "top1_score": float(top1_score),
-                "margin": float(margin),
-            }
-        return prev_best, None
-
-    floor = float(top1_score) - margin
-    if float(prev_best) < floor and float(current_score) >= floor:
-        return floor, {
-            "applied": True,
-            "reason": "clip_prev_best_below_top1_band",
-            "prev_best": float(prev_best),
-            "effective_best": floor,
-            "top1_score": float(top1_score),
-            "margin": float(margin),
-        }
-    return prev_best, None
-
-
 def _build_code_reference_repair_prompt(
     *,
     base_prompt_text: str,
@@ -10530,20 +10364,3 @@ def _build_code_reference_repair_prompt(
         "## Original Improvement Context\n\n"
         f"{base_prompt_text}\n"
     )
-
-
-def _should_update_best_accuracy_candidate(
-    *,
-    current_potential: dict[str, object],
-    best_potential: dict[str, object] | None,
-    current_score: float,
-    best_score: float | None,
-    direction: str,
-) -> bool:
-    if best_potential is None or best_score is None:
-        return True
-    current_priority = _to_int(current_potential.get("frontier_priority")) or 0
-    best_priority = _to_int(best_potential.get("frontier_priority")) or 0
-    if current_priority != best_priority:
-        return current_priority > best_priority
-    return _update_best_score(best_score, current_score, direction, 0.0)
