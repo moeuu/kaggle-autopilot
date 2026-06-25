@@ -114,9 +114,10 @@ Shared JSON object loading lives in `src/kagglebot/json_utils.py` so policy and 
 permissive artifact reads.
 Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful submit result normalization,
 submit-error classification normalization, submit-error retry/abort decisions, submission outcome abort/classification
-decisions, rank payload/guard/display normalization, iteration submit-status formatting, and campaign-aware submission
-message/score tracking resolution live in `src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit` into typed
-file-submit/notebook-submit stage services.
+decisions, poll-result outcome normalization/detail construction, rank payload/guard/display normalization,
+iteration submit-status formatting, and campaign-aware submission message/score tracking resolution live in
+`src/kagglebot/submit_stage.py`, starting the split of `_attempt_submit` into typed file-submit/notebook-submit stage
+services.
 
 For each iteration:
 1. Train (`local_gpu` or Kaggle kernel mode)
@@ -342,7 +343,8 @@ Recommended extraction order:
    submit-kernel error wrapping, and notebook submit exception/retry orchestration are extracted. Initial submit-stage mode
    decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-error classification normalization, submit-error retry/abort decisions, submission
-   outcome abort/classification decisions, rank payload/guard/display normalization, iteration submit-status formatting,
+   outcome abort/classification and poll-result post-processing decisions, rank payload/guard/display normalization,
+   iteration submit-status formatting,
    campaign-aware submission message resolution, submission iteration inference, tracking score selection, submission
    knowledge orchestration/context/default-insight preparation/record dispatch resolution, file-submit-to-notebook
    fallback decisions, and submission outcome polling orchestration are now in `submit_stage.py`; submission knowledge

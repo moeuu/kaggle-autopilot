@@ -5447,47 +5447,35 @@ def _attempt_submit(
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
-    if isinstance(outcome, dict):
-        outcome_status = _submit_stage.normalize_submission_outcome_status(outcome.get("status"))
-        outcome["status"] = outcome_status
-        raw_detail = ""
-        if outcome_status in _submit_stage.FAILED_SUBMISSION_OUTCOME_STATUSES or (
-            outcome_status in _submit_stage.SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
-            and outcome.get("score") is None
-            and infer_deliverable_mode_from_paths(config.paths, default="leaderboard") == "leaderboard"
-        ):
-            raw_detail = _submit_stage.build_submission_outcome_error_detail(
-                slug=config.slug,
-                message=message,
-                submitted_at=submitted_at,
-                outcome=outcome,
-                fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
-                normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
-            )
-        outcome_abort_decision = _submit_stage.decide_submission_outcome_abort(
-            outcome_status=outcome_status,
-            outcome_score=outcome.get("score"),
-            deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
-            raw_detail=raw_detail,
+    outcome_post_poll = _submit_stage.evaluate_submission_outcome_after_poll(
+        slug=config.slug,
+        message=message,
+        submitted_at=submitted_at,
+        outcome=outcome,
+        deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
+        fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
+        normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
+    )
+    outcome = outcome_post_poll.outcome
+    outcome_abort_decision = outcome_post_poll.abort_decision
+    if outcome_abort_decision.should_abort:
+        return _abort_submit_for_run(
+            config=config,
+            run_id=run_id,
+            problem_types=problem_types,
+            submission_ref=submission_ref,
+            submission_artifact_path=submission_for_submit_path,
+            artifact_mode=submission_artifact_mode,
+            code_fingerprint=submit_code_fingerprint,
+            fingerprint=compute_error_fingerprint("", outcome_abort_decision.detail),
+            error_kind=outcome_abort_decision.error_kind,
+            reason=outcome_abort_decision.reason,
+            message=outcome_abort_decision.message,
+            stdout_tail="",
+            stderr_tail=outcome_abort_decision.detail,
+            exit_code=None,
+            submit_attempt_recorder=submit_attempt_recorder,
         )
-        if outcome_abort_decision.should_abort:
-            return _abort_submit_for_run(
-                config=config,
-                run_id=run_id,
-                problem_types=problem_types,
-                submission_ref=submission_ref,
-                submission_artifact_path=submission_for_submit_path,
-                artifact_mode=submission_artifact_mode,
-                code_fingerprint=submit_code_fingerprint,
-                fingerprint=compute_error_fingerprint("", outcome_abort_decision.detail),
-                error_kind=outcome_abort_decision.error_kind,
-                reason=outcome_abort_decision.reason,
-                message=outcome_abort_decision.message,
-                stdout_tail="",
-                stderr_tail=outcome_abort_decision.detail,
-                exit_code=None,
-                submit_attempt_recorder=submit_attempt_recorder,
-            )
 
     outcome_recording = _submit_attempts.decide_submit_outcome_recording(
         outcome=outcome,

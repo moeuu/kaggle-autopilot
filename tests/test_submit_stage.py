@@ -15,6 +15,7 @@ from kagglebot.submit_stage import (
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
     ensure_submission_problem_insights,
+    evaluate_submission_outcome_after_poll,
     find_campaign_candidate_for_submission,
     format_iteration_submit_status_message,
     format_rank_force_reason,
@@ -726,6 +727,60 @@ def test_build_submission_outcome_error_detail_falls_back_to_raw_payload() -> No
     )
 
     assert 'Kaggle submission raw payload: "raw failure"' in detail
+
+
+def test_evaluate_submission_outcome_after_poll_normalizes_and_aborts_scoreless_leaderboard() -> None:
+    rows = [
+        {
+            "description": "target message",
+            "status": "SubmissionStatus.COMPLETE",
+            "publicScore": "",
+            "errorDescription": "Submission Scoring Error: incorrect format",
+            "date": "2026-06-25T00:41:17Z",
+        }
+    ]
+
+    decision = evaluate_submission_outcome_after_poll(
+        slug="demo",
+        message="target message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        outcome={"status": "SubmissionStatus.COMPLETE", "score": None, "raw": {"status": "complete"}},
+        deliverable_mode="leaderboard",
+        fetch_submission_rows=lambda slug: rows,
+        normalize_detail=lambda text: text,
+    )
+
+    assert isinstance(decision.outcome, dict)
+    assert decision.outcome["status"] == "complete"
+    assert decision.abort_decision.should_abort is True
+    assert decision.abort_decision.reason == "submission_poll_status_complete_no_score"
+    assert "Submission Scoring Error" in decision.abort_decision.detail
+
+
+def test_evaluate_submission_outcome_after_poll_allows_writeup_and_non_dict_outcomes() -> None:
+    writeup = evaluate_submission_outcome_after_poll(
+        slug="demo",
+        message="target message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        outcome={"status": "SubmissionStatus.COMPLETE", "score": None},
+        deliverable_mode="writeup",
+        fetch_submission_rows=lambda slug: [],
+        normalize_detail=lambda text: text,
+    )
+    missing = evaluate_submission_outcome_after_poll(
+        slug="demo",
+        message="target message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        outcome=None,
+        deliverable_mode="leaderboard",
+        fetch_submission_rows=lambda slug: [],
+        normalize_detail=lambda text: text,
+    )
+
+    assert writeup.outcome == {"status": "complete", "score": None}
+    assert writeup.abort_decision.should_abort is False
+    assert missing.outcome is None
+    assert missing.abort_decision.should_abort is False
 
 
 def test_run_submit_stage_attempt_uses_file_submit_result_path(tmp_path: Path) -> None:

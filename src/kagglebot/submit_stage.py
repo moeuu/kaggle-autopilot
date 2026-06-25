@@ -88,6 +88,12 @@ class SubmitOutcomeAbortDecision:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class SubmissionOutcomePostPollDecision:
+    outcome: object
+    abort_decision: SubmitOutcomeAbortDecision
+
+
 FAILED_SUBMISSION_OUTCOME_STATUSES = {"error", "failed", "cancelled", "canceled"}
 SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES = {"complete", "completed"}
 
@@ -615,6 +621,50 @@ def decide_submission_outcome_abort(
         )
 
     return SubmitOutcomeAbortDecision(should_abort=False)
+
+
+def evaluate_submission_outcome_after_poll(
+    *,
+    slug: str,
+    message: str,
+    submitted_at: datetime,
+    outcome: object,
+    deliverable_mode: str,
+    fetch_submission_rows: Callable[[str], list[dict[str, str]]],
+    normalize_detail: Callable[[str], str],
+) -> SubmissionOutcomePostPollDecision:
+    if not isinstance(outcome, dict):
+        return SubmissionOutcomePostPollDecision(
+            outcome=outcome,
+            abort_decision=SubmitOutcomeAbortDecision(should_abort=False),
+        )
+
+    normalized_outcome = dict(outcome)
+    outcome_status = normalize_submission_outcome_status(normalized_outcome.get("status"))
+    normalized_outcome["status"] = outcome_status
+    raw_detail = ""
+    if outcome_status in FAILED_SUBMISSION_OUTCOME_STATUSES or (
+        outcome_status in SCORELESS_COMPLETE_SUBMISSION_OUTCOME_STATUSES
+        and normalized_outcome.get("score") is None
+        and str(deliverable_mode or "").strip().lower() == "leaderboard"
+    ):
+        raw_detail = build_submission_outcome_error_detail(
+            slug=slug,
+            message=message,
+            submitted_at=submitted_at,
+            outcome=normalized_outcome,
+            fetch_submission_rows=fetch_submission_rows,
+            normalize_detail=normalize_detail,
+        )
+    return SubmissionOutcomePostPollDecision(
+        outcome=normalized_outcome,
+        abort_decision=decide_submission_outcome_abort(
+            outcome_status=outcome_status,
+            outcome_score=normalized_outcome.get("score"),
+            deliverable_mode=deliverable_mode,
+            raw_detail=raw_detail,
+        ),
+    )
 
 
 def wait_for_submission_outcome(
