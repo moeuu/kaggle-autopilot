@@ -5090,10 +5090,10 @@ def _attempt_submit(
             duplicate_sources=duplicate_sources,
         )
         submit_attempt_recorder.record_payloads(skip_payloads)
-        _submit_failure_context.mark_submit_failure_context_resolved(
+        _submit_failure_context.mark_submit_failure_context_duplicate_skipped(
             run_dir=run_dir,
-            resolution=reason,
             submission_ref=str(prepared_submission_path),
+            reason=reason,
         )
         return _submit_attempts.build_duplicate_submit_skip_result_payload(
             message=message,

@@ -15,6 +15,7 @@ from kagglebot.submit_failure_context import (
     format_submit_file_repair_contract_prompt,
     format_submit_file_repair_contract_retry_feedback,
     load_submit_failure_context,
+    mark_submit_failure_context_duplicate_skipped,
     mark_submit_failure_context_resolved,
     mark_submit_failure_context_submitted,
     path_from_submit_reference,
@@ -89,6 +90,26 @@ def test_mark_submit_failure_context_submitted_uses_submitted_resolution(tmp_pat
 
     assert payload["active"] is False
     assert payload["resolution"] == "submitted"
+    assert payload["resolved_submission_ref"] == "submission.csv"
+    assert payload["resolved_at"]
+
+
+def test_mark_submit_failure_context_duplicate_skipped_uses_duplicate_resolution(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "reason": "submission_polling_error",
+            "repair_target": "platform_or_transient",
+        },
+    )
+
+    mark_submit_failure_context_duplicate_skipped(run_dir=run_dir, submission_ref="submission.csv")
+    payload = json.loads(submit_failure_context_path(run_dir).read_text(encoding="utf-8"))
+
+    assert payload["active"] is False
+    assert payload["resolution"] == "duplicate_submission_sha_seen"
     assert payload["resolved_submission_ref"] == "submission.csv"
     assert payload["resolved_at"]
 

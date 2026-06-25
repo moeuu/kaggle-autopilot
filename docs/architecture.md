@@ -91,8 +91,8 @@ longer owns the pure decision table for whether a failed submit should repair th
 polling path, or wait for manual intervention.
 Submit failure context persistence, reference parsing, prompt formatting, stale repaired-artifact decisions, and submit
 autofix artifact resolution live in `src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out
-of the main loop. Submit failure-context payload creation and submitted-resolution marking also live there; the loop
-supplies repair decisions and runtime state snapshots.
+of the main loop. Submit failure-context payload creation plus submitted/duplicate-skip resolution marking also live
+there; the loop supplies repair decisions and runtime state snapshots.
 Deterministic submit file repair preparation lives in `src/kagglebot/submit_autofix.py`; the loop supplies persistence
 and validation callbacks while the module owns the repair-required check and result summary.
 Submit code fingerprinting, same-error-fingerprint reuse/allowance decisions, duplicate-submission source collection
