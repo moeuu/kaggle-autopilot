@@ -23,7 +23,7 @@ class CodeReferenceNotebook:
 
 def extract_score_from_text(text: str) -> float | None:
     for match in CODE_SCORE_RE.finditer(text):
-        value = _to_float(match.group(1))
+        value = parse_finite_float(match.group(1))
         if value is None:
             continue
         if 0.0 <= value <= 1.0:
@@ -45,7 +45,7 @@ def extract_code_reference_score_from_index(path: Path) -> tuple[float | None, s
         return None, "empty_code_index"
 
     kernel_id = str(selected.get("kernel_id") or "top_entry").strip() or "top_entry"
-    score = _to_float(selected.get("score"))
+    score = parse_finite_float(selected.get("score"))
     if score is not None:
         return score, f"code_index:{kernel_id}"
 
@@ -179,7 +179,3 @@ def _optional_string(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value)
