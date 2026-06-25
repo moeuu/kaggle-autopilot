@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kagglebot.env_utils import env_flag, env_int, env_truthy, parse_float_value, parse_int_value
+from kagglebot.env_utils import env_flag, env_int, env_truthy, parse_bool_value, parse_float_value, parse_int_value
 
 
 def test_env_flag_parses_boolean_values(monkeypatch) -> None:
@@ -15,6 +15,15 @@ def test_env_flag_parses_boolean_values(monkeypatch) -> None:
 
     monkeypatch.delenv("KAGGLEBOT_TEST_FLAG", raising=False)
     assert env_flag("KAGGLEBOT_TEST_FLAG", default=False) is False
+
+
+def test_parse_bool_value_handles_env_and_policy_values() -> None:
+    assert parse_bool_value("y", default=False) is True
+    assert parse_bool_value("n", default=True) is False
+    assert parse_bool_value(1, default=False) is True
+    assert parse_bool_value(0, default=True) is False
+    assert parse_bool_value(True, default=False) is True
+    assert parse_bool_value("maybe", default=True) is True
 
 
 def test_env_int_parses_with_minimum_and_default(monkeypatch) -> None:

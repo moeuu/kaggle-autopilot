@@ -10,6 +10,7 @@ from pathlib import Path
 from rich import print
 
 from kagglebot import kaggle_cli
+from kagglebot.env_utils import env_flag
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.kernel_status import parse_kernel_status
@@ -685,7 +686,7 @@ def _stop_failed_kernel_run(
     slug: str,
     status_output: str,
 ) -> None:
-    if os.getenv("KAGGLEBOT_STOP_FAILED_KERNEL", "1").strip().lower() in {"0", "false", "no", "off"}:
+    if not env_flag("KAGGLEBOT_STOP_FAILED_KERNEL", default=True):
         return
 
     stop_dir = logs_dir.parent / "kernel-stop"

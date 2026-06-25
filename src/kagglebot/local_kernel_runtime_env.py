@@ -4,14 +4,13 @@ import os
 from pathlib import Path
 
 from kagglebot import local_kernel_limits
+from kagglebot.env_utils import parse_bool_value
 
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 
 
 def env_truthy(raw: str | None) -> bool:
-    if raw is None:
-        return False
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return parse_bool_value(raw, default=False)
 
 
 def module_available(module_name: str) -> bool:

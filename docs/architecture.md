@@ -227,8 +227,8 @@ shared utilities and exception types, but should not import campaign or submissi
 
 Recent cleanup has started consolidating scalar and environment parsing into `scalar_utils.py` and `env_utils.py`. Keep
 following that pattern: when two modules parse the same external shape, put the tolerant conversion in a shared utility
-and leave call-site wrappers only where they document a local policy choice, such as comma handling or accepting
-integral float strings.
+and leave call-site wrappers only where they document a local policy choice, such as comma handling, accepting integral
+float strings, or choosing an environment-flag default.
 
 The next high-value modernization work is:
 

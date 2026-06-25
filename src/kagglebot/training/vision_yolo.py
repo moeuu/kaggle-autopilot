@@ -15,6 +15,8 @@ import pandas as pd
 from PIL import Image
 from sklearn.metrics import f1_score
 
+from kagglebot.env_utils import env_flag
+
 OFFICIAL_COMBINED_METRIC = "0.5 * mAP@[0.5:0.95] + 0.5 * F1-Score"
 
 
@@ -795,7 +797,7 @@ def _seed_everything(seed: int) -> None:
 
 
 def _use_pretrained_backbone() -> bool:
-    return os.getenv("KAGGLEBOT_YOLO_PRETRAIN", "1").strip() not in {"0", "false", "False"}
+    return env_flag("KAGGLEBOT_YOLO_PRETRAIN", default=True)
 
 
 def _resolve_training_epochs(*, time_budget_min: int | None, default_epochs: int, cap_epochs: int) -> int:

@@ -57,7 +57,7 @@ def test_load_competition_policy_normalizes_nested_policy_values(tmp_path: Path)
                     "ablation_groups": ["text_runtime"],
                     "min_model_families_before_stop": "2",
                     "require_oof_blend_before_stop": True,
-                    "prefer_ensemble_reference": "on",
+                    "prefer_ensemble_reference": "y",
                     "extra_notes": ["keep fold artifacts"],
                 },
                 "repair": {"same_family_plateau_signal": True},

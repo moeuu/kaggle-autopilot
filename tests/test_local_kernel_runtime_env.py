@@ -7,6 +7,13 @@ import pytest
 from kagglebot import local_kernel_runtime_env
 
 
+def test_env_truthy_uses_shared_bool_parser() -> None:
+    assert local_kernel_runtime_env.env_truthy("y") is True
+    assert local_kernel_runtime_env.env_truthy("n") is False
+    assert local_kernel_runtime_env.env_truthy("maybe") is False
+    assert local_kernel_runtime_env.env_truthy(None) is False
+
+
 def test_apply_local_runtime_env_defaults_sets_optional_backend_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

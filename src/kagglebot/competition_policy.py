@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from kagglebot.env_utils import parse_bool_value
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
 from kagglebot.scalar_utils import parse_finite_float, parse_int
@@ -193,14 +194,7 @@ def _to_mapping_dict(raw: object, *, key: str) -> dict[str, Any]:
 def _to_bool(raw: object, *, key: str) -> bool:
     if not isinstance(raw, dict):
         return False
-    value = raw.get(key)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return False
+    return parse_bool_value(raw.get(key), default=False)
 
 
 def _to_int(raw: object, *, key: str) -> int | None:
