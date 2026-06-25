@@ -127,6 +127,12 @@ class SubmitPreparedSubmissionResolution:
     abort_spec: SubmitAbortSpec | None = None
 
 
+@dataclass(frozen=True)
+class SubmitRulesAcceptanceResolution:
+    rules_accepted: bool
+    abort_spec: SubmitAbortSpec | None = None
+
+
 def build_submit_abort_spec_kwargs(spec: SubmitAbortSpec) -> dict[str, object]:
     return {
         "fingerprint": spec.fingerprint,
@@ -158,6 +164,41 @@ def resolve_prepared_submission_for_submit(
                 compute_error_fingerprint=compute_error_fingerprint,
             ),
         )
+
+
+def resolve_rules_acceptance_for_submit(
+    *,
+    check_rules_accepted: Callable[[], bool],
+    cli_error_types: tuple[type[BaseException], ...],
+    is_missing_credentials_error: Callable[[BaseException], bool],
+    rules_not_accepted_exit_code: int | None,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitRulesAcceptanceResolution:
+    try:
+        rules_accepted = check_rules_accepted()
+    except cli_error_types as exc:
+        if not is_missing_credentials_error(exc):
+            raise
+        return SubmitRulesAcceptanceResolution(
+            rules_accepted=False,
+            abort_spec=build_kaggle_credentials_missing_abort_spec(
+                stdout=str(getattr(exc, "stdout", "") or ""),
+                stderr=str(getattr(exc, "stderr", "") or ""),
+                output=str(getattr(exc, "output", "") or ""),
+                exit_code=getattr(exc, "exit_code", None),
+                compute_error_fingerprint=compute_error_fingerprint,
+            ),
+        )
+
+    if not rules_accepted:
+        return SubmitRulesAcceptanceResolution(
+            rules_accepted=False,
+            abort_spec=build_rules_not_accepted_abort_spec(
+                exit_code=rules_not_accepted_exit_code,
+                compute_error_fingerprint=compute_error_fingerprint,
+            ),
+        )
+    return SubmitRulesAcceptanceResolution(rules_accepted=True)
 
 
 @dataclass(frozen=True)

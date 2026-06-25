@@ -44,6 +44,7 @@ from kagglebot.submit_stage import (
     record_successful_submit_stage_result,
     resolve_iteration_submit_phase_state,
     resolve_prepared_submission_for_submit,
+    resolve_rules_acceptance_for_submit,
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
     resolve_submission_message,
@@ -126,6 +127,23 @@ class SubmitAttemptRecorderStub:
 
 class SubmitValidationStubError(ValueError):
     pass
+
+
+class SubmitCliStubError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        output: str = "",
+        exit_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+        self.output = output
+        self.exit_code = exit_code
 
 
 def test_decide_initial_submit_stage_mode_keeps_file_submit() -> None:
@@ -412,6 +430,73 @@ def test_build_rules_not_accepted_abort_spec_sets_manual_blocker_contract() -> N
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "rules_not_accepted"
     assert spec.exit_code == 77
+
+
+def test_resolve_rules_acceptance_for_submit_returns_accepted() -> None:
+    resolution = resolve_rules_acceptance_for_submit(
+        check_rules_accepted=lambda: True,
+        cli_error_types=(SubmitCliStubError,),
+        is_missing_credentials_error=lambda exc: False,
+        rules_not_accepted_exit_code=77,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert resolution.rules_accepted is True
+    assert resolution.abort_spec is None
+
+
+def test_resolve_rules_acceptance_for_submit_maps_not_accepted_to_abort() -> None:
+    resolution = resolve_rules_acceptance_for_submit(
+        check_rules_accepted=lambda: False,
+        cli_error_types=(SubmitCliStubError,),
+        is_missing_credentials_error=lambda exc: False,
+        rules_not_accepted_exit_code=77,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert resolution.rules_accepted is False
+    assert resolution.abort_spec is not None
+    assert resolution.abort_spec.reason == "rules_not_accepted"
+    assert resolution.abort_spec.exit_code == 77
+
+
+def test_resolve_rules_acceptance_for_submit_maps_missing_credentials_to_abort() -> None:
+    resolution = resolve_rules_acceptance_for_submit(
+        check_rules_accepted=lambda: (_ for _ in ()).throw(
+            SubmitCliStubError(
+                "missing credentials",
+                stdout="stdout",
+                stderr="",
+                output="missing kaggle.json",
+                exit_code=2,
+            )
+        ),
+        cli_error_types=(SubmitCliStubError,),
+        is_missing_credentials_error=lambda exc: True,
+        rules_not_accepted_exit_code=77,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert resolution.rules_accepted is False
+    assert resolution.abort_spec is not None
+    assert resolution.abort_spec.reason == "kaggle_credentials_missing"
+    assert resolution.abort_spec.fingerprint == "fp:stdout:missing kaggle.json"
+    assert resolution.abort_spec.exit_code == 2
+
+
+def test_resolve_rules_acceptance_for_submit_reraises_unmatched_cli_error() -> None:
+    try:
+        resolve_rules_acceptance_for_submit(
+            check_rules_accepted=lambda: (_ for _ in ()).throw(SubmitCliStubError("other cli error")),
+            cli_error_types=(SubmitCliStubError,),
+            is_missing_credentials_error=lambda exc: False,
+            rules_not_accepted_exit_code=77,
+            compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        )
+    except SubmitCliStubError as exc:
+        assert str(exc) == "other cli error"
+    else:
+        raise AssertionError("SubmitCliStubError was not raised")
 
 
 def test_build_local_submission_guardrail_abort_spec_sets_local_blocker_contract() -> None:

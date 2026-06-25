@@ -5092,39 +5092,21 @@ def _attempt_submit(
     if duplicate_skip_result is not None:
         return duplicate_skip_result
 
-    try:
-        rules_accepted = check_rules_accepted(config.slug, dry_run=config.dry_run)
-    except KaggleCliError as exc:
-        if _is_missing_kaggle_credentials_error(exc):
-            abort_spec = _submit_stage.build_kaggle_credentials_missing_abort_spec(
-                stdout=exc.stdout,
-                stderr=exc.stderr,
-                output=exc.output,
-                exit_code=exc.exit_code,
-                compute_error_fingerprint=compute_error_fingerprint,
-            )
-            return _abort_submit_for_run(
-                config=config,
-                run_id=run_id,
-                problem_types=problem_types,
-                submission_ref=prepared_submission_path,
-                code_fingerprint=submit_code_fingerprint,
-                **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
-                submit_attempt_recorder=submit_attempt_recorder,
-            )
-        raise
-    if not rules_accepted:
-        abort_spec = _submit_stage.build_rules_not_accepted_abort_spec(
-            exit_code=RulesNotAcceptedError.exit_code,
-            compute_error_fingerprint=compute_error_fingerprint,
-        )
+    rules_resolution = _submit_stage.resolve_rules_acceptance_for_submit(
+        check_rules_accepted=lambda: check_rules_accepted(config.slug, dry_run=config.dry_run),
+        cli_error_types=(KaggleCliError,),
+        is_missing_credentials_error=_is_missing_kaggle_credentials_error,
+        rules_not_accepted_exit_code=RulesNotAcceptedError.exit_code,
+        compute_error_fingerprint=compute_error_fingerprint,
+    )
+    if rules_resolution.abort_spec is not None:
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
             submission_ref=prepared_submission_path,
             code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
+            **_submit_stage.build_submit_abort_spec_kwargs(rules_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
