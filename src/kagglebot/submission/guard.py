@@ -30,6 +30,16 @@ _PERMANENT_RULES: tuple[tuple[str, tuple[Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "notebook_submit_argument_missing",
+        (
+            re.compile(
+                r"output file name(?: and)?(?: the)? version label",
+                flags=re.IGNORECASE,
+            ),
+            re.compile(r"kernel must be specified(?: as)?", flags=re.IGNORECASE),
+        ),
+    ),
+    (
         "bad_request",
         (
             re.compile(r"\b400\s+client\s+error\b", flags=re.IGNORECASE),

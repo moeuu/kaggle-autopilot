@@ -2211,8 +2211,11 @@ def test_attempt_submit_switches_to_notebook_submit_after_bad_request(monkeypatc
             "Kaggle CLI submit failed.",
             command=["kaggle", "competitions", "submit"],
             exit_code=1,
-            output="400 Client Error: Bad Request (submit-notebook)",
-            stdout="Code competition submissions require both the output file name and the version label",
+            output=(
+                "400 Client Error: Bad Request (submit-notebook)\n"
+                "Code competition submissions require both the output file name and the version label"
+            ),
+            stdout="",
             stderr="",
         )
 

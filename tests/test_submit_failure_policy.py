@@ -48,6 +48,17 @@ def test_classify_submit_failure_repair_routes_notebook_mode_errors() -> None:
     assert decision.repairable is True
 
 
+def test_classify_submit_failure_repair_routes_notebook_submit_argument_errors() -> None:
+    decision = classify_submit_failure_repair(
+        reason="notebook_submit_argument_missing",
+        error_kind="permanent",
+        detail="Code competition submissions require both the output file name and the version label.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE
+    assert decision.repairable is True
+
+
 def test_classify_submit_failure_repair_routes_polling_without_file_hint_to_platform() -> None:
     decision = classify_submit_failure_repair(
         reason="submission_poll_status_error",
@@ -68,6 +79,11 @@ def test_submit_error_requires_file_fix_for_local_validation() -> None:
 
 
 def test_notebook_submit_fallback_requires_clear_hint() -> None:
+    assert should_use_notebook_submit_fallback(
+        reason="notebook_submit_argument_missing",
+        stdout="",
+        stderr="",
+    )
     assert should_use_notebook_submit_fallback(
         reason="bad_request",
         stdout="",

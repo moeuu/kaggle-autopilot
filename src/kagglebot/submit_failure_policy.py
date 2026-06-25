@@ -46,7 +46,7 @@ class SubmitFailureRepairDecision:
 def should_use_notebook_submit_fallback(*, reason: str, stdout: str, stderr: str) -> bool:
     """Return True only when submit errors clearly indicate notebook-only submission."""
     normalized_reason = str(reason or "").strip().lower()
-    if normalized_reason == "notebook_only_submission_required":
+    if normalized_reason in {"notebook_only_submission_required", "notebook_submit_argument_missing"}:
         return True
     if normalized_reason not in {"bad_request", "unclassified_submit_error", "unknown"}:
         return False
@@ -92,7 +92,7 @@ def submit_failure_manual_next_step(*, reason: str, detail: str) -> str:
 def submit_error_targets_submit_mode(*, reason: str, detail: str) -> bool:
     normalized_reason = str(reason or "").strip().lower()
     lowered_detail = str(detail or "").strip().lower()
-    if normalized_reason == "notebook_only_submission_required":
+    if normalized_reason in {"notebook_only_submission_required", "notebook_submit_argument_missing"}:
         return True
     mode_markers = (
         "notebook",

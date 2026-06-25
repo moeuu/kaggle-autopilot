@@ -7114,7 +7114,7 @@ def _attempt_submit(
                 should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback(
                     reason=classification_reason,
                     stdout=exc.stdout,
-                    stderr=exc.stderr,
+                    stderr=classification_stderr,
                 ),
                 resolved_notebook_artifact_mode=_resolve_notebook_submit_artifact_mode(
                     paths=config.paths,

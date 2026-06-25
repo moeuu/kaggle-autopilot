@@ -453,6 +453,16 @@ def test_validate_submission_sniffs_tab_delimiter_and_flags_missing_header(tmp_p
             "permanent",
             "notebook_only_submission_required",
         ),
+        (
+            "Code competition submissions require both the output file name and the version label.",
+            "permanent",
+            "notebook_submit_argument_missing",
+        ),
+        (
+            "kernel must be specified as <owner>/<notebook>",
+            "permanent",
+            "notebook_submit_argument_missing",
+        ),
         ("400 Client Error: Bad Request for url: https://www.kaggle.com/api/v1/...", "permanent", "bad_request"),
         ("You must accept the rules before submitting", "permanent", "rules_not_accepted"),
         ("No Kaggle API credentials found", "permanent", "authentication"),
