@@ -276,6 +276,7 @@ The next high-value modernization work is:
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.
    Kernel source preflight error construction now calls `validators.py` directly; `autopilot.py` keeps only the fix loop
    policy. Top1 public-score display formatting now calls `top1_exhaustive.py` directly.
+   Agent plan payload normalization now calls `plan_policy.py` directly instead of living inside the agent pipeline.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.

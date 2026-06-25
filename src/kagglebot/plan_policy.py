@@ -28,6 +28,11 @@ DEFAULT_EVAL_SEEDS = (42, 2024, 777)
 DEFAULT_EVAL_REPEATS = 2
 EVAL_REPEAT_SEED_OFFSET = 1009
 FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
+STOP_POLICY_ABORT_ALIASES = (
+    "repeated_error_fingerprint_abort",
+    "error_fingerprint_policy",
+    "abort_on_repeated_error_fingerprint",
+)
 
 COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
     "deep-past-initiative-machine-translation": {
@@ -117,6 +122,91 @@ class TimeBudgetDecision:
 class TargetObjectiveDecision:
     target_medal: str | None
     target_rank_percentile: float | None
+
+
+def normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Normalize agent-produced plan payload shape without applying environment guardrails."""
+    normalized = dict(payload)
+    pipelines_raw = normalized.get("pipelines")
+    if isinstance(pipelines_raw, list):
+        pipelines: list[object] = []
+        for index, item in enumerate(pipelines_raw):
+            if not isinstance(item, dict):
+                pipelines.append(item)
+                continue
+            pipeline = dict(item)
+            name = pipeline.get("name")
+            if not isinstance(name, str) or not name.strip():
+                model_hint = ""
+                models = pipeline.get("models")
+                if isinstance(models, list) and models and isinstance(models[0], str) and models[0].strip():
+                    model_hint = re.sub(r"[^a-zA-Z0-9]+", "_", models[0]).strip("_").lower()
+                pipeline["name"] = model_hint or f"pipeline_{index + 1}"
+            key_hyperparameters = pipeline.get("key_hyperparameters")
+            if isinstance(key_hyperparameters, dict):
+                pipeline["key_hyperparameters"] = _normalize_pipeline_hyperparameter_value(key_hyperparameters) or {}
+            pipelines.append(pipeline)
+        normalized["pipelines"] = pipelines
+
+    suites_raw = normalized.get("suites")
+    if isinstance(suites_raw, list):
+        suites: list[object] = []
+        for index, item in enumerate(suites_raw):
+            if not isinstance(item, dict):
+                suites.append(item)
+                continue
+            suite = dict(item)
+            name = suite.get("name")
+            if not isinstance(name, str) or not name.strip():
+                train_mode = suite.get("train_mode")
+                feature_recipe = suite.get("feature_recipe")
+                hint = ""
+                if isinstance(train_mode, str) and train_mode.strip():
+                    hint = train_mode.strip().lower()
+                elif isinstance(feature_recipe, str) and feature_recipe.strip():
+                    hint = feature_recipe.strip().lower()
+                hint = re.sub(r"[^a-zA-Z0-9]+", "_", hint).strip("_")
+                suite["name"] = hint or f"suite_{index + 1}"
+            suites.append(suite)
+        normalized["suites"] = suites
+
+    stop_policy_raw = normalized.get("stop_policy")
+    if not isinstance(stop_policy_raw, dict):
+        return normalized
+
+    stop_policy = dict(stop_policy_raw)
+
+    if "max_iterations" not in stop_policy:
+        top_level_max_iterations = normalized.get("max_iterations")
+        if isinstance(top_level_max_iterations, int):
+            stop_policy["max_iterations"] = top_level_max_iterations
+
+    if "error_fingerprint_abort" not in stop_policy:
+        alias_value: object | None = None
+        for alias in STOP_POLICY_ABORT_ALIASES:
+            if alias in stop_policy:
+                alias_value = stop_policy[alias]
+                break
+        stop_policy["error_fingerprint_abort"] = alias_value if alias_value is not None else True
+
+    normalized["stop_policy"] = stop_policy
+    return normalized
+
+
+def _normalize_pipeline_hyperparameter_value(value: object) -> object | None:
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            normalized_item = _normalize_pipeline_hyperparameter_value(item)
+            if normalized_item is None:
+                continue
+            normalized[str(key)] = normalized_item
+        return normalized
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        return _normalize_pipeline_hyperparameter_value(value[0])
+    return value
 
 
 def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:

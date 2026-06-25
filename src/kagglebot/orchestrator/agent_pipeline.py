@@ -39,6 +39,7 @@ from kagglebot.medals import (
 )
 from kagglebot.method_scout import render_method_registry_for_prompt, run_method_scout
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.plan_policy import normalize_plan_payload
 from kagglebot.runtime_policy import is_heavy_deep_learning_modality
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
@@ -730,30 +731,7 @@ def _extract_plan_json(text: str) -> tuple[dict[str, object] | None, str | None]
         return None, f"PLAN_JSON is not valid JSON: {exc}"
     if not isinstance(payload, dict):
         return None, "PLAN_JSON must be a JSON object."
-    return _normalize_plan_payload(payload), None
-
-
-_STOP_POLICY_ABORT_ALIASES = (
-    "repeated_error_fingerprint_abort",
-    "error_fingerprint_policy",
-    "abort_on_repeated_error_fingerprint",
-)
-
-
-def _normalize_pipeline_hyperparameter_value(value: object) -> object | None:
-    if isinstance(value, dict):
-        normalized: dict[str, object] = {}
-        for key, item in value.items():
-            normalized_item = _normalize_pipeline_hyperparameter_value(item)
-            if normalized_item is None:
-                continue
-            normalized[str(key)] = normalized_item
-        return normalized
-    if isinstance(value, (list, tuple)):
-        if not value:
-            return None
-        return _normalize_pipeline_hyperparameter_value(value[0])
-    return value
+    return normalize_plan_payload(payload), None
 
 
 def _find_sequence_hyperparameter_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
@@ -766,74 +744,6 @@ def _find_sequence_hyperparameter_paths(value: object, *, prefix: str = "key_hyp
     if isinstance(value, (list, tuple)):
         paths.append(prefix)
     return paths
-
-
-def _normalize_plan_payload(payload: dict[str, object]) -> dict[str, object]:
-    normalized = dict(payload)
-    pipelines_raw = normalized.get("pipelines")
-    if isinstance(pipelines_raw, list):
-        pipelines: list[object] = []
-        for index, item in enumerate(pipelines_raw):
-            if not isinstance(item, dict):
-                pipelines.append(item)
-                continue
-            pipeline = dict(item)
-            name = pipeline.get("name")
-            if not isinstance(name, str) or not name.strip():
-                model_hint = ""
-                models = pipeline.get("models")
-                if isinstance(models, list) and models and isinstance(models[0], str) and models[0].strip():
-                    model_hint = re.sub(r"[^a-zA-Z0-9]+", "_", models[0]).strip("_").lower()
-                pipeline["name"] = model_hint or f"pipeline_{index + 1}"
-            key_hyperparameters = pipeline.get("key_hyperparameters")
-            if isinstance(key_hyperparameters, dict):
-                pipeline["key_hyperparameters"] = _normalize_pipeline_hyperparameter_value(key_hyperparameters) or {}
-            pipelines.append(pipeline)
-        normalized["pipelines"] = pipelines
-
-    suites_raw = normalized.get("suites")
-    if isinstance(suites_raw, list):
-        suites: list[object] = []
-        for index, item in enumerate(suites_raw):
-            if not isinstance(item, dict):
-                suites.append(item)
-                continue
-            suite = dict(item)
-            name = suite.get("name")
-            if not isinstance(name, str) or not name.strip():
-                train_mode = suite.get("train_mode")
-                feature_recipe = suite.get("feature_recipe")
-                hint = ""
-                if isinstance(train_mode, str) and train_mode.strip():
-                    hint = train_mode.strip().lower()
-                elif isinstance(feature_recipe, str) and feature_recipe.strip():
-                    hint = feature_recipe.strip().lower()
-                hint = re.sub(r"[^a-zA-Z0-9]+", "_", hint).strip("_")
-                suite["name"] = hint or f"suite_{index + 1}"
-            suites.append(suite)
-        normalized["suites"] = suites
-
-    stop_policy_raw = normalized.get("stop_policy")
-    if not isinstance(stop_policy_raw, dict):
-        return normalized
-
-    stop_policy = dict(stop_policy_raw)
-
-    if "max_iterations" not in stop_policy:
-        top_level_max_iterations = normalized.get("max_iterations")
-        if isinstance(top_level_max_iterations, int):
-            stop_policy["max_iterations"] = top_level_max_iterations
-
-    if "error_fingerprint_abort" not in stop_policy:
-        alias_value: object | None = None
-        for alias in _STOP_POLICY_ABORT_ALIASES:
-            if alias in stop_policy:
-                alias_value = stop_policy[alias]
-                break
-        stop_policy["error_fingerprint_abort"] = alias_value if alias_value is not None else True
-
-    normalized["stop_policy"] = stop_policy
-    return normalized
 
 
 def _suite_token(value: object) -> str:
@@ -899,7 +809,7 @@ def _repair_plan_payload_for_profile(
     payload: dict[str, object],
     profile: dict[str, object],
 ) -> dict[str, object]:
-    normalized = _normalize_plan_payload(payload)
+    normalized = normalize_plan_payload(payload)
     if not _is_high_accuracy_tabular_blend_target(profile):
         return normalized
 
@@ -945,7 +855,7 @@ def _repair_plan_payload_for_profile(
     repaired["suites"] = [
         required_suites[str(suite["name"])] for suite in _HIGH_ACCURACY_TABULAR_REQUIRED_SUITES
     ] + extra_suites
-    return _normalize_plan_payload(repaired)
+    return normalize_plan_payload(repaired)
 
 
 def _pipeline_texts(pipeline: dict[str, object]) -> list[str]:
@@ -1014,7 +924,7 @@ def _validate_high_accuracy_tabular_plan(
 
 
 def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, object] | None = None) -> list[str]:
-    payload = _normalize_plan_payload(payload)
+    payload = normalize_plan_payload(payload)
     issues: list[str] = []
     required = [
         "target_metric",
@@ -1153,11 +1063,11 @@ def _validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obj
 
 
 def _write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> None:
-    payload = _normalize_plan_payload(_apply_plan_guardrails(paths, payload))
+    payload = normalize_plan_payload(_apply_plan_guardrails(paths, payload))
     existing = load_json_object(paths.plan_path) or {}
-    merged = _normalize_plan_payload({**existing, **payload})
+    merged = normalize_plan_payload({**existing, **payload})
     defaults = PlanConfig.from_dict(merged).to_dict()
-    persisted = _normalize_plan_payload({**merged, **defaults})
+    persisted = normalize_plan_payload({**merged, **defaults})
     write_json_object(paths.plan_path, persisted)
 
 

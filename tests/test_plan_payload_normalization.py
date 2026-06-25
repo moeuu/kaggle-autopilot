@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import kagglebot.orchestrator.agent_pipeline as agent_pipeline
+from kagglebot.plan_policy import normalize_plan_payload
 
 
 def test_normalize_plan_payload_injects_pipeline_names() -> None:
@@ -36,7 +37,7 @@ def test_normalize_plan_payload_injects_pipeline_names() -> None:
         ]
     }
 
-    normalized = agent_pipeline._normalize_plan_payload(payload)  # noqa: SLF001
+    normalized = normalize_plan_payload(payload)
     pipelines = normalized["pipelines"]
     assert isinstance(pipelines, list)
     assert pipelines[0]["name"] == "lightgbm_classifier"
@@ -68,7 +69,7 @@ def test_normalize_plan_payload_injects_suite_names() -> None:
         ]
     }
 
-    normalized = agent_pipeline._normalize_plan_payload(payload)  # noqa: SLF001
+    normalized = normalize_plan_payload(payload)
     suites = normalized["suites"]
     assert isinstance(suites, list)
     assert suites[0]["name"] == "competition_only"
@@ -186,7 +187,7 @@ def test_normalize_plan_payload_scalarizes_pipeline_hyperparameters() -> None:
         ]
     }
 
-    normalized = agent_pipeline._normalize_plan_payload(payload)  # noqa: SLF001
+    normalized = normalize_plan_payload(payload)
     pipelines = normalized["pipelines"]
     assert isinstance(pipelines, list)
     key_hyperparameters = pipelines[0]["key_hyperparameters"]
