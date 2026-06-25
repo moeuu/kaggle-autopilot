@@ -3101,24 +3101,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 else:
                     submitted = True
                     last_submission_result = fallback_result
-                    fallback_online_score: float | None = None
-                    outcome_payload = fallback_result.get("outcome")
-                    if isinstance(outcome_payload, dict):
-                        fallback_online_score = tolerant_finite_float(outcome_payload.get("score"))
-                    if best_submittable_score is not None:
-                        submitted_tracking_score, _submitted_tracking_source = (
-                            _submit_stage.submission_score_for_tracking(
-                                offline_score=best_submittable_score,
-                                online_score=fallback_online_score,
-                            )
-                        )
-                        if _update_best_score(
-                            best_submitted_score,
-                            submitted_tracking_score,
-                            metric_direction,
-                            0.0,
-                        ):
-                            best_submitted_score = submitted_tracking_score
+                    tracking_decision = _submit_stage.decide_submitted_tracking_score_update(
+                        submission_result=fallback_result,
+                        offline_score=best_submittable_score,
+                        previous_best_score=best_submitted_score,
+                        direction=metric_direction,
+                    )
+                    if tracking_decision.update_best_submitted_score:
+                        best_submitted_score = tracking_decision.best_submitted_score
         else:
             print(
                 "[yellow]submit skipped[/yellow]: fallback artifact is not better "

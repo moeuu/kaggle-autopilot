@@ -30,6 +30,7 @@ from kagglebot.submit_stage import (
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
     decide_submit_stage_error_action_from_classification,
+    decide_submitted_tracking_score_update,
     ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,
     find_campaign_candidate_for_submission,
@@ -849,6 +850,63 @@ def test_submission_score_for_tracking_prefers_finite_online_score() -> None:
     assert submission_score_for_tracking(offline_score=0.9, online_score=0.8) == (0.8, "submission_public_score")
     assert submission_score_for_tracking(offline_score=0.9, online_score=float("nan")) == (0.9, "offline")
     assert submission_score_for_tracking(offline_score=0.9, online_score=None) == (0.9, "offline")
+
+
+def test_decide_submitted_tracking_score_update_prefers_online_score() -> None:
+    decision = decide_submitted_tracking_score_update(
+        submission_result={"outcome": {"score": "0.8"}},
+        offline_score=0.9,
+        previous_best_score=None,
+        direction="minimize",
+    )
+
+    assert decision.online_score == 0.8
+    assert decision.tracking_score == 0.8
+    assert decision.tracking_source == "submission_public_score"
+    assert decision.update_best_submitted_score is True
+    assert decision.best_submitted_score == 0.8
+
+
+def test_decide_submitted_tracking_score_update_falls_back_to_offline_score() -> None:
+    decision = decide_submitted_tracking_score_update(
+        submission_result={"outcome": {"score": ""}},
+        offline_score=0.9,
+        previous_best_score=1.0,
+        direction="minimize",
+    )
+
+    assert decision.online_score is None
+    assert decision.tracking_score == 0.9
+    assert decision.tracking_source == "offline"
+    assert decision.update_best_submitted_score is True
+    assert decision.best_submitted_score == 0.9
+
+
+def test_decide_submitted_tracking_score_update_keeps_better_previous_score() -> None:
+    decision = decide_submitted_tracking_score_update(
+        submission_result={"outcome": {"score": "0.95"}},
+        offline_score=0.9,
+        previous_best_score=0.8,
+        direction="minimize",
+    )
+
+    assert decision.tracking_score == 0.95
+    assert decision.update_best_submitted_score is False
+    assert decision.best_submitted_score == 0.8
+
+
+def test_decide_submitted_tracking_score_update_noops_without_offline_score() -> None:
+    decision = decide_submitted_tracking_score_update(
+        submission_result={"outcome": {"score": "0.8"}},
+        offline_score=None,
+        previous_best_score=0.7,
+        direction="minimize",
+    )
+
+    assert decision.tracking_score is None
+    assert decision.tracking_source == "unavailable"
+    assert decision.update_best_submitted_score is False
+    assert decision.best_submitted_score == 0.7
 
 
 def test_classify_submission_outcome_uses_target_score() -> None:
