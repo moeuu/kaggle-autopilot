@@ -357,6 +357,8 @@ Recommended extraction order:
    feedback prompt construction in `agent_io.py`; orchestration code should pass identity/path context only.
    Strategy, improvement, error-repair, and mandatory code-reference repair prompt rendering now lives in
    `agent_prompts.py`, keeping long prompt templates out of `autopilot.py`.
+   Strategy prompt file persistence, runner invocation, response loading, and failed/empty fallback handling now lives in
+   `agent_strategy.py`; orchestration wrappers should only supply stage-specific labels and fallback messages.
    Problem-type knowledge context rendering and knowledge-hints file generation are shared through
    `knowledge_context.py`, so planning and improvement prompts do not duplicate insight/research lookup policy.
    Dataset-profile-to-problem-type resolution also lives there, keeping orchestration code from directly owning profile

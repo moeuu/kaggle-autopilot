@@ -15,6 +15,7 @@ from rich import print
 
 from kagglebot import agent_io as _agent_io
 from kagglebot import agent_prompts as _agent_prompts
+from kagglebot import agent_strategy as _agent_strategy
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
@@ -4095,25 +4096,24 @@ def _run_improvement(
 
 
 def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bool) -> str:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    prompt_path = output_dir / "gpt_improvement_prompt.md"
-    prompt_path.write_text(prompt_text, encoding="utf-8")
-    print("[cyan]improve[/cyan]: gpt drafting improvement prompt")
-    result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
-    strategy_text = _agent_io.read_agent_response(result.last_message_path).strip()
-    if result.returncode != 0:
-        print(
-            f"[yellow]improve[/yellow]: gpt improvement strategy failed, "
-            f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
-        )
-        return ""
-    if not strategy_text:
-        print(
-            f"[yellow]improve[/yellow]: gpt improvement strategy empty, "
-            f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
-        )
-        return ""
-    return strategy_text
+    return _agent_strategy.run_strategy_prompt(
+        prompt_text=prompt_text,
+        output_dir=output_dir,
+        dry_run=dry_run,
+        config=_agent_strategy.StrategyPromptRunConfig(
+            prompt_filename="gpt_improvement_prompt.md",
+            start_message="[cyan]improve[/cyan]: gpt drafting improvement prompt",
+            failure_message=(
+                f"[yellow]improve[/yellow]: gpt improvement strategy failed, "
+                f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
+            ),
+            empty_message=(
+                f"[yellow]improve[/yellow]: gpt improvement strategy empty, "
+                f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
+            ),
+        ),
+        run_strategy_func=run_strategy,
+    )
 
 
 def _run_kernel_fix(
@@ -5004,29 +5004,28 @@ def _run_error_strategy(
     dry_run: bool,
     stage_label: str,
 ) -> str:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    prompt_path = output_dir / "gpt_strategy_prompt.md"
-    prompt_path.write_text(prompt_text, encoding="utf-8")
-    print(f"[cyan]{stage_label}[/cyan]: gpt analyzing error")
-    print(
-        f"[cyan]{stage_label}[/cyan]: strategy model={_ERROR_STRATEGY_MODEL} "
-        f"reasoning={_ERROR_STRATEGY_REASONING_EFFORT}"
+    return _agent_strategy.run_strategy_prompt(
+        prompt_text=prompt_text,
+        output_dir=output_dir,
+        dry_run=dry_run,
+        config=_agent_strategy.StrategyPromptRunConfig(
+            prompt_filename="gpt_strategy_prompt.md",
+            start_message=f"[cyan]{stage_label}[/cyan]: gpt analyzing error",
+            detail_message=(
+                f"[cyan]{stage_label}[/cyan]: strategy model={_ERROR_STRATEGY_MODEL} "
+                f"reasoning={_ERROR_STRATEGY_REASONING_EFFORT}"
+            ),
+            failure_message=(
+                f"[yellow]{stage_label}[/yellow]: gpt strategy failed, "
+                f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
+            ),
+            empty_message=(
+                f"[yellow]{stage_label}[/yellow]: gpt strategy empty, "
+                f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
+            ),
+        ),
+        run_strategy_func=run_strategy,
     )
-    result = run_strategy(prompt_path, output_dir, dry_run=dry_run)
-    strategy_text = _agent_io.read_agent_response(result.last_message_path).strip()
-    if result.returncode != 0:
-        print(
-            f"[yellow]{stage_label}[/yellow]: gpt strategy failed, "
-            f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
-        )
-        return ""
-    if not strategy_text:
-        print(
-            f"[yellow]{stage_label}[/yellow]: gpt strategy empty, "
-            f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
-        )
-        return ""
-    return strategy_text
 
 
 def _maybe_regenerate_kernel_sources_once(
