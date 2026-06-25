@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -277,29 +276,6 @@ def build_final_metrics_payload(
     payload["quality_guard"] = quality_guard
     payload["regression_guard"] = regression_guard
     return payload
-
-
-def record_iteration_with_submit_phase_compat(
-    *,
-    record_iteration: Callable[..., object],
-    canonical_record_iteration: Callable[..., object],
-    iteration_record_kwargs: dict[str, object],
-    submit_phase_finished: bool,
-) -> None:
-    try:
-        record_iteration(**iteration_record_kwargs)
-    except TypeError as exc:
-        if "submit_phase_finished" not in str(exc):
-            raise
-        try:
-            canonical_record_iteration(
-                **iteration_record_kwargs,
-                submit_phase_finished=submit_phase_finished,
-            )
-        except TypeError as fallback_exc:
-            if "submit_phase_finished" not in str(fallback_exc):
-                raise
-            canonical_record_iteration(**iteration_record_kwargs)
 
 
 def iteration_metrics_allow_submit(metrics_path: Path, evaluation: EvaluationResult) -> bool:

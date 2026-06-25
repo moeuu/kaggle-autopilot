@@ -30,7 +30,6 @@ from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
-from kagglebot import knowledge as _knowledge
 from kagglebot import knowledge_context as _knowledge_context
 from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
@@ -2444,12 +2443,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 top1_info=top1_info if isinstance(top1_info, dict) else {},
                 met_target=met_target,
             )
-            _iteration_metrics.record_iteration_with_submit_phase_compat(
-                record_iteration=record_iteration,
-                canonical_record_iteration=_knowledge.record_iteration,
-                iteration_record_kwargs=iteration_record_kwargs,
-                submit_phase_finished=submit_phase_completion.submit_phase_finished,
-            )
+            record_iteration(**iteration_record_kwargs)
             _autopilot_state._write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,

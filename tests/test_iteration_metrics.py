@@ -16,7 +16,6 @@ from kagglebot.iteration_metrics import (
     evaluation_to_payload,
     extract_fold_scores_for_report,
     iteration_metrics_allow_submit,
-    record_iteration_with_submit_phase_compat,
     resolve_iteration_submit_phase_completion,
     resume_best_readiness_score,
     resume_noise_guard_state,
@@ -338,65 +337,6 @@ def test_build_final_metrics_payload_omits_absent_optional_sections() -> None:
     assert "submission_score" not in payload
     assert "campaign" not in payload
     assert "best_score_guard" not in payload
-
-
-def test_record_iteration_with_submit_phase_compat_uses_primary_when_supported() -> None:
-    calls: list[dict[str, object]] = []
-
-    def primary(**kwargs: object) -> None:
-        calls.append({"primary": kwargs})
-
-    def canonical(**kwargs: object) -> None:
-        calls.append({"canonical": kwargs})
-
-    record_iteration_with_submit_phase_compat(
-        record_iteration=primary,
-        canonical_record_iteration=canonical,
-        iteration_record_kwargs={"run_id": "run-1"},
-        submit_phase_finished=True,
-    )
-
-    assert calls == [{"primary": {"run_id": "run-1"}}]
-
-
-def test_record_iteration_with_submit_phase_compat_falls_back_to_canonical_submit_phase() -> None:
-    calls: list[dict[str, object]] = []
-
-    def primary(**kwargs: object) -> None:
-        raise TypeError("missing required keyword-only argument: submit_phase_finished")
-
-    def canonical(**kwargs: object) -> None:
-        calls.append(kwargs)
-
-    record_iteration_with_submit_phase_compat(
-        record_iteration=primary,
-        canonical_record_iteration=canonical,
-        iteration_record_kwargs={"run_id": "run-1"},
-        submit_phase_finished=False,
-    )
-
-    assert calls == [{"run_id": "run-1", "submit_phase_finished": False}]
-
-
-def test_record_iteration_with_submit_phase_compat_handles_legacy_canonical() -> None:
-    calls: list[dict[str, object]] = []
-
-    def primary(**kwargs: object) -> None:
-        raise TypeError("missing required keyword-only argument: submit_phase_finished")
-
-    def canonical(**kwargs: object) -> None:
-        if "submit_phase_finished" in kwargs:
-            raise TypeError("got an unexpected keyword argument 'submit_phase_finished'")
-        calls.append(kwargs)
-
-    record_iteration_with_submit_phase_compat(
-        record_iteration=primary,
-        canonical_record_iteration=canonical,
-        iteration_record_kwargs={"run_id": "run-1"},
-        submit_phase_finished=False,
-    )
-
-    assert calls == [{"run_id": "run-1"}]
 
 
 def test_iteration_metrics_allow_submit_prefers_quality_guard(tmp_path) -> None:
