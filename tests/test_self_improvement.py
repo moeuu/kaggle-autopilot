@@ -8,7 +8,10 @@ from kagglebot.knowledge import build_plan_and_initial_prompt
 from kagglebot.paths import KnowledgePaths
 from kagglebot.self_improvement import (
     SelfImprovementConfig,
+    _best_iteration_value,
+    _best_online_score,
     _read_json_object,
+    _score_gap,
     load_self_improvement_context,
     run_self_improvement_cycle,
 )
@@ -29,6 +32,18 @@ def test_read_json_object_returns_empty_for_missing_invalid_or_non_object_payloa
     array_payload = tmp_path / "array.json"
     array_payload.write_text("[]", encoding="utf-8")
     assert _read_json_object(array_payload) == {}
+
+
+def test_self_improvement_score_helpers_use_shared_direction_policy() -> None:
+    iterations = [{"value": 0.5}, {"value": "bad"}, {"value": 0.4}]
+    outcomes = [{"score": 0.7}, {"score": 0.8}]
+
+    assert _best_iteration_value(iterations=iterations, direction="minimize") == 0.4
+    assert _best_iteration_value(iterations=iterations, direction=None) == 0.5
+    assert _best_online_score(outcomes=outcomes, direction="maximize") == 0.8
+    assert _score_gap(best_score=0.75, top1_score=0.9, direction="maximize") == 0.15000000000000002
+    assert _score_gap(best_score=0.75, top1_score=0.6, direction="minimize") == 0.15000000000000002
+    assert _score_gap(best_score=0.95, top1_score=0.9, direction="maximize") == 0.0
 
 
 def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: Path) -> None:

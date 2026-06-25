@@ -322,7 +322,7 @@ The next high-value modernization work is:
    Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
    solver and kernel-runtime submission writers share one row-count contract. Direction-aware score gaps, best-score
    selection, and candidate-vs-baseline comparisons now live in `score_utils.py`, leaving campaign modules as
-   compatibility call sites.
+   compatibility call sites and self-improvement run summaries on the shared score policy.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.

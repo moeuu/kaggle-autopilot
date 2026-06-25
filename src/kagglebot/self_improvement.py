@@ -20,6 +20,8 @@ from kagglebot.json_utils import (
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.scalar_utils import parse_finite_float as _to_float
+from kagglebot.score_utils import best_score as _best_score
+from kagglebot.score_utils import score_gap as _score_delta
 from kagglebot.submit_attempts import load_submit_attempt_rows
 
 
@@ -846,26 +848,18 @@ def _is_problem_run(run: dict[str, object]) -> bool:
 
 
 def _best_iteration_value(*, iterations: list[dict[str, object]], direction: str | None) -> float | None:
-    values = [_to_float(item.get("value")) for item in iterations]
-    finite = [value for value in values if value is not None and math.isfinite(value)]
-    if not finite:
-        return None
-    return min(finite) if direction == "minimize" else max(finite)
+    return _best_score(direction=direction or "maximize", scores=[item.get("value") for item in iterations])
 
 
 def _best_online_score(*, outcomes: list[dict[str, object]], direction: str | None) -> float | None:
-    values = [_to_float(item.get("score")) for item in outcomes]
-    finite = [value for value in values if value is not None and math.isfinite(value)]
-    if not finite:
-        return None
-    return min(finite) if direction == "minimize" else max(finite)
+    return _best_score(direction=direction or "maximize", scores=[item.get("score") for item in outcomes])
 
 
 def _score_gap(*, best_score: float | None, top1_score: float | None, direction: str | None) -> float | None:
-    if best_score is None or top1_score is None:
+    gap = _score_delta(current=best_score, reference=top1_score, direction=direction or "maximize")
+    if gap is None:
         return None
-    gap = best_score - top1_score if direction == "minimize" else top1_score - best_score
-    return max(0.0, gap)
+    return max(0.0, -gap)
 
 
 def _metric_value(metrics: dict[str, object]) -> float | None:
