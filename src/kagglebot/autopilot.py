@@ -130,8 +130,10 @@ from kagglebot.experiment_graph import (
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import SubmissionLedger, new_run_id
+from kagglebot.json_utils import load_json_array as _load_json_array
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.json_utils import load_json_object_or_empty as _load_json_object_or_empty
+from kagglebot.json_utils import write_json_array as _write_json_array
 from kagglebot.json_utils import write_json_object as _write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
@@ -3893,24 +3895,16 @@ def _build_run_payload(
 
 
 def _load_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
-    if not paths.dataset_profile_path.exists():
-        return {}
-    try:
-        payload = json.loads(paths.dataset_profile_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(payload, dict):
+    payload = _load_json_object(paths.dataset_profile_path)
+    if payload is None:
         return {}
     return _plan_policy.apply_competition_eval_override(slug=paths.slug, payload=payload)
 
 
 def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
     spec_path = paths.context_dir / "evaluation_spec.json"
-    if not spec_path.exists():
-        return {}
-    try:
-        payload = json.loads(spec_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    payload = _load_json_object(spec_path)
+    if payload is None:
         return {}
     spec, issues = validate_evaluation_spec(payload)
     if issues:
@@ -8833,23 +8827,15 @@ def _maybe_apply_lightweight_runtime_fix(
 
 
 def _load_blocked_modules(context_dir: Path) -> list[str]:
-    path = context_dir / _BLOCKED_MODULES_FILENAME
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    if isinstance(payload, list):
-        return [str(item) for item in payload if item]
-    return []
+    payload = _load_json_array(context_dir / _BLOCKED_MODULES_FILENAME)
+    return [str(item) for item in payload if item] if payload is not None else []
 
 
 def _save_blocked_modules(context_dir: Path, modules: list[str]) -> None:
     context_dir.mkdir(parents=True, exist_ok=True)
     path = context_dir / _BLOCKED_MODULES_FILENAME
     if modules:
-        path.write_text(json.dumps(modules, indent=2), encoding="utf-8")
+        _write_json_array(path, [str(module) for module in modules])
         return
     if path.exists():
         path.unlink()
@@ -10176,8 +10162,7 @@ def _load_previous_submission_history(
         source="kaggle competitions submissions --csv",
     )
     payload["cache_path"] = str(history_path)
-    paths.context_dir.mkdir(parents=True, exist_ok=True)
-    history_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    _write_json_object(history_path, payload)
     return payload
 
 
@@ -10327,13 +10312,8 @@ def _format_previous_submission_history_for_prompt(history: dict[str, object] | 
 
 def _format_method_registry_for_prompt(paths: CompetitionPaths) -> str:
     registry_path = method_registry_path(paths.context_dir)
-    if not registry_path.exists():
-        return ""
-    try:
-        payload = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(payload, dict):
+    payload = _load_json_object(registry_path)
+    if payload is None:
         return ""
     return render_method_registry_for_prompt(payload, max_methods=8)
 
@@ -10667,13 +10647,10 @@ def _extract_score_from_text(text: str) -> float | None:
 
 
 def _extract_code_reference_score_from_index(path: Path) -> tuple[float | None, str]:
-    if not path.exists():
-        return None, "missing_code_index"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None, "invalid_code_index"
-    if not isinstance(payload, dict):
+    payload = _load_json_object(path)
+    if payload is None:
+        if not path.exists():
+            return None, "missing_code_index"
         return None, "invalid_code_index"
     notebooks = payload.get("notebooks")
     if not isinstance(notebooks, list) or not notebooks:
@@ -10756,13 +10733,8 @@ def _extract_code_reference_score(paths: CompetitionPaths) -> tuple[float | None
 
 def _load_code_reference_notebook(paths: CompetitionPaths, *, id_key: str) -> _CodeReferenceNotebook | None:
     index_path = paths.code_notebooks_index_path
-    if not index_path.exists():
-        return None
-    try:
-        payload = json.loads(index_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
+    payload = _load_json_object(index_path)
+    if payload is None:
         return None
     notebooks = payload.get("notebooks")
     if not isinstance(notebooks, list) or not notebooks:

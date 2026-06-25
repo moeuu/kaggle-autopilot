@@ -18,7 +18,7 @@ from kagglebot.agents.identity import (
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_array, load_json_object, write_json_object
 from kagglebot.knowledge import (
     derive_problem_types,
     format_error_fix_insights,
@@ -661,16 +661,8 @@ def _has_data_rows(path: Path) -> bool:
 
 
 def _load_blocked_modules(context_dir: Path) -> list[str]:
-    path = context_dir / "blocked_modules.json"
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    if isinstance(payload, list):
-        return [str(item) for item in payload if item]
-    return []
+    payload = load_json_array(context_dir / "blocked_modules.json")
+    return [str(item) for item in payload if item] if payload is not None else []
 
 
 def _resolve_blocked_modules_for_runtime(context_dir: Path, *, compute: str) -> list[str]:

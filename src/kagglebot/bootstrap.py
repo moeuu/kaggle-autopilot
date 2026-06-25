@@ -858,9 +858,8 @@ def _summarize_notebook_source(path: Path | None) -> str:
         return ""
     suffix = path.suffix.lower()
     if suffix == ".ipynb":
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-        except json.JSONDecodeError:
+        payload = load_json_object(path, errors="ignore")
+        if payload is None:
             return ""
         cells = payload.get("cells", [])
         if not isinstance(cells, list):

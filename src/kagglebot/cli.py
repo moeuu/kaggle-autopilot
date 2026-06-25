@@ -21,6 +21,7 @@ from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAb
 from kagglebot.exec_utils import run_command
 from kagglebot.hardware import resolve_hardware_profile
 from kagglebot.history import new_run_id
+from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import knowledge_search, knowledge_show
@@ -1189,23 +1190,13 @@ def _store_submission_artifact(*, source: Path, destination_dir: Path, run_id: s
 
 
 def _default_metric(paths: CompetitionPaths) -> str:
-    plan_path = paths.plan_path
-    if plan_path.exists():
-        try:
-            data = json.loads(plan_path.read_text(encoding="utf-8"))
-            metric = data.get("target_metric")
-            if isinstance(metric, str) and metric.strip():
-                return metric
-        except json.JSONDecodeError:
-            pass
+    plan = load_json_object(paths.plan_path)
+    metric = plan.get("target_metric") if plan is not None else None
+    if isinstance(metric, str) and metric.strip():
+        return metric
 
-    profile_path = paths.dataset_profile_path
-    if profile_path.exists():
-        try:
-            data = json.loads(profile_path.read_text(encoding="utf-8"))
-            metric = data.get("metric")
-            if isinstance(metric, str):
-                return metric
-        except json.JSONDecodeError:
-            pass
+    profile = load_json_object(paths.dataset_profile_path)
+    metric = profile.get("metric") if profile is not None else None
+    if isinstance(metric, str):
+        return metric
     return "rmse"
