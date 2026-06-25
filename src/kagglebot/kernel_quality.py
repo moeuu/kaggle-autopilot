@@ -84,6 +84,31 @@ def build_score_source_quality_signal(score_source: str | None) -> dict[str, obj
     }
 
 
+def merge_quality_signal_messages(
+    *,
+    reasons: list[str],
+    warnings: list[str],
+    signal: dict[str, object],
+    dedupe: bool = False,
+) -> dict[str, list[str]]:
+    merged_reasons = list(reasons)
+    merged_warnings = list(warnings)
+    raw_reasons = signal.get("reasons")
+    raw_warnings = signal.get("warnings")
+    if isinstance(raw_reasons, list):
+        for reason in raw_reasons:
+            if isinstance(reason, str) and (not dedupe or reason not in merged_reasons):
+                merged_reasons.append(reason)
+    if isinstance(raw_warnings, list):
+        for warning in raw_warnings:
+            if isinstance(warning, str) and (not dedupe or warning not in merged_warnings):
+                merged_warnings.append(warning)
+    return {
+        "reasons": merged_reasons,
+        "warnings": merged_warnings,
+    }
+
+
 def build_oracle_override_signal(payload: dict[str, object] | None) -> dict[str, object]:
     oracle_payload = payload.get("oracle") if isinstance(payload, dict) else None
     mode: str | None = None

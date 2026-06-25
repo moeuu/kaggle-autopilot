@@ -311,6 +311,7 @@ _max_nested_int = _kernel_quality.max_nested_int
 _min_nested_int = _kernel_quality.min_nested_int
 _any_nested_bool = _kernel_quality.any_nested_bool
 _nested_text = _kernel_quality.nested_text
+_merge_quality_signal_messages = _kernel_quality.merge_quality_signal_messages
 _build_external_label_transfer_quality_signal = _kernel_quality.build_external_label_transfer_quality_signal
 _build_oracle_override_signal = _kernel_quality.build_oracle_override_signal
 _build_score_source_quality_signal = _kernel_quality.build_score_source_quality_signal
@@ -4660,45 +4661,36 @@ def _build_kernel_quality_guard(
     is_final_iteration = iteration >= max_iterations
     payload = kernel_metrics_payload or {}
 
+    def merge_signal_messages(signal: dict[str, object], *, dedupe: bool = False) -> None:
+        nonlocal reasons, warnings
+        merged = _merge_quality_signal_messages(
+            reasons=reasons,
+            warnings=warnings,
+            signal=signal,
+            dedupe=dedupe,
+        )
+        reasons = merged["reasons"]
+        warnings = merged["warnings"]
+
     score_source_signal = _build_score_source_quality_signal(evaluation.score_source)
-    for reason in score_source_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in score_source_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(score_source_signal)
     if not bool(score_source_signal.get("trusted")):
         if not force_submit:
             block_submit = True
 
     oracle_signal = _build_oracle_override_signal(payload)
-    for reason in oracle_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in oracle_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(oracle_signal)
     if bool(oracle_signal.get("detected")):
         if not force_submit:
             block_submit = True
 
     external_label_transfer_signal = _build_external_label_transfer_quality_signal(payload)
-    for reason in external_label_transfer_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in external_label_transfer_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(external_label_transfer_signal)
     if bool(external_label_transfer_signal.get("hard_block")):
         block_submit = True
 
     candidate_selection_signal = _build_candidate_selection_quality_signal(payload=payload, direction=direction)
-    for reason in candidate_selection_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in candidate_selection_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(candidate_selection_signal)
     candidate_selection_mismatch = candidate_selection_signal.get("mismatch")
     if bool(candidate_selection_signal.get("detected")):
         if not force_submit:
@@ -4708,12 +4700,7 @@ def _build_kernel_quality_guard(
         payload=payload,
         candidate_selection_mismatch=candidate_selection_mismatch,
     )
-    for reason in prediction_distribution_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in prediction_distribution_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(prediction_distribution_signal)
     prediction_distribution_collapse = prediction_distribution_signal.get("collapse")
     if prediction_distribution_signal.get("reasons"):
         if not force_submit:
@@ -4730,12 +4717,7 @@ def _build_kernel_quality_guard(
     competition_faithfulness = competition_faithfulness_signal.get("faithfulness")
     if not isinstance(competition_faithfulness, dict):
         competition_faithfulness = {}
-    for reason in competition_faithfulness_signal.get("reasons", []):
-        if isinstance(reason, str) and reason not in reasons:
-            reasons.append(reason)
-    for warning in competition_faithfulness_signal.get("warnings", []):
-        if isinstance(warning, str) and warning not in warnings:
-            warnings.append(warning)
+    merge_signal_messages(competition_faithfulness_signal, dedupe=True)
     if bool(competition_faithfulness_signal.get("block_submit")):
         block_submit = True
 
@@ -4755,12 +4737,7 @@ def _build_kernel_quality_guard(
     baseline_signal = baseline_regression_signal.get("baseline")
     if not isinstance(baseline_signal, dict):
         baseline_signal = {}
-    for reason in baseline_regression_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in baseline_regression_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(baseline_regression_signal)
     if bool(baseline_regression_signal.get("block_submit")):
         block_submit = True
 
@@ -4779,12 +4756,7 @@ def _build_kernel_quality_guard(
     step_bucket_signal = validation_stability_signal.get("step_bucket")
     if not isinstance(step_bucket_signal, dict):
         step_bucket_signal = {}
-    for reason in validation_stability_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in validation_stability_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(validation_stability_signal)
     if bool(validation_stability_signal.get("block_submit")):
         block_submit = True
 
@@ -4813,12 +4785,7 @@ def _build_kernel_quality_guard(
     code_reference_signal = code_reference_regression_signal.get("code_reference")
     if not isinstance(code_reference_signal, dict):
         code_reference_signal = {}
-    for reason in code_reference_regression_signal.get("reasons", []):
-        if isinstance(reason, str):
-            reasons.append(reason)
-    for warning in code_reference_regression_signal.get("warnings", []):
-        if isinstance(warning, str):
-            warnings.append(warning)
+    merge_signal_messages(code_reference_regression_signal)
     if bool(code_reference_regression_signal.get("block_submit")):
         block_submit = True
 

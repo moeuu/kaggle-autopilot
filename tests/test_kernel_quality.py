@@ -24,6 +24,7 @@ from kagglebot.kernel_quality import (
     infer_capacity_tier,
     infer_data_tier,
     is_significantly_worse,
+    merge_quality_signal_messages,
 )
 
 
@@ -71,6 +72,30 @@ def test_build_score_source_quality_signal_allows_trusted_sources() -> None:
         "reasons": [],
         "warnings": [],
     }
+
+
+def test_merge_quality_signal_messages_filters_and_dedupes_strings() -> None:
+    merged = merge_quality_signal_messages(
+        reasons=["existing"],
+        warnings=["warn"],
+        signal={"reasons": ["existing", "new", 7], "warnings": ["warn", "new-warn", None]},
+        dedupe=True,
+    )
+
+    assert merged == {
+        "reasons": ["existing", "new"],
+        "warnings": ["warn", "new-warn"],
+    }
+
+
+def test_merge_quality_signal_messages_preserves_duplicates_by_default() -> None:
+    merged = merge_quality_signal_messages(
+        reasons=["existing"],
+        warnings=[],
+        signal={"reasons": ["existing"], "warnings": []},
+    )
+
+    assert merged["reasons"] == ["existing", "existing"]
 
 
 def test_build_oracle_override_signal_flags_applied_or_enabled_mode() -> None:
