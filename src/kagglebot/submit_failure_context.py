@@ -32,6 +32,15 @@ class SubmitAutofixInputDecision:
 
 
 @dataclass(frozen=True)
+class SubmitAutofixAttemptContext:
+    run_state: dict[str, object]
+    failure_context: dict[str, object]
+    latest_submit_attempt: dict[str, object]
+    input_submission_path: Path
+    message: str
+
+
+@dataclass(frozen=True)
 class SubmitAbortAutofixDecision:
     autofixable: bool
     message: str
@@ -326,6 +335,48 @@ def apply_stale_submit_autofix_decision(
     updated_context.update(decision.failure_context_updates)
     save_failure_context(updated_context)
     return updated_context
+
+
+def resolve_submit_autofix_context_for_attempt(
+    *,
+    run_dir: Path,
+    submission_path: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+    load_latest_submit_attempt: Callable[[Path], dict[str, object]],
+    save_run_state: Callable[[dict[str, object]], object],
+    now_iso: str,
+) -> SubmitAutofixAttemptContext:
+    stale_autofix_state = load_run_state(run_dir)
+    stale_autofix_context = load_submit_failure_context(run_dir)
+    stale_autofix_decision = decide_stale_submit_autofix_artifact(
+        run_state=stale_autofix_state,
+        failure_context=stale_autofix_context,
+        submission_path=submission_path,
+        now_iso=now_iso,
+    )
+    apply_stale_submit_autofix_decision(
+        decision=stale_autofix_decision,
+        failure_context=stale_autofix_context,
+        save_run_state=save_run_state,
+        save_failure_context=lambda payload: save_submit_failure_context(run_dir, payload),
+    )
+
+    run_state = load_run_state(run_dir)
+    failure_context = load_submit_failure_context(run_dir)
+    latest_submit_attempt = load_latest_submit_attempt(run_dir)
+    input_decision = decide_submit_autofix_input_submission(
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        failure_context=failure_context,
+        submission_path=submission_path,
+    )
+    return SubmitAutofixAttemptContext(
+        run_state=run_state,
+        failure_context=failure_context,
+        latest_submit_attempt=latest_submit_attempt,
+        input_submission_path=input_decision.input_submission_path,
+        message=input_decision.message,
+    )
 
 
 def decide_submit_autofix_input_submission(

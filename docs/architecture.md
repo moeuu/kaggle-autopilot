@@ -92,10 +92,11 @@ Submit failure classification, notebook-submit fallback detection, and repair-ta
 `src/kagglebot/submit_failure_policy.py`. The loop still owns persistence, ledgers, and knowledge recording, but it no
 longer owns the pure decision table for whether a failed submit should repair the artifact, submit mode/kernel, platform
 polling path, or wait for manual intervention.
-Submit failure context persistence, reference parsing, prompt formatting, stale repaired-artifact decisions, and submit
-autofix artifact resolution live in `src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out
-of the main loop. Submit failure-context payload creation plus submitted/duplicate-skip resolution marking also live
-there; the loop supplies repair decisions and runtime state snapshots.
+Submit failure context persistence, reference parsing, prompt formatting, stale repaired-artifact decisions/application,
+submit-attempt autofix input resolution, and submit autofix artifact resolution live in
+`src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out of the main loop. Submit
+failure-context payload creation plus submitted/duplicate-skip resolution marking also live there; the loop supplies
+repair decisions and runtime state snapshots.
 Deterministic submit file repair preparation lives in `src/kagglebot/submit_autofix.py`; the loop supplies persistence
 and validation callbacks while the module owns the repair-required check and result summary.
 Submit code fingerprinting, same-error-fingerprint reuse/allowance decisions, duplicate-submission source collection

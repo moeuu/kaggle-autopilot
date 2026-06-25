@@ -4634,38 +4634,25 @@ def _attempt_submit(
         run_dir=run_dir,
         save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
-    stale_autofix_state = _load_run_state(run_dir)
-    stale_autofix_context = _submit_failure_context.load_submit_failure_context(run_dir)
-    stale_autofix_decision = _submit_failure_context.decide_stale_submit_autofix_artifact(
-        run_state=stale_autofix_state,
-        failure_context=stale_autofix_context,
+    autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_attempt(
+        run_dir=run_dir,
         submission_path=submission_path,
+        load_run_state=_load_run_state,
+        load_latest_submit_attempt=_load_latest_submit_attempt,
+        save_run_state=lambda updates: _save_run_state(run_dir, updates),
         now_iso=datetime.now(UTC).isoformat(),
     )
-    _submit_failure_context.apply_stale_submit_autofix_decision(
-        decision=stale_autofix_decision,
-        failure_context=stale_autofix_context,
-        save_run_state=lambda updates: _save_run_state(run_dir, updates),
-        save_failure_context=lambda payload: _submit_failure_context.save_submit_failure_context(run_dir, payload),
-    )
-    run_state = _load_run_state(run_dir)
-    submit_failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
-    latest_submit_attempt = _load_latest_submit_attempt(run_dir)
+    run_state = autofix_attempt_context.run_state
+    latest_submit_attempt = autofix_attempt_context.latest_submit_attempt
     submit_code_fingerprint = _submit_retry_policy.compute_submit_code_fingerprint(
         src_root=Path(__file__).resolve().parent,
         kernel_source_dir=config.paths.kernel_source_dir,
         sha256_or_none=_sha256_or_none,
     )
     allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
-    autofix_input_decision = _submit_failure_context.decide_submit_autofix_input_submission(
-        run_state=run_state,
-        latest_submit_attempt=latest_submit_attempt,
-        failure_context=submit_failure_context,
-        submission_path=submission_path,
-    )
-    input_submission_path = autofix_input_decision.input_submission_path
-    if autofix_input_decision.message:
-        print(autofix_input_decision.message)
+    input_submission_path = autofix_attempt_context.input_submission_path
+    if autofix_attempt_context.message:
+        print(autofix_attempt_context.message)
 
     message = _submit_stage.resolve_submission_message(
         context_dir=config.paths.context_dir,

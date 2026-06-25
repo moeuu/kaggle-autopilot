@@ -22,6 +22,7 @@ from kagglebot.submit_failure_context import (
     path_from_submit_reference,
     persist_submit_abort_failure,
     resolve_submit_abort_artifact_path,
+    resolve_submit_autofix_context_for_attempt,
     resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
     should_defer_submit_abort_to_next_iteration,
@@ -404,6 +405,78 @@ def test_decide_submit_autofix_input_submission_ignores_repair_for_different_fai
 
     assert decision.input_submission_path == original
     assert decision.message == ""
+
+
+def test_resolve_submit_autofix_context_for_attempt_clears_stale_repair(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    new_submission = tmp_path / "iter-2" / "submission.csv"
+    run_state = {"submit_autofix_submission_path": str(repaired)}
+    saved_updates: list[dict[str, object]] = []
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "repair_target": "submission_artifact",
+            "submission_artifact_path": str(original),
+        },
+    )
+
+    def save_run_state(updates: dict[str, object]) -> None:
+        saved_updates.append(updates)
+        run_state.update(updates)
+
+    context = resolve_submit_autofix_context_for_attempt(
+        run_dir=run_dir,
+        submission_path=new_submission,
+        load_run_state=lambda path: dict(run_state),
+        load_latest_submit_attempt=lambda path: {"stderr_tail": "old error"},
+        save_run_state=save_run_state,
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+
+    assert saved_updates == [{"submit_autofix_submission_path": ""}]
+    assert context.run_state["submit_autofix_submission_path"] == ""
+    assert context.latest_submit_attempt == {"stderr_tail": "old error"}
+    assert context.input_submission_path == new_submission
+    assert context.message == ""
+    assert context.failure_context["stale_repaired_artifact_cleared_at"] == "2026-06-25T00:00:00+00:00"
+    assert context.failure_context["superseded_by_submission_path"] == str(new_submission)
+
+
+def test_resolve_submit_autofix_context_for_attempt_uses_matching_repaired_artifact(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    original = tmp_path / "iter-1" / "submission.csv"
+    repaired = tmp_path / "iter-1" / "output" / "submission-fixed.csv"
+    repaired.parent.mkdir(parents=True)
+    repaired.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    run_state = {"submit_autofix_submission_path": str(repaired)}
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "repair_target": "submission_artifact",
+            "submission_artifact_path": str(original),
+        },
+    )
+
+    context = resolve_submit_autofix_context_for_attempt(
+        run_dir=run_dir,
+        submission_path=original,
+        load_run_state=lambda path: dict(run_state),
+        load_latest_submit_attempt=lambda path: {},
+        save_run_state=lambda updates: run_state.update(updates),
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+
+    assert context.run_state["submit_autofix_submission_path"] == str(repaired)
+    assert context.failure_context["submission_artifact_path"] == str(original)
+    assert context.latest_submit_attempt == {}
+    assert context.input_submission_path == repaired
+    assert str(repaired) in context.message
 
 
 def test_decide_submit_abort_autofixability_allows_repairable_failure_context() -> None:
