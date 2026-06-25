@@ -232,7 +232,8 @@ The next high-value modernization work is:
    in `kernel_plan_validation.py`; local sample-submission mirroring/placeholder expansion is now in
    `local_sample_submission.py`; local data/context profile staging is now in `local_kernel_context.py`;
    local progress tracking, stall detection, and heartbeat formatting is now in `local_kernel_progress.py`;
-   local model-cache discovery and staging is now in `local_kernel_models.py`;
+   local model-cache discovery and staging is now in `local_kernel_models.py`; local text-runtime aux input staging is
+   now in `local_kernel_aux_inputs.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
