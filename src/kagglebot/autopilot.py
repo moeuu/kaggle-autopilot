@@ -262,15 +262,6 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
-_infer_campaign_candidate_category = _campaign_metrics.infer_campaign_candidate_category
-_infer_campaign_model_family = _campaign_metrics.infer_campaign_model_family
-_infer_campaign_feature_set = _campaign_metrics.infer_campaign_feature_set
-_extract_campaign_fold_scores = _campaign_metrics.extract_campaign_fold_scores
-_extract_campaign_prediction_correlation = _campaign_metrics.extract_campaign_prediction_correlation
-_extract_campaign_artifact_path = _campaign_metrics.extract_campaign_artifact_path
-_extract_campaign_method_id = _campaign_metrics.extract_campaign_method_id
-_extract_campaign_validation_profile_id = _campaign_metrics.extract_campaign_validation_profile_id
-_campaign_prefers_validation_redesign = _campaign_metrics.campaign_prefers_validation_redesign
 _extract_trusted_cv_value_from_metrics_payload = _kernel_metrics.extract_trusted_cv_value_from_metrics_payload
 _extract_kernel_metric = _kernel_metrics.extract_kernel_metric
 _metric_value_from_payload_item = _kernel_metrics.metric_value_from_payload_item
@@ -1759,7 +1750,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             portfolio_optimizer_report: dict[str, object] | None = None
             top1_exhaustion_report: dict[str, object] | None = None
             if campaign_mode == "top1":
-                campaign_category = _infer_campaign_candidate_category(
+                campaign_category = _campaign_metrics.infer_campaign_candidate_category(
                     iteration=iteration,
                     kernel_metrics_payload=kernel_metrics_payload,
                     quality_reasons=quality_reasons,
@@ -1775,16 +1766,22 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     score_source=decision_source,
                     submission_path=submission_path,
                     metrics_path=metrics_path,
-                    oof_path=_extract_campaign_artifact_path(kernel_metrics_payload, "oof"),
-                    prediction_path=_extract_campaign_artifact_path(kernel_metrics_payload, "prediction"),
-                    model_family=_infer_campaign_model_family(model_summary, kernel_metrics_payload),
-                    feature_set=_infer_campaign_feature_set(model_summary, kernel_metrics_payload),
-                    method_id=_extract_campaign_method_id(kernel_metrics_payload)
+                    oof_path=_campaign_metrics.extract_campaign_artifact_path(kernel_metrics_payload, "oof"),
+                    prediction_path=_campaign_metrics.extract_campaign_artifact_path(
+                        kernel_metrics_payload, "prediction"
+                    ),
+                    model_family=_campaign_metrics.infer_campaign_model_family(model_summary, kernel_metrics_payload),
+                    feature_set=_campaign_metrics.infer_campaign_feature_set(model_summary, kernel_metrics_payload),
+                    method_id=_campaign_metrics.extract_campaign_method_id(kernel_metrics_payload)
                     or select_method_id_for_category(method_registry, campaign_category),
-                    validation_profile_id=_extract_campaign_validation_profile_id(kernel_metrics_payload)
+                    validation_profile_id=_campaign_metrics.extract_campaign_validation_profile_id(
+                        kernel_metrics_payload
+                    )
                     or str(method_registry.get("active_validation_profile") or "default_cv"),
-                    fold_scores=_extract_campaign_fold_scores(kernel_metrics_payload),
-                    prediction_correlation=_extract_campaign_prediction_correlation(kernel_metrics_payload),
+                    fold_scores=_campaign_metrics.extract_campaign_fold_scores(kernel_metrics_payload),
+                    prediction_correlation=_campaign_metrics.extract_campaign_prediction_correlation(
+                        kernel_metrics_payload
+                    ),
                     metadata={
                         "metric": evaluation.metric,
                         "readiness_score": readiness_score,
@@ -2808,7 +2805,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             if online_mismatch_signal is not None:
                 extra_policy_notes.append(str(online_mismatch_signal["note"]))
-                if campaign_mode == "top1" and _campaign_prefers_validation_redesign(campaign_state, method_registry):
+                if campaign_mode == "top1" and _campaign_metrics.campaign_prefers_validation_redesign(
+                    campaign_state, method_registry
+                ):
                     minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                         minimum_improvement_mode_next or "minor_tuning",
                         "validation_redesign",
@@ -2835,7 +2834,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             if online_history_regression_signal is not None:
                 extra_policy_notes.append(str(online_history_regression_signal["note"]))
-                if campaign_mode == "top1" and _campaign_prefers_validation_redesign(campaign_state, method_registry):
+                if campaign_mode == "top1" and _campaign_metrics.campaign_prefers_validation_redesign(
+                    campaign_state, method_registry
+                ):
                     minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                         minimum_improvement_mode_next or "minor_tuning",
                         "validation_redesign",
