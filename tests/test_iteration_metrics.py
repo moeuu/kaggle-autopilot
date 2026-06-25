@@ -8,6 +8,9 @@ from kagglebot.iteration_metrics import (
     build_eval_data_cache_fallback,
     build_iteration_record_kwargs,
     build_metrics_payload,
+    build_noise_guard_payload,
+    build_rank_guard_payload,
+    build_regression_guard_payload,
     build_split_index_fingerprints,
     evaluation_to_payload,
     extract_fold_scores_for_report,
@@ -161,6 +164,78 @@ def test_build_iteration_record_kwargs_uses_evaluation_and_top1_score() -> None:
         "top1_public_score": 0.95,
         "met_target": False,
         "git_commit": None,
+    }
+
+
+def test_build_guard_payload_helpers_preserve_expected_keys() -> None:
+    assert build_noise_guard_payload(
+        delta_srs_vs_prev=0.01,
+        noise_threshold=0.02,
+        noise_limited_streak=2,
+        force_major_overhaul_next=True,
+    ) == {
+        "delta_srs_vs_prev": 0.01,
+        "threshold": 0.02,
+        "streak": 2,
+        "force_major_overhaul_next": True,
+    }
+
+    assert build_rank_guard_payload(
+        target_medal="gold",
+        target_rank_percentile=0.01,
+        target_rank_met=False,
+        minimum_improvement_mode="moderate_update",
+        rank=12,
+        total_teams=100,
+        rank_percentile=0.12,
+        rank_source="submission_row",
+        estimated_rank=10,
+        estimated_total_teams=100,
+        estimated_rank_percentile=0.10,
+        rank_estimate_source="leaderboard_score_estimate",
+        max_percentile=0.01,
+        min_teams=200,
+        force_major_overhaul_next=True,
+    ) == {
+        "target_medal": "gold",
+        "target_rank_percentile": 0.01,
+        "target_rank_met": False,
+        "minimum_improvement_mode": "moderate_update",
+        "rank": 12,
+        "total_teams": 100,
+        "rank_percentile": 0.12,
+        "rank_source": "submission_row",
+        "estimated_rank": 10,
+        "estimated_total_teams": 100,
+        "estimated_rank_percentile": 0.10,
+        "rank_estimate_source": "leaderboard_score_estimate",
+        "max_percentile": 0.01,
+        "min_teams": 200,
+        "force_major_overhaul_next": True,
+    }
+
+    assert build_regression_guard_payload(
+        best_score_before_iteration=0.8,
+        score_drop_vs_best=0.05,
+        severe_regression_detected=True,
+        conservative_feature_collapse=False,
+        conservative_regression_detected=True,
+        first_iteration_below_code_reference=False,
+        code_reference_score=0.9,
+        code_reference_comparison_score=0.88,
+        code_reference_delta_vs_current=-0.02,
+        code_reference_forced_reproduction=True,
+    ) == {
+        "best_score_before_iteration": 0.8,
+        "score_drop_vs_best": 0.05,
+        "severe_regression_detected": True,
+        "conservative_feature_collapse": False,
+        "conservative_regression_detected": True,
+        "first_iteration_below_code_reference": False,
+        "code_reference_score": 0.9,
+        "code_reference_comparison_score": 0.88,
+        "code_reference_delta_vs_current": -0.02,
+        "code_reference_forced_reproduction": True,
     }
 
 

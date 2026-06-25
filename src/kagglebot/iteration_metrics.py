@@ -131,6 +131,85 @@ def build_iteration_record_kwargs(
     }
 
 
+def build_noise_guard_payload(
+    *,
+    delta_srs_vs_prev: float | None,
+    noise_threshold: float,
+    noise_limited_streak: int,
+    force_major_overhaul_next: bool,
+) -> dict[str, object]:
+    return {
+        "delta_srs_vs_prev": delta_srs_vs_prev,
+        "threshold": noise_threshold,
+        "streak": noise_limited_streak,
+        "force_major_overhaul_next": force_major_overhaul_next,
+    }
+
+
+def build_rank_guard_payload(
+    *,
+    target_medal: str | None,
+    target_rank_percentile: float | None,
+    target_rank_met: bool,
+    minimum_improvement_mode: str | None,
+    rank: int | None,
+    total_teams: int | None,
+    rank_percentile: float | None,
+    rank_source: str | None,
+    estimated_rank: int | None,
+    estimated_total_teams: int | None,
+    estimated_rank_percentile: float | None,
+    rank_estimate_source: str | None,
+    max_percentile: float,
+    min_teams: int,
+    force_major_overhaul_next: bool,
+) -> dict[str, object]:
+    return {
+        "target_medal": target_medal,
+        "target_rank_percentile": target_rank_percentile,
+        "target_rank_met": target_rank_met,
+        "minimum_improvement_mode": minimum_improvement_mode,
+        "rank": rank,
+        "total_teams": total_teams,
+        "rank_percentile": rank_percentile,
+        "rank_source": rank_source,
+        "estimated_rank": estimated_rank,
+        "estimated_total_teams": estimated_total_teams,
+        "estimated_rank_percentile": estimated_rank_percentile,
+        "rank_estimate_source": rank_estimate_source,
+        "max_percentile": max_percentile,
+        "min_teams": min_teams,
+        "force_major_overhaul_next": force_major_overhaul_next,
+    }
+
+
+def build_regression_guard_payload(
+    *,
+    best_score_before_iteration: float | None,
+    score_drop_vs_best: float | None,
+    severe_regression_detected: bool,
+    conservative_feature_collapse: bool,
+    conservative_regression_detected: bool,
+    first_iteration_below_code_reference: bool,
+    code_reference_score: float | None,
+    code_reference_comparison_score: float | None,
+    code_reference_delta_vs_current: float | None,
+    code_reference_forced_reproduction: bool,
+) -> dict[str, object]:
+    return {
+        "best_score_before_iteration": best_score_before_iteration,
+        "score_drop_vs_best": score_drop_vs_best,
+        "severe_regression_detected": severe_regression_detected,
+        "conservative_feature_collapse": conservative_feature_collapse,
+        "conservative_regression_detected": conservative_regression_detected,
+        "first_iteration_below_code_reference": first_iteration_below_code_reference,
+        "code_reference_score": code_reference_score,
+        "code_reference_comparison_score": code_reference_comparison_score,
+        "code_reference_delta_vs_current": code_reference_delta_vs_current,
+        "code_reference_forced_reproduction": code_reference_forced_reproduction,
+    }
+
+
 def record_iteration_with_submit_phase_compat(
     *,
     record_iteration: Callable[..., object],

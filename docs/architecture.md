@@ -331,8 +331,8 @@ Recommended extraction order:
    Kernel quality guard constants, payload-level detectors for subgroup collapse, external test-label transfer,
    candidate-selection mismatch, prediction-distribution collapse, and the aggregate submit quality-guard payload builder
    are now in `kernel_quality.py`.
-   Iteration metrics payload assembly, evaluation-result serialization, evaluation data-cache/fingerprint helpers, and
-   iteration submit eligibility, plus iteration record kwargs/compat persistence and run evaluation-report
+   Iteration metrics payload/guard-section assembly, evaluation-result serialization, evaluation data-cache/fingerprint
+   helpers, and iteration submit eligibility, plus iteration record kwargs/compat persistence and run evaluation-report
    resume/persistence, are now in `iteration_metrics.py`.
    Iteration repair-signal extraction and next-iteration policy/knowledge payload assembly are now in
    `iteration_signals.py`.
