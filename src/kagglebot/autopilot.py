@@ -5047,16 +5047,19 @@ def _attempt_submit(
         )
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
-    duplicate_sources: list[str] = []
-    if prepared_submission_sha and not allow_force:
-        if _submit_attempts.submit_attempt_sha_seen(run_dir=run_dir, submission_sha=prepared_submission_sha):
-            duplicate_sources.append("run_attempts")
-        if SubmissionLedger(config.paths.submission_ledger_path).is_duplicate(
+    duplicate_sources = _submit_retry_policy.collect_duplicate_submission_sources(
+        prepared_submission_sha=prepared_submission_sha,
+        allow_force=allow_force,
+        submission_attempt_sha_seen=lambda submission_sha: _submit_attempts.submit_attempt_sha_seen(
+            run_dir=run_dir,
+            submission_sha=submission_sha,
+        ),
+        submission_ledger_duplicate=lambda: SubmissionLedger(config.paths.submission_ledger_path).is_duplicate(
             slug=config.slug,
             message=message,
             submission_path=prepared_submission_path,
-        ):
-            duplicate_sources.append("submission_ledger")
+        ),
+    )
     duplicate_decision = _submit_retry_policy.decide_duplicate_submission_action(
         slug=config.slug,
         prepared_submission_sha=prepared_submission_sha,

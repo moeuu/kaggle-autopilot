@@ -4,6 +4,7 @@ from pathlib import Path
 
 from kagglebot.hashing import sha256_file_or_none
 from kagglebot.submit_retry_policy import (
+    collect_duplicate_submission_sources,
     compute_submit_backoff,
     compute_submit_code_fingerprint,
     consume_same_submit_fingerprint_retry_allowance,
@@ -168,6 +169,38 @@ def test_decide_duplicate_submission_action_proceeds_when_not_duplicate() -> Non
 
     assert decision.action == "proceed"
     assert decision.duplicate_sources == []
+
+
+def test_collect_duplicate_submission_sources_checks_run_and_ledger_sources() -> None:
+    sources = collect_duplicate_submission_sources(
+        prepared_submission_sha=" sha ",
+        allow_force=False,
+        submission_attempt_sha_seen=lambda submission_sha: submission_sha == "sha",
+        submission_ledger_duplicate=lambda: True,
+    )
+
+    assert sources == ["run_attempts", "submission_ledger"]
+
+
+def test_collect_duplicate_submission_sources_skips_checks_when_forced_or_missing_sha() -> None:
+    calls: list[str] = []
+
+    forced = collect_duplicate_submission_sources(
+        prepared_submission_sha="sha",
+        allow_force=True,
+        submission_attempt_sha_seen=lambda submission_sha: calls.append(f"attempt:{submission_sha}") or True,
+        submission_ledger_duplicate=lambda: calls.append("ledger") or True,
+    )
+    missing_sha = collect_duplicate_submission_sources(
+        prepared_submission_sha=" ",
+        allow_force=False,
+        submission_attempt_sha_seen=lambda submission_sha: calls.append(f"attempt:{submission_sha}") or True,
+        submission_ledger_duplicate=lambda: calls.append("ledger") or True,
+    )
+
+    assert forced == []
+    assert missing_sha == []
+    assert calls == []
 
 
 def test_decide_duplicate_submission_action_skips_with_fingerprint_and_sources() -> None:

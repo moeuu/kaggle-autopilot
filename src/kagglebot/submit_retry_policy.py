@@ -67,6 +67,24 @@ def compute_submit_backoff(
     return float(base_seconds) * (2 ** max(0, int(attempt) - 1)) + float(jitter_func())
 
 
+def collect_duplicate_submission_sources(
+    *,
+    prepared_submission_sha: str,
+    allow_force: bool,
+    submission_attempt_sha_seen: Callable[[str], bool],
+    submission_ledger_duplicate: Callable[[], bool],
+) -> list[str]:
+    normalized_sha = str(prepared_submission_sha or "").strip()
+    if allow_force or not normalized_sha:
+        return []
+    duplicate_sources: list[str] = []
+    if submission_attempt_sha_seen(normalized_sha):
+        duplicate_sources.append("run_attempts")
+    if submission_ledger_duplicate():
+        duplicate_sources.append("submission_ledger")
+    return duplicate_sources
+
+
 def decide_duplicate_submission_action(
     *,
     slug: str,

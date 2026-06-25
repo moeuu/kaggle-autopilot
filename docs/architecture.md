@@ -95,9 +95,9 @@ of the main loop. Submit failure-context payload creation also lives there; the 
 runtime state snapshots.
 Deterministic submit file repair preparation lives in `src/kagglebot/submit_autofix.py`; the loop supplies persistence
 and validation callbacks while the module owns the repair-required check and result summary.
-Submit code fingerprinting, same-error-fingerprint retry allowance, duplicate-submission skip decisions, and
-same-submission-path retry/skip decisions live in `src/kagglebot/submit_retry_policy.py`; the loop supplies paths,
-hashing, and state persistence callbacks.
+Submit code fingerprinting, same-error-fingerprint retry allowance, duplicate-submission source collection and skip
+decisions, and same-submission-path retry/skip decisions live in `src/kagglebot/submit_retry_policy.py`; the loop
+supplies paths, hashing, and state persistence callbacks.
 Submit attempt payloads, submit run-state updates, submit knowledge-record message/fix summaries, submit result payloads,
 and submit success outcome display/ledger-recording decisions live in `src/kagglebot/submit_attempts.py`. The same module
 now owns `submit_attempts.jsonl` append, duplicate SHA lookup, and tolerant row readers used by resume state and
@@ -335,7 +335,7 @@ Recommended extraction order:
 4. Submit state persistence: submit attempt JSONL writing/reading, duplicate SHA lookup, submit attempt/run-state payloads,
    submit-abort artifact path resolution, repair-classified submit failure-context payloads, submit knowledge-record
    payloads/orchestration, submit-abort attempt/context persistence, and submit result payload construction are now
-   centralized. Duplicate-submit skip decisions are extracted.
+   centralized. Duplicate-submit source collection and skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, initial artifact-mode resolution, tiny public
    sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,
