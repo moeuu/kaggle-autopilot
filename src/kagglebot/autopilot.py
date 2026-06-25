@@ -4107,8 +4107,13 @@ def _run_improvement(
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = agent_dir / "prompt.md"
-    submit_failure_notes, submit_failure_force_reason = _build_submit_failure_improvement_context(
-        run_dir=config.paths.run_dir(run_id)
+    run_dir = config.paths.run_dir(run_id)
+    (
+        submit_failure_notes,
+        submit_failure_force_reason,
+    ) = _submit_failure_context.build_submit_failure_improvement_context(
+        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
+        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
     )
     top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
     effective_current_score = evaluation.value if current_score is None else current_score
@@ -6972,13 +6977,6 @@ def _load_previous_submission_history(
     payload["cache_path"] = str(history_path)
     _write_json_object(history_path, payload)
     return payload
-
-
-def _build_submit_failure_improvement_context(*, run_dir: Path) -> tuple[list[str], str | None]:
-    return _submit_failure_context.build_submit_failure_improvement_context(
-        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-        latest_submit_attempt=_load_latest_submit_attempt(run_dir),
-    )
 
 
 def _record_submission_knowledge(

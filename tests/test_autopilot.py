@@ -20,7 +20,6 @@ from kagglebot.autopilot import (
     _attempt_submit,
     _build_accuracy_potential,
     _build_kernel_quality_guard,
-    _build_submit_failure_improvement_context,
     _decide_notebook_submit_artifact_mode_for_submission,
     _detect_online_mismatch_signal,
     _detect_online_regression_vs_submission_history,
@@ -3063,49 +3062,6 @@ def test_attempt_submit_aborts_when_complete_has_no_score(monkeypatch, tmp_path:
     assert failure_context["active"] is True
     assert failure_context["repairable"] is True
     assert failure_context["repair_target"] == "submission_artifact"
-
-
-def test_build_submit_failure_improvement_context_for_file_issue(tmp_path: Path) -> None:
-    run_dir = tmp_path / "artifacts" / "demo" / "runs" / "run-1"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    artifact_path = run_dir / "iter-1" / "submission.csv"
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
-
-    (run_dir / "submit_failure_context.json").write_text(
-        json.dumps(
-            {
-                "active": True,
-                "repairable": True,
-                "repair_target": "submission_artifact",
-                "reason": "submission_poll_status_error",
-                "error_kind": "validation",
-                "submission_artifact_path": str(artifact_path),
-                "summary": "Kaggle reported a submission row-count mismatch.",
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    (run_dir / "submit_attempts.jsonl").write_text(
-        json.dumps(
-            {
-                "stderr_tail": "Evaluation Exception: Submission must have 132133 rows",
-                "reason": "submission_poll_status_error",
-                "error_kind": "validation",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    notes, reason = _build_submit_failure_improvement_context(run_dir=run_dir)
-
-    assert reason is not None
-    assert "repair submit format" in reason.lower()
-    assert any("failed_submission_artifact=" in note for note in notes)
-    assert any("Submission must have 132133 rows" in note for note in notes)
-    assert any("authoritative `kernel.py`" in note for note in notes)
 
 
 def test_attempt_submit_prefers_repaired_submit_artifact_from_submit_autofix(monkeypatch, tmp_path: Path) -> None:
