@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from kagglebot.autopilot_helpers import _to_int, _update_best_score
 from kagglebot.metric_matching import metrics_equivalent
+from kagglebot.scalar_utils import parse_int
+from kagglebot.score_utils import should_update_best_score
 from kagglebot.solver.metrics import canonical_metric
 
 MAJOR_TOP1_GAP = 0.03
@@ -220,4 +221,8 @@ def should_update_best_accuracy_candidate(
     best_priority = _to_int(best_potential.get("frontier_priority")) or 0
     if current_priority != best_priority:
         return current_priority > best_priority
-    return _update_best_score(best_score, current_score, direction, 0.0)
+    return should_update_best_score(best_score, current_score, direction, 0.0)
+
+
+def _to_int(value: object) -> int | None:
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)

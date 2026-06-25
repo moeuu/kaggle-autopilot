@@ -105,3 +105,10 @@ def test_rank_and_best_accuracy_candidate_policy() -> None:
         best_score=0.75,
         direction="maximize",
     )
+    assert should_update_best_accuracy_candidate(
+        current_potential={"frontier_priority": "2.9"},
+        best_potential={"frontier_priority": "2"},
+        current_score=0.80,
+        best_score=0.75,
+        direction="maximize",
+    )
