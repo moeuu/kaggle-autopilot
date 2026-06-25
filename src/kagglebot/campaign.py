@@ -11,6 +11,7 @@ from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.scalar_utils import finite_float as _to_float
 from kagglebot.scalar_utils import optional_int as _to_int
 from kagglebot.scalar_utils import optional_str as _optional_str
+from kagglebot.score_utils import score_gap as _score_gap
 from kagglebot.solver.metrics import normalize_direction
 
 CampaignMode = Literal["baseline", "top1"]
@@ -485,13 +486,7 @@ def best_score(*, direction: str, scores: list[object]) -> float | None:
 
 
 def score_gap(*, current: object, reference: object, direction: str) -> float | None:
-    current_float = _to_float(current)
-    reference_float = _to_float(reference)
-    if current_float is None or reference_float is None:
-        return None
-    if _normalize_direction(direction) == "minimize":
-        return reference_float - current_float
-    return current_float - reference_float
+    return _score_gap(current=current, reference=reference, direction=direction)
 
 
 def _candidate_gain_vs_baseline(

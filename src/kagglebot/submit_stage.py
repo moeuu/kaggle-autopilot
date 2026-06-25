@@ -18,7 +18,7 @@ from kagglebot.campaign import (
 )
 from kagglebot.json_utils import load_json_object
 from kagglebot.scalar_utils import parse_finite_float, parse_int
-from kagglebot.score_utils import should_update_best_score
+from kagglebot.score_utils import score_gap, should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
@@ -775,10 +775,7 @@ def classify_submission_outcome(
     if target_score is not None and _meets_target(score, target_score, direction):
         return "good"
     if top1_score is not None:
-        if direction == "minimize":
-            gap = score - top1_score
-        else:
-            gap = top1_score - score
+        gap = -(score_gap(current=score, reference=top1_score, direction=direction) or 0.0)
         scale = max(abs(top1_score), 1.0)
         if max(gap, 0.0) / scale <= 0.1:
             return "good"
