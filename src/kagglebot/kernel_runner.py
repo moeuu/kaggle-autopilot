@@ -22,6 +22,7 @@ import psutil
 from rich import print
 
 from kagglebot import kernel_logs as _kernel_logs
+from kagglebot import kernel_metadata as _kernel_metadata
 from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot.compute import detect_local_gpu
@@ -36,7 +37,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import CommandResult
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object, load_json_object_or_empty, read_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, read_json_object, write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -61,7 +62,7 @@ from kagglebot.kernel_progress import (
     resolve_fold_current,
     resolve_seed_current,
 )
-from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config, pipeline_env_suffix
+from kagglebot.kernel_sources import load_kernel_source_config, pipeline_env_suffix
 from kagglebot.kernel_status import (
     is_kernel_status_complete,
     is_kernel_status_failed,
@@ -866,22 +867,6 @@ class KernelSubmitBuildConfig:
     hardware_profile: str | None = "auto"
 
 
-def _resolve_submit_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
-    if kernel_name:
-        return _build_versioned_kernel_slug(
-            prefix_parts=("submit", sanitize_kernel_slug(kernel_name)),
-            run_id=run_id,
-            iteration=iteration,
-            fallback_prefix="submit",
-        )
-    return _build_versioned_kernel_slug(
-        prefix_parts=("kagglebot", "submit", slug),
-        run_id=run_id,
-        iteration=iteration,
-        fallback_prefix="kagglebot-submit",
-    )
-
-
 def _resolve_submit_kernel_accelerator(requested: str) -> str:
     override = os.getenv(_SUBMIT_KERNEL_ACCELERATOR_ENV)
     value = str(override if override is not None else "cpu").strip().lower()
@@ -1150,7 +1135,12 @@ class KernelPackageBuilder:
             print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
             kernels_init(kernel_dir, dry_run=False)
 
-        kernel_slug = _resolve_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
+        kernel_slug = _kernel_metadata.resolve_kernel_slug(
+            config.kernel_name,
+            config.slug,
+            config.run_id,
+            config.iteration,
+        )
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
         custom_kernel_dir = config.base_dir / config.slug / "kernel"
         custom_kernel_path = custom_kernel_dir / "kernel.py"
@@ -1191,7 +1181,7 @@ class KernelPackageBuilder:
         _inject_force_train_env(kernel_dir)
         _ensure_training_progress_shim(kernel_dir)
         ensure_kernel_sources_valid(kernel_dir)
-        _write_kernel_metadata(
+        _kernel_metadata.write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
             title=kernel_slug,
@@ -1243,7 +1233,12 @@ class KernelSubmitPackageBuilder:
             print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
             kernels_init(kernel_dir, dry_run=False)
 
-        kernel_slug = _resolve_submit_kernel_slug(config.kernel_name, config.slug, config.run_id, config.iteration)
+        kernel_slug = _kernel_metadata.resolve_submit_kernel_slug(
+            config.kernel_name,
+            config.slug,
+            config.run_id,
+            config.iteration,
+        )
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
         if submit_mode == "inference":
             custom_kernel_dir = config.base_dir / config.slug / "kernel"
@@ -1289,7 +1284,7 @@ class KernelSubmitPackageBuilder:
             _inject_competition_slug_env(kernel_dir, config.slug)
             ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
         submit_accelerator = _resolve_submit_kernel_accelerator(config.accelerator)
-        _write_kernel_metadata(
+        _kernel_metadata.write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
             title=kernel_slug,
@@ -1391,11 +1386,6 @@ class KernelLogParser:
     @staticmethod
     def collect_tail(output_dir: Path, max_lines: int = 50) -> str | None:
         return _kernel_logs.collect_log_tail(output_dir, max_lines=max_lines)
-
-
-def sanitize_kernel_slug(value: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
-    return cleaned[:50]
 
 
 def _extract_invalid_kernel_push_sources(output: str) -> dict[str, list[str]]:
@@ -2846,94 +2836,6 @@ def _format_local_gpu_activity_suffix(*, accelerator: str) -> str:
         return ""
     util, mem_used, mem_total = parts[0], parts[1], parts[2]
     return f" (gpu={util}%, mem={mem_used}/{mem_total}MiB)"
-
-
-def _resolve_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
-    if kernel_name:
-        return sanitize_kernel_slug(kernel_name)
-    return _build_versioned_kernel_slug(
-        prefix_parts=("kagglebot", slug),
-        run_id=run_id,
-        iteration=iteration,
-        fallback_prefix="kagglebot",
-    )
-
-
-def _build_versioned_kernel_slug(
-    *,
-    prefix_parts: tuple[str, ...],
-    run_id: str,
-    iteration: int,
-    fallback_prefix: str,
-) -> str:
-    suffix = f"{run_id[-6:]}-i{iteration}"
-    prefix = "-".join(part for part in prefix_parts if part)
-    max_len = 50
-    allowed_prefix_len = max_len - len(suffix) - 1
-    if allowed_prefix_len < 1:
-        prefix = fallback_prefix
-    else:
-        prefix = prefix[:allowed_prefix_len].rstrip("-")
-    return sanitize_kernel_slug(f"{prefix}-{suffix}")
-
-
-def _metadata_source_lists(
-    *,
-    existing_meta: dict[str, object],
-    source_config: KernelSourceConfig | None,
-) -> tuple[list[str], list[str], list[str]]:
-    source_config = source_config or KernelSourceConfig()
-    dataset_sources = list(source_config.dataset_sources)
-    model_sources = list(source_config.model_sources)
-    if source_config.has_explicit_kernel_sources():
-        kernel_sources = list(source_config.kernel_sources)
-    else:
-        raw_existing = existing_meta.get("kernel_sources")
-        if isinstance(raw_existing, list):
-            kernel_sources = [str(item).strip() for item in raw_existing if str(item).strip()]
-        else:
-            kernel_sources = []
-    return dataset_sources, kernel_sources, model_sources
-
-
-def _write_kernel_metadata(
-    *,
-    kernel_dir: Path,
-    kernel_id: str,
-    title: str,
-    code_file: str,
-    kernel_type: str,
-    accelerator: str,
-    enable_internet: bool,
-    competition_slug: str,
-    source_config: KernelSourceConfig | None = None,
-) -> None:
-    meta_path = kernel_dir / "kernel-metadata.json"
-    meta = load_json_object_or_empty(meta_path)
-    dataset_sources, kernel_sources, model_sources = _metadata_source_lists(
-        existing_meta=meta,
-        source_config=source_config,
-    )
-    meta.update(
-        {
-            "id": kernel_id,
-            "title": title,
-            "code_file": code_file,
-            "language": "python",
-            "kernel_type": kernel_type,
-            "is_private": True,
-            "enable_gpu": accelerator == "gpu",
-            "enable_tpu": accelerator == "tpu",
-            "enable_internet": bool(enable_internet),
-            "competition_sources": [competition_slug],
-            "dataset_sources": dataset_sources,
-            "kernel_sources": kernel_sources,
-            "model_sources": model_sources,
-        }
-    )
-    if meta["enable_gpu"] and meta["enable_tpu"]:
-        raise ValueError("kernel-metadata.json cannot enable both GPU and TPU.")
-    write_json_object(meta_path, meta)
 
 
 def _copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
