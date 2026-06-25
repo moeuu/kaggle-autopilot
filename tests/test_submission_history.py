@@ -13,6 +13,12 @@ def test_build_previous_submission_history_payload_selects_best_and_latest_for_m
     payload = build_previous_submission_history_payload(
         rows=[
             {
+                "description": "invalid",
+                "publicScore": "nan",
+                "status": "complete",
+                "date": "2026-05-23 09:24:24",
+            },
+            {
                 "description": "latest",
                 "publicScore": "10.308",
                 "status": "complete",
@@ -33,6 +39,7 @@ def test_build_previous_submission_history_payload_selects_best_and_latest_for_m
     assert payload["best_score"] == pytest.approx(9.600)
     assert payload["latest_score"] == pytest.approx(10.308)
     assert payload["scored_count"] == 2
+    assert payload["count"] == 3
     assert payload["best"] is not None
     assert "best" in str(payload["best"])
 

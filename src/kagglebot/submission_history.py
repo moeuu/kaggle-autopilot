@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from kagglebot.autopilot_helpers import _to_float, _update_best_score
+from kagglebot.scalar_utils import parse_finite_float
+from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomeService
 
 
@@ -20,7 +21,7 @@ def build_previous_submission_history_payload(
     for entry in scored_entries:
         score = _to_float(entry.get("score"))
         best_score = _to_float(best_entry.get("score")) if best_entry is not None else None
-        if score is not None and _update_best_score(best_score, score, direction, 0.0):
+        if score is not None and should_update_best_score(best_score, score, direction, 0.0):
             best_entry = entry
 
     def sort_key(entry: dict[str, object]) -> tuple[int, str]:
@@ -56,7 +57,7 @@ def detect_online_regression_vs_submission_history(
     current = _to_float(current_online)
     if baseline is None or current is None:
         return None
-    if _update_best_score(baseline, current, direction, 0.0):
+    if should_update_best_score(baseline, current, direction, 0.0):
         return None
     best_entry = (history or {}).get("best")
     return {
@@ -148,3 +149,7 @@ def _submission_history_entry(row: dict[str, str]) -> dict[str, object] | None:
     if rank is not None and total_teams is not None and total_teams > 0:
         entry["rank_percentile"] = rank / total_teams
     return entry
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
