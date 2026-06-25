@@ -31,6 +31,13 @@ class SubmitStageModeDecision:
 
 
 @dataclass(frozen=True)
+class SubmitStageRuntimeState:
+    notebook_submit_required: bool
+    notebook_fallback_activated: bool
+    submission_artifact_mode: str
+
+
+@dataclass(frozen=True)
 class SubmitStageNotebookFallbackDecision:
     retry_as_notebook: bool
     notebook_submit_required: bool
@@ -184,6 +191,36 @@ def infer_iteration_from_submission_path(path: Path | None) -> int | None:
         return int(name.split("-", 1)[1])
     except Exception:  # noqa: BLE001
         return None
+
+
+def build_submit_stage_runtime_state(decision: SubmitStageModeDecision) -> SubmitStageRuntimeState:
+    return SubmitStageRuntimeState(
+        notebook_submit_required=decision.notebook_submit_required,
+        notebook_fallback_activated=decision.notebook_fallback_activated,
+        submission_artifact_mode=decision.submission_artifact_mode,
+    )
+
+
+def update_submit_stage_artifact_mode(
+    state: SubmitStageRuntimeState,
+    *,
+    submission_artifact_mode: str,
+) -> SubmitStageRuntimeState:
+    return SubmitStageRuntimeState(
+        notebook_submit_required=state.notebook_submit_required,
+        notebook_fallback_activated=state.notebook_fallback_activated,
+        submission_artifact_mode=submission_artifact_mode,
+    )
+
+
+def apply_notebook_fallback_retry_state(
+    fallback_state: SubmitStageNotebookFallbackRetryState,
+) -> SubmitStageRuntimeState:
+    return SubmitStageRuntimeState(
+        notebook_submit_required=fallback_state.notebook_submit_required,
+        notebook_fallback_activated=fallback_state.notebook_fallback_activated,
+        submission_artifact_mode=fallback_state.submission_artifact_mode,
+    )
 
 
 def submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:

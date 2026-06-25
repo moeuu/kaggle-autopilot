@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.submit_stage import (
+    apply_notebook_fallback_retry_state,
     build_default_submission_problem_insight,
     build_kaggle_credentials_missing_abort_spec,
     build_local_submission_guardrail_abort_spec,
@@ -15,6 +16,7 @@ from kagglebot.submit_stage import (
     build_submission_outcome_error_detail,
     build_submission_polling_error_abort_spec,
     build_submit_abort_spec_kwargs,
+    build_submit_stage_runtime_state,
     build_submit_stage_success_record,
     classify_submission_outcome,
     classify_submit_stage_error,
@@ -42,6 +44,7 @@ from kagglebot.submit_stage import (
     resolve_submission_rank_payload,
     run_submit_stage_attempt,
     submission_score_for_tracking,
+    update_submit_stage_artifact_mode,
     wait_for_submission_outcome,
 )
 
@@ -111,6 +114,43 @@ def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> 
         "[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit",
         "[yellow]submit mode[/yellow]: using notebook submit",
     )
+
+
+def test_submit_stage_runtime_state_tracks_initial_artifact_and_fallback_updates() -> None:
+    initial = decide_initial_submit_stage_mode(
+        requested_notebook_submit=False,
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="wrapper",
+        resolved_notebook_artifact_mode="inference",
+    )
+    state = build_submit_stage_runtime_state(initial)
+
+    assert state.notebook_submit_required is False
+    assert state.notebook_fallback_activated is False
+    assert state.submission_artifact_mode == "wrapper"
+
+    state = update_submit_stage_artifact_mode(state, submission_artifact_mode="inference")
+    assert state.notebook_submit_required is False
+    assert state.notebook_fallback_activated is False
+    assert state.submission_artifact_mode == "inference"
+
+    fallback_decision = decide_notebook_fallback_after_file_submit_error(
+        notebook_submit_required=False,
+        notebook_fallback_activated=False,
+        should_use_notebook_fallback=True,
+        resolved_notebook_artifact_mode="wrapper",
+        current_submission_artifact_mode=state.submission_artifact_mode,
+    )
+    fallback_state = build_notebook_fallback_retry_state(
+        fallback_decision=fallback_decision,
+        artifact_mode="wrapper",
+        artifact_message="artifact message",
+    )
+    state = apply_notebook_fallback_retry_state(fallback_state)
+
+    assert state.notebook_submit_required is True
+    assert state.notebook_fallback_activated is True
+    assert state.submission_artifact_mode == "wrapper"
 
 
 def test_build_kaggle_credentials_missing_abort_spec_preserves_error_details() -> None:

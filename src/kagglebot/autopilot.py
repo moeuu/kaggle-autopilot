@@ -5150,25 +5150,26 @@ def _attempt_submit(
         notebook_submit_artifact_mode=notebook_submit_artifact_mode,
         resolved_notebook_artifact_mode=resolved_notebook_artifact_mode,
     )
-    notebook_submit_required = submit_stage_mode.notebook_submit_required
-    notebook_fallback_activated = submit_stage_mode.notebook_fallback_activated
-    submission_artifact_mode = submit_stage_mode.submission_artifact_mode
+    submit_stage_state = _submit_stage.build_submit_stage_runtime_state(submit_stage_mode)
     for mode_message in submit_stage_mode.messages:
         print(mode_message)
     artifact_mode_decision = _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
-        requested_mode=submission_artifact_mode,
-        notebook_submit_required=notebook_submit_required,
+        requested_mode=submit_stage_state.submission_artifact_mode,
+        notebook_submit_required=submit_stage_state.notebook_submit_required,
         code_competition=code_competition,
         sample_submission_path=config.paths.sample_submission_path,
         fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
         submission_path=prepared_submission_path,
         count_csv_data_rows=_count_csv_data_rows_capped,
     )
-    submission_artifact_mode = artifact_mode_decision.mode
+    submit_stage_state = _submit_stage.update_submit_stage_artifact_mode(
+        submit_stage_state,
+        submission_artifact_mode=artifact_mode_decision.mode,
+    )
     if artifact_mode_decision.message:
         print(artifact_mode_decision.message)
 
-    if not notebook_submit_required:
+    if not submit_stage_state.notebook_submit_required:
         same_path_decision = _submit_retry_policy.decide_same_submission_path_action(
             run_state=run_state,
             latest_submit_attempt=latest_submit_attempt,
@@ -5176,7 +5177,7 @@ def _attempt_submit(
             current_submission_sha=str(_sha256_or_none(prepared_submission_path) or "").strip(),
             submit_code_fingerprint=submit_code_fingerprint,
             allow_force=allow_force,
-            notebook_submit_required=notebook_submit_required,
+            notebook_submit_required=submit_stage_state.notebook_submit_required,
         )
         if same_path_decision.action == "retry":
             print(same_path_decision.message)
@@ -5206,14 +5207,14 @@ def _attempt_submit(
     for attempt in range(1, max_attempts + 1):
         try:
             submit_attempt_result = _submit_stage.run_submit_stage_attempt(
-                notebook_submit_required=notebook_submit_required,
+                notebook_submit_required=submit_stage_state.notebook_submit_required,
                 file_submission_path=prepared_submission_path,
                 run_notebook_submit=lambda: _submit_with_notebook_kernel(
                     config=config,
                     run_id=run_id,
                     submission_path=prepared_submission_path,
                     message=message,
-                    artifact_mode=submission_artifact_mode,
+                    artifact_mode=submit_stage_state.submission_artifact_mode,
                 ),
                 run_file_submit=lambda: submission_service.submit_prepared(
                     prepared_path=prepared_submission_path,
@@ -5235,8 +5236,8 @@ def _attempt_submit(
                 classify_submit_error=classify_submit_error,
             )
             notebook_fallback_decision = _submit_stage.decide_notebook_fallback_after_file_submit_error(
-                notebook_submit_required=notebook_submit_required,
-                notebook_fallback_activated=notebook_fallback_activated,
+                notebook_submit_required=submit_stage_state.notebook_submit_required,
+                notebook_fallback_activated=submit_stage_state.notebook_fallback_activated,
                 should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback(
                     reason=submit_error_classification.reason,
                     stdout=exc.stdout,
@@ -5246,7 +5247,7 @@ def _attempt_submit(
                     submit_mode="notebook",
                     code_competition=code_competition,
                 ),
-                current_submission_artifact_mode=submission_artifact_mode,
+                current_submission_artifact_mode=submit_stage_state.submission_artifact_mode,
             )
             if notebook_fallback_decision.retry_as_notebook:
                 artifact_mode_decision = _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
@@ -5263,9 +5264,7 @@ def _attempt_submit(
                     artifact_mode=artifact_mode_decision.mode,
                     artifact_message=artifact_mode_decision.message,
                 )
-                notebook_submit_required = fallback_retry_state.notebook_submit_required
-                notebook_fallback_activated = fallback_retry_state.notebook_fallback_activated
-                submission_artifact_mode = fallback_retry_state.submission_artifact_mode
+                submit_stage_state = _submit_stage.apply_notebook_fallback_retry_state(fallback_retry_state)
                 for mode_message in fallback_retry_state.messages:
                     print(mode_message)
                 continue
@@ -5297,7 +5296,7 @@ def _attempt_submit(
                     problem_types=problem_types,
                     submission_ref=submission_reference,
                     submission_artifact_path=submission_artifact_path,
-                    artifact_mode=submission_artifact_mode,
+                    artifact_mode=submit_stage_state.submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
                     fingerprint=fingerprint,
                     error_kind=error_action.error_kind,
@@ -5365,7 +5364,7 @@ def _attempt_submit(
                     problem_types=problem_types,
                     submission_ref=submission_reference,
                     submission_artifact_path=submission_artifact_path,
-                    artifact_mode=submission_artifact_mode,
+                    artifact_mode=submit_stage_state.submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
                     **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
                     submit_attempt_recorder=submit_attempt_recorder,
@@ -5396,7 +5395,7 @@ def _attempt_submit(
             problem_types=problem_types,
             submission_ref=submission_ref,
             submission_artifact_path=submission_for_submit_path,
-            artifact_mode=submission_artifact_mode,
+            artifact_mode=submit_stage_state.submission_artifact_mode,
             code_fingerprint=submit_code_fingerprint,
             **_submit_stage.build_submit_abort_spec_kwargs(outcome_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
