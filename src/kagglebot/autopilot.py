@@ -27,6 +27,7 @@ from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import knowledge_context as _knowledge_context
+from kagglebot import loop_control as _loop_control
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
@@ -2938,27 +2939,18 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 frontier_no_improve_streak if best_high_potential_score is not None else no_improve_streak
             )
             effective_track_label = "accuracy frontier" if best_high_potential_score is not None else "offline metric"
-            if (
-                (not submit_enabled)
-                and stop_no_improve_patience > 0
-                and effective_no_improve_streak >= stop_no_improve_patience
-            ):
+            stagnation_stop = _loop_control.decide_stagnation_stop(
+                stop_allowed=not submit_enabled,
+                no_improve_streak=effective_no_improve_streak,
+                no_improve_patience=stop_no_improve_patience,
+                stop_min_delta=stop_min_delta,
+                track_label=effective_track_label,
+                same_config_streak=same_config_streak,
+                same_config_patience=stop_same_config_patience,
+            )
+            if stagnation_stop.should_stop:
                 run_payload["status"] = "stopped"
-                run_payload["stop_reason"] = (
-                    f"{effective_track_label} did not improve by >= {stop_min_delta:.6f} "
-                    f"for {effective_no_improve_streak} consecutive iterations"
-                )
-                print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
-                break
-            if (
-                (not submit_enabled)
-                and stop_same_config_patience > 0
-                and same_config_streak >= stop_same_config_patience
-            ):
-                run_payload["status"] = "stopped"
-                run_payload["stop_reason"] = (
-                    f"model/pipeline config hash unchanged for {same_config_streak} consecutive iterations"
-                )
+                run_payload["stop_reason"] = stagnation_stop.reason
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 

@@ -82,6 +82,9 @@ Submission behavior:
 - Markdown rule text such as `five (5) Submissions per day` and rolling 24h limits such as `2 submissions within 24 hours` are parsed as daily limits
 - Loop decision uses readiness score (SRS); submission score/rank are secondary guardrails
 - Repeated submit-error fingerprints are aborted safely
+- Local GPU runs do not impose a default wall-clock time budget; set `time_budget_min`/`max_total_min` only for explicit
+  operator or rule limits. Bug-like stagnation is controlled separately through repeated-error fingerprints,
+  no-improvement patience, and same-config loop guards.
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test.csv`/`sample_submission.csv` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test CSV in a wrapper kernel
