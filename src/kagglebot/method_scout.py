@@ -349,12 +349,7 @@ def build_method_scout_queries(
 
 
 def load_research_sources(path: Path, *, limit: int = 12) -> list[dict[str, object]]:
-    sources: list[dict[str, object]] = []
-    for payload in load_jsonl_records(path):
-        sources.append(payload)
-        if len(sources) >= max(1, int(limit)):
-            break
-    return sources
+    return load_jsonl_records(path, limit=max(1, int(limit)))
 
 
 def _active_sources_from_registry(registry: dict[str, object]) -> list[dict[str, object]]:

@@ -115,6 +115,25 @@ def test_load_jsonl_records_returns_empty_for_missing_or_unreadable_payload(tmp_
     assert load_jsonl_records(invalid_encoding, errors="ignore") == [{"ok": True}]
 
 
+def test_load_jsonl_records_limit_counts_valid_dict_rows(tmp_path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                "not-json",
+                '{"first": true}',
+                "[1, 2]",
+                '{"second": true}',
+                '{"third": true}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_jsonl_records(path, limit=2) == [{"first": True}, {"second": True}]
+    assert load_jsonl_records(path, limit=0) == []
+
+
 def test_write_json_object_creates_parent_and_writes_indented_json(tmp_path) -> None:
     path = tmp_path / "nested" / "payload.json"
 

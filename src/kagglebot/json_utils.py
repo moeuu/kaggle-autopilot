@@ -37,8 +37,11 @@ def load_json_array(path: Path, *, errors: str = "strict") -> list[object] | Non
     return None
 
 
-def load_jsonl_records(path: Path, *, errors: str = "strict") -> list[dict[str, object]]:
+def load_jsonl_records(path: Path, *, errors: str = "strict", limit: int | None = None) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
+    max_records = max(0, int(limit)) if limit is not None else None
+    if max_records == 0:
+        return records
     try:
         lines = path.read_text(encoding="utf-8", errors=errors).splitlines()
     except (OSError, UnicodeDecodeError):
@@ -52,6 +55,8 @@ def load_jsonl_records(path: Path, *, errors: str = "strict") -> list[dict[str, 
             continue
         if isinstance(payload, dict):
             records.append(payload)
+            if max_records is not None and len(records) >= max_records:
+                break
     return records
 
 
