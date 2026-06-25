@@ -4913,9 +4913,8 @@ def _attempt_submit(
                 time.sleep(error_action.wait_seconds)
                 continue
         except (DuplicateSubmissionError, SubmissionRateLimitError) as exc:
-            abort_spec = _submit_stage.build_local_submission_guardrail_abort_spec(
+            abort_spec = _submit_stage.resolve_local_submission_guardrail_abort_spec(
                 error=exc,
-                exit_code=getattr(exc, "exit_code", 1),
                 compute_error_fingerprint=compute_error_fingerprint,
             )
             return _abort_submit_for_run(
@@ -4929,26 +4928,24 @@ def _attempt_submit(
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         except KaggleCliError as exc:
-            if _is_missing_kaggle_credentials_error(exc):
-                abort_spec = _submit_stage.build_kaggle_credentials_missing_abort_spec(
-                    stdout=exc.stdout,
-                    stderr=exc.stderr,
-                    output=exc.output,
-                    exit_code=exc.exit_code,
-                    compute_error_fingerprint=compute_error_fingerprint,
-                )
-                return _abort_submit_for_run(
-                    config=config,
-                    run_id=run_id,
-                    problem_types=problem_types,
-                    submission_ref=submission_reference,
-                    submission_artifact_path=submission_artifact_path,
-                    artifact_mode=submit_stage_state.submission_artifact_mode,
-                    code_fingerprint=submit_code_fingerprint,
-                    **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
-                    submit_attempt_recorder=submit_attempt_recorder,
-                )
-            raise
+            abort_spec = _submit_stage.resolve_kaggle_cli_submit_abort_spec(
+                error=exc,
+                is_missing_credentials_error=_is_missing_kaggle_credentials_error,
+                compute_error_fingerprint=compute_error_fingerprint,
+            )
+            if abort_spec is None:
+                raise
+            return _abort_submit_for_run(
+                config=config,
+                run_id=run_id,
+                problem_types=problem_types,
+                submission_ref=submission_reference,
+                submission_artifact_path=submission_artifact_path,
+                artifact_mode=submit_stage_state.submission_artifact_mode,
+                code_fingerprint=submit_code_fingerprint,
+                **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
+                submit_attempt_recorder=submit_attempt_recorder,
+            )
         break
 
     if submission_result is None:

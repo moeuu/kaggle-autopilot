@@ -47,6 +47,8 @@ from kagglebot.submit_stage import (
     record_successful_submit_stage_result,
     resolve_initial_submit_stage_runtime_state,
     resolve_iteration_submit_phase_state,
+    resolve_kaggle_cli_submit_abort_spec,
+    resolve_local_submission_guardrail_abort_spec,
     resolve_notebook_fallback_after_file_submit_error,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
@@ -618,6 +620,60 @@ def test_build_local_submission_guardrail_abort_spec_sets_local_blocker_contract
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "duplicate submission sha"
     assert spec.exit_code == 9
+
+
+def test_resolve_local_submission_guardrail_abort_spec_reads_error_exit_code() -> None:
+    error = SubmitCliStubError("rate limited", exit_code=88)
+
+    spec = resolve_local_submission_guardrail_abort_spec(
+        error=error,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.reason == "local_submission_guardrail"
+    assert spec.stderr_tail == "rate limited"
+    assert spec.exit_code == 88
+
+
+def test_resolve_local_submission_guardrail_abort_spec_uses_default_exit_code() -> None:
+    spec = resolve_local_submission_guardrail_abort_spec(
+        error=RuntimeError("duplicate submission sha"),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec.reason == "local_submission_guardrail"
+    assert spec.exit_code == 1
+
+
+def test_resolve_kaggle_cli_submit_abort_spec_maps_missing_credentials() -> None:
+    error = SubmitCliStubError(
+        "missing credentials",
+        stdout="stdout",
+        stderr="",
+        output="missing kaggle.json",
+        exit_code=2,
+    )
+
+    spec = resolve_kaggle_cli_submit_abort_spec(
+        error=error,
+        is_missing_credentials_error=lambda exc: True,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec is not None
+    assert spec.reason == "kaggle_credentials_missing"
+    assert spec.fingerprint == "fp:stdout:missing kaggle.json"
+    assert spec.exit_code == 2
+
+
+def test_resolve_kaggle_cli_submit_abort_spec_ignores_other_cli_errors() -> None:
+    spec = resolve_kaggle_cli_submit_abort_spec(
+        error=SubmitCliStubError("server unavailable"),
+        is_missing_credentials_error=lambda exc: False,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert spec is None
 
 
 def test_build_local_submission_validation_abort_spec_sets_validation_contract() -> None:

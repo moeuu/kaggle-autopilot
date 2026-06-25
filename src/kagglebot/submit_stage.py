@@ -1216,6 +1216,36 @@ def build_local_submission_guardrail_abort_spec(
     )
 
 
+def resolve_local_submission_guardrail_abort_spec(
+    *,
+    error: object,
+    compute_error_fingerprint: Callable[[str, str], str],
+    default_exit_code: int = 1,
+) -> SubmitAbortSpec:
+    return build_local_submission_guardrail_abort_spec(
+        error=error,
+        exit_code=getattr(error, "exit_code", default_exit_code),
+        compute_error_fingerprint=compute_error_fingerprint,
+    )
+
+
+def resolve_kaggle_cli_submit_abort_spec(
+    *,
+    error: BaseException,
+    is_missing_credentials_error: Callable[[BaseException], bool],
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitAbortSpec | None:
+    if not is_missing_credentials_error(error):
+        return None
+    return build_kaggle_credentials_missing_abort_spec(
+        stdout=str(getattr(error, "stdout", "") or ""),
+        stderr=str(getattr(error, "stderr", "") or ""),
+        output=str(getattr(error, "output", "") or ""),
+        exit_code=getattr(error, "exit_code", None),
+        compute_error_fingerprint=compute_error_fingerprint,
+    )
+
+
 def build_local_submission_validation_abort_spec(
     *,
     error: object,

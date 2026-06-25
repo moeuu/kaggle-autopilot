@@ -364,6 +364,7 @@ Recommended extraction order:
    submit-error action abort specs,
    submit-retry attempt/knowledge recording orchestration, abort-spec kwargs mapping,
    duplicate-submit decision application, local validation resolution, rules-acceptance blocker resolution,
+   local/Kaggle submit blocker abort-spec resolution,
    same-submission-path decision application, notebook fallback runtime-state resolution and decision
    application/state/message assembly,
    manual local validation/submit-blocker abort specs,
