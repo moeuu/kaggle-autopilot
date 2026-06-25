@@ -8,9 +8,11 @@ from kagglebot.submission_policy import (
     count_submission_rows_on_utc_day,
     decide_initial_submit_probe,
     decide_limited_submission_holdback,
+    decide_major_overhaul_policy,
     decide_quality_submit_override,
     has_spare_daily_submission_slot,
     is_top1_tier,
+    latest_iteration_fallback_submit_blocked_reason,
     meets_target,
     non_final_submission_checkpoints,
     normalized_submission_gate,
@@ -239,6 +241,57 @@ def test_decide_quality_submit_override_leaves_forced_paths_unchanged() -> None:
 
     assert decision.quality_allows_submit is False
     assert decision.blocked_reason is None
+
+
+def test_latest_iteration_fallback_submit_blocked_reason_prefers_hard_quality_blocks() -> None:
+    assert (
+        latest_iteration_fallback_submit_blocked_reason(
+            ["selected_worse_than_detected_baseline", "external_test_label_transfer_detected"]
+        )
+        == "latest_iteration_external_test_label_transfer_detected"
+    )
+    assert latest_iteration_fallback_submit_blocked_reason(["selected_worse_than_detected_baseline"]) is None
+
+
+def test_decide_major_overhaul_policy_collects_reasons_and_fallback_blocker() -> None:
+    decision = decide_major_overhaul_policy(
+        noise_forced_major_overhaul=True,
+        rank_forced_major_overhaul=True,
+        quality_forced_major_overhaul=True,
+        code_reference_forced_reproduction=True,
+        noise_limited_streak=2,
+        rank_force_reason="rank is poor",
+        quality_force_reason=None,
+        code_reference_force_reason="code reference required",
+        quality_reasons=["competition_metric_mismatch"],
+    )
+
+    assert decision.force_major_overhaul is True
+    assert decision.fallback_submit_blocked_reason == "latest_iteration_competition_metric_mismatch"
+    assert decision.forced_major_overhaul_reason == (
+        "Two consecutive iterations were noise-limited: |ΔSRS| < 0.5*CV std (streak=2). "
+        "rank is poor "
+        "Quality guard requires major overhaul due to code-reference underperformance. "
+        "code reference required"
+    )
+
+
+def test_decide_major_overhaul_policy_noops_without_signals() -> None:
+    decision = decide_major_overhaul_policy(
+        noise_forced_major_overhaul=False,
+        rank_forced_major_overhaul=False,
+        quality_forced_major_overhaul=False,
+        code_reference_forced_reproduction=False,
+        noise_limited_streak=0,
+        rank_force_reason=None,
+        quality_force_reason=None,
+        code_reference_force_reason=None,
+        quality_reasons=[],
+    )
+
+    assert decision.force_major_overhaul is False
+    assert decision.forced_major_overhaul_reason is None
+    assert decision.fallback_submit_blocked_reason is None
 
 
 def test_decide_initial_submit_probe_allows_soft_baseline_probe() -> None:

@@ -2259,48 +2259,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     f"(drop_vs_best={drop_text}, max_features={_score_progress.CONSERVATIVE_COLLAPSE_MAX_FEATURES}). "
                     "Next iteration must recover from code reference baseline instead of keeping the collapsed path."
                 )
-            force_major_overhaul_next = (
-                noise_forced_major_overhaul
-                or rank_forced_major_overhaul
-                or quality_forced_major_overhaul
-                or code_reference_forced_reproduction
+            major_overhaul_policy = _submission_policy.decide_major_overhaul_policy(
+                noise_forced_major_overhaul=noise_forced_major_overhaul,
+                rank_forced_major_overhaul=rank_forced_major_overhaul,
+                quality_forced_major_overhaul=quality_forced_major_overhaul,
+                code_reference_forced_reproduction=code_reference_forced_reproduction,
+                noise_limited_streak=noise_limited_streak,
+                rank_force_reason=rank_force_reason,
+                quality_force_reason=quality_force_reason,
+                code_reference_force_reason=code_reference_force_reason,
+                quality_reasons=quality_reasons,
             )
-            fallback_submit_blocked_reason = None
-            for blocked_reason in (
-                "untrusted_score_source",
-                "competition_metric_mismatch",
-                "competition_split_mismatch",
-                "competition_score_source_mismatch",
-                "competition_evaluation_unfaithful",
-                "missing_competitive_data",
-                "external_test_label_transfer_detected",
-            ):
-                if blocked_reason in quality_reasons:
-                    fallback_submit_blocked_reason = f"latest_iteration_{blocked_reason}"
-                    break
-            forced_major_overhaul_reasons: list[str] = []
-            if noise_forced_major_overhaul:
-                forced_major_overhaul_reasons.append(
-                    "Two consecutive iterations were noise-limited: "
-                    f"|ΔSRS| < 0.5*CV std (streak={noise_limited_streak})."
-                )
-            if rank_forced_major_overhaul:
-                forced_major_overhaul_reasons.append(
-                    rank_force_reason or "Leaderboard rank indicates major improvement is still required."
-                )
-            if quality_forced_major_overhaul:
-                forced_major_overhaul_reasons.append(
-                    quality_force_reason
-                    or "Quality guard requires major overhaul due to code-reference underperformance."
-                )
-            if code_reference_forced_reproduction:
-                forced_major_overhaul_reasons.append(
-                    code_reference_force_reason
-                    or "Mandatory code-reference implementation is required in the next iteration."
-                )
-            forced_major_overhaul_reason = (
-                " ".join(forced_major_overhaul_reasons) if forced_major_overhaul_reasons else None
-            )
+            force_major_overhaul_next = major_overhaul_policy.force_major_overhaul
+            forced_major_overhaul_reason = major_overhaul_policy.forced_major_overhaul_reason
+            fallback_submit_blocked_reason = major_overhaul_policy.fallback_submit_blocked_reason
 
             metrics_payload = _iteration_metrics.build_metrics_payload(
                 run_id=run_id,

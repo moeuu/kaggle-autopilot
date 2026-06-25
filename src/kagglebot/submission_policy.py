@@ -44,6 +44,13 @@ class PlanSubmissionPolicyDecision:
     messages: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class MajorOverhaulPolicyDecision:
+    force_major_overhaul: bool
+    forced_major_overhaul_reason: str | None
+    fallback_submit_blocked_reason: str | None
+
+
 def meets_target(value: float, target: float, direction: str) -> bool:
     if direction == "minimize":
         return value <= target
@@ -307,6 +314,65 @@ def decide_quality_submit_override(
     return QualitySubmitOverrideDecision(
         quality_allows_submit=False,
         blocked_reason=reason_text,
+    )
+
+
+def latest_iteration_fallback_submit_blocked_reason(quality_reasons: list[str]) -> str | None:
+    for blocked_reason in (
+        "untrusted_score_source",
+        "competition_metric_mismatch",
+        "competition_split_mismatch",
+        "competition_score_source_mismatch",
+        "competition_evaluation_unfaithful",
+        "missing_competitive_data",
+        "external_test_label_transfer_detected",
+    ):
+        if blocked_reason in quality_reasons:
+            return f"latest_iteration_{blocked_reason}"
+    return None
+
+
+def decide_major_overhaul_policy(
+    *,
+    noise_forced_major_overhaul: bool,
+    rank_forced_major_overhaul: bool,
+    quality_forced_major_overhaul: bool,
+    code_reference_forced_reproduction: bool,
+    noise_limited_streak: int,
+    rank_force_reason: str | None,
+    quality_force_reason: str | None,
+    code_reference_force_reason: str | None,
+    quality_reasons: list[str],
+) -> MajorOverhaulPolicyDecision:
+    forced_major_overhaul_reasons: list[str] = []
+    if noise_forced_major_overhaul:
+        forced_major_overhaul_reasons.append(
+            f"Two consecutive iterations were noise-limited: |ΔSRS| < 0.5*CV std (streak={noise_limited_streak})."
+        )
+    if rank_forced_major_overhaul:
+        forced_major_overhaul_reasons.append(
+            rank_force_reason or "Leaderboard rank indicates major improvement is still required."
+        )
+    if quality_forced_major_overhaul:
+        forced_major_overhaul_reasons.append(
+            quality_force_reason or "Quality guard requires major overhaul due to code-reference underperformance."
+        )
+    if code_reference_forced_reproduction:
+        forced_major_overhaul_reasons.append(
+            code_reference_force_reason or "Mandatory code-reference implementation is required in the next iteration."
+        )
+
+    return MajorOverhaulPolicyDecision(
+        force_major_overhaul=(
+            noise_forced_major_overhaul
+            or rank_forced_major_overhaul
+            or quality_forced_major_overhaul
+            or code_reference_forced_reproduction
+        ),
+        forced_major_overhaul_reason=(
+            " ".join(forced_major_overhaul_reasons) if forced_major_overhaul_reasons else None
+        ),
+        fallback_submit_blocked_reason=latest_iteration_fallback_submit_blocked_reason(quality_reasons),
     )
 
 
