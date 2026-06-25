@@ -451,14 +451,13 @@ _SUBMIT_BACKOFF_BASE_SEC = 2.0
 _SUBMIT_STDERR_TAIL_CHARS = 1200
 _SUBMIT_STDOUT_TAIL_CHARS = 1200
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
-_DEFAULT_EVAL_SEEDS = [42, 2024, 777]
-_DEFAULT_EVAL_REPEATS = 2
+_DEFAULT_EVAL_SEEDS = list(_plan_policy.DEFAULT_EVAL_SEEDS)
+_DEFAULT_EVAL_REPEATS = _plan_policy.DEFAULT_EVAL_REPEATS
 _DEFAULT_MAX_ITERATIONS = 5
 _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN = 12 * 60
 _LONG_LOCAL_GPU_MAX_ITERATIONS = 3
 _HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text"})
 _HEAVY_LOCAL_GPU_MAX_CV_FOLDS = 3
-_EVAL_REPEAT_SEED_OFFSET = 1009
 _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE = 0.35
 _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS = 200
 _DEFAULT_TARGET_MEDAL = DEFAULT_TARGET_MEDAL
@@ -3974,11 +3973,11 @@ def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
 
 
 def _normalize_eval_seeds(value: object, *, fallback: list[int] | None = None) -> list[int]:
-    return _plan_policy.normalize_eval_seeds(value, fallback=fallback, default_seeds=_DEFAULT_EVAL_SEEDS)
+    return _plan_policy.normalize_default_eval_seeds(value, fallback=fallback)
 
 
 def _normalize_eval_repeats(value: object, *, fallback: int | None = None) -> int:
-    return _plan_policy.normalize_eval_repeats(value, fallback=fallback, default_repeats=_DEFAULT_EVAL_REPEATS)
+    return _plan_policy.normalize_default_eval_repeats(value, fallback=fallback)
 
 
 def _normalize_rank_force_percentile(value: object, *, fallback: float) -> float:
@@ -4011,13 +4010,7 @@ def _upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> st
 
 
 def _expanded_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
-    return _plan_policy.expanded_eval_seeds(
-        base_seeds=base_seeds,
-        repeats=repeats,
-        default_seeds=_DEFAULT_EVAL_SEEDS,
-        default_repeats=_DEFAULT_EVAL_REPEATS,
-        repeat_seed_offset=_EVAL_REPEAT_SEED_OFFSET,
-    )
+    return _plan_policy.expanded_default_eval_seeds(base_seeds=base_seeds, repeats=repeats)
 
 
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:

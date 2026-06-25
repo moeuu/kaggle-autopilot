@@ -5,11 +5,17 @@ from pathlib import Path
 
 from kagglebot.paths import CompetitionPaths
 from kagglebot.plan_policy import (
+    DEFAULT_EVAL_REPEATS,
+    DEFAULT_EVAL_SEEDS,
+    EVAL_REPEAT_SEED_OFFSET,
     apply_competition_eval_override,
     competition_eval_override,
+    expanded_default_eval_seeds,
     expanded_eval_seeds,
     extract_plan_split_strategy_hints,
     infer_split_strategy_from_hint_text,
+    normalize_default_eval_repeats,
+    normalize_default_eval_seeds,
     normalize_eval_repeats,
     normalize_eval_seeds,
     normalize_rank_force_min_teams,
@@ -95,6 +101,15 @@ def test_normalize_eval_seeds_deduplicates_and_uses_defaults() -> None:
     assert normalize_eval_seeds([1, "x", 1, 2], default_seeds=defaults) == [1, 2]
     assert normalize_eval_seeds(None, fallback=[3, 3], default_seeds=defaults) == [3]
     assert normalize_eval_seeds(None, default_seeds=defaults) == [42, 2024, 777]
+
+
+def test_default_eval_seed_helpers_use_shared_policy_defaults() -> None:
+    assert DEFAULT_EVAL_SEEDS == (42, 2024, 777)
+    assert DEFAULT_EVAL_REPEATS == 2
+    assert EVAL_REPEAT_SEED_OFFSET == 1009
+    assert normalize_default_eval_seeds(None) == [42, 2024, 777]
+    assert normalize_default_eval_repeats(None) == 2
+    assert expanded_default_eval_seeds(base_seeds=[1], repeats=2) == [1, 1010]
 
 
 def test_resolve_deliverable_mode_prefers_spec_then_inferred_then_plan() -> None:

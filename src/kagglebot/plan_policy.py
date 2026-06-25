@@ -13,6 +13,10 @@ SPLIT_STRATEGY_PRIORITY = {
     "timeseries_split": 3,
 }
 
+DEFAULT_EVAL_SEEDS = (42, 2024, 777)
+DEFAULT_EVAL_REPEATS = 2
+EVAL_REPEAT_SEED_OFFSET = 1009
+
 COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
     "deep-past-initiative-machine-translation": {
         "metric_name": "Geometric Mean of the BLEU and the chrF++ scores",
@@ -219,6 +223,10 @@ def normalize_eval_seeds(
     return list(default_seeds)
 
 
+def normalize_default_eval_seeds(value: object, *, fallback: list[int] | None = None) -> list[int]:
+    return normalize_eval_seeds(value, fallback=fallback, default_seeds=DEFAULT_EVAL_SEEDS)
+
+
 def resolve_deliverable_mode(
     *,
     plan_value: object,
@@ -250,6 +258,10 @@ def normalize_eval_repeats(value: object, *, fallback: int | None = None, defaul
     if isinstance(resolved, int):
         return max(1, min(resolved, 10))
     return int(default_repeats)
+
+
+def normalize_default_eval_repeats(value: object, *, fallback: int | None = None) -> int:
+    return normalize_eval_repeats(value, fallback=fallback, default_repeats=DEFAULT_EVAL_REPEATS)
 
 
 def normalize_rank_force_percentile(value: object, *, fallback: float) -> float:
@@ -296,3 +308,13 @@ def expanded_eval_seeds(
         for seed in seeds:
             expanded.append(int(seed + offset))
     return expanded
+
+
+def expanded_default_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
+    return expanded_eval_seeds(
+        base_seeds=base_seeds,
+        repeats=repeats,
+        default_seeds=DEFAULT_EVAL_SEEDS,
+        default_repeats=DEFAULT_EVAL_REPEATS,
+        repeat_seed_offset=EVAL_REPEAT_SEED_OFFSET,
+    )

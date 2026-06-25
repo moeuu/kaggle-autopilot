@@ -22,10 +22,6 @@ from kagglebot.solver.io import load_competition_data
 if TYPE_CHECKING:
     from kagglebot.solver.evaluate import EvaluationResult
 
-DEFAULT_EVAL_SEEDS = [42, 2024, 777]
-DEFAULT_EVAL_REPEATS = 2
-EVAL_REPEAT_SEED_OFFSET = 1009
-
 
 def evaluation_to_payload(evaluation: EvaluationResult) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -264,13 +260,7 @@ def ensure_eval_data_cache(
         return fallback
     try:
         y = np.asarray(data.train[data.target_column])
-        expanded_seeds = plan_policy.expanded_eval_seeds(
-            base_seeds=eval_seeds,
-            repeats=eval_repeats,
-            default_seeds=DEFAULT_EVAL_SEEDS,
-            default_repeats=DEFAULT_EVAL_REPEATS,
-            repeat_seed_offset=EVAL_REPEAT_SEED_OFFSET,
-        )
+        expanded_seeds = plan_policy.expanded_default_eval_seeds(base_seeds=eval_seeds, repeats=eval_repeats)
         split = SplitStrategyFactory.create(y=y, strategy=split_strategy, n_splits=cv_folds, seed=seed)
         fingerprints: list[dict[str, object]] = []
         for expanded_seed in expanded_seeds:
