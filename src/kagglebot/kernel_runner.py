@@ -20,6 +20,7 @@ from pathlib import Path
 
 from rich import print
 
+from kagglebot import kernel_bootstrap as _kernel_bootstrap
 from kagglebot import kernel_logs as _kernel_logs
 from kagglebot import kernel_metadata as _kernel_metadata
 from kagglebot import kernel_module_inliner as _kernel_module_inliner
@@ -88,8 +89,6 @@ _LGBM_GPU_GUARD_SHIM_MARKER = "# kagglebot: lgbm-gpu-guard-shim"
 _TORCH_RUNTIME_GUARD_SHIM_MARKER = "# kagglebot: torch-runtime-guard-shim"
 _TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
 _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER = "# kagglebot: transformers-eval-strategy-shim"
-_KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
-_KERNEL_SUBMIT_INFERENCE_MARKER = "# kagglebot:submit_inference"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
 _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
@@ -1057,9 +1056,9 @@ class KernelPackageBuilder:
             plan_path=config.base_dir / config.slug / "plan.json",
             targets=[kernel_dir / "plan.json"],
         )
-        _ensure_kernel_import_path(kernel_dir)
-        _inject_competition_slug_env(kernel_dir, config.slug)
-        _inject_hardware_profile_env(
+        _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
+        _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
+        _kernel_bootstrap.inject_hardware_profile_env(
             kernel_dir,
             config.hardware_profile,
             compute="kaggle_gpu" if config.accelerator == "gpu" else "kaggle_tpu",
@@ -1079,8 +1078,8 @@ class KernelPackageBuilder:
             context_dir=context_dir,
         )
         _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
-        _inject_competition_slug_env(kernel_dir, config.slug)
-        _inject_force_train_env(kernel_dir)
+        _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
+        _kernel_bootstrap.inject_force_train_env(kernel_dir)
         _ensure_training_progress_shim(kernel_dir)
         ensure_kernel_sources_valid(kernel_dir)
         _kernel_metadata.write_kernel_metadata(
@@ -1163,8 +1162,8 @@ class KernelSubmitPackageBuilder:
                 plan_path=config.base_dir / config.slug / "plan.json",
                 targets=[kernel_dir / "plan.json"],
             )
-            _ensure_kernel_import_path(kernel_dir)
-            _inject_competition_slug_env(kernel_dir, config.slug)
+            _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
+            _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
             _kernel_module_inliner.inline_kernel_modules(kernel_dir)
             _inject_data_dir_resolver(kernel_dir)
             _inject_pipeline_cfg_fallback(kernel_dir)
@@ -1180,7 +1179,7 @@ class KernelSubmitPackageBuilder:
                 context_dir=context_dir,
             )
             _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
-            _inject_submit_inference_env(kernel_dir)
+            _kernel_bootstrap.inject_submit_inference_env(kernel_dir)
             _sanitize_submit_inference_output_roots(kernel_dir)
             _validate_inference_submit_kernel(kernel_dir)
             ensure_kernel_sources_valid(kernel_dir)
@@ -1190,8 +1189,8 @@ class KernelSubmitPackageBuilder:
                 _render_submission_kernel_script(config.submission_path),
                 encoding="utf-8",
             )
-            _ensure_kernel_import_path(kernel_dir)
-            _inject_competition_slug_env(kernel_dir, config.slug)
+            _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
+            _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
             ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
         submit_accelerator = _resolve_submit_kernel_accelerator(config.accelerator)
         _kernel_metadata.write_kernel_metadata(
@@ -1226,11 +1225,11 @@ class KernelJobMonitor:
         slug: str,
         timeout_minutes: int | None,
     ) -> str:
-        _ensure_kernel_competition_slug_env(preparation.kernel_dir, slug)
+        _kernel_bootstrap.ensure_kernel_competition_slug_env(preparation.kernel_dir, slug)
         if preparation.runtime_bootstrap_mode == "force_train":
-            _ensure_kernel_force_train_env(preparation.kernel_dir)
+            _kernel_bootstrap.ensure_kernel_force_train_env(preparation.kernel_dir)
         elif preparation.runtime_bootstrap_mode == "submit_inference":
-            _ensure_kernel_submit_inference_env(preparation.kernel_dir)
+            _kernel_bootstrap.ensure_kernel_submit_inference_env(preparation.kernel_dir)
         _clear_stale_kernel_output(preparation.output_dir)
         push_attempt = 1
         kernel_id = preparation.kernel_id
@@ -1549,9 +1548,9 @@ def run_kernel_local(
             raise KernelFailedError("No local GPU detected while --strict-accelerator is enabled for local_gpu.")
 
     # Mirror packaging shims so local and kaggle kernel behavior are aligned.
-    _ensure_kernel_import_path(kernel_stage_dir)
-    _inject_competition_slug_env(kernel_stage_dir, slug)
-    _inject_hardware_profile_env(kernel_stage_dir, hardware_profile, compute="local_gpu")
+    _kernel_bootstrap.ensure_kernel_import_path(kernel_stage_dir)
+    _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
+    _kernel_bootstrap.inject_hardware_profile_env(kernel_stage_dir, hardware_profile, compute="local_gpu")
     _kernel_module_inliner.inline_kernel_modules(kernel_stage_dir)
     _inject_data_dir_resolver(kernel_stage_dir)
     _inject_pipeline_cfg_fallback(kernel_stage_dir)
@@ -1566,8 +1565,8 @@ def run_kernel_local(
     _inject_transformers_eval_strategy_shim(kernel_stage_dir)
     _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
     _inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
-    _inject_competition_slug_env(kernel_stage_dir, slug)
-    _inject_force_train_env(kernel_stage_dir)
+    _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
+    _kernel_bootstrap.inject_force_train_env(kernel_stage_dir)
     _ensure_training_progress_shim(kernel_stage_dir)
     ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
     local_aux_env, local_aux_notes = _local_kernel_aux_inputs.stage_local_kernel_aux_inputs(
@@ -1825,12 +1824,8 @@ def run_kernel_local(
     )
 
 
-_KERNEL_BOOTSTRAP_MARKER = "# kagglebot:kernel_sys_path"
-_KERNEL_BOOTSTRAP_END = "del _os, _sys, _KROOT, _KWORK"
 _KERNEL_DATA_RESOLVER_MARKER = "# kagglebot:data_resolver"
 _KERNEL_PIPELINE_CFG_MARKER = "# kagglebot:pipeline_cfg_fallback"
-_KERNEL_COMPETITION_SLUG_MARKER = "# kagglebot:competition_slug"
-_KERNEL_HARDWARE_PROFILE_MARKER = "# kagglebot:hardware_profile"
 _DATA_DIR_JOIN_RE = re.compile(r"(\bdata_dir\s*/\s*)(['\"])([^'\"]+)\2")
 _DATA_DIR_REQUIRED_RE = re.compile(r"all\(\(cand\s*/\s*name\)\.exists\(\)\s*for\s*name\s*in\s*required\)")
 _DATA_DIR_LOCATE_FALLBACK_MARKER = "# kagglebot:data-dir-fallback-scan"
@@ -1838,63 +1833,6 @@ _DATA_DIR_RAISE_RE = re.compile(
     r"^\s*raise FileNotFoundError\(f\"Could not find required csv files for slug='\{slug\}'\"\)\s*$",
     re.MULTILINE,
 )
-
-
-def _strip_kernel_bootstrap(lines: list[str]) -> list[str]:
-    stripped = lines
-    while _KERNEL_BOOTSTRAP_MARKER in stripped:
-        start = stripped.index(_KERNEL_BOOTSTRAP_MARKER)
-        end = None
-        search_end = min(start + 60, len(stripped))
-        for idx in range(start + 1, search_end):
-            if stripped[idx].strip() == _KERNEL_BOOTSTRAP_END:
-                end = idx + 1
-                break
-        if end is None:
-            stripped = stripped[:start] + stripped[start + 1 :]
-        else:
-            stripped = stripped[:start] + stripped[end:]
-    return stripped
-
-
-def _ensure_kernel_import_path(kernel_dir: Path) -> None:
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    bootstrap = (
-        f"{_KERNEL_BOOTSTRAP_MARKER}\n"
-        "import os as _os\n"
-        "import sys as _sys\n"
-        "try:\n"
-        "    _KROOT = _os.path.dirname(_os.path.abspath(__file__))\n"
-        "except NameError:\n"
-        "    _KROOT = _os.getcwd()\n"
-        "if _KROOT not in _sys.path:\n"
-        "    _sys.path.insert(0, _KROOT)\n"
-        "_KWORK = '/kaggle/working'\n"
-        "if _KWORK not in _sys.path:\n"
-        "    _sys.path.insert(0, _KWORK)\n"
-        "try:\n"
-        "    _KSC = _os.path.join(_KROOT, 'sitecustomize.py')\n"
-        "    if _os.path.exists(_KSC):\n"
-        "        with open(_KSC, 'rb') as _kb_f:\n"
-        "            exec(\n"
-        "                compile(_kb_f.read(), _KSC, 'exec'),\n"
-        "                {'__file__': _KSC, '__name__': 'kagglebot_sitecustomize'},\n"
-        "            )\n"
-        "except Exception:\n"
-        "    pass\n"
-        "del _os, _sys, _KROOT, _KWORK\n"
-    )
-    lines = _strip_kernel_bootstrap(text.splitlines())
-    insert_at = _find_bootstrap_insertion_index(lines)
-    bootstrap_lines = bootstrap.splitlines()
-    new_lines = lines[:insert_at] + bootstrap_lines + lines[insert_at:]
-    new_text = "\n".join(new_lines)
-    if text.endswith("\n"):
-        new_text += "\n"
-    kernel_path.write_text(new_text, encoding="utf-8")
 
 
 def _inject_data_dir_resolver(kernel_dir: Path) -> None:
@@ -1923,9 +1861,9 @@ def _inject_data_dir_resolver(kernel_dir: Path) -> None:
             "    return candidate",
             "",
         ]
-        insert_at = _find_bootstrap_block_end(lines)
+        insert_at = _kernel_bootstrap.find_bootstrap_block_end(lines)
         if insert_at is None:
-            insert_at = _find_bootstrap_insertion_index(lines)
+            insert_at = _kernel_bootstrap.find_bootstrap_insertion_index(lines)
         lines = lines[:insert_at] + resolver_block + lines[insert_at:]
     updated = "\n".join(lines)
     updated = _DATA_DIR_JOIN_RE.sub(r"_kb_find_file(data_dir, '\3')", updated)
@@ -1949,285 +1887,6 @@ def _inject_data_dir_resolver(kernel_dir: Path) -> None:
     if text.endswith("\n"):
         updated += "\n"
     kernel_path.write_text(updated, encoding="utf-8")
-
-
-def _inject_competition_slug_env(kernel_dir: Path, competition_slug: str) -> None:
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_COMPETITION_SLUG_MARKER in text:
-        return
-
-    slug_literal = json.dumps(str(competition_slug))
-    resolver_block = [
-        _KERNEL_COMPETITION_SLUG_MARKER,
-        "import os as _kb_os",
-        f"_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = {slug_literal}",
-        f"_kb_os.environ['KAGGLEBOT_SLUG'] = {slug_literal}",
-        "del _kb_os",
-        "",
-    ]
-    lines = text.splitlines()
-    insert_at = _find_bootstrap_block_end(lines)
-    if insert_at is None:
-        insert_at = _find_bootstrap_insertion_index(lines)
-    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
-    updated = "\n".join(lines)
-    if text.endswith("\n"):
-        updated += "\n"
-    kernel_path.write_text(updated, encoding="utf-8")
-
-
-def _inject_hardware_profile_env(kernel_dir: Path, hardware_profile: str | None, *, compute: str) -> None:
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_HARDWARE_PROFILE_MARKER in text:
-        return
-
-    profile = resolve_hardware_profile(hardware_profile, compute=compute)
-    env_payload = hardware_env(profile)
-    resolver_block = [
-        _KERNEL_HARDWARE_PROFILE_MARKER,
-        "import os as _kb_os",
-    ]
-    for key, value in sorted(env_payload.items()):
-        resolver_block.append(f"_kb_os.environ.setdefault({json.dumps(key)}, {json.dumps(value)})")
-    resolver_block.extend(["del _kb_os", ""])
-    lines = text.splitlines()
-    insert_at = _find_bootstrap_block_end(lines)
-    if insert_at is None:
-        insert_at = _find_bootstrap_insertion_index(lines)
-    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
-    updated = "\n".join(lines)
-    if text.endswith("\n"):
-        updated += "\n"
-    kernel_path.write_text(updated, encoding="utf-8")
-
-
-def _inject_force_train_env(kernel_dir: Path) -> None:
-    """Inject environment bootstrap that keeps training enabled in staged kernels."""
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_FORCE_TRAIN_MARKER in text:
-        return
-
-    resolver_block = [
-        _KERNEL_FORCE_TRAIN_MARKER,
-        "import os as _kb_os",
-        "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '1'",
-        "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '1'",
-        "del _kb_os",
-        "",
-    ]
-    lines = text.splitlines()
-    insert_at = _find_bootstrap_block_end(lines)
-    if insert_at is None:
-        insert_at = _find_bootstrap_insertion_index(lines)
-    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
-    updated = "\n".join(lines)
-    if text.endswith("\n"):
-        updated += "\n"
-    kernel_path.write_text(updated, encoding="utf-8")
-
-
-def _strip_competition_slug_bootstrap(lines: list[str]) -> list[str]:
-    stripped = lines
-    while _KERNEL_COMPETITION_SLUG_MARKER in stripped:
-        start = stripped.index(_KERNEL_COMPETITION_SLUG_MARKER)
-        end = None
-        search_end = min(start + 12, len(stripped))
-        for idx in range(start + 1, search_end):
-            if stripped[idx].strip() == "del _kb_os":
-                end = idx + 1
-                if end < len(stripped) and stripped[end].strip() == "":
-                    end += 1
-                break
-        if end is None:
-            stripped = stripped[:start] + stripped[start + 1 :]
-        else:
-            stripped = stripped[:start] + stripped[end:]
-    return stripped
-
-
-def _strip_force_train_bootstrap(lines: list[str]) -> list[str]:
-    """Remove injected force-train bootstrap blocks from kernel text lines."""
-    stripped = lines
-    while _KERNEL_FORCE_TRAIN_MARKER in stripped:
-        start = stripped.index(_KERNEL_FORCE_TRAIN_MARKER)
-        end = None
-        search_end = min(start + 12, len(stripped))
-        for idx in range(start + 1, search_end):
-            if stripped[idx].strip() == "del _kb_os":
-                end = idx + 1
-                if end < len(stripped) and stripped[end].strip() == "":
-                    end += 1
-                break
-        if end is None:
-            stripped = stripped[:start] + stripped[start + 1 :]
-        else:
-            stripped = stripped[:start] + stripped[end:]
-    return stripped
-
-
-def _inject_submit_inference_env(kernel_dir: Path) -> None:
-    """Inject environment bootstrap that disables training and forces inference-only submit notebooks."""
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if _KERNEL_SUBMIT_INFERENCE_MARKER in text:
-        return
-
-    resolver_block = [
-        _KERNEL_SUBMIT_INFERENCE_MARKER,
-        "import os as _kb_os",
-        "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '0'",
-        "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '0'",
-        "_kb_os.environ['KAGGLEBOT_DO_INFER'] = '1'",
-        "_kb_os.environ['KAGGLEBOT_SUBMIT_NOTEBOOK'] = '1'",
-        "_kb_os.environ['KAGGLEBOT_SUBMIT_SKIP_CV'] = '1'",
-        "del _kb_os",
-        "",
-    ]
-    lines = _strip_force_train_bootstrap(text.splitlines())
-    insert_at = _find_bootstrap_block_end(lines)
-    if insert_at is None:
-        insert_at = _find_bootstrap_insertion_index(lines)
-    lines = lines[:insert_at] + resolver_block + lines[insert_at:]
-    updated = "\n".join(lines)
-    if text.endswith("\n"):
-        updated += "\n"
-    kernel_path.write_text(updated, encoding="utf-8")
-
-
-def _strip_submit_inference_bootstrap(lines: list[str]) -> list[str]:
-    stripped = lines
-    while _KERNEL_SUBMIT_INFERENCE_MARKER in stripped:
-        start = stripped.index(_KERNEL_SUBMIT_INFERENCE_MARKER)
-        end = None
-        search_end = min(start + 12, len(stripped))
-        for idx in range(start + 1, search_end):
-            if stripped[idx].strip() == "del _kb_os":
-                end = idx + 1
-                if end < len(stripped) and stripped[end].strip() == "":
-                    end += 1
-                break
-        if end is None:
-            stripped = stripped[:start] + stripped[start + 1 :]
-        else:
-            stripped = stripped[:start] + stripped[end:]
-    return stripped
-
-
-def _ensure_kernel_competition_slug_env(kernel_dir: Path, competition_slug: str) -> None:
-    """Ensure the kernel runtime can resolve the competition slug on Kaggle.
-
-    Kaggle script kernels run from `/kaggle/working`, so naive filesystem-based defaults
-    (e.g. using parent directory names) often resolve to "kaggle" instead of the
-    competition slug. Inject a tiny env bootstrap into kernel.py so the runtime uses
-    the correct slug regardless of working directory layout.
-    """
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    slug_literal = json.dumps(str(competition_slug))
-    expected_slug_line = f"_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = {slug_literal}"
-    expected_alias_line = f"_kb_os.environ['KAGGLEBOT_SLUG'] = {slug_literal}"
-    if _KERNEL_COMPETITION_SLUG_MARKER in text and expected_slug_line in text and expected_alias_line in text:
-        return
-    if _KERNEL_COMPETITION_SLUG_MARKER in text:
-        stripped_lines = _strip_competition_slug_bootstrap(text.splitlines())
-        stripped_text = "\n".join(stripped_lines)
-        if text.endswith("\n"):
-            stripped_text += "\n"
-        kernel_path.write_text(stripped_text, encoding="utf-8")
-    _inject_competition_slug_env(kernel_dir, competition_slug)
-    updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if (
-        _KERNEL_COMPETITION_SLUG_MARKER not in updated
-        or expected_slug_line not in updated
-        or expected_alias_line not in updated
-    ):
-        raise KernelFailedError(
-            "Failed to inject competition slug bootstrap into kernel.py. "
-            "Refusing to push a kernel that may mis-resolve /kaggle/input paths."
-        )
-
-
-def _ensure_kernel_force_train_env(kernel_dir: Path) -> None:
-    """Ensure staged kernel runtime has force-train env injection."""
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    expected_train_line = "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '1'"
-    expected_force_line = "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '1'"
-    if _KERNEL_FORCE_TRAIN_MARKER in text and expected_train_line in text and expected_force_line in text:
-        return
-    if _KERNEL_FORCE_TRAIN_MARKER in text:
-        stripped_lines = _strip_force_train_bootstrap(text.splitlines())
-        stripped_text = "\n".join(stripped_lines)
-        if text.endswith("\n"):
-            stripped_text += "\n"
-        kernel_path.write_text(stripped_text, encoding="utf-8")
-    _inject_force_train_env(kernel_dir)
-    updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if (
-        _KERNEL_FORCE_TRAIN_MARKER not in updated
-        or expected_train_line not in updated
-        or expected_force_line not in updated
-    ):
-        raise KernelFailedError(
-            "Failed to inject force-train bootstrap into kernel.py. "
-            "Refusing to push a kernel that may auto-disable training."
-        )
-
-
-def _ensure_kernel_submit_inference_env(kernel_dir: Path) -> None:
-    """Ensure staged notebook submit kernel disables training and keeps inference on."""
-    kernel_path = kernel_dir / "kernel.py"
-    if not kernel_path.exists():
-        return
-    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    expected_train_line = "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '0'"
-    expected_force_line = "_kb_os.environ['KAGGLEBOT_FORCE_TRAIN'] = '0'"
-    expected_infer_line = "_kb_os.environ['KAGGLEBOT_DO_INFER'] = '1'"
-    expected_submit_line = "_kb_os.environ['KAGGLEBOT_SUBMIT_NOTEBOOK'] = '1'"
-    expected_skip_cv_line = "_kb_os.environ['KAGGLEBOT_SUBMIT_SKIP_CV'] = '1'"
-    if (
-        _KERNEL_SUBMIT_INFERENCE_MARKER in text
-        and expected_train_line in text
-        and expected_force_line in text
-        and expected_infer_line in text
-        and expected_submit_line in text
-        and expected_skip_cv_line in text
-    ):
-        return
-    stripped_lines = _strip_submit_inference_bootstrap(_strip_force_train_bootstrap(text.splitlines()))
-    stripped_text = "\n".join(stripped_lines)
-    if text.endswith("\n"):
-        stripped_text += "\n"
-    kernel_path.write_text(stripped_text, encoding="utf-8")
-    _inject_submit_inference_env(kernel_dir)
-    updated = kernel_path.read_text(encoding="utf-8", errors="ignore")
-    if (
-        _KERNEL_SUBMIT_INFERENCE_MARKER not in updated
-        or expected_train_line not in updated
-        or expected_force_line not in updated
-        or expected_infer_line not in updated
-        or expected_submit_line not in updated
-        or expected_skip_cv_line not in updated
-    ):
-        raise KernelFailedError(
-            "Failed to inject submit-inference bootstrap into kernel.py. "
-            "Refusing to push a notebook submit kernel that may still force training."
-        )
 
 
 def _sanitize_submit_inference_output_roots(kernel_dir: Path) -> None:
@@ -3346,45 +3005,6 @@ def _ensure_training_progress_shim(kernel_dir: Path) -> None:
             f"Training progress shim marker not found in {site_path}. "
             "Refusing to run a kernel without mandatory progress logging."
         )
-
-
-def _find_bootstrap_block_end(lines: list[str]) -> int | None:
-    if _KERNEL_BOOTSTRAP_MARKER not in lines:
-        return None
-    start = lines.index(_KERNEL_BOOTSTRAP_MARKER)
-    search_end = min(start + 30, len(lines))
-    for idx in range(start + 1, search_end):
-        if lines[idx].strip() == _KERNEL_BOOTSTRAP_END:
-            return idx + 1
-    return None
-
-
-def _find_bootstrap_insertion_index(lines: list[str]) -> int:
-    idx = 0
-    if idx < len(lines) and lines[idx].startswith("#!"):
-        idx += 1
-    for _ in range(2):
-        if idx < len(lines) and re.match(r"^#.*coding[:=]\s*[-\w.]+", lines[idx]):
-            idx += 1
-    while idx < len(lines) and (lines[idx].strip() == "" or lines[idx].lstrip().startswith("#")):
-        idx += 1
-    if idx < len(lines):
-        stripped = lines[idx].lstrip()
-        if stripped.startswith('"""') or stripped.startswith("'''"):
-            quote = '"""' if stripped.startswith('"""') else "'''"
-            if stripped.count(quote) >= 2:
-                idx += 1
-            else:
-                idx += 1
-                while idx < len(lines) and quote not in lines[idx]:
-                    idx += 1
-                if idx < len(lines):
-                    idx += 1
-    while idx < len(lines) and (lines[idx].strip() == "" or lines[idx].lstrip().startswith("#")):
-        idx += 1
-    while idx < len(lines) and re.match(r"^\s*from\s+__future__\s+import\s+", lines[idx]):
-        idx += 1
-    return idx
 
 
 LOG_POLL_INTERVAL = 2.0

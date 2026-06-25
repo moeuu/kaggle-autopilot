@@ -762,7 +762,7 @@ def test_kernel_push_aborts_immediately_on_invalid_attached_sources(
 
 
 def test_ensure_kernel_competition_slug_env_rewrites_stale_slug(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
+    from kagglebot.kernel_bootstrap import ensure_kernel_competition_slug_env
 
     kernel_dir = tmp_path / "demo" / "kernels" / "run-1"
     kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -784,7 +784,7 @@ def test_ensure_kernel_competition_slug_env_rewrites_stale_slug(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    kernel_runner._ensure_kernel_competition_slug_env(kernel_dir, "demo")
+    ensure_kernel_competition_slug_env(kernel_dir, "demo")
     updated = kernel_path.read_text(encoding="utf-8")
     assert "_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = \"demo\"" in updated
     assert "_kb_os.environ['KAGGLEBOT_SLUG'] = \"demo\"" in updated
@@ -1296,8 +1296,6 @@ def test_inject_pipeline_cfg_fallback_replaces_keyerror(tmp_path: Path) -> None:
 
 
 def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     kernel_path = kernel_dir / "kernel.py"
@@ -1316,7 +1314,9 @@ def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    kernel_runner._ensure_kernel_import_path(kernel_dir)
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
     lines = kernel_path.read_text(encoding="utf-8").splitlines()
     future_idx = next(i for i, line in enumerate(lines) if "from __future__ import annotations" in line)
     marker_idx = next(i for i, line in enumerate(lines) if "kagglebot:kernel_sys_path" in line)
