@@ -14,6 +14,7 @@ from kagglebot.plan_policy import (
     competition_eval_override,
     expanded_default_eval_seeds,
     expanded_eval_seeds,
+    extract_evaluation_spec_values,
     extract_plan_split_strategy_hints,
     infer_split_strategy_from_hint_text,
     normalize_default_eval_repeats,
@@ -35,6 +36,71 @@ def test_normalize_split_strategy_name_handles_aliases() -> None:
     assert normalize_split_strategy_name("time series") is None
     assert normalize_split_strategy_name("timeseriessplit") == "timeseries_split"
     assert normalize_split_strategy_name("unknown") is None
+
+
+def test_extract_evaluation_spec_values_reads_nested_policy_sections() -> None:
+    values = extract_evaluation_spec_values(
+        {
+            "metric_name": "log_loss",
+            "direction": "minimize",
+            "split_strategy": "stratified_kfold",
+            "n_splits": 5,
+            "seeds": [11, "bad", 22],
+            "repeats": 3,
+            "ci_method": "bootstrap",
+            "ci_alpha": 0.1,
+            "readiness_rule": {
+                "method": "mean_std",
+                "k": 1.5,
+                "target_score": 0.4,
+                "submission_gate": "readiness_only",
+            },
+            "drift_check": {"enabled": True, "drift_weight": 0.25},
+            "stop_policy": {"min_delta": 0.01, "no_improve_patience": 4, "same_config_patience": 2},
+        }
+    )
+
+    assert values.metric_name == "log_loss"
+    assert values.direction == "minimize"
+    assert values.split_strategy == "stratified_kfold"
+    assert values.n_splits == 5
+    assert values.seed == 11
+    assert values.eval_seeds == (11, 22)
+    assert values.repeats == 3
+    assert values.ci_method == "bootstrap"
+    assert values.ci_alpha == 0.1
+    assert values.readiness_method == "mean_std"
+    assert values.readiness_k == 1.5
+    assert values.readiness_target_score == 0.4
+    assert values.submission_gate == "readiness_only"
+    assert values.drift_enabled is True
+    assert values.drift_weight == 0.25
+    assert values.stop_min_delta == 0.01
+    assert values.stop_no_improve_patience == 4
+    assert values.stop_same_config_patience == 2
+
+
+def test_extract_evaluation_spec_values_ignores_wrong_shapes() -> None:
+    values = extract_evaluation_spec_values(
+        {
+            "metric_name": 123,
+            "direction": ["minimize"],
+            "n_splits": "5",
+            "seeds": "11",
+            "readiness_rule": "bad",
+            "drift_check": {"enabled": "yes"},
+            "stop_policy": {"no_improve_patience": "4"},
+        }
+    )
+
+    assert values.metric_name is None
+    assert values.direction is None
+    assert values.n_splits is None
+    assert values.seed is None
+    assert values.eval_seeds == ()
+    assert values.readiness_method is None
+    assert values.drift_enabled is None
+    assert values.stop_no_improve_patience is None
 
 
 def test_infer_split_strategy_from_hint_text_handles_natural_language() -> None:

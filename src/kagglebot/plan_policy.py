@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.paths import CompetitionPaths
@@ -28,6 +29,74 @@ COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
         "group_column_hint": "oare_id",
     }
 }
+
+
+@dataclass(frozen=True)
+class EvaluationSpecValues:
+    metric_name: str | None = None
+    direction: str | None = None
+    split_strategy: str | None = None
+    n_splits: int | None = None
+    seed: int | None = None
+    eval_seeds: tuple[int, ...] = ()
+    repeats: int | None = None
+    ci_method: str | None = None
+    ci_alpha: int | float | None = None
+    readiness_method: str | None = None
+    readiness_k: int | float | None = None
+    readiness_target_score: int | float | None = None
+    submission_gate: str | None = None
+    drift_enabled: bool | None = None
+    drift_weight: int | float | None = None
+    stop_min_delta: int | float | None = None
+    stop_no_improve_patience: int | None = None
+    stop_same_config_patience: int | None = None
+
+
+def extract_evaluation_spec_values(eval_spec: dict[str, object]) -> EvaluationSpecValues:
+    """Extract typed values from the persisted evaluation spec contract."""
+
+    seeds: list[int] = []
+    raw_seeds = eval_spec.get("seeds")
+    if isinstance(raw_seeds, list):
+        seeds = [item for item in raw_seeds if isinstance(item, int)]
+
+    readiness_rule = eval_spec.get("readiness_rule") if isinstance(eval_spec.get("readiness_rule"), dict) else {}
+    drift_cfg = eval_spec.get("drift_check") if isinstance(eval_spec.get("drift_check"), dict) else {}
+    stop_policy = eval_spec.get("stop_policy") if isinstance(eval_spec.get("stop_policy"), dict) else {}
+
+    return EvaluationSpecValues(
+        metric_name=_str_or_none(eval_spec.get("metric_name")),
+        direction=_str_or_none(eval_spec.get("direction")),
+        split_strategy=_str_or_none(eval_spec.get("split_strategy")),
+        n_splits=_int_or_none(eval_spec.get("n_splits")),
+        seed=seeds[0] if seeds else None,
+        eval_seeds=tuple(seeds),
+        repeats=_int_or_none(eval_spec.get("repeats")),
+        ci_method=_str_or_none(eval_spec.get("ci_method")),
+        ci_alpha=_number_or_none(eval_spec.get("ci_alpha")),
+        readiness_method=_str_or_none(readiness_rule.get("method")),
+        readiness_k=_number_or_none(readiness_rule.get("k")),
+        readiness_target_score=_number_or_none(readiness_rule.get("target_score")),
+        submission_gate=_str_or_none(readiness_rule.get("submission_gate")),
+        drift_enabled=drift_cfg.get("enabled") if isinstance(drift_cfg.get("enabled"), bool) else None,
+        drift_weight=_number_or_none(drift_cfg.get("drift_weight")),
+        stop_min_delta=_number_or_none(stop_policy.get("min_delta")),
+        stop_no_improve_patience=_int_or_none(stop_policy.get("no_improve_patience")),
+        stop_same_config_patience=_int_or_none(stop_policy.get("same_config_patience")),
+    )
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _number_or_none(value: object) -> int | float | None:
+    return value if isinstance(value, (int, float)) else None
 
 
 def normalize_split_strategy_name(value: object) -> str | None:

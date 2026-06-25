@@ -3391,46 +3391,8 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         return default
 
     eval_spec = _load_evaluation_spec(config.paths)
-    spec_metric = eval_spec.get("metric_name") if isinstance(eval_spec.get("metric_name"), str) else None
-    spec_direction = eval_spec.get("direction") if isinstance(eval_spec.get("direction"), str) else None
-    spec_split = eval_spec.get("split_strategy") if isinstance(eval_spec.get("split_strategy"), str) else None
-    spec_folds = eval_spec.get("n_splits") if isinstance(eval_spec.get("n_splits"), int) else None
-    spec_seed: int | None = None
-    spec_eval_seeds: list[int] = []
-    spec_seeds = eval_spec.get("seeds")
-    if isinstance(spec_seeds, list):
-        for item in spec_seeds:
-            if isinstance(item, int):
-                spec_eval_seeds.append(item)
-                if spec_seed is None:
-                    spec_seed = item
-    spec_repeats = eval_spec.get("repeats") if isinstance(eval_spec.get("repeats"), int) else None
-    spec_ci_method = eval_spec.get("ci_method") if isinstance(eval_spec.get("ci_method"), str) else None
-    spec_ci_alpha = eval_spec.get("ci_alpha") if isinstance(eval_spec.get("ci_alpha"), (int, float)) else None
-    readiness_rule = eval_spec.get("readiness_rule") if isinstance(eval_spec.get("readiness_rule"), dict) else {}
-    spec_readiness_method = readiness_rule.get("method") if isinstance(readiness_rule.get("method"), str) else None
-    spec_readiness_k = readiness_rule.get("k") if isinstance(readiness_rule.get("k"), (int, float)) else None
-    spec_readiness_target = (
-        readiness_rule.get("target_score") if isinstance(readiness_rule.get("target_score"), (int, float)) else None
-    )
-    spec_submission_gate = (
-        readiness_rule.get("submission_gate") if isinstance(readiness_rule.get("submission_gate"), str) else None
-    )
-    drift_cfg = eval_spec.get("drift_check") if isinstance(eval_spec.get("drift_check"), dict) else {}
-    spec_drift_enabled = drift_cfg.get("enabled") if isinstance(drift_cfg.get("enabled"), bool) else None
-    spec_drift_weight = (
-        drift_cfg.get("drift_weight") if isinstance(drift_cfg.get("drift_weight"), (int, float)) else None
-    )
-    stop_policy = eval_spec.get("stop_policy") if isinstance(eval_spec.get("stop_policy"), dict) else {}
-    spec_stop_min_delta = (
-        stop_policy.get("min_delta") if isinstance(stop_policy.get("min_delta"), (int, float)) else None
-    )
-    spec_stop_no_improve = (
-        stop_policy.get("no_improve_patience") if isinstance(stop_policy.get("no_improve_patience"), int) else None
-    )
-    spec_stop_same_config = (
-        stop_policy.get("same_config_patience") if isinstance(stop_policy.get("same_config_patience"), int) else None
-    )
+    spec_values = _plan_policy.extract_evaluation_spec_values(eval_spec)
+    spec_eval_seeds = list(spec_values.eval_seeds)
 
     strict_competition_metric = _env_flag(
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
@@ -3470,9 +3432,9 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         )
     explicit_target_metric = config.target_metric is not None or plan.target_metric is not None
     explicit_target_direction = config.target_direction is not None or plan.target_direction is not None
-    target_metric = choose(config.target_metric, plan.target_metric, spec_metric)
-    target_score = choose(config.target_score, plan.target_score, spec_readiness_target)
-    target_direction = choose(config.target_direction, plan.target_direction, spec_direction or "auto")
+    target_metric = choose(config.target_metric, plan.target_metric, spec_values.metric_name)
+    target_score = choose(config.target_score, plan.target_score, spec_values.readiness_target_score)
+    target_direction = choose(config.target_direction, plan.target_direction, spec_values.direction or "auto")
     competition_override = _plan_policy.competition_eval_override(config.paths.slug)
     override_metric = str(competition_override.get("metric_name") or "").strip()
     override_direction = str(competition_override.get("direction") or "").strip().lower()
@@ -3495,48 +3457,48 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         target_direction = override_direction
     # Competition-specific overrides are authoritative and must not be undone by a stale
     # evaluation_spec.json contract from an earlier iteration.
-    if strict_competition_metric and spec_metric and not competition_override:
+    if strict_competition_metric and spec_values.metric_name and not competition_override:
         requested_metric = target_metric if isinstance(target_metric, str) else None
         requested_metric_norm = _canonical_metric_name_for_match(requested_metric)
-        spec_metric_norm = _canonical_metric_name_for_match(spec_metric)
+        spec_metric_norm = _canonical_metric_name_for_match(spec_values.metric_name)
         if requested_metric_norm != spec_metric_norm:
             if explicit_target_metric and requested_metric:
                 print(
                     "[yellow]note[/yellow]: strict competition metric mode is enabled, "
                     "but keeping explicit target_metric "
-                    f"'{requested_metric}' over evaluation_spec metric '{spec_metric}'."
+                    f"'{requested_metric}' over evaluation_spec metric '{spec_values.metric_name}'."
                 )
             elif requested_metric:
                 print(
                     "[yellow]note[/yellow]: strict competition metric mode is enabled; "
-                    f"overriding target_metric '{requested_metric}' -> '{spec_metric}'."
+                    f"overriding target_metric '{requested_metric}' -> '{spec_values.metric_name}'."
                 )
-                target_metric = spec_metric
+                target_metric = spec_values.metric_name
             else:
-                target_metric = spec_metric
-        if spec_direction in {"minimize", "maximize"}:
+                target_metric = spec_values.metric_name
+        if spec_values.direction in {"minimize", "maximize"}:
             requested_direction = str(target_direction or "").strip().lower()
-            if requested_direction != spec_direction:
+            if requested_direction != spec_values.direction:
                 if explicit_target_direction and requested_direction:
                     print(
                         "[yellow]note[/yellow]: strict competition metric mode is enabled, "
                         "but keeping explicit target_direction "
-                        f"'{requested_direction}' over evaluation_spec direction '{spec_direction}'."
+                        f"'{requested_direction}' over evaluation_spec direction '{spec_values.direction}'."
                     )
                 else:
                     print(
                         "[yellow]note[/yellow]: strict competition metric mode is enabled; "
-                        f"overriding target_direction '{requested_direction or 'auto'}' -> '{spec_direction}'."
+                        f"overriding target_direction '{requested_direction or 'auto'}' -> '{spec_values.direction}'."
                     )
-                    target_direction = spec_direction
+                    target_direction = spec_values.direction
     score_source = str(choose(config.score_source, plan.score_source, "cv") or "cv")
     normalized_score_source = _score_sources.normalize_score_source_name(score_source)
     if normalized_score_source not in {"cv", "holdout"}:
         print("[yellow]note[/yellow]: non-generalizable score_source is not allowed; overriding to cv.")
         score_source = "cv"
     holdout_frac = choose(config.holdout_frac, plan.holdout_frac, 0.2)
-    cv_folds = choose(config.cv_folds, plan.cv_folds, spec_folds if spec_folds is not None else 5)
-    split_strategy = choose(None, plan.split_strategy, spec_split)
+    cv_folds = choose(config.cv_folds, plan.cv_folds, spec_values.n_splits if spec_values.n_splits is not None else 5)
+    split_strategy = choose(None, plan.split_strategy, spec_values.split_strategy)
     split_strategy, split_strategy_note = _plan_policy.resolve_split_strategy_from_artifacts(
         paths=config.paths,
         split_strategy=split_strategy,
@@ -3564,7 +3526,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             "Use cached embeddings/TTA/lightweight heads for extra validation instead of full folds."
         )
         cv_folds = _HEAVY_LOCAL_GPU_MAX_CV_FOLDS
-    seed = choose(config.seed, plan.seed, spec_seed if spec_seed is not None else 42)
+    seed = choose(config.seed, plan.seed, spec_values.seed if spec_values.seed is not None else 42)
     eval_seeds = _normalize_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
     if heavy_local_gpu and len(eval_seeds) > 1:
         primary_seed = int(seed) if isinstance(seed, int) else eval_seeds[0]
@@ -3582,7 +3544,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
             f"upgrading to multi-seed defaults {_DEFAULT_EVAL_SEEDS}."
         )
         eval_seeds = list(_DEFAULT_EVAL_SEEDS)
-    eval_repeats = _normalize_eval_repeats(plan.eval_repeats, fallback=spec_repeats)
+    eval_repeats = _normalize_eval_repeats(plan.eval_repeats, fallback=spec_values.repeats)
     if heavy_local_gpu and eval_repeats > 1:
         print(
             "[yellow]note[/yellow]: heavy modality on local_gpu; "
@@ -3667,7 +3629,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)
     requested_submit_policy = str(choose(config.submit_policy, plan.submit_policy, "always") or "always")
-    requested_submission_gate_raw = choose(None, plan.submission_gate, spec_submission_gate)
+    requested_submission_gate_raw = choose(None, plan.submission_gate, spec_values.submission_gate)
     requested_submission_gate = str(requested_submission_gate_raw or "").strip().lower() or None
     submit_policy_decision = _submission_policy.resolve_plan_submission_policy(
         config_submit_policy=config.submit_policy,
@@ -3683,34 +3645,38 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     readiness_target_score = choose(
         None,
         plan.readiness_target_score,
-        spec_readiness_target if spec_readiness_target is not None else target_score,
+        spec_values.readiness_target_score if spec_values.readiness_target_score is not None else target_score,
     )
-    readiness_method = choose(None, plan.readiness_method, spec_readiness_method or "ci_bound")
-    readiness_k = choose(None, plan.readiness_k, spec_readiness_k if spec_readiness_k is not None else 1.0)
-    ci_method = choose(None, plan.ci_method, spec_ci_method or "normal")
-    ci_alpha = choose(None, plan.ci_alpha, spec_ci_alpha if spec_ci_alpha is not None else 0.05)
+    readiness_method = choose(None, plan.readiness_method, spec_values.readiness_method or "ci_bound")
+    readiness_k = choose(
+        None, plan.readiness_k, spec_values.readiness_k if spec_values.readiness_k is not None else 1.0
+    )
+    ci_method = choose(None, plan.ci_method, spec_values.ci_method or "normal")
+    ci_alpha = choose(None, plan.ci_alpha, spec_values.ci_alpha if spec_values.ci_alpha is not None else 0.05)
     drift_check = bool(
         choose(
             None,
             plan.drift_check,
-            spec_drift_enabled if spec_drift_enabled is not None else False,
+            spec_values.drift_enabled if spec_values.drift_enabled is not None else False,
         )
     )
-    drift_weight = choose(None, plan.drift_weight, spec_drift_weight if spec_drift_weight is not None else 1.0)
+    drift_weight = choose(
+        None, plan.drift_weight, spec_values.drift_weight if spec_values.drift_weight is not None else 1.0
+    )
     stop_min_delta = choose(
         None,
         plan.stop_min_delta,
-        spec_stop_min_delta if spec_stop_min_delta is not None else min_improvement,
+        spec_values.stop_min_delta if spec_values.stop_min_delta is not None else min_improvement,
     )
     stop_no_improve_patience = choose(
         None,
         plan.stop_no_improve_patience,
-        spec_stop_no_improve if spec_stop_no_improve is not None else patience,
+        spec_values.stop_no_improve_patience if spec_values.stop_no_improve_patience is not None else patience,
     )
     stop_same_config_patience = choose(
         None,
         plan.stop_same_config_patience,
-        spec_stop_same_config if spec_stop_same_config is not None else 0,
+        spec_values.stop_same_config_patience if spec_values.stop_same_config_patience is not None else 0,
     )
     rank_force_major_max_percentile = _normalize_rank_force_percentile(
         plan.rank_force_major_max_percentile,
