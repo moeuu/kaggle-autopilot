@@ -15,6 +15,13 @@ from kagglebot.knowledge import (
 from kagglebot.paths import KnowledgePaths
 
 
+def resolve_problem_types_from_profile(*, dataset_profile_path: Path) -> list[str]:
+    profile = load_json_object(dataset_profile_path) or {}
+    if not isinstance(profile, dict):
+        profile = {}
+    return derive_problem_types(profile)
+
+
 def load_problem_type_knowledge_text(
     *,
     dataset_profile_path: Path,
@@ -25,10 +32,7 @@ def load_problem_type_knowledge_text(
 ) -> str:
     """Render reusable problem-type knowledge context for planning and improvement prompts."""
     try:
-        profile = load_json_object(dataset_profile_path) or {}
-        if not isinstance(profile, dict):
-            profile = {}
-        problem_types = derive_problem_types(profile)
+        problem_types = resolve_problem_types_from_profile(dataset_profile_path=dataset_profile_path)
         sections = [
             format_problem_type_insights(
                 resolve_problem_type_insights(knowledge_paths, problem_types, limit=limit),

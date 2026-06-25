@@ -141,7 +141,6 @@ from kagglebot.kaggle_cli_errors import is_missing_kaggle_credentials_error as _
 from kagglebot.kernel_logs import collect_log_tail as _collect_log_tail
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local, run_submit_kernel
 from kagglebot.knowledge import (
-    derive_problem_types,
     ensure_taxonomy,
     record_error_fix_insight,
     record_improvement,
@@ -150,7 +149,7 @@ from kagglebot.knowledge import (
     record_run,
     resolve_similar_improvements,
 )
-from kagglebot.knowledge_context import load_problem_type_knowledge_text
+from kagglebot.knowledge_context import load_problem_type_knowledge_text, resolve_problem_types_from_profile
 from kagglebot.leaderboard_policy import build_medal_target_reason as _build_medal_target_reason
 from kagglebot.leaderboard_policy import meets_rank_percentile_target as _meets_rank_percentile_target
 from kagglebot.leaderboard_policy import resume_best_online_submission_score as _resume_best_online_submission_score
@@ -508,7 +507,7 @@ class KnowledgePhase:
         )
 
     def derive_problem_types(self) -> list[str]:
-        return derive_problem_types(self.load_dataset_profile())
+        return resolve_problem_types_from_profile(dataset_profile_path=self.config.paths.dataset_profile_path)
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,7 @@ from kagglebot.knowledge import (
     resolve_problem_type_insights,
 )
 from kagglebot.knowledge.repositories import InsightRepository
-from kagglebot.knowledge_context import load_problem_type_knowledge_text
+from kagglebot.knowledge_context import load_problem_type_knowledge_text, resolve_problem_types_from_profile
 from kagglebot.paths import KnowledgePaths
 
 
@@ -347,6 +347,24 @@ def test_load_problem_type_knowledge_text_can_skip_research(tmp_path) -> None:
     assert "No prior problem-type insights available." in text
     assert "No prior error-fix insights available." in text
     assert "Cross-competition research artifacts" not in text
+
+
+def test_resolve_problem_types_from_profile_handles_json_profile(tmp_path) -> None:
+    profile_path = tmp_path / "dataset_profile.json"
+    profile_path.write_text(json.dumps({"modality": "tabular", "task": "regression"}), encoding="utf-8")
+
+    assert resolve_problem_types_from_profile(dataset_profile_path=profile_path) == [
+        "tabular:regression",
+        "tabular",
+        "regression",
+    ]
+
+
+def test_resolve_problem_types_from_profile_handles_invalid_profile(tmp_path) -> None:
+    profile_path = tmp_path / "dataset_profile.json"
+    profile_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+    assert resolve_problem_types_from_profile(dataset_profile_path=profile_path) == ["unknown"]
 
 
 def test_knowledge_classifies_external_signal_and_online_mismatch(tmp_path) -> None:

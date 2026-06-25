@@ -356,7 +356,8 @@ Recommended extraction order:
 7. Agent I/O helpers: keep prompt/response transcript display, response-file reads, capacity-error detection, and retry
    feedback prompt construction in `agent_io.py`; orchestration code should pass identity/path context only.
    Problem-type knowledge context rendering is shared through `knowledge_context.py`, so planning and improvement prompts
-   do not duplicate insight/research lookup policy.
+   do not duplicate insight/research lookup policy. Dataset-profile-to-problem-type resolution also lives there, keeping
+   orchestration code from directly owning profile parsing for knowledge lookup.
 8. Context artifacts: keep dataset-profile loading, evaluation-spec validation/override normalization, and capped CSV
    row-count helpers in `context_artifacts.py`; loop code should not open these context files directly.
 9. Verify execution/staging: keep verify command execution policy, local/external artifact mirroring, pytest environment
