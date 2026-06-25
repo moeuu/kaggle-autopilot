@@ -410,6 +410,37 @@ def build_code_reference_quality_signal(
     }
 
 
+def build_code_reference_regression_quality_signal(
+    *,
+    current_value: float,
+    metric: str,
+    code_reference_score: float | None,
+    code_reference_source: str | None,
+    direction: str,
+    force_submit: bool,
+) -> dict[str, object]:
+    code_reference = build_code_reference_quality_signal(
+        current_value=current_value,
+        metric=metric,
+        code_reference_score=code_reference_score,
+        code_reference_source=code_reference_source,
+        direction=direction,
+    )
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if bool(code_reference.get("below_reference")):
+        reasons.append("below_code_reference_baseline")
+        warning = code_reference.get("warning")
+        if isinstance(warning, str) and warning:
+            warnings.append(warning)
+    return {
+        "code_reference": code_reference,
+        "reasons": reasons,
+        "warnings": warnings,
+        "block_submit": bool(reasons) and not force_submit,
+    }
+
+
 def iter_payload_mappings(payload: object) -> Iterator[dict[object, object]]:
     if isinstance(payload, dict):
         yield payload

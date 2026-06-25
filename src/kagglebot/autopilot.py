@@ -323,7 +323,7 @@ _find_selected_pipeline = _kernel_quality.find_selected_pipeline
 _build_prediction_distribution_quality_signal = _kernel_quality.build_prediction_distribution_quality_signal
 _build_competition_faithfulness_quality_signal = _kernel_quality.build_competition_faithfulness_quality_signal
 _build_baseline_regression_quality_signal = _kernel_quality.build_baseline_regression_quality_signal
-_build_code_reference_quality_signal = _kernel_quality.build_code_reference_quality_signal
+_build_code_reference_regression_quality_signal = _kernel_quality.build_code_reference_regression_quality_signal
 _build_validation_stability_quality_signal = _kernel_quality.build_validation_stability_quality_signal
 _BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
 _best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
@@ -4802,20 +4802,25 @@ def _build_kernel_quality_guard(
         if not force_submit:
             block_submit = True
 
-    code_reference_signal = _build_code_reference_quality_signal(
+    code_reference_regression_signal = _build_code_reference_regression_quality_signal(
         current_value=float(evaluation.value),
         metric=evaluation.metric,
         code_reference_score=code_reference_score,
         code_reference_source=code_reference_source,
         direction=direction,
+        force_submit=force_submit,
     )
-    if bool(code_reference_signal.get("below_reference")):
-        reasons.append("below_code_reference_baseline")
-        warning = code_reference_signal.get("warning")
-        if isinstance(warning, str) and warning:
+    code_reference_signal = code_reference_regression_signal.get("code_reference")
+    if not isinstance(code_reference_signal, dict):
+        code_reference_signal = {}
+    for reason in code_reference_regression_signal.get("reasons", []):
+        if isinstance(reason, str):
+            reasons.append(reason)
+    for warning in code_reference_regression_signal.get("warnings", []):
+        if isinstance(warning, str):
             warnings.append(warning)
-        if not force_submit:
-            block_submit = True
+    if bool(code_reference_regression_signal.get("block_submit")):
+        block_submit = True
 
     allow_submit = not block_submit
     return {
@@ -4844,6 +4849,7 @@ def _build_kernel_quality_guard(
         "prediction_distribution_collapse": prediction_distribution_collapse,
         "prediction_distribution": prediction_distribution_signal,
         "code_reference": code_reference_signal,
+        "code_reference_regression": code_reference_regression_signal,
     }
 
 

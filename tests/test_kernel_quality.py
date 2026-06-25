@@ -6,6 +6,7 @@ from kagglebot.kernel_quality import (
     build_baseline_regression_quality_signal,
     build_candidate_selection_quality_signal,
     build_code_reference_quality_signal,
+    build_code_reference_regression_quality_signal,
     build_competition_faithfulness_quality_signal,
     build_external_label_transfer_quality_signal,
     build_oracle_override_signal,
@@ -339,6 +340,37 @@ def test_build_code_reference_quality_signal_normalizes_percent_accuracy_referen
     assert round(float(signal["delta_vs_current"]), 6) == 0.0
     assert signal["below_reference"] is False
     assert signal["warning"] is None
+
+
+def test_build_code_reference_regression_quality_signal_blocks_below_reference() -> None:
+    signal = build_code_reference_regression_quality_signal(
+        current_value=0.70,
+        metric="accuracy",
+        code_reference_score=0.76,
+        code_reference_source="code_index:user/ref",
+        direction="maximize",
+        force_submit=False,
+    )
+
+    assert signal["block_submit"] is True
+    assert signal["reasons"] == ["below_code_reference_baseline"]
+    assert len(signal["warnings"]) == 1
+    assert "code_reference_score=0.760000" in signal["warnings"][0]
+    assert signal["code_reference"]["below_reference"] is True
+
+
+def test_build_code_reference_regression_quality_signal_respects_force_submit() -> None:
+    signal = build_code_reference_regression_quality_signal(
+        current_value=0.70,
+        metric="accuracy",
+        code_reference_score=0.76,
+        code_reference_source="code_index:user/ref",
+        direction="maximize",
+        force_submit=True,
+    )
+
+    assert signal["reasons"] == ["below_code_reference_baseline"]
+    assert signal["block_submit"] is False
 
 
 def test_detect_external_test_label_transfer_signal_requires_specific_leak_pattern() -> None:
