@@ -61,6 +61,8 @@ Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the 
 instead of carrying private rule-parsing aliases in `autopilot.py`.
 Offline score-source normalization and trust checks live in `src/kagglebot/score_sources.py` for the same reason:
 the loop should consume normalized policy answers rather than own every parsing rule inline.
+Campaign mode normalization lives in `src/kagglebot/campaign.py`; CLI commands and the loop share the same aliases and
+validation instead of keeping separate option parsers.
 Verify command execution support, external artifact mirroring for pytest verification, pytest environment isolation, and
 competition-specific verify compatibility shims live in `src/kagglebot/verify_artifacts.py`; `autopilot.py` only invokes
 that module from the verify step.

@@ -12,6 +12,7 @@ from rich import print
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
+from kagglebot.campaign import normalize_campaign_mode
 from kagglebot.competition import parse_competition_slug
 from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute, resolve_accelerator
@@ -530,12 +531,10 @@ def autopilot(
                 param_hint="--score-source",
             )
         score_source = normalized_score_source
-    normalized_campaign_mode = campaign_mode.strip().lower()
-    if normalized_campaign_mode not in {"top1", "baseline"}:
-        raise typer.BadParameter(
-            "Invalid --campaign-mode. Allowed values: top1, baseline.",
-            param_hint="--campaign-mode",
-        )
+    try:
+        normalized_campaign_mode = normalize_campaign_mode(campaign_mode, deliverable_mode="leaderboard")
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--campaign-mode") from exc
     normalized_method_scout = method_scout.strip().lower()
     if normalized_method_scout not in {"auto", "off", "refresh"}:
         raise typer.BadParameter(

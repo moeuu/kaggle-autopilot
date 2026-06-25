@@ -165,6 +165,36 @@ def test_autopilot_cli_accepts_baseline_campaign_mode(monkeypatch, tmp_path: Pat
     assert captured["campaign_mode"] == "baseline"
 
 
+def test_autopilot_cli_uses_shared_campaign_mode_aliases(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("kagglebot.cli.bootstrap_competition", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.cli.run_autopilot", lambda config: captured.update(campaign_mode=config.campaign_mode)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--workdir",
+            str(tmp_path),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "autopilot",
+            "playground-series-s6e2",
+            "--compute",
+            "local_gpu",
+            "--campaign-mode",
+            "top-1",
+            "--no-auto-eval-spec",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["campaign_mode"] == "top1"
+
+
 def test_autopilot_cli_accepts_method_scout_options(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     captured: dict[str, object] = {}
