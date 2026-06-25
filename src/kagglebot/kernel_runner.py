@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import codecs
-import json
 import os
 import re
 import selectors
@@ -18,6 +17,7 @@ from pathlib import Path
 from rich import print
 
 from kagglebot import kernel_bootstrap as _kernel_bootstrap
+from kagglebot import kernel_contracts as _kernel_contracts
 from kagglebot import kernel_logs as _kernel_logs
 from kagglebot import kernel_metadata as _kernel_metadata
 from kagglebot import kernel_module_inliner as _kernel_module_inliner
@@ -44,7 +44,7 @@ from kagglebot.exceptions import (
 )
 from kagglebot.exec_utils import CommandResult
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object, read_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -88,13 +88,6 @@ _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
 _LOCAL_KERNEL_EXIT_PIPE_DRAIN_SEC = 1.0
 _LOCAL_LGBM_GPU_PROBE_OK: bool | None = None
 _SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
-_BVS_KERNEL_CONTRACT_SLUG_PREFIX = "beyond-visible-spectrum-ai-for-agriculture-2026"
-_BVS_TIMM_FAILURE_MARKERS = (
-    "timm is unavailable",
-    "timm.create_model is missing",
-    "skipping tri_branch_timm_gated because timm is unavailable",
-    "falling back to smallspectralencoder for rgb",
-)
 _TRUSTED_KERNEL_SCORE_SOURCES = frozenset({"cv", "holdout", "consensus"})
 _URBAN_FLOOD_SAMPLEISH_SCORE_SOURCES = frozenset(
     {
@@ -121,10 +114,6 @@ _BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
     r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
     re.IGNORECASE,
 )
-
-
-def _requires_bvs_kernel_contract(slug: str) -> bool:
-    return slug.strip().lower().startswith(_BVS_KERNEL_CONTRACT_SLUG_PREFIX)
 
 
 def _normalize_kernel_score_source(value: object) -> str:
@@ -177,26 +166,6 @@ def _normalize_local_kernel_metrics(
     except OSError:
         return metrics_path
     return metrics_path
-
-
-def _collect_local_kernel_log_text(logs_dir: Path) -> str:
-    chunks: list[str] = []
-    for name in (
-        "local_kernel_stdout.log",
-        "local_kernel_stderr.log",
-        "local_kernel_stdout_oom_retry.log",
-        "local_kernel_stderr_oom_retry.log",
-    ):
-        path = logs_dir / name
-        if not path.exists():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if text:
-            chunks.append(text)
-    return "\n".join(chunks)
 
 
 @dataclass(frozen=True)
@@ -509,73 +478,6 @@ def _run_local_kernel_once(
         killed_for_stall=bool(stall_state["killed_for_stall"]),
         stall_kill_message=(str(stall_state["stall_kill_message"]) if stall_state["stall_kill_message"] else None),
     )
-
-
-def _extract_kernel_size_markers(log_text: str) -> list[int]:
-    pattern = re.compile(r"\b(?:load_size|img_size)\s*=\s*(\d+)\b")
-    values: list[int] = []
-    for match in pattern.finditer(log_text):
-        try:
-            values.append(int(match.group(1)))
-        except ValueError:
-            continue
-    return values
-
-
-def _enforce_competition_kernel_contract(
-    *,
-    slug: str,
-    logs_dir: Path,
-    metrics_path: Path | None,
-) -> None:
-    """Enforce competition-specific quality contracts to prevent silent regressions."""
-    if not _requires_bvs_kernel_contract(slug):
-        return
-
-    errors: list[str] = []
-    payload: dict[str, object] = {}
-    if metrics_path is None or not metrics_path.exists():
-        errors.append("metrics.json is missing; cannot validate BVS kernel contract.")
-    else:
-        try:
-            payload = read_json_object(metrics_path)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            errors.append(f"metrics.json is unreadable: {exc}")
-        except ValueError:
-            errors.append("metrics.json payload must be a JSON object.")
-
-    log_text = _collect_local_kernel_log_text(logs_dir)
-    lowered_log = log_text.lower()
-    for marker in _BVS_TIMM_FAILURE_MARKERS:
-        if marker in lowered_log:
-            errors.append(f"timm/ConvNeXt fallback marker detected in logs: {marker}")
-
-    size_markers = _extract_kernel_size_markers(log_text)
-    if not size_markers:
-        errors.append("No img_size/load_size markers found in local kernel logs.")
-    else:
-        undersized = sorted({value for value in size_markers if value < 128})
-        if undersized:
-            errors.append(f"Detected img_size/load_size below 128 in logs: {undersized}")
-
-    if payload:
-        model_name = str(payload.get("model_name") or "").strip().lower()
-        if model_name in {"resnet50", "small_rgb_encoder", "none"}:
-            errors.append(f"Weak fallback backbone detected in metrics model_name={model_name!r}.")
-
-        pipelines = payload.get("pipelines")
-        if not isinstance(pipelines, list) or len(pipelines) < 2:
-            errors.append("metrics.json must report at least two pipeline candidates for ensemble selection.")
-
-        chosen_pipeline = str(payload.get("chosen_pipeline") or "").strip().lower()
-        if not chosen_pipeline:
-            errors.append("metrics.json must include chosen_pipeline.")
-        elif "ensemble" not in chosen_pipeline:
-            errors.append(f"chosen_pipeline must be ensemble-based, got: {chosen_pipeline!r}.")
-
-    if errors:
-        issue_text = "\n".join(f"- {message}" for message in errors)
-        raise KernelFailedError(f"BVS kernel contract failed (timm/size/ensemble guard):\n{issue_text}")
 
 
 def _env_truthy(raw: str | None) -> bool:
@@ -1503,7 +1405,7 @@ def run_kernel_local(
             metrics_path=metrics_dst,
             score_source=score_source,
         )
-    _enforce_competition_kernel_contract(
+    _kernel_contracts.enforce_competition_kernel_contract(
         slug=slug,
         logs_dir=logs_dir,
         metrics_path=metrics_dst,

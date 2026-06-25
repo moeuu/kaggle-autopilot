@@ -239,7 +239,8 @@ The next high-value modernization work is:
    in `kernel_bootstrap.py`; local sitecustomize shim injection is now in `local_kernel_shims.py`; static submit
    wrapper rendering and code-competition tiny-submission rejection are now in `kernel_submit_wrapper.py`; Kaggle push
    source validation is now in `kernel_push_validation.py`; notebook submit-inference validation and output-root
-   sanitization are now in `kernel_submit_inference.py`;
+   sanitization are now in `kernel_submit_inference.py`; competition-specific local-kernel contract checks are now in
+   `kernel_contracts.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
