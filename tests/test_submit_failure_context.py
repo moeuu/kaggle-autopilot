@@ -14,6 +14,7 @@ from kagglebot.submit_failure_context import (
     load_submit_failure_context,
     mark_submit_failure_context_resolved,
     path_from_submit_reference,
+    resolve_submit_abort_artifact_path,
     resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
     should_defer_submit_abort_to_next_iteration,
@@ -149,6 +150,37 @@ def test_path_from_submit_reference_ignores_kernel_references() -> None:
     assert path_from_submit_reference("kernel:user/demo") is None
     assert path_from_submit_reference("") is None
     assert path_from_submit_reference("/tmp/submission.csv") == Path("/tmp/submission.csv")
+
+
+def test_resolve_submit_abort_artifact_path_prefers_explicit_artifact(tmp_path: Path) -> None:
+    explicit = tmp_path / "copied" / "submission.csv"
+
+    assert (
+        resolve_submit_abort_artifact_path(
+            submission_ref=tmp_path / "original.csv",
+            submission_artifact_path=explicit,
+        )
+        == explicit
+    )
+
+
+def test_resolve_submit_abort_artifact_path_uses_path_submission_ref(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+
+    assert (
+        resolve_submit_abort_artifact_path(
+            submission_ref=submission_path,
+            submission_artifact_path=None,
+        )
+        == submission_path
+    )
+    assert (
+        resolve_submit_abort_artifact_path(
+            submission_ref="kernel:user/demo",
+            submission_artifact_path=None,
+        )
+        is None
+    )
 
 
 def test_decide_stale_submit_autofix_artifact_returns_context_updates(tmp_path: Path) -> None:

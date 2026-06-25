@@ -182,6 +182,18 @@ def path_from_submit_reference(value: object) -> Path | None:
         return None
 
 
+def resolve_submit_abort_artifact_path(
+    *,
+    submission_ref: str | Path,
+    submission_artifact_path: Path | None,
+) -> Path | None:
+    if submission_artifact_path is not None:
+        return submission_artifact_path
+    if isinstance(submission_ref, Path):
+        return submission_ref
+    return None
+
+
 def decide_stale_submit_autofix_artifact(
     *,
     run_state: dict[str, object],

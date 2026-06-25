@@ -6220,13 +6220,10 @@ def _abort_submit_for_run(
             save_run_state=lambda updates: _save_run_state(run_dir, updates),
         )
     submission_ref_text = str(submission_ref)
-    artifact_path: Path | None
-    if submission_artifact_path is not None:
-        artifact_path = submission_artifact_path
-    elif isinstance(submission_ref, Path):
-        artifact_path = submission_ref
-    else:
-        artifact_path = None
+    artifact_path = _submit_failure_context.resolve_submit_abort_artifact_path(
+        submission_ref=submission_ref,
+        submission_artifact_path=submission_artifact_path,
+    )
     prior = _load_run_state(run_dir)
     prior_ok = bool(prior.get("submit_ok")) or _has_successful_submit_attempt(run_dir)
     abort_payloads = _submit_attempts.build_submit_abort_record_payloads(

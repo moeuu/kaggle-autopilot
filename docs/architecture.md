@@ -323,8 +323,8 @@ Recommended extraction order:
    direct agent prompt rendering.
    Best-kernel snapshot capture/restore helpers are now in `kernel_snapshot.py`.
 4. Submit state persistence: submit attempt JSONL writing/reading, duplicate SHA lookup, submit attempt/run-state payloads,
-   repair-classified submit failure-context payloads, submit knowledge-record payloads, and submit result payload
-   construction are now centralized. Duplicate-submit skip decisions are extracted.
+   submit-abort artifact path resolution, repair-classified submit failure-context payloads, submit knowledge-record
+   payloads, and submit result payload construction are now centralized. Duplicate-submit skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, initial artifact-mode resolution, tiny public
    sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,
