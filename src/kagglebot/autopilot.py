@@ -2439,11 +2439,15 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 direction=metric_direction,
             )
             if campaign_mode == "top1" and campaign_candidate is not None:
-                if submission_result is not None and not submission_skipped:
+                campaign_submission_succeeded = _campaign_metrics.campaign_submission_succeeded(
+                    submission_result=submission_result,
+                    submission_skipped=submission_skipped,
+                )
+                if campaign_submission_succeeded:
                     campaign_candidate = replace(
                         campaign_candidate,
                         submitted=True,
-                        public_score=float(online_score) if isinstance(online_score, (int, float)) else None,
+                        public_score=_campaign_metrics.campaign_public_score_from_online_score(online_score),
                     )
                     upsert_candidate(campaign_registry_file, campaign_candidate)
                 campaign_state = update_campaign_state(
@@ -2459,8 +2463,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     remaining_daily_slots=remaining_daily_slots,
                     method_registry=method_registry,
                 )
-                campaign_outcome_phase = (
-                    "post_submit" if submission_result is not None and not submission_skipped else "post_iteration"
+                campaign_outcome_phase = _campaign_metrics.campaign_outcome_phase(
+                    submission_result=submission_result,
+                    submission_skipped=submission_skipped,
                 )
                 append_campaign_outcome(
                     context_dir=config.paths.context_dir,

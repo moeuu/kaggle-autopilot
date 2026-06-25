@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from kagglebot.campaign_metrics import (
+    campaign_outcome_phase,
     campaign_prefers_validation_redesign,
+    campaign_public_score_from_online_score,
+    campaign_submission_succeeded,
     extract_campaign_artifact_path,
     extract_campaign_fold_scores,
     extract_campaign_method_id,
@@ -95,3 +98,15 @@ def test_campaign_prefers_validation_redesign_from_online_regression_by_directio
         {"direction": "maximize", "latest_submission_score": 0.85, "historical_best_score": 0.8},
         None,
     )
+
+
+def test_campaign_post_submit_helpers_preserve_existing_submit_semantics() -> None:
+    assert campaign_submission_succeeded(submission_result={"ok": True}, submission_skipped=False)
+    assert not campaign_submission_succeeded(submission_result={"ok": True}, submission_skipped=True)
+    assert not campaign_submission_succeeded(submission_result=None, submission_skipped=False)
+
+    assert campaign_outcome_phase(submission_result={"ok": True}, submission_skipped=False) == "post_submit"
+    assert campaign_outcome_phase(submission_result={"ok": True}, submission_skipped=True) == "post_iteration"
+
+    assert campaign_public_score_from_online_score(0.72) == 0.72
+    assert campaign_public_score_from_online_score("0.72") is None

@@ -138,3 +138,22 @@ def campaign_prefers_validation_redesign(
     if direction == "maximize":
         return latest < champion
     return latest > champion
+
+
+def campaign_submission_succeeded(*, submission_result: dict[str, object] | None, submission_skipped: bool) -> bool:
+    return submission_result is not None and not submission_skipped
+
+
+def campaign_public_score_from_online_score(online_score: object) -> float | None:
+    return float(online_score) if isinstance(online_score, (int, float)) else None
+
+
+def campaign_outcome_phase(*, submission_result: dict[str, object] | None, submission_skipped: bool) -> str:
+    return (
+        "post_submit"
+        if campaign_submission_succeeded(
+            submission_result=submission_result,
+            submission_skipped=submission_skipped,
+        )
+        else "post_iteration"
+    )
