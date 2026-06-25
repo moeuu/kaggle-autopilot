@@ -61,9 +61,6 @@ from kagglebot.autopilot_helpers import (
     _requires_tabular_multi_family_policy,
     _resume_best_online_submission_score,
     _should_force_major_overhaul_by_rank,
-    _to_float,
-    _to_int,
-    _update_best_score,
 )
 from kagglebot.autopilot_state import (
     _copy_kernel_support_artifacts_to_iteration_dir,
@@ -197,6 +194,8 @@ from kagglebot.orchestrator.agent_pipeline import (
 )
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
+from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.score_utils import should_update_best_score as _update_best_score
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
 from kagglebot.submission.guard import (
     classify_submit_error,
@@ -252,6 +251,16 @@ _load_ensemble_reference_notebook = _code_reference.load_ensemble_reference_note
 _load_required_reference_notebook = _code_reference.load_required_reference_notebook
 _reference_requires_tabicl = _code_reference.reference_requires_tabicl
 _validate_code_reference_implementation = _code_reference.validate_code_reference_implementation
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
+
+
+def _to_int(value: object) -> int | None:
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
+
+
 MAJOR_TOP1_GAP = _score_progress.MAJOR_TOP1_GAP
 MODERATE_TOP1_GAP = _score_progress.MODERATE_TOP1_GAP
 _BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN = _score_progress.BEST_SCORE_OUTLIER_TOP1_ABS_MARGIN
