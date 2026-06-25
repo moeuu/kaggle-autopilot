@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from kagglebot.submission_policy import (
     count_daily_competition_submissions,
     count_submission_rows_in_recent_window,
@@ -15,6 +17,7 @@ from kagglebot.submission_policy import (
     latest_iteration_fallback_submit_blocked_reason,
     meets_target,
     non_final_submission_checkpoints,
+    normalize_watch_submit_policy,
     normalized_submission_gate,
     normalized_submit_policy,
     quality_reasons_allow_initial_submit_probe,
@@ -45,6 +48,15 @@ def test_submission_policy_normalization() -> None:
     assert normalized_submission_gate("unknown", default="final_only") == "final_only"
     assert submission_gate_for_policy("improved") == "always"
     assert submission_gate_for_policy("final_only") == "final_only"
+
+
+def test_watch_submit_policy_normalization_is_strict() -> None:
+    assert normalize_watch_submit_policy(" improved_only ") == "improved"
+    assert normalize_watch_submit_policy("no-submit") == "none"
+    assert normalize_watch_submit_policy("off") == "none"
+
+    with pytest.raises(ValueError, match="improved, none"):
+        normalize_watch_submit_policy("always")
 
 
 def test_resolve_plan_submission_policy_honors_forced_improved_policy() -> None:

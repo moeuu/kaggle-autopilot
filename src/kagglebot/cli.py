@@ -31,6 +31,7 @@ from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_
 from kagglebot.score_sources import normalize_generalizable_score_source
 from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.submission_policy import normalize_watch_submit_policy
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once, run_watch_self_improvement
 from kagglebot.top1_exhaustive import normalize_top1_submit_policy
@@ -715,9 +716,10 @@ def watch(
     ),
 ) -> None:
     cfg = ctx.obj
-    normalized_submit_policy = submit_policy.strip().lower()
-    if normalized_submit_policy not in {"improved", "none"}:
-        raise typer.BadParameter("--submit-policy must be improved or none.", param_hint="--submit-policy")
+    try:
+        normalized_submit_policy = normalize_watch_submit_policy(submit_policy)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--submit-policy") from exc
     if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run watch with submissions enabled without --force.")
     if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
@@ -854,9 +856,10 @@ def watch_kaggle_gpu_sidecar(
     ),
 ) -> None:
     cfg = ctx.obj
-    normalized_submit_policy = submit_policy.strip().lower()
-    if normalized_submit_policy not in {"improved", "none"}:
-        raise typer.BadParameter("--submit-policy must be improved or none.", param_hint="--submit-policy")
+    try:
+        normalized_submit_policy = normalize_watch_submit_policy(submit_policy)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--submit-policy") from exc
     if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run Kaggle GPU sidecar with submissions enabled without --force.")
     if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:

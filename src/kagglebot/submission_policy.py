@@ -195,6 +195,16 @@ def normalized_submit_policy(policy: str | None) -> str:
     return "always"
 
 
+def normalize_watch_submit_policy(policy: str | None) -> str:
+    """Normalize the narrower submit policy accepted by watch commands."""
+    normalized = str(policy or "").strip().lower()
+    if normalized in {"improved", "improvement_only", "improved_only", "on_improvement"}:
+        return "improved"
+    if normalized in {"none", "off", "disabled", "no_submit", "no-submit"}:
+        return "none"
+    raise ValueError("submit_policy must be one of: improved, none")
+
+
 def normalized_submission_gate(gate: str | None, *, default: str) -> str:
     normalized = str(gate or "").strip().lower()
     if normalized in {"always", "each_iteration"}:
