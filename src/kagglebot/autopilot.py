@@ -49,6 +49,9 @@ from kagglebot.autopilot_state import (
     _build_run_payload as _state_build_run_payload,
 )
 from kagglebot.autopilot_state import (
+    _build_run_summary_payload as _state_build_run_summary_payload,
+)
+from kagglebot.autopilot_state import (
     _copy_kernel_support_artifacts_to_iteration_dir,
     _copy_submission_artifact_to_iteration_dir,
     _has_successful_submit_attempt,
@@ -3156,21 +3159,17 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     elif run_payload.get("status") not in {"interrupted", "submit_failed"}:
         run_payload["status"] = "completed"
 
-    run_payload["summary"] = {
-        "best_trusted_score": best_score,
-        "best_trusted_submission": str(best_submission) if best_submission is not None else None,
-        "best_competition_faithful_score": best_submittable_score,
-        "best_competition_faithful_submission": (
-            str(best_submittable_submission) if best_submittable_submission is not None else None
-        ),
-        "best_high_potential_score": best_high_potential_score,
-        "best_high_potential_submission": (
-            str(best_high_potential_submission) if best_high_potential_submission is not None else None
-        ),
-        "best_high_potential_iteration": best_high_potential_iteration,
-        "best_high_potential_meta": best_high_potential_meta,
-        "fallback_submit_blocked_reason": fallback_submit_blocked_reason,
-    }
+    run_payload["summary"] = _state_build_run_summary_payload(
+        best_score=best_score,
+        best_submission=best_submission,
+        best_submittable_score=best_submittable_score,
+        best_submittable_submission=best_submittable_submission,
+        best_high_potential_score=best_high_potential_score,
+        best_high_potential_submission=best_high_potential_submission,
+        best_high_potential_iteration=best_high_potential_iteration,
+        best_high_potential_meta=best_high_potential_meta,
+        fallback_submit_blocked_reason=fallback_submit_blocked_reason,
+    )
 
     _write_json_object(run_dir / "run.json", run_payload)
 

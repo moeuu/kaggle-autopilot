@@ -99,6 +99,35 @@ def _build_run_payload(
     }
 
 
+def _build_run_summary_payload(
+    *,
+    best_score: float | None,
+    best_submission: Path | None,
+    best_submittable_score: float | None,
+    best_submittable_submission: Path | None,
+    best_high_potential_score: float | None,
+    best_high_potential_submission: Path | None,
+    best_high_potential_iteration: int | None,
+    best_high_potential_meta: dict[str, object] | None,
+    fallback_submit_blocked_reason: str | None,
+) -> dict[str, object]:
+    return {
+        "best_trusted_score": best_score,
+        "best_trusted_submission": str(best_submission) if best_submission is not None else None,
+        "best_competition_faithful_score": best_submittable_score,
+        "best_competition_faithful_submission": (
+            str(best_submittable_submission) if best_submittable_submission is not None else None
+        ),
+        "best_high_potential_score": best_high_potential_score,
+        "best_high_potential_submission": (
+            str(best_high_potential_submission) if best_high_potential_submission is not None else None
+        ),
+        "best_high_potential_iteration": best_high_potential_iteration,
+        "best_high_potential_meta": best_high_potential_meta,
+        "fallback_submit_blocked_reason": fallback_submit_blocked_reason,
+    }
+
+
 def _write_iteration_state_marker(
     *,
     iter_dir: Path,

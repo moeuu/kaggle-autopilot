@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from kagglebot.autopilot_state import (
     _build_run_payload,
+    _build_run_summary_payload,
     _load_run_state,
     _load_submitted_iteration_tracking_score,
     _save_run_state,
@@ -49,6 +50,36 @@ def test_build_run_payload_records_config_and_resolved_state() -> None:
     assert payload["config"]["target_score"] == 0.5
     assert payload["config"]["submit"] is True
     assert payload["config"]["evaluation_contract"] == {"metric_name": "rmse"}
+
+
+def test_build_run_summary_payload_stringifies_paths(tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted.csv"
+    faithful = tmp_path / "faithful.csv"
+    high_potential = tmp_path / "high.csv"
+
+    payload = _build_run_summary_payload(
+        best_score=0.9,
+        best_submission=trusted,
+        best_submittable_score=0.8,
+        best_submittable_submission=faithful,
+        best_high_potential_score=0.95,
+        best_high_potential_submission=high_potential,
+        best_high_potential_iteration=3,
+        best_high_potential_meta={"trusted": False},
+        fallback_submit_blocked_reason="higher_potential_unsubmitted_candidate_exists",
+    )
+
+    assert payload == {
+        "best_trusted_score": 0.9,
+        "best_trusted_submission": str(trusted),
+        "best_competition_faithful_score": 0.8,
+        "best_competition_faithful_submission": str(faithful),
+        "best_high_potential_score": 0.95,
+        "best_high_potential_submission": str(high_potential),
+        "best_high_potential_iteration": 3,
+        "best_high_potential_meta": {"trusted": False},
+        "fallback_submit_blocked_reason": "higher_potential_unsubmitted_candidate_exists",
+    }
 
 
 def test_load_run_state_defaults_for_missing_invalid_or_non_object_state(tmp_path: Path) -> None:
