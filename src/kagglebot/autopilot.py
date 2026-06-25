@@ -244,20 +244,6 @@ def _to_int(value: object) -> int | None:
     return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
 
 
-def _classify_submit_failure_repair(
-    *,
-    reason: object,
-    error_kind: object,
-    detail: str,
-) -> tuple[str, bool, str]:
-    decision = _submit_failure_policy.classify_submit_failure_repair(
-        reason=reason,
-        error_kind=error_kind,
-        detail=detail,
-    )
-    return decision.repair_target, decision.repairable, decision.manual_next_step
-
-
 # Backward-compatible symbol for tests/extensions.
 # Runtime no longer uses the legacy src local trainer path.
 def train_evaluate_and_predict(*args, **kwargs):  # type: ignore[no-untyped-def]
