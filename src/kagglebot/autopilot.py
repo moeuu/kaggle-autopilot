@@ -24,6 +24,7 @@ from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
+from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
@@ -282,6 +283,11 @@ _extract_campaign_prediction_correlation = _campaign_metrics.extract_campaign_pr
 _extract_campaign_artifact_path = _campaign_metrics.extract_campaign_artifact_path
 _extract_campaign_method_id = _campaign_metrics.extract_campaign_method_id
 _extract_campaign_validation_profile_id = _campaign_metrics.extract_campaign_validation_profile_id
+_BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
+_best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
+_capture_best_kernel_snapshot = _kernel_snapshot.capture_best_kernel_snapshot
+_ensure_best_kernel_snapshot = _kernel_snapshot.ensure_best_kernel_snapshot
+_restore_best_kernel_snapshot = _kernel_snapshot.restore_best_kernel_snapshot
 _maybe_write_column_fill = _runtime_fixes.maybe_write_column_fill
 _maybe_write_object_coerce = _runtime_fixes.maybe_write_object_coerce
 _maybe_write_device_coerce = _runtime_fixes.maybe_write_device_coerce
@@ -471,7 +477,6 @@ _HIGH_CAPACITY_MARKERS = (
     "stack",
 )
 _EXTREME_CAPACITY_MARKERS = ("diffusion", "llm", "convnext", "foundation", "pretrained")
-_BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
 
 
 class _TrainingLiveStdout:
@@ -9841,42 +9846,6 @@ def _record_submission_knowledge(
             outcome_bucket=outcome_bucket,
             submission_score=online_score,
         )
-
-
-def _best_kernel_snapshot_path(run_dir: Path) -> Path:
-    return run_dir / _BEST_KERNEL_SNAPSHOT_FILENAME
-
-
-def _capture_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> bool:
-    kernel_path = paths.kernel_source_dir / "kernel.py"
-    if not kernel_path.exists():
-        return False
-    snapshot_path = _best_kernel_snapshot_path(run_dir)
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.copy2(kernel_path, snapshot_path)
-    except OSError:
-        return False
-    return True
-
-
-def _ensure_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> None:
-    snapshot_path = _best_kernel_snapshot_path(run_dir)
-    if snapshot_path.exists():
-        return
-    _capture_best_kernel_snapshot(paths=paths, run_dir=run_dir)
-
-
-def _restore_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> bool:
-    snapshot_path = _best_kernel_snapshot_path(run_dir)
-    kernel_path = paths.kernel_source_dir / "kernel.py"
-    if not snapshot_path.exists():
-        return False
-    try:
-        shutil.copy2(snapshot_path, kernel_path)
-    except OSError:
-        return False
-    return True
 
 
 def _build_code_reference_repair_prompt(
