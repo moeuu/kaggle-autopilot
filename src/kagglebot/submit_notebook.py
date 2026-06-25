@@ -339,7 +339,7 @@ def _is_tiny_public_notebook_contract(
 ) -> bool:
     if sample_data_rows is None or submission_data_rows is None:
         return False
-    return 0 < sample_data_rows <= tiny_row_limit and 0 < submission_data_rows <= tiny_row_limit
+    return 0 < sample_data_rows <= tiny_row_limit and 0 <= submission_data_rows <= tiny_row_limit
 
 
 def _no_cpu_fallback() -> NotebookSubmitCpuFallbackDecision:

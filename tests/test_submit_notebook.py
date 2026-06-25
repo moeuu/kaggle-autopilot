@@ -187,6 +187,19 @@ def test_decide_notebook_submit_artifact_mode_forces_inference_for_tiny_public_c
     assert "hidden-test row mismatch" in decision.message
 
 
+def test_decide_notebook_submit_artifact_mode_forces_inference_for_empty_tiny_artifact() -> None:
+    decision = decide_notebook_submit_artifact_mode(
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        code_competition=False,
+        sample_data_rows=3,
+        submission_data_rows=0,
+    )
+
+    assert decision.mode == "inference"
+    assert decision.reason == "tiny_public_sample_notebook_contract"
+
+
 def test_decide_notebook_submit_artifact_mode_keeps_wrapper_for_regular_notebook_submit() -> None:
     decision = decide_notebook_submit_artifact_mode(
         requested_mode="wrapper",
