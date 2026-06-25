@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from kagglebot.scalar_utils import parse_int
+from kagglebot.scalar_utils import tolerant_int
 from kagglebot.score_utils import should_update_best_score
 
 
@@ -73,7 +73,7 @@ def extract_pseudo_label_failure_signal(
                 "accepted_candidates",
                 "pseudo_label_accepted_count",
             ):
-                value = _to_int(node.get(accepted_key))
+                value = tolerant_int(node.get(accepted_key))
                 if value is not None:
                     accepted = value
                     break
@@ -86,7 +86,7 @@ def extract_pseudo_label_failure_signal(
                 "attempted_count",
                 "pseudo_label_total_count",
             ):
-                value = _to_int(node.get(total_key))
+                value = tolerant_int(node.get(total_key))
                 if value is not None and value > 0:
                     total = value
                     break
@@ -259,7 +259,7 @@ def requires_tabular_multi_family_policy(dataset_profile: dict[str, object] | No
     tags = (
         [str(item).strip().lower() for item in tags_raw if isinstance(item, str)] if isinstance(tags_raw, list) else []
     )
-    train_rows = _to_int(profile.get("train_rows")) or 0
+    train_rows = tolerant_int(profile.get("train_rows")) or 0
     categorical_count = (
         len(profile.get("categorical_columns", [])) if isinstance(profile.get("categorical_columns"), list) else 0
     )
@@ -282,7 +282,3 @@ def _iter_nested_mappings(payload: object):
     if isinstance(payload, list):
         for item in payload:
             yield from _iter_nested_mappings(item)
-
-
-def _to_int(value: object) -> int | None:
-    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)

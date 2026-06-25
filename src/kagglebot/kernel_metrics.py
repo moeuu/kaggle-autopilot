@@ -6,13 +6,9 @@ from statistics import stdev
 
 from kagglebot.json_utils import load_json_object
 from kagglebot.metric_matching import normalize_metric_name
-from kagglebot.scalar_utils import parse_finite_float
+from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
 from kagglebot.solver.evaluate import EvaluationResult
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)
 
 
 def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) -> float | None:
@@ -27,13 +23,13 @@ def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) ->
         "oof_metric",
         "oof_brier",
     ):
-        parsed = _to_float(payload.get(key))
+        parsed = tolerant_finite_float(payload.get(key))
         if parsed is not None:
             return float(parsed)
 
     fold_scores_raw = payload.get("fold_scores")
     if isinstance(fold_scores_raw, list):
-        fold_scores = [float(parsed) for item in fold_scores_raw if (parsed := _to_float(item)) is not None]
+        fold_scores = [float(parsed) for item in fold_scores_raw if (parsed := tolerant_finite_float(item)) is not None]
         if fold_scores:
             return float(sum(fold_scores) / len(fold_scores))
     return None
@@ -41,7 +37,7 @@ def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) ->
 
 def extract_kernel_metric(payload: dict[str, object], target_metric: str | None) -> tuple[str | None, float | None]:
     def as_number(value: object) -> float | None:
-        return _to_float(value)
+        return tolerant_finite_float(value)
 
     def normalize(text: str) -> str:
         return "".join(ch for ch in text.lower() if ch.isalnum())
@@ -292,7 +288,7 @@ def evaluation_from_kernel_metrics_payload(
         std = payload.get("std")
     if std is None:
         std = payload.get("selected_cv_std")
-    std_value = _to_float(std)
+    std_value = tolerant_finite_float(std)
 
     fold_scores_raw = payload.get("fold_scores")
     fold_scores: list[float] | None = None
@@ -351,7 +347,7 @@ def metric_value_from_payload_item(item: dict[str, object]) -> float | None:
         "mean_map",
         "oof_f1",
     ):
-        value = _to_float(item.get(key))
+        value = tolerant_finite_float(item.get(key))
         if value is not None:
             return value
     return None
@@ -386,7 +382,7 @@ def extract_baseline_candidates_from_metrics_payload(payload: dict[str, object])
                 candidates.append((f"metrics:{key}", float(score)))
                 continue
             for nested_key, nested_value in value.items():
-                nested_score = _to_float(nested_value)
+                nested_score = tolerant_finite_float(nested_value)
                 if nested_score is None:
                     continue
                 candidates.append((f"metrics:{key}.{nested_key}", float(nested_score)))
@@ -397,11 +393,11 @@ def extract_baseline_candidates_from_metrics_payload(payload: dict[str, object])
                     if score is not None:
                         candidates.append((f"metrics:{key}[{index}]", float(score)))
                         continue
-                parsed = _to_float(item)
+                parsed = tolerant_finite_float(item)
                 if parsed is not None:
                     candidates.append((f"metrics:{key}[{index}]", float(parsed)))
         else:
-            parsed = _to_float(value)
+            parsed = tolerant_finite_float(value)
             if parsed is not None:
                 candidates.append((f"metrics:{key}", float(parsed)))
 
@@ -439,7 +435,7 @@ def extract_validation_scores_from_log_text(log_text: str, metric_name: str | No
     scores: list[float] = []
     for match in pattern.finditer(log_text):
         metric_label = match.group(1).strip()
-        parsed = _to_float(match.group(2))
+        parsed = tolerant_finite_float(match.group(2))
         if parsed is None:
             continue
         if target_norm:
@@ -467,7 +463,7 @@ def extract_baseline_scores_from_log_text(log_text: str) -> list[float]:
         if "fold=" in lowered:
             continue
         for match in pattern.finditer(line):
-            parsed = _to_float(match.group("value"))
+            parsed = tolerant_finite_float(match.group("value"))
             if parsed is not None:
                 scores.append(float(parsed))
     return scores

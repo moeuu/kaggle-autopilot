@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from kagglebot.scalar_utils import parse_finite_float
+from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomeService
 
@@ -16,11 +16,11 @@ def build_previous_submission_history_payload(
     entries = [_submission_history_entry(row) for row in rows]
     entries = [entry for entry in entries if entry is not None]
 
-    scored_entries = [entry for entry in entries if _to_float(entry.get("score")) is not None]
+    scored_entries = [entry for entry in entries if tolerant_finite_float(entry.get("score")) is not None]
     best_entry: dict[str, object] | None = None
     for entry in scored_entries:
-        score = _to_float(entry.get("score"))
-        best_score = _to_float(best_entry.get("score")) if best_entry is not None else None
+        score = tolerant_finite_float(entry.get("score"))
+        best_score = tolerant_finite_float(best_entry.get("score")) if best_entry is not None else None
         if score is not None and should_update_best_score(best_score, score, direction, 0.0):
             best_entry = entry
 
@@ -37,9 +37,9 @@ def build_previous_submission_history_payload(
         "direction": direction,
         "count": len(rows),
         "scored_count": len(scored_entries),
-        "best_score": _to_float(best_entry.get("score")) if best_entry is not None else None,
+        "best_score": tolerant_finite_float(best_entry.get("score")) if best_entry is not None else None,
         "best": best_entry,
-        "latest_score": _to_float(latest_entry.get("score")) if latest_entry is not None else None,
+        "latest_score": tolerant_finite_float(latest_entry.get("score")) if latest_entry is not None else None,
         "latest": latest_entry,
         "recent": recent_scored[:10],
     }
@@ -52,9 +52,9 @@ def detect_online_regression_vs_submission_history(
     direction: str,
     history: dict[str, object] | None,
 ) -> dict[str, object] | None:
-    historical_best = _to_float((history or {}).get("best_score"))
+    historical_best = tolerant_finite_float((history or {}).get("best_score"))
     baseline = historical_best if historical_best is not None else previous_best_online
-    current = _to_float(current_online)
+    current = tolerant_finite_float(current_online)
     if baseline is None or current is None:
         return None
     if should_update_best_score(baseline, current, direction, 0.0):
@@ -77,7 +77,7 @@ def detect_online_regression_vs_submission_history(
 def format_previous_submission_history_for_prompt(history: dict[str, object] | None) -> str:
     if not history:
         return ""
-    best_score = _to_float(history.get("best_score"))
+    best_score = tolerant_finite_float(history.get("best_score"))
     recent = history.get("recent")
     if best_score is None and not isinstance(recent, list):
         return ""
@@ -98,7 +98,7 @@ def format_previous_submission_history_for_prompt(history: dict[str, object] | N
         for item in recent[:5]:
             if not isinstance(item, dict):
                 continue
-            score = _to_float(item.get("score"))
+            score = tolerant_finite_float(item.get("score"))
             if score is None:
                 continue
             submitted = str(item.get("submitted_at") or "unknown_time")
@@ -149,7 +149,3 @@ def _submission_history_entry(row: dict[str, str]) -> dict[str, object] | None:
     if rank is not None and total_teams is not None and total_teams > 0:
         entry["rank_percentile"] = rank / total_teams
     return entry
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)

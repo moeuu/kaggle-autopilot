@@ -2,11 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.scalar_utils import parse_finite_float
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value, allow_commas=True)
+from kagglebot.scalar_utils import tolerant_finite_float
 
 
 def infer_campaign_candidate_category(
@@ -59,7 +55,7 @@ def extract_campaign_fold_scores(kernel_metrics_payload: dict[str, object] | Non
         raw = payload.get(key)
         if not isinstance(raw, list):
             continue
-        scores = [_to_float(item) for item in raw]
+        scores = [tolerant_finite_float(item) for item in raw]
         return [float(score) for score in scores if score is not None]
     return []
 
@@ -73,7 +69,7 @@ def extract_campaign_prediction_correlation(kernel_metrics_payload: dict[str, ob
         return {}
     parsed: dict[str, float] = {}
     for key, value in raw.items():
-        numeric = _to_float(value)
+        numeric = tolerant_finite_float(value)
         if numeric is not None:
             parsed[str(key)] = float(numeric)
     return parsed
@@ -129,11 +125,13 @@ def campaign_prefers_validation_redesign(
 ) -> bool:
     if isinstance(method_registry, dict) and bool(method_registry.get("validation_priority")):
         return True
-    corr = _to_float(campaign_state.get("offline_online_correlation"))
+    corr = tolerant_finite_float(campaign_state.get("offline_online_correlation"))
     if corr is not None and corr < 0.25:
         return True
-    latest = _to_float(campaign_state.get("latest_submission_score"))
-    champion = _to_float(campaign_state.get("champion_score") or campaign_state.get("historical_best_score"))
+    latest = tolerant_finite_float(campaign_state.get("latest_submission_score"))
+    champion = tolerant_finite_float(
+        campaign_state.get("champion_score") or campaign_state.get("historical_best_score")
+    )
     if latest is None or champion is None:
         return False
     direction = str(campaign_state.get("direction") or "minimize").strip().lower()
