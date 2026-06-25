@@ -361,9 +361,9 @@ Recommended extraction order:
    submission polling/outcome abort specs, submission outcome
    classification and poll-result post-processing decisions, rank
    payload/guard/display normalization, iteration submit-status formatting,
-   campaign-aware submission message resolution, submission iteration inference, fallback submit gate decisions,
-   tracking score selection/update, submission knowledge orchestration/context/default-insight preparation/record
-   dispatch resolution, successful submit attempt/outcome/failure-context recording orchestration,
+   campaign-aware submission message resolution, submission iteration inference, iteration/fallback submit improvement
+   gate decisions, tracking score selection/update, submission knowledge orchestration/context/default-insight
+   preparation/record dispatch resolution, successful submit attempt/outcome/failure-context recording orchestration,
    file-submit-to-notebook fallback decisions, submission
    outcome polling orchestration, and post-poll abort-spec resolution are now in `submit_stage.py`; submission knowledge
    recording now calls the submit-stage helper directly from the loop. Notebook kernel submit execution, output-reference

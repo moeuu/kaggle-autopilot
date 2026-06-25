@@ -27,6 +27,7 @@ from kagglebot.submit_stage import (
     classify_submit_stage_error,
     decide_fallback_submit_gate,
     decide_initial_submit_stage_mode,
+    decide_iteration_submit_improvement_gate,
     decide_notebook_fallback_after_file_submit_error,
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
@@ -971,6 +972,122 @@ def test_decide_fallback_submit_gate_allows_force_submit() -> None:
     )
 
     assert decision.allow_submit is True
+    assert decision.message == ""
+
+
+def test_decide_iteration_submit_improvement_gate_defers_without_prior_submission() -> None:
+    decision = decide_iteration_submit_improvement_gate(
+        submit_improved_only=True,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submitted_score=None,
+        current_score=0.8,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration=False,
+        submit_enabled=True,
+        quality_allows_submit=False,
+        spare_daily_submission_slot=False,
+        submission_limit_per_day=3,
+        forced_submit_reason=None,
+        spare_submit_reason="spare_daily_submission_slot",
+    )
+
+    assert decision.submit_improvement_allowed is False
+    assert decision.submit_non_improving is True
+    assert "prior submitted checkpoint" in decision.message
+
+
+def test_decide_iteration_submit_improvement_gate_allows_spare_slot_without_prior_submission() -> None:
+    decision = decide_iteration_submit_improvement_gate(
+        submit_improved_only=True,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submitted_score=None,
+        current_score=0.8,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration=False,
+        submit_enabled=True,
+        quality_allows_submit=True,
+        spare_daily_submission_slot=True,
+        submission_limit_per_day=3,
+        forced_submit_reason=None,
+        spare_submit_reason="spare_daily_submission_slot",
+    )
+
+    assert decision.submit_improvement_allowed is True
+    assert decision.submit_non_improving is False
+    assert decision.forced_submit_reason == "spare_daily_submission_slot"
+    assert "allowing submit without a prior submitted checkpoint" in decision.message
+
+
+def test_decide_iteration_submit_improvement_gate_defers_non_improving_score() -> None:
+    decision = decide_iteration_submit_improvement_gate(
+        submit_improved_only=False,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submitted_score=0.8,
+        current_score=0.9,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration=False,
+        submit_enabled=True,
+        quality_allows_submit=True,
+        spare_daily_submission_slot=False,
+        submission_limit_per_day=3,
+        forced_submit_reason=None,
+        spare_submit_reason="spare_daily_submission_slot",
+    )
+
+    assert decision.submit_improvement_allowed is False
+    assert decision.submit_non_improving is True
+    assert "score did not improve" in decision.message
+
+
+def test_decide_iteration_submit_improvement_gate_allows_final_iteration_override() -> None:
+    decision = decide_iteration_submit_improvement_gate(
+        submit_improved_only=False,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submitted_score=0.8,
+        current_score=0.9,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration=True,
+        submit_enabled=True,
+        quality_allows_submit=True,
+        spare_daily_submission_slot=False,
+        submission_limit_per_day=3,
+        forced_submit_reason=None,
+        spare_submit_reason="spare_daily_submission_slot",
+    )
+
+    assert decision.submit_improvement_allowed is True
+    assert decision.submit_non_improving is False
+    assert "final iteration reached" in decision.message
+
+
+def test_decide_iteration_submit_improvement_gate_allows_improved_score() -> None:
+    decision = decide_iteration_submit_improvement_gate(
+        submit_improved_only=False,
+        force_submit=False,
+        require_submit_improvement=True,
+        best_submitted_score=0.8,
+        current_score=0.7,
+        direction="minimize",
+        min_improvement=0.001,
+        final_iteration=False,
+        submit_enabled=True,
+        quality_allows_submit=True,
+        spare_daily_submission_slot=False,
+        submission_limit_per_day=3,
+        forced_submit_reason=None,
+        spare_submit_reason="spare_daily_submission_slot",
+    )
+
+    assert decision.submit_improvement_allowed is True
+    assert decision.submit_non_improving is False
     assert decision.message == ""
 
 

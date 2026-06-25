@@ -1869,60 +1869,27 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             submit_improvement_allowed = True
             submit_non_improving = False
             defer_submit_for_accuracy_frontier = False
-            if submit_improved_only and not config.force_submit and best_submitted_score is None:
-                if (
-                    submit_enabled
-                    and quality_allows_submit
-                    and (spare_daily_submission_slot or submission_limit_per_day is None)
-                ):
-                    forced_submit_reason = forced_submit_reason or _SPARE_DAILY_SUBMIT_REASON
-                    slot_reason = (
-                        "spare daily submission slots remain"
-                        if spare_daily_submission_slot
-                        else "no numeric daily submission limit is known"
-                    )
-                    print(
-                        f"[yellow]submit override[/yellow]: {slot_reason}; allowing submit without a prior "
-                        "submitted checkpoint."
-                    )
-                else:
-                    submit_improvement_allowed = False
-                    submit_non_improving = True
-                    print(
-                        "[yellow]submit deferred[/yellow]: submit_policy=improved requires "
-                        "a prior submitted checkpoint."
-                    )
-            elif (
-                (require_submit_improvement or submit_improved_only)
-                and not config.force_submit
-                and best_submitted_score is not None
-            ):
-                submit_improvement_allowed = _update_best_score(
-                    best_submitted_score,
-                    decision_score,
-                    metric_direction,
-                    stop_min_delta,
-                )
-                if not submit_improvement_allowed:
-                    if is_final_iteration and not submit_improved_only:
-                        print(
-                            "[yellow]submit override[/yellow]: final iteration reached; "
-                            "allowing submit even though score did not improve over submitted checkpoints."
-                        )
-                        submit_improvement_allowed = True
-                    elif submit_enabled and spare_daily_submission_slot and quality_allows_submit:
-                        forced_submit_reason = forced_submit_reason or _SPARE_DAILY_SUBMIT_REASON
-                        submit_improvement_allowed = True
-                        print(
-                            "[yellow]submit override[/yellow]: spare daily submission slots remain; "
-                            "allowing non-improving checkpoint submit."
-                        )
-                    else:
-                        submit_non_improving = True
-                        print(
-                            "[yellow]submit deferred[/yellow]: "
-                            "score did not improve over previous submitted checkpoint."
-                        )
+            submit_improvement_gate = _submit_stage.decide_iteration_submit_improvement_gate(
+                submit_improved_only=submit_improved_only,
+                force_submit=config.force_submit,
+                require_submit_improvement=require_submit_improvement,
+                best_submitted_score=best_submitted_score,
+                current_score=decision_score,
+                direction=metric_direction,
+                min_improvement=stop_min_delta,
+                final_iteration=is_final_iteration,
+                submit_enabled=submit_enabled,
+                quality_allows_submit=quality_allows_submit,
+                spare_daily_submission_slot=spare_daily_submission_slot,
+                submission_limit_per_day=submission_limit_per_day,
+                forced_submit_reason=forced_submit_reason,
+                spare_submit_reason=_SPARE_DAILY_SUBMIT_REASON,
+            )
+            submit_improvement_allowed = submit_improvement_gate.submit_improvement_allowed
+            submit_non_improving = submit_improvement_gate.submit_non_improving
+            forced_submit_reason = submit_improvement_gate.forced_submit_reason
+            if submit_improvement_gate.message:
+                print(submit_improvement_gate.message)
             if submit_enabled and isinstance(best_high_potential_meta, dict):
                 current_priority = tolerant_int(accuracy_potential.get("frontier_priority")) or 0
                 best_priority = tolerant_int(best_high_potential_meta.get("frontier_priority")) or 0
