@@ -226,6 +226,7 @@ from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
 from kagglebot.validators import ensure_kernel_sources_valid
 from kagglebot.verify_artifacts import mirror_verify_artifacts
+from kagglebot.verify_artifacts import run_verify as _verify_run_verify
 from kagglebot.writeup import (
     build_writeup_bundle,
     infer_code_competition_from_paths,
@@ -3774,30 +3775,13 @@ def _mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
-    if dry_run:
-        return
-    args = shlex.split(verify_cmd)
-
-    def _is_pytest_invocation(cmd_args: list[str]) -> bool:
-        for idx, item in enumerate(cmd_args):
-            if item == "pytest" or item.endswith("/pytest"):
-                return True
-            if item == "-m" and idx + 1 < len(cmd_args) and cmd_args[idx + 1] == "pytest":
-                return True
-        return False
-
-    env = None
-    if _is_pytest_invocation(args):
-        if artifacts_dir is not None:
-            _mirror_verify_artifacts(artifacts_dir, repo_root=Path.cwd())
-        # Avoid crashes from unrelated third-party pytest plugins present in the environment
-        # (e.g. system/site packages) by disabling auto-loading during verification.
-        env = os.environ.copy()
-        env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
-
-    result = run_command(args, env=env)
-    if result.returncode != 0:
-        raise RuntimeError(f"Verification failed: {result.output}")
+    _verify_run_verify(
+        verify_cmd,
+        dry_run=dry_run,
+        artifacts_dir=artifacts_dir,
+        repo_root=Path.cwd(),
+        run_command_fn=run_command,
+    )
 
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:

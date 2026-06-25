@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kagglebot.verify_artifacts import mirror_verify_artifacts, verify_compat_shim
+from kagglebot.exec_utils import CommandResult
+from kagglebot.verify_artifacts import is_pytest_invocation, mirror_verify_artifacts, run_verify, verify_compat_shim
 
 
 def test_verify_compat_shim_resolves_known_competition_files() -> None:
@@ -15,6 +16,44 @@ def test_verify_compat_shim_resolves_known_competition_files() -> None:
     assert "KAGGLEBOT_VERIFY_COMPAT_SHIM" in s6e3
     assert "build_suite_specs" in s6e3
     assert verify_compat_shim(slug="demo", filename="kernel.py") == ""
+
+
+def test_is_pytest_invocation_detects_direct_and_module_forms() -> None:
+    assert is_pytest_invocation(["pytest", "-q"])
+    assert is_pytest_invocation(["uv", "run", "pytest", "-q"])
+    assert is_pytest_invocation(["python", "-m", "pytest", "-q"])
+    assert not is_pytest_invocation(["uv", "run", "ruff", "check", "."])
+
+
+def test_run_verify_sets_pytest_env_and_mirrors_artifacts(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    artifacts_dir = tmp_path / "external"
+    source_kernel = artifacts_dir / "demo" / "kernel"
+    source_kernel.mkdir(parents=True)
+    (source_kernel / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, **kwargs):  # noqa: ANN003
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        return CommandResult(args=args, returncode=0, stdout="", stderr="", duration_sec=0.0)
+
+    monkeypatch.delenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", raising=False)
+
+    run_verify(
+        "uv run pytest -q",
+        dry_run=False,
+        artifacts_dir=artifacts_dir,
+        repo_root=repo_root,
+        run_command_fn=fake_run_command,
+    )
+
+    assert captured["args"] == ["uv", "run", "pytest", "-q"]
+    env = captured.get("env")
+    assert isinstance(env, dict)
+    assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert (repo_root / "artifacts" / "demo" / "kernel" / "kernel.py").exists()
 
 
 def test_mirror_verify_artifacts_copies_kernel_tree_and_excludes_outputs(tmp_path: Path) -> None:

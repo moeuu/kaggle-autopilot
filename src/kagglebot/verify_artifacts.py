@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
+from collections.abc import Callable
 from pathlib import Path
+
+from kagglebot.exec_utils import run_command
 
 VERIFY_COMPAT_SHIM_MARKER = "# KAGGLEBOT_VERIFY_COMPAT_SHIM"
 
@@ -289,6 +293,38 @@ def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
                 shutil.copy2(nested_artifact_plan, local_artifacts_dir / slug_dir.name / "plan.json")
         append_verify_compat_shim(dest_kernel_dir / "kernel.py", slug=slug_dir.name)
         append_verify_compat_shim(dest_kernel_dir / "runtime.py", slug=slug_dir.name)
+
+
+def run_verify(
+    verify_cmd: str,
+    *,
+    dry_run: bool,
+    artifacts_dir: Path | None = None,
+    repo_root: Path | None = None,
+    run_command_fn: Callable[..., object] = run_command,
+) -> None:
+    if dry_run:
+        return
+    args = shlex.split(verify_cmd)
+    env = None
+    if is_pytest_invocation(args):
+        if artifacts_dir is not None:
+            mirror_verify_artifacts(artifacts_dir, repo_root=repo_root or Path.cwd())
+        env = os.environ.copy()
+        env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+
+    result = run_command_fn(args, env=env)
+    if getattr(result, "returncode", 1) != 0:
+        raise RuntimeError(f"Verification failed: {getattr(result, 'output', '')}")
+
+
+def is_pytest_invocation(cmd_args: list[str]) -> bool:
+    for idx, item in enumerate(cmd_args):
+        if item == "pytest" or item.endswith("/pytest"):
+            return True
+        if item == "-m" and idx + 1 < len(cmd_args) and cmd_args[idx + 1] == "pytest":
+            return True
+    return False
 
 
 def append_verify_compat_shim(path: Path, *, slug: str) -> None:
