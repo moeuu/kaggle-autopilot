@@ -287,6 +287,49 @@ def record_submission_knowledge_entries(
         )
 
 
+def record_submission_knowledge(
+    *,
+    knowledge_paths: object,
+    slug: str,
+    run_id: str,
+    problem_types: list[str],
+    pending_problem_insights: list[dict[str, object]],
+    pending_error_fixes: list[dict[str, object]],
+    submission_result: dict[str, object] | None,
+    metric_direction: str,
+    target_score: float | None,
+    top1_score: float | None,
+    load_diagnostics_text: Callable[[int], str],
+    record_problem_type_insight: Callable[..., object],
+    record_error_fix_insight: Callable[..., object],
+) -> bool:
+    knowledge_context = resolve_submission_knowledge_context(
+        submission_result=submission_result,
+        metric_direction=metric_direction,
+        target_score=target_score,
+        top1_score=top1_score,
+    )
+    if knowledge_context is None:
+        return False
+    ensure_submission_problem_insights(
+        pending_problem_insights=pending_problem_insights,
+        knowledge_context=knowledge_context,
+        load_diagnostics_text=load_diagnostics_text,
+    )
+    record_submission_knowledge_entries(
+        knowledge_paths=knowledge_paths,
+        slug=slug,
+        run_id=run_id,
+        problem_types=problem_types,
+        pending_problem_insights=pending_problem_insights,
+        pending_error_fixes=pending_error_fixes,
+        knowledge_context=knowledge_context,
+        record_problem_type_insight=record_problem_type_insight,
+        record_error_fix_insight=record_error_fix_insight,
+    )
+    return True
+
+
 def resolve_submission_rank_payload(
     *,
     slug: str,

@@ -21,6 +21,7 @@ from kagglebot.submit_stage import (
     format_submission_rank_message,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
+    record_submission_knowledge,
     record_submission_knowledge_entries,
     resolve_iteration_submit_phase_state,
     resolve_submission_knowledge_context,
@@ -313,6 +314,56 @@ def test_record_submission_knowledge_entries_records_problem_and_error_items() -
             "submission_score": 0.42,
         }
     ]
+
+
+def test_record_submission_knowledge_prepares_default_and_records_entries() -> None:
+    problem_calls: list[dict[str, object]] = []
+    error_calls: list[dict[str, object]] = []
+    pending_problem_insights: list[dict[str, object]] = []
+    pending_error_fixes = [{"iteration": "", "error_message": "bad csv", "fix_summary": "fixed", "resolved": True}]
+
+    recorded = record_submission_knowledge(
+        knowledge_paths=object(),
+        slug="demo",
+        run_id="run-1",
+        problem_types=["tabular"],
+        pending_problem_insights=pending_problem_insights,
+        pending_error_fixes=pending_error_fixes,
+        submission_result={"outcome": {"score": "0.42"}, "iteration": 3},
+        metric_direction="minimize",
+        target_score=0.5,
+        top1_score=None,
+        load_diagnostics_text=lambda iteration: f"diagnostics for {iteration}",
+        record_problem_type_insight=lambda **kwargs: problem_calls.append(kwargs),
+        record_error_fix_insight=lambda **kwargs: error_calls.append(kwargs),
+    )
+
+    assert recorded is True
+    assert pending_problem_insights[0]["why_poor"] == "diagnostics for 3"
+    assert problem_calls[0]["iteration"] == 3
+    assert problem_calls[0]["submission_score"] == 0.42
+    assert error_calls[0]["iteration"] == 3
+    assert error_calls[0]["resolved"] is True
+
+
+def test_record_submission_knowledge_skips_invalid_result_without_loading_diagnostics() -> None:
+    recorded = record_submission_knowledge(
+        knowledge_paths=object(),
+        slug="demo",
+        run_id="run-1",
+        problem_types=["tabular"],
+        pending_problem_insights=[],
+        pending_error_fixes=[],
+        submission_result={"outcome": {"status": "complete"}, "iteration": 3},
+        metric_direction="minimize",
+        target_score=0.5,
+        top1_score=None,
+        load_diagnostics_text=lambda _iteration: (_ for _ in ()).throw(AssertionError("should not load")),
+        record_problem_type_insight=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should not record")),
+        record_error_fix_insight=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should not record")),
+    )
+
+    assert recorded is False
 
 
 def test_resolve_submission_rank_payload_keeps_reported_rank() -> None:

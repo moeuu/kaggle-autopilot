@@ -6342,34 +6342,24 @@ def _record_submission_knowledge(
     target_score: float | None,
     top1_score: float | None,
 ) -> None:
-    knowledge_context = _submit_stage.resolve_submission_knowledge_context(
-        submission_result=submission_result,
-        metric_direction=metric_direction,
-        target_score=target_score,
-        top1_score=top1_score,
-    )
-    if knowledge_context is None:
-        return
-
     def load_diagnostics_text(iteration: int) -> str:
         diagnostics_path = config.paths.iter_dir(run_id, iteration) / "diagnostics.md"
         if diagnostics_path.exists():
             return diagnostics_path.read_text(encoding="utf-8", errors="ignore")
         return ""
 
-    _submit_stage.ensure_submission_problem_insights(
-        pending_problem_insights=pending_problem_insights,
-        knowledge_context=knowledge_context,
-        load_diagnostics_text=load_diagnostics_text,
-    )
-    _submit_stage.record_submission_knowledge_entries(
+    _submit_stage.record_submission_knowledge(
         knowledge_paths=config.knowledge_paths,
         slug=config.slug,
         run_id=run_id,
         problem_types=problem_types,
         pending_problem_insights=pending_problem_insights,
         pending_error_fixes=pending_error_fixes,
-        knowledge_context=knowledge_context,
+        submission_result=submission_result,
+        metric_direction=metric_direction,
+        target_score=target_score,
+        top1_score=top1_score,
+        load_diagnostics_text=load_diagnostics_text,
         record_problem_type_insight=record_problem_type_insight,
         record_error_fix_insight=record_error_fix_insight,
     )
