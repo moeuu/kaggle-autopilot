@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from kagglebot.kernel_metrics import (
     extract_kernel_metric,
     extract_trusted_cv_value_from_metrics_payload,
     extract_validation_scores_from_log_text,
+    load_kernel_metrics,
 )
 
 
@@ -90,6 +92,59 @@ def test_extract_kernel_metric_from_selected_cv_mean_schema() -> None:
 
     assert metric == "rmse_on_log_target"
     assert value == 0.11915219856213632
+
+
+def test_load_kernel_metrics_supports_selected_cv_mean_schema(tmp_path: Path) -> None:
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "leaderboard": [
+                    {
+                        "cv_mean": 0.11915219856213632,
+                        "cv_std": 0.016552210168151973,
+                        "pipeline": "demo_pipeline",
+                    }
+                ],
+                "metric": "rmse_on_log_target",
+                "selected_cv_mean": 0.11915219856213632,
+                "selected_cv_std": 0.016552210168151973,
+                "selected_pipeline": "demo_pipeline",
+                "target_direction": "minimize",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evaluation = load_kernel_metrics(metrics_path, direction="maximize", target_metric="rmse")
+
+    assert evaluation is not None
+    assert evaluation.metric == "rmse_on_log_target"
+    assert evaluation.direction == "minimize"
+    assert evaluation.value == 0.11915219856213632
+    assert evaluation.std == 0.016552210168151973
+
+
+def test_load_kernel_metrics_falls_back_to_cv_for_untrusted_score_source(tmp_path: Path) -> None:
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "metric": "brier_score",
+                "direction": "minimize",
+                "score_source": "oracle",
+                "brier_score": 0.0,
+                "cv_brier": 0.17321,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evaluation = load_kernel_metrics(metrics_path, direction="minimize", target_metric="brier_score")
+
+    assert evaluation is not None
+    assert evaluation.score_source == "cv"
+    assert evaluation.value == pytest.approx(0.17321)
 
 
 def test_extract_kernel_metric_supports_pipelines_cv_mean_schema() -> None:

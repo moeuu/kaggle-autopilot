@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from statistics import stdev
 
+from kagglebot.json_utils import load_json_object
 from kagglebot.metric_matching import normalize_metric_name
 from kagglebot.scalar_utils import parse_finite_float
+from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
+from kagglebot.solver.evaluate import EvaluationResult
 
 
 def _to_float(value: object) -> float | None:
@@ -263,6 +267,77 @@ def extract_kernel_metric(payload: dict[str, object], target_metric: str | None)
                 return (metric_name, parsed)
 
     return (str(target_metric) if target_metric else None, None)
+
+
+def evaluation_from_kernel_metrics_payload(
+    payload: dict[str, object],
+    *,
+    direction: str,
+    target_metric: str | None,
+) -> EvaluationResult | None:
+    """Build an evaluation result from kernel metrics payload with trust-aware source fallback."""
+    metric_name, value = extract_kernel_metric(payload, target_metric)
+    if value is None:
+        return None
+    payload_direction_raw = payload.get("direction")
+    if payload_direction_raw is None:
+        payload_direction_raw = payload.get("target_direction")
+    payload_direction = str(payload_direction_raw).strip().lower() if payload_direction_raw is not None else ""
+    resolved_direction = direction
+    if payload_direction in {"minimize", "maximize"}:
+        resolved_direction = payload_direction
+
+    std = payload.get("offline_std")
+    if std is None:
+        std = payload.get("std")
+    if std is None:
+        std = payload.get("selected_cv_std")
+    std_value = _to_float(std)
+
+    fold_scores_raw = payload.get("fold_scores")
+    fold_scores: list[float] | None = None
+    if isinstance(fold_scores_raw, list):
+        parsed_fold_scores = [float(item) for item in fold_scores_raw if isinstance(item, (int, float))]
+        if parsed_fold_scores:
+            fold_scores = parsed_fold_scores
+            if std_value is None and len(parsed_fold_scores) > 1:
+                std_value = float(stdev(parsed_fold_scores))
+
+    score_source = normalize_score_source_name(payload.get("score_source", "holdout"))
+    if score_source == "holdout":
+        for key in payload.keys():
+            if isinstance(key, str) and key.lower().startswith("oof_"):
+                score_source = "cv"
+                break
+    trusted_fallback_value = None
+    if not is_trusted_offline_score_source(score_source):
+        trusted_fallback_value = extract_trusted_cv_value_from_metrics_payload(payload)
+        if trusted_fallback_value is not None:
+            value = trusted_fallback_value
+            score_source = "cv"
+
+    return EvaluationResult(
+        score_source=score_source,
+        metric=metric_name or target_metric or "unknown",
+        direction=resolved_direction,  # type: ignore[arg-type]
+        value=float(value),
+        std=std_value,
+        train_score=None,
+        val_score=None,
+        fold_scores=fold_scores,
+    )
+
+
+def load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str | None) -> EvaluationResult | None:
+    """Load kernel metrics from disk into a normalized evaluation result."""
+    payload = load_json_object(metrics_path)
+    if payload is None:
+        return None
+    return evaluation_from_kernel_metrics_payload(
+        payload,
+        direction=direction,
+        target_metric=target_metric,
+    )
 
 
 def metric_value_from_payload_item(item: dict[str, object]) -> float | None:

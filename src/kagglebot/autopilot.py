@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import shlex
@@ -13,7 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 from rich import print
 
 from kagglebot import agent_io as _agent_io
@@ -30,7 +28,6 @@ from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
-from kagglebot import score_sources as _score_sources
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_autofix as _submit_autofix
@@ -1034,7 +1031,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
                             kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
-                            evaluation = _load_kernel_metrics(
+                            evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
                                 target_metric,
@@ -1210,7 +1207,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
                             kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
-                            evaluation = _load_kernel_metrics(
+                            evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
                                 target_metric,
@@ -1425,7 +1422,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
                             kernel_metrics_payload = _load_json_object(kernel_result.metrics_path)
-                            evaluation = _load_kernel_metrics(
+                            evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
                                 target_metric,
@@ -1675,7 +1672,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     kernel_metrics_payload=kernel_metrics_payload,
                     quality_reasons=quality_reasons,
                 )
-                candidate_offline_std = _finite_float_or_none(evaluation.std)
+                candidate_offline_std = _to_float(evaluation.std)
                 campaign_candidate = build_campaign_candidate(
                     run_id=run_id,
                     iteration=iteration,
@@ -3778,88 +3775,6 @@ def _effective_method_scout_mode(*, config: AutopilotConfig, campaign_mode: str)
     return requested
 
 
-def _finite_float_or_none(value: object) -> float | None:
-    parsed = _to_float(value)
-    if parsed is None:
-        return None
-    if not math.isfinite(parsed):
-        return None
-    return float(parsed)
-
-
-def _evaluation_from_kernel_metrics_payload(
-    payload: dict[str, object],
-    *,
-    direction: str,
-    target_metric: str | None,
-) -> EvaluationResult | None:
-    """Build an evaluation result from kernel metrics payload with trust-aware source fallback."""
-    from kagglebot.solver.evaluate import EvaluationResult
-
-    metric_name, value = _kernel_metrics.extract_kernel_metric(payload, target_metric)
-    if value is None:
-        return None
-    payload_direction_raw = payload.get("direction")
-    if payload_direction_raw is None:
-        payload_direction_raw = payload.get("target_direction")
-    payload_direction = str(payload_direction_raw).strip().lower() if payload_direction_raw is not None else ""
-    resolved_direction = direction
-    if payload_direction in {"minimize", "maximize"}:
-        resolved_direction = payload_direction
-
-    std = payload.get("offline_std")
-    if std is None:
-        std = payload.get("std")
-    if std is None:
-        std = payload.get("selected_cv_std")
-    std_value = _finite_float_or_none(std)
-
-    fold_scores_raw = payload.get("fold_scores")
-    fold_scores: list[float] | None = None
-    if isinstance(fold_scores_raw, list):
-        parsed_fold_scores = [float(item) for item in fold_scores_raw if isinstance(item, (int, float))]
-        if parsed_fold_scores:
-            fold_scores = parsed_fold_scores
-            if std_value is None and len(parsed_fold_scores) > 1:
-                std_value = float(np.std(parsed_fold_scores, ddof=1))
-
-    score_source = _score_sources.normalize_score_source_name(payload.get("score_source", "holdout"))
-    if score_source == "holdout":
-        for key in payload.keys():
-            if isinstance(key, str) and key.lower().startswith("oof_"):
-                score_source = "cv"
-                break
-    trusted_fallback_value = None
-    if not _score_sources.is_trusted_offline_score_source(score_source):
-        trusted_fallback_value = _kernel_metrics.extract_trusted_cv_value_from_metrics_payload(payload)
-        if trusted_fallback_value is not None:
-            value = trusted_fallback_value
-            score_source = "cv"
-
-    return EvaluationResult(
-        score_source=score_source,
-        metric=metric_name or target_metric or "unknown",
-        direction=resolved_direction,  # type: ignore[arg-type]
-        value=float(value),
-        std=std_value,
-        train_score=None,
-        val_score=None,
-        fold_scores=fold_scores,
-    )
-
-
-def _load_kernel_metrics(metrics_path: Path, direction: str, target_metric: str | None) -> EvaluationResult | None:
-    """Load kernel metrics from disk into a normalized evaluation result."""
-    payload = _load_json_object(metrics_path)
-    if payload is None:
-        return None
-    return _evaluation_from_kernel_metrics_payload(
-        payload,
-        direction=direction,
-        target_metric=target_metric,
-    )
-
-
 def _build_evaluation_contract(
     *,
     paths: CompetitionPaths,
@@ -5376,7 +5291,7 @@ def _rerun_kernel_for_metric_recheck(
             continue
         if str(candidate_payload.get("kind") or "").strip().lower() == "submit_only":
             continue
-        candidate_evaluation = _load_kernel_metrics(
+        candidate_evaluation = _kernel_metrics.load_kernel_metrics(
             metrics_candidate,
             metric_direction,
             target_metric,
@@ -6079,7 +5994,7 @@ def _resume_best_submitted_offline_score(
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
-        load_kernel_metrics=_load_kernel_metrics,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
 
@@ -6097,7 +6012,7 @@ def _resume_best_submittable_iteration_state(
         metric_direction=metric_direction,
         target_metric=target_metric,
         max_iterations=max_iterations,
-        load_kernel_metrics=_load_kernel_metrics,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
         iteration_metrics_allow_submit=_iteration_metrics.iteration_metrics_allow_submit,
     )
 
@@ -6118,7 +6033,7 @@ def _resume_iteration_state(
         target_metric=target_metric,
         max_iterations=max_iterations,
         require_submit_phase=require_submit_phase,
-        load_kernel_metrics=_load_kernel_metrics,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
         infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
     )
 
@@ -6141,7 +6056,7 @@ def _load_submit_retry_artifacts(
         metric_direction=metric_direction,
         target_metric=target_metric,
         require_submit_phase=require_submit_phase,
-        load_kernel_metrics=_load_kernel_metrics,
+        load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
     )
 
 

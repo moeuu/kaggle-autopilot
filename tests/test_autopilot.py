@@ -4390,59 +4390,6 @@ def test_resolve_plan_forces_internet_off_when_rules_ban_notebook_internet(tmp_p
     assert resolved["internet"] == "off"
 
 
-def test_load_kernel_metrics_supports_selected_cv_mean_schema(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _load_kernel_metrics
-
-    metrics_path = tmp_path / "metrics.json"
-    metrics_path.write_text(
-        json.dumps(
-            {
-                "leaderboard": [
-                    {
-                        "cv_mean": 0.11915219856213632,
-                        "cv_std": 0.016552210168151973,
-                        "pipeline": "demo_pipeline",
-                    }
-                ],
-                "metric": "rmse_on_log_target",
-                "selected_cv_mean": 0.11915219856213632,
-                "selected_cv_std": 0.016552210168151973,
-                "selected_pipeline": "demo_pipeline",
-                "target_direction": "minimize",
-            }
-        ),
-        encoding="utf-8",
-    )
-    evaluation = _load_kernel_metrics(metrics_path, direction="maximize", target_metric="rmse")
-    assert evaluation is not None
-    assert evaluation.metric == "rmse_on_log_target"
-    assert evaluation.direction == "minimize"
-    assert evaluation.value == 0.11915219856213632
-    assert evaluation.std == 0.016552210168151973
-
-
-def test_load_kernel_metrics_falls_back_to_cv_for_untrusted_score_source(tmp_path: Path) -> None:
-    from kagglebot.autopilot import _load_kernel_metrics
-
-    metrics_path = tmp_path / "metrics.json"
-    metrics_path.write_text(
-        json.dumps(
-            {
-                "metric": "brier_score",
-                "direction": "minimize",
-                "score_source": "oracle",
-                "brier_score": 0.0,
-                "cv_brier": 0.17321,
-            }
-        ),
-        encoding="utf-8",
-    )
-    evaluation = _load_kernel_metrics(metrics_path, direction="minimize", target_metric="brier_score")
-    assert evaluation is not None
-    assert evaluation.score_source == "cv"
-    assert evaluation.value == pytest.approx(0.17321)
-
-
 def test_kernel_quality_guard_blocks_when_selected_worse_than_baseline() -> None:
     evaluation = EvaluationResult(
         score_source="cv",
