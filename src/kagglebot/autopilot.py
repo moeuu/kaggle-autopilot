@@ -443,7 +443,9 @@ def run_autopilot(config: AutopilotConfig) -> None:
                     f"{IMPLEMENTATION_AGENT.log_alias} to repair and retry submit"
                 )
                 run_dir = config.paths.run_dir(run_id)
-                if (not _has_successful_submit_attempt(run_dir)) or _should_force_resubmit_after_submit_abort(run_dir):
+                if (not _has_successful_submit_attempt(run_dir)) or (
+                    _submit_failure_context.should_force_resubmit_after_submit_abort(_load_run_state(run_dir))
+                ):
                     os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
                     submit_force_override = True
                 _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
@@ -6341,7 +6343,10 @@ def _attempt_submit(
                 attempt=attempt,
                 max_attempts=max_attempts,
                 retry_after_seconds=submit_error_classification.retry_after_seconds,
-                backoff_seconds=_compute_submit_backoff(attempt),
+                backoff_seconds=_submit_retry_policy.compute_submit_backoff(
+                    attempt=attempt,
+                    base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
+                ),
             )
             for action_message in error_action.messages:
                 print(action_message)
@@ -6901,17 +6906,6 @@ def _consume_same_submit_fingerprint_retry_allowance(
         code_fingerprint=code_fingerprint,
         save_run_state=lambda updates: _save_run_state(run_dir, updates),
     )
-
-
-def _compute_submit_backoff(attempt: int) -> float:
-    return _submit_retry_policy.compute_submit_backoff(
-        attempt=attempt,
-        base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
-    )
-
-
-def _should_force_resubmit_after_submit_abort(run_dir: Path) -> bool:
-    return _submit_failure_context.should_force_resubmit_after_submit_abort(_load_run_state(run_dir))
 
 
 def _should_defer_submit_abort_to_next_iteration(
