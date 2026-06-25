@@ -14,6 +14,7 @@ from kagglebot.submit_stage import (
     decide_notebook_fallback_after_file_submit_error,
     decide_submission_outcome_abort,
     decide_submit_stage_error_action,
+    ensure_submission_problem_insights,
     find_campaign_candidate_for_submission,
     format_iteration_submit_status_message,
     format_rank_force_reason,
@@ -202,6 +203,51 @@ def test_build_default_submission_problem_insight_uses_iteration_and_diagnostics
         "how_improved": "Submitted iteration 3 result after validation.",
         "delta_offline": None,
     }
+
+
+def test_ensure_submission_problem_insights_adds_default_with_diagnostics() -> None:
+    pending: list[dict[str, object]] = []
+    context = resolve_submission_knowledge_context(
+        submission_result={"outcome": {"score": "0.42"}, "iteration": 3},
+        metric_direction="minimize",
+        target_score=0.5,
+        top1_score=None,
+    )
+    assert context is not None
+
+    ensure_submission_problem_insights(
+        pending_problem_insights=pending,
+        knowledge_context=context,
+        load_diagnostics_text=lambda iteration: f"diagnostics for {iteration}",
+    )
+
+    assert pending == [
+        {
+            "iteration": 3,
+            "why_poor": "diagnostics for 3",
+            "how_improved": "Submitted iteration 3 result after validation.",
+            "delta_offline": None,
+        }
+    ]
+
+
+def test_ensure_submission_problem_insights_keeps_existing_items() -> None:
+    pending: list[dict[str, object]] = [{"iteration": 2, "why_poor": "existing"}]
+    context = resolve_submission_knowledge_context(
+        submission_result={"outcome": {"score": "0.42"}, "iteration": 3},
+        metric_direction="minimize",
+        target_score=0.5,
+        top1_score=None,
+    )
+    assert context is not None
+
+    ensure_submission_problem_insights(
+        pending_problem_insights=pending,
+        knowledge_context=context,
+        load_diagnostics_text=lambda _iteration: (_ for _ in ()).throw(AssertionError("should not load")),
+    )
+
+    assert pending == [{"iteration": 2, "why_poor": "existing"}]
 
 
 def test_resolve_submission_knowledge_iteration_uses_fallback_for_bad_values() -> None:

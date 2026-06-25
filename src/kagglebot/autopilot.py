@@ -6350,19 +6350,18 @@ def _record_submission_knowledge(
     )
     if knowledge_context is None:
         return
-    iteration_value = knowledge_context.iteration
-    if not pending_problem_insights:
-        diagnostics_text = ""
-        if iteration_value is not None:
-            diagnostics_path = config.paths.iter_dir(run_id, iteration_value) / "diagnostics.md"
-            if diagnostics_path.exists():
-                diagnostics_text = diagnostics_path.read_text(encoding="utf-8", errors="ignore")
-        pending_problem_insights.append(
-            _submit_stage.build_default_submission_problem_insight(
-                iteration=iteration_value,
-                diagnostics_text=diagnostics_text,
-            )
-        )
+
+    def load_diagnostics_text(iteration: int) -> str:
+        diagnostics_path = config.paths.iter_dir(run_id, iteration) / "diagnostics.md"
+        if diagnostics_path.exists():
+            return diagnostics_path.read_text(encoding="utf-8", errors="ignore")
+        return ""
+
+    _submit_stage.ensure_submission_problem_insights(
+        pending_problem_insights=pending_problem_insights,
+        knowledge_context=knowledge_context,
+        load_diagnostics_text=load_diagnostics_text,
+    )
     _submit_stage.record_submission_knowledge_entries(
         knowledge_paths=config.knowledge_paths,
         slug=config.slug,

@@ -220,6 +220,25 @@ def build_default_submission_problem_insight(
     }
 
 
+def ensure_submission_problem_insights(
+    *,
+    pending_problem_insights: list[dict[str, object]],
+    knowledge_context: SubmissionKnowledgeContext,
+    load_diagnostics_text: Callable[[int], str],
+) -> None:
+    if pending_problem_insights:
+        return
+    diagnostics_text = ""
+    if knowledge_context.iteration is not None:
+        diagnostics_text = load_diagnostics_text(knowledge_context.iteration)
+    pending_problem_insights.append(
+        build_default_submission_problem_insight(
+            iteration=knowledge_context.iteration,
+            diagnostics_text=diagnostics_text,
+        )
+    )
+
+
 def record_submission_knowledge_entries(
     *,
     knowledge_paths: object,
