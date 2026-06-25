@@ -23,6 +23,7 @@ from kagglebot import code_reference as _code_reference
 from kagglebot import competition_rules as _competition_rules
 from kagglebot import context_artifacts as _context_artifacts
 from kagglebot import diagnostics as _diagnostics
+from kagglebot import env_utils as _env_utils
 from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import iteration_signals as _iteration_signals
 from kagglebot import kernel_errors as _kernel_errors
@@ -35,6 +36,7 @@ from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
+from kagglebot import runtime_policy as _runtime_policy
 from kagglebot import score_progress as _score_progress
 from kagglebot import score_utils as _score_utils
 from kagglebot import submission_history as _submission_history
@@ -78,9 +80,6 @@ from kagglebot.campaign import (
     upsert_candidate,
 )
 from kagglebot.competition_policy import load_competition_policy
-from kagglebot.env_utils import env_flag as _env_flag
-from kagglebot.env_utils import env_int as _env_int
-from kagglebot.env_utils import env_truthy as _env_truthy
 from kagglebot.exceptions import (
     DuplicateSubmissionError,
     KaggleCliError,
@@ -146,15 +145,6 @@ from kagglebot.orchestrator.agent_pipeline import (
 )
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
-from kagglebot.runtime_policy import (
-    is_heavy_deep_learning_modality as _is_heavy_deep_learning_modality,
-)
-from kagglebot.runtime_policy import (
-    is_local_gpu_compute as _is_local_gpu_compute,
-)
-from kagglebot.runtime_policy import (
-    local_gpu_time_budget_limit_min as _local_gpu_time_budget_limit_min,
-)
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission.guard import (
@@ -520,16 +510,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     resolved["submit_mode"] = submit_mode
     writeup_mode = deliverable_mode == "writeup"
     submit_enabled = bool(config.submit and not writeup_mode)
-    strict_competition_metric = _env_flag(
+    strict_competition_metric = _env_utils.env_flag(
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
         default=_DEFAULT_STRICT_COMPETITION_METRIC,
     )
-    require_submit_improvement = _env_flag(
+    require_submit_improvement = _env_utils.env_flag(
         "KAGGLEBOT_REQUIRE_SUBMIT_IMPROVEMENT",
         default=_DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT,
     )
     submit_improved_only = str(resolved.get("submit_policy") or "").strip().lower() == "improved"
-    force_major_on_no_improve = _env_flag(
+    force_major_on_no_improve = _env_utils.env_flag(
         "KAGGLEBOT_FORCE_MAJOR_ON_NO_IMPROVE",
         default=_DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE,
     )
@@ -971,7 +961,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             max_repeats=MAX_KERNEL_CAPACITY_REPEAT,
                             output_dir=output_dir,
                         )
-                        capacity_retries = _env_int(
+                        capacity_retries = _env_utils.env_int(
                             "KAGGLEBOT_KERNEL_CAPACITY_RETRIES",
                             default=MAX_KERNEL_CAPACITY_RETRIES,
                         )
@@ -2763,7 +2753,7 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     )
     spec_values = _plan_policy.extract_evaluation_spec_values(eval_spec)
 
-    strict_competition_metric = _env_flag(
+    strict_competition_metric = _env_utils.env_flag(
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
         default=_DEFAULT_STRICT_COMPETITION_METRIC,
     )
@@ -2847,7 +2837,9 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         dataset_profile_path=config.paths.dataset_profile_path,
     )
     profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
-    heavy_local_gpu = _is_local_gpu_compute(config.compute) and _is_heavy_deep_learning_modality(profile_modality)
+    heavy_local_gpu = _runtime_policy.is_local_gpu_compute(
+        config.compute
+    ) and _runtime_policy.is_heavy_deep_learning_modality(profile_modality)
     seed = base_evaluation_request.seed
     eval_seeds = base_evaluation_request.eval_seeds
     eval_repeats = base_evaluation_request.eval_repeats
@@ -2892,11 +2884,11 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     for message in runtime_request.messages:
         print(message)
     runtime_limit_min = _competition_rules.runtime_limit_for_compute(constraints=constraints, compute=config.compute)
-    is_local_gpu_compute = _is_local_gpu_compute(config.compute)
+    is_local_gpu_compute = _runtime_policy.is_local_gpu_compute(config.compute)
     time_budget_decision = _plan_policy.resolve_time_budget_policy(
         time_budget_min=time_budget_min,
         runtime_limit_min=runtime_limit_min,
-        local_budget_min=_local_gpu_time_budget_limit_min() if is_local_gpu_compute else None,
+        local_budget_min=_runtime_policy.local_gpu_time_budget_limit_min() if is_local_gpu_compute else None,
         is_local_gpu=is_local_gpu_compute,
     )
     time_budget_min = time_budget_decision.time_budget_min
@@ -3564,7 +3556,7 @@ def _run_improvement(
     def _run_improve_codex_pass(*, current_prompt_path: Path, stage_suffix: str) -> tuple[str, Path]:
         capacity_attempts = max(
             1,
-            _env_int("KAGGLEBOT_AGENT_CAPACITY_ATTEMPTS", default=MAX_AGENT_CAPACITY_ATTEMPTS),
+            _env_utils.env_int("KAGGLEBOT_AGENT_CAPACITY_ATTEMPTS", default=MAX_AGENT_CAPACITY_ATTEMPTS),
         )
         for capacity_attempt in range(1, capacity_attempts + 1):
             pass_output_dir = (
@@ -4577,7 +4569,7 @@ def _attempt_submit(
         kernel_source_dir=config.paths.kernel_source_dir,
         sha256_or_none=_sha256_or_none,
     )
-    allow_force = config.force_submit or _env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
+    allow_force = config.force_submit or _env_utils.env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
     input_submission_path = autofix_attempt_context.input_submission_path
     if autofix_attempt_context.message:
         print(autofix_attempt_context.message)
