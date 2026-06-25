@@ -3141,8 +3141,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
     if submitted and last_submission_result:
         top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
-        _record_submission_knowledge(
-            config=config,
+
+        def load_submission_diagnostics(iteration: int) -> str:
+            diagnostics_path = config.paths.iter_dir(run_id, iteration) / "diagnostics.md"
+            if diagnostics_path.exists():
+                return diagnostics_path.read_text(encoding="utf-8", errors="ignore")
+            return ""
+
+        _submit_stage.record_submission_knowledge(
+            knowledge_paths=config.knowledge_paths,
+            slug=config.slug,
             run_id=run_id,
             problem_types=problem_types,
             pending_problem_insights=pending_problem_insights,
@@ -3151,6 +3159,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             metric_direction=metric_direction,
             target_score=target_score,
             top1_score=top1_score if isinstance(top1_score, (int, float)) else None,
+            load_diagnostics_text=load_submission_diagnostics,
+            record_problem_type_insight=record_problem_type_insight,
+            record_error_fix_insight=record_error_fix_insight,
         )
         run_payload["status"] = "submitted"
     elif writeup_mode and writeup_bundle_meta:
@@ -6328,41 +6339,6 @@ def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> boo
     if decision.message:
         print(decision.message)
     return decision.autofixable
-
-
-def _record_submission_knowledge(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    problem_types: list[str],
-    pending_problem_insights: list[dict[str, object]],
-    pending_error_fixes: list[dict[str, object]],
-    submission_result: dict[str, object] | None,
-    metric_direction: str,
-    target_score: float | None,
-    top1_score: float | None,
-) -> None:
-    def load_diagnostics_text(iteration: int) -> str:
-        diagnostics_path = config.paths.iter_dir(run_id, iteration) / "diagnostics.md"
-        if diagnostics_path.exists():
-            return diagnostics_path.read_text(encoding="utf-8", errors="ignore")
-        return ""
-
-    _submit_stage.record_submission_knowledge(
-        knowledge_paths=config.knowledge_paths,
-        slug=config.slug,
-        run_id=run_id,
-        problem_types=problem_types,
-        pending_problem_insights=pending_problem_insights,
-        pending_error_fixes=pending_error_fixes,
-        submission_result=submission_result,
-        metric_direction=metric_direction,
-        target_score=target_score,
-        top1_score=top1_score,
-        load_diagnostics_text=load_diagnostics_text,
-        record_problem_type_insight=record_problem_type_insight,
-        record_error_fix_insight=record_error_fix_insight,
-    )
 
 
 def _build_code_reference_repair_prompt(

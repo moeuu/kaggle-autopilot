@@ -335,7 +335,8 @@ Recommended extraction order:
    outcome abort/classification decisions, rank payload/guard/display normalization, iteration submit-status formatting,
    campaign-aware submission message resolution, submission iteration inference, tracking score selection, submission
    knowledge orchestration/context/default-insight preparation/record dispatch resolution, file-submit-to-notebook
-   fallback decisions, and submission outcome polling orchestration are now in `submit_stage.py`.
+   fallback decisions, and submission outcome polling orchestration are now in `submit_stage.py`; submission knowledge
+   recording now calls the submit-stage helper directly from the loop.
    Next, move the remaining `_attempt_submit` side-effect orchestration into a typed service that coordinates the
    existing `submit_attempts`, `submit_stage`, `submit_notebook`, and `submit_failure_context` modules rather than
    adding more private wrappers in `autopilot.py`.
