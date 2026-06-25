@@ -120,6 +120,24 @@ def decide_terminal_iteration_stop(
     return LoopTerminalDecision(should_stop=False, status="", stop_reason="", message="")
 
 
+def decide_max_total_time_stop(
+    *,
+    elapsed_total_min: float,
+    max_total_min: float | None,
+) -> LoopTerminalDecision:
+    if max_total_min is None or max_total_min <= 0:
+        return LoopTerminalDecision(should_stop=False, status="", stop_reason="", message="")
+    if elapsed_total_min < max_total_min:
+        return LoopTerminalDecision(should_stop=False, status="", stop_reason="", message="")
+    reason = f"max_total_min reached: elapsed={elapsed_total_min:.1f}m limit={max_total_min:.1f}m"
+    return LoopTerminalDecision(
+        should_stop=True,
+        status="stopped",
+        stop_reason=reason,
+        message=f"[yellow]stop[/yellow]: {reason}",
+    )
+
+
 def decide_no_improve_major_overhaul(
     *,
     force_enabled: bool,

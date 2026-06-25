@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kagglebot.loop_control import (
     append_policy_reason,
+    decide_max_total_time_stop,
     decide_no_improve_major_overhaul,
     decide_stagnation_stop,
     decide_terminal_iteration_stop,
@@ -137,6 +138,29 @@ def test_decide_terminal_iteration_stop_can_defer_max_iteration_check() -> None:
     )
 
     assert decision.should_stop is False
+
+
+def test_decide_max_total_time_stop_noops_without_positive_limit() -> None:
+    none_limit = decide_max_total_time_stop(elapsed_total_min=999.0, max_total_min=None)
+    zero_limit = decide_max_total_time_stop(elapsed_total_min=999.0, max_total_min=0.0)
+
+    assert none_limit.should_stop is False
+    assert zero_limit.should_stop is False
+
+
+def test_decide_max_total_time_stop_waits_until_limit_is_reached() -> None:
+    decision = decide_max_total_time_stop(elapsed_total_min=59.9, max_total_min=60.0)
+
+    assert decision.should_stop is False
+
+
+def test_decide_max_total_time_stop_returns_stopped_status_and_reason() -> None:
+    decision = decide_max_total_time_stop(elapsed_total_min=60.04, max_total_min=60.0)
+
+    assert decision.should_stop is True
+    assert decision.status == "stopped"
+    assert decision.stop_reason == "max_total_min reached: elapsed=60.0m limit=60.0m"
+    assert decision.message == "[yellow]stop[/yellow]: max_total_min reached: elapsed=60.0m limit=60.0m"
 
 
 def test_decide_no_improve_major_overhaul_forces_when_enabled_and_not_improved() -> None:

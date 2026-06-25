@@ -882,15 +882,16 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         for iteration in range(start_iteration, max_iterations + 1):
             _watch_state.update_watch_phase(config, run_id, "iteration_starting", iteration=iteration)
             last_completed_iteration = iteration
-            if max_total_min is not None and max_total_min > 0:
-                elapsed_total_min = (time.monotonic() - loop_started_at) / 60.0
-                if elapsed_total_min >= float(max_total_min):
-                    run_payload["status"] = "stopped"
-                    run_payload["stop_reason"] = (
-                        f"max_total_min reached: elapsed={elapsed_total_min:.1f}m limit={float(max_total_min):.1f}m"
-                    )
-                    print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
-                    break
+            elapsed_total_min = (time.monotonic() - loop_started_at) / 60.0
+            max_total_stop = _loop_control.decide_max_total_time_stop(
+                elapsed_total_min=elapsed_total_min,
+                max_total_min=max_total_min,
+            )
+            if max_total_stop.should_stop:
+                run_payload["status"] = max_total_stop.status
+                run_payload["stop_reason"] = max_total_stop.stop_reason
+                print(max_total_stop.message)
+                break
             iter_dir = config.paths.iter_dir(run_id, iteration)
             logs_dir = iter_dir / "logs"
             agent_dir = iter_dir / "agent"
