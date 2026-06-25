@@ -19,8 +19,6 @@ from kagglebot.autopilot import (
     AutopilotConfig,
     SubmissionPhase,
     _attempt_submit,
-    _detect_online_regression_vs_submission_history,
-    _format_previous_submission_history_for_prompt,
     _is_submit_abort_autofixable,
     _load_run_state,
     _resolve_iteration_submission_artifact,
@@ -61,6 +59,10 @@ from kagglebot.plan_policy import build_evaluation_contract
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.submission.guard import compute_error_fingerprint
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError
+from kagglebot.submission_history import (
+    detect_online_regression_vs_submission_history,
+    format_previous_submission_history_for_prompt,
+)
 from kagglebot.submission_policy import (
     count_submission_rows_in_recent_window,
     count_submission_rows_on_utc_day,
@@ -5962,7 +5964,7 @@ def test_online_regression_signal_uses_historical_submission_baseline() -> None:
         "recent": [{"submitted_at": "2026-05-22T09:24:24+00:00", "score": 10.308}],
     }
 
-    signal = _detect_online_regression_vs_submission_history(
+    signal = detect_online_regression_vs_submission_history(
         previous_best_online=10.271,
         current_online=10.308,
         direction="minimize",
@@ -5974,7 +5976,7 @@ def test_online_regression_signal_uses_historical_submission_baseline() -> None:
     assert "historical_best=9.600000" in str(signal["note"])
     assert "materially different" in str(signal["note"])
 
-    prompt = _format_previous_submission_history_for_prompt(history)
+    prompt = format_previous_submission_history_for_prompt(history)
     assert "Best historical public score: 9.600000" in prompt
     assert "Do not call a new iteration improved" in prompt
 

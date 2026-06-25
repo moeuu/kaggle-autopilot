@@ -276,7 +276,8 @@ The next high-value modernization work is:
    `submit_failure_context.py` directly, and submit code fingerprinting now calls `submit_retry_policy.py` directly.
    Submit-kernel CPU fallback
    decisions, initial/path-based artifact-mode resolution, and kernel push version-label inference now call
-   `submit_notebook.py` directly. Previous-submission history loading now calls `submission_history.py` directly.
+   `submit_notebook.py` directly. Previous-submission history loading, regression checks, and prompt formatting now
+   call `submission_history.py` directly.
    Metric-recheck OOF column
    selection and fold-score list parsing now call `kernel_metrics.py` directly.
    Daily quota count/fallback decisions now call `submission_policy.py` directly.

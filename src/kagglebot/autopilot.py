@@ -33,6 +33,7 @@ from kagglebot import loop_control as _loop_control
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
+from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_autofix as _submit_autofix
@@ -193,12 +194,6 @@ from kagglebot.submission.guard import (
     compute_error_fingerprint,
     normalize_error_text,
     run_kaggle_submit_kernel,
-)
-from kagglebot.submission_history import (
-    detect_online_regression_vs_submission_history as _detect_online_regression_vs_submission_history,
-)
-from kagglebot.submission_history import (
-    format_previous_submission_history_for_prompt as _format_previous_submission_history_for_prompt,
 )
 from kagglebot.submission_history import load_previous_submission_history
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
@@ -2400,7 +2395,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 current_online=online_score,
                 previous_submission_history=previous_submission_history,
                 detect_subgroup_collapse_signal=_kernel_quality.detect_subgroup_collapse_signal,
-                detect_online_history_regression_signal=_detect_online_regression_vs_submission_history,
+                detect_online_history_regression_signal=(
+                    _submission_history.detect_online_regression_vs_submission_history
+                ),
             )
             best_online_submission_score = _update_best_online_submission_score(
                 current_best_score=best_online_submission_score,
@@ -3439,7 +3436,7 @@ def _run_improvement(
             "- If suspiciously high CV is detected, keep leak fixes but preserve competitive model strength "
             "instead of defaulting to a weak baseline.\n"
         )
-    history_prompt = _format_previous_submission_history_for_prompt(previous_submission_history)
+    history_prompt = _submission_history.format_previous_submission_history_for_prompt(previous_submission_history)
     if history_prompt:
         base_prompt_text += "\n\nPrevious Kaggle Submission Results:\n" + history_prompt + "\n"
     method_registry_payload = _load_json_object(config.paths.method_registry_path)
