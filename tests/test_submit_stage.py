@@ -43,6 +43,7 @@ from kagglebot.submit_stage import (
     record_submit_stage_retry_attempt,
     record_successful_submit_stage_result,
     resolve_iteration_submit_phase_state,
+    resolve_prepared_submission_for_submit,
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
     resolve_submission_message,
@@ -121,6 +122,10 @@ class SubmitAttemptRecorderStub:
 
     def append(self, payload: dict[str, object]) -> None:
         self.payloads.append(payload)
+
+
+class SubmitValidationStubError(ValueError):
+    pass
 
 
 def test_decide_initial_submit_stage_mode_keeps_file_submit() -> None:
@@ -439,6 +444,54 @@ def test_build_local_submission_validation_abort_spec_sets_validation_contract()
     assert spec.stdout_tail == ""
     assert spec.stderr_tail == "row count mismatch"
     assert spec.exit_code == 65
+
+
+def test_resolve_prepared_submission_for_submit_returns_prepared_path(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.csv"
+    prepared_path = tmp_path / "prepared.csv"
+
+    resolution = resolve_prepared_submission_for_submit(
+        input_submission_path=input_path,
+        validate_and_prepare=lambda path: prepared_path if path == input_path else path,
+        validation_error_types=(SubmitValidationStubError,),
+        validation_exit_code=65,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert resolution.prepared_submission_path == prepared_path
+    assert resolution.abort_spec is None
+
+
+def test_resolve_prepared_submission_for_submit_maps_validation_error_to_abort(tmp_path: Path) -> None:
+    resolution = resolve_prepared_submission_for_submit(
+        input_submission_path=tmp_path / "input.csv",
+        validate_and_prepare=lambda path: (_ for _ in ()).throw(SubmitValidationStubError("bad rows")),
+        validation_error_types=(SubmitValidationStubError,),
+        validation_exit_code=65,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+    )
+
+    assert resolution.prepared_submission_path is None
+    assert resolution.abort_spec is not None
+    assert resolution.abort_spec.fingerprint == "fp::bad rows"
+    assert resolution.abort_spec.error_kind == "validation"
+    assert resolution.abort_spec.reason == "local_submission_validation_failed"
+    assert resolution.abort_spec.exit_code == 65
+
+
+def test_resolve_prepared_submission_for_submit_reraises_unmatched_error(tmp_path: Path) -> None:
+    try:
+        resolve_prepared_submission_for_submit(
+            input_submission_path=tmp_path / "input.csv",
+            validate_and_prepare=lambda path: (_ for _ in ()).throw(RuntimeError("unexpected")),
+            validation_error_types=(SubmitValidationStubError,),
+            validation_exit_code=65,
+            compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "unexpected"
+    else:
+        raise AssertionError("RuntimeError was not raised")
 
 
 def test_build_submit_abort_spec_kwargs_maps_abort_spec_fields() -> None:

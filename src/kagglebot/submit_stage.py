@@ -121,6 +121,12 @@ class SubmitAbortSpec:
     exit_code: int | None
 
 
+@dataclass(frozen=True)
+class SubmitPreparedSubmissionResolution:
+    prepared_submission_path: Path | None
+    abort_spec: SubmitAbortSpec | None = None
+
+
 def build_submit_abort_spec_kwargs(spec: SubmitAbortSpec) -> dict[str, object]:
     return {
         "fingerprint": spec.fingerprint,
@@ -131,6 +137,27 @@ def build_submit_abort_spec_kwargs(spec: SubmitAbortSpec) -> dict[str, object]:
         "stderr_tail": spec.stderr_tail,
         "exit_code": spec.exit_code,
     }
+
+
+def resolve_prepared_submission_for_submit(
+    *,
+    input_submission_path: Path,
+    validate_and_prepare: Callable[[Path], Path],
+    validation_error_types: tuple[type[BaseException], ...],
+    validation_exit_code: int | None,
+    compute_error_fingerprint: Callable[[str, str], str],
+) -> SubmitPreparedSubmissionResolution:
+    try:
+        return SubmitPreparedSubmissionResolution(prepared_submission_path=validate_and_prepare(input_submission_path))
+    except validation_error_types as exc:
+        return SubmitPreparedSubmissionResolution(
+            prepared_submission_path=None,
+            abort_spec=build_local_submission_validation_abort_spec(
+                error=exc,
+                exit_code=validation_exit_code,
+                compute_error_fingerprint=compute_error_fingerprint,
+            ),
+        )
 
 
 @dataclass(frozen=True)

@@ -5025,23 +5025,26 @@ def _attempt_submit(
     print(f"[cyan]submit[/cyan]: {config.slug}")
     submitted_at = datetime.now(UTC)
 
-    try:
-        prepared_submission_path = submission_service.validate_and_prepare_submission(input_submission_path)
-    except SubmissionValidationError as exc:
-        abort_spec = _submit_stage.build_local_submission_validation_abort_spec(
-            error=exc,
-            exit_code=SubmissionValidationError.exit_code,
-            compute_error_fingerprint=compute_error_fingerprint,
-        )
+    prepared_resolution = _submit_stage.resolve_prepared_submission_for_submit(
+        input_submission_path=input_submission_path,
+        validate_and_prepare=submission_service.validate_and_prepare_submission,
+        validation_error_types=(SubmissionValidationError,),
+        validation_exit_code=SubmissionValidationError.exit_code,
+        compute_error_fingerprint=compute_error_fingerprint,
+    )
+    if prepared_resolution.abort_spec is not None:
         return _abort_submit_for_run(
             config=config,
             run_id=run_id,
             problem_types=problem_types,
             submission_ref=input_submission_path,
             code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
+            **_submit_stage.build_submit_abort_spec_kwargs(prepared_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
+    if prepared_resolution.prepared_submission_path is None:
+        raise SubmitAbortedError("Submit validation did not produce a prepared submission path.")
+    prepared_submission_path = prepared_resolution.prepared_submission_path
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
     duplicate_sources = _submit_retry_policy.collect_duplicate_submission_sources(
