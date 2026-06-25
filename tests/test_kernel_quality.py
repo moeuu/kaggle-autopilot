@@ -112,6 +112,7 @@ def test_build_oracle_override_signal_flags_applied_or_enabled_mode() -> None:
         "applied": True,
         "reasons": ["oracle_override_detected"],
         "warnings": ["oracle_mode=off"],
+        "block_submit": True,
     }
     assert enabled == {
         "detected": True,
@@ -119,6 +120,7 @@ def test_build_oracle_override_signal_flags_applied_or_enabled_mode() -> None:
         "applied": False,
         "reasons": ["oracle_override_detected"],
         "warnings": ["oracle_mode=auto"],
+        "block_submit": True,
     }
 
 
@@ -132,6 +134,7 @@ def test_build_oracle_override_signal_allows_missing_or_off_payload() -> None:
         "applied": False,
         "reasons": [],
         "warnings": [],
+        "block_submit": False,
     }
     assert disabled == {
         "detected": False,
@@ -139,6 +142,7 @@ def test_build_oracle_override_signal_allows_missing_or_off_payload() -> None:
         "applied": False,
         "reasons": [],
         "warnings": [],
+        "block_submit": False,
     }
 
 

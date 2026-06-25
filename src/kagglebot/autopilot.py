@@ -4681,9 +4681,8 @@ def _build_kernel_quality_guard(
 
     oracle_signal = _build_oracle_override_signal(payload)
     merge_signal_messages(oracle_signal)
-    if bool(oracle_signal.get("detected")):
-        if not force_submit:
-            block_submit = True
+    if bool(oracle_signal.get("block_submit")) and not force_submit:
+        block_submit = True
 
     external_label_transfer_signal = _build_external_label_transfer_quality_signal(payload)
     merge_signal_messages(external_label_transfer_signal)

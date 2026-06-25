@@ -130,6 +130,7 @@ def build_oracle_override_signal(payload: dict[str, object] | None) -> dict[str,
         "applied": applied,
         "reasons": reasons,
         "warnings": warnings,
+        "block_submit": detected,
     }
 
 
