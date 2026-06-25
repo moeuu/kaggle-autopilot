@@ -4852,34 +4852,20 @@ def _attempt_submit(
                 exit_code=exc.exit_code,
                 classify_submit_error=classify_submit_error,
             )
-            notebook_fallback_decision = _submit_stage.decide_notebook_fallback_after_file_submit_error(
-                notebook_submit_required=submit_stage_state.notebook_submit_required,
-                notebook_fallback_activated=submit_stage_state.notebook_fallback_activated,
+            fallback_application = _submit_stage.resolve_notebook_fallback_after_file_submit_error(
+                state=submit_stage_state,
                 should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback(
                     reason=submit_error_classification.reason,
                     stdout=exc.stdout,
                     stderr=submit_error_classification.stderr,
                 ),
-                resolved_notebook_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode(
-                    submit_mode="notebook",
-                    code_competition=code_competition,
-                ),
-                current_submission_artifact_mode=submit_stage_state.submission_artifact_mode,
-            )
-            fallback_application = _submit_stage.apply_notebook_fallback_decision(
-                state=submit_stage_state,
-                fallback_decision=notebook_fallback_decision,
-                resolve_artifact_mode=lambda requested_mode, notebook_required: (
-                    _submit_notebook.decide_notebook_submit_artifact_mode_for_paths(
-                        requested_mode=requested_mode,
-                        notebook_submit_required=notebook_required,
-                        code_competition=code_competition,
-                        sample_submission_path=config.paths.sample_submission_path,
-                        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-                        submission_path=prepared_submission_path,
-                        count_csv_data_rows=_count_csv_data_rows_capped,
-                    )
-                ),
+                code_competition=code_competition,
+                sample_submission_path=config.paths.sample_submission_path,
+                fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+                submission_path=prepared_submission_path,
+                resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
+                decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
+                count_csv_data_rows=_count_csv_data_rows_capped,
                 on_message=print,
             )
             submit_stage_state = fallback_application.state

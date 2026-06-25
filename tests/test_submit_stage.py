@@ -47,6 +47,7 @@ from kagglebot.submit_stage import (
     record_successful_submit_stage_result,
     resolve_initial_submit_stage_runtime_state,
     resolve_iteration_submit_phase_state,
+    resolve_notebook_fallback_after_file_submit_error,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
     resolve_submission_knowledge_context,
@@ -2273,6 +2274,99 @@ def test_apply_notebook_fallback_decision_keeps_state_when_not_retrying() -> Non
         state=state,
         fallback_decision=decision,
         resolve_artifact_mode=lambda mode, required: (_ for _ in ()).throw(AssertionError("not used")),
+        on_message=messages.append,
+    )
+
+    assert applied.retry_as_notebook is False
+    assert applied.state == state
+    assert messages == []
+
+
+def test_resolve_notebook_fallback_after_file_submit_error_updates_state(tmp_path: Path) -> None:
+    state = build_submit_stage_runtime_state(
+        decide_initial_submit_stage_mode(
+            requested_notebook_submit=False,
+            notebook_submissions_only=False,
+            notebook_submit_artifact_mode="wrapper",
+            resolved_notebook_artifact_mode=None,
+        )
+    )
+    submission_path = tmp_path / "submission.csv"
+    sample_path = tmp_path / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data_sample_submission.csv"
+    resolver_calls: list[dict[str, object]] = []
+    artifact_calls: list[tuple[str, bool, bool]] = []
+    messages: list[str] = []
+
+    def resolve_notebook_mode(**kwargs: object) -> str:
+        resolver_calls.append(kwargs)
+        return "inference"
+
+    def decide_artifact_mode(**kwargs: object) -> ArtifactModeDecisionStub:
+        artifact_calls.append(
+            (
+                str(kwargs["requested_mode"]),
+                bool(kwargs["notebook_submit_required"]),
+                bool(kwargs["code_competition"]),
+            )
+        )
+        return ArtifactModeDecisionStub(
+            mode="inference",
+            message="[yellow]submit mode[/yellow]: using inference artifact",
+        )
+
+    applied = resolve_notebook_fallback_after_file_submit_error(
+        state=state,
+        should_use_notebook_fallback=True,
+        code_competition=True,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        submission_path=submission_path,
+        resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
+        decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
+        count_csv_data_rows=lambda path: 3,
+        on_message=messages.append,
+    )
+
+    assert applied.retry_as_notebook is True
+    assert applied.state.notebook_submit_required is True
+    assert applied.state.notebook_fallback_activated is True
+    assert applied.state.submission_artifact_mode == "inference"
+    assert resolver_calls == [{"submit_mode": "notebook", "code_competition": True}]
+    assert artifact_calls == [("inference", True, True)]
+    assert messages == [
+        "[yellow]submit mode[/yellow]: file submit indicates notebook submit is required; "
+        "retrying via notebook submit automatically.",
+        "[yellow]submit mode[/yellow]: using inference artifact",
+    ]
+
+
+def test_resolve_notebook_fallback_after_file_submit_error_keeps_state_when_disabled(tmp_path: Path) -> None:
+    state = build_submit_stage_runtime_state(
+        decide_initial_submit_stage_mode(
+            requested_notebook_submit=False,
+            notebook_submissions_only=False,
+            notebook_submit_artifact_mode="wrapper",
+            resolved_notebook_artifact_mode=None,
+        )
+    )
+    messages: list[str] = []
+
+    def resolve_notebook_mode(**kwargs: object) -> str:
+        raise AssertionError(f"notebook resolver should not be used: {kwargs}")
+
+    applied = resolve_notebook_fallback_after_file_submit_error(
+        state=state,
+        should_use_notebook_fallback=False,
+        code_competition=False,
+        sample_submission_path=tmp_path / "sample_submission.csv",
+        fallback_sample_submission_path=tmp_path / "data_sample_submission.csv",
+        submission_path=tmp_path / "submission.csv",
+        resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
+        decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError(f"artifact resolver should not be used: {kwargs}")
+        ),
+        count_csv_data_rows=lambda path: 3,
         on_message=messages.append,
     )
 

@@ -1828,3 +1828,49 @@ def apply_notebook_fallback_decision(
         retry_as_notebook=True,
         state=apply_notebook_fallback_retry_state(fallback_retry_state),
     )
+
+
+def resolve_notebook_fallback_after_file_submit_error(
+    *,
+    state: SubmitStageRuntimeState,
+    should_use_notebook_fallback: bool,
+    code_competition: bool,
+    sample_submission_path: Path,
+    fallback_sample_submission_path: Path,
+    submission_path: Path,
+    resolve_notebook_submit_artifact_mode: Callable[..., str],
+    decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
+    count_csv_data_rows: Callable[[Path], int | None],
+    on_message: Callable[[str], object],
+) -> SubmitStageFallbackApplication:
+    resolved_notebook_artifact_mode = (
+        resolve_notebook_submit_artifact_mode(
+            submit_mode="notebook",
+            code_competition=code_competition,
+        )
+        if should_use_notebook_fallback and not state.notebook_submit_required and not state.notebook_fallback_activated
+        else None
+    )
+    fallback_decision = decide_notebook_fallback_after_file_submit_error(
+        notebook_submit_required=state.notebook_submit_required,
+        notebook_fallback_activated=state.notebook_fallback_activated,
+        should_use_notebook_fallback=should_use_notebook_fallback,
+        resolved_notebook_artifact_mode=resolved_notebook_artifact_mode,
+        current_submission_artifact_mode=state.submission_artifact_mode,
+    )
+    return apply_notebook_fallback_decision(
+        state=state,
+        fallback_decision=fallback_decision,
+        resolve_artifact_mode=lambda requested_mode, notebook_required: (
+            decide_notebook_submit_artifact_mode_for_paths(
+                requested_mode=requested_mode,
+                notebook_submit_required=notebook_required,
+                code_competition=code_competition,
+                sample_submission_path=sample_submission_path,
+                fallback_sample_submission_path=fallback_sample_submission_path,
+                submission_path=submission_path,
+                count_csv_data_rows=count_csv_data_rows,
+            )
+        ),
+        on_message=on_message,
+    )

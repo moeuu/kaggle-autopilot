@@ -362,7 +362,8 @@ Recommended extraction order:
    submit-error classification normalization, classification-driven retry/abort decisions, submit-error action abort specs,
    submit-retry attempt/knowledge recording orchestration, abort-spec kwargs mapping,
    duplicate-submit decision application, local validation resolution, rules-acceptance blocker resolution,
-   same-submission-path decision application, notebook fallback decision application/state/message assembly,
+   same-submission-path decision application, notebook fallback runtime-state resolution and decision
+   application/state/message assembly,
    manual local validation/submit-blocker abort specs,
    submission polling/outcome abort specs, submission outcome
    classification and poll-result post-processing decisions, rank
