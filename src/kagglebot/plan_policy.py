@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from kagglebot.json_utils import load_json_object
 from kagglebot.metric_matching import canonical_metric_name_for_match, metrics_equivalent
 from kagglebot.paths import CompetitionPaths
+from kagglebot.scalar_utils import parse_int
 from kagglebot.score_sources import (
     DEFAULT_ACCEPTED_SCORE_SOURCES,
     normalize_score_source_list,
@@ -75,6 +76,20 @@ class PlanScoreSourceDecision:
 @dataclass(frozen=True)
 class SplitStrategyOverrideDecision:
     split_strategy: object
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EvalBudgetDecision:
+    cv_folds: object
+    eval_seeds: list[int]
+    eval_repeats: int
+    messages: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MaxIterationsDecision:
+    max_iterations: int
     messages: tuple[str, ...] = ()
 
 
@@ -242,6 +257,122 @@ def resolve_split_strategy_override(
             f"forcing split_strategy '{split_strategy or 'auto'}' -> '{normalized_override}'.",
         ),
     )
+
+
+def resolve_eval_budget_policy(
+    *,
+    heavy_local_gpu: bool,
+    cv_folds: object,
+    seed: object,
+    eval_seeds: list[int],
+    eval_repeats: int,
+    max_heavy_local_gpu_cv_folds: int,
+    default_eval_seeds: list[int] | tuple[int, ...] = DEFAULT_EVAL_SEEDS,
+    default_eval_repeats: int = DEFAULT_EVAL_REPEATS,
+) -> EvalBudgetDecision:
+    """Apply plan-level evaluation budget policy for heavy local GPU workloads."""
+
+    messages: list[str] = []
+    resolved_cv_folds = cv_folds
+    cv_folds_int = parse_int(cv_folds, allow_commas=True, allow_float=True, require_integral_float=False)
+    if cv_folds_int is not None:
+        resolved_cv_folds = cv_folds_int
+    if heavy_local_gpu and isinstance(resolved_cv_folds, int) and resolved_cv_folds > max_heavy_local_gpu_cv_folds:
+        messages.append(
+            "[yellow]note[/yellow]: heavy modality on local_gpu; "
+            f"capping full-training cv_folds from {resolved_cv_folds} to {max_heavy_local_gpu_cv_folds}. "
+            "Use cached embeddings/TTA/lightweight heads for extra validation instead of full folds."
+        )
+        resolved_cv_folds = max_heavy_local_gpu_cv_folds
+
+    resolved_eval_seeds = list(eval_seeds)
+    if heavy_local_gpu and len(resolved_eval_seeds) > 1:
+        primary_seed = int(seed) if isinstance(seed, int) else resolved_eval_seeds[0]
+        if primary_seed not in resolved_eval_seeds:
+            primary_seed = resolved_eval_seeds[0]
+        resolved_eval_seeds = [primary_seed]
+        messages.append(
+            "[yellow]note[/yellow]: heavy modality on local_gpu; "
+            f"using one full-training seed ({primary_seed}) to stay inside the local runtime budget. "
+            "Reserve extra seeds for cheap heads/blends or final confirmation."
+        )
+    elif len(resolved_eval_seeds) < 2:
+        resolved_eval_seeds = list(default_eval_seeds)
+        messages.append(
+            "[yellow]note[/yellow]: evaluation seeds were single-seed; "
+            f"upgrading to multi-seed defaults {list(default_eval_seeds)}."
+        )
+
+    resolved_eval_repeats = int(eval_repeats)
+    if heavy_local_gpu and resolved_eval_repeats > 1:
+        messages.append(
+            "[yellow]note[/yellow]: heavy modality on local_gpu; "
+            "using one full-training evaluation repeat to keep each iteration under the runtime budget."
+        )
+        resolved_eval_repeats = 1
+    elif resolved_eval_repeats < 2:
+        messages.append(
+            "[yellow]note[/yellow]: evaluation repeats were < 2; "
+            f"upgrading to default {default_eval_repeats} to reduce noise."
+        )
+        resolved_eval_repeats = int(default_eval_repeats)
+
+    return EvalBudgetDecision(
+        cv_folds=resolved_cv_folds,
+        eval_seeds=resolved_eval_seeds,
+        eval_repeats=resolved_eval_repeats,
+        messages=tuple(messages),
+    )
+
+
+def resolve_plan_max_iterations(
+    *,
+    config_max_iterations: int | None,
+    plan_max_iterations: object,
+    default_max_iterations: int,
+) -> MaxIterationsDecision:
+    """Resolve CLI/plan max_iterations with legacy tolerant plan parsing."""
+
+    if config_max_iterations is not None:
+        return MaxIterationsDecision(max_iterations=max(1, int(config_max_iterations)))
+
+    planned = parse_int(plan_max_iterations, allow_commas=True, allow_float=True, require_integral_float=False)
+    if planned is not None and planned > 0:
+        return MaxIterationsDecision(max_iterations=planned)
+
+    messages: list[str] = []
+    if planned is not None:
+        messages.append(
+            "[yellow]note[/yellow]: invalid plan max_iterations "
+            f"({plan_max_iterations}); using default {default_max_iterations}."
+        )
+    return MaxIterationsDecision(max_iterations=int(default_max_iterations), messages=tuple(messages))
+
+
+def resolve_heavy_local_gpu_max_iterations(
+    *,
+    heavy_local_gpu: bool,
+    time_budget_min: object,
+    max_iterations: int,
+    long_iteration_budget_min: int,
+    max_long_iterations: int,
+) -> MaxIterationsDecision:
+    """Cap long heavy local GPU loops so single iterations can run deeper."""
+
+    if (
+        heavy_local_gpu
+        and (time_budget_min is None or time_budget_min >= long_iteration_budget_min)
+        and max_iterations > max_long_iterations
+    ):
+        return MaxIterationsDecision(
+            max_iterations=max_long_iterations,
+            messages=(
+                "[yellow]note[/yellow]: heavy long-running local_gpu plan detected; "
+                f"capping max_iterations from {max_iterations} to {max_long_iterations} "
+                "so accuracy-first iterations can run deeper.",
+            ),
+        )
+    return MaxIterationsDecision(max_iterations=max_iterations)
 
 
 def normalize_split_strategy_name(value: object) -> str | None:

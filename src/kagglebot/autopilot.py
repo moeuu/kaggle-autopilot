@@ -3471,47 +3471,22 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     dataset_profile = _load_dataset_profile(config.paths)
     profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
     heavy_local_gpu = _is_local_gpu_compute(config.compute) and _is_heavy_deep_learning_modality(profile_modality)
-    cv_folds_int = _to_int(cv_folds)
-    if cv_folds_int is not None:
-        cv_folds = cv_folds_int
-    if heavy_local_gpu and isinstance(cv_folds, int) and cv_folds > _HEAVY_LOCAL_GPU_MAX_CV_FOLDS:
-        print(
-            "[yellow]note[/yellow]: heavy modality on local_gpu; "
-            f"capping full-training cv_folds from {cv_folds} to {_HEAVY_LOCAL_GPU_MAX_CV_FOLDS}. "
-            "Use cached embeddings/TTA/lightweight heads for extra validation instead of full folds."
-        )
-        cv_folds = _HEAVY_LOCAL_GPU_MAX_CV_FOLDS
     seed = choose(config.seed, plan.seed, spec_values.seed if spec_values.seed is not None else 42)
     eval_seeds = _normalize_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
-    if heavy_local_gpu and len(eval_seeds) > 1:
-        primary_seed = int(seed) if isinstance(seed, int) else eval_seeds[0]
-        if primary_seed not in eval_seeds:
-            primary_seed = eval_seeds[0]
-        eval_seeds = [primary_seed]
-        print(
-            "[yellow]note[/yellow]: heavy modality on local_gpu; "
-            f"using one full-training seed ({primary_seed}) to stay inside the local runtime budget. "
-            "Reserve extra seeds for cheap heads/blends or final confirmation."
-        )
-    elif len(eval_seeds) < 2:
-        print(
-            "[yellow]note[/yellow]: evaluation seeds were single-seed; "
-            f"upgrading to multi-seed defaults {_DEFAULT_EVAL_SEEDS}."
-        )
-        eval_seeds = list(_DEFAULT_EVAL_SEEDS)
     eval_repeats = _normalize_eval_repeats(plan.eval_repeats, fallback=spec_values.repeats)
-    if heavy_local_gpu and eval_repeats > 1:
-        print(
-            "[yellow]note[/yellow]: heavy modality on local_gpu; "
-            "using one full-training evaluation repeat to keep each iteration under the runtime budget."
-        )
-        eval_repeats = 1
-    elif eval_repeats < 2:
-        print(
-            "[yellow]note[/yellow]: evaluation repeats were < 2; "
-            f"upgrading to default {_DEFAULT_EVAL_REPEATS} to reduce noise."
-        )
-        eval_repeats = _DEFAULT_EVAL_REPEATS
+    eval_budget_decision = _plan_policy.resolve_eval_budget_policy(
+        heavy_local_gpu=heavy_local_gpu,
+        cv_folds=cv_folds,
+        seed=seed,
+        eval_seeds=eval_seeds,
+        eval_repeats=eval_repeats,
+        max_heavy_local_gpu_cv_folds=_HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
+    )
+    cv_folds = eval_budget_decision.cv_folds
+    eval_seeds = eval_budget_decision.eval_seeds
+    eval_repeats = eval_budget_decision.eval_repeats
+    for message in eval_budget_decision.messages:
+        print(message)
     constraints = _competition_rules.load_competition_rule_constraints(config.paths)
     code_competition = infer_code_competition_from_paths(config.paths)
     if code_competition and submit_mode != "notebook":
@@ -3556,30 +3531,24 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
                 "Unset KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN or set it to 0 for unlimited local runtime."
             )
             time_budget_min = local_budget_min
-    if config.max_iterations is None:
-        planned_max_iterations = _to_int(plan.max_iterations)
-        if planned_max_iterations is not None and planned_max_iterations > 0:
-            max_iterations = planned_max_iterations
-        else:
-            max_iterations = _DEFAULT_MAX_ITERATIONS
-            if planned_max_iterations is not None:
-                print(
-                    "[yellow]note[/yellow]: invalid plan max_iterations "
-                    f"({plan.max_iterations}); using default {_DEFAULT_MAX_ITERATIONS}."
-                )
-    else:
-        max_iterations = max(1, int(config.max_iterations))
-    if (
-        heavy_local_gpu
-        and (time_budget_min is None or time_budget_min >= _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN)
-        and max_iterations > _LONG_LOCAL_GPU_MAX_ITERATIONS
-    ):
-        print(
-            "[yellow]note[/yellow]: heavy long-running local_gpu plan detected; "
-            f"capping max_iterations from {max_iterations} to {_LONG_LOCAL_GPU_MAX_ITERATIONS} "
-            "so accuracy-first iterations can run deeper."
-        )
-        max_iterations = _LONG_LOCAL_GPU_MAX_ITERATIONS
+    max_iterations_decision = _plan_policy.resolve_plan_max_iterations(
+        config_max_iterations=config.max_iterations,
+        plan_max_iterations=plan.max_iterations,
+        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
+    )
+    max_iterations = max_iterations_decision.max_iterations
+    for message in max_iterations_decision.messages:
+        print(message)
+    max_iterations_decision = _plan_policy.resolve_heavy_local_gpu_max_iterations(
+        heavy_local_gpu=heavy_local_gpu,
+        time_budget_min=time_budget_min,
+        max_iterations=max_iterations,
+        long_iteration_budget_min=_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
+        max_long_iterations=_LONG_LOCAL_GPU_MAX_ITERATIONS,
+    )
+    max_iterations = max_iterations_decision.max_iterations
+    for message in max_iterations_decision.messages:
+        print(message)
     max_total_min = choose(config.max_total_min, plan.max_total_min, None)
     patience = choose(config.patience, plan.patience, 2)
     min_improvement = choose(config.min_improvement, plan.min_improvement, 0.0)

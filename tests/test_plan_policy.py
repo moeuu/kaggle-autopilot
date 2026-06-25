@@ -25,6 +25,9 @@ from kagglebot.plan_policy import (
     normalize_rank_force_percentile,
     normalize_split_strategy_name,
     resolve_deliverable_mode,
+    resolve_eval_budget_policy,
+    resolve_heavy_local_gpu_max_iterations,
+    resolve_plan_max_iterations,
     resolve_plan_score_source,
     resolve_split_strategy_from_artifacts,
     resolve_split_strategy_override,
@@ -213,6 +216,97 @@ def test_resolve_split_strategy_override_ignores_missing_invalid_or_same_overrid
     same = resolve_split_strategy_override(split_strategy="group_kfold", override_split_strategy="groupkfold")
     assert same.split_strategy == "group_kfold"
     assert same.messages == ()
+
+
+def test_resolve_eval_budget_policy_caps_heavy_local_gpu_folds_seeds_and_repeats() -> None:
+    decision = resolve_eval_budget_policy(
+        heavy_local_gpu=True,
+        cv_folds="5",
+        seed=2024,
+        eval_seeds=[42, 2024, 777],
+        eval_repeats=2,
+        max_heavy_local_gpu_cv_folds=3,
+    )
+
+    assert decision.cv_folds == 3
+    assert decision.eval_seeds == [2024]
+    assert decision.eval_repeats == 1
+    assert decision.messages == (
+        "[yellow]note[/yellow]: heavy modality on local_gpu; "
+        "capping full-training cv_folds from 5 to 3. "
+        "Use cached embeddings/TTA/lightweight heads for extra validation instead of full folds.",
+        "[yellow]note[/yellow]: heavy modality on local_gpu; "
+        "using one full-training seed (2024) to stay inside the local runtime budget. "
+        "Reserve extra seeds for cheap heads/blends or final confirmation.",
+        "[yellow]note[/yellow]: heavy modality on local_gpu; "
+        "using one full-training evaluation repeat to keep each iteration under the runtime budget.",
+    )
+
+
+def test_resolve_eval_budget_policy_upgrades_light_eval_defaults() -> None:
+    decision = resolve_eval_budget_policy(
+        heavy_local_gpu=False,
+        cv_folds="4.9",
+        seed=1,
+        eval_seeds=[1],
+        eval_repeats=1,
+        max_heavy_local_gpu_cv_folds=3,
+    )
+
+    assert decision.cv_folds == 4
+    assert decision.eval_seeds == [42, 2024, 777]
+    assert decision.eval_repeats == 2
+    assert decision.messages == (
+        "[yellow]note[/yellow]: evaluation seeds were single-seed; upgrading to multi-seed defaults [42, 2024, 777].",
+        "[yellow]note[/yellow]: evaluation repeats were < 2; upgrading to default 2 to reduce noise.",
+    )
+
+
+def test_resolve_plan_max_iterations_uses_cli_plan_or_default() -> None:
+    assert (
+        resolve_plan_max_iterations(
+            config_max_iterations=0, plan_max_iterations=9, default_max_iterations=7
+        ).max_iterations
+        == 1
+    )
+    assert (
+        resolve_plan_max_iterations(
+            config_max_iterations=None, plan_max_iterations="9.8", default_max_iterations=7
+        ).max_iterations
+        == 9
+    )
+    invalid = resolve_plan_max_iterations(
+        config_max_iterations=None,
+        plan_max_iterations=0,
+        default_max_iterations=7,
+    )
+    assert invalid.max_iterations == 7
+    assert invalid.messages == ("[yellow]note[/yellow]: invalid plan max_iterations (0); using default 7.",)
+
+
+def test_resolve_heavy_local_gpu_max_iterations_caps_long_runs() -> None:
+    capped = resolve_heavy_local_gpu_max_iterations(
+        heavy_local_gpu=True,
+        time_budget_min=None,
+        max_iterations=5,
+        long_iteration_budget_min=720,
+        max_long_iterations=3,
+    )
+    uncapped = resolve_heavy_local_gpu_max_iterations(
+        heavy_local_gpu=True,
+        time_budget_min=120,
+        max_iterations=5,
+        long_iteration_budget_min=720,
+        max_long_iterations=3,
+    )
+
+    assert capped.max_iterations == 3
+    assert capped.messages == (
+        "[yellow]note[/yellow]: heavy long-running local_gpu plan detected; "
+        "capping max_iterations from 5 to 3 so accuracy-first iterations can run deeper.",
+    )
+    assert uncapped.max_iterations == 5
+    assert uncapped.messages == ()
 
 
 def test_infer_split_strategy_from_hint_text_handles_natural_language() -> None:
