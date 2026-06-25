@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kagglebot.autopilot_state import _load_run_state, _save_run_state, _write_iteration_state_marker
+from kagglebot.autopilot_state import (
+    _load_run_state,
+    _load_submitted_iteration_tracking_score,
+    _save_run_state,
+    _write_iteration_state_marker,
+)
+from kagglebot.solver.evaluate import EvaluationResult
 
 
 def test_load_run_state_defaults_for_missing_invalid_or_non_object_state(tmp_path: Path) -> None:
@@ -70,3 +76,32 @@ def test_write_iteration_state_marker_writes_json_object(tmp_path: Path) -> None
     assert payload["submission_exists"] is True
     assert payload["submit_phase_finished"] is True
     assert payload["readiness_score"] == 0.42
+
+
+def test_load_submitted_iteration_tracking_score_ignores_non_finite_submission_score(tmp_path: Path) -> None:
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(json.dumps({"submission_score": "inf"}), encoding="utf-8")
+
+    def load_kernel_metrics(path: Path, direction: str, target_metric: str) -> EvaluationResult:
+        assert path == metrics_path
+        assert direction == "minimize"
+        assert target_metric == "rmse"
+        return EvaluationResult(
+            score_source="cv",
+            metric="rmse",
+            direction="minimize",
+            value=0.37,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+
+    score = _load_submitted_iteration_tracking_score(
+        metrics_path=metrics_path,
+        metric_direction="minimize",
+        target_metric="rmse",
+        load_kernel_metrics=load_kernel_metrics,
+    )
+
+    assert score == 0.37

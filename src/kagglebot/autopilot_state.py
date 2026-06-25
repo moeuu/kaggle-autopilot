@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
-from kagglebot.autopilot_helpers import _to_float, _to_int, _update_best_score
 from kagglebot.json_utils import load_json_object as _load_json_object
 from kagglebot.json_utils import write_json_object
+from kagglebot.scalar_utils import parse_finite_float, parse_int
+from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 if TYPE_CHECKING:
@@ -205,7 +206,7 @@ def _resume_best_submitted_offline_score(
         )
         if submitted_score is None:
             continue
-        if _update_best_score(best_score, submitted_score, metric_direction, 0.0):
+        if should_update_best_score(best_score, submitted_score, metric_direction, 0.0):
             best_score = submitted_score
     return best_score
 
@@ -241,7 +242,7 @@ def _resume_best_submittable_iteration_state(
         evaluation = load_kernel_metrics(metrics_path, metric_direction, target_metric)
         if evaluation is None or (not iteration_metrics_allow_submit(metrics_path, evaluation)):
             continue
-        if _update_best_score(best_score, evaluation.value, metric_direction, 0.0):
+        if should_update_best_score(best_score, evaluation.value, metric_direction, 0.0):
             best_score = evaluation.value
             best_submission = submission_path
     return best_score, best_submission
@@ -335,7 +336,7 @@ def _resume_iteration_state(
             continue
         if best_submission is None:
             best_submission = submission_path
-        if best_score is None or _update_best_score(best_score, evaluation.value, metric_direction, 0.0):
+        if best_score is None or should_update_best_score(best_score, evaluation.value, metric_direction, 0.0):
             best_score = evaluation.value
             best_submission = submission_path
     if not completed_iters:
@@ -604,3 +605,11 @@ def _load_submit_fingerprints(run_dir: Path) -> list[str]:
 
 def _load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
     return _submit_attempts.load_latest_submit_attempt(run_dir)
+
+
+def _to_float(value: object) -> float | None:
+    return parse_finite_float(value, allow_commas=True)
+
+
+def _to_int(value: object) -> int | None:
+    return parse_int(value, allow_commas=True, allow_float=True, require_integral_float=False)
