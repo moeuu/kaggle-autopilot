@@ -21,7 +21,6 @@ from kagglebot.kernel_package_files import (
     sync_plan_snapshot,
 )
 from kagglebot.kernel_runner import (
-    _ensure_training_progress_shim,
     _LocalKernelLogFilterState,
     _run_local_kernel_once,
     _should_suppress_local_kernel_log_line,
@@ -31,6 +30,12 @@ from kagglebot.kernel_runner import (
     run_submit_kernel,
 )
 from kagglebot.local_kernel_progress import build_local_kernel_progress_tracker
+from kagglebot.local_kernel_shims import (
+    ensure_training_progress_shim,
+    inject_kaggle_working_redirect_shim,
+    inject_lgbm_gpu_guard_shim,
+    inject_transformers_eval_strategy_shim,
+)
 
 pytestmark = pytest.mark.slow
 
@@ -1194,14 +1199,12 @@ def test_inject_device_coerce_shim(tmp_path: Path) -> None:
 
 
 def test_inject_local_runtime_shims(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
 
-    kernel_runner._inject_kaggle_working_redirect_shim(kernel_dir)
-    kernel_runner._inject_lgbm_gpu_guard_shim(kernel_dir)
+    inject_kaggle_working_redirect_shim(kernel_dir)
+    inject_lgbm_gpu_guard_shim(kernel_dir)
 
     site_path = kernel_dir / "sitecustomize.py"
     assert site_path.exists()
@@ -1211,13 +1214,11 @@ def test_inject_local_runtime_shims(tmp_path: Path) -> None:
 
 
 def test_inject_transformers_eval_strategy_shim(tmp_path: Path) -> None:
-    from kagglebot import kernel_runner
-
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
 
-    kernel_runner._inject_transformers_eval_strategy_shim(kernel_dir)
+    inject_transformers_eval_strategy_shim(kernel_dir)
 
     site_path = kernel_dir / "sitecustomize.py"
     assert site_path.exists()
@@ -2746,4 +2747,4 @@ def test_ensure_training_progress_shim_requires_marker(tmp_path: Path) -> None:
     site_path.write_text("# no marker\n", encoding="utf-8")
 
     with pytest.raises(KernelFailedError, match="mandatory progress logging"):
-        _ensure_training_progress_shim(kernel_dir)
+        ensure_training_progress_shim(kernel_dir)

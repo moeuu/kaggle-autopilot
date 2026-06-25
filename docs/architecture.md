@@ -236,7 +236,7 @@ The next high-value modernization work is:
    now in `local_kernel_aux_inputs.py`; kernel package source/runtime/external-file staging is now in
    `kernel_package_files.py`; local-module inlining for packaged kernels is now in `kernel_module_inliner.py`;
    zero-overlap drift guard generation is now in `local_kernel_drift_guard.py`; kernel bootstrap/env injection is now
-   in `kernel_bootstrap.py`;
+   in `kernel_bootstrap.py`; local runtime shim injection is now in `local_kernel_shims.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema

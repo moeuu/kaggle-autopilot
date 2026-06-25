@@ -33,6 +33,7 @@ from kagglebot import local_kernel_duration as _local_kernel_duration
 from kagglebot import local_kernel_limits as _local_kernel_limits
 from kagglebot import local_kernel_models as _local_kernel_models
 from kagglebot import local_kernel_progress as _local_kernel_progress
+from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
 from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot.compute import detect_local_gpu
@@ -84,11 +85,6 @@ _OBJECT_COERCE_SHIM_MARKER = "# kagglebot: object-coerce-shim"
 _DEVICE_COERCE_FILENAME = "device_coerce.json"
 _DEVICE_COERCE_SHIM_MARKER = "# kagglebot: device-coerce-shim"
 _ZERO_OVERLAP_DRIFT_SHIM_MARKER = "# kagglebot: zero-overlap-drift-shim"
-_KAGGLE_WORKING_REDIRECT_SHIM_MARKER = "# kagglebot: kaggle-working-redirect-shim"
-_LGBM_GPU_GUARD_SHIM_MARKER = "# kagglebot: lgbm-gpu-guard-shim"
-_TORCH_RUNTIME_GUARD_SHIM_MARKER = "# kagglebot: torch-runtime-guard-shim"
-_TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
-_TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER = "# kagglebot: transformers-eval-strategy-shim"
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_KERNEL_MEMORY_POLL_INTERVAL_SEC = 1.0
 _LOCAL_KERNEL_STDOUT_POLL_INTERVAL_SEC = 0.2
@@ -1071,7 +1067,7 @@ class KernelPackageBuilder:
         _inject_object_coerce_shim(kernel_dir, context_dir)
         _inject_device_coerce_shim(kernel_dir, context_dir)
         _inject_training_progress_shim(kernel_dir)
-        _inject_transformers_eval_strategy_shim(kernel_dir)
+        _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_dir)
         _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
             base_dir=config.base_dir,
             slug=config.slug,
@@ -1080,7 +1076,7 @@ class KernelPackageBuilder:
         _inject_zero_overlap_drift_shim(kernel_dir, context_dir)
         _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
         _kernel_bootstrap.inject_force_train_env(kernel_dir)
-        _ensure_training_progress_shim(kernel_dir)
+        _local_kernel_shims.ensure_training_progress_shim(kernel_dir)
         ensure_kernel_sources_valid(kernel_dir)
         _kernel_metadata.write_kernel_metadata(
             kernel_dir=kernel_dir,
@@ -1172,7 +1168,7 @@ class KernelSubmitPackageBuilder:
             _inject_object_coerce_shim(kernel_dir, context_dir)
             _inject_device_coerce_shim(kernel_dir, context_dir)
             _inject_training_progress_shim(kernel_dir)
-            _inject_transformers_eval_strategy_shim(kernel_dir)
+            _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_dir)
             _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
                 base_dir=config.base_dir,
                 slug=config.slug,
@@ -1558,16 +1554,16 @@ def run_kernel_local(
     _inject_column_fill_shim(kernel_stage_dir, context_dir)
     _inject_object_coerce_shim(kernel_stage_dir, context_dir)
     _inject_device_coerce_shim(kernel_stage_dir, context_dir)
-    _inject_kaggle_working_redirect_shim(kernel_stage_dir)
-    _inject_lgbm_gpu_guard_shim(kernel_stage_dir)
-    _inject_torch_runtime_guard_shim(kernel_stage_dir)
+    _local_kernel_shims.inject_kaggle_working_redirect_shim(kernel_stage_dir)
+    _local_kernel_shims.inject_lgbm_gpu_guard_shim(kernel_stage_dir)
+    _local_kernel_shims.inject_torch_runtime_guard_shim(kernel_stage_dir)
     _inject_training_progress_shim(kernel_stage_dir)
-    _inject_transformers_eval_strategy_shim(kernel_stage_dir)
+    _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_stage_dir)
     _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
     _inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
     _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
     _kernel_bootstrap.inject_force_train_env(kernel_stage_dir)
-    _ensure_training_progress_shim(kernel_stage_dir)
+    _local_kernel_shims.ensure_training_progress_shim(kernel_stage_dir)
     ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
     local_aux_env, local_aux_notes = _local_kernel_aux_inputs.stage_local_kernel_aux_inputs(
         base_dir=base_dir,
@@ -2495,200 +2491,12 @@ def _inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
     site_path.write_text("\n".join(shim), encoding="utf-8")
 
 
-def _inject_kaggle_working_redirect_shim(kernel_dir: Path) -> None:
-    site_path = kernel_dir / "sitecustomize.py"
-    shim = [
-        _KAGGLE_WORKING_REDIRECT_SHIM_MARKER,
-        "import builtins",
-        "import io",
-        "import os",
-        "from pathlib import Path",
-        "",
-        "def _kb_local_kernel_mode() -> bool:",
-        "    value = str(os.environ.get('KAGGLEBOT_LOCAL_KERNEL', '0')).strip().lower()",
-        "    return value in {'1', 'true', 'yes', 'on'}",
-        "",
-        "def _kb_redirect_root() -> Path | None:",
-        "    root = str(os.environ.get('KAGGLEBOT_LOCAL_WORKING_DIR', '')).strip()",
-        "    if not root:",
-        "        return None",
-        "    return Path(root)",
-        "",
-        "def _kb_remap_path(path_value):",
-        "    try:",
-        "        raw = os.fspath(path_value)",
-        "    except Exception:",
-        "        return path_value",
-        "    if not isinstance(raw, str):",
-        "        return path_value",
-        "    if raw == '/kaggle/working':",
-        "        root = _kb_redirect_root()",
-        "        return str(root) if root is not None else path_value",
-        "    if raw.startswith('/kaggle/working/'):",
-        "        root = _kb_redirect_root()",
-        "        if root is None:",
-        "            return path_value",
-        "        suffix = raw[len('/kaggle/working/'):].lstrip('/')",
-        "        return str(root / suffix)",
-        "    return path_value",
-        "",
-        "def _kb_prepare_parent(path_value, mode: str) -> None:",
-        "    if not any(flag in mode for flag in ('w', 'a', 'x', '+')):",
-        "        return",
-        "    try:",
-        "        parent = Path(os.fspath(path_value)).parent",
-        "        parent.mkdir(parents=True, exist_ok=True)",
-        "    except Exception:",
-        "        return",
-        "",
-        "def _kb_patch_open_redirect() -> None:",
-        "    if not _kb_local_kernel_mode():",
-        "        return",
-        "    _orig_builtin_open = builtins.open",
-        "    _orig_io_open = io.open",
-        "",
-        "    def _open_builtin(file, mode='r', *args, **kwargs):",
-        "        mapped = _kb_remap_path(file)",
-        "        _kb_prepare_parent(mapped, mode)",
-        "        return _orig_builtin_open(mapped, mode, *args, **kwargs)",
-        "",
-        "    def _open_io(file, mode='r', *args, **kwargs):",
-        "        mapped = _kb_remap_path(file)",
-        "        _kb_prepare_parent(mapped, mode)",
-        "        return _orig_io_open(mapped, mode, *args, **kwargs)",
-        "",
-        "    builtins.open = _open_builtin",
-        "    io.open = _open_io",
-        "",
-        "_kb_patch_open_redirect()",
-        "",
-    ]
-    if site_path.exists():
-        text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _KAGGLE_WORKING_REDIRECT_SHIM_MARKER in text:
-            return
-        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
-        return
-    site_path.write_text("\n".join(shim), encoding="utf-8")
-
-
-def _inject_lgbm_gpu_guard_shim(kernel_dir: Path) -> None:
-    site_path = kernel_dir / "sitecustomize.py"
-    shim = [
-        _LGBM_GPU_GUARD_SHIM_MARKER,
-        "import os",
-        "",
-        "def _kb_disable_lgbm_gpu_enabled() -> bool:",
-        "    value = str(os.environ.get('KAGGLEBOT_DISABLE_LGBM_GPU', '0')).strip().lower()",
-        "    return value in {'1', 'true', 'yes', 'on'}",
-        "",
-        "def _kb_patch_lgbm_gpu_guard() -> None:",
-        "    if not _kb_disable_lgbm_gpu_enabled():",
-        "        return",
-        "    try:",
-        "        import lightgbm as _lgb",
-        "    except Exception:",
-        "        return",
-        "",
-        "    def _force_cpu(estimator) -> None:",
-        "        for key in ('device', 'device_type'):",
-        "            try:",
-        "                estimator.set_params(**{key: 'cpu'})",
-        "            except Exception:",
-        "                continue",
-        "",
-        "    targets = ('LGBMModel', 'LGBMRegressor', 'LGBMClassifier', 'LGBMRanker')",
-        "    for cls_name in targets:",
-        "        cls = getattr(_lgb, cls_name, None)",
-        "        if cls is None:",
-        "            continue",
-        "        fit = getattr(cls, 'fit', None)",
-        "        if fit is None or not callable(fit) or getattr(fit, '__kb_lgbm_cpu_wrapped__', False):",
-        "            continue",
-        "        def _wrapped(self, *args, _fit=fit, **kwargs):",
-        "            _force_cpu(self)",
-        "            return _fit(self, *args, **kwargs)",
-        "        _wrapped.__kb_lgbm_cpu_wrapped__ = True",
-        "        setattr(cls, 'fit', _wrapped)",
-        "",
-        "    train_fn = getattr(_lgb, 'train', None)",
-        "    if callable(train_fn) and not getattr(train_fn, '__kb_lgbm_cpu_wrapped__', False):",
-        "        def _train(params, *args, _train=train_fn, **kwargs):",
-        "            if isinstance(params, dict):",
-        "                updated = dict(params)",
-        "                updated['device'] = 'cpu'",
-        "                updated['device_type'] = 'cpu'",
-        "                params = updated",
-        "            return _train(params, *args, **kwargs)",
-        "        _train.__kb_lgbm_cpu_wrapped__ = True",
-        "        _lgb.train = _train",
-        "",
-        "_kb_patch_lgbm_gpu_guard()",
-        "",
-    ]
-    if site_path.exists():
-        text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _LGBM_GPU_GUARD_SHIM_MARKER in text:
-            return
-        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
-        return
-    site_path.write_text("\n".join(shim), encoding="utf-8")
-
-
-def _inject_torch_runtime_guard_shim(kernel_dir: Path) -> None:
-    site_path = kernel_dir / "sitecustomize.py"
-    shim = [
-        _TORCH_RUNTIME_GUARD_SHIM_MARKER,
-        "import os",
-        "",
-        "def _kb_local_kernel_mode() -> bool:",
-        "    value = str(os.environ.get('KAGGLEBOT_LOCAL_KERNEL', '0')).strip().lower()",
-        "    return value in {'1', 'true', 'yes', 'on'}",
-        "",
-        "def _kb_patch_torch_runtime_guard() -> None:",
-        "    if not _kb_local_kernel_mode():",
-        "        return",
-        "    target_nofile = str(os.environ.get('KAGGLEBOT_LOCAL_NOFILE', '')).strip()",
-        "    if target_nofile:",
-        "        try:",
-        "            import resource",
-        "            desired = max(256, int(target_nofile))",
-        "            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)",
-        "            hard_cap = desired if hard is None or int(hard) < 0 else int(hard)",
-        "            new_soft = min(max(int(soft), desired), hard_cap)",
-        "            if new_soft > int(soft):",
-        "                resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))",
-        "        except Exception:",
-        "            pass",
-        "    strategy = str(os.environ.get('KAGGLEBOT_TORCH_SHARING_STRATEGY', '')).strip()",
-        "    if strategy:",
-        "        try:",
-        "            import torch.multiprocessing as _kb_tmp",
-        "            getter = getattr(_kb_tmp, 'get_sharing_strategy', None)",
-        "            current = getter() if callable(getter) else None",
-        "            if current != strategy:",
-        "                _kb_tmp.set_sharing_strategy(strategy)",
-        "        except Exception:",
-        "            pass",
-        "",
-        "_kb_patch_torch_runtime_guard()",
-        "",
-    ]
-    if site_path.exists():
-        text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _TORCH_RUNTIME_GUARD_SHIM_MARKER in text:
-            return
-        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
-        return
-    site_path.write_text("\n".join(shim), encoding="utf-8")
-
-
 def _inject_training_progress_shim(kernel_dir: Path) -> None:
     site_path = kernel_dir / "sitecustomize.py"
     shim = (
         (
             f"""
-{_TRAIN_PROGRESS_SHIM_MARKER}
+{_local_kernel_shims.TRAIN_PROGRESS_SHIM_MARKER}
 import importlib
 import os
 import threading
@@ -2944,67 +2752,11 @@ _kb_patch_training_progress()
     )
     if site_path.exists():
         text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _TRAIN_PROGRESS_SHIM_MARKER in text:
+        if _local_kernel_shims.TRAIN_PROGRESS_SHIM_MARKER in text:
             return
         site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
         return
     site_path.write_text("\n".join(shim), encoding="utf-8")
-
-
-def _inject_transformers_eval_strategy_shim(kernel_dir: Path) -> None:
-    """Patch transformers API drift for Seq2SeqTrainingArguments eval strategy naming."""
-    site_path = kernel_dir / "sitecustomize.py"
-    shim = [
-        _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER,
-        "import inspect",
-        "",
-        "def _kb_patch_transformers_eval_strategy_alias() -> None:",
-        "    try:",
-        "        import transformers as _tf",
-        "    except Exception:",
-        "        return",
-        "    args_cls = getattr(_tf, 'Seq2SeqTrainingArguments', None)",
-        "    if args_cls is None:",
-        "        return",
-        "    try:",
-        "        params = inspect.signature(args_cls.__init__).parameters",
-        "    except Exception:",
-        "        return",
-        "    if 'evaluation_strategy' in params:",
-        "        return",
-        "    if 'eval_strategy' not in params:",
-        "        return",
-        "    _orig_init = args_cls.__init__",
-        "    def _patched_init(self, *args, **kwargs):",
-        "        if 'evaluation_strategy' in kwargs and 'eval_strategy' not in kwargs:",
-        "            kwargs['eval_strategy'] = kwargs.pop('evaluation_strategy')",
-        "        return _orig_init(self, *args, **kwargs)",
-        "    args_cls.__init__ = _patched_init",
-        "",
-        "_kb_patch_transformers_eval_strategy_alias()",
-        "",
-    ]
-    if site_path.exists():
-        text = site_path.read_text(encoding="utf-8", errors="ignore")
-        if _TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER in text:
-            return
-        site_path.write_text(text.rstrip("\n") + "\n\n" + "\n".join(shim), encoding="utf-8")
-        return
-    site_path.write_text("\n".join(shim), encoding="utf-8")
-
-
-def _ensure_training_progress_shim(kernel_dir: Path) -> None:
-    site_path = kernel_dir / "sitecustomize.py"
-    if not site_path.exists():
-        raise KernelFailedError(
-            f"Training progress shim missing: {site_path}. Refusing to run a kernel without mandatory progress logging."
-        )
-    text = site_path.read_text(encoding="utf-8", errors="ignore")
-    if _TRAIN_PROGRESS_SHIM_MARKER not in text:
-        raise KernelFailedError(
-            f"Training progress shim marker not found in {site_path}. "
-            "Refusing to run a kernel without mandatory progress logging."
-        )
 
 
 LOG_POLL_INTERVAL = 2.0
