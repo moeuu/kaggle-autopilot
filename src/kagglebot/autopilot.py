@@ -262,11 +262,6 @@ _is_severe_regression_vs_best = _score_progress.is_severe_regression_vs_best
 _is_conservative_feature_collapse = _score_progress.is_conservative_feature_collapse
 _effective_best_score_for_progress = _score_progress.effective_best_score_for_progress
 _should_update_best_accuracy_candidate = _score_progress.should_update_best_accuracy_candidate
-_BEST_KERNEL_SNAPSHOT_FILENAME = _kernel_snapshot.BEST_KERNEL_SNAPSHOT_FILENAME
-_best_kernel_snapshot_path = _kernel_snapshot.best_kernel_snapshot_path
-_capture_best_kernel_snapshot = _kernel_snapshot.capture_best_kernel_snapshot
-_ensure_best_kernel_snapshot = _kernel_snapshot.ensure_best_kernel_snapshot
-_restore_best_kernel_snapshot = _kernel_snapshot.restore_best_kernel_snapshot
 _maybe_write_column_fill = _runtime_fixes.maybe_write_column_fill
 _maybe_write_object_coerce = _runtime_fixes.maybe_write_object_coerce
 _maybe_write_device_coerce = _runtime_fixes.maybe_write_device_coerce
@@ -740,7 +735,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         status="running",
     )
     _write_json_object(run_dir / "run.json", run_payload)
-    _ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
+    _kernel_snapshot.ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
     record_run(
         knowledge_paths=config.knowledge_paths,
@@ -2962,11 +2957,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 best_score = decision_score
                 best_submission = submission_path
                 no_improve_streak = 0
-                _capture_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
+                _kernel_snapshot.capture_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
             else:
                 no_improve_streak += 1
                 if conservative_regression_detected:
-                    restored = _restore_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
+                    restored = _kernel_snapshot.restore_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
                     if restored:
                         print(
                             "[yellow]kernel regression guard[/yellow]: "
