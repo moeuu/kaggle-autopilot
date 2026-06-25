@@ -46,6 +46,9 @@ from kagglebot.agents.identity import (
 )
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot_state import (
+    _build_run_payload as _state_build_run_payload,
+)
+from kagglebot.autopilot_state import (
     _copy_kernel_support_artifacts_to_iteration_dir,
     _copy_submission_artifact_to_iteration_dir,
     _has_successful_submit_attempt,
@@ -593,7 +596,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     target_metric = resolved["target_metric"]
     target_score = resolved["target_score"]
     if target_metric is None or target_score is None:
-        run_payload = _build_run_payload(
+        run_payload = _state_build_run_payload(
             run_id=run_id,
             config=config,
             resolved=resolved,
@@ -643,7 +646,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
     _watch_state.update_watch_phase(config, run_id, "initializing_iterations")
-    run_payload = _build_run_payload(
+    run_payload = _state_build_run_payload(
         run_id=run_id,
         config=config,
         resolved=resolved,
@@ -3441,78 +3444,6 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         "rank_force_major_max_percentile": rank_force_major_max_percentile,
         "rank_force_major_min_teams": rank_force_major_min_teams,
         "evaluation_contract": evaluation_contract,
-    }
-
-
-def _build_run_payload(
-    *,
-    run_id: str,
-    config: AutopilotConfig,
-    resolved: dict[str, object],
-    status: str,
-) -> dict[str, object]:
-    return {
-        "run_id": run_id,
-        "slug": config.slug,
-        "started_at": datetime.now(UTC).isoformat(),
-        "status": status,
-        "config": {
-            "agent": config.agent,
-            "compute": config.compute,
-            "accelerator": config.accelerator,
-            "deliverable_mode": resolved.get("deliverable_mode"),
-            "submit_mode": resolved.get("submit_mode"),
-            "code_competition": resolved.get("code_competition"),
-            "notebook_submit_artifact_mode": resolved.get("notebook_submit_artifact_mode"),
-            "target_medal": resolved.get("target_medal"),
-            "target_rank_percentile": resolved.get("target_rank_percentile"),
-            "campaign_mode": resolved.get("campaign_mode"),
-            "method_scout": config.method_scout,
-            "research_scout": resolved.get("research_scout"),
-            "method_scout_max_sources": config.method_scout_max_sources,
-            "validation_lab": resolved.get("validation_lab"),
-            "portfolio_execution": resolved.get("portfolio_execution"),
-            "candidate_budget_min": config.candidate_budget_min,
-            "max_candidates_per_iteration": config.max_candidates_per_iteration,
-            "top1_exhaustive": resolved.get("top1_exhaustive"),
-            "top1_submit_policy": resolved.get("top1_submit_policy"),
-            "kaggle_username": config.kaggle_username,
-            "kernel_name": resolved.get("kernel_name"),
-            "internet": resolved.get("internet"),
-            "score_source": resolved.get("score_source"),
-            "holdout_frac": resolved.get("holdout_frac"),
-            "cv_folds": resolved.get("cv_folds"),
-            "split_strategy": resolved.get("split_strategy"),
-            "target_metric": resolved.get("target_metric"),
-            "target_score": resolved.get("target_score"),
-            "target_direction": resolved.get("target_direction"),
-            "max_iterations": resolved.get("max_iterations"),
-            "max_total_min": resolved.get("max_total_min"),
-            "patience": resolved.get("patience"),
-            "min_improvement": resolved.get("min_improvement"),
-            "time_budget_min": resolved.get("time_budget_min"),
-            "seed": resolved.get("seed"),
-            "eval_seeds": resolved.get("eval_seeds"),
-            "eval_repeats": resolved.get("eval_repeats"),
-            "submit_policy": resolved.get("submit_policy"),
-            "submission_gate": resolved.get("submission_gate"),
-            "submission_limit_per_day": resolved.get("submission_limit_per_day"),
-            "readiness_target_score": resolved.get("readiness_target_score"),
-            "readiness_method": resolved.get("readiness_method"),
-            "readiness_k": resolved.get("readiness_k"),
-            "ci_method": resolved.get("ci_method"),
-            "ci_alpha": resolved.get("ci_alpha"),
-            "drift_check": resolved.get("drift_check"),
-            "drift_weight": resolved.get("drift_weight"),
-            "stop_min_delta": resolved.get("stop_min_delta"),
-            "stop_no_improve_patience": resolved.get("stop_no_improve_patience"),
-            "stop_same_config_patience": resolved.get("stop_same_config_patience"),
-            "rank_force_major_max_percentile": resolved.get("rank_force_major_max_percentile"),
-            "rank_force_major_min_teams": resolved.get("rank_force_major_min_teams"),
-            "evaluation_contract": resolved.get("evaluation_contract"),
-            "submit": config.submit,
-            "message": config.message,
-        },
     }
 
 

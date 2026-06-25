@@ -2,14 +2,53 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from kagglebot.autopilot_state import (
+    _build_run_payload,
     _load_run_state,
     _load_submitted_iteration_tracking_score,
     _save_run_state,
     _write_iteration_state_marker,
 )
 from kagglebot.solver.evaluate import EvaluationResult
+
+
+def test_build_run_payload_records_config_and_resolved_state() -> None:
+    config = SimpleNamespace(
+        slug="demo",
+        agent="codex",
+        compute="local_gpu",
+        accelerator="gpu",
+        method_scout="auto",
+        method_scout_max_sources=12,
+        candidate_budget_min=20,
+        max_candidates_per_iteration=3,
+        kaggle_username="user",
+        submit=True,
+        message="submit message",
+    )
+    resolved = {
+        "deliverable_mode": "leaderboard",
+        "submit_mode": "file",
+        "target_metric": "rmse",
+        "target_score": 0.5,
+        "target_direction": "minimize",
+        "max_iterations": 5,
+        "evaluation_contract": {"metric_name": "rmse"},
+    }
+
+    payload = _build_run_payload(run_id="run-1", config=config, resolved=resolved, status="running")
+
+    assert payload["run_id"] == "run-1"
+    assert payload["slug"] == "demo"
+    assert payload["status"] == "running"
+    assert payload["started_at"]
+    assert payload["config"]["compute"] == "local_gpu"
+    assert payload["config"]["target_metric"] == "rmse"
+    assert payload["config"]["target_score"] == 0.5
+    assert payload["config"]["submit"] is True
+    assert payload["config"]["evaluation_contract"] == {"metric_name": "rmse"}
 
 
 def test_load_run_state_defaults_for_missing_invalid_or_non_object_state(tmp_path: Path) -> None:
