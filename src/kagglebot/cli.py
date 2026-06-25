@@ -19,17 +19,21 @@ from kagglebot.compute import Compute, resolve_accelerator
 from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import RulesNotAcceptedError, SubmitAbortedError
+from kagglebot.experiment_graph import normalize_portfolio_execution
 from kagglebot.hardware import resolve_hardware_profile
 from kagglebot.history import new_run_id
 from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import knowledge_search, knowledge_show
+from kagglebot.method_scout import normalize_method_scout_mode, normalize_research_scout_mode
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
 from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once, run_watch_self_improvement
+from kagglebot.top1_exhaustive import normalize_top1_submit_policy
+from kagglebot.validation_lab import normalize_validation_lab_mode
 from kagglebot.verify_artifacts import run_verify
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
@@ -535,35 +539,27 @@ def autopilot(
         normalized_campaign_mode = normalize_campaign_mode(campaign_mode, deliverable_mode="leaderboard")
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--campaign-mode") from exc
-    normalized_method_scout = method_scout.strip().lower()
-    if normalized_method_scout not in {"auto", "off", "refresh"}:
-        raise typer.BadParameter(
-            "Invalid --method-scout. Allowed values: auto, off, refresh.",
-            param_hint="--method-scout",
-        )
-    normalized_research_scout = research_scout.strip().lower()
-    if normalized_research_scout not in {"auto", "off", "refresh"}:
-        raise typer.BadParameter(
-            "Invalid --research-scout. Allowed values: auto, off, refresh.",
-            param_hint="--research-scout",
-        )
+    try:
+        normalized_method_scout = normalize_method_scout_mode(method_scout)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--method-scout") from exc
+    try:
+        normalized_research_scout = normalize_research_scout_mode(research_scout)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--research-scout") from exc
     if method_scout_max_sources <= 0:
         raise typer.BadParameter(
             "--method-scout-max-sources must be positive.",
             param_hint="--method-scout-max-sources",
         )
-    normalized_portfolio_execution = portfolio_execution.strip().lower()
-    if normalized_portfolio_execution not in {"off", "serial", "parallel", "budgeted"}:
-        raise typer.BadParameter(
-            "Invalid --portfolio-execution. Allowed values: off, serial, parallel, budgeted.",
-            param_hint="--portfolio-execution",
-        )
-    normalized_validation_lab = validation_lab.strip().lower()
-    if normalized_validation_lab not in {"auto", "off", "force"}:
-        raise typer.BadParameter(
-            "Invalid --validation-lab. Allowed values: auto, off, force.",
-            param_hint="--validation-lab",
-        )
+    try:
+        normalized_portfolio_execution = normalize_portfolio_execution(portfolio_execution)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--portfolio-execution") from exc
+    try:
+        normalized_validation_lab = normalize_validation_lab_mode(validation_lab)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--validation-lab") from exc
     if candidate_budget_min is not None and candidate_budget_min <= 0:
         raise typer.BadParameter("--candidate-budget must be positive.", param_hint="--candidate-budget")
     if max_candidates_per_iteration is not None and max_candidates_per_iteration <= 0:
@@ -571,12 +567,10 @@ def autopilot(
             "--max-candidates-per-iteration must be positive.",
             param_hint="--max-candidates-per-iteration",
         )
-    normalized_top1_submit_policy = top1_submit_policy.strip().lower()
-    if normalized_top1_submit_policy not in {"value_only", "calibration", "final_lock"}:
-        raise typer.BadParameter(
-            "Invalid --top1-submit-policy. Allowed values: value_only, calibration, final_lock.",
-            param_hint="--top1-submit-policy",
-        )
+    try:
+        normalized_top1_submit_policy = normalize_top1_submit_policy(top1_submit_policy)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--top1-submit-policy") from exc
     if top1_exhaustive:
         normalized_campaign_mode = "top1"
         if normalized_method_scout == "auto":
@@ -732,12 +726,10 @@ def watch(
         raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
     if self_improvement_publish and not self_improvement_codex:
         raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
-    normalized_top1_submit_policy = top1_submit_policy.strip().lower()
-    if normalized_top1_submit_policy not in {"value_only", "calibration", "final_lock"}:
-        raise typer.BadParameter(
-            "Invalid --top1-submit-policy. Allowed values: value_only, calibration, final_lock.",
-            param_hint="--top1-submit-policy",
-        )
+    try:
+        normalized_top1_submit_policy = normalize_top1_submit_policy(top1_submit_policy)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--top1-submit-policy") from exc
     try:
         resolve_hardware_profile(hardware_profile, compute=compute.value)
     except ValueError as exc:

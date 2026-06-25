@@ -263,6 +263,37 @@ def test_autopilot_cli_accepts_portfolio_execution_mode(monkeypatch, tmp_path: P
     assert captured["portfolio_execution"] == "parallel"
 
 
+def test_autopilot_cli_uses_shared_portfolio_execution_aliases(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("kagglebot.cli.bootstrap_competition", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.cli.run_autopilot",
+        lambda config: captured.update(portfolio_execution=config.portfolio_execution),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--workdir",
+            str(tmp_path),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "autopilot",
+            "playground-series-s6e2",
+            "--compute",
+            "local_gpu",
+            "--portfolio-execution",
+            "budget",
+            "--no-auto-eval-spec",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["portfolio_execution"] == "budgeted"
+
+
 def test_autopilot_cli_top1_exhaustive_applies_safe_defaults(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     captured: dict[str, object] = {}

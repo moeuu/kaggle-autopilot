@@ -63,6 +63,8 @@ Offline score-source normalization and trust checks live in `src/kagglebot/score
 the loop should consume normalized policy answers rather than own every parsing rule inline.
 Campaign mode normalization lives in `src/kagglebot/campaign.py`; CLI commands and the loop share the same aliases and
 validation instead of keeping separate option parsers.
+Method-scout, research-scout, portfolio-execution, validation-lab, and top1-submit policy normalization similarly stay
+in their owning modules; CLI commands translate their policy errors into parameter errors.
 Verify command execution support, external artifact mirroring for pytest verification, pytest environment isolation, and
 competition-specific verify compatibility shims live in `src/kagglebot/verify_artifacts.py`; `autopilot.py` only invokes
 that module from the verify step.
