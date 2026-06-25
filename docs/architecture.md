@@ -61,9 +61,10 @@ Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the 
 instead of carrying private rule-parsing aliases in `autopilot.py`.
 Offline score-source normalization and trust checks live in `src/kagglebot/score_sources.py` for the same reason:
 the loop should consume normalized policy answers rather than own every parsing rule inline.
-Split-strategy policy and competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps
-plan resolution moving toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still
-being retired incrementally.
+Split-strategy policy, evaluation seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and
+competition-specific evaluation overrides live in `src/kagglebot/plan_policy.py`. This keeps plan resolution moving
+toward a set of small policy functions while the larger `_resolve_plan` orchestrator is still being retired
+incrementally.
 Submit-gate normalization, target/top1 checks, quality reason soft overrides, daily-limit row counting, and slot spacing live in
 `src/kagglebot/submission_policy.py`, leaving Kaggle API quota lookup and ledger side effects in the orchestration layer.
 Explicit submit decision objects such as `QualitySubmitOverrideDecision`, `InitialSubmitProbeDecision`, and

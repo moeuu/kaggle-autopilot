@@ -856,8 +856,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     cv_folds = int(resolved["cv_folds"])
     split_strategy = str(resolved.get("split_strategy") or "").strip().lower() or None
     seed = int(resolved["seed"])
-    eval_seeds = _normalize_eval_seeds(resolved.get("eval_seeds"), fallback=[seed])
-    eval_repeats = _normalize_eval_repeats(resolved.get("eval_repeats"), fallback=_DEFAULT_EVAL_REPEATS)
+    eval_seeds = _plan_policy.normalize_default_eval_seeds(resolved.get("eval_seeds"), fallback=[seed])
+    eval_repeats = _plan_policy.normalize_default_eval_repeats(
+        resolved.get("eval_repeats"), fallback=_DEFAULT_EVAL_REPEATS
+    )
     score_source = str(resolved["score_source"] or "cv")
     max_total_min_raw = resolved.get("max_total_min")
     max_total_min = float(max_total_min_raw) if isinstance(max_total_min_raw, (int, float)) else None
@@ -894,11 +896,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     stop_min_delta = float(resolved.get("stop_min_delta") or 0.0)
     stop_no_improve_patience = int(resolved.get("stop_no_improve_patience") or 0)
     stop_same_config_patience = int(resolved.get("stop_same_config_patience") or 0)
-    rank_force_major_max_percentile = _normalize_rank_force_percentile(
+    rank_force_major_max_percentile = _plan_policy.normalize_rank_force_percentile(
         resolved.get("rank_force_major_max_percentile"),
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
     )
-    rank_force_major_min_teams = _normalize_rank_force_min_teams(
+    rank_force_major_min_teams = _plan_policy.normalize_rank_force_min_teams(
         resolved.get("rank_force_major_min_teams"),
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
@@ -2709,7 +2711,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             loop_signal_problems: list[dict[str, object]] = []
             if orig_proba_signal is not None:
                 extra_policy_notes.append(str(orig_proba_signal["note"]))
-                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                     minimum_improvement_mode_next or "minor_tuning",
                     "moderate_update",
                 )
@@ -2731,7 +2733,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             if original_data_unused_signal is not None:
                 extra_policy_notes.append(str(original_data_unused_signal["note"]))
-                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                     minimum_improvement_mode_next or "minor_tuning",
                     "moderate_update",
                 )
@@ -2751,7 +2753,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             if pseudo_label_signal is not None:
                 extra_policy_notes.append(str(pseudo_label_signal["note"]))
-                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                     minimum_improvement_mode_next or "minor_tuning",
                     "moderate_update",
                 )
@@ -2808,7 +2810,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             if subgroup_collapse_signal is not None:
                 extra_policy_notes.append(str(subgroup_collapse_signal["note"]))
-                minimum_improvement_mode_next = _upgrade_improvement_mode(
+                minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                     minimum_improvement_mode_next or "minor_tuning",
                     "moderate_update",
                 )
@@ -2832,7 +2834,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if online_mismatch_signal is not None:
                 extra_policy_notes.append(str(online_mismatch_signal["note"]))
                 if campaign_mode == "top1" and _campaign_prefers_validation_redesign(campaign_state, method_registry):
-                    minimum_improvement_mode_next = _upgrade_improvement_mode(
+                    minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                         minimum_improvement_mode_next or "minor_tuning",
                         "validation_redesign",
                     )
@@ -2859,7 +2861,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if online_history_regression_signal is not None:
                 extra_policy_notes.append(str(online_history_regression_signal["note"]))
                 if campaign_mode == "top1" and _campaign_prefers_validation_redesign(campaign_state, method_registry):
-                    minimum_improvement_mode_next = _upgrade_improvement_mode(
+                    minimum_improvement_mode_next = _plan_policy.upgrade_improvement_mode(
                         minimum_improvement_mode_next or "minor_tuning",
                         "validation_redesign",
                     )
@@ -3472,8 +3474,8 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
     profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
     heavy_local_gpu = _is_local_gpu_compute(config.compute) and _is_heavy_deep_learning_modality(profile_modality)
     seed = choose(config.seed, plan.seed, spec_values.seed if spec_values.seed is not None else 42)
-    eval_seeds = _normalize_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
-    eval_repeats = _normalize_eval_repeats(plan.eval_repeats, fallback=spec_values.repeats)
+    eval_seeds = _plan_policy.normalize_default_eval_seeds(plan.eval_seeds, fallback=spec_eval_seeds)
+    eval_repeats = _plan_policy.normalize_default_eval_repeats(plan.eval_repeats, fallback=spec_values.repeats)
     eval_budget_decision = _plan_policy.resolve_eval_budget_policy(
         heavy_local_gpu=heavy_local_gpu,
         cv_folds=cv_folds,
@@ -3594,13 +3596,13 @@ def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object
         plan.stop_same_config_patience,
         spec_values.stop_same_config_patience if spec_values.stop_same_config_patience is not None else 0,
     )
-    rank_force_major_max_percentile = _normalize_rank_force_percentile(
+    rank_force_major_max_percentile = _plan_policy.normalize_rank_force_percentile(
         plan.rank_force_major_max_percentile,
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
     )
     if target_rank_percentile is not None:
         rank_force_major_max_percentile = min(rank_force_major_max_percentile, float(target_rank_percentile))
-    rank_force_major_min_teams = _normalize_rank_force_min_teams(
+    rank_force_major_min_teams = _plan_policy.normalize_rank_force_min_teams(
         plan.rank_force_major_min_teams,
         fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
@@ -3694,11 +3696,11 @@ def _resolved_plan(resolved: dict[str, object]) -> PlanConfig:
         stop_min_delta=float(resolved.get("stop_min_delta") or 0.0),
         stop_no_improve_patience=int(resolved.get("stop_no_improve_patience") or 0),
         stop_same_config_patience=int(resolved.get("stop_same_config_patience") or 0),
-        rank_force_major_max_percentile=_normalize_rank_force_percentile(
+        rank_force_major_max_percentile=_plan_policy.normalize_rank_force_percentile(
             resolved.get("rank_force_major_max_percentile"),
             fallback=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
         ),
-        rank_force_major_min_teams=_normalize_rank_force_min_teams(
+        rank_force_major_min_teams=_plan_policy.normalize_rank_force_min_teams(
             resolved.get("rank_force_major_min_teams"),
             fallback=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
         ),
@@ -3801,22 +3803,6 @@ def _load_evaluation_spec(paths: CompetitionPaths) -> dict[str, object]:
     )
 
 
-def _normalize_eval_seeds(value: object, *, fallback: list[int] | None = None) -> list[int]:
-    return _plan_policy.normalize_default_eval_seeds(value, fallback=fallback)
-
-
-def _normalize_eval_repeats(value: object, *, fallback: int | None = None) -> int:
-    return _plan_policy.normalize_default_eval_repeats(value, fallback=fallback)
-
-
-def _normalize_rank_force_percentile(value: object, *, fallback: float) -> float:
-    return _plan_policy.normalize_rank_force_percentile(value, fallback=fallback)
-
-
-def _normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
-    return _plan_policy.normalize_rank_force_min_teams(value, fallback=fallback)
-
-
 def _normalize_target_medal(value: object, *, default: str | None = None) -> str | None:
     return normalize_target_medal(value, default=default)
 
@@ -3828,18 +3814,6 @@ def _normalize_target_rank_percentile(
     fallback: float | None = None,
 ) -> float | None:
     return normalize_target_rank_percentile(value, medal=medal, fallback=fallback)
-
-
-def _improvement_mode_rank(mode: str) -> int:
-    return _plan_policy.improvement_mode_rank(mode)
-
-
-def _upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> str:
-    return _plan_policy.upgrade_improvement_mode(current_mode, minimum_mode)
-
-
-def _expanded_eval_seeds(*, base_seeds: list[int], repeats: int) -> list[int]:
-    return _plan_policy.expanded_default_eval_seeds(base_seeds=base_seeds, repeats=repeats)
 
 
 def _refresh_knowledge_hints(config: AutopilotConfig) -> None:
@@ -4866,7 +4840,7 @@ def _run_improvement(
         top1_score,
         evaluation.direction,
     )
-    upgraded_mode = _upgrade_improvement_mode(improvement_mode, minimum_improvement_mode)
+    upgraded_mode = _plan_policy.upgrade_improvement_mode(improvement_mode, minimum_improvement_mode)
     if upgraded_mode != improvement_mode:
         print(
             "[yellow]improve mode floor[/yellow]: "
