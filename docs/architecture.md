@@ -489,11 +489,12 @@ Recommended extraction order:
    persistence choreography after the retry loop succeeds.
    duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
-   This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects
-   behind typed submit-stage helpers.
-   Next, move the remaining `_attempt_submit` side-effect orchestration into a typed service that coordinates the
-   existing `submit_attempts`, `submit_stage`, `submit_notebook`, and `submit_failure_context` modules rather than
-   adding more private wrappers in `autopilot.py`.
+   The remaining `_attempt_submit` side-effect orchestration now lives in `submit_runner.py` behind
+   `attempt_submit_for_run`, which coordinates `submit_stage`, `submit_notebook`, `submission_service`,
+   `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. `autopilot.py` keeps
+   `_attempt_submit` as a compatibility wrapper that supplies run-specific dependencies.
+   Next, continue shrinking the compatibility wrapper surface by moving session-level submit construction to call
+   `submit_runner.py` directly where tests/extensions no longer rely on the private `_attempt_submit` symbol.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to

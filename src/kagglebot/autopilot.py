@@ -52,6 +52,7 @@ from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot import submit_notebook as _submit_notebook
 from kagglebot import submit_retry_policy as _submit_retry_policy
+from kagglebot import submit_runner as _submit_runner
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
@@ -75,16 +76,11 @@ from kagglebot.campaign import (
 )
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.exceptions import (
-    DuplicateSubmissionError,
-    KaggleCliError,
     KaggleNetworkError,
     KernelCapacityError,
     KernelFailedError,
     KernelStillRunningError,
     RulesNotAcceptedError,
-    SubmissionCliError,
-    SubmissionRateLimitError,
-    SubmissionValidationError,
     SubmitAbortedError,
 )
 from kagglebot.exec_utils import run_command
@@ -3342,215 +3338,59 @@ def _attempt_submit(
     submit_mode: str = "file",
     notebook_submit_artifact_mode: str = "wrapper",
 ) -> dict[str, object] | None:
-    if not config.submit or config.dry_run:
-        return None
-    run_dir = config.paths.run_dir(run_id)
-    submit_run_context = _submit_stage.build_submit_run_context(
-        run_dir=run_dir,
+    return _submit_runner.attempt_submit_for_run(
+        config=config,
         run_id=run_id,
-        slug=config.slug,
         submission_path=submission_path,
-        src_root=Path(__file__).resolve().parent,
-        kernel_source_dir=config.paths.kernel_source_dir,
-        knowledge_paths=config.knowledge_paths,
-        problem_types=problem_types,
-        force_submit=config.force_submit,
-        force_resubmit=_env_utils.env_truthy("KAGGLEBOT_FORCE_RESUBMIT"),
-        load_run_state=_autopilot_state.load_run_state,
-        save_run_state_for_run=_autopilot_state.save_run_state,
-        compute_submit_code_fingerprint=_submit_retry_policy.compute_submit_code_fingerprint,
-        compute_submission_sha256=_sha256_or_none,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        now_iso=lambda: datetime.now(UTC).isoformat(),
-        normalize_detail=normalize_error_text,
-        record_error_fix_insight=record_error_fix_insight,
-        on_message=print,
-        build_error=SubmitAbortedError,
-    )
-    submit_attempt_recorder = submit_run_context.submit_attempt_recorder
-    run_state = submit_run_context.run_state
-    latest_submit_attempt = submit_run_context.latest_submit_attempt
-    submit_code_fingerprint = submit_run_context.submit_code_fingerprint
-    allow_force = submit_run_context.allow_force
-    input_submission_path = submit_run_context.input_submission_path
-
-    submit_runtime_context = _submit_stage.build_submit_runtime_context(
-        slug=config.slug,
-        context_dir=config.paths.context_dir,
-        run_id=run_id,
         best_score=best_score,
-        explicit_message=config.message,
-        submission_path=input_submission_path,
-        campaign_mode=config.campaign_mode,
-        target_direction=config.target_direction,
-        data_dir=config.paths.data_dir,
-        sample_submission_path=config.paths.sample_submission_path,
-        submission_ledger_path=config.paths.submission_ledger_path,
-        dry_run=config.dry_run,
-        force_submit=config.force_submit,
-        now=lambda: datetime.now(UTC),
-        on_message=print,
-    )
-    message = submit_runtime_context.message
-    submission_service = submit_runtime_context.submission_service
-    submitted_at = submit_runtime_context.submitted_at
-
-    submit_aborter = submit_run_context.submit_aborter
-    submit_retry_recorder = submit_run_context.submit_retry_recorder
-
-    constraints = _competition_rules.load_competition_rule_constraints(config.paths)
-    prepared_preflight_context = _submit_stage.prepare_and_resolve_submit_preflight_for_run_or_abort(
-        run_dir=run_dir,
-        submission_ledger_path=config.paths.submission_ledger_path,
-        slug=config.slug,
-        run_id=run_id,
-        message=message,
-        submitted_at=submitted_at,
-        source_submission_path=submission_path,
-        input_submission_path=input_submission_path,
-        validate_and_prepare=submission_service.validate_and_prepare_submission,
-        validation_error_types=(SubmissionValidationError,),
-        validation_exit_code=SubmissionValidationError.exit_code,
-        code_fingerprint=submit_code_fingerprint,
-        allow_force=allow_force,
-        run_state=run_state,
-        latest_submit_attempt=latest_submit_attempt,
+        problem_types=problem_types,
         submit_mode=submit_mode,
-        notebook_submissions_only=constraints.notebook_submissions_only,
         notebook_submit_artifact_mode=notebook_submit_artifact_mode,
-        code_competition=infer_code_competition_from_paths(config.paths),
-        sample_submission_path=config.paths.sample_submission_path,
-        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-        load_run_state=_autopilot_state.load_run_state,
-        collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
-        decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
-        check_rules_accepted=lambda: check_rules_accepted(config.slug, dry_run=config.dry_run),
-        cli_error_types=(KaggleCliError,),
-        is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
-        rules_not_accepted_exit_code=RulesNotAcceptedError.exit_code,
-        resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
-        decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
-        decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
-        compute_error_fingerprint=compute_error_fingerprint,
-        compute_submission_sha256=_sha256_or_none,
-        submit_aborter=submit_aborter,
-        submit_attempt_recorder=submit_attempt_recorder,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        build_error=SubmitAbortedError,
-        on_message=print,
-    )
-    prepared_context = prepared_preflight_context.prepared_context
-    prepared_submission_path = prepared_context.prepared_submission_path
-    preflight_context = prepared_preflight_context.preflight_context
-    if preflight_context.duplicate_skip_result is not None:
-        return preflight_context.duplicate_skip_result
-    if preflight_context.same_submission_path_skipped:
-        return None
-    submit_stage_state = preflight_context.submit_stage_state
-    if submit_stage_state is None:
-        raise SubmitAbortedError("Submit preflight did not produce submit stage state.")
-    code_competition = preflight_context.code_competition
-    seen_fingerprints = preflight_context.seen_fingerprints
-
-    notebook_submitter = _submit_notebook.build_notebook_submit_runner_for_run(
-        slug=config.slug,
-        run_id=run_id,
-        paths=config.paths,
-        kaggle_username=config.kaggle_username,
-        kernel_name=config.kernel_name,
-        accelerator=config.accelerator,
-        strict_accelerator=config.strict_accelerator,
-        dry_run=config.dry_run,
-        timeout_minutes=config.time_budget_min,
-        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
-        resolve_kaggle_username=resolve_kaggle_username,
-        run_submit_kernel=run_submit_kernel,
-        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
-        copy_submission_artifact_to_iteration_dir=_autopilot_state.copy_submission_artifact_to_iteration_dir,
-        classify_submit_error=classify_submit_error,
-        should_retry_ambiguous=_submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
-        sleep=time.sleep,
-        on_message=print,
-    )
-
-    submit_attempt_loop_result = _submit_stage.run_submit_stage_attempts_until_success_or_abort(
-        run_dir=run_dir,
-        run_id=run_id,
-        state=submit_stage_state,
-        prepared_submission_path=prepared_submission_path,
-        message=message,
-        code_competition=code_competition,
-        max_attempts=_SUBMIT_MAX_TRANSIENT_RETRIES,
-        backoff_base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
-        sample_submission_path=config.paths.sample_submission_path,
-        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-        submit_code_fingerprint=submit_code_fingerprint,
-        run_state=run_state,
-        seen_fingerprints=seen_fingerprints,
-        run_notebook_submit=lambda current_state: notebook_submitter.submit(
-            submission_path=prepared_submission_path,
-            message=message,
-            artifact_mode=current_state.submission_artifact_mode,
+        deps=_submit_runner.SubmitRunnerDependencies(
+            load_competition_rule_constraints=_competition_rules.load_competition_rule_constraints,
+            env_truthy=_env_utils.env_truthy,
+            load_run_state=_autopilot_state.load_run_state,
+            save_run_state=_autopilot_state.save_run_state,
+            compute_submit_code_fingerprint=_submit_retry_policy.compute_submit_code_fingerprint,
+            compute_submission_sha256=_sha256_or_none,
+            now_iso=lambda: datetime.now(UTC).isoformat(),
+            now_datetime=lambda: datetime.now(UTC),
+            normalize_error_text=normalize_error_text,
+            record_error_fix_insight=record_error_fix_insight,
+            build_error=SubmitAbortedError,
+            check_rules_accepted=check_rules_accepted,
+            infer_code_competition_from_paths=infer_code_competition_from_paths,
+            collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
+            decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
+            decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
+            resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
+            decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
+            count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
+            resolve_kaggle_username=resolve_kaggle_username,
+            run_submit_kernel=run_submit_kernel,
+            run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+            copy_submission_artifact_to_iteration_dir=_autopilot_state.copy_submission_artifact_to_iteration_dir,
+            classify_submit_error=classify_submit_error,
+            should_retry_ambiguous_notebook_submit_error=(
+                _submit_failure_policy.should_retry_ambiguous_notebook_submit_error
+            ),
+            should_use_notebook_submit_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
+            compute_error_fingerprint=compute_error_fingerprint,
+            decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
+            compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
+            is_missing_kaggle_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
+            deliverable_mode=lambda paths: infer_deliverable_mode_from_paths(paths, default="leaderboard"),
+            list_competition_submissions=list_competition_submissions,
+            sleep=time.sleep,
+            on_message=print,
         ),
-        run_file_submit=lambda: submission_service.submit_prepared(
-            prepared_path=prepared_submission_path,
-            message=message,
-            run_id=run_id,
-            offline_score=best_score,
-            score_source="offline",
+        limits=_submit_runner.SubmitRunnerLimits(
+            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+            max_transient_retries=_SUBMIT_MAX_TRANSIENT_RETRIES,
+            backoff_base_sec=_SUBMIT_BACKOFF_BASE_SEC,
+            poll_max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
+            poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
+            poll_max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
         ),
-        submit_aborter=submit_aborter,
-        submit_attempt_recorder=submit_attempt_recorder,
-        submit_retry_recorder=submit_retry_recorder,
-        submission_cli_error_types=(SubmissionCliError,),
-        local_guardrail_error_types=(DuplicateSubmissionError, SubmissionRateLimitError),
-        kaggle_cli_error_types=(KaggleCliError,),
-        classify_submit_error=classify_submit_error,
-        should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
-        resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
-        decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
-        compute_error_fingerprint=compute_error_fingerprint,
-        decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
-        compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
-        save_run_state_for_run=_autopilot_state.save_run_state,
-        is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
-        build_submit_aborted_error=SubmitAbortedError,
-        sleep=time.sleep,
-        on_message=print,
-    )
-    submit_stage_state = submit_attempt_loop_result.submit_stage_state
-    submission_ref = submit_attempt_loop_result.submission_reference
-    submission_for_submit_path = submit_attempt_loop_result.submission_artifact_path
-    return _submit_stage.finalize_submit_outcome_for_run_or_abort(
-        run_dir=run_dir,
-        submission_ledger_path=config.paths.submission_ledger_path,
-        slug=config.slug,
-        run_id=run_id,
-        message=message,
-        submitted_at=submitted_at,
-        submission_ref=submission_ref,
-        submission_result=submit_attempt_loop_result.submission_result,
-        source_submission_path=submission_path,
-        submission_artifact_path=submission_for_submit_path,
-        submit_stage_state=submit_stage_state,
-        code_fingerprint=submit_code_fingerprint,
-        deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
-        fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
-        max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
-        poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
-        max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
-        normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
-        submit_aborter=submit_aborter,
-        submit_attempt_recorder=submit_attempt_recorder,
-        load_run_state=_autopilot_state.load_run_state,
-        compute_error_fingerprint=compute_error_fingerprint,
-        compute_submission_sha256=_sha256_or_none,
-        record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        on_message=print,
     )
