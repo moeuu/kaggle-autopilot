@@ -328,6 +328,9 @@ The next high-value modernization work is:
    Autofix error transcript creation, submit failure context loading, deterministic submit-file repair preparation,
    prompt planning, and strategy-prompt rendering now live in `autofix_context.py`, leaving the autofix loop to focus
    on strategy execution and implementation passes.
+   Kernel-fix lightweight repair dispatch, prompt planning, missing-module context, subgroup-collapse prompt context,
+   and strategy-prompt rendering now live in `kernel_fix_context.py`, leaving the kernel-fix loop focused on agent
+   execution, write guards, verification, and regeneration fallback.
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the

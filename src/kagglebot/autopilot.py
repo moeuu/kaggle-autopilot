@@ -28,6 +28,7 @@ from kagglebot import iteration_signals as _iteration_signals
 from kagglebot import json_utils as _json_utils
 from kagglebot import kaggle_cli_errors as _kaggle_cli_errors
 from kagglebot import kernel_errors as _kernel_errors
+from kagglebot import kernel_fix_context as _kernel_fix_context
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_preflight as _kernel_preflight
 from kagglebot import kernel_quality as _kernel_quality
@@ -3245,11 +3246,11 @@ def _run_kernel_fix(
 ) -> None:
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    lightweight_note_path = agent_dir / f"kernel_fix_note-{attempt:02d}.txt"
-    lightweight_fix = _runtime_fixes.apply_lightweight_runtime_fix(
+    lightweight_fix = _kernel_fix_context.prepare_lightweight_kernel_fix(
         config=config,
+        iter_dir=iter_dir,
+        attempt=attempt,
         error_text=error_message,
-        note_path=lightweight_note_path,
     )
     if lightweight_fix:
         print(
@@ -3267,71 +3268,30 @@ def _run_kernel_fix(
             )
         return
 
-    prompt_template = render_prompt_identity(config.paths.codex_kernel_fix_template.read_text(encoding="utf-8"))
-    prompt_path = agent_dir / "kernel_fix_prompt.md"
-    missing_module = _runtime_fixes.extract_missing_module(error_message)
-    blocked_modules = _runtime_fixes.load_blocked_modules(config.paths.context_dir)
-    if missing_module:
-        # Keep dependency recovery paths open: do not auto-block newly missing modules.
-        blocked_modules = [name for name in blocked_modules if name != missing_module]
-        _runtime_fixes.save_blocked_modules(config.paths.context_dir, blocked_modules)
-    blocked_text = "\n".join(f"- {name}" for name in blocked_modules) if blocked_modules else "None"
-    prompt_text = prompt_template.format(
-        **prompt_identity_format_args(),
-        slug=config.slug,
+    prompt_plan = _kernel_fix_context.build_kernel_fix_prompt_plan(
+        config=config,
         run_id=run_id,
         iteration=iteration,
-        compute=config.compute,
-        accelerator=config.accelerator,
+        iter_dir=iter_dir,
+        agent_dir=agent_dir,
         error_message=error_message,
-        blocked_modules=blocked_text,
-        logs_dir=str(iter_dir / "logs"),
-        kernel_main=str(config.paths.kernel_source_dir / "kernel.py"),
-        kernel_script=str(config.paths.kernel_run_dir(run_id) / "kernel.py"),
-        rules_url=str(config.paths.rules_url_path),
-        rules_md=str(config.paths.rules_md_path),
-        overview_md=str(config.paths.overview_md_path),
-        data_md=str(config.paths.data_md_path),
-        submission_format=str(config.paths.submission_format_md_path),
-        dataset_profile=str(config.paths.dataset_profile_path),
-        sample_submission=str(config.paths.sample_submission_path),
+        attempt=attempt,
+        prompt_prefix=prompt_prefix,
+        use_gpt_strategy=use_gpt_strategy,
+        prompt_identity_args=prompt_identity_format_args(),
+        hardware_constraints=render_hardware_constraints(
+            resolve_hardware_profile(config.hardware_profile, compute=config.compute),
+            compute=config.compute,
+            time_budget_min=config.time_budget_min,
+        ),
     )
-    subgroup_metrics_path = iter_dir / "output" / "metrics.json"
-    subgroup_payload = _json_utils.load_json_object(subgroup_metrics_path) if subgroup_metrics_path.exists() else {}
-    subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal(
-        kernel_metrics_payload=subgroup_payload if isinstance(subgroup_payload, dict) else None,
-        direction="minimize",
-    )
-    if subgroup_collapse_signal is not None:
-        prompt_text = (
-            "Subgroup repair target:\n"
-            f"- {subgroup_collapse_signal['note']}\n"
-            "- Prefer subgroup-aware fixes over global retuning.\n"
-            "- If selection or fallback logic is coarse, refine it to (model_id,node_type) granularity.\n\n"
-            + prompt_text
-        )
-    if missing_module:
-        prompt_text = (
-            f"Missing dependency detected: {missing_module}\n"
-            "Guard/disable only this missing package path. Keep actively using other available "
-            "repo dependencies (torch/timm/torchvision/opencv/xgboost/lightgbm/catboost/"
-            "transformers/tabicl/ultralytics/sklearn) and avoid silent capacity downgrades. "
-            "If this package is required, add it via `uv add <package>` and update `pyproject.toml` "
-            "+ `uv.lock`.\n\n" + prompt_text
-        )
-    if prompt_prefix.strip():
-        prompt_text = f"{prompt_prefix.strip()}\n\n{prompt_text}"
 
     strategy_text = ""
-    strategy_skip_reason: str | None = None
-    if not use_gpt_strategy:
-        strategy_skip_reason = "metric_fix_policy"
-    else:
-        strategy_skip_reason = _runtime_fixes.error_strategy_skip_reason(stage="kernel_fix", error_text=error_message)
-    if strategy_skip_reason:
+    if prompt_plan.strategy_skip_reason:
         print(
             "[yellow]kernel fix[/yellow]: "
-            f"skipping gpt strategy ({strategy_skip_reason}); invoking {IMPLEMENTATION_AGENT.log_alias} fixer directly."
+            f"skipping gpt strategy ({prompt_plan.strategy_skip_reason}); "
+            f"invoking {IMPLEMENTATION_AGENT.log_alias} fixer directly."
         )
     else:
         _watch_state.update_watch_phase(
@@ -3341,25 +3301,9 @@ def _run_kernel_fix(
             detail="GPT is analyzing the kernel failure and drafting a fix strategy.",
             iteration=iteration,
         )
-        strategy_prompt = _agent_prompts.build_error_strategy_prompt(
-            stage="kernel_fix",
-            slug=config.slug,
-            run_id=run_id,
-            attempt=attempt,
-            compute=config.compute,
-            accelerator=config.accelerator,
-            hardware_constraints=render_hardware_constraints(
-                resolve_hardware_profile(config.hardware_profile, compute=config.compute),
-                compute=config.compute,
-                time_budget_min=config.time_budget_min,
-            ),
-            error_text=error_message,
-            codex_prompt=prompt_text,
-        )
-        strategy_dir = agent_dir / f"kernel_fix_strategy-{attempt:02d}"
         strategy_text = _agent_strategy.run_error_strategy_prompt(
-            prompt_text=strategy_prompt,
-            output_dir=strategy_dir,
+            prompt_text=str(prompt_plan.strategy_prompt or ""),
+            output_dir=prompt_plan.strategy_dir,
             dry_run=config.dry_run,
             stage_label="kernel fix",
             implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
@@ -3367,17 +3311,16 @@ def _run_kernel_fix(
             reasoning_effort=_ERROR_STRATEGY_REASONING_EFFORT,
             run_strategy_func=run_strategy,
         )
-    if strategy_text:
-        prompt_text += (
-            f"\n\n## {STRATEGY_AGENT.display_name} Extra-High Error-Fix Strategy\n"
-            "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"
-            f"{strategy_text}\n"
-        )
+    prompt_text = _kernel_fix_context.append_kernel_fix_strategy(
+        prompt_text=prompt_plan.prompt_text,
+        strategy_text=strategy_text,
+        strategy_agent_display_name=STRATEGY_AGENT.display_name,
+    )
 
     base_prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
+    prompt_path = prompt_plan.prompt_path
     _agent_io.write_agent_prompt(prompt_path, base_prompt_text)
-    attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
-    _agent_io.write_agent_prompt(attempt_path, base_prompt_text)
+    _agent_io.write_agent_prompt(prompt_plan.attempt_path, base_prompt_text)
     _agent_io.print_agent_prompt(
         log_alias=IMPLEMENTATION_AGENT.log_alias,
         prompt_path=prompt_path,
