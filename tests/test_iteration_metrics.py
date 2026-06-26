@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from kagglebot.eval import EvaluationReport
@@ -19,6 +21,8 @@ from kagglebot.iteration_metrics import (
     resolve_iteration_submit_phase_completion,
     resume_best_readiness_score,
     resume_noise_guard_state,
+    write_iteration_evaluation_report,
+    write_iteration_metrics_payload,
 )
 from kagglebot.solver.evaluate import EvaluationResult
 
@@ -134,6 +138,17 @@ def test_build_metrics_payload_includes_readiness_and_offline_sources() -> None:
     assert payload["evaluation_contract"] == {"faithful": True}
     assert payload["competition_faithfulness"] == {"faithful": True}
     assert payload["accuracy_potential"] == {"status": "frontier"}
+
+
+def test_iteration_metrics_write_helpers_write_json_objects(tmp_path) -> None:
+    metrics_path = tmp_path / "metrics.json"
+    report_path = tmp_path / "evaluation_report.json"
+
+    write_iteration_metrics_payload(metrics_path, {"run_id": "run-1", "iter": 2})
+    write_iteration_evaluation_report(report_path, {"readiness_score": 0.91})
+
+    assert json.loads(metrics_path.read_text(encoding="utf-8")) == {"run_id": "run-1", "iter": 2}
+    assert json.loads(report_path.read_text(encoding="utf-8")) == {"readiness_score": 0.91}
 
 
 def test_build_iteration_record_kwargs_uses_evaluation_and_top1_score() -> None:

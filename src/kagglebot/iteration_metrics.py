@@ -115,6 +115,14 @@ def build_metrics_payload(
     return payload
 
 
+def write_iteration_metrics_payload(path: Path, payload: dict[str, object]) -> None:
+    write_json_object(path, payload)
+
+
+def write_iteration_evaluation_report(path: Path, payload: dict[str, object]) -> None:
+    write_json_object(path, payload)
+
+
 def build_iteration_record_kwargs(
     *,
     knowledge_paths: object,

@@ -1350,7 +1350,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 run_dir=run_dir, iteration=iteration, payload=report_payload
             )
             evaluation_report_path = iter_dir / "evaluation_report.json"
-            _json_utils.write_json_object(evaluation_report_path, report_payload)
+            _iteration_metrics.write_iteration_evaluation_report(evaluation_report_path, report_payload)
 
             readiness_score = report.readiness_score
             print(
@@ -1993,7 +1993,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "allocator_decision": allocator_decision,
                     "graph_execution_report": graph_execution_report,
                 }
-            _json_utils.write_json_object(metrics_path, pre_submit_metrics_payload)
+            _iteration_metrics.write_iteration_metrics_payload(metrics_path, pre_submit_metrics_payload)
             _autopilot_state._write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
@@ -2261,7 +2261,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     code_reference_forced_reproduction=code_reference_forced_reproduction,
                 ),
             )
-            _json_utils.write_json_object(metrics_path, metrics_payload)
+            _iteration_metrics.write_iteration_metrics_payload(metrics_path, metrics_payload)
 
             diff_summary = "Diff tracking disabled (git integration removed)."
             diagnostics = _diagnostics.build_diagnostics(
@@ -2381,7 +2381,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 metrics_payload["repair_signals"] = repair_signal_policy.repair_signals
             metrics_payload["previous_submission_history"] = previous_submission_history
             metrics_payload["next_iteration_policy"] = repair_signal_policy.next_iteration_policy
-            _json_utils.write_json_object(metrics_path, metrics_payload)
+            _iteration_metrics.write_iteration_metrics_payload(metrics_path, metrics_payload)
 
             _iteration_signals.record_iteration_repair_signal_knowledge(
                 knowledge_paths=config.knowledge_paths,
@@ -2408,7 +2408,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
                 metrics_payload["deliverable_mode"] = "writeup"
                 metrics_payload["writeup_bundle"] = writeup_bundle_meta
-                _json_utils.write_json_object(metrics_path, metrics_payload)
+                _iteration_metrics.write_iteration_metrics_payload(metrics_path, metrics_payload)
 
             submit_phase_completion = _iteration_metrics.resolve_iteration_submit_phase_completion(
                 submit_enabled=submit_enabled,

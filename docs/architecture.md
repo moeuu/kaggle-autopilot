@@ -361,7 +361,7 @@ Recommended extraction order:
    Kernel quality guard constants, payload-level detectors for subgroup collapse, external test-label transfer,
    candidate-selection mismatch, prediction-distribution collapse, and the aggregate submit quality-guard payload builder
    are now in `kernel_quality.py`.
-   Iteration metrics payload/final guard-section composition, evaluation-result serialization, evaluation
+   Iteration metrics payload/final guard-section composition, metrics/report persistence, evaluation-result serialization, evaluation
    data-cache/fingerprint helpers, iteration submit eligibility, submit-phase completion decisions, iteration record
    kwargs construction, and run evaluation-report resume/persistence are now in `iteration_metrics.py`.
    Run payload persistence for `run.json` now lives in `autopilot_state.py`, so orchestration code no longer open-codes
