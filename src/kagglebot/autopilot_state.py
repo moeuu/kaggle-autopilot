@@ -9,7 +9,7 @@ from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
-from kagglebot.kernel_outputs import copy_artifact_if_needed, find_submission_file
+from kagglebot.kernel_outputs import copy_artifact_if_needed, find_newest_existing_path, find_submission_file
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
 
@@ -498,24 +498,8 @@ def _resume_iteration_state(
     return next_iter, best_score, best_submission
 
 
-def _newest_existing_path(candidates: list[Path]) -> Path | None:
-    existing: list[tuple[float, int, Path]] = []
-    for candidate in candidates:
-        try:
-            if not candidate.exists():
-                continue
-            stat = candidate.stat()
-            existing.append((float(stat.st_mtime), int(stat.st_size), candidate))
-        except OSError:
-            continue
-    if not existing:
-        return None
-    existing.sort(reverse=True)
-    return existing[0][2]
-
-
 def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
-    primary = _newest_existing_path(
+    primary = find_newest_existing_path(
         [
             iter_dir / filename,
             iter_dir / "output" / filename,
@@ -550,7 +534,7 @@ def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
             fallback_candidates.extend(path for path in root.rglob(filename) if path.is_file())
         except OSError:
             continue
-    return _newest_existing_path(fallback_candidates)
+    return find_newest_existing_path(fallback_candidates)
 
 
 def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:

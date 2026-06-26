@@ -9,6 +9,7 @@ import pytest
 from kagglebot.kernel_outputs import (
     copy_artifact_if_needed,
     find_intermediate_submission_file,
+    find_newest_existing_path,
     find_output_file,
     find_submission_file,
     pick_latest_artifact,
@@ -142,6 +143,17 @@ def test_pick_latest_artifact_filters_stale_files(tmp_path: Path) -> None:
 
     assert pick_latest_artifact([stale, fresh], min_mtime=1500) == fresh
     assert pick_latest_artifact([stale], min_mtime=1500) is None
+
+
+def test_find_newest_existing_path_uses_size_and_path_tiebreakers(tmp_path: Path) -> None:
+    smaller = tmp_path / "a.json"
+    larger = tmp_path / "b.json"
+    smaller.write_text("{}", encoding="utf-8")
+    larger.write_text('{"value": 1}', encoding="utf-8")
+    os.utime(smaller, (2000, 2000))
+    os.utime(larger, (2000, 2000))
+
+    assert find_newest_existing_path([smaller, larger]) == larger
 
 
 def test_resolve_local_kernel_artifacts_finds_fresh_nested_outputs(tmp_path: Path) -> None:

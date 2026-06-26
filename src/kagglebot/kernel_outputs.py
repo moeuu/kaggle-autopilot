@@ -134,19 +134,25 @@ def local_kernel_artifact_roots(*, kernel_dir: Path, output_dir: Path) -> list[P
     ]
 
 
-def pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
-    fresh: list[tuple[float, Path]] = []
+def find_newest_existing_path(paths: list[Path], *, min_mtime: float | None = None) -> Path | None:
+    candidates: list[tuple[float, int, str, Path]] = []
     for path in paths:
         try:
-            mtime = path.stat().st_mtime
+            if not path.exists():
+                continue
+            stat = path.stat()
         except OSError:
             continue
-        if mtime < min_mtime:
+        if min_mtime is not None and stat.st_mtime < min_mtime:
             continue
-        fresh.append((mtime, path))
-    if not fresh:
+        candidates.append((float(stat.st_mtime), int(stat.st_size), str(path), path))
+    if not candidates:
         return None
-    return max(fresh, key=lambda item: item[0])[1]
+    return max(candidates)[3]
+
+
+def pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
+    return find_newest_existing_path(paths, min_mtime=min_mtime)
 
 
 def copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
