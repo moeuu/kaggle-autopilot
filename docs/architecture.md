@@ -489,9 +489,9 @@ Recommended extraction order:
    `submit_preflight.py`.
    Successful submit attempt payloads, outcome ledger recording, failure-context resolution, and final success payload
    construction now live in `submit_success.py`.
-   Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
-   Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
-   standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does
+   Submit retry attempt/knowledge recording, submit-abort recorder construction, and submit-abort exception raising now
+   live in `submit_abort.py`; standard submit-abort helper wiring is built by
+   `submit_abort.build_submit_run_aborter_for_run`, so the main loop does
    not enumerate submit-failure persistence, latest-attempt loading, or success-check callbacks directly.
    Run-bound submit context wiring for attempt recording, submit autofix input resolution, code fingerprinting, abort
    handling, and retry recording now lives behind `submit_stage.build_submit_run_context`, so submit decision flow no
