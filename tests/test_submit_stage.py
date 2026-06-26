@@ -16,6 +16,7 @@ from kagglebot.submit_cli_error_resolution import (
     decide_submit_stage_error_action,
 )
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
+from kagglebot.submit_gate import decide_fallback_submit_gate, decide_iteration_submit_improvement_gate
 from kagglebot.submit_rank import (
     format_rank_force_reason,
     format_submission_rank_message,
@@ -44,9 +45,7 @@ from kagglebot.submit_stage import (
     build_submit_stage_runtime_state,
     build_submit_stage_success_record,
     classify_submission_outcome,
-    decide_fallback_submit_gate,
     decide_initial_submit_stage_mode,
-    decide_iteration_submit_improvement_gate,
     decide_submission_outcome_abort,
     ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,

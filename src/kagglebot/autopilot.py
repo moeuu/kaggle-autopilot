@@ -46,6 +46,7 @@ from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
+from kagglebot import submit_gate as _submit_gate
 from kagglebot import submit_rank as _submit_rank
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
@@ -1617,7 +1618,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             submit_improvement_allowed = True
             submit_non_improving = False
             defer_submit_for_accuracy_frontier = False
-            submit_improvement_gate = _submit_stage.decide_iteration_submit_improvement_gate(
+            submit_improvement_gate = _submit_gate.decide_iteration_submit_improvement_gate(
                 submit_improved_only=submit_improved_only,
                 force_submit=config.force_submit,
                 require_submit_improvement=require_submit_improvement,
@@ -2469,7 +2470,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         and fallback_submit_blocked_reason is None
     ):
         final_iteration_reached = last_completed_iteration >= max_iterations
-        fallback_submit_gate = _submit_stage.decide_fallback_submit_gate(
+        fallback_submit_gate = _submit_gate.decide_fallback_submit_gate(
             submit_improved_only=submit_improved_only,
             force_submit=config.force_submit,
             require_submit_improvement=require_submit_improvement,
