@@ -508,7 +508,9 @@ Recommended extraction order:
    runner local submission preservation, submit artifact storage, TSV submit-format staging, bootstrap sample-submission
    caching/mirroring, local sample submission and auxiliary-input file staging, kernel package source/runtime/external
    asset staging, plan snapshots, local kernel shim config files, and local dataset-profile context staging use that
-   helper for file-copy paths. Vision YOLO dataset staging also uses that helper for symlink fallback copies.
+   helper for file-copy paths. Remote Kaggle kernel status polling, heartbeat/log-tail checks, and wait timeout handling
+   now live in `kernel_wait.py`; `kernel_runner.py` keeps compatibility wrappers and package orchestration. Vision YOLO
+   dataset staging also uses that helper for symlink fallback copies.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
    compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
 7. Agent I/O helpers: keep prompt/error transcript file persistence, prompt/response transcript display,

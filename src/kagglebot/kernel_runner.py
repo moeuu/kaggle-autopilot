@@ -23,6 +23,7 @@ from kagglebot import kernel_metadata as _kernel_metadata
 from kagglebot import kernel_module_inliner as _kernel_module_inliner
 from kagglebot import kernel_package_files as _kernel_package_files
 from kagglebot import kernel_plan_validation as _kernel_plan_validation
+from kagglebot import kernel_wait as _kernel_wait
 from kagglebot import local_kernel_aux_inputs as _local_kernel_aux_inputs
 from kagglebot import local_kernel_context as _local_kernel_context
 from kagglebot import local_kernel_data_resolver as _local_kernel_data_resolver
@@ -41,7 +42,6 @@ from kagglebot.artifact_io import copy_artifact_if_needed as _copy_artifact_if_n
 from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
     KaggleCliError,
-    KaggleNetworkError,
     KernelFailedError,
     KernelStillRunningError,
     KernelTimeoutError,
@@ -1256,15 +1256,7 @@ KERNEL_REGISTER_SLEEP = 5.0
 
 
 def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
-    status = (last_status or "unknown").lower()
-    if is_kernel_status_running(status):
-        raise KernelStillRunningError(
-            f"Kaggle kernel {kernel_id} is still {status} after the local wait budget; "
-            "leaving the remote run active and refusing to push a duplicate version."
-        )
-    raise KernelTimeoutError(
-        f"Kaggle kernel {kernel_id} did not complete within the local wait budget; last status was {status}."
-    )
+    _kernel_wait.raise_kernel_timeout(kernel_id, last_status)
 
 
 def _wait_for_kernel_and_record_pending(
@@ -1359,105 +1351,30 @@ def _wait_for_kernel(
     output_dir: Path,
     initial_queued_since: float | None = None,
 ) -> None:
-    deadline = None
-    if timeout_minutes is not None:
-        deadline = time.monotonic() + max(timeout_minutes, 1) * 60
-    started_at = time.monotonic()
-    last_status = None
-    last_log_fetch = 0.0
-    log_state = _kernel_logs.KernelLogState()
-    status_errors = 0
-    queued_since = initial_queued_since
-    queued_timeout_sec = _remote_kernel_state.remote_kernel_queued_timeout_sec()
-    while True:
-        try:
-            output = kernels_status(kernel_id, slug=slug, dry_run=False)
-            status_errors = 0
-        except KaggleCliError as exc:
-            status_errors += 1
-            detail = (exc.output or str(exc)).strip()
-            if detail:
-                detail = detail.replace("\n", " ")
-            if isinstance(exc, KaggleNetworkError):
-                message = (
-                    f"[yellow]kernel status network error[/yellow]: {detail or 'unknown error'} "
-                    f"(attempt {status_errors})"
-                )
-                print(message)
-                if deadline is not None and time.monotonic() > deadline:
-                    _raise_kernel_timeout(kernel_id, last_status)
-                if MAX_STATUS_ERRORS is not None and status_errors >= MAX_STATUS_ERRORS:
-                    kernel_url = f"https://www.kaggle.com/code/{kernel_id}"
-                    raise KaggleNetworkError(
-                        "Kaggle API unreachable while polling kernel status. "
-                        f"Check network/DNS and monitor the kernel at {kernel_url}.",
-                        getattr(exc, "command", None),
-                        exit_code=getattr(exc, "exit_code", None),
-                        output=getattr(exc, "output", ""),
-                    ) from exc
-                time.sleep(STATUS_ERROR_SLEEP)
-                continue
-            message = f"[yellow]kernel status failed[/yellow]: {detail or 'unknown error'} (attempt {status_errors})"
-            print(message)
-            if deadline is not None and time.monotonic() > deadline:
-                _raise_kernel_timeout(kernel_id, last_status)
-            if MAX_STATUS_ERRORS is not None and status_errors >= MAX_STATUS_ERRORS:
-                raise KernelFailedError(
-                    f"Kaggle kernel status failed {status_errors} times. Last error: {detail or 'unknown error'}"
-                ) from exc
-            time.sleep(STATUS_ERROR_SLEEP)
-            continue
-        status = parse_kernel_status(output)
-        if status != last_status:
-            print(f"[cyan]kernel status[/cyan]: {status}")
-            last_status = status
-        now = time.monotonic()
-        if is_kernel_status_queued(status):
-            if queued_since is None:
-                queued_since = now
-            if queued_timeout_sec is not None and now - queued_since >= queued_timeout_sec:
-                _remote_kernel_state.raise_kernel_queued_timeout(kernel_id, now - queued_since, queued_timeout_sec)
-        else:
-            queued_since = None
-        if now - last_log_fetch >= LOG_POLL_INTERVAL:
-            _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
-            had_logs = _kernel_logs.print_kernel_logs(output_dir, log_state)
-            if had_logs:
-                log_state.last_log_at = now
-            last_log_fetch = now
-            log_failure = _kernel_logs.detect_failure_in_logs(output_dir)
-            if log_failure:
-                log_failure = truncate_lines(log_failure, max_lines=5)
-                message = f"Kaggle kernel error detected in logs.\n\n--- kernel log tail ---\n{log_failure}"
-                raise KernelFailedError(message)
-        if is_kernel_status_running(status):
-            if log_state.last_heartbeat == 0.0 or now - log_state.last_heartbeat >= HEARTBEAT_INTERVAL:
-                elapsed = max(0, int(now - started_at))
-                timeout_hint = ""
-                if deadline is not None:
-                    timeout_hint = f", timeout in <= {max(0, int(deadline - now))}s"
-                since = now - log_state.last_log_at if log_state.last_log_at is not None else None
-                if since is None:
-                    print(f"[cyan]kernel[/cyan]: still running (elapsed={elapsed}s{timeout_hint}, no logs yet)")
-                else:
-                    print(
-                        f"[cyan]kernel[/cyan]: still running "
-                        f"(elapsed={elapsed}s{timeout_hint}, no new logs for {since:.0f}s)"
-                    )
-                log_state.last_heartbeat = now
-        if is_kernel_status_complete(status):
-            return
-        if is_kernel_status_failed(status):
-            _try_fetch_kernel_output(kernel_id, output_dir=output_dir, slug=slug)
-            log_tail = _kernel_logs.collect_log_tail(output_dir)
-            message = f"Kaggle kernel failed: {output}"
-            if log_tail:
-                log_tail = truncate_lines(log_tail, max_lines=5)
-                message = f"{message}\n\n--- kernel log tail ---\n{log_tail}"
-            raise KernelFailedError(message)
-        time.sleep(STATUS_ERROR_SLEEP)
-        if deadline is not None and time.monotonic() > deadline:
-            _raise_kernel_timeout(kernel_id, last_status)
+    _kernel_wait.wait_for_kernel(
+        kernel_id,
+        slug,
+        timeout_minutes,
+        output_dir=output_dir,
+        initial_queued_since=initial_queued_since,
+        deps=_kernel_wait.KernelWaitDependencies(
+            kernels_status=kernels_status,
+            try_fetch_kernel_output=_try_fetch_kernel_output,
+            print_kernel_logs=_kernel_logs.print_kernel_logs,
+            detect_failure_in_logs=_kernel_logs.detect_failure_in_logs,
+            collect_log_tail=_kernel_logs.collect_log_tail,
+            monotonic=time.monotonic,
+            sleep=time.sleep,
+            remote_kernel_queued_timeout_sec=_remote_kernel_state.remote_kernel_queued_timeout_sec,
+            raise_kernel_queued_timeout=_remote_kernel_state.raise_kernel_queued_timeout,
+        ),
+        limits=_kernel_wait.KernelWaitLimits(
+            log_poll_interval=LOG_POLL_INTERVAL,
+            heartbeat_interval=HEARTBEAT_INTERVAL,
+            status_error_sleep=STATUS_ERROR_SLEEP,
+            max_status_errors=MAX_STATUS_ERRORS,
+        ),
+    )
 
 
 def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | None:
