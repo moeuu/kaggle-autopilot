@@ -10,9 +10,9 @@ from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
+from kagglebot.kernel_outputs import find_submission_file
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
-from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -555,24 +555,7 @@ def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
 
 
 def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
-    manifest_path = find_submission_manifest(iter_dir)
-    if manifest_path is not None:
-        _, submission_path, staging_dir, members = resolve_manifest_references(manifest_path)
-        if submission_path is not None and submission_path.exists() and submission_path.is_file():
-            return submission_path
-        if staging_dir is not None or members:
-            return manifest_path
-    candidates: list[Path] = [iter_dir / "submission.csv", iter_dir / "output" / "submission.csv"]
-    for root in (iter_dir, iter_dir / "output"):
-        if not root.exists():
-            continue
-        try:
-            for path in root.rglob("submission.*"):
-                if path.is_file():
-                    candidates.append(path)
-        except OSError:
-            continue
-    return _newest_existing_path(candidates)
+    return find_submission_file(iter_dir)
 
 
 def _is_submit_only_metrics_payload(metrics_path: Path) -> bool:

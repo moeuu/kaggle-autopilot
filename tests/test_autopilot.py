@@ -3311,6 +3311,20 @@ def test_resolve_iteration_submission_artifact_prefers_manifest_when_bundle_stag
     assert _resolve_iteration_submission_artifact(iter_dir) == manifest_path
 
 
+def test_resolve_iteration_submission_artifact_uses_latest_fold_intermediate(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    fold1 = iter_dir / "submission_model_fold1.csv"
+    fold2 = iter_dir / "output" / "submission_model_fold2.csv"
+    fold2.parent.mkdir()
+    fold1.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    fold2.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    os.utime(fold1, (1000, 1000))
+    os.utime(fold2, (2000, 2000))
+
+    assert _resolve_iteration_submission_artifact(iter_dir) == fold2
+
+
 def test_attempt_submit_aborts_when_polling_raises_error(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_id = config.run_id or "run-1"
