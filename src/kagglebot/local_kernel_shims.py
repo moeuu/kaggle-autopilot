@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from kagglebot.exceptions import KernelFailedError
+from kagglebot.kernel_outputs import copy_artifact_if_needed
 from kagglebot.local_kernel_drift_guard import ZERO_OVERLAP_DRIFT_GUARD_FILENAME
 
 COLUMN_MAP_FILENAME = "column_map.json"
@@ -56,7 +56,7 @@ def inject_column_map_shim(kernel_dir: Path, context_dir: Path) -> None:
     if not map_path.exists():
         return
     kernel_map_path = kernel_dir / COLUMN_MAP_FILENAME
-    shutil.copy2(map_path, kernel_map_path)
+    copy_artifact_if_needed(source=map_path, destination=kernel_map_path)
     shim = [
         COLUMN_MAP_SHIM_MARKER,
         "import json",
@@ -106,7 +106,7 @@ def inject_column_fill_shim(kernel_dir: Path, context_dir: Path) -> None:
     if not fill_path.exists():
         return
     kernel_fill_path = kernel_dir / COLUMN_FILL_FILENAME
-    shutil.copy2(fill_path, kernel_fill_path)
+    copy_artifact_if_needed(source=fill_path, destination=kernel_fill_path)
     shim = [
         COLUMN_FILL_SHIM_MARKER,
         "import json",
@@ -244,7 +244,7 @@ def inject_object_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
     if not coerce_path.exists():
         return
     kernel_coerce_path = kernel_dir / OBJECT_COERCE_FILENAME
-    shutil.copy2(coerce_path, kernel_coerce_path)
+    copy_artifact_if_needed(source=coerce_path, destination=kernel_coerce_path)
     shim = [
         OBJECT_COERCE_SHIM_MARKER,
         "import json",
@@ -327,7 +327,7 @@ def inject_device_coerce_shim(kernel_dir: Path, context_dir: Path) -> None:
     if not coerce_path.exists():
         return
     kernel_coerce_path = kernel_dir / DEVICE_COERCE_FILENAME
-    shutil.copy2(coerce_path, kernel_coerce_path)
+    copy_artifact_if_needed(source=coerce_path, destination=kernel_coerce_path)
     shim = [
         DEVICE_COERCE_SHIM_MARKER,
         "import json",
@@ -415,7 +415,7 @@ def inject_zero_overlap_drift_shim(kernel_dir: Path, context_dir: Path) -> None:
     if not guard_path.exists():
         return
     kernel_guard_path = kernel_dir / ZERO_OVERLAP_DRIFT_GUARD_FILENAME
-    shutil.copy2(guard_path, kernel_guard_path)
+    copy_artifact_if_needed(source=guard_path, destination=kernel_guard_path)
     shim = [
         ZERO_OVERLAP_DRIFT_SHIM_MARKER,
         "import json",
