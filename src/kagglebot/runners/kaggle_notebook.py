@@ -12,7 +12,7 @@ from kagglebot import kernel_outputs as _kernel_outputs
 from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.env_utils import env_flag
 from kagglebot.json_utils import load_json_object, write_json_object
-from kagglebot.kaggle_credentials import resolve_kaggle_username as _resolve_kaggle_username
+from kagglebot.kaggle_credentials import resolve_kaggle_username
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.kernel_status import parse_kernel_status
 from kagglebot.runners.base import RunContext, RunResult
@@ -619,10 +619,6 @@ def render_kernel_main(competition_slug: str, accelerator: str) -> str:
         .replace("__ACCELERATOR__", accelerator)
         .strip()
     )
-
-
-def resolve_kaggle_username(explicit: str | None) -> str:
-    return _resolve_kaggle_username(explicit)
 
 
 def find_submission_file(output_dir: Path) -> Path:

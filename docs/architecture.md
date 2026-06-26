@@ -519,8 +519,9 @@ Recommended extraction order:
    runner local submission preservation, submit artifact storage, TSV submit-format staging, bootstrap sample-submission
    caching/mirroring, local sample submission and auxiliary-input file staging, kernel package source/runtime/external
    asset staging, plan snapshots, local kernel shim config files, local dataset-profile context staging, and local-kernel
-   primary/optional artifact preservation use that helper for file-copy paths. Remote Kaggle kernel status polling,
-   heartbeat/log-tail checks, wait timeout handling, and wait-limit defaults now live in `kernel_wait.py`;
+   primary/optional artifact preservation use that helper for file-copy paths. Notebook runner username resolution now
+   calls `kaggle_credentials.py` directly instead of keeping a local compatibility wrapper. Remote Kaggle kernel status
+   polling, heartbeat/log-tail checks, wait timeout handling, and wait-limit defaults now live in `kernel_wait.py`;
    `kernel_runner.py` keeps compatibility wrappers and package orchestration. Vision YOLO dataset staging also uses that
    helper for symlink fallback copies.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
