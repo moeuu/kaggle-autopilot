@@ -4917,7 +4917,7 @@ def test_metric_mismatch_keeps_competition_metric_in_strict_mode(monkeypatch, tm
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
-    monkeypatch.setattr("kagglebot.autopilot._rerun_kernel_for_metric_recheck", fake_metric_recheck)
+    monkeypatch.setattr("kagglebot.metric_recheck.recheck_kernel_metrics_from_artifacts", fake_metric_recheck)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
@@ -5130,7 +5130,7 @@ def test_metric_only_fix_reruns_local_kernel_to_materialize_metric_outputs(monke
 
 
 def test_metric_recheck_uses_existing_artifacts_without_retraining(monkeypatch, tmp_path: Path) -> None:
-    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+    from kagglebot.metric_recheck import recheck_kernel_metrics_from_artifacts
 
     config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
     iter_dir = config.paths.iter_dir("run-1", 1)
@@ -5162,22 +5162,12 @@ def test_metric_recheck_uses_existing_artifacts_without_retraining(monkeypatch, 
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
     )
 
-    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
-        config=config,
-        run_id="run-1",
-        iteration=1,
+    evaluation, payload, resolved_submission = recheck_kernel_metrics_from_artifacts(
         submission_path=submission_path,
         iter_dir=iter_dir,
         metrics_artifact_path=metrics_path,
-        kernel_name=None,
-        enable_internet=False,
-        score_source="cv",
         target_metric="rmse",
         metric_direction="minimize",
-        holdout_frac=0.2,
-        cv_folds=5,
-        seed=42,
-        time_budget_min=10,
     )
 
     assert evaluation.metric == "rmse"
@@ -5188,7 +5178,7 @@ def test_metric_recheck_uses_existing_artifacts_without_retraining(monkeypatch, 
 
 
 def test_metric_recheck_prefers_output_metrics_over_stale_iteration_metrics(monkeypatch, tmp_path: Path) -> None:
-    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+    from kagglebot.metric_recheck import recheck_kernel_metrics_from_artifacts
 
     config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
     iter_dir = config.paths.iter_dir("run-1", 1)
@@ -5234,22 +5224,12 @@ def test_metric_recheck_prefers_output_metrics_over_stale_iteration_metrics(monk
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
     )
 
-    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
-        config=config,
-        run_id="run-1",
-        iteration=1,
+    evaluation, payload, resolved_submission = recheck_kernel_metrics_from_artifacts(
         submission_path=submission_path,
         iter_dir=iter_dir,
         metrics_artifact_path=stale_iter_metrics_path,
-        kernel_name=None,
-        enable_internet=False,
-        score_source="cv",
         target_metric="auc",
         metric_direction="maximize",
-        holdout_frac=0.2,
-        cv_folds=5,
-        seed=42,
-        time_budget_min=10,
     )
 
     assert evaluation.metric == "auc"
@@ -5260,7 +5240,7 @@ def test_metric_recheck_prefers_output_metrics_over_stale_iteration_metrics(monk
 
 
 def test_metric_recheck_ignores_submit_only_output_metrics(monkeypatch, tmp_path: Path) -> None:
-    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+    from kagglebot.metric_recheck import recheck_kernel_metrics_from_artifacts
 
     config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
     iter_dir = config.paths.iter_dir("run-1", 1)
@@ -5300,22 +5280,12 @@ def test_metric_recheck_ignores_submit_only_output_metrics(monkeypatch, tmp_path
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
     )
 
-    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
-        config=config,
-        run_id="run-1",
-        iteration=1,
+    evaluation, payload, resolved_submission = recheck_kernel_metrics_from_artifacts(
         submission_path=submission_path,
         iter_dir=iter_dir,
         metrics_artifact_path=iter_metrics_path,
-        kernel_name=None,
-        enable_internet=False,
-        score_source="cv",
         target_metric="rmse",
         metric_direction="minimize",
-        holdout_frac=0.2,
-        cv_folds=5,
-        seed=42,
-        time_budget_min=10,
     )
 
     assert evaluation.metric == "rmse"
@@ -5326,7 +5296,7 @@ def test_metric_recheck_ignores_submit_only_output_metrics(monkeypatch, tmp_path
 
 
 def test_metric_recheck_recomputes_target_metric_from_oof_without_retraining(monkeypatch, tmp_path: Path) -> None:
-    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+    from kagglebot.metric_recheck import recheck_kernel_metrics_from_artifacts
 
     config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
     iter_dir = config.paths.iter_dir("run-1", 1)
@@ -5373,22 +5343,12 @@ def test_metric_recheck_recomputes_target_metric_from_oof_without_retraining(mon
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
     )
 
-    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
-        config=config,
-        run_id="run-1",
-        iteration=1,
+    evaluation, payload, resolved_submission = recheck_kernel_metrics_from_artifacts(
         submission_path=submission_path,
         iter_dir=iter_dir,
         metrics_artifact_path=metrics_path,
-        kernel_name=None,
-        enable_internet=False,
-        score_source="cv",
         target_metric="auc",
         metric_direction="maximize",
-        holdout_frac=0.2,
-        cv_folds=5,
-        seed=42,
-        time_budget_min=10,
     )
 
     assert evaluation.metric == "auc"
@@ -5403,7 +5363,7 @@ def test_metric_recheck_recomputes_target_metric_from_oof_without_retraining(mon
 
 
 def test_metric_recheck_resolves_oof_from_staged_local_kernel_outputs(monkeypatch, tmp_path: Path) -> None:
-    from kagglebot.autopilot import _rerun_kernel_for_metric_recheck
+    from kagglebot.metric_recheck import recheck_kernel_metrics_from_artifacts
 
     config = _make_config(tmp_path, compute="local_gpu", accelerator="gpu")
     iter_dir = config.paths.iter_dir("run-1", 1)
@@ -5451,22 +5411,12 @@ def test_metric_recheck_resolves_oof_from_staged_local_kernel_outputs(monkeypatc
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("run_kernel_local must not be called")),
     )
 
-    evaluation, payload, resolved_submission = _rerun_kernel_for_metric_recheck(
-        config=config,
-        run_id="run-1",
-        iteration=1,
+    evaluation, payload, resolved_submission = recheck_kernel_metrics_from_artifacts(
         submission_path=submission_path,
         iter_dir=iter_dir,
         metrics_artifact_path=metrics_path,
-        kernel_name=None,
-        enable_internet=False,
-        score_source="cv",
         target_metric="auc",
         metric_direction="maximize",
-        holdout_frac=0.2,
-        cv_folds=5,
-        seed=42,
-        time_budget_min=10,
     )
 
     assert evaluation.metric == "auc"
