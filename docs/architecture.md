@@ -496,6 +496,8 @@ Recommended extraction order:
 9. Verify execution/staging: keep verify command execution policy, repo-root default wiring, local/external artifact
    mirroring, pytest environment isolation, and competition-specific compatibility shims in `verify_artifacts.py`;
    `autopilot.py` and CLI commands should call the repo-level verify adapter instead of rebuilding those defaults.
+   Mirrored verify artifacts use the shared artifact copy helper so same-path no-ops and parent-directory creation stay
+   consistent with kernel output staging.
 10. Kernel error policy: keep exception formatting, same-error fingerprinting, pushed-kernel registration failure
    classification, kernel-error artifact writing, and repeated-error abort policy in `kernel_errors.py`; `autopilot.py`
    should only decide when to invoke that policy.

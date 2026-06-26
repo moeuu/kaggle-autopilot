@@ -124,5 +124,9 @@ def test_mirror_verify_artifacts_prefers_latest_kernel_version_and_appends_shim(
     text = mirrored_runtime.read_text(encoding="utf-8")
     assert "VALUE = 'new'" in text
     assert "KAGGLEBOT_VERIFY_COMPAT_SHIM" in text
-    assert (repo_root / "artifacts" / "playground-series-s6e3" / "kernel" / "plan.json").exists()
-    assert (repo_root / "artifacts" / "playground-series-s6e3" / "plan.json").exists()
+    assert (repo_root / "artifacts" / "playground-series-s6e3" / "kernel" / "plan.json").read_text(
+        encoding="utf-8"
+    ) == '{"run": "b"}\n'
+    assert (repo_root / "artifacts" / "playground-series-s6e3" / "plan.json").read_text(
+        encoding="utf-8"
+    ) == '{"artifact": "b"}\n'

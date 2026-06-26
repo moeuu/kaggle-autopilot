@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 from kagglebot.exec_utils import run_command
+from kagglebot.kernel_outputs import copy_artifact_if_needed
 
 VERIFY_COMPAT_SHIM_MARKER = "# KAGGLEBOT_VERIFY_COMPAT_SHIM"
 
@@ -272,8 +272,7 @@ def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
                     if source_path.suffix == ".pyc":
                         continue
                     dest_path = dest_kernel_dir / source_path.relative_to(source_kernel_dir)
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source_path, dest_path)
+                    copy_artifact_if_needed(source=source_path, destination=dest_path)
         kernel_versions_dir = slug_dir / "kernels"
         if not kernel_versions_dir.is_dir():
             continue
@@ -283,14 +282,16 @@ def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
                 continue
             preferred_source = max(candidates, key=lambda path: path.stat().st_mtime_ns)
             dest_path = dest_kernel_dir / filename
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(preferred_source, dest_path)
+            copy_artifact_if_needed(source=preferred_source, destination=dest_path)
             nested_kernel_plan = preferred_source.parent / "plan.json"
             if nested_kernel_plan.exists():
-                shutil.copy2(nested_kernel_plan, dest_kernel_dir / "plan.json")
+                copy_artifact_if_needed(source=nested_kernel_plan, destination=dest_kernel_dir / "plan.json")
             nested_artifact_plan = preferred_source.parent.parent / "plan.json"
             if nested_artifact_plan.exists():
-                shutil.copy2(nested_artifact_plan, local_artifacts_dir / slug_dir.name / "plan.json")
+                copy_artifact_if_needed(
+                    source=nested_artifact_plan,
+                    destination=local_artifacts_dir / slug_dir.name / "plan.json",
+                )
         append_verify_compat_shim(dest_kernel_dir / "kernel.py", slug=slug_dir.name)
         append_verify_compat_shim(dest_kernel_dir / "runtime.py", slug=slug_dir.name)
 
