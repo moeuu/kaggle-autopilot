@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import os
 import random
-import shutil
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ import pandas as pd
 from PIL import Image
 from sklearn.metrics import f1_score
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.env_utils import env_flag
 
 OFFICIAL_COMBINED_METRIC = "0.5 * mAP@[0.5:0.95] + 0.5 * F1-Score"
@@ -882,7 +882,7 @@ def _link_or_copy(src: Path, dst: Path) -> None:
     try:
         dst.symlink_to(src.resolve())
     except Exception:  # noqa: BLE001
-        shutil.copy2(src, dst)
+        copy_artifact_if_needed(source=src, destination=dst)
 
 
 def _link_or_copy_or_empty(src: Path, dst: Path) -> None:
