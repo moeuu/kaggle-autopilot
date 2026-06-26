@@ -436,8 +436,9 @@ Recommended extraction order:
    CLI stdout/stderr parsing or ad hoc pending-run files.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
    compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
-7. Agent I/O helpers: keep prompt/response transcript display, response-file reads, Codex sandbox-fallback logging,
-   capacity-error detection, retry feedback prompt construction, and live stdout rendering in `agent_io.py`;
+7. Agent I/O helpers: keep prompt/error transcript file persistence, prompt/response transcript display,
+   response-file reads, Codex sandbox-fallback logging, capacity-error detection, retry feedback prompt construction,
+   and live stdout rendering in `agent_io.py`;
    orchestration code should pass identity/path context only.
    Strategy, improvement, autofix, error-repair, and mandatory code-reference repair prompt rendering now lives in
    `agent_prompts.py`, keeping long prompt templates out of `autopilot.py`.

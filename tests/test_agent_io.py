@@ -9,11 +9,35 @@ from kagglebot.agent_io import (
     log_codex_sandbox_fallback,
     read_agent_response,
     tail_for_prompt,
+    write_agent_prompt,
+    write_autofix_error_transcript,
 )
 
 
 def test_read_agent_response_returns_empty_for_missing_file(tmp_path: Path) -> None:
     assert read_agent_response(tmp_path / "missing.txt") == ""
+
+
+def test_write_agent_prompt_writes_text_and_returns_path(tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+
+    returned = write_agent_prompt(prompt_path, "hello\n")
+
+    assert returned == prompt_path
+    assert prompt_path.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_write_autofix_error_transcript_writes_attempt_and_latest_alias(tmp_path: Path) -> None:
+    error_path = write_autofix_error_transcript(
+        autofix_dir=tmp_path,
+        attempt=3,
+        error_text="boom",
+    )
+
+    expected = "autofix_attempt: 3\nboom\n"
+    assert error_path == tmp_path / "error-03.txt"
+    assert error_path.read_text(encoding="utf-8") == expected
+    assert (tmp_path / "error.txt").read_text(encoding="utf-8") == expected
 
 
 def test_read_agent_response_strips_trailing_whitespace(tmp_path: Path) -> None:

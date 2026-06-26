@@ -3264,7 +3264,7 @@ def _run_improvement(
             f"{base_prompt_text}\n"
         )
 
-    prompt_path.write_text(prompt_text, encoding="utf-8")
+    _agent_io.write_agent_prompt(prompt_path, prompt_text)
     _agent_io.print_agent_prompt(
         log_alias=IMPLEMENTATION_AGENT.log_alias,
         prompt_path=prompt_path,
@@ -3381,7 +3381,7 @@ def _run_improvement(
                 issues=implementation_issues,
                 kernel_path=kernel_path,
             )
-            repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
+            _agent_io.write_agent_prompt(repair_prompt_path, repair_prompt_text)
             _agent_io.print_agent_prompt(
                 log_alias=IMPLEMENTATION_AGENT.log_alias,
                 prompt_path=repair_prompt_path,
@@ -3583,9 +3583,9 @@ def _run_kernel_fix(
         )
 
     base_prompt_text = f"Kernel fix attempt: {attempt}\n\n{prompt_text}"
-    prompt_path.write_text(base_prompt_text, encoding="utf-8")
+    _agent_io.write_agent_prompt(prompt_path, base_prompt_text)
     attempt_path = agent_dir / f"kernel_fix_prompt-{attempt:02d}.md"
-    attempt_path.write_text(base_prompt_text, encoding="utf-8")
+    _agent_io.write_agent_prompt(attempt_path, base_prompt_text)
     _agent_io.print_agent_prompt(
         log_alias=IMPLEMENTATION_AGENT.log_alias,
         prompt_path=prompt_path,
@@ -3616,7 +3616,7 @@ def _run_kernel_fix(
         pass_prompt_path = (
             prompt_path if codex_pass == 1 else agent_dir / f"kernel_fix_prompt-{attempt:02d}-pass-{codex_pass:02d}.md"
         )
-        pass_prompt_path.write_text(pass_prompt_text, encoding="utf-8")
+        _agent_io.write_agent_prompt(pass_prompt_path, pass_prompt_text)
         if codex_pass > 1:
             print(
                 "[yellow]kernel fix[/yellow]: "
@@ -3988,11 +3988,11 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             error_text = f"{error_text}\n\nDeterministic Submit File Autofix:\n{prepared_submission_summary}"
         if submit_context:
             error_text = f"{error_text}\n\nSubmit Failure Context:\n{submit_context}"
-    attempt_tag = f"{attempt:02d}"
-    header = f"autofix_attempt: {attempt}\n"
-    error_path = autofix_dir / f"error-{attempt_tag}.txt"
-    error_path.write_text(header + error_text + "\n", encoding="utf-8")
-    (autofix_dir / "error.txt").write_text(header + error_text + "\n", encoding="utf-8")
+    error_path = _agent_io.write_autofix_error_transcript(
+        autofix_dir=autofix_dir,
+        attempt=attempt,
+        error_text=error_text,
+    )
 
     allowed_prefixes = build_repair_write_policy(
         repo_root=config.paths.repo_root,
@@ -4068,7 +4068,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             f"{strategy_text}\n"
         )
     prompt_path = autofix_dir / "prompt.md"
-    prompt_path.write_text(prompt_text, encoding="utf-8")
+    _agent_io.write_agent_prompt(prompt_path, prompt_text)
     _agent_io.print_agent_prompt(
         log_alias=IMPLEMENTATION_AGENT.log_alias,
         prompt_path=prompt_path,
@@ -4088,7 +4088,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             )
         )
         pass_prompt_path = prompt_path if codex_pass == 1 else autofix_dir / f"prompt-pass-{codex_pass:02d}.md"
-        pass_prompt_path.write_text(pass_prompt_text, encoding="utf-8")
+        _agent_io.write_agent_prompt(pass_prompt_path, pass_prompt_text)
         if codex_pass > 1:
             print(
                 "[yellow]autofix[/yellow]: "

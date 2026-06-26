@@ -68,6 +68,11 @@ def print_agent_prompt(*, log_alias: str, prompt_path: Path, prompt_text: str) -
     builtins.print("")
 
 
+def write_agent_prompt(path: Path, prompt_text: str) -> Path:
+    path.write_text(prompt_text, encoding="utf-8")
+    return path
+
+
 def read_agent_response(path: Path) -> str:
     if not path.exists():
         return ""
@@ -119,6 +124,16 @@ def agent_failure_detail(result: object, response: str) -> str:
         if part
     )
     return tail_for_prompt(detail, max_chars=8000)
+
+
+def write_autofix_error_transcript(*, autofix_dir: Path, attempt: int, error_text: str) -> Path:
+    attempt_tag = f"{attempt:02d}"
+    header = f"autofix_attempt: {attempt}\n"
+    transcript = header + error_text + "\n"
+    error_path = autofix_dir / f"error-{attempt_tag}.txt"
+    error_path.write_text(transcript, encoding="utf-8")
+    (autofix_dir / "error.txt").write_text(transcript, encoding="utf-8")
+    return error_path
 
 
 def append_fix_retry_feedback(
