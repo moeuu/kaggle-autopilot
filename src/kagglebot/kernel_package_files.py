@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from kagglebot.kernel_outputs import copy_artifact_if_needed
+
 
 def copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
     for path in source_dir.iterdir():
@@ -16,7 +18,7 @@ def copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:
         elif path.is_file():
             if path.suffix == ".pyc":
                 continue
-            shutil.copy2(path, dest_path)
+            copy_artifact_if_needed(source=path, destination=dest_path)
 
 
 def copy_competition_external_assets(*, base_dir: Path, slug: str, kernel_dir: Path) -> None:
@@ -26,7 +28,7 @@ def copy_competition_external_assets(*, base_dir: Path, slug: str, kernel_dir: P
     for path in external_dir.iterdir():
         if not path.is_file():
             continue
-        shutil.copy2(path, kernel_dir / path.name)
+        copy_artifact_if_needed(source=path, destination=kernel_dir / path.name)
 
 
 def copy_shared_kernel_runtime_modules(kernel_dir: Path) -> None:
@@ -36,7 +38,7 @@ def copy_shared_kernel_runtime_modules(kernel_dir: Path) -> None:
     for path in sorted(runtime_dir.glob("*.py")):
         if path.name == "__init__.py":
             continue
-        shutil.copy2(path, kernel_dir / path.name)
+        copy_artifact_if_needed(source=path, destination=kernel_dir / path.name)
 
 
 def sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
@@ -45,5 +47,4 @@ def sync_plan_snapshot(*, plan_path: Path, targets: list[Path]) -> None:
     for target in targets:
         if target.resolve() == plan_path.resolve():
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(plan_path, target)
+        copy_artifact_if_needed(source=plan_path, destination=target)
