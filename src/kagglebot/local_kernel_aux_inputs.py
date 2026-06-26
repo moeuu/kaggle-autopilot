@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot import local_kernel_context as _local_kernel_context
 from kagglebot.exceptions import KernelFailedError
+from kagglebot.kernel_outputs import copy_artifact_if_needed
 from kagglebot.kernel_sources import load_kernel_source_config
 
 
@@ -103,4 +104,4 @@ def stage_local_path_alias(*, source_path: Path, target_path: Path) -> None:
     try:
         target_path.symlink_to(source_path)
     except Exception:
-        shutil.copy2(source_path, target_path)
+        copy_artifact_if_needed(source=source_path, destination=target_path)

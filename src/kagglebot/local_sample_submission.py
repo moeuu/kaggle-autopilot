@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
+
+from kagglebot.kernel_outputs import copy_artifact_if_needed
 
 
 def ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path | None:
@@ -19,7 +20,7 @@ def ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path | 
     if source_path is None:
         return None
     data_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, canonical_path)
+    copy_artifact_if_needed(source=source_path, destination=canonical_path)
     expand_placeholder_sample_submission(canonical_path=canonical_path, data_dir=data_dir)
     return canonical_path
 
