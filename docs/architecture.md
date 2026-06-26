@@ -260,7 +260,8 @@ The next high-value modernization work is:
    staging is now in `kernel_package_files.py`; local-module inlining for packaged kernels is now in
    `kernel_module_inliner.py`;
    zero-overlap drift guard generation is now in `local_kernel_drift_guard.py`; kernel bootstrap/env injection is now
-   in `kernel_bootstrap.py`; local sitecustomize shim injection is now in `local_kernel_shims.py`; static submit
+   in `kernel_bootstrap.py`; local sitecustomize shim injection groups are now in `local_kernel_shims.py`; runner code
+   should call those groups instead of enumerating individual shim functions; static submit
    wrapper rendering and code-competition tiny-submission rejection are now in `kernel_submit_wrapper.py`; Kaggle push
    source validation is now in `kernel_push_validation.py`; notebook submit-inference validation and output-root
    sanitization are now in `kernel_submit_inference.py`; competition-specific local-kernel contract checks are now in

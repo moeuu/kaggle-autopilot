@@ -22,6 +22,24 @@ TRAIN_PROGRESS_SHIM_MARKER = "# kagglebot: train-progress-shim"
 TRANSFORMERS_EVAL_STRATEGY_SHIM_MARKER = "# kagglebot: transformers-eval-strategy-shim"
 
 
+def inject_context_io_shims(kernel_dir: Path, context_dir: Path) -> None:
+    inject_column_map_shim(kernel_dir, context_dir)
+    inject_column_fill_shim(kernel_dir, context_dir)
+    inject_object_coerce_shim(kernel_dir, context_dir)
+    inject_device_coerce_shim(kernel_dir, context_dir)
+
+
+def inject_local_runtime_shims(kernel_dir: Path) -> None:
+    inject_kaggle_working_redirect_shim(kernel_dir)
+    inject_lgbm_gpu_guard_shim(kernel_dir)
+    inject_torch_runtime_guard_shim(kernel_dir)
+
+
+def inject_training_compat_shims(kernel_dir: Path) -> None:
+    inject_training_progress_shim(kernel_dir)
+    inject_transformers_eval_strategy_shim(kernel_dir)
+
+
 def append_sitecustomize_shim(kernel_dir: Path, marker: str, shim: list[str]) -> None:
     site_path = kernel_dir / "sitecustomize.py"
     if site_path.exists():

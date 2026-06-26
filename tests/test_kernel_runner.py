@@ -34,10 +34,11 @@ from kagglebot.local_kernel_shims import (
     ensure_training_progress_shim,
     inject_column_fill_shim,
     inject_column_map_shim,
+    inject_context_io_shims,
     inject_device_coerce_shim,
-    inject_kaggle_working_redirect_shim,
-    inject_lgbm_gpu_guard_shim,
+    inject_local_runtime_shims,
     inject_object_coerce_shim,
+    inject_training_compat_shims,
     inject_training_progress_shim,
     inject_transformers_eval_strategy_shim,
     inject_zero_overlap_drift_shim,
@@ -1227,19 +1228,43 @@ def test_inject_device_coerce_shim(tmp_path: Path) -> None:
     assert (kernel_dir / "device_coerce.json").exists()
 
 
+def test_inject_context_io_shims_groups_context_driven_shims(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "column_map.json").write_text(json.dumps({"mapping": {"old": "new"}}), encoding="utf-8")
+    (context_dir / "column_fill.json").write_text(json.dumps({"files": {"test.csv": ["A"]}}), encoding="utf-8")
+    (context_dir / "object_coerce.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
+    (context_dir / "device_coerce.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
+
+    inject_context_io_shims(kernel_dir, context_dir)
+    inject_context_io_shims(kernel_dir, context_dir)
+
+    text = (kernel_dir / "sitecustomize.py").read_text(encoding="utf-8")
+    for marker in ("column-map-shim", "column-fill-shim", "object-coerce-shim", "device-coerce-shim"):
+        assert marker in text
+        assert text.count(marker) == 1
+
+
 def test_inject_local_runtime_shims(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
 
-    inject_kaggle_working_redirect_shim(kernel_dir)
-    inject_lgbm_gpu_guard_shim(kernel_dir)
+    inject_local_runtime_shims(kernel_dir)
+    inject_local_runtime_shims(kernel_dir)
 
     site_path = kernel_dir / "sitecustomize.py"
     assert site_path.exists()
     text = site_path.read_text(encoding="utf-8")
     assert "kaggle-working-redirect-shim" in text
+    assert text.count("kaggle-working-redirect-shim") == 1
     assert "lgbm-gpu-guard-shim" in text
+    assert text.count("lgbm-gpu-guard-shim") == 1
+    assert "torch-runtime-guard-shim" in text
+    assert text.count("torch-runtime-guard-shim") == 1
 
 
 def test_inject_transformers_eval_strategy_shim(tmp_path: Path) -> None:
@@ -1273,6 +1298,21 @@ def test_inject_training_progress_shim(tmp_path: Path) -> None:
     assert "cv fold start:" in text
     assert "train start:" in text
     assert "train done:" in text
+
+
+def test_inject_training_compat_shims_groups_training_shims(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    inject_training_compat_shims(kernel_dir)
+    inject_training_compat_shims(kernel_dir)
+
+    text = (kernel_dir / "sitecustomize.py").read_text(encoding="utf-8")
+    assert "kagglebot: train-progress-shim" in text
+    assert text.count("kagglebot: train-progress-shim") == 1
+    assert "transformers-eval-strategy-shim" in text
+    assert text.count("transformers-eval-strategy-shim") == 1
 
 
 def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:

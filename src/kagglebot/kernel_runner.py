@@ -534,12 +534,8 @@ class KernelPackageBuilder:
         _kernel_module_inliner.inline_kernel_modules(kernel_dir)
         _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
         _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_dir)
-        _local_kernel_shims.inject_column_map_shim(kernel_dir, context_dir)
-        _local_kernel_shims.inject_column_fill_shim(kernel_dir, context_dir)
-        _local_kernel_shims.inject_object_coerce_shim(kernel_dir, context_dir)
-        _local_kernel_shims.inject_device_coerce_shim(kernel_dir, context_dir)
-        _local_kernel_shims.inject_training_progress_shim(kernel_dir)
-        _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_dir)
+        _local_kernel_shims.inject_context_io_shims(kernel_dir, context_dir)
+        _local_kernel_shims.inject_training_compat_shims(kernel_dir)
         _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
             base_dir=config.base_dir,
             slug=config.slug,
@@ -635,12 +631,8 @@ class KernelSubmitPackageBuilder:
             _kernel_module_inliner.inline_kernel_modules(kernel_dir)
             _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
             _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_dir)
-            _local_kernel_shims.inject_column_map_shim(kernel_dir, context_dir)
-            _local_kernel_shims.inject_column_fill_shim(kernel_dir, context_dir)
-            _local_kernel_shims.inject_object_coerce_shim(kernel_dir, context_dir)
-            _local_kernel_shims.inject_device_coerce_shim(kernel_dir, context_dir)
-            _local_kernel_shims.inject_training_progress_shim(kernel_dir)
-            _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_dir)
+            _local_kernel_shims.inject_context_io_shims(kernel_dir, context_dir)
+            _local_kernel_shims.inject_training_compat_shims(kernel_dir)
             _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
                 base_dir=config.base_dir,
                 slug=config.slug,
@@ -986,15 +978,9 @@ def run_kernel_local(
     _kernel_module_inliner.inline_kernel_modules(kernel_stage_dir)
     _local_kernel_data_resolver.inject_data_dir_resolver(kernel_stage_dir)
     _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_stage_dir)
-    _local_kernel_shims.inject_column_map_shim(kernel_stage_dir, context_dir)
-    _local_kernel_shims.inject_column_fill_shim(kernel_stage_dir, context_dir)
-    _local_kernel_shims.inject_object_coerce_shim(kernel_stage_dir, context_dir)
-    _local_kernel_shims.inject_device_coerce_shim(kernel_stage_dir, context_dir)
-    _local_kernel_shims.inject_kaggle_working_redirect_shim(kernel_stage_dir)
-    _local_kernel_shims.inject_lgbm_gpu_guard_shim(kernel_stage_dir)
-    _local_kernel_shims.inject_torch_runtime_guard_shim(kernel_stage_dir)
-    _local_kernel_shims.inject_training_progress_shim(kernel_stage_dir)
-    _local_kernel_shims.inject_transformers_eval_strategy_shim(kernel_stage_dir)
+    _local_kernel_shims.inject_context_io_shims(kernel_stage_dir, context_dir)
+    _local_kernel_shims.inject_local_runtime_shims(kernel_stage_dir)
+    _local_kernel_shims.inject_training_compat_shims(kernel_stage_dir)
     _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
     _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
     _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
