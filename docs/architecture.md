@@ -495,6 +495,10 @@ Recommended extraction order:
    `submit_attempt_loop.py`.
    Submit run context construction, autofix attempt context binding, retry/abort helper wiring, and runtime
    message/service/timestamp initialization now live in `submit_context.py`.
+   Notebook submit artifact-mode decisions, kernel output reference construction, Kaggle kernel-submit kwargs, ambiguous
+   submit retry decisions, CPU fallback decisions, and submit-kernel push-error text detection now live in
+   `submit_notebook_decisions.py`, leaving `submit_notebook.py` focused on runner construction and execution
+   orchestration.
    Submit retry attempt/knowledge recording, submit-abort recorder construction, and submit-abort exception raising now
    live in `submit_abort.py`; standard submit-abort helper wiring is built by
    `submit_abort.build_submit_run_aborter_for_run`, so the main loop does
