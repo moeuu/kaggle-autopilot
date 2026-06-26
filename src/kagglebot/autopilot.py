@@ -41,6 +41,7 @@ from kagglebot import metric_matching as _metric_matching
 from kagglebot import metric_recheck as _metric_recheck
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import plan_resolution as _plan_resolution
+from kagglebot import planning_runner as _planning_runner
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
 from kagglebot import score_utils as _score_utils
@@ -59,7 +60,6 @@ from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
     STRATEGY_AGENT,
-    planning_flow_summary,
     prompt_identity_format_args,
     render_prompt_identity,
 )
@@ -117,10 +117,6 @@ from kagglebot.medals import (
     DEFAULT_TARGET_MEDAL,
     normalize_target_medal,
     normalize_target_rank_percentile,
-)
-from kagglebot.orchestrator.agent_pipeline import (
-    AgentPipelineConfig,
-    run_agent_pipeline,
 )
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
@@ -361,7 +357,7 @@ class PlanningPhase:
                 "gpt_planning",
                 detail="GPT is drafting the initial competition plan.",
             )
-            _run_plan_and_initial(self.config, self.run_id)
+            _planning_runner.run_plan_and_initial(self.config, self.run_id)
             return _plan_policy.load_plan_config(self.config.paths)
         return plan
 
@@ -1020,7 +1016,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 iteration=iteration,
                                 attempt=kernel_attempts,
                                 trigger_reason="repeated_error_fingerprint",
-                                regenerate_kernel_sources=lambda: _run_plan_and_initial(config, run_id),
+                                regenerate_kernel_sources=lambda: _planning_runner.run_plan_and_initial(config, run_id),
                             ):
                                 error_fingerprints.clear()
                                 continue
@@ -1114,7 +1110,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 iteration=iteration,
                                 attempt=kernel_attempts,
                                 trigger_reason="repeated_error_fingerprint",
-                                regenerate_kernel_sources=lambda: _run_plan_and_initial(config, run_id),
+                                regenerate_kernel_sources=lambda: _planning_runner.run_plan_and_initial(config, run_id),
                             ):
                                 error_fingerprints.clear()
                                 continue
@@ -2745,47 +2741,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     _autopilot_state.write_run_payload(run_dir, run_payload)
 
 
-def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
-    print(f"[cyan]plan[/cyan]: {planning_flow_summary()}")
-    _watch_state.update_watch_phase(
-        config,
-        run_id,
-        "gpt_planning",
-        detail=planning_flow_summary(),
-    )
-    planning_campaign_mode = normalize_campaign_mode(config.campaign_mode, deliverable_mode="leaderboard")
-    pipeline_config = AgentPipelineConfig(
-        slug=config.slug,
-        competition_url=config.competition_url,
-        compute=config.compute,
-        accelerator=config.accelerator,
-        internet=str(config.internet or "auto"),
-        run_id=run_id,
-        dry_run=config.dry_run,
-        repo_root=config.paths.repo_root,
-        method_scout=_method_scout.effective_method_scout_mode(
-            requested_mode=config.method_scout,
-            campaign_mode=planning_campaign_mode,
-        ),
-        method_scout_max_sources=int(config.method_scout_max_sources or 12),
-        hardware_profile=config.hardware_profile,
-        time_budget_min=config.time_budget_min,
-    )
-    run_agent_pipeline(paths=config.paths, config=pipeline_config)
-    _watch_state.update_watch_phase(
-        config,
-        run_id,
-        "verifying",
-        detail="Verifying the generated plan and kernel scaffold.",
-    )
-    _verify_artifacts.run_repo_verify(
-        config.verify_cmd,
-        dry_run=config.dry_run,
-        artifacts_dir=config.paths.artifacts_dir,
-        run_command_fn=run_command,
-    )
-
-
 def _run_improvement(
     config: AutopilotConfig,
     run_id: str,
@@ -3620,7 +3575,7 @@ def _run_kernel_fix(
                 iteration=iteration,
                 attempt=attempt,
                 trigger_reason="codex_no_changes",
-                regenerate_kernel_sources=lambda: _run_plan_and_initial(config, run_id),
+                regenerate_kernel_sources=lambda: _planning_runner.run_plan_and_initial(config, run_id),
             )
             if not regenerated:
                 raise KernelFailedError(

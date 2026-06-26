@@ -331,7 +331,7 @@ def test_autopilot_does_not_force_iter1_submit_when_quality_gate_blocks(monkeypa
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr(
         "kagglebot.kernel_quality.build_kernel_quality_guard",
@@ -408,7 +408,7 @@ def test_autopilot_forces_iter1_submit_through_soft_detected_baseline_guard(
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr(
         "kagglebot.kernel_quality.build_kernel_quality_guard",
@@ -519,7 +519,7 @@ def test_autopilot_local_requires_kernel_when_legacy_disabled(monkeypatch, tmp_p
         target_score=0.5,
         target_direction="minimize",
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
 
@@ -559,7 +559,7 @@ def test_autopilot_uses_plan_from_agent(monkeypatch, tmp_path: Path) -> None:
             accelerator="cpu",
         )
 
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", fake_plan)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", fake_plan)
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
@@ -1304,7 +1304,7 @@ def test_autopilot_submit_when_top1_tier_single_iteration(monkeypatch, tmp_path:
         lambda *args, **kwargs: [{"description": "", "status": "complete", "publicScore": "0.49"}],
     )
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -1345,7 +1345,7 @@ def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monke
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=False, max_iterations=2)
     run_autopilot(config)
@@ -1427,7 +1427,7 @@ def test_autopilot_submission_runs_every_iteration(
         "kagglebot.autopilot.list_competition_submissions",
         lambda *args, **kwargs: [{"description": "", "status": "complete", "publicScore": "0.40"}],
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -1486,7 +1486,7 @@ def test_autopilot_aborts_on_repeated_submit_fingerprint(monkeypatch, tmp_path: 
         "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
         lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     with pytest.raises(SubmitAbortedError):
@@ -1571,7 +1571,7 @@ def test_autopilot_transient_retry_stops_after_max_attempts(monkeypatch, tmp_pat
         "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
         lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
@@ -1635,7 +1635,7 @@ def test_autopilot_validation_failure_aborts_before_kaggle_submit(monkeypatch, t
         "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
         lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     with pytest.raises(SubmitAbortedError):
@@ -1705,7 +1705,7 @@ def test_autopilot_resume_allows_submit_after_prior_attempt(monkeypatch, tmp_pat
         "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
         lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_dir = config.paths.run_dir(config.run_id or "run-1")
@@ -1784,7 +1784,7 @@ def test_autopilot_force_submit_aborts_on_state_fingerprint_repeat(monkeypatch, 
         "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
         lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1, force_submit=True)
     run_dir = config.paths.run_dir(config.run_id or "run-1")
@@ -2077,7 +2077,7 @@ def test_autopilot_submit_validation_error_autofixes_and_resubmits(monkeypatch, 
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr(
-        "kagglebot.autopilot._run_plan_and_initial",
+        "kagglebot.planning_runner.run_plan_and_initial",
         lambda *args, **kwargs: planning_calls.update(count=planning_calls["count"] + 1),
     )
     monkeypatch.setattr("kagglebot.autopilot._run_autofix", fake_submit_autofix)
@@ -3428,7 +3428,7 @@ def test_autopilot_submits_every_iteration_without_limit(monkeypatch, tmp_path: 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
@@ -3491,7 +3491,7 @@ def test_autopilot_allows_non_improving_submit_on_final_iteration(monkeypatch, t
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.35})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
@@ -3570,7 +3570,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.25})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.kernel_quality.build_kernel_quality_guard", fake_quality_guard)
@@ -3639,7 +3639,7 @@ def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatc
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.35})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
@@ -4818,7 +4818,7 @@ def test_autopilot_missing_kernel_metric_triggers_kernel_fix(monkeypatch, tmp_pa
         target_score=0.5,
         target_direction="minimize",
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.plan_policy.needs_planning", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
@@ -4920,7 +4920,7 @@ def test_metric_mismatch_keeps_competition_metric_in_strict_mode(monkeypatch, tm
     monkeypatch.setattr("kagglebot.metric_recheck.recheck_kernel_metrics_from_artifacts", fake_metric_recheck)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=False, max_iterations=1)
@@ -4971,7 +4971,7 @@ def test_metric_alias_equivalence_does_not_trigger_mismatch(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=False, max_iterations=1)
@@ -5056,7 +5056,7 @@ def test_metric_mismatch_can_follow_kernel_metric_when_strict_mode_disabled(monk
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=False, max_iterations=1)
@@ -5075,7 +5075,7 @@ def test_metric_only_fix_reruns_local_kernel_to_materialize_metric_outputs(monke
         target_direction="maximize",
     )
     monkeypatch.setenv("KAGGLEBOT_STRICT_COMPETITION_METRIC", "1")
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.plan_policy.needs_planning", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
@@ -5485,7 +5485,7 @@ def test_local_kernel_oof_artifact_is_synced_for_metric_recheck(monkeypatch, tmp
     monkeypatch.setattr("kagglebot.metric_fix.run_metric_only_competition_metric_fix", fake_metric_only_fix)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=False, max_iterations=1, compute="local_gpu", accelerator="gpu")
@@ -5544,7 +5544,7 @@ def test_autopilot_submit_when_top1_tier(monkeypatch, tmp_path: Path) -> None:
         "kagglebot.autopilot.list_competition_submissions",
         lambda *args, **kwargs: [{"description": "", "status": "complete", "publicScore": "0.11"}],
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -5597,7 +5597,7 @@ def test_autopilot_submit_at_final_iteration(monkeypatch, tmp_path: Path) -> Non
         "kagglebot.autopilot.list_competition_submissions",
         lambda *args, **kwargs: [{"description": "", "status": "complete", "publicScore": "0.95"}],
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -5657,7 +5657,7 @@ def test_autopilot_skips_submit_when_kaggle_credentials_missing(monkeypatch, tmp
             type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
         )[1],
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     with pytest.raises(SubmitAbortedError):
@@ -5675,7 +5675,7 @@ def test_autopilot_stops_when_target_missing(monkeypatch, tmp_path: Path) -> Non
         calls["train"] += 1
         raise AssertionError("train should not be called when target missing")
 
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
@@ -5735,7 +5735,7 @@ def test_autopilot_records_problem_knowledge_after_submission_result(monkeypatch
         "kagglebot.autopilot.list_competition_submissions",
         lambda *args, **kwargs: [{"description": "", "status": "complete", "publicScore": "0.95"}],
     )
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_autopilot(config)
@@ -5763,7 +5763,7 @@ def test_autopilot_refreshes_knowledge_hints(monkeypatch, tmp_path: Path) -> Non
         "kagglebot.knowledge_context.ensure_taxonomy", lambda *args, **kwargs: {"tags": [], "aliases": {}}
     )
     monkeypatch.setattr("kagglebot.knowledge_context.resolve_similar_improvements", fake_resolve_similar_improvements)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path)
@@ -5832,7 +5832,7 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.1})
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot.run_strategy", fake_run_strategy)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, max_iterations=2)
     run_autopilot(config)
@@ -6522,13 +6522,13 @@ def test_autopilot_runs_agent_pipeline(monkeypatch, tmp_path: Path) -> None:
     def fake_pipeline(*args, **kwargs):  # noqa: ARG001
         called["run"] = True
 
-    monkeypatch.setattr("kagglebot.autopilot.run_agent_pipeline", fake_pipeline)
+    monkeypatch.setattr("kagglebot.planning_runner.run_agent_pipeline", fake_pipeline)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path)
-    from kagglebot.autopilot import _run_plan_and_initial
+    from kagglebot.planning_runner import run_plan_and_initial
 
-    _run_plan_and_initial(config, config.run_id or "run-1")
+    run_plan_and_initial(config, config.run_id or "run-1")
     assert called["run"] is True
 
 
@@ -6602,7 +6602,7 @@ def test_autopilot_retries_kernel_failure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.kernel_runner.ensure_kernel_sources_valid", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, compute="kaggle_gpu", accelerator="gpu", max_iterations=1)
@@ -6663,7 +6663,7 @@ def test_autopilot_preflight_fixes_kernel_sources_before_local_run(monkeypatch, 
             metrics_path=metrics_path,
         )
 
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", fake_run_kernel_fix)
@@ -6712,7 +6712,7 @@ def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         "kagglebot.submission_service.run_kaggle_submit",
@@ -6784,7 +6784,7 @@ def test_autopilot_skips_fallback_submit_after_untrusted_final_iteration(
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.submission_policy.should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
@@ -6877,7 +6877,7 @@ def test_autopilot_skips_fallback_submit_when_higher_potential_candidate_exists(
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.submission_policy.should_force_initial_submit", lambda **kwargs: False)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr(
@@ -6972,7 +6972,7 @@ def test_autopilot_top1_stop_requires_submission_score(monkeypatch, tmp_path: Pa
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
 
     config = _make_config(tmp_path, submit=True, max_iterations=3)
@@ -7097,7 +7097,7 @@ def test_autopilot_does_not_stop_on_estimated_rank_one(monkeypatch, tmp_path: Pa
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.2})
     monkeypatch.setattr(
         "kagglebot.autopilot.leaderboard_rank_for_score",
@@ -7163,7 +7163,7 @@ def test_autopilot_submit_mode_ignores_no_improve_stop_policy(monkeypatch, tmp_p
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=True, max_iterations=2)
@@ -7229,7 +7229,7 @@ def test_autopilot_forces_major_overhaul_after_noise_limited_streak(monkeypatch,
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=False, max_iterations=4)
@@ -7295,7 +7295,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_is_outlier(monkeypa
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
         "kagglebot.autopilot_state.resume_iteration_state",
@@ -7371,7 +7371,7 @@ def test_autopilot_forces_major_overhaul_when_below_code_reference(monkeypatch, 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
 
     config = _make_config(tmp_path, submit=False, max_iterations=2)
@@ -7433,7 +7433,7 @@ def test_autopilot_forces_major_overhaul_on_online_mismatch(monkeypatch, tmp_pat
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
     monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.93})
@@ -7544,7 +7544,7 @@ def test_autopilot_forces_major_overhaul_when_submission_rank_is_poor(monkeypatc
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=True, max_iterations=2)
@@ -7600,7 +7600,7 @@ def test_autopilot_blocks_minor_tuning_until_medal_band_is_reached(monkeypatch, 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.91})
 
     config = _make_config(tmp_path, submit=False, max_iterations=2)
@@ -7656,7 +7656,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_anchor_is_outlier(m
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
         "kagglebot.autopilot_state.resume_iteration_state",
@@ -7720,7 +7720,7 @@ def test_autopilot_evaluation_report_uses_multiseed_defaults(monkeypatch, tmp_pa
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
 
     config = _make_config(tmp_path, submit=False, max_iterations=1)
@@ -7829,7 +7829,7 @@ def test_autopilot_resume_submit_only_from_legacy_output_artifacts(monkeypatch, 
     monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
@@ -8391,7 +8391,7 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
 
     monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", fake_replan)
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", fake_replan)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})

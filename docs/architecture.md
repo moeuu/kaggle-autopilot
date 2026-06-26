@@ -317,6 +317,9 @@ The next high-value modernization work is:
    leaving `autopilot.py` to provide run-specific services and state callbacks.
    Submit abort autofixability decisions now call `submit_failure_context.py` directly, removing the obsolete
    `autopilot.py` private wrapper around that policy.
+   Initial planning/pipeline execution and its immediate repository verification now live in `planning_runner.py`,
+   leaving `autopilot.py` to schedule planning phases and reuse the same regeneration entrypoint for kernel-rebuild
+   fallbacks.
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the
