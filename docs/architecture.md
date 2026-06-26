@@ -314,6 +314,8 @@ The next high-value modernization work is:
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the
    loop to orchestrate policy calls instead of owning the final artifact shape.
+   Autopilot resolved-plan orchestration now lives in `plan_resolution.py`, so `autopilot.py` only adapts
+   `AutopilotConfig` and default constants while existing plan policies remain reusable.
    Agent write-guard policy, repair edit-scope construction, snapshots, repairs, and secret prompt checks now live in
    `write_guard.py`; agent and autopilot orchestration import that shared module instead of sharing guard internals
    through `agent_pipeline.py`.

@@ -38,8 +38,8 @@ from kagglebot import loop_control as _loop_control
 from kagglebot import method_scout as _method_scout
 from kagglebot import metric_matching as _metric_matching
 from kagglebot import plan_policy as _plan_policy
+from kagglebot import plan_resolution as _plan_resolution
 from kagglebot import runtime_fixes as _runtime_fixes
-from kagglebot import runtime_policy as _runtime_policy
 from kagglebot import score_progress as _score_progress
 from kagglebot import score_utils as _score_utils
 from kagglebot import submission_history as _submission_history
@@ -160,7 +160,6 @@ from kagglebot.writeup import (
     build_writeup_bundle,
     infer_code_competition_from_paths,
     infer_deliverable_mode_from_paths,
-    infer_submit_mode_from_paths,
     normalize_deliverable_mode,
     normalize_submit_mode,
 )
@@ -2728,268 +2727,36 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
-    eval_spec = _context_artifacts.load_evaluation_spec(
-        slug=config.paths.slug,
-        evaluation_spec_path=config.paths.context_dir / "evaluation_spec.json",
-    )
-    spec_values = _plan_policy.extract_evaluation_spec_values(eval_spec)
-
-    strict_competition_metric = _env_utils.env_flag(
-        "KAGGLEBOT_STRICT_COMPETITION_METRIC",
-        default=_DEFAULT_STRICT_COMPETITION_METRIC,
-    )
-    deliverable_mode = _plan_policy.resolve_deliverable_mode(
-        plan_value=getattr(plan, "deliverable_mode", None),
-        spec_value=eval_spec.get("deliverable_mode"),
-        inferred_value=infer_deliverable_mode_from_paths(config.paths, default=""),
-    )
-    submit_mode = _plan_policy.resolve_submit_mode(
-        plan_value=getattr(plan, "submit_mode", None),
-        spec_value=eval_spec.get("submit_mode"),
-        inferred_value=infer_submit_mode_from_paths(config.paths, default=""),
-    )
-    competition_policy = load_competition_policy(config.paths)
-    target_objective = _plan_policy.resolve_target_objective(
-        plan_target_medal=getattr(plan, "target_medal", None),
-        plan_target_rank_percentile=getattr(plan, "target_rank_percentile", None),
-        spec_target_medal=eval_spec.get("target_medal"),
-        spec_target_rank_percentile=eval_spec.get("target_rank_percentile"),
-        deliverable_mode=deliverable_mode,
-        search_stop_rank_percentile=competition_policy.evaluation.search_stop_rank_percentile,
-        default_target_medal=_DEFAULT_TARGET_MEDAL,
-    )
-    target_medal = target_objective.target_medal
-    target_rank_percentile = target_objective.target_rank_percentile
-    target_request = _plan_policy.resolve_target_request(
-        config_target_metric=config.target_metric,
-        config_target_score=config.target_score,
-        config_target_direction=config.target_direction,
+    return _plan_resolution.resolve_plan_for_autopilot(
         plan=plan,
-        spec_values=spec_values,
-    )
-    target_metric = target_request.target_metric
-    target_score = target_request.target_score
-    target_direction = target_request.target_direction
-    competition_override = _plan_policy.competition_eval_override(config.paths.slug)
-    metric_direction_decision = _plan_policy.resolve_target_metric_direction(
-        target_metric=target_metric,
-        target_direction=target_direction,
-        spec_metric=spec_values.metric_name,
-        spec_direction=spec_values.direction,
-        explicit_target_metric=target_request.explicit_target_metric,
-        explicit_target_direction=target_request.explicit_target_direction,
-        strict_competition_metric=strict_competition_metric,
-        competition_override=competition_override,
-    )
-    target_metric = metric_direction_decision.target_metric
-    target_direction = metric_direction_decision.target_direction
-    override_split_strategy = metric_direction_decision.override_split_strategy
-    for message in metric_direction_decision.messages:
-        print(message)
-    base_evaluation_request = _plan_policy.resolve_base_evaluation_request(
-        config_score_source=config.score_source,
-        config_holdout_frac=config.holdout_frac,
-        config_cv_folds=config.cv_folds,
-        config_seed=config.seed,
-        plan=plan,
-        spec_values=spec_values,
-    )
-    score_source = base_evaluation_request.score_source
-    for message in base_evaluation_request.messages:
-        print(message)
-    holdout_frac = base_evaluation_request.holdout_frac
-    cv_folds = base_evaluation_request.cv_folds
-    split_strategy = base_evaluation_request.split_strategy
-    split_strategy, split_strategy_note = _plan_policy.resolve_split_strategy_from_artifacts(
         paths=config.paths,
-        split_strategy=split_strategy,
-    )
-    split_override_decision = _plan_policy.resolve_split_strategy_override(
-        split_strategy=split_strategy,
-        override_split_strategy=override_split_strategy,
-    )
-    split_strategy = split_override_decision.split_strategy
-    for message in split_override_decision.messages:
-        print(message)
-    if split_strategy_note:
-        print(f"[yellow]note[/yellow]: {split_strategy_note}")
-    dataset_profile = _context_artifacts.load_dataset_profile(
-        slug=config.paths.slug,
-        dataset_profile_path=config.paths.dataset_profile_path,
-    )
-    profile_modality = str(dataset_profile.get("modality") or "").strip().lower()
-    heavy_local_gpu = _runtime_policy.is_local_gpu_compute(
-        config.compute
-    ) and _runtime_policy.is_heavy_deep_learning_modality(profile_modality)
-    seed = base_evaluation_request.seed
-    eval_seeds = base_evaluation_request.eval_seeds
-    eval_repeats = base_evaluation_request.eval_repeats
-    eval_budget_decision = _plan_policy.resolve_eval_budget_policy(
-        heavy_local_gpu=heavy_local_gpu,
-        cv_folds=cv_folds,
-        seed=seed,
-        eval_seeds=eval_seeds,
-        eval_repeats=eval_repeats,
-        max_heavy_local_gpu_cv_folds=_HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
-    )
-    cv_folds = eval_budget_decision.cv_folds
-    eval_seeds = eval_budget_decision.eval_seeds
-    eval_repeats = eval_budget_decision.eval_repeats
-    for message in eval_budget_decision.messages:
-        print(message)
-    constraints = _competition_rules.load_competition_rule_constraints(config.paths)
-    code_competition = infer_code_competition_from_paths(config.paths)
-    submit_mode_decision = _plan_policy.resolve_submit_mode_constraints(
-        submit_mode=submit_mode,
         compute=config.compute,
-        code_competition=code_competition,
-        notebook_submissions_only=constraints.notebook_submissions_only,
-    )
-    submit_mode = submit_mode_decision.submit_mode
-    for message in submit_mode_decision.messages:
-        print(message)
-    notebook_submit_artifact_mode = _submit_notebook.resolve_notebook_submit_artifact_mode(
-        submit_mode=submit_mode,
-        code_competition=code_competition,
-    )
-    runtime_request = _plan_policy.resolve_runtime_request(
-        config_time_budget_min=config.time_budget_min,
-        config_kernel_name=config.kernel_name,
-        config_internet=config.internet,
-        plan=plan,
-        internet_must_be_off=constraints.internet_must_be_off,
-    )
-    time_budget_min = runtime_request.time_budget_min
-    kernel_name = runtime_request.kernel_name
-    internet = runtime_request.internet
-    for message in runtime_request.messages:
-        print(message)
-    runtime_limit_min = _competition_rules.runtime_limit_for_compute(constraints=constraints, compute=config.compute)
-    is_local_gpu_compute = _runtime_policy.is_local_gpu_compute(config.compute)
-    time_budget_decision = _plan_policy.resolve_time_budget_policy(
-        time_budget_min=time_budget_min,
-        runtime_limit_min=runtime_limit_min,
-        local_budget_min=_runtime_policy.local_gpu_time_budget_limit_min() if is_local_gpu_compute else None,
-        is_local_gpu=is_local_gpu_compute,
-    )
-    time_budget_min = time_budget_decision.time_budget_min
-    for message in time_budget_decision.messages:
-        print(message)
-    max_iterations_decision = _plan_policy.resolve_plan_max_iterations(
-        config_max_iterations=config.max_iterations,
-        plan_max_iterations=plan.max_iterations,
-        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
-    )
-    max_iterations = max_iterations_decision.max_iterations
-    for message in max_iterations_decision.messages:
-        print(message)
-    max_iterations_decision = _plan_policy.resolve_heavy_local_gpu_max_iterations(
-        heavy_local_gpu=heavy_local_gpu,
-        time_budget_min=time_budget_min,
-        max_iterations=max_iterations,
-        long_iteration_budget_min=_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
-        max_long_iterations=_LONG_LOCAL_GPU_MAX_ITERATIONS,
-    )
-    max_iterations = max_iterations_decision.max_iterations
-    for message in max_iterations_decision.messages:
-        print(message)
-    loop_control_request = _plan_policy.resolve_loop_control_request(
-        config_max_total_min=config.max_total_min,
-        config_patience=config.patience,
-        config_min_improvement=config.min_improvement,
-        config_submit_policy=config.submit_policy,
-        plan=plan,
-        spec_values=spec_values,
-    )
-    max_total_min = loop_control_request.max_total_min
-    patience = loop_control_request.patience
-    min_improvement = loop_control_request.min_improvement
-    submit_policy_decision = _submission_policy.resolve_plan_submission_policy(
-        config_submit_policy=config.submit_policy,
-        requested_submit_policy=loop_control_request.requested_submit_policy,
-        requested_submission_gate=loop_control_request.requested_submission_gate,
-        submission_limit_detected=constraints.submission_limit_detected,
+        target_metric=config.target_metric,
+        target_score=config.target_score,
+        target_direction=config.target_direction,
+        score_source=config.score_source,
+        holdout_frac=config.holdout_frac,
+        cv_folds=config.cv_folds,
+        seed=config.seed,
+        time_budget_min=config.time_budget_min,
+        kernel_name=config.kernel_name,
+        internet=config.internet,
+        max_iterations=config.max_iterations,
+        max_total_min=config.max_total_min,
+        patience=config.patience,
+        min_improvement=config.min_improvement,
+        submit_policy=config.submit_policy,
+        default_strict_competition_metric=_DEFAULT_STRICT_COMPETITION_METRIC,
+        default_target_medal=_DEFAULT_TARGET_MEDAL,
         default_limited_submission_gate=_DEFAULT_LIMITED_SUBMISSION_GATE,
+        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
+        heavy_local_gpu_max_cv_folds=_HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
+        long_local_gpu_iteration_budget_min=_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
+        long_local_gpu_max_iterations=_LONG_LOCAL_GPU_MAX_ITERATIONS,
+        default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+        default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+        on_message=print,
     )
-    submit_policy = submit_policy_decision.submit_policy
-    submission_gate = submit_policy_decision.submission_gate
-    for message in submit_policy_decision.messages:
-        print(message)
-    readiness_stop_policy = _plan_policy.resolve_readiness_stop_policy(
-        plan=plan,
-        spec_values=spec_values,
-        target_score=target_score,
-        min_improvement=min_improvement,
-        patience=patience,
-    )
-    readiness_target_score = readiness_stop_policy.readiness_target_score
-    readiness_method = readiness_stop_policy.readiness_method
-    readiness_k = readiness_stop_policy.readiness_k
-    ci_method = readiness_stop_policy.ci_method
-    ci_alpha = readiness_stop_policy.ci_alpha
-    drift_check = readiness_stop_policy.drift_check
-    drift_weight = readiness_stop_policy.drift_weight
-    stop_min_delta = readiness_stop_policy.stop_min_delta
-    stop_no_improve_patience = readiness_stop_policy.stop_no_improve_patience
-    stop_same_config_patience = readiness_stop_policy.stop_same_config_patience
-    rank_force_policy = _plan_policy.resolve_rank_force_policy(
-        rank_force_major_max_percentile=plan.rank_force_major_max_percentile,
-        rank_force_major_min_teams=plan.rank_force_major_min_teams,
-        target_rank_percentile=target_rank_percentile,
-        default_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
-        default_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
-    )
-    rank_force_major_max_percentile = rank_force_policy.rank_force_major_max_percentile
-    rank_force_major_min_teams = rank_force_policy.rank_force_major_min_teams
-    evaluation_contract = _plan_policy.build_evaluation_contract(
-        slug=config.paths.slug,
-        eval_spec=eval_spec,
-        target_metric=str(target_metric) if isinstance(target_metric, str) else None,
-        target_direction=str(target_direction) if isinstance(target_direction, str) else None,
-        split_strategy=str(split_strategy) if isinstance(split_strategy, str) else None,
-    )
-
-    return _plan_policy.ResolvedPlan(
-        deliverable_mode=deliverable_mode,
-        submit_mode=submit_mode,
-        code_competition=code_competition,
-        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
-        target_medal=target_medal,
-        target_rank_percentile=target_rank_percentile,
-        target_metric=target_metric,
-        target_score=target_score,
-        target_direction=target_direction,
-        score_source=score_source,
-        holdout_frac=holdout_frac,
-        cv_folds=cv_folds,
-        split_strategy=split_strategy,
-        seed=seed,
-        eval_seeds=eval_seeds,
-        eval_repeats=eval_repeats,
-        time_budget_min=time_budget_min,
-        kernel_name=kernel_name,
-        internet=internet,
-        max_iterations=max_iterations,
-        max_total_min=max_total_min,
-        patience=patience,
-        min_improvement=min_improvement,
-        submit_policy=submit_policy,
-        submission_gate=submission_gate,
-        submission_limit_per_day=constraints.submission_limit_per_day,
-        readiness_target_score=readiness_target_score,
-        readiness_method=readiness_method,
-        readiness_k=readiness_k,
-        ci_method=ci_method,
-        ci_alpha=ci_alpha,
-        drift_check=drift_check,
-        drift_weight=drift_weight,
-        stop_min_delta=stop_min_delta,
-        stop_no_improve_patience=stop_no_improve_patience,
-        stop_same_config_patience=stop_same_config_patience,
-        rank_force_major_max_percentile=rank_force_major_max_percentile,
-        rank_force_major_min_teams=rank_force_major_min_teams,
-        evaluation_contract=evaluation_contract,
-    ).to_payload()
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
