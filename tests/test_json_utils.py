@@ -11,6 +11,7 @@ from kagglebot.json_utils import (
     load_json_object,
     load_json_object_or_empty,
     load_jsonl_records,
+    parse_json_object_text,
     read_json_object,
     write_json_array,
     write_json_object,
@@ -66,6 +67,12 @@ def test_load_json_object_or_empty_returns_empty_dict_for_missing_or_invalid_pay
     invalid = tmp_path / "invalid.json"
     invalid.write_text("{", encoding="utf-8")
     assert load_json_object_or_empty(invalid) == {}
+
+
+def test_parse_json_object_text_returns_only_object_payloads() -> None:
+    assert parse_json_object_text('{"ok": true}') == {"ok": True}
+    assert parse_json_object_text("[1, 2, 3]") is None
+    assert parse_json_object_text("{") is None
 
 
 def test_load_json_array_returns_list_payload(tmp_path) -> None:

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.competition_policy import load_competition_policy
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, parse_json_object_text, write_json_object
 from kagglebot.kaggle_api import download_competition, download_dataset, kernels_pull
 from kagglebot.paths import CompetitionPaths
 from kagglebot.validators import safe_extract_zip
@@ -238,10 +237,7 @@ def _collect_notebook_text_input_sources(path: Path | None) -> list[dict[str, st
 
     text = content
     if path.suffix.lower() == ".ipynb":
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
-            payload = {}
+        payload = parse_json_object_text(content) or {}
         cells = payload.get("cells", []) if isinstance(payload, dict) else []
         if isinstance(cells, list):
             text = "\n".join(_normalize_cell_source(cell.get("source")) for cell in cells if isinstance(cell, dict))

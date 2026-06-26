@@ -7,6 +7,8 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
+from kagglebot.json_utils import parse_json_object_text
+
 _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 
 SECRET_PATTERNS = [
@@ -95,13 +97,10 @@ def validate_kernel_package(package_dir: Path) -> None:
     if meta_path.exists():
         meta_text = meta_path.read_text(encoding="utf-8", errors="ignore")
         content.append(meta_text)
-        try:
-            import json
-
-            payload = json.loads(meta_text)
-            code_file = payload.get("code_file")
-        except json.JSONDecodeError:
-            code_file = None
+        payload = parse_json_object_text(meta_text)
+        if payload is not None:
+            raw_code_file = payload.get("code_file")
+            code_file = raw_code_file if isinstance(raw_code_file, str) else None
 
     for candidate in ("main.py", "kernel.py", code_file):
         if not candidate:

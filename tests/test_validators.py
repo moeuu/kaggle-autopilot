@@ -59,6 +59,12 @@ def test_validate_kernel_package_scans_kernel(tmp_path: Path) -> None:
         validate_kernel_package(tmp_path)
 
 
+def test_validate_kernel_package_ignores_non_string_code_file(tmp_path: Path) -> None:
+    (tmp_path / "kernel-metadata.json").write_text('{"code_file": ["kernel.py"]}', encoding="utf-8")
+
+    validate_kernel_package(tmp_path)
+
+
 def test_validate_kernel_package_scans_auxiliary_sources(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
     (tmp_path / "helpers").mkdir()

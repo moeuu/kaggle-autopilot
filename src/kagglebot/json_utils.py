@@ -25,6 +25,14 @@ def load_json_object_or_empty(path: Path, *, errors: str = "strict") -> dict[str
     return load_json_object(path, errors=errors) or {}
 
 
+def parse_json_object_text(text: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def load_json_array(path: Path, *, errors: str = "strict") -> list[object] | None:
     if not path.exists():
         return None

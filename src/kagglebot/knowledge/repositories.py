@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.json_utils import write_json_object
+from kagglebot.json_utils import parse_json_object_text, write_json_object
 from kagglebot.paths import KnowledgePaths
 
 _DEFAULT_TAXONOMY: dict[str, object] = {
@@ -64,10 +63,10 @@ class TaxonomyRepository:
     @staticmethod
     def load(path: Path) -> dict[str, object]:
         text = path.read_text(encoding="utf-8")
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return TaxonomyRepository._parse_yaml_taxonomy(text)
+        payload = parse_json_object_text(text)
+        if payload is not None:
+            return payload
+        return TaxonomyRepository._parse_yaml_taxonomy(text)
 
     @staticmethod
     def _parse_yaml_taxonomy(text: str) -> dict[str, object]:
