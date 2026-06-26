@@ -36,7 +36,6 @@ from kagglebot import local_kernel_runtime_env as _local_kernel_runtime_env
 from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
 from kagglebot import remote_kernel_state as _remote_kernel_state
-from kagglebot.artifact_io import copy_artifact_if_needed as _copy_artifact_if_needed
 from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
     KaggleCliError,
@@ -56,6 +55,7 @@ from kagglebot.kaggle_api import (
     kernels_status,
 )
 from kagglebot.kaggle_credentials import resolve_kaggle_username as _resolve_kaggle_username
+from kagglebot.kernel_outputs import copy_local_kernel_primary_artifacts as _copy_local_kernel_primary_artifacts
 from kagglebot.kernel_outputs import copy_optional_local_kernel_artifacts as _copy_optional_local_kernel_artifacts
 from kagglebot.kernel_outputs import find_output_file as _find_output_file
 from kagglebot.kernel_outputs import find_submission_file
@@ -866,16 +866,12 @@ def run_kernel_local(
     if submission_src is None:
         raise KernelFailedError("Local kernel completed but submission output was not found.")
 
-    submission_dst = _copy_artifact_if_needed(
-        source=submission_src,
-        destination=output_dir / submission_src.name,
+    submission_dst, metrics_dst = _copy_local_kernel_primary_artifacts(
+        submission_path=submission_src,
+        metrics_path=metrics_src,
+        output_dir=output_dir,
     )
-    metrics_dst = None
-    if metrics_src is not None:
-        metrics_dst = _copy_artifact_if_needed(
-            source=metrics_src,
-            destination=output_dir / "metrics.json",
-        )
+    if metrics_dst is not None:
         metrics_dst = _local_kernel_metrics_normalization.normalize_local_kernel_metrics(
             slug=slug,
             data_dir=base_dir / slug / "data",

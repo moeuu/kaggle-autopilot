@@ -518,8 +518,8 @@ Recommended extraction order:
    `artifact_io.copy_artifact_if_needed`; `kernel_outputs` keeps a compatibility import for older call sites. Notebook
    runner local submission preservation, submit artifact storage, TSV submit-format staging, bootstrap sample-submission
    caching/mirroring, local sample submission and auxiliary-input file staging, kernel package source/runtime/external
-   asset staging, plan snapshots, local kernel shim config files, local dataset-profile context staging, and optional
-   local-kernel artifact preservation use that helper for file-copy paths. Remote Kaggle kernel status polling,
+   asset staging, plan snapshots, local kernel shim config files, local dataset-profile context staging, and local-kernel
+   primary/optional artifact preservation use that helper for file-copy paths. Remote Kaggle kernel status polling,
    heartbeat/log-tail checks, wait timeout handling, and wait-limit defaults now live in `kernel_wait.py`;
    `kernel_runner.py` keeps compatibility wrappers and package orchestration. Vision YOLO dataset staging also uses that
    helper for symlink fallback copies.

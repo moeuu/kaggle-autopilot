@@ -8,6 +8,7 @@ import pytest
 
 from kagglebot.kernel_outputs import (
     copy_artifact_if_needed,
+    copy_local_kernel_primary_artifacts,
     copy_optional_local_kernel_artifacts,
     find_intermediate_submission_file,
     find_newest_existing_path,
@@ -201,6 +202,28 @@ def test_resolve_local_kernel_artifact_file_and_copy(tmp_path: Path) -> None:
     assert resolved == source
     assert copy_artifact_if_needed(source=source, destination=destination) == destination
     assert destination.read_text(encoding="utf-8") == "{}"
+
+
+def test_copy_local_kernel_primary_artifacts_copies_submission_and_metrics(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    source_dir = tmp_path / "source"
+    output_dir.mkdir()
+    source_dir.mkdir()
+    submission = source_dir / "submission_model_fold1.csv"
+    metrics = source_dir / "metrics_nested.json"
+    submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    metrics.write_text('{"score": 0.1}', encoding="utf-8")
+
+    submission_dst, metrics_dst = copy_local_kernel_primary_artifacts(
+        submission_path=submission,
+        metrics_path=metrics,
+        output_dir=output_dir,
+    )
+
+    assert submission_dst == output_dir / "submission_model_fold1.csv"
+    assert metrics_dst == output_dir / "metrics.json"
+    assert submission_dst.read_text(encoding="utf-8") == "id,target\n1,0.1\n"
+    assert metrics_dst.read_text(encoding="utf-8") == '{"score": 0.1}'
 
 
 def test_copy_optional_local_kernel_artifacts_copies_configured_outputs(tmp_path: Path) -> None:

@@ -169,6 +169,25 @@ def copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
     return _copy_artifact_if_needed(source=source, destination=destination)
 
 
+def copy_local_kernel_primary_artifacts(
+    *,
+    submission_path: Path,
+    metrics_path: Path | None,
+    output_dir: Path,
+) -> tuple[Path, Path | None]:
+    submission_dst = copy_artifact_if_needed(
+        source=submission_path,
+        destination=output_dir / submission_path.name,
+    )
+    metrics_dst = None
+    if metrics_path is not None:
+        metrics_dst = copy_artifact_if_needed(
+            source=metrics_path,
+            destination=output_dir / "metrics.json",
+        )
+    return submission_dst, metrics_dst
+
+
 def copy_optional_local_kernel_artifacts(
     *,
     kernel_dir: Path,
