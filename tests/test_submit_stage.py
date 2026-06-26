@@ -12,6 +12,7 @@ from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
     SubmitRunAborter,
     SubmitRunRetryRecorder,
+    SubmitStageRuntimeState,
     abort_submit_for_run,
     apply_duplicate_submission_decision,
     apply_initial_submit_stage_artifact_mode,
@@ -46,6 +47,7 @@ from kagglebot.submit_stage import (
     decide_submitted_tracking_score_update,
     ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,
+    finalize_submit_outcome_for_run_or_abort,
     find_campaign_candidate_for_submission,
     format_iteration_submit_status_message,
     format_rank_force_reason,
@@ -1957,6 +1959,136 @@ def test_resolve_submission_outcome_after_submit_maps_polling_error_to_abort() -
     assert resolution.abort_spec.error_kind == "transient"
     assert resolution.abort_spec.reason == "submission_polling_error"
     assert "network unavailable" in resolution.abort_spec.stderr_tail
+
+
+def test_finalize_submit_outcome_for_run_or_abort_records_success(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    source_submission = run_dir / "iter-4" / "submission.csv"
+    source_submission.parent.mkdir(parents=True)
+    source_submission.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    artifact_path = tmp_path / "kernel-output" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    recorded_payloads: list[object] = []
+    messages: list[str] = []
+
+    result = finalize_submit_outcome_for_run_or_abort(
+        run_dir=run_dir,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        slug="demo",
+        run_id="run-1",
+        message="submission message",
+        submitted_at=datetime(2026, 1, 1, tzinfo=UTC),
+        submission_ref="kernel:user/demo/submission.csv",
+        submission_result=SubmitResultStub(stdout="ok", stderr="", exit_code=0),
+        source_submission_path=source_submission,
+        submission_artifact_path=artifact_path,
+        submit_stage_state=SubmitStageRuntimeState(
+            notebook_submit_required=True,
+            notebook_fallback_activated=True,
+            submission_artifact_mode="inference",
+        ),
+        code_fingerprint="code-fp",
+        deliverable_mode="leaderboard",
+        fetch_submission_rows=lambda _slug: [
+            {
+                "description": "submission message",
+                "date": "2026-01-01T00:01:00Z",
+                "status": "SubmissionStatus.COMPLETE",
+                "publicScore": "0.123",
+            }
+        ],
+        max_attempts=1,
+        poll_interval_sec=0.0,
+        max_fetch_errors=1,
+        normalize_detail=lambda text: text,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "sha" if path == artifact_path else None,
+        load_run_state=lambda _run_dir: {},
+        record_submit_attempt_payloads=recorded_payloads.append,
+        submit_aborter=object(),
+        submit_attempt_recorder=object(),
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert result["submission_path"] == "kernel:user/demo/submission.csv"
+    assert result["outcome"]["score"] == 0.123
+    assert recorded_payloads
+    assert messages == [
+        "[green]submission recorded[/green]",
+        "[cyan]submission result[/cyan]: status=complete score=0.123000",
+    ]
+
+
+def test_finalize_submit_outcome_for_run_or_abort_delegates_outcome_abort(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    artifact_path = tmp_path / "kernel-output" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    abort_calls: list[dict[str, object]] = []
+
+    class Aborter:
+        @staticmethod
+        def abort(**kwargs: object) -> None:
+            abort_calls.append(kwargs)
+            raise RuntimeError("aborted")
+
+    try:
+        finalize_submit_outcome_for_run_or_abort(
+            run_dir=run_dir,
+            submission_ledger_path=tmp_path / "ledger.jsonl",
+            slug="demo",
+            run_id="run-1",
+            message="submission message",
+            submitted_at=datetime(2026, 1, 1, tzinfo=UTC),
+            submission_ref="kernel:user/demo/submission.csv",
+            submission_result=SubmitResultStub(stdout="ok", stderr="", exit_code=0),
+            source_submission_path=run_dir / "iter-4" / "submission.csv",
+            submission_artifact_path=artifact_path,
+            submit_stage_state=SubmitStageRuntimeState(
+                notebook_submit_required=True,
+                notebook_fallback_activated=True,
+                submission_artifact_mode="inference",
+            ),
+            code_fingerprint="code-fp",
+            deliverable_mode="leaderboard",
+            fetch_submission_rows=lambda _slug: [
+                {
+                    "description": "submission message",
+                    "date": "2026-01-01T00:01:00Z",
+                    "status": "SubmissionStatus.COMPLETE",
+                    "publicScore": "",
+                    "errorDescription": "Submission Scoring Error",
+                }
+            ],
+            max_attempts=1,
+            poll_interval_sec=0.0,
+            max_fetch_errors=1,
+            normalize_detail=lambda text: text,
+            compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+            compute_submission_sha256=lambda path: "sha" if path == artifact_path else None,
+            load_run_state=lambda _run_dir: {},
+            record_submit_attempt_payloads=lambda _payload: None,
+            submit_aborter=Aborter(),
+            submit_attempt_recorder=object(),
+            stdout_tail_chars=20,
+            stderr_tail_chars=20,
+            on_message=lambda _message: None,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "aborted"
+    else:
+        raise AssertionError("aborter did not raise")
+
+    assert abort_calls
+    assert abort_calls[0]["submission_ref"] == "kernel:user/demo/submission.csv"
+    assert abort_calls[0]["submission_artifact_path"] == artifact_path
+    assert abort_calls[0]["artifact_mode"] == "inference"
+    assert abort_calls[0]["reason"] == "submission_poll_status_complete_no_score"
 
 
 def test_infer_iteration_from_submission_path_reads_iter_parent() -> None:

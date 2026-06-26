@@ -447,6 +447,9 @@ Recommended extraction order:
    Duplicate-submit checks, rules-acceptance checks, initial submit runtime-state resolution, same-path skip handling,
    and seen-fingerprint assembly now flow through `submit_stage.resolve_submit_preflight_for_run_or_abort`, leaving
    `_attempt_submit` to consume one typed preflight context before entering the retry loop.
+   Submission outcome polling, post-poll abort handling, and successful submit ledger/attempt/failure-context recording
+   now use `submit_stage.finalize_submit_outcome_for_run_or_abort`, so `_attempt_submit` no longer owns final
+   persistence choreography after the retry loop succeeds.
    duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects

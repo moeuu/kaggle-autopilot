@@ -4493,30 +4493,7 @@ def _attempt_submit(
         raise SubmitAbortedError("Submit failed before producing a submission result.")
     submission_ref = submission_reference
     submission_for_submit_path = submission_artifact_path
-    outcome_resolution = _submit_stage.resolve_submission_outcome_after_submit(
-        slug=config.slug,
-        message=message,
-        submitted_at=submitted_at,
-        deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
-        fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
-        max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
-        poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
-        max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
-        normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
-        compute_error_fingerprint=compute_error_fingerprint,
-    )
-    if outcome_resolution.abort_spec is not None:
-        return submit_aborter.abort(
-            submission_ref=submission_ref,
-            submission_artifact_path=submission_for_submit_path,
-            artifact_mode=submit_stage_state.submission_artifact_mode,
-            code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(outcome_resolution.abort_spec),
-            submit_attempt_recorder=submit_attempt_recorder,
-        )
-    outcome = outcome_resolution.outcome
-
-    return _submit_stage.record_successful_submit_for_run(
+    return _submit_stage.finalize_submit_outcome_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
         slug=config.slug,
@@ -4525,10 +4502,18 @@ def _attempt_submit(
         submitted_at=submitted_at,
         submission_ref=submission_ref,
         submission_result=submission_result,
-        submission_path=submission_path,
+        source_submission_path=submission_path,
         submission_artifact_path=submission_for_submit_path,
-        outcome=outcome,
+        submit_stage_state=submit_stage_state,
         code_fingerprint=submit_code_fingerprint,
+        deliverable_mode=infer_deliverable_mode_from_paths(config.paths, default="leaderboard"),
+        fetch_submission_rows=lambda current_slug: list_competition_submissions(current_slug, dry_run=False),
+        max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
+        poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
+        max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
+        normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
+        submit_aborter=submit_aborter,
+        submit_attempt_recorder=submit_attempt_recorder,
         load_run_state=_autopilot_state._load_run_state,
         compute_error_fingerprint=compute_error_fingerprint,
         compute_submission_sha256=_sha256_or_none,
