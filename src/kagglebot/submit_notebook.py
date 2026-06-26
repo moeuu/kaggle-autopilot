@@ -4,10 +4,14 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kagglebot.exceptions import KaggleCliError, SubmissionCliError
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
+
+if TYPE_CHECKING:
+    from kagglebot.paths import CompetitionPaths
 
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
 
@@ -299,6 +303,64 @@ def run_notebook_kernel_submission(
         on_message=on_message,
     )
     return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
+
+
+def run_notebook_kernel_submission_for_run(
+    *,
+    slug: str,
+    run_id: str,
+    paths: CompetitionPaths,
+    kaggle_username: str | None,
+    kernel_name: str | None,
+    accelerator: str,
+    strict_accelerator: bool,
+    submission_path: Path,
+    message: str,
+    artifact_mode: str | None,
+    dry_run: bool,
+    timeout_minutes: int | None,
+    infer_iteration_from_submission_path: Callable[[Path], int | None],
+    resolve_kaggle_username: Callable[[str | None], str],
+    run_submit_kernel: Callable[..., object],
+    run_kaggle_submit_kernel: Callable[..., object],
+    copy_submission_artifact_to_iteration_dir: Callable[..., Path],
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
+    should_retry_ambiguous: Callable[..., bool],
+    sleep: Callable[[float], None],
+    on_message: Callable[[str], None],
+    is_capacity_error: Callable[[BaseException], bool],
+    is_push_error: Callable[[BaseException], bool],
+) -> tuple[object, str, Path | None]:
+    iteration = infer_iteration_from_submission_path(submission_path) or 1
+    iter_dir = paths.iter_dir(run_id, iteration)
+    return run_notebook_kernel_submission(
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        base_dir=paths.base_dir.parent,
+        kaggle_username=resolve_kaggle_username(kaggle_username),
+        kernel_name=kernel_name,
+        accelerator=accelerator,
+        strict_accelerator=strict_accelerator,
+        submission_path=submission_path,
+        message=message,
+        artifact_mode=artifact_mode,
+        dry_run=dry_run,
+        timeout_minutes=timeout_minutes,
+        run_submit_kernel=run_submit_kernel,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        copy_submission_artifact=lambda source: copy_submission_artifact_to_iteration_dir(
+            source=source,
+            iter_dir=iter_dir,
+        ),
+        classify_submit_error=classify_submit_error,
+        should_retry_ambiguous=should_retry_ambiguous,
+        sleep=sleep,
+        on_message=on_message,
+        is_capacity_error=is_capacity_error,
+        is_push_error=is_push_error,
+        iter_logs_dir=iter_dir / "logs",
+    )
 
 
 def run_submit_kernel_with_cpu_fallback(

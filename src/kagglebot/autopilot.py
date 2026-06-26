@@ -4933,16 +4933,11 @@ def _submit_with_notebook_kernel(
     message: str,
     artifact_mode: str = "wrapper",
 ):
-    """Execute a Kaggle notebook kernel and submit via kernel reference."""
-    iteration = _submit_stage.infer_iteration_from_submission_path(submission_path) or 1
-    iter_dir = config.paths.iter_dir(run_id, iteration)
-    kaggle_user = resolve_kaggle_username(config.kaggle_username)
-    return _submit_notebook.run_notebook_kernel_submission(
+    return _submit_notebook.run_notebook_kernel_submission_for_run(
         slug=config.slug,
         run_id=run_id,
-        iteration=iteration,
-        base_dir=config.paths.base_dir.parent,
-        kaggle_username=kaggle_user,
+        paths=config.paths,
+        kaggle_username=config.kaggle_username,
         kernel_name=config.kernel_name,
         accelerator=config.accelerator,
         strict_accelerator=config.strict_accelerator,
@@ -4951,19 +4946,17 @@ def _submit_with_notebook_kernel(
         artifact_mode=artifact_mode,
         dry_run=config.dry_run,
         timeout_minutes=config.time_budget_min,
+        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
+        resolve_kaggle_username=resolve_kaggle_username,
         run_submit_kernel=run_submit_kernel,
         run_kaggle_submit_kernel=run_kaggle_submit_kernel,
-        copy_submission_artifact=lambda source: _autopilot_state._copy_submission_artifact_to_iteration_dir(
-            source=source,
-            iter_dir=iter_dir,
-        ),
+        copy_submission_artifact_to_iteration_dir=_autopilot_state._copy_submission_artifact_to_iteration_dir,
         classify_submit_error=classify_submit_error,
         should_retry_ambiguous=_submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
         sleep=time.sleep,
         on_message=print,
         is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
         is_push_error=lambda exc: isinstance(exc, KaggleCliError) and _submit_notebook.is_submit_kernel_push_error(exc),
-        iter_logs_dir=iter_dir / "logs",
     )
 
 
