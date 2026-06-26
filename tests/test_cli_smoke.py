@@ -21,21 +21,44 @@ def test_watch_help() -> None:
     assert "--submit-policy" in result.stdout
 
 
-def test_cli_run_verify_uses_shared_verify_helper(monkeypatch, tmp_path: Path) -> None:
+def test_cli_implement_uses_shared_verify_helper(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
     captured: dict[str, object] = {}
 
-    def fake_run_verify(cmd: str, **kwargs: object) -> None:
+    def fake_run_repo_verify(cmd: str, **kwargs: object) -> None:
         captured["cmd"] = cmd
         captured.update(kwargs)
 
-    monkeypatch.setattr(cli, "run_verify", fake_run_verify)
+    def fake_bootstrap_competition(**kwargs: object) -> Path:
+        paths = kwargs["paths"]
+        meta_path = paths.context_dir / "metadata.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path.write_text("{}", encoding="utf-8")
+        return meta_path
 
-    cli._run_verify("uv run pytest -q", dry_run=False, artifacts_dir=tmp_path / "artifacts")
+    monkeypatch.setattr(cli, "run_repo_verify", fake_run_repo_verify)
+    monkeypatch.setattr(cli, "bootstrap_competition", fake_bootstrap_competition)
+    monkeypatch.setattr(cli, "run_codex", lambda *args, **kwargs: None)
 
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "--workdir",
+            str(tmp_path),
+            "implement",
+            "demo",
+            "--verify-cmd",
+            "uv run pytest -q",
+        ],
+    )
+
+    assert result.exit_code == 0
     assert captured["cmd"] == "uv run pytest -q"
     assert captured["dry_run"] is False
     assert captured["artifacts_dir"] == tmp_path / "artifacts"
-    assert captured["repo_root"] == Path.cwd()
 
 
 def test_cli_resolve_accelerator_converts_policy_error(monkeypatch) -> None:

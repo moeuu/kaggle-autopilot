@@ -4,7 +4,13 @@ import os
 from pathlib import Path
 
 from kagglebot.exec_utils import CommandResult
-from kagglebot.verify_artifacts import is_pytest_invocation, mirror_verify_artifacts, run_verify, verify_compat_shim
+from kagglebot.verify_artifacts import (
+    is_pytest_invocation,
+    mirror_verify_artifacts,
+    run_repo_verify,
+    run_verify,
+    verify_compat_shim,
+)
 
 
 def test_verify_compat_shim_resolves_known_competition_files() -> None:
@@ -54,6 +60,28 @@ def test_run_verify_sets_pytest_env_and_mirrors_artifacts(monkeypatch, tmp_path:
     assert isinstance(env, dict)
     assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert (repo_root / "artifacts" / "demo" / "kernel" / "kernel.py").exists()
+
+
+def test_run_repo_verify_uses_current_directory_as_repo_root(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    artifacts_dir = tmp_path / "external"
+    source_kernel = artifacts_dir / "demo" / "kernel"
+    source_kernel.mkdir(parents=True)
+    (source_kernel / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def fake_run_command(args, **kwargs):  # noqa: ANN003, ARG001
+        assert (repo_root / "artifacts" / "demo" / "kernel" / "kernel.py").exists()
+        return CommandResult(args=args, returncode=0, stdout="", stderr="", duration_sec=0.0)
+
+    monkeypatch.chdir(repo_root)
+
+    run_repo_verify(
+        "pytest -q",
+        dry_run=False,
+        artifacts_dir=artifacts_dir,
+        run_command_fn=fake_run_command,
+    )
 
 
 def test_mirror_verify_artifacts_copies_kernel_tree_and_excludes_outputs(tmp_path: Path) -> None:

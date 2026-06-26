@@ -36,7 +36,7 @@ from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once, run_watch_self_improvement
 from kagglebot.top1_exhaustive import normalize_top1_submit_policy
 from kagglebot.validation_lab import normalize_validation_lab_mode
-from kagglebot.verify_artifacts import run_verify
+from kagglebot.verify_artifacts import run_repo_verify
 
 app = typer.Typer(add_completion=False, help="Kaggle competition automation CLI (safe by default).")
 knowledge_app = typer.Typer(add_completion=False, help="Knowledge base commands.")
@@ -180,7 +180,7 @@ def implement(
 
     run_codex(prompt_path, agent_dir, dry_run=cfg.dry_run)
 
-    _run_verify(verify_cmd, cfg.dry_run, artifacts_dir=cfg.artifacts_dir)
+    run_repo_verify(verify_cmd, dry_run=cfg.dry_run, artifacts_dir=cfg.artifacts_dir)
     print(f"[green]agent logs[/green]: {agent_dir}")
 
 
@@ -1068,10 +1068,6 @@ def _print_download_progress(done_files: int, total_files: int, file_name: str |
     percent = (done_files / total_files) * 100.0
     detail = f" - {Path(file_name).name}" if file_name else ""
     print(f"[cyan]download progress[/cyan]: {done_files}/{total_files} ({percent:.1f}%){detail}")
-
-
-def _run_verify(cmd: str, dry_run: bool, *, artifacts_dir: Path | None = None) -> None:
-    run_verify(cmd, dry_run=dry_run, artifacts_dir=artifacts_dir, repo_root=Path.cwd())
 
 
 def _resolve_accelerator(compute: str, accelerator: str) -> str:

@@ -318,6 +318,22 @@ def run_verify(
         raise RuntimeError(f"Verification failed: {getattr(result, 'output', '')}")
 
 
+def run_repo_verify(
+    verify_cmd: str,
+    *,
+    dry_run: bool,
+    artifacts_dir: Path | None = None,
+    run_command_fn: Callable[..., object] = run_command,
+) -> None:
+    run_verify(
+        verify_cmd,
+        dry_run=dry_run,
+        artifacts_dir=artifacts_dir,
+        repo_root=Path.cwd(),
+        run_command_fn=run_command_fn,
+    )
+
+
 def is_pytest_invocation(cmd_args: list[str]) -> bool:
     for idx, item in enumerate(cmd_args):
         if item == "pytest" or item.endswith("/pytest"):
