@@ -12,7 +12,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from kagglebot import autopilot as autopilot_mod
+from kagglebot import autopilot_state as _autopilot_state_test
 from kagglebot import kernel_metrics as _kernel_metrics
+from kagglebot import submit_notebook as _submit_notebook_test
 from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
 from kagglebot.autopilot import (
     _DEFAULT_MAX_ITERATIONS,
@@ -23,7 +26,6 @@ from kagglebot.autopilot import (
     _resolve_plan,
     _run_autofix,
     _run_kernel_fix,
-    _submit_with_notebook_kernel,
     run_autopilot,
 )
 from kagglebot.autopilot_state import (
@@ -100,6 +102,42 @@ def _write_sample_submission(path: Path) -> None:
     df = pd.DataFrame({"id": [1, 2], "target": [0.5, 0.5]})
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def _run_notebook_submission_for_config(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    submission_path: Path,
+    message: str,
+    artifact_mode: str = "wrapper",
+):
+    return _submit_notebook_test.run_notebook_kernel_submission_for_run(
+        slug=config.slug,
+        run_id=run_id,
+        paths=config.paths,
+        kaggle_username=config.kaggle_username,
+        kernel_name=config.kernel_name,
+        accelerator=config.accelerator,
+        strict_accelerator=config.strict_accelerator,
+        submission_path=submission_path,
+        message=message,
+        artifact_mode=artifact_mode,
+        dry_run=config.dry_run,
+        timeout_minutes=config.time_budget_min,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
+        resolve_kaggle_username=autopilot_mod.resolve_kaggle_username,
+        run_submit_kernel=autopilot_mod.run_submit_kernel,
+        run_kaggle_submit_kernel=autopilot_mod.run_kaggle_submit_kernel,
+        copy_submission_artifact_to_iteration_dir=_autopilot_state_test._copy_submission_artifact_to_iteration_dir,
+        classify_submit_error=autopilot_mod.classify_submit_error,
+        should_retry_ambiguous=autopilot_mod._submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
+        sleep=autopilot_mod.time.sleep,
+        on_message=lambda message: None,
+        is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
+        is_push_error=lambda exc: isinstance(exc, KaggleCliError)
+        and _submit_notebook_test.is_submit_kernel_push_error(exc),
+    )
 
 
 def _write_plan(paths: CompetitionPaths, **overrides) -> None:
@@ -2515,7 +2553,7 @@ def test_attempt_submit_retries_same_path_when_previous_bad_request(monkeypatch,
     assert result["submission_path"] == "kernel:user/demo-kernel"
 
 
-def test_submit_with_notebook_kernel_forces_internet_off(monkeypatch, tmp_path: Path) -> None:
+def test_run_notebook_submission_for_config_forces_internet_off(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu", internet="on")
     run_id = config.run_id or "run-1"
     submission_path = config.paths.iter_dir(run_id, 1) / "submission.csv"
@@ -2546,7 +2584,7 @@ def test_submit_with_notebook_kernel_forces_internet_off(monkeypatch, tmp_path: 
         lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
     )
 
-    _submit_with_notebook_kernel(
+    _run_notebook_submission_for_config(
         config=config,
         run_id=run_id,
         submission_path=submission_path,
@@ -2557,7 +2595,7 @@ def test_submit_with_notebook_kernel_forces_internet_off(monkeypatch, tmp_path: 
     assert captured["run_submit_kernel"]["mode"] == "wrapper"
 
 
-def test_submit_with_notebook_kernel_retries_cpu_after_gpu_capacity_error(
+def test_run_notebook_submission_for_config_retries_cpu_after_gpu_capacity_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2598,7 +2636,7 @@ def test_submit_with_notebook_kernel_retries_cpu_after_gpu_capacity_error(
         lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
     )
 
-    result, kernel_ref, artifact_path = _submit_with_notebook_kernel(
+    result, kernel_ref, artifact_path = _run_notebook_submission_for_config(
         config=config,
         run_id=run_id,
         submission_path=submission_path,
@@ -2611,7 +2649,7 @@ def test_submit_with_notebook_kernel_retries_cpu_after_gpu_capacity_error(
     assert accelerators == ["gpu", "cpu"]
 
 
-def test_submit_with_notebook_kernel_retries_cpu_after_kernel_push_not_found(
+def test_run_notebook_submission_for_config_retries_cpu_after_kernel_push_not_found(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2652,7 +2690,7 @@ def test_submit_with_notebook_kernel_retries_cpu_after_kernel_push_not_found(
         lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
     )
 
-    result, kernel_ref, artifact_path = _submit_with_notebook_kernel(
+    result, kernel_ref, artifact_path = _run_notebook_submission_for_config(
         config=config,
         run_id=run_id,
         submission_path=submission_path,
@@ -2665,7 +2703,7 @@ def test_submit_with_notebook_kernel_retries_cpu_after_kernel_push_not_found(
     assert accelerators == ["gpu", "cpu"]
 
 
-def test_submit_with_notebook_kernel_preserves_kaggle_cli_error_details(
+def test_run_notebook_submission_for_config_preserves_kaggle_cli_error_details(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2689,7 +2727,7 @@ def test_submit_with_notebook_kernel_preserves_kaggle_cli_error_details(
     monkeypatch.setattr("kagglebot.autopilot.run_submit_kernel", fake_run_submit_kernel)
 
     with pytest.raises(SubmissionCliError) as exc_info:
-        _submit_with_notebook_kernel(
+        _run_notebook_submission_for_config(
             config=config,
             run_id=run_id,
             submission_path=submission_path,
@@ -2703,7 +2741,7 @@ def test_submit_with_notebook_kernel_preserves_kaggle_cli_error_details(
     assert exc.stderr == output
 
 
-def test_submit_with_notebook_kernel_does_not_retry_generic_submit_notebook_bad_request(
+def test_run_notebook_submission_for_config_does_not_retry_generic_submit_notebook_bad_request(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -2752,7 +2790,7 @@ def test_submit_with_notebook_kernel_does_not_retry_generic_submit_notebook_bad_
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda seconds: sleep_calls.append(seconds))
 
     with pytest.raises(SubmissionCliError):
-        _submit_with_notebook_kernel(
+        _run_notebook_submission_for_config(
             config=config,
             run_id=run_id,
             submission_path=submission_path,
@@ -2763,7 +2801,7 @@ def test_submit_with_notebook_kernel_does_not_retry_generic_submit_notebook_bad_
     assert sleep_calls == []
 
 
-def test_submit_with_notebook_kernel_uses_inference_mode_when_requested(
+def test_run_notebook_submission_for_config_uses_inference_mode_when_requested(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = _make_config(tmp_path, submit=True, compute="local_gpu", accelerator="gpu")
@@ -2796,7 +2834,7 @@ def test_submit_with_notebook_kernel_uses_inference_mode_when_requested(
         lambda **kwargs: type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})(),
     )
 
-    _submit_with_notebook_kernel(
+    _run_notebook_submission_for_config(
         config=config,
         run_id=run_id,
         submission_path=submission_path,
