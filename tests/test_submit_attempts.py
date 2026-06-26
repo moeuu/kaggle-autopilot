@@ -15,6 +15,7 @@ from kagglebot.submit_attempts import (
     build_seen_submit_fingerprint_set_for_run,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
+    build_submit_attempt_recorder_for_run,
     build_submit_knowledge_payload,
     build_submit_result_payload,
     build_submit_retry_attempt_payload,
@@ -131,6 +132,25 @@ def test_submit_attempt_recorder_appends_attempt_and_saves_state(tmp_path) -> No
     assert rows[0]["ok"] is True
     assert "ts" in rows[0]
     assert saved_updates == [{"submit_attempted": True, "submit_ok": True}]
+
+
+def test_build_submit_attempt_recorder_for_run_binds_run_dir(tmp_path: Path) -> None:
+    saved_updates: list[tuple[Path, dict[str, object]]] = []
+
+    recorder = build_submit_attempt_recorder_for_run(
+        run_dir=tmp_path,
+        save_run_state_for_run=lambda run_dir, updates: saved_updates.append((run_dir, updates)),
+    )
+    recorder.record_payloads(
+        SubmitAttemptStatePayloads(
+            attempt_payload={"run_id": "run-1", "ok": False},
+            run_state_update={"submit_ok": False},
+        )
+    )
+
+    rows = load_submit_attempt_rows(tmp_path)
+    assert rows[0]["run_id"] == "run-1"
+    assert saved_updates == [(tmp_path, {"submit_ok": False})]
 
 
 def test_submit_attempt_sha_seen_ignores_invalid_rows(tmp_path) -> None:

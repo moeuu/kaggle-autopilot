@@ -55,6 +55,17 @@ class SubmitAttemptRecorder:
         )
 
 
+def build_submit_attempt_recorder_for_run(
+    *,
+    run_dir: Path,
+    save_run_state_for_run: Callable[[Path, dict[str, object]], None],
+) -> SubmitAttemptRecorder:
+    return SubmitAttemptRecorder(
+        run_dir=run_dir,
+        save_run_state=lambda updates: save_run_state_for_run(run_dir, updates),
+    )
+
+
 def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso: str | None = None) -> None:
     record = {
         "ts": now_iso or datetime.now(UTC).isoformat(),

@@ -498,7 +498,7 @@ def test_resolve_submit_autofix_context_for_run_loads_latest_attempt(tmp_path: P
         run_dir=run_dir,
         submission_path=original,
         load_run_state=lambda path: {"submit_ok": False} if path == run_dir else {},
-        save_run_state=lambda _updates: None,
+        save_run_state_for_run=lambda _run_dir, _updates: None,
         now_iso="2026-06-25T00:01:00+00:00",
     )
 

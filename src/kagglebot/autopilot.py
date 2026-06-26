@@ -4324,15 +4324,15 @@ def _attempt_submit(
     if not config.submit or config.dry_run:
         return None
     run_dir = config.paths.run_dir(run_id)
-    submit_attempt_recorder = _submit_attempts.SubmitAttemptRecorder(
+    submit_attempt_recorder = _submit_attempts.build_submit_attempt_recorder_for_run(
         run_dir=run_dir,
-        save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
+        save_run_state_for_run=_autopilot_state._save_run_state,
     )
     autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_run(
         run_dir=run_dir,
         submission_path=submission_path,
         load_run_state=_autopilot_state._load_run_state,
-        save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
+        save_run_state_for_run=_autopilot_state._save_run_state,
         now_iso=datetime.now(UTC).isoformat(),
     )
     run_state = autofix_attempt_context.run_state

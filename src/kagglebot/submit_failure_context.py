@@ -388,7 +388,7 @@ def resolve_submit_autofix_context_for_run(
     run_dir: Path,
     submission_path: Path,
     load_run_state: Callable[[Path], dict[str, object]],
-    save_run_state: Callable[[dict[str, object]], object],
+    save_run_state_for_run: Callable[[Path, dict[str, object]], object],
     now_iso: str,
 ) -> SubmitAutofixAttemptContext:
     return resolve_submit_autofix_context_for_attempt(
@@ -396,7 +396,7 @@ def resolve_submit_autofix_context_for_run(
         submission_path=submission_path,
         load_run_state=load_run_state,
         load_latest_submit_attempt=load_latest_submit_attempt,
-        save_run_state=save_run_state,
+        save_run_state=lambda updates: save_run_state_for_run(run_dir, updates),
         now_iso=now_iso,
     )
 
