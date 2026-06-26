@@ -1799,10 +1799,6 @@ def format_iteration_submit_status_message(
     )
 
 
-def _format_competition_faithfulness_detail(competition_faithfulness: dict[str, object]) -> str:
-    return _submit_stage_messages.format_competition_faithfulness_detail(competition_faithfulness)
-
-
 def find_campaign_candidate_for_submission(
     *,
     candidates: list[CampaignCandidate],
@@ -2521,7 +2517,7 @@ def build_submission_outcome_error_detail(
 
     details: list[str] = []
     if row:
-        row_message = _extract_submission_row_message(row)
+        row_message = _submit_stage_messages.extract_submission_row_message(row)
         if row_message:
             details.append(f"Kaggle reported: {row_message}")
         details.append(f"Kaggle submission row: {json.dumps(row, ensure_ascii=True)}")
@@ -2530,10 +2526,6 @@ def build_submission_outcome_error_detail(
     else:
         details.append(f"Kaggle submission status: {outcome.get('status') or 'unknown'}")
     return normalize_detail("\n".join(details))
-
-
-def _extract_submission_row_message(row: dict[str, object]) -> str:
-    return _submit_stage_messages.extract_submission_row_message(row)
 
 
 def build_submit_stage_success_record(
