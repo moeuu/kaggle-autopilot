@@ -491,10 +491,10 @@ Recommended extraction order:
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    The remaining `_attempt_submit` side-effect orchestration now lives in `submit_runner.py` behind
    `attempt_submit_for_run`, which coordinates `submit_stage`, `submit_notebook`, `submission_service`,
-   `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. `autopilot.py` keeps
-   `_attempt_submit` as a compatibility wrapper that supplies run-specific dependencies.
-   Next, continue shrinking the compatibility wrapper surface by moving session-level submit construction to call
-   `submit_runner.py` directly where tests/extensions no longer rely on the private `_attempt_submit` symbol.
+   `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. Production dependency
+   and limit construction now lives in `autopilot_submit.py`, leaving `autopilot.py`'s private `_attempt_submit` as a
+   thin compatibility wrapper. Next, continue shrinking the compatibility wrapper surface by moving tests/extensions and
+   session-level submit construction to the public submit service where they no longer need the private symbol.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to

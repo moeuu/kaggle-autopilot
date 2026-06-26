@@ -4,7 +4,6 @@ import os
 import time
 import traceback
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,17 +15,15 @@ from kagglebot import agent_strategy as _agent_strategy
 from kagglebot import autofix_context as _autofix_context
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import autopilot_state as _autopilot_state
+from kagglebot import autopilot_submit as _autopilot_submit
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
-from kagglebot import competition_rules as _competition_rules
-from kagglebot import context_artifacts as _context_artifacts
 from kagglebot import diagnostics as _diagnostics
 from kagglebot import env_utils as _env_utils
 from kagglebot import improvement_context as _improvement_context
 from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import iteration_signals as _iteration_signals
 from kagglebot import json_utils as _json_utils
-from kagglebot import kaggle_cli_errors as _kaggle_cli_errors
 from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_fix_context as _kernel_fix_context
 from kagglebot import kernel_metrics as _kernel_metrics
@@ -49,10 +46,6 @@ from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
-from kagglebot import submit_failure_policy as _submit_failure_policy
-from kagglebot import submit_notebook as _submit_notebook
-from kagglebot import submit_retry_policy as _submit_retry_policy
-from kagglebot import submit_runner as _submit_runner
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
@@ -228,16 +221,9 @@ _METRIC_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
 _METRIC_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
 _MAX_METRIC_FIX_ATTEMPTS = 3
 _MAX_METRIC_FIX_CODEX_PASSES = 4
-_SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
-_SUBMISSION_POLL_INTERVAL_SEC = 30.0
-_SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
 _SPARE_DAILY_SUBMIT_REASON = "spare_daily_submission_slot"
 _SUBMIT_FAILED_DEFERRED_STATE = "submit_failed_deferred"
-_SUBMIT_MAX_TRANSIENT_RETRIES = 3
-_SUBMIT_BACKOFF_BASE_SEC = 2.0
-_SUBMIT_STDERR_TAIL_CHARS = 1200
-_SUBMIT_STDOUT_TAIL_CHARS = 1200
 _DEFAULT_EVAL_SEEDS = list(_plan_policy.DEFAULT_EVAL_SEEDS)
 _DEFAULT_MAX_ITERATIONS = 5
 _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN = 12 * 60
@@ -3338,7 +3324,7 @@ def _attempt_submit(
     submit_mode: str = "file",
     notebook_submit_artifact_mode: str = "wrapper",
 ) -> dict[str, object] | None:
-    return _submit_runner.attempt_submit_for_run(
+    return _autopilot_submit.attempt_submit_for_autopilot_run(
         config=config,
         run_id=run_id,
         submission_path=submission_path,
@@ -3346,51 +3332,17 @@ def _attempt_submit(
         problem_types=problem_types,
         submit_mode=submit_mode,
         notebook_submit_artifact_mode=notebook_submit_artifact_mode,
-        deps=_submit_runner.SubmitRunnerDependencies(
-            load_competition_rule_constraints=_competition_rules.load_competition_rule_constraints,
-            env_truthy=_env_utils.env_truthy,
-            load_run_state=_autopilot_state.load_run_state,
-            save_run_state=_autopilot_state.save_run_state,
-            compute_submit_code_fingerprint=_submit_retry_policy.compute_submit_code_fingerprint,
-            compute_submission_sha256=_sha256_or_none,
-            now_iso=lambda: datetime.now(UTC).isoformat(),
-            now_datetime=lambda: datetime.now(UTC),
-            normalize_error_text=normalize_error_text,
-            record_error_fix_insight=record_error_fix_insight,
-            build_error=SubmitAbortedError,
-            check_rules_accepted=check_rules_accepted,
-            infer_code_competition_from_paths=infer_code_competition_from_paths,
-            collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
-            decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
-            decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
-            resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
-            decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-            count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
-            resolve_kaggle_username=resolve_kaggle_username,
-            run_submit_kernel=run_submit_kernel,
-            run_kaggle_submit_kernel=run_kaggle_submit_kernel,
-            copy_submission_artifact_to_iteration_dir=_autopilot_state.copy_submission_artifact_to_iteration_dir,
-            classify_submit_error=classify_submit_error,
-            should_retry_ambiguous_notebook_submit_error=(
-                _submit_failure_policy.should_retry_ambiguous_notebook_submit_error
-            ),
-            should_use_notebook_submit_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
-            compute_error_fingerprint=compute_error_fingerprint,
-            decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
-            compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
-            is_missing_kaggle_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
-            deliverable_mode=lambda paths: infer_deliverable_mode_from_paths(paths, default="leaderboard"),
-            list_competition_submissions=list_competition_submissions,
-            sleep=time.sleep,
-            on_message=print,
-        ),
-        limits=_submit_runner.SubmitRunnerLimits(
-            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-            max_transient_retries=_SUBMIT_MAX_TRANSIENT_RETRIES,
-            backoff_base_sec=_SUBMIT_BACKOFF_BASE_SEC,
-            poll_max_attempts=_SUBMISSION_POLL_MAX_ATTEMPTS,
-            poll_interval_sec=_SUBMISSION_POLL_INTERVAL_SEC,
-            poll_max_fetch_errors=_SUBMISSION_POLL_MAX_FETCH_ERRORS,
+        deps=_autopilot_submit.build_autopilot_submit_dependencies(
+            check_rules_accepted_func=check_rules_accepted,
+            infer_code_competition_from_paths_func=infer_code_competition_from_paths,
+            resolve_kaggle_username_func=resolve_kaggle_username,
+            run_submit_kernel_func=run_submit_kernel,
+            run_kaggle_submit_kernel_func=run_kaggle_submit_kernel,
+            classify_submit_error_func=classify_submit_error,
+            compute_error_fingerprint_func=compute_error_fingerprint,
+            normalize_error_text_func=normalize_error_text,
+            record_error_fix_insight_func=record_error_fix_insight,
+            list_competition_submissions_func=list_competition_submissions,
+            deliverable_mode_func=infer_deliverable_mode_from_paths,
         ),
     )
