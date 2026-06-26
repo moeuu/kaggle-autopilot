@@ -237,7 +237,7 @@ def write_run_payload(run_dir: Path, payload: dict[str, object]) -> None:
     write_json_object(run_dir / "run.json", payload)
 
 
-def _write_iteration_state_marker(
+def write_iteration_state_marker(
     *,
     iter_dir: Path,
     run_id: str,

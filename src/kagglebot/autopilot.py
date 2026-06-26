@@ -2012,7 +2012,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     "graph_execution_report": graph_execution_report,
                 }
             _iteration_metrics.write_iteration_metrics_payload(metrics_path, pre_submit_metrics_payload)
-            _autopilot_state._write_iteration_state_marker(
+            _autopilot_state.write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
                 iteration=iteration,
@@ -2445,7 +2445,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 met_target=met_target,
             )
             record_iteration(**iteration_record_kwargs)
-            _autopilot_state._write_iteration_state_marker(
+            _autopilot_state.write_iteration_state_marker(
                 iter_dir=iter_dir,
                 run_id=run_id,
                 iteration=iteration,

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from kagglebot.autopilot_state import (
     ResumeRunResolutionError,
     _load_submitted_iteration_tracking_score,
-    _write_iteration_state_marker,
     apply_final_run_status,
     apply_run_status,
     build_run_payload,
@@ -18,6 +17,7 @@ from kagglebot.autopilot_state import (
     load_run_state,
     resolve_resume_run_id,
     save_run_state,
+    write_iteration_state_marker,
     write_run_payload,
 )
 from kagglebot.paths import CompetitionPaths
@@ -224,7 +224,7 @@ def test_write_iteration_state_marker_writes_json_object(tmp_path: Path) -> None
     metrics_path = iter_dir / "metrics.json"
     evaluation_report_path = iter_dir / "evaluation_report.json"
 
-    _write_iteration_state_marker(
+    write_iteration_state_marker(
         iter_dir=iter_dir,
         run_id="run-1",
         iteration=1,

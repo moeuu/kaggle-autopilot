@@ -39,8 +39,8 @@ from kagglebot.autopilot_state import (
     _load_submit_retry_artifacts,
     _resolve_iteration_submission_artifact,
     _resume_iteration_state,
-    _write_iteration_state_marker,
     load_run_state,
+    write_iteration_state_marker,
 )
 from kagglebot.competition_rules import load_competition_rule_constraints
 from kagglebot.eval import EvaluationReport
@@ -8337,7 +8337,7 @@ def test_write_iteration_state_marker_derives_submit_phase_finished(tmp_path: Pa
     evaluation_report_path = iter_dir / "evaluation_report.md"
     evaluation_report_path.write_text("# report\n", encoding="utf-8")
 
-    _write_iteration_state_marker(
+    write_iteration_state_marker(
         iter_dir=iter_dir,
         run_id="run-1",
         iteration=1,
