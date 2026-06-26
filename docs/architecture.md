@@ -245,7 +245,9 @@ The next high-value modernization work is:
    and persistence payloads.
 2. **Plan resolution service**: resolved-plan orchestration now lives in `plan_resolution.py`. The next step is to
    reduce downstream dependence on mutable resolved-plan dictionaries by passing the typed `ResolvedPlan` data through
-   training, evaluation, submission, and prompts where practical.
+   training, evaluation, submission, and prompts where practical. Autopilot loop bootstrap now resolves the normalized
+   iteration settings through `autopilot_loop_settings.py`, which preserves legacy `resolved` write-backs while giving the
+   loop a typed settings object for campaign, submit, evaluation, readiness, and stop-policy values.
 3. **Kernel/run adapter split**: keep runner implementations behind `runners/` and prevent `kernel_runner.py` from
    accumulating unrelated hardware, parsing, and local-runtime policy. Shared runtime parsing belongs in small helpers;
    local training-progress parsing is now in `kernel_progress.py`, and kernel output/submission discovery is now in

@@ -14,6 +14,7 @@ from kagglebot import agent_prompts as _agent_prompts
 from kagglebot import agent_strategy as _agent_strategy
 from kagglebot import autofix_context as _autofix_context
 from kagglebot import autofix_restart as _autofix_restart
+from kagglebot import autopilot_loop_settings as _autopilot_loop_settings
 from kagglebot import autopilot_state as _autopilot_state
 from kagglebot import autopilot_submit as _autopilot_submit
 from kagglebot import campaign_metrics as _campaign_metrics
@@ -58,12 +59,10 @@ from kagglebot.agents.identity import (
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot_session import AutopilotSession, SubmissionPhase
 from kagglebot.campaign import (
-    TOP1_TARGET_RANK_PERCENTILE,
     allocate_submission,
     build_campaign_candidate,
     campaign_state_path,
     candidate_registry_path,
-    normalize_campaign_mode,
     update_campaign_state,
     upsert_candidate,
 )
@@ -81,7 +80,6 @@ from kagglebot.experiment_executor import execute_experiment_graph
 from kagglebot.experiment_graph import (
     append_campaign_outcome,
     build_experiment_graph,
-    normalize_portfolio_execution,
     write_allocator_decision,
 )
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
@@ -102,16 +100,11 @@ from kagglebot.knowledge import (
     record_run,
 )
 from kagglebot.knowledge_phase import KnowledgePhase
-from kagglebot.medals import (
-    DEFAULT_TARGET_MEDAL,
-    normalize_target_medal,
-    normalize_target_rank_percentile,
-)
+from kagglebot.medals import DEFAULT_TARGET_MEDAL
 from kagglebot.planning_phase import PlanningPhase
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
-from kagglebot.solver.metrics import infer_direction
 from kagglebot.submission.guard import (
     classify_submit_error,
     compute_error_fingerprint,
@@ -131,10 +124,9 @@ from kagglebot.top1_exhaustive import (
     build_top1_exhaustion_report,
     build_win_contract,
     format_top1_public_score_message,
-    normalize_top1_submit_policy,
     write_top1_public_snapshot,
 )
-from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
+from kagglebot.validation_lab import run_validation_lab
 from kagglebot.write_guard import (
     _backup_guarded_files,
     _diff_snapshots,
@@ -142,13 +134,7 @@ from kagglebot.write_guard import (
     _snapshot_tree,
     build_repair_write_policy,
 )
-from kagglebot.writeup import (
-    build_writeup_bundle,
-    infer_code_competition_from_paths,
-    infer_deliverable_mode_from_paths,
-    normalize_deliverable_mode,
-    normalize_submit_mode,
-)
+from kagglebot.writeup import build_writeup_bundle, infer_code_competition_from_paths, infer_deliverable_mode_from_paths
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -363,38 +349,33 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         _autopilot_state.write_run_payload(run_dir, run_payload)
         return
 
-    metric_direction = infer_direction(target_metric, resolved["target_direction"])
-    resolved["target_direction"] = metric_direction
-    deliverable_mode = normalize_deliverable_mode(resolved.get("deliverable_mode"), default="leaderboard")
-    resolved["deliverable_mode"] = deliverable_mode
-    campaign_mode = normalize_campaign_mode(config.campaign_mode, deliverable_mode=deliverable_mode)
-    portfolio_execution = normalize_portfolio_execution(config.portfolio_execution)
-    validation_lab_mode = normalize_validation_lab_mode(config.validation_lab)
-    research_scout_mode = _method_scout.normalize_research_scout_mode(config.research_scout)
-    top1_submit_policy = normalize_top1_submit_policy(config.top1_submit_policy)
-    resolved["campaign_mode"] = campaign_mode
-    resolved["portfolio_execution"] = portfolio_execution
-    resolved["validation_lab"] = validation_lab_mode
-    resolved["research_scout"] = research_scout_mode
-    resolved["top1_exhaustive"] = bool(config.top1_exhaustive)
-    resolved["top1_submit_policy"] = top1_submit_policy
-    submit_mode = normalize_submit_mode(resolved.get("submit_mode"), default="file")
-    resolved["submit_mode"] = submit_mode
-    writeup_mode = deliverable_mode == "writeup"
-    submit_enabled = bool(config.submit and not writeup_mode)
-    strict_competition_metric = _env_utils.env_flag(
-        "KAGGLEBOT_STRICT_COMPETITION_METRIC",
-        default=_DEFAULT_STRICT_COMPETITION_METRIC,
+    loop_settings = _autopilot_loop_settings.resolve_autopilot_loop_settings(
+        config=config,
+        resolved=resolved,
+        target_metric=target_metric,
+        target_score=target_score,
+        defaults=_autopilot_loop_settings.AutopilotLoopSettingsDefaults(
+            strict_competition_metric=_DEFAULT_STRICT_COMPETITION_METRIC,
+            require_submit_improvement=_DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT,
+            force_major_on_no_improve=_DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE,
+            force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+            force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+        ),
     )
-    require_submit_improvement = _env_utils.env_flag(
-        "KAGGLEBOT_REQUIRE_SUBMIT_IMPROVEMENT",
-        default=_DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT,
-    )
-    submit_improved_only = str(resolved.get("submit_policy") or "").strip().lower() == "improved"
-    force_major_on_no_improve = _env_utils.env_flag(
-        "KAGGLEBOT_FORCE_MAJOR_ON_NO_IMPROVE",
-        default=_DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE,
-    )
+    metric_direction = loop_settings.metric_direction
+    deliverable_mode = loop_settings.deliverable_mode
+    campaign_mode = loop_settings.campaign_mode
+    portfolio_execution = loop_settings.portfolio_execution
+    validation_lab_mode = loop_settings.validation_lab_mode
+    research_scout_mode = loop_settings.research_scout_mode
+    top1_submit_policy = loop_settings.top1_submit_policy
+    submit_mode = loop_settings.submit_mode
+    writeup_mode = loop_settings.writeup_mode
+    submit_enabled = loop_settings.submit_enabled
+    strict_competition_metric = loop_settings.strict_competition_metric
+    require_submit_improvement = loop_settings.require_submit_improvement
+    submit_improved_only = loop_settings.submit_improved_only
+    force_major_on_no_improve = loop_settings.force_major_on_no_improve
 
     _plan_policy.write_resolved_plan_config(
         config.paths,
@@ -450,61 +431,36 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     fallback_submit_blocked_reason: str | None = None
     writeup_bundle_meta: dict[str, object] | None = None
 
-    max_iterations = max(1, int(resolved["max_iterations"]))
+    max_iterations = loop_settings.max_iterations
     iteration_phase = _score_progress.IterationPhase(metric_direction=metric_direction)
-    holdout_frac = float(resolved["holdout_frac"])
-    cv_folds = int(resolved["cv_folds"])
-    split_strategy = str(resolved.get("split_strategy") or "").strip().lower() or None
-    seed = int(resolved["seed"])
-    eval_seeds = _plan_policy.normalize_default_eval_seeds(resolved.get("eval_seeds"), fallback=[seed])
-    eval_repeats = _plan_policy.normalize_default_eval_repeats(
-        resolved.get("eval_repeats"), fallback=_plan_policy.DEFAULT_EVAL_REPEATS
-    )
-    score_source = str(resolved["score_source"] or "cv")
-    max_total_min_raw = resolved.get("max_total_min")
-    max_total_min = float(max_total_min_raw) if isinstance(max_total_min_raw, (int, float)) else None
-    time_budget_min_raw = resolved.get("time_budget_min")
-    time_budget_min = int(time_budget_min_raw) if isinstance(time_budget_min_raw, (int, float)) else None
-    kernel_name = resolved["kernel_name"]
-    enable_internet = str(resolved["internet"]) == "on"
-    submission_gate = str(resolved.get("submission_gate") or "always")
-    submission_limit_per_day_raw = resolved.get("submission_limit_per_day")
-    submission_limit_per_day = (
-        int(submission_limit_per_day_raw)
-        if isinstance(submission_limit_per_day_raw, (int, float)) and int(submission_limit_per_day_raw) > 0
-        else None
-    )
-    evaluation_contract = (
-        resolved.get("evaluation_contract") if isinstance(resolved.get("evaluation_contract"), dict) else None
-    )
-    readiness_target = float(resolved.get("readiness_target_score") or target_score)
-    readiness_method = str(resolved.get("readiness_method") or "ci_bound")
-    readiness_k = float(resolved.get("readiness_k") or 1.0)
-    ci_method = str(resolved.get("ci_method") or "normal")
-    ci_alpha = float(resolved.get("ci_alpha") or 0.05)
-    target_medal = normalize_target_medal(resolved.get("target_medal"), default=None)
-    target_rank_percentile = normalize_target_rank_percentile(
-        resolved.get("target_rank_percentile"),
-        medal=target_medal,
-        fallback=None,
-    )
-    if campaign_mode == "top1" and target_rank_percentile is None:
-        target_rank_percentile = TOP1_TARGET_RANK_PERCENTILE
-        resolved["target_rank_percentile"] = target_rank_percentile
-    drift_check_enabled = bool(resolved.get("drift_check", False))
-    drift_weight = float(resolved.get("drift_weight") or 1.0)
-    stop_min_delta = float(resolved.get("stop_min_delta") or 0.0)
-    stop_no_improve_patience = int(resolved.get("stop_no_improve_patience") or 0)
-    stop_same_config_patience = int(resolved.get("stop_same_config_patience") or 0)
-    rank_force_policy = _plan_policy.resolve_rank_force_policy(
-        rank_force_major_max_percentile=resolved.get("rank_force_major_max_percentile"),
-        rank_force_major_min_teams=resolved.get("rank_force_major_min_teams"),
-        target_rank_percentile=target_rank_percentile,
-        default_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
-        default_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
-    )
-    rank_force_major_max_percentile = rank_force_policy.rank_force_major_max_percentile
-    rank_force_major_min_teams = rank_force_policy.rank_force_major_min_teams
+    holdout_frac = loop_settings.holdout_frac
+    cv_folds = loop_settings.cv_folds
+    split_strategy = loop_settings.split_strategy
+    seed = loop_settings.seed
+    eval_seeds = loop_settings.eval_seeds
+    eval_repeats = loop_settings.eval_repeats
+    score_source = loop_settings.score_source
+    max_total_min = loop_settings.max_total_min
+    time_budget_min = loop_settings.time_budget_min
+    kernel_name = loop_settings.kernel_name
+    enable_internet = loop_settings.enable_internet
+    submission_gate = loop_settings.submission_gate
+    submission_limit_per_day = loop_settings.submission_limit_per_day
+    evaluation_contract = loop_settings.evaluation_contract
+    readiness_target = loop_settings.readiness_target
+    readiness_method = loop_settings.readiness_method
+    readiness_k = loop_settings.readiness_k
+    ci_method = loop_settings.ci_method
+    ci_alpha = loop_settings.ci_alpha
+    target_medal = loop_settings.target_medal
+    target_rank_percentile = loop_settings.target_rank_percentile
+    drift_check_enabled = loop_settings.drift_check_enabled
+    drift_weight = loop_settings.drift_weight
+    stop_min_delta = loop_settings.stop_min_delta
+    stop_no_improve_patience = loop_settings.stop_no_improve_patience
+    stop_same_config_patience = loop_settings.stop_same_config_patience
+    rank_force_major_max_percentile = loop_settings.rank_force_major_max_percentile
+    rank_force_major_min_teams = loop_settings.rank_force_major_min_teams
     no_improve_streak = 0
     frontier_no_improve_streak = 0
     same_config_streak = 0
