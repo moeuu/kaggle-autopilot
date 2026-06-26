@@ -12,6 +12,23 @@ if TYPE_CHECKING:
     from kagglebot.solver.evaluate import EvaluationResult
 
 
+def diagnostics_path_for_iteration(iter_dir: Path) -> Path:
+    return iter_dir / "diagnostics.md"
+
+
+def write_iteration_diagnostics(*, iter_dir: Path, diagnostics: str) -> Path:
+    path = diagnostics_path_for_iteration(iter_dir)
+    path.write_text(diagnostics, encoding="utf-8")
+    return path
+
+
+def load_iteration_diagnostics_text(iter_dir: Path) -> str:
+    path = diagnostics_path_for_iteration(iter_dir)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
 def pipeline_config_hash(*, model_summary: dict[str, object], metric: str, accelerator: str) -> str:
     stable_payload: dict[str, object] = {
         "metric": metric,

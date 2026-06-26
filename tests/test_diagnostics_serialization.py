@@ -2,8 +2,26 @@ from __future__ import annotations
 
 import pytest
 
-from kagglebot.diagnostics import build_diagnostics, pipeline_config_hash
+from kagglebot.diagnostics import (
+    build_diagnostics,
+    diagnostics_path_for_iteration,
+    load_iteration_diagnostics_text,
+    pipeline_config_hash,
+    write_iteration_diagnostics,
+)
 from kagglebot.solver.evaluate import EvaluationResult
+
+
+def test_iteration_diagnostics_helpers_round_trip_text(tmp_path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    iter_dir.mkdir()
+
+    path = write_iteration_diagnostics(iter_dir=iter_dir, diagnostics="# Diagnostics\n")
+
+    assert path == diagnostics_path_for_iteration(iter_dir)
+    assert path.name == "diagnostics.md"
+    assert load_iteration_diagnostics_text(iter_dir) == "# Diagnostics\n"
+    assert load_iteration_diagnostics_text(tmp_path / "missing") == ""
 
 
 def test_build_diagnostics_handles_unserializable_objects() -> None:

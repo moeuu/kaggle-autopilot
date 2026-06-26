@@ -369,7 +369,8 @@ Recommended extraction order:
    `submit_failure_context.py`, keeping the main loop from loading failure context and latest-attempt artifacts directly.
    Iteration repair-signal collection/extraction and next-iteration policy/knowledge payload assembly/dispatch are now
    in `iteration_signals.py`.
-   Diagnostics rendering and stable pipeline config hashing are now in `diagnostics.py`.
+   Diagnostics rendering, iteration diagnostics read/write helpers, and stable pipeline config hashing are now in
+   `diagnostics.py`.
    Loop score-update/readiness-noise/streak decisions and terminal/stagnation stop policy are now in `loop_control.py`.
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file

@@ -2278,7 +2278,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 quality_guard=quality_guard,
                 accuracy_potential=accuracy_potential,
             )
-            (iter_dir / "diagnostics.md").write_text(diagnostics, encoding="utf-8")
+            _diagnostics.write_iteration_diagnostics(iter_dir=iter_dir, diagnostics=diagnostics)
 
             competition_policy = load_competition_policy(config.paths)
             reference_inputs_manifest_payload = _json_utils.load_json_object(
@@ -2683,10 +2683,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
 
         def load_submission_diagnostics(iteration: int) -> str:
-            diagnostics_path = config.paths.iter_dir(run_id, iteration) / "diagnostics.md"
-            if diagnostics_path.exists():
-                return diagnostics_path.read_text(encoding="utf-8", errors="ignore")
-            return ""
+            return _diagnostics.load_iteration_diagnostics_text(config.paths.iter_dir(run_id, iteration))
 
         _submit_stage.record_submission_knowledge(
             knowledge_paths=config.knowledge_paths,
@@ -3407,10 +3404,7 @@ def _run_improvement(
 
     _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
     summary = response_text
-    diagnostics_text = ""
-    diagnostics_path = iter_dir / "diagnostics.md"
-    if diagnostics_path.exists():
-        diagnostics_text = diagnostics_path.read_text(encoding="utf-8", errors="ignore")
+    diagnostics_text = _diagnostics.load_iteration_diagnostics_text(iter_dir)
     record_improvement(
         knowledge_paths=config.knowledge_paths,
         run_id=run_id,
