@@ -47,6 +47,7 @@ from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_stage as _submit_stage
+from kagglebot import submit_stage_messages as _submit_stage_messages
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
 from kagglebot.agents.codex_runner import run_codex
@@ -1791,7 +1792,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 submit_limited_holdback=submit_limited_holdback,
             )
             pre_submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate)
-            submit_status_message = _submit_stage.format_iteration_submit_status_message(
+            submit_status_message = _submit_stage_messages.format_iteration_submit_status_message(
                 iteration=iteration,
                 max_iterations=max_iterations,
                 submit_enabled=submit_enabled,

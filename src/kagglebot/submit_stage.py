@@ -1778,27 +1778,6 @@ def resolve_submission_rank_state(
     )
 
 
-def format_iteration_submit_status_message(
-    *,
-    iteration: int,
-    max_iterations: int,
-    submit_enabled: bool,
-    submit_allowed_by_gate: bool,
-    submit_phase_state: str,
-    quality_reasons: list[str],
-    competition_faithfulness: dict[str, object] | None = None,
-) -> str | None:
-    return _submit_stage_messages.format_iteration_submit_status_message(
-        iteration=iteration,
-        max_iterations=max_iterations,
-        submit_enabled=submit_enabled,
-        submit_allowed_by_gate=submit_allowed_by_gate,
-        submit_phase_state=submit_phase_state,
-        quality_reasons=quality_reasons,
-        competition_faithfulness=competition_faithfulness,
-    )
-
-
 def find_campaign_candidate_for_submission(
     *,
     candidates: list[CampaignCandidate],

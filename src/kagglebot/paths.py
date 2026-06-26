@@ -255,8 +255,3 @@ class KnowledgePaths:
     @property
     def kb_path(self) -> Path:
         return self.knowledge_dir / "kb.sqlite"
-
-
-def repo_root() -> Path:
-    """Backward-compatible repo root helper (current working directory)."""
-    return Path.cwd()

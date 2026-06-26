@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from kagglebot.submit_cli_error_resolution import SubmitStageRuntimeState
 from kagglebot.submit_runner import SubmitRunnerDependencies, SubmitRunnerLimits, attempt_submit_for_run
-from kagglebot.submit_stage import SubmitStageRuntimeState
 
 
 def _deps(tmp_path: Path) -> SubmitRunnerDependencies:

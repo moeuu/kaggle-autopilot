@@ -8,23 +8,32 @@ from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate
 from kagglebot.history import SubmissionLedger
 from kagglebot.json_utils import load_jsonl_records
 from kagglebot.submit_attempts import SubmitAttemptStatePayloads, append_submit_attempt
+from kagglebot.submit_cli_error_resolution import (
+    SubmitStageRuntimeState,
+    apply_notebook_fallback_decision,
+    apply_notebook_fallback_retry_state,
+    build_notebook_fallback_retry_state,
+    classify_submit_stage_error,
+    decide_notebook_fallback_after_file_submit_error,
+    decide_submit_stage_error_action,
+    decide_submit_stage_error_action_from_classification,
+    resolve_notebook_fallback_after_file_submit_error,
+    resolve_submit_cli_error,
+    resolve_submit_cli_error_for_run,
+)
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
     SubmitRunAborter,
     SubmitRunRetryRecorder,
-    SubmitStageRuntimeState,
     abort_submit_for_run,
     apply_duplicate_submission_decision,
     apply_initial_submit_stage_artifact_mode,
-    apply_notebook_fallback_decision,
-    apply_notebook_fallback_retry_state,
     apply_same_submission_path_decision,
     build_default_submission_problem_insight,
     build_kaggle_credentials_missing_abort_spec,
     build_local_submission_guardrail_abort_spec,
     build_local_submission_validation_abort_spec,
-    build_notebook_fallback_retry_state,
     build_rules_not_accepted_abort_spec,
     build_submission_outcome_abort_spec,
     build_submission_outcome_error_detail,
@@ -37,20 +46,15 @@ from kagglebot.submit_stage import (
     build_submit_stage_runtime_state,
     build_submit_stage_success_record,
     classify_submission_outcome,
-    classify_submit_stage_error,
     decide_fallback_submit_gate,
     decide_initial_submit_stage_mode,
     decide_iteration_submit_improvement_gate,
-    decide_notebook_fallback_after_file_submit_error,
     decide_submission_outcome_abort,
-    decide_submit_stage_error_action,
-    decide_submit_stage_error_action_from_classification,
     decide_submitted_tracking_score_update,
     ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,
     finalize_submit_outcome_for_run_or_abort,
     find_campaign_candidate_for_submission,
-    format_iteration_submit_status_message,
     format_rank_force_reason,
     format_submission_rank_message,
     infer_iteration_from_submission_path,
@@ -70,7 +74,6 @@ from kagglebot.submit_stage import (
     resolve_iteration_submit_phase_state,
     resolve_kaggle_cli_submit_abort_spec,
     resolve_local_submission_guardrail_abort_spec,
-    resolve_notebook_fallback_after_file_submit_error,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
     resolve_same_submission_path_for_run,
@@ -81,8 +84,6 @@ from kagglebot.submit_stage import (
     resolve_submission_outcome_after_submit,
     resolve_submission_rank_payload,
     resolve_submission_rank_state,
-    resolve_submit_cli_error,
-    resolve_submit_cli_error_for_run,
     resolve_submit_preflight_for_run_or_abort,
     run_submit_stage_attempt,
     run_submit_stage_attempts_until_success_or_abort,
@@ -2787,53 +2788,6 @@ def test_resolve_submission_rank_state_formats_estimated_rank_without_guard() ->
     assert state.force_major_overhaul is False
     assert state.messages == (
         "[yellow]submission rank estimate[/yellow]: 20/200 (percentile=10.00%) source=leaderboard_score_estimate",
-    )
-
-
-def test_format_iteration_submit_status_message_handles_disabled_allowed_and_blocked() -> None:
-    assert (
-        format_iteration_submit_status_message(
-            iteration=1,
-            max_iterations=3,
-            submit_enabled=False,
-            submit_allowed_by_gate=False,
-            submit_phase_state="disabled",
-            quality_reasons=[],
-        )
-        is None
-    )
-    assert (
-        format_iteration_submit_status_message(
-            iteration=1,
-            max_iterations=3,
-            submit_enabled=True,
-            submit_allowed_by_gate=True,
-            submit_phase_state="ready",
-            quality_reasons=[],
-        )
-        == "[cyan]submit[/cyan]: iter 1/3 attempting submission now."
-    )
-
-    blocked = format_iteration_submit_status_message(
-        iteration=2,
-        max_iterations=3,
-        submit_enabled=True,
-        submit_allowed_by_gate=False,
-        submit_phase_state="blocked_quality_guard",
-        quality_reasons=["collapsed_predictions", "weak_cv"],
-        competition_faithfulness={
-            "expected_metric": "logloss",
-            "actual_metric": "accuracy",
-            "expected_split_strategy": "group_kfold",
-            "actual_split_strategy": "kfold",
-            "dataset_mode": "sample",
-        },
-    )
-
-    assert blocked == (
-        "[cyan]submit[/cyan]: iter 2/3 not attempted yet "
-        "(state=blocked_quality_guard reasons=collapsed_predictions,weak_cv "
-        "metric=accuracy/logloss split=kfold/group_kfold dataset_mode=sample)."
     )
 
 

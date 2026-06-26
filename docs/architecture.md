@@ -470,8 +470,8 @@ Recommended extraction order:
    runtime-state/message assembly now live in `submit_cli_error_resolution.py`; `submit_stage.py` re-exports the
    compatibility names while the retry loop consumes the focused module boundary.
    Pure submit-status/detail message rendering and submission-row message extraction now live in
-   `submit_stage_messages.py`; submit-stage internals call those helpers directly while `submit_stage.py` keeps only
-   public compatibility wrappers still used by older call sites.
+   `submit_stage_messages.py`; submit-stage internals and loop status reporting call those helpers directly instead of
+   preserving submit-status wrapper functions in `submit_stage.py`.
    Run-bound duplicate-submission and same-path skip handling now use
    `submit_stage.resolve_duplicate_submission_for_run` and `submit_stage.resolve_same_submission_path_for_run`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
