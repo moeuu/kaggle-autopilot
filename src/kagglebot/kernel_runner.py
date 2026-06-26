@@ -358,7 +358,7 @@ class KernelJobMonitor:
             _kernel_bootstrap.ensure_kernel_force_train_env(preparation.kernel_dir)
         elif preparation.runtime_bootstrap_mode == "submit_inference":
             _kernel_bootstrap.ensure_kernel_submit_inference_env(preparation.kernel_dir)
-        _clear_stale_kernel_output(preparation.output_dir)
+        _kernel_remote_ops.clear_stale_kernel_output(preparation.output_dir)
         push_attempt = 1
         kernel_id = preparation.kernel_id
         pending_kernel_id = _remote_kernel_state.read_pending_remote_kernel_id(
@@ -379,25 +379,33 @@ class KernelJobMonitor:
 
         print(f"[cyan]kernel push[/cyan]: {preparation.kernel_dir}")
         push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
-        _write_push_log(preparation.logs_dir, push_attempt, push_output)
+        _kernel_remote_ops.write_push_log(preparation.logs_dir, push_attempt, push_output)
         _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
         pushed_kernel_id = _remote_kernel_state.extract_kernel_id_from_push(push_output)
         if pushed_kernel_id and pushed_kernel_id != kernel_id:
             print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
             kernel_id = pushed_kernel_id
-        kernel_id = _resolve_kernel_id(kernel_id, preparation.kernel_slug)
+        kernel_id = _kernel_remote_ops.resolve_kernel_id(
+            kernel_id,
+            preparation.kernel_slug,
+            kernel_id_by_title_func=kernel_id_by_title,
+        )
         resolved_id = _wait_for_kernel_registration(kernel_id, preparation.kernel_slug)
         if not resolved_id:
             print("[yellow]kernel not found after push[/yellow]: retrying once")
             push_attempt += 1
             push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
-            _write_push_log(preparation.logs_dir, push_attempt, push_output)
+            _kernel_remote_ops.write_push_log(preparation.logs_dir, push_attempt, push_output)
             _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
             pushed_kernel_id = _remote_kernel_state.extract_kernel_id_from_push(push_output)
             if pushed_kernel_id and pushed_kernel_id != kernel_id:
                 print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
                 kernel_id = pushed_kernel_id
-            kernel_id = _resolve_kernel_id(kernel_id, preparation.kernel_slug)
+            kernel_id = _kernel_remote_ops.resolve_kernel_id(
+                kernel_id,
+                preparation.kernel_slug,
+                kernel_id_by_title_func=kernel_id_by_title,
+            )
             resolved_id = _wait_for_kernel_registration(kernel_id, preparation.kernel_slug)
             if not resolved_id:
                 raise KernelFailedError("Kaggle kernel not found after push; aborting.")
@@ -925,7 +933,7 @@ def _resume_prior_kernel_if_active(
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel is stale queued ({status}); pushing a new version")
         return None
 
-    _clear_stale_kernel_output(preparation.output_dir)
+    _kernel_remote_ops.clear_stale_kernel_output(preparation.output_dir)
     print(f"[yellow]kernel resume[/yellow]: waiting for existing remote kernel {kernel_id} ({status})")
     if is_kernel_status_running(status):
         _wait_for_kernel_and_record_pending(
@@ -980,22 +988,6 @@ def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | Non
             sleep=time.sleep,
         ),
     )
-
-
-def _resolve_kernel_id(kernel_id: str, kernel_slug: str) -> str:
-    return _kernel_remote_ops.resolve_kernel_id(
-        kernel_id,
-        kernel_slug,
-        kernel_id_by_title_func=kernel_id_by_title,
-    )
-
-
-def _write_push_log(logs_dir: Path, attempt: int, output: str) -> None:
-    _kernel_remote_ops.write_push_log(logs_dir, attempt, output)
-
-
-def _clear_stale_kernel_output(output_dir: Path) -> None:
-    _kernel_remote_ops.clear_stale_kernel_output(output_dir)
 
 
 def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> None:

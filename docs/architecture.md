@@ -524,6 +524,7 @@ Recommended extraction order:
    primary/optional artifact preservation use that helper for file-copy paths. Notebook runner username resolution now
    calls `kaggle_credentials.py` directly instead of keeping a local compatibility wrapper. Remote Kaggle kernel status
    polling, heartbeat/log-tail checks, wait timeout handling, and wait-limit defaults now live in `kernel_wait.py`;
+   remote kernel id resolution, push-log writes, and stale-output cleanup now call `kernel_remote_ops.py` directly;
    `kernel_runner.py` keeps package orchestration while local subprocess execution goes through `local_kernel_process.py`
    directly. Vision YOLO dataset staging also uses that helper for symlink fallback copies.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
