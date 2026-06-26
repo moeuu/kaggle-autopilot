@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import time
 import traceback
 from dataclasses import dataclass, replace
@@ -15,6 +14,7 @@ from rich import print
 from kagglebot import agent_io as _agent_io
 from kagglebot import agent_prompts as _agent_prompts
 from kagglebot import agent_strategy as _agent_strategy
+from kagglebot import autofix_context as _autofix_context
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import autopilot_state as _autopilot_state
 from kagglebot import campaign_metrics as _campaign_metrics
@@ -48,7 +48,6 @@ from kagglebot import score_utils as _score_utils
 from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
-from kagglebot import submit_autofix as _submit_autofix
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot import submit_notebook as _submit_notebook
@@ -131,7 +130,6 @@ from kagglebot.submission.guard import (
     normalize_error_text,
     run_kaggle_submit_kernel,
 )
-from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.top1_campaign import (
     build_blend_report,
     build_candidate_portfolio_plan,
@@ -3546,84 +3544,23 @@ def _run_kernel_fix(
 
 
 def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception) -> None:
-    run_dir = config.paths.run_dir(run_id)
-    autofix_dir = run_dir / "autofix" / f"attempt-{attempt}"
-    autofix_dir.mkdir(parents=True, exist_ok=True)
-    error_text = "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip()
-    submit_autofix = isinstance(error, SubmitAbortedError)
-    submit_context = ""
-    submit_file_fix_required = False
-    submit_file_fix_baseline_path: Path | None = None
-    submit_file_fix_baseline_sha256: str | None = None
-    if isinstance(error, KaggleCliError):
-        if error.command:
-            error_text = f"{error_text}\n\nKaggle CLI command:\n{shlex.join(error.command)}"
-        if error.output:
-            error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
-    if submit_autofix:
-        submit_autofix_context = _submit_failure_context.load_submit_autofix_run_context(
-            run_dir=run_dir,
-            load_run_state=_autopilot_state.load_run_state,
-        )
-        failure_context = submit_autofix_context.failure_context
-        run_state = submit_autofix_context.run_state
-        latest_submit_attempt = submit_autofix_context.latest_submit_attempt
-        submit_context = submit_autofix_context.formatted_context
-        submit_file_fix_required = _submit_autofix.submit_file_fix_required_for_attempt(latest_submit_attempt)
-        max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
-
-        def fallback_iteration_dirs():
-            return (config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1))
-
-        def save_repaired_submit_path(fixed: Path) -> None:
-            _submit_failure_context.save_submit_autofix_repaired_path_for_run(
-                run_dir=run_dir,
-                repaired_path=fixed,
-                save_run_state_for_run=_autopilot_state.save_run_state,
-            )
-
-        if submit_file_fix_required:
-            submit_file_fix_baseline_path = _submit_failure_context.resolve_submit_autofix_submission_artifact(
-                run_state=run_state,
-                latest_submit_attempt=latest_submit_attempt,
-                failure_context=failure_context,
-                fallback_iteration_dirs=fallback_iteration_dirs(),
-                resolve_iteration_submission_artifact=_autopilot_state.resolve_iteration_submission_artifact,
-            )
-            submit_file_fix_baseline_sha256 = _sha256_or_none(submit_file_fix_baseline_path)
-        repair_service = SubmissionService(
-            SubmissionConfig(
-                slug=config.slug,
-                data_dir=config.paths.data_dir,
-                sample_submission_path=config.paths.sample_submission_path,
-                submission_ledger_path=config.paths.submission_ledger_path,
-                dry_run=True,
-                force_submit=True,
-                bypass_rate_limit=True,
-            )
-        )
-        preparation = _submit_autofix.prepare_submit_file_autofix_for_run(
-            latest_submit_attempt=latest_submit_attempt,
-            run_state=run_state,
-            failure_context=failure_context,
-            fallback_iteration_dirs=fallback_iteration_dirs,
-            resolve_iteration_submission_artifact=_autopilot_state.resolve_iteration_submission_artifact,
-            validate_and_prepare=repair_service.validate_and_prepare_submission,
-            save_repaired_path=save_repaired_submit_path,
-        )
-        _prepared_submission_path, prepared_submission_summary = preparation.path, preparation.summary
-        if prepared_submission_summary:
-            submit_context = (
-                f"{submit_context}\n\ndeterministic_submit_file_autofix:\n{prepared_submission_summary}".strip()
-            )
-            error_text = f"{error_text}\n\nDeterministic Submit File Autofix:\n{prepared_submission_summary}"
-        if submit_context:
-            error_text = f"{error_text}\n\nSubmit Failure Context:\n{submit_context}"
-    error_path = _agent_io.write_autofix_error_transcript(
-        autofix_dir=autofix_dir,
+    prepared_context = _autofix_context.prepare_autofix_context(
+        config=config,
+        run_id=run_id,
         attempt=attempt,
-        error_text=error_text,
+        error=error,
+        max_search_iteration=MAX_AUTOFIX_ATTEMPTS + int(MAX_KERNEL_FIX_ATTEMPTS or 0) + MAX_AUTOFIX_CODEX_PASSES,
+        sha256_or_none=_sha256_or_none,
     )
+    run_dir = prepared_context.run_dir
+    autofix_dir = prepared_context.autofix_dir
+    error_text = prepared_context.error_text
+    error_path = prepared_context.error_path
+    submit_autofix = prepared_context.submit_autofix
+    submit_context = prepared_context.submit_context
+    submit_file_fix_required = prepared_context.submit_file_fix_required
+    submit_file_fix_baseline_path = prepared_context.submit_file_fix_baseline_path
+    submit_file_fix_baseline_sha256 = prepared_context.submit_file_fix_baseline_sha256
 
     allowed_prefixes = build_repair_write_policy(
         repo_root=config.paths.repo_root,
