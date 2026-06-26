@@ -127,7 +127,7 @@ public sample hidden-test guards, submit-kernel run kwargs construction, kernel 
 kernel push version-label inference, output file selection, Kaggle submit-kernel kwargs construction, ambiguous submit
 retry execution, push-error text detection, and CPU fallback execution live in `src/kagglebot/submit_notebook.py`.
 Shared JSON object loading, including permissive empty-dict fallback, lives in `src/kagglebot/json_utils.py` so policy,
-state, notification, and restart modules do not reimplement artifact reads.
+knowledge, state, notification, and restart modules do not reimplement artifact reads.
 Initial submit-stage mode decisions, file/notebook submit attempt dispatch, successful submit result normalization,
 submit-error classification normalization, submit-error retry/abort decisions, manual submit-blocker abort specs,
 submission outcome abort/classification decisions, poll-result outcome normalization/detail construction, rank

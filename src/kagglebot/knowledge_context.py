@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.json_utils import load_json_object
+from kagglebot.json_utils import load_json_object_or_empty
 from kagglebot.knowledge import (
     derive_problem_types,
     ensure_taxonomy,
@@ -18,7 +18,7 @@ from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 
 def resolve_problem_types_from_profile(*, dataset_profile_path: Path) -> list[str]:
-    profile = load_json_object(dataset_profile_path) or {}
+    profile = load_json_object_or_empty(dataset_profile_path)
     if not isinstance(profile, dict):
         profile = {}
     return derive_problem_types(profile)
@@ -28,7 +28,7 @@ def refresh_knowledge_hints(*, paths: CompetitionPaths, knowledge_paths: Knowled
     """Write competition knowledge hints from dataset tags and self-improvement context."""
     from kagglebot.self_improvement import load_self_improvement_context
 
-    profile = load_json_object(paths.dataset_profile_path) or {}
+    profile = load_json_object_or_empty(paths.dataset_profile_path)
     if not isinstance(profile, dict):
         profile = {}
     raw_tags = profile.get("tags", [])

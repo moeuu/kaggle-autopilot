@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
 from kagglebot.medals import DEFAULT_TARGET_MEDAL, normalize_target_medal, normalize_target_rank_percentile
 from kagglebot.metric_matching import canonical_metric_name_for_match, metrics_equivalent
 from kagglebot.paths import CompetitionPaths
@@ -582,7 +582,7 @@ def validate_plan_payload(payload: dict[str, object], *, profile: dict[str, obje
 
 def write_plan_payload(paths: CompetitionPaths, payload: dict[str, object]) -> None:
     payload = normalize_plan_payload(apply_plan_guardrails(paths, payload))
-    existing = load_json_object(paths.plan_path) or {}
+    existing = load_json_object_or_empty(paths.plan_path)
     merged = normalize_plan_payload({**existing, **payload})
     defaults = PlanConfig.from_dict(merged).to_dict()
     persisted = normalize_plan_payload({**merged, **defaults})
@@ -597,7 +597,7 @@ def load_plan_config(paths: CompetitionPaths) -> PlanConfig:
 
 
 def write_plan_config(paths: CompetitionPaths, plan: PlanConfig) -> None:
-    existing = load_json_object(paths.plan_path) or {}
+    existing = load_json_object_or_empty(paths.plan_path)
     payload = apply_plan_guardrails(paths, {**existing, **plan.to_dict()})
     write_json_object(paths.plan_path, payload)
 
@@ -1984,7 +1984,7 @@ def resolve_split_strategy_from_artifacts(
     if normalized_current not in {None, "kfold"}:
         return normalized_current, None
 
-    plan_payload = load_json_object(paths.plan_path) or {}
+    plan_payload = load_json_object_or_empty(paths.plan_path)
     hints = extract_plan_split_strategy_hints(plan_payload)
     hinted_strategy: str | None = None
     for hint in hints:
@@ -2004,7 +2004,7 @@ def resolve_split_strategy_from_artifacts(
             "using plan evaluation hints for better local/public alignment.",
         )
 
-    profile = load_json_object(paths.dataset_profile_path) or {}
+    profile = load_json_object_or_empty(paths.dataset_profile_path)
     if (
         str(profile.get("modality", "")).strip().lower() == "timeseries"
         and profile_has_temporal_signal(profile)
