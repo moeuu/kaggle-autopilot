@@ -31,6 +31,7 @@ from kagglebot.submit_failure_context import (
     save_submit_failure_context,
     should_defer_submit_abort_to_next_iteration,
     should_force_resubmit_after_submit_abort,
+    should_force_resubmit_after_submit_abort_for_run,
     submit_failure_context_path,
     submit_file_fix_contract_satisfied,
     submit_file_fix_contract_satisfied_for_run,
@@ -629,6 +630,28 @@ def test_should_force_resubmit_after_submit_abort_only_for_polling_or_scoring_fa
     assert should_force_resubmit_after_submit_abort({"last_reason": "submission_poll_status_complete_no_score"})
     assert not should_force_resubmit_after_submit_abort({"last_reason": "rules_not_accepted"})
     assert not should_force_resubmit_after_submit_abort({})
+
+
+def test_should_force_resubmit_after_submit_abort_for_run_uses_attempts_and_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    state_calls: list[Path] = []
+
+    assert should_force_resubmit_after_submit_abort_for_run(
+        run_dir=run_dir,
+        load_run_state=lambda _run_dir: (_ for _ in ()).throw(AssertionError("state should not be loaded")),
+        has_successful_submit_attempt=lambda path: False if path == run_dir else True,
+    )
+    assert should_force_resubmit_after_submit_abort_for_run(
+        run_dir=run_dir,
+        load_run_state=lambda path: state_calls.append(path) or {"last_reason": "submission_poll_status_error"},
+        has_successful_submit_attempt=lambda path: True if path == run_dir else False,
+    )
+    assert not should_force_resubmit_after_submit_abort_for_run(
+        run_dir=run_dir,
+        load_run_state=lambda path: {"last_reason": "rules_not_accepted"} if path == run_dir else {},
+        has_successful_submit_attempt=lambda path: True if path == run_dir else False,
+    )
+    assert state_calls == [run_dir]
 
 
 def test_should_defer_submit_abort_to_next_iteration_requires_kaggle_gpu_repairable_nonfinal() -> None:

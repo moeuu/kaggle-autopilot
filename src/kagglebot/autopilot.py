@@ -301,10 +301,10 @@ def run_autopilot(config: AutopilotConfig) -> None:
                     f"[yellow]autofix[/yellow]: submit stage failed; invoking "
                     f"{IMPLEMENTATION_AGENT.log_alias} to repair and retry submit"
                 )
-                if (not _submit_attempts.has_successful_submit_attempt(run_dir)) or (
-                    _submit_failure_context.should_force_resubmit_after_submit_abort(
-                        _autopilot_state._load_run_state(run_dir)
-                    )
+                if _submit_failure_context.should_force_resubmit_after_submit_abort_for_run(
+                    run_dir=run_dir,
+                    load_run_state=_autopilot_state._load_run_state,
+                    has_successful_submit_attempt=_submit_attempts.has_successful_submit_attempt,
                 ):
                     os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
                     submit_force_override = True

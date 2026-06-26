@@ -538,6 +538,17 @@ def should_force_resubmit_after_submit_abort(run_state: dict[str, object]) -> bo
     return reason.startswith("submission_poll_status_")
 
 
+def should_force_resubmit_after_submit_abort_for_run(
+    *,
+    run_dir: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+    has_successful_submit_attempt: Callable[[Path], bool],
+) -> bool:
+    if not has_successful_submit_attempt(run_dir):
+        return True
+    return should_force_resubmit_after_submit_abort(load_run_state(run_dir))
+
+
 def should_defer_submit_abort_to_next_iteration(
     *,
     compute: str,

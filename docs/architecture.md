@@ -103,7 +103,7 @@ longer owns the pure decision table for whether a failed submit should repair th
 polling path, or wait for manual intervention.
 Submit failure context persistence, reference parsing, prompt formatting, stale repaired-artifact decisions/application,
 run-level submit-attempt autofix context/input resolution, submit-autofix run-context loading,
-repaired-artifact state recording/contract checks, and submit autofix artifact resolution live in
+repaired-artifact state recording/contract checks, submit-abort force-resubmit decisions, and submit autofix artifact resolution live in
 `src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out of the main loop. Submit
 failure-context payload creation plus submitted/duplicate-skip resolution marking also live there; the loop supplies
 repair decisions and runtime state snapshots.
