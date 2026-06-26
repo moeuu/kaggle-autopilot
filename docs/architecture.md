@@ -88,8 +88,8 @@ Context artifact reads such as dataset profile loading, evaluation-spec validati
 data-row counting live in `src/kagglebot/context_artifacts.py`; orchestration code consumes normalized context payloads.
 Metric aliases, metric direction inference, and canonical direction normalization live in
 `src/kagglebot/solver/metrics.py`; callers should not hand-roll `minimize|maximize` parsing.
-Split-strategy policy, planning necessity/resume-skip checks, evaluation seed/repeat normalization, rank-force
-thresholds, improvement-mode upgrades, and competition-specific evaluation overrides live in
+Split-strategy policy, planning necessity/resume-skip checks, CLI train default-metric resolution, evaluation
+seed/repeat normalization, rank-force thresholds, improvement-mode upgrades, and competition-specific evaluation overrides live in
 `src/kagglebot/plan_policy.py`. This keeps plan resolution moving toward a set of small policy functions while the
 larger `_resolve_plan` orchestrator is still being retired incrementally.
 Submit-gate normalization, target/top1 checks, quality reason soft overrides, daily-limit row counting, daily quota
@@ -345,7 +345,8 @@ Recommended extraction order:
    `plan_policy.py`; split strategy normalization/override,
    target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, metric/direction override policy, plan score-source normalization, evaluation-spec value extraction,
-   local-GPU evaluation budget/max-iteration policy, submit/runtime constraint application, planning
+   local-GPU evaluation budget/max-iteration policy, submit/runtime constraint application, CLI train default-metric
+   resolution, planning
    necessity/resume-skip checks, readiness/stop-policy resolution, rank-force threshold resolution, and
    competition-specific overrides are already out of the main loop. Leaderboard medal/rank objective resolution, plan
    file I/O, and resolved-plan config conversion are now also in `plan_policy.py`.

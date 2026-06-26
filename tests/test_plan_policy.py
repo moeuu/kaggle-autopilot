@@ -27,6 +27,7 @@ from kagglebot.plan_policy import (
     normalize_rank_force_percentile,
     normalize_split_strategy_name,
     resolve_base_evaluation_request,
+    resolve_default_metric_from_artifacts,
     resolve_deliverable_mode,
     resolve_eval_budget_policy,
     resolve_heavy_local_gpu_max_iterations,
@@ -214,6 +215,27 @@ def test_resolve_target_request_falls_back_to_spec_and_auto_direction() -> None:
     assert decision.target_direction == "auto"
     assert decision.explicit_target_metric is False
     assert decision.explicit_target_direction is False
+
+
+def test_resolve_default_metric_from_artifacts_prefers_plan_target_metric(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.plan_path.parent.mkdir(parents=True)
+    paths.dataset_profile_path.parent.mkdir(parents=True)
+    paths.plan_path.write_text(json.dumps({"target_metric": "auc"}), encoding="utf-8")
+    paths.dataset_profile_path.write_text(json.dumps({"metric": "rmse"}), encoding="utf-8")
+
+    assert resolve_default_metric_from_artifacts(paths) == "auc"
+
+
+def test_resolve_default_metric_from_artifacts_uses_profile_metric_then_fallback(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.dataset_profile_path.parent.mkdir(parents=True)
+    paths.dataset_profile_path.write_text(json.dumps({"target_metric": "", "metric": "log_loss"}), encoding="utf-8")
+
+    assert resolve_default_metric_from_artifacts(paths) == "log_loss"
+
+    paths.dataset_profile_path.write_text(json.dumps({"metric": "   "}), encoding="utf-8")
+    assert resolve_default_metric_from_artifacts(paths) == "rmse"
 
 
 def test_resolved_plan_payload_keeps_full_orchestration_schema() -> None:

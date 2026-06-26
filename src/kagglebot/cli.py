@@ -22,12 +22,12 @@ from kagglebot.exceptions import RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.experiment_graph import normalize_portfolio_execution
 from kagglebot.hardware import resolve_hardware_profile
 from kagglebot.history import new_run_id
-from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_api import check_rules_accepted
 from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import knowledge_search, knowledge_show
 from kagglebot.method_scout import normalize_method_scout_mode, normalize_research_scout_mode
 from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_dir
+from kagglebot.plan_policy import resolve_default_metric_from_artifacts
 from kagglebot.score_sources import normalize_generalizable_score_source
 from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
@@ -224,7 +224,7 @@ def train(
         raise typer.BadParameter(str(exc), param_hint="--hardware-profile") from exc
     resolved_time_budget = time_budget_min if time_budget_min is not None else 60
     resolved_seed = seed if seed is not None else 42
-    metric = _default_metric(paths)
+    metric = resolve_default_metric_from_artifacts(paths)
     direction = infer_direction(metric, "auto")
     run_id = new_run_id()
     run_dir = paths.run_dir(run_id)
@@ -1083,16 +1083,3 @@ def _resolve_accelerator(compute: str, accelerator: str) -> str:
 
 def _print_rules(slug: str) -> None:
     print(f"[red]Rules not accepted[/red]. Visit: https://www.kaggle.com/competitions/{slug}/rules")
-
-
-def _default_metric(paths: CompetitionPaths) -> str:
-    plan = load_json_object(paths.plan_path)
-    metric = plan.get("target_metric") if plan is not None else None
-    if isinstance(metric, str) and metric.strip():
-        return metric
-
-    profile = load_json_object(paths.dataset_profile_path)
-    metric = profile.get("metric") if profile is not None else None
-    if isinstance(metric, str):
-        return metric
-    return "rmse"

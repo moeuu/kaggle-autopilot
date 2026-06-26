@@ -596,6 +596,29 @@ def load_plan_config(paths: CompetitionPaths) -> PlanConfig:
     return PlanConfig.from_dict(payload)
 
 
+def resolve_default_metric_from_artifacts(paths: CompetitionPaths, *, fallback: str = "rmse") -> str:
+    plan = load_json_object(paths.plan_path)
+    if isinstance(plan, dict):
+        metric = _non_empty_string(plan.get("target_metric"))
+        if metric is not None:
+            return metric
+
+    profile = load_json_object(paths.dataset_profile_path)
+    if isinstance(profile, dict):
+        for key in ("target_metric", "metric"):
+            metric = _non_empty_string(profile.get(key))
+            if metric is not None:
+                return metric
+    return fallback
+
+
+def _non_empty_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
 def write_plan_config(paths: CompetitionPaths, plan: PlanConfig) -> None:
     existing = load_json_object_or_empty(paths.plan_path)
     payload = apply_plan_guardrails(paths, {**existing, **plan.to_dict()})
