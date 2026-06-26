@@ -139,6 +139,41 @@ def test_build_dataset_profile_handles_json_list_features(tmp_path) -> None:
     assert profile["file_extension_counts"] == {".json": 3}
 
 
+def test_legacy_build_dataset_profile_handles_json_list_features(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.json").write_text(
+        json.dumps(
+            [
+                {"id": "a", "grid": [[1, 2], [3, 4]], "target": 0},
+                {"id": "b", "grid": [[4, 3], [2, 1]], "target": 1},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (data_dir / "test.json").write_text(
+        json.dumps(
+            [
+                {"id": "c", "grid": [[1, 1], [1, 1]]},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (data_dir / "sample_submission.json").write_text(
+        json.dumps(
+            [
+                {"id": "c", "target": 0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profile = knowledge_init_mod.build_dataset_profile(data_dir)
+
+    assert profile["status"] == "ok"
+    assert profile["file_extension_counts"] == {".json": 3}
+
+
 def test_build_dataset_profile_does_not_treat_times_suffix_as_timeseries(tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)

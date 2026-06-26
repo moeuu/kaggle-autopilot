@@ -20,6 +20,7 @@ from kagglebot.knowledge.classification import (
     classify_error_category,
     classify_fix_category,
 )
+from kagglebot.knowledge.profile_utils import safe_nunique
 from kagglebot.knowledge.repositories import InsightRepository, TaxonomyRepository
 from kagglebot.paths import KnowledgePaths
 from kagglebot.rna_structure import detect_rna_structure_task, extract_target_id, load_rna_structure_task
@@ -535,7 +536,7 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     missingness_by_column = {col: float(val) for col, val in train.isna().mean().items()}
     dtype_by_column = {col: str(dtype) for col, dtype in train.dtypes.items()}
     cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
-    high_cardinality = [c for c in cat_cols if train[c].nunique(dropna=True) > 50]
+    high_cardinality = [c for c in cat_cols if safe_nunique(train[c]) > 50]
 
     modality = _infer_modality(data_dir, train)
     task_tag = _task_tag(task, train[target_col])
@@ -946,7 +947,7 @@ def _task_tag(task: str, target: pd.Series) -> str:
         return "multitask"
     if task == "regression":
         return "regression"
-    unique = target.nunique(dropna=True)
+    unique = safe_nunique(target)
     return "binary" if unique <= 2 else "multiclass"
 
 
