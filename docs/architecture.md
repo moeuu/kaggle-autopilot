@@ -487,6 +487,8 @@ Recommended extraction order:
    `submit_stage_modes.py`.
    Prepared-submission validation/preparation and rules-acceptance preflight decisions now live in
    `submit_preflight.py`.
+   Successful submit attempt payloads, outcome ledger recording, failure-context resolution, and final success payload
+   construction now live in `submit_success.py`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does
@@ -513,8 +515,8 @@ Recommended extraction order:
    Submission outcome polling, post-poll abort handling, and successful submit ledger/attempt/failure-context recording
    now use `submit_stage.finalize_submit_outcome_for_run_or_abort`, so final persistence choreography stays in the
    submit service after the retry loop succeeds.
-   duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
-   successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
+   duplicate-submit run-state snapshots are loaded inside the run-level submit helpers, and successful submit
+   ledger/outcome/failure-context finalization uses `submit_success.record_successful_submit_for_run`.
    Submit side-effect orchestration now lives in `submit_runner.py` behind `attempt_submit_for_run`, which coordinates
    `submit_stage`, `submit_notebook`, `submission_service`,
    `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. Production dependency
