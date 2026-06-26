@@ -320,6 +320,8 @@ The next high-value modernization work is:
    Initial planning/pipeline execution and its immediate repository verification now live in `planning_runner.py`,
    leaving `autopilot.py` to schedule planning phases and reuse the same regeneration entrypoint for kernel-rebuild
    fallbacks.
+   Planning-phase orchestration and knowledge-refresh/profile derivation now live in `planning_phase.py` and
+   `knowledge_phase.py`, keeping `autopilot.py` focused on session and iteration-loop wiring.
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the

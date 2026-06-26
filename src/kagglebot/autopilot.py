@@ -113,11 +113,13 @@ from kagglebot.knowledge import (
     record_problem_type_insight,
     record_run,
 )
+from kagglebot.knowledge_phase import KnowledgePhase
 from kagglebot.medals import (
     DEFAULT_TARGET_MEDAL,
     normalize_target_medal,
     normalize_target_rank_percentile,
 )
+from kagglebot.planning_phase import PlanningPhase
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
@@ -145,7 +147,6 @@ from kagglebot.top1_exhaustive import (
     normalize_top1_submit_policy,
     write_top1_public_snapshot,
 )
-from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
 from kagglebot.write_guard import (
     _backup_guarded_files,
@@ -325,60 +326,6 @@ def run_autopilot(config: AutopilotConfig) -> None:
     finally:
         if submit_force_override:
             os.environ.pop("KAGGLEBOT_FORCE_RESUBMIT", None)
-
-
-@dataclass(frozen=True)
-class PlanningPhase:
-    config: AutopilotConfig
-    run_id: str
-    resume_run: bool
-
-    def execute(self, plan: PlanConfig) -> PlanConfig:
-        if _plan_policy.should_skip_planning_on_resume(
-            resume_run=self.resume_run,
-            plan_path=self.config.paths.plan_path,
-            kernel_path=self.config.paths.kernel_source_dir / "kernel.py",
-        ):
-            print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
-            return plan
-        if _plan_policy.needs_planning(
-            agent=self.config.agent,
-            config_target_metric=self.config.target_metric,
-            config_target_score=self.config.target_score,
-            config_target_direction=self.config.target_direction,
-            plan_target_metric=plan.target_metric,
-            plan_target_score=plan.target_score,
-            plan_target_direction=plan.target_direction,
-        ):
-            print("[cyan]plan[/cyan]: generating initial plan")
-            _watch_state.update_watch_phase(
-                self.config,
-                self.run_id,
-                "gpt_planning",
-                detail="GPT is drafting the initial competition plan.",
-            )
-            _planning_runner.run_plan_and_initial(self.config, self.run_id)
-            return _plan_policy.load_plan_config(self.config.paths)
-        return plan
-
-
-@dataclass(frozen=True)
-class KnowledgePhase:
-    config: AutopilotConfig
-
-    def refresh(self) -> None:
-        _knowledge_context.refresh_knowledge_hints(paths=self.config.paths, knowledge_paths=self.config.knowledge_paths)
-
-    def load_dataset_profile(self) -> dict[str, object]:
-        return _context_artifacts.load_dataset_profile(
-            slug=self.config.paths.slug,
-            dataset_profile_path=self.config.paths.dataset_profile_path,
-        )
-
-    def derive_problem_types(self) -> list[str]:
-        return _knowledge_context.resolve_problem_types_from_profile(
-            dataset_profile_path=self.config.paths.dataset_profile_path
-        )
 
 
 @dataclass(frozen=True)
