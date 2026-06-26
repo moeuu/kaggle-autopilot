@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_object
+
+KAGGLE_CREDENTIALS_ERROR = (
+    "Kaggle API credentials not found. Set KAGGLE_USERNAME/KAGGLE_KEY or point KAGGLE_CONFIG_DIR "
+    "to a directory (or kaggle.json file) containing username/key."
+)
 
 
 def kaggle_json_candidates(*, config_dir_env: str | None = None, home: Path | None = None) -> list[Path]:
@@ -48,3 +54,24 @@ def resolve_kaggle_username(explicit: str | None) -> str:
         "Set --kaggle-username, KAGGLE_USERNAME, or point KAGGLE_CONFIG_DIR "
         "to a directory (or kaggle.json file) containing a username."
     )
+
+
+def resolve_kaggle_api_credentials(*, config_candidates: Iterable[Path] | None = None) -> tuple[str, str]:
+    """Resolve Kaggle API username/key from environment or kaggle.json candidates."""
+    username = os.getenv("KAGGLE_USERNAME")
+    api_key = os.getenv("KAGGLE_KEY")
+    if username and api_key:
+        return username, api_key
+
+    candidates = config_candidates
+    if candidates is None:
+        candidates = kaggle_json_candidates(config_dir_env=os.getenv("KAGGLE_CONFIG_DIR"))
+    for path in candidates:
+        payload = load_json_object(path)
+        if payload is None:
+            continue
+        username = str(payload.get("username") or "").strip()
+        api_key = str(payload.get("key") or "").strip()
+        if username and api_key:
+            return username, api_key
+    raise ValueError(KAGGLE_CREDENTIALS_ERROR)

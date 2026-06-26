@@ -24,7 +24,11 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
 )
 from kagglebot.exec_utils import run_command
-from kagglebot.json_utils import load_json_object
+from kagglebot.kaggle_credentials import (
+    KAGGLE_CREDENTIALS_ERROR,
+    kaggle_json_candidates,
+    resolve_kaggle_api_credentials,
+)
 from kagglebot.submission.guard import run_kaggle_submit
 from kagglebot.validators import safe_extract_zip
 
@@ -834,33 +838,17 @@ def _build_kaggle_download_session() -> object:
 
 
 def _kaggle_api_credentials() -> tuple[str, str]:
-    username = os.getenv("KAGGLE_USERNAME")
-    api_key = os.getenv("KAGGLE_KEY")
-    if username and api_key:
-        return username, api_key
-
-    for path in _kaggle_config_file_candidates():
-        payload = load_json_object(path)
-        if payload is None:
-            continue
-        username = str(payload.get("username") or "").strip()
-        api_key = str(payload.get("key") or "").strip()
-        if username and api_key:
-            return username, api_key
-    raise KaggleCliError(
-        "Kaggle API credentials not found for streaming download. Set KAGGLE_USERNAME/KAGGLE_KEY or kaggle.json.",
-        ["kaggle", "competitions", "download"],
-    )
+    try:
+        return resolve_kaggle_api_credentials(config_candidates=_kaggle_config_file_candidates())
+    except ValueError as exc:
+        raise KaggleCliError(
+            f"{KAGGLE_CREDENTIALS_ERROR} Required for streaming download.",
+            ["kaggle", "competitions", "download"],
+        ) from exc
 
 
 def _kaggle_config_file_candidates() -> list[Path]:
-    candidates: list[Path] = []
-    config_dir = os.getenv("KAGGLE_CONFIG_DIR")
-    if config_dir:
-        candidates.append(Path(config_dir).expanduser() / "kaggle.json")
-    candidates.append(Path.home() / ".kaggle" / "kaggle.json")
-    candidates.append(Path.home() / ".config" / "kaggle" / "kaggle.json")
-    return list(dict.fromkeys(candidates))
+    return kaggle_json_candidates(config_dir_env=os.getenv("KAGGLE_CONFIG_DIR"))
 
 
 def _is_rate_limited_download_error(exc: KaggleCliError) -> bool:

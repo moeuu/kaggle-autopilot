@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from kagglebot.kaggle_credentials import kaggle_json_candidates, resolve_kaggle_username
+from kagglebot.kaggle_credentials import (
+    kaggle_json_candidates,
+    resolve_kaggle_api_credentials,
+    resolve_kaggle_username,
+)
 
 
 def test_kaggle_json_candidates_accepts_config_dir_and_file_path(tmp_path: Path) -> None:
@@ -79,3 +83,40 @@ def test_resolve_kaggle_username_errors_when_missing(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(ValueError, match="Kaggle username is required"):
         resolve_kaggle_username(None)
+
+
+def test_resolve_kaggle_api_credentials_prefers_complete_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KAGGLE_USERNAME", "env-user")
+    monkeypatch.setenv("KAGGLE_KEY", "env-key")
+    config_path = tmp_path / "kaggle.json"
+    config_path.write_text(json.dumps({"username": "cfg-user", "key": "cfg-key"}), encoding="utf-8")
+
+    assert resolve_kaggle_api_credentials(config_candidates=[config_path]) == ("env-user", "env-key")
+
+
+def test_resolve_kaggle_api_credentials_uses_config_when_env_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("KAGGLE_USERNAME", "env-user")
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    config_path = tmp_path / "kaggle.json"
+    config_path.write_text(json.dumps({"username": "cfg-user", "key": "cfg-key"}), encoding="utf-8")
+
+    assert resolve_kaggle_api_credentials(config_candidates=[invalid, config_path]) == ("cfg-user", "cfg-key")
+
+
+def test_resolve_kaggle_api_credentials_errors_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="Kaggle API credentials not found"):
+        resolve_kaggle_api_credentials(config_candidates=[tmp_path / "missing.json"])
