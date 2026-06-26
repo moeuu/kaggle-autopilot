@@ -5,7 +5,6 @@ import os
 import shlex
 import time
 import traceback
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3420,19 +3419,22 @@ def _run_kernel_fix(
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     lightweight_note_path = agent_dir / f"kernel_fix_note-{attempt:02d}.txt"
-    lightweight_fix = _maybe_apply_lightweight_runtime_fix(
+    lightweight_fix = _runtime_fixes.apply_lightweight_runtime_fix(
         config=config,
         error_text=error_message,
         note_path=lightweight_note_path,
-        stage_label="kernel fix",
     )
     if lightweight_fix:
+        print(
+            f"[yellow]kernel fix[/yellow]: wrote {lightweight_fix.artifact_name}; "
+            f"retrying without {IMPLEMENTATION_AGENT.log_alias} edits"
+        )
         if pending_error_fixes is not None:
             pending_error_fixes.append(
                 {
                     "iteration": iteration,
                     "error_message": error_message,
-                    "fix_summary": f"Applied lightweight runtime autofix: {lightweight_fix}",
+                    "fix_summary": f"Applied lightweight runtime autofix: {lightweight_fix.artifact_name}",
                     "resolved": True,
                 }
             )
@@ -4177,55 +4179,6 @@ def _maybe_regenerate_kernel_sources_once(
         trigger_reason=trigger_reason,
     )
     return True
-
-
-def _maybe_apply_lightweight_runtime_fix(
-    *,
-    config: AutopilotConfig,
-    error_text: str,
-    note_path: Path,
-    stage_label: str,
-) -> str | None:
-    actions: tuple[tuple[str, str, Callable[[AutopilotConfig, str], bool]], ...] = (
-        (
-            "column_fill.json",
-            "missing column error",
-            _runtime_fixes.maybe_write_column_fill,
-        ),
-        (
-            "object_coerce.json",
-            "numpy.object_ conversion error",
-            _runtime_fixes.maybe_write_object_coerce,
-        ),
-        (
-            "device_coerce.json",
-            "torch device mismatch error",
-            _runtime_fixes.maybe_write_device_coerce,
-        ),
-        (
-            "column_map.json",
-            "column alias mismatch",
-            _runtime_fixes.maybe_write_column_map,
-        ),
-    )
-    for artifact_name, reason, action in actions:
-        try:
-            changed = bool(action(config, error_text))
-        except Exception:
-            changed = False
-        if not changed:
-            continue
-        _runtime_fixes.write_lightweight_autofix_note(
-            note_path=note_path,
-            artifact_name=artifact_name,
-            reason=reason,
-        )
-        print(
-            f"[yellow]{stage_label}[/yellow]: wrote {artifact_name}; "
-            f"retrying without {IMPLEMENTATION_AGENT.log_alias} edits"
-        )
-        return artifact_name
-    return None
 
 
 def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:

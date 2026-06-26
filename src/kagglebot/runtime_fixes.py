@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import csv
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -36,6 +38,13 @@ COLUMN_ERROR_PATTERNS = (
     "not in index",
     "are in the [columns]",
 )
+
+
+@dataclass(frozen=True)
+class LightweightRuntimeFixResult:
+    artifact_name: str
+    reason: str
+    note: str
 
 
 def error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
@@ -311,6 +320,53 @@ def maybe_write_column_map(config: object, error_text: str) -> bool:
     }
     write_json_object(map_path, payload)
     return True
+
+
+LIGHTWEIGHT_RUNTIME_FIX_ACTIONS: tuple[tuple[str, str, Callable[[object, str], bool]], ...] = (
+    (
+        COLUMN_FILL_FILENAME,
+        "missing column error",
+        maybe_write_column_fill,
+    ),
+    (
+        OBJECT_COERCE_FILENAME,
+        "numpy.object_ conversion error",
+        maybe_write_object_coerce,
+    ),
+    (
+        DEVICE_COERCE_FILENAME,
+        "torch device mismatch error",
+        maybe_write_device_coerce,
+    ),
+    (
+        COLUMN_MAP_FILENAME,
+        "column alias mismatch",
+        maybe_write_column_map,
+    ),
+)
+
+
+def apply_lightweight_runtime_fix(
+    *,
+    config: object,
+    error_text: str,
+    note_path: Path,
+    actions: tuple[tuple[str, str, Callable[[object, str], bool]], ...] = LIGHTWEIGHT_RUNTIME_FIX_ACTIONS,
+) -> LightweightRuntimeFixResult | None:
+    for artifact_name, reason, action in actions:
+        try:
+            changed = bool(action(config, error_text))
+        except Exception:
+            changed = False
+        if not changed:
+            continue
+        note = write_lightweight_autofix_note(
+            note_path=note_path,
+            artifact_name=artifact_name,
+            reason=reason,
+        )
+        return LightweightRuntimeFixResult(artifact_name=artifact_name, reason=reason, note=note)
+    return None
 
 
 def scan_tabular_headers(data_dir: Path) -> dict[str, list[str]]:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from kagglebot.paths import CompetitionPaths
 from kagglebot.runtime_fixes import (
+    apply_lightweight_runtime_fix,
     error_strategy_skip_reason,
     extract_candidate_groups,
     extract_missing_module,
@@ -87,6 +88,41 @@ def test_write_lightweight_autofix_note_creates_parent_and_records_reason(tmp_pa
     assert note_path.read_text(encoding="utf-8") == note
     assert "column_fill.json created for missing column error" in note
     assert "retry without modifying kernel sources" in note
+
+
+def test_apply_lightweight_runtime_fix_uses_first_changed_action(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    calls: list[str] = []
+
+    def broken_action(config: object, error_text: str) -> bool:  # noqa: ARG001
+        calls.append("broken")
+        raise RuntimeError("ignored")
+
+    def skipped_action(config: object, error_text: str) -> bool:  # noqa: ARG001
+        calls.append("skipped")
+        return False
+
+    def changed_action(config: object, error_text: str) -> bool:  # noqa: ARG001
+        calls.append("changed")
+        return True
+
+    note_path = tmp_path / "agent" / "note.txt"
+    result = apply_lightweight_runtime_fix(
+        config=config,
+        error_text="runtime error",
+        note_path=note_path,
+        actions=(
+            ("broken.json", "broken reason", broken_action),
+            ("skipped.json", "skipped reason", skipped_action),
+            ("changed.json", "changed reason", changed_action),
+        ),
+    )
+
+    assert result is not None
+    assert result.artifact_name == "changed.json"
+    assert result.reason == "changed reason"
+    assert calls == ["broken", "skipped", "changed"]
+    assert "changed.json created for changed reason" in note_path.read_text(encoding="utf-8")
 
 
 def test_maybe_write_column_fill_from_missing_columns_error(tmp_path: Path) -> None:
