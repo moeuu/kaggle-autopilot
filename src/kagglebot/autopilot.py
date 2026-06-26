@@ -50,6 +50,7 @@ from kagglebot import submit_rank as _submit_rank
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
 from kagglebot import submit_stage_messages as _submit_stage_messages
+from kagglebot import submit_tracking as _submit_tracking
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
 from kagglebot.agents.codex_runner import run_codex
@@ -1944,7 +1945,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 for message in rank_state.messages:
                                     print(message)
                         submitted_tracking_score, submitted_tracking_source = (
-                            _submit_stage.submission_score_for_tracking(
+                            _submit_tracking.submission_score_for_tracking(
                                 offline_score=decision_score,
                                 online_score=online_score,
                             )
@@ -2515,7 +2516,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 else:
                     submitted = True
                     last_submission_result = fallback_result
-                    tracking_decision = _submit_stage.decide_submitted_tracking_score_update(
+                    tracking_decision = _submit_tracking.decide_submitted_tracking_score_update(
                         submission_result=fallback_result,
                         offline_score=best_submittable_score,
                         previous_best_score=best_submitted_score,

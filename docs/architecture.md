@@ -475,6 +475,8 @@ Recommended extraction order:
    Run-bound duplicate-submission and same-path skip handling now live in `submit_stage_duplicate.py`.
    Submission rank payload normalization, rank display formatting, and rank-guard state resolution now live in
    `submit_rank.py`.
+   Submitted-checkpoint tracking score selection and best-submitted score update decisions now live in
+   `submit_tracking.py`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does

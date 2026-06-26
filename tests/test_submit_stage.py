@@ -48,7 +48,6 @@ from kagglebot.submit_stage import (
     decide_initial_submit_stage_mode,
     decide_iteration_submit_improvement_gate,
     decide_submission_outcome_abort,
-    decide_submitted_tracking_score_update,
     ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,
     finalize_submit_outcome_for_run_or_abort,
@@ -76,7 +75,6 @@ from kagglebot.submit_stage import (
     resolve_submit_preflight_for_run_or_abort,
     run_submit_stage_attempt,
     run_submit_stage_attempts_until_success_or_abort,
-    submission_score_for_tracking,
     update_submit_stage_artifact_mode,
     wait_for_submission_outcome,
 )
@@ -89,6 +87,7 @@ from kagglebot.submit_stage_duplicate import (
     resolve_same_submission_path_for_run,
     resolve_same_submission_path_for_submit,
 )
+from kagglebot.submit_tracking import decide_submitted_tracking_score_update, submission_score_for_tracking
 
 
 class FileSubmitResult:
