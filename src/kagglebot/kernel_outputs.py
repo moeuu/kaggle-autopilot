@@ -7,6 +7,16 @@ from kagglebot.artifact_io import copy_artifact_if_needed as _copy_artifact_if_n
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 _INTERMEDIATE_SUBMISSION_RE = re.compile(r"^submission(?:_[A-Za-z0-9_.-]+)?_fold(?P<fold>\d+)\.csv$", re.IGNORECASE)
+LOCAL_KERNEL_OPTIONAL_ARTIFACTS: tuple[str, ...] = (
+    "oof_predictions.csv",
+    "split_diagnostics.json",
+    "feature_suspects.csv",
+    "submission_manifest.json",
+    "metrics_summary.json",
+    "cv_results.json",
+    "cv_summary.json",
+    "pipeline_diagnostics.json",
+)
 
 
 def find_submission_file(output_dir: Path) -> Path | None:
@@ -157,6 +167,32 @@ def pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
 
 def copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
     return _copy_artifact_if_needed(source=source, destination=destination)
+
+
+def copy_optional_local_kernel_artifacts(
+    *,
+    kernel_dir: Path,
+    output_dir: Path,
+    started_at: float,
+    filenames: tuple[str, ...] = LOCAL_KERNEL_OPTIONAL_ARTIFACTS,
+) -> list[Path]:
+    copied: list[Path] = []
+    for filename in filenames:
+        optional_src = resolve_local_kernel_artifact_file(
+            kernel_dir=kernel_dir,
+            output_dir=output_dir,
+            started_at=started_at,
+            filename=filename,
+        )
+        if optional_src is None:
+            continue
+        copied.append(
+            copy_artifact_if_needed(
+                source=optional_src,
+                destination=output_dir / filename,
+            )
+        )
+    return copied
 
 
 def _find_submission_by_extension(output_dir: Path) -> Path | None:

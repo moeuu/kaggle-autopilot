@@ -8,6 +8,7 @@ import pytest
 
 from kagglebot.kernel_outputs import (
     copy_artifact_if_needed,
+    copy_optional_local_kernel_artifacts,
     find_intermediate_submission_file,
     find_newest_existing_path,
     find_output_file,
@@ -200,3 +201,27 @@ def test_resolve_local_kernel_artifact_file_and_copy(tmp_path: Path) -> None:
     assert resolved == source
     assert copy_artifact_if_needed(source=source, destination=destination) == destination
     assert destination.read_text(encoding="utf-8") == "{}"
+
+
+def test_copy_optional_local_kernel_artifacts_copies_configured_outputs(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1" / "local-iter-1"
+    output_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "output"
+    artifact_dir = kernel_dir.parent / "outputs"
+    artifact_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    fresh = artifact_dir / "cv_results.json"
+    stale = artifact_dir / "metrics_summary.json"
+    fresh.write_text('{"fresh": true}', encoding="utf-8")
+    stale.write_text('{"stale": true}', encoding="utf-8")
+    os.utime(fresh, (2000, 2000))
+    os.utime(stale, (1000, 1000))
+
+    copied = copy_optional_local_kernel_artifacts(
+        kernel_dir=kernel_dir,
+        output_dir=output_dir,
+        started_at=1500,
+        filenames=("cv_results.json", "metrics_summary.json", "missing.json"),
+    )
+
+    assert copied == [output_dir / "cv_results.json"]
+    assert (output_dir / "cv_results.json").read_text(encoding="utf-8") == '{"fresh": true}'

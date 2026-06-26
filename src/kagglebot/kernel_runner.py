@@ -56,9 +56,9 @@ from kagglebot.kaggle_api import (
     kernels_status,
 )
 from kagglebot.kaggle_credentials import resolve_kaggle_username as _resolve_kaggle_username
+from kagglebot.kernel_outputs import copy_optional_local_kernel_artifacts as _copy_optional_local_kernel_artifacts
 from kagglebot.kernel_outputs import find_output_file as _find_output_file
 from kagglebot.kernel_outputs import find_submission_file
-from kagglebot.kernel_outputs import resolve_local_kernel_artifact_file as _resolve_local_kernel_artifact_file
 from kagglebot.kernel_outputs import resolve_local_kernel_artifacts as _resolve_local_kernel_artifacts
 from kagglebot.kernel_push_validation import (
     raise_for_invalid_kernel_push_sources as _raise_for_invalid_kernel_push_sources,
@@ -887,28 +887,11 @@ def run_kernel_local(
         logs_dir=logs_dir,
         metrics_path=metrics_dst,
     )
-    for filename in (
-        "oof_predictions.csv",
-        "split_diagnostics.json",
-        "feature_suspects.csv",
-        "submission_manifest.json",
-        "metrics_summary.json",
-        "cv_results.json",
-        "cv_summary.json",
-        "pipeline_diagnostics.json",
-    ):
-        optional_src = _resolve_local_kernel_artifact_file(
-            kernel_dir=kernel_stage_dir,
-            output_dir=output_dir,
-            started_at=started_at,
-            filename=filename,
-        )
-        if optional_src is None:
-            continue
-        _copy_artifact_if_needed(
-            source=optional_src,
-            destination=output_dir / filename,
-        )
+    _copy_optional_local_kernel_artifacts(
+        kernel_dir=kernel_stage_dir,
+        output_dir=output_dir,
+        started_at=started_at,
+    )
 
     return KernelRunResult(
         kernel_id=f"local/{slug}",
