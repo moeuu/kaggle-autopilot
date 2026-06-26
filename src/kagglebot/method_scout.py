@@ -123,6 +123,18 @@ def validation_registry_path(context_dir: Path) -> Path:
     return context_dir / VALIDATION_REGISTRY_FILENAME
 
 
+def load_method_registry(path: Path) -> dict[str, object]:
+    return _load_registry_payload(path)
+
+
+def load_source_registry(path: Path) -> dict[str, object]:
+    return _load_registry_payload(path)
+
+
+def load_validation_registry(path: Path) -> dict[str, object]:
+    return _load_registry_payload(path)
+
+
 def run_method_scout(
     *,
     paths: CompetitionPaths,
@@ -656,6 +668,11 @@ def _load_existing_registry(path: Path, *, slug: str, mode: str) -> dict[str, ob
         payload["mode"] = mode
         return payload
     return {"version": 1, "slug": slug, "mode": mode, "methods": [], "active_method_ids": [], "blocked_method_ids": []}
+
+
+def _load_registry_payload(path: Path) -> dict[str, object]:
+    payload = load_json_object(path)
+    return payload if isinstance(payload, dict) else {}
 
 
 def _seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:

@@ -699,7 +699,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             research_mode=research_scout_mode,
             max_sources=int(config.method_scout_max_sources or 12),
         )
-        source_registry = _json_utils.load_json_object_or_empty(config.paths.source_registry_path)
+        source_registry = _method_scout.load_source_registry(config.paths.source_registry_path)
         if campaign_mode == "top1":
             campaign_state = update_campaign_state(
                 state_path=campaign_state_file,
@@ -712,7 +712,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submission_history=previous_submission_history,
                 method_registry=method_registry,
             )
-            validation_registry = _json_utils.load_json_object_or_empty(config.paths.validation_registry_path)
+            validation_registry = _method_scout.load_validation_registry(config.paths.validation_registry_path)
             validation_lab_report = run_validation_lab(
                 context_dir=config.paths.context_dir,
                 validation_registry=validation_registry,
@@ -724,10 +724,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 method_registry["active_validation_profile"] = validation_lab_report["registry"].get("active_profile")
         print(f"[cyan]method scout[/cyan]: {config.paths.method_registry_path}")
     elif campaign_mode == "top1":
-        method_registry = _json_utils.load_json_object_or_empty(config.paths.method_registry_path)
-        source_registry = _json_utils.load_json_object_or_empty(config.paths.source_registry_path)
+        method_registry = _method_scout.load_method_registry(config.paths.method_registry_path)
+        source_registry = _method_scout.load_source_registry(config.paths.source_registry_path)
     if campaign_mode == "top1":
-        validation_registry_for_contract = _json_utils.load_json_object_or_empty(config.paths.validation_registry_path)
+        validation_registry_for_contract = _method_scout.load_validation_registry(config.paths.validation_registry_path)
         win_contract = build_win_contract(
             context_dir=config.paths.context_dir,
             slug=config.slug,
@@ -1601,7 +1601,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     code_reference_score=code_reference_comparison_score,
                     code_reference_source=code_reference_source,
                 )
-                validation_registry = _json_utils.load_json_object_or_empty(config.paths.validation_registry_path)
+                validation_registry = _method_scout.load_validation_registry(config.paths.validation_registry_path)
                 validation_lab_report = run_validation_lab(
                     context_dir=config.paths.context_dir,
                     validation_registry=validation_registry,
@@ -1696,7 +1696,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                     direction=metric_direction,
                 )
                 source_registry = (
-                    _json_utils.load_json_object_or_empty(config.paths.source_registry_path) or source_registry
+                    _method_scout.load_source_registry(config.paths.source_registry_path) or source_registry
                 )
                 top1_exhaustion_report = build_top1_exhaustion_report(
                     context_dir=config.paths.context_dir,
@@ -3105,12 +3105,8 @@ def _run_improvement(
     history_prompt = _submission_history.format_previous_submission_history_for_prompt(previous_submission_history)
     if history_prompt:
         base_prompt_text += "\n\nPrevious Kaggle Submission Results:\n" + history_prompt + "\n"
-    method_registry_payload = _json_utils.load_json_object(config.paths.method_registry_path)
-    method_prompt = (
-        _method_scout.render_method_registry_for_prompt(method_registry_payload, max_methods=8)
-        if isinstance(method_registry_payload, dict)
-        else ""
-    )
+    method_registry_payload = _method_scout.load_method_registry(config.paths.method_registry_path)
+    method_prompt = _method_scout.render_method_registry_for_prompt(method_registry_payload, max_methods=8)
     if method_prompt:
         base_prompt_text += "\n\nCompetition-Specific Method Scout:\n" + method_prompt + "\n"
     if extra_policy_notes:

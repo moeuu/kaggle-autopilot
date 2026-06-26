@@ -277,8 +277,8 @@ The next high-value modernization work is:
    `kernel_quality.py` directly. Autopilot medal/rank normalization wrappers have also been removed; call sites now use
    `medals.py` directly. Online-best, rank-overhaul, and medal-target policy calls now use `leaderboard_policy.py`
    directly. Dataset-profile/evaluation-spec wrapper reads in `autopilot.py` have also been retired in
-   favor of direct `context_artifacts.py` calls. Method-registry prompt formatting and effective method-scout mode
-   resolution now read `method_scout.py` directly. Submit retry backoff and force-resubmit checks now call
+   favor of direct `context_artifacts.py` calls. Method/source/validation registry loading, method-registry prompt
+   formatting, and effective method-scout mode resolution now read `method_scout.py` directly. Submit retry backoff and force-resubmit checks now call
    `submit_retry_policy.py` and `submit_failure_context.py` directly, same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
    Planning necessity and resume-skip checks now call `plan_policy.py` directly.

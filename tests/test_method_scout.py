@@ -9,6 +9,9 @@ from kagglebot.method_scout import (
     build_validation_registry,
     classify_source,
     effective_method_scout_mode,
+    load_method_registry,
+    load_source_registry,
+    load_validation_registry,
     method_registry_path,
     render_method_registry_for_prompt,
     run_method_scout,
@@ -44,6 +47,18 @@ def test_effective_method_scout_mode_disables_auto_outside_top1() -> None:
     assert effective_method_scout_mode(requested_mode="auto", campaign_mode="top1") == "auto"
     assert effective_method_scout_mode(requested_mode="refresh", campaign_mode="standard") == "refresh"
     assert effective_method_scout_mode(requested_mode="off", campaign_mode="top1") == "off"
+
+
+def test_registry_loaders_return_objects_or_empty_dict(tmp_path: Path) -> None:
+    method_path = tmp_path / "method_registry.json"
+    source_path = tmp_path / "source_registry.json"
+    validation_path = tmp_path / "validation_registry.json"
+    method_path.write_text('{"methods": []}', encoding="utf-8")
+    source_path.write_text("[]", encoding="utf-8")
+
+    assert load_method_registry(method_path) == {"methods": []}
+    assert load_source_registry(source_path) == {}
+    assert load_validation_registry(validation_path) == {}
 
 
 def test_source_quality_blocks_unsafe_leaderboard_proxy_method() -> None:
