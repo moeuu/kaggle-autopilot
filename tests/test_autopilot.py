@@ -22,7 +22,6 @@ from kagglebot.autopilot import (
     AutopilotConfig,
     SubmissionPhase,
     _attempt_submit,
-    _is_submit_abort_autofixable,
     _resolve_plan,
     _run_autofix,
     _run_kernel_fix,
@@ -78,7 +77,11 @@ from kagglebot.submission_policy import (
     should_force_initial_submit,
 )
 from kagglebot.submit_autofix import SubmitFileAutofixPreparation
-from kagglebot.submit_failure_context import load_submit_failure_context
+from kagglebot.submit_failure_context import (
+    SubmitAbortAutofixDecision,
+    load_submit_failure_context,
+    resolve_submit_abort_autofixability_for_run,
+)
 from kagglebot.submit_stage import (
     infer_iteration_from_submission_path,
     resolve_submission_message,
@@ -138,6 +141,14 @@ def _run_notebook_submission_for_config(
         is_push_error=lambda exc: isinstance(exc, KaggleCliError)
         and _submit_notebook_test.is_submit_kernel_push_error(exc),
     )
+
+
+def _resolve_submit_abort_autofixable_for_config(*, config: AutopilotConfig, run_id: str) -> bool:
+    decision = resolve_submit_abort_autofixability_for_run(
+        run_dir=config.paths.run_dir(run_id),
+        load_run_state=_load_run_state,
+    )
+    return decision.autofixable
 
 
 def _write_plan(paths: CompetitionPaths, **overrides) -> None:
@@ -1444,7 +1455,10 @@ def test_autopilot_aborts_on_repeated_submit_fingerprint(monkeypatch, tmp_path: 
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", always_transient_fail)
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
@@ -1526,7 +1540,10 @@ def test_autopilot_transient_retry_stops_after_max_attempts(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", transient_fail_unique_fingerprint)
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
 
@@ -1587,7 +1604,10 @@ def test_autopilot_validation_failure_aborts_before_kaggle_submit(monkeypatch, t
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", fake_check_rules)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
@@ -1654,7 +1674,10 @@ def test_autopilot_resume_allows_submit_after_prior_attempt(monkeypatch, tmp_pat
         "kagglebot.autopilot.list_competition_submissions",
         lambda *args, **kwargs: [{"description": "", "status": "complete", "publicScore": "0.49"}],
     )
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1)
@@ -1730,7 +1753,10 @@ def test_autopilot_force_submit_aborts_on_state_fingerprint_repeat(monkeypatch, 
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", always_transient_fail)
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(False, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=True, max_iterations=1, force_submit=True)
@@ -2071,7 +2097,10 @@ def test_submit_autofix_does_not_force_resubmit_when_run_already_has_success(mon
 
     monkeypatch.delenv("KAGGLEBOT_FORCE_RESUBMIT", raising=False)
     monkeypatch.setattr("kagglebot.autopilot.AutopilotSession.run", always_submit_abort)
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(True, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_autofix", fake_run_autofix)
 
     with pytest.raises(RuntimeError, match="stop_after_autofix_check"):
@@ -2113,7 +2142,10 @@ def test_submit_autofix_forces_resubmit_on_polling_abort_even_with_prior_success
 
     monkeypatch.delenv("KAGGLEBOT_FORCE_RESUBMIT", raising=False)
     monkeypatch.setattr("kagglebot.autopilot.AutopilotSession.run", always_submit_abort)
-    monkeypatch.setattr("kagglebot.autopilot._is_submit_abort_autofixable", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "kagglebot.submit_failure_context.resolve_submit_abort_autofixability_for_run",
+        lambda *args, **kwargs: SubmitAbortAutofixDecision(True, ""),
+    )
     monkeypatch.setattr("kagglebot.autopilot._run_autofix", fake_run_autofix)
 
     with pytest.raises(RuntimeError, match="stop_after_autofix_check"):
@@ -2330,7 +2362,7 @@ def test_attempt_submit_does_not_switch_to_notebook_on_generic_bad_request(
     assert context["reason"] == "ambiguous_notebook_bad_request"
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
-    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+    assert _resolve_submit_abort_autofixable_for_config(config=config, run_id=run_id) is False
 
 
 def test_load_submit_failure_context_normalizes_stale_ambiguous_notebook_context(tmp_path: Path) -> None:
@@ -2361,7 +2393,7 @@ def test_load_submit_failure_context_normalizes_stale_ambiguous_notebook_context
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
     assert "submit-notebook 400" in context["manual_next_step"]
-    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+    assert _resolve_submit_abort_autofixable_for_config(config=config, run_id=run_id) is False
 
 
 def test_attempt_submit_treats_submission_limit_as_manual_blocker(
@@ -2414,7 +2446,7 @@ def test_attempt_submit_treats_submission_limit_as_manual_blocker(
     assert context["repair_target"] == "manual_intervention"
     assert context["repairable"] is False
     assert "submission limit" in context["manual_next_step"].lower()
-    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+    assert _resolve_submit_abort_autofixable_for_config(config=config, run_id=run_id) is False
 
 
 def test_attempt_submit_skips_duplicate_sha_before_notebook_submit(monkeypatch, tmp_path: Path) -> None:
@@ -3664,7 +3696,7 @@ def test_attempt_submit_persists_manual_submit_failure_context_for_rules_block(m
     assert context["repairable"] is False
     assert context["reason"] == "rules_not_accepted"
     assert "Accept the competition rules" in str(context["manual_next_step"])
-    assert _is_submit_abort_autofixable(config=config, run_id=run_id) is False
+    assert _resolve_submit_abort_autofixable_for_config(config=config, run_id=run_id) is False
 
 
 def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, tmp_path: Path) -> None:

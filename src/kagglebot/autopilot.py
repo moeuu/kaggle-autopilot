@@ -286,7 +286,14 @@ def run_autopilot(config: AutopilotConfig) -> None:
             except SubmitAbortedError as exc:
                 if config.dry_run:
                     raise
-                if not _is_submit_abort_autofixable(config=config, run_id=run_id):
+                run_dir = config.paths.run_dir(run_id)
+                submit_abort_autofix = _submit_failure_context.resolve_submit_abort_autofixability_for_run(
+                    run_dir=run_dir,
+                    load_run_state=_autopilot_state._load_run_state,
+                )
+                if submit_abort_autofix.message:
+                    print(submit_abort_autofix.message)
+                if not submit_abort_autofix.autofixable:
                     raise
                 attempt += 1
                 if attempt > MAX_AUTOFIX_ATTEMPTS:
@@ -295,7 +302,6 @@ def run_autopilot(config: AutopilotConfig) -> None:
                     f"[yellow]autofix[/yellow]: submit stage failed; invoking "
                     f"{IMPLEMENTATION_AGENT.log_alias} to repair and retry submit"
                 )
-                run_dir = config.paths.run_dir(run_id)
                 if (not _submit_attempts.has_successful_submit_attempt(run_dir)) or (
                     _submit_failure_context.should_force_resubmit_after_submit_abort(
                         _autopilot_state._load_run_state(run_dir)
@@ -5004,14 +5010,3 @@ def _abort_submit_for_run(
         on_message=print,
     )
     raise SubmitAbortedError(message)
-
-
-def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
-    run_dir = config.paths.run_dir(run_id)
-    decision = _submit_failure_context.resolve_submit_abort_autofixability_for_run(
-        run_dir=run_dir,
-        load_run_state=_autopilot_state._load_run_state,
-    )
-    if decision.message:
-        print(decision.message)
-    return decision.autofixable
