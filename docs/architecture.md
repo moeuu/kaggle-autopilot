@@ -444,6 +444,9 @@ Recommended extraction order:
    Local validation/prepared-submission resolution and prepared SHA calculation now use
    `submit_stage.prepare_submission_for_run_or_abort`, so `_attempt_submit` no longer open-codes validation abort
    handling.
+   Duplicate-submit checks, rules-acceptance checks, initial submit runtime-state resolution, same-path skip handling,
+   and seen-fingerprint assembly now flow through `submit_stage.resolve_submit_preflight_for_run_or_abort`, leaving
+   `_attempt_submit` to consume one typed preflight context before entering the retry loop.
    duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects

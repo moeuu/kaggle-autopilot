@@ -79,6 +79,7 @@ from kagglebot.submit_stage import (
     resolve_submission_rank_state,
     resolve_submit_cli_error,
     resolve_submit_cli_error_for_run,
+    resolve_submit_preflight_for_run_or_abort,
     run_submit_stage_attempt,
     submission_score_for_tracking,
     update_submit_stage_artifact_mode,
@@ -154,10 +155,13 @@ class ArtifactModeDecisionStub:
 
 class SubmitAttemptRecorderStub:
     def __init__(self) -> None:
-        self.payloads: list[dict[str, object]] = []
+        self.payloads: list[object] = []
 
     def append(self, payload: dict[str, object]) -> None:
         self.payloads.append(payload)
+
+    def record_payloads(self, payloads: object) -> None:
+        self.payloads.append(payloads)
 
 
 class SubmitValidationStubError(ValueError):
@@ -804,6 +808,133 @@ def test_resolve_duplicate_submission_for_run_binds_attempt_ledger_and_failure_c
     assert failure_context["resolution"] == "duplicate_submission_sha_seen"
     assert failure_context["resolved_submission_ref"] == str(prepared_submission_path)
     assert messages == ["[yellow]submit skipped[/yellow]: duplicate"]
+
+
+def test_resolve_submit_preflight_for_run_returns_runtime_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ledger_path = tmp_path / "ledger.jsonl"
+    sample_path = tmp_path / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data" / "sample_submission.csv"
+    fallback_sample_path.parent.mkdir()
+    prepared_submission_path = tmp_path / "prepared.csv"
+    source_submission_path = tmp_path / "iter-2" / "submission.csv"
+    source_submission_path.parent.mkdir()
+    for path in (sample_path, fallback_sample_path, prepared_submission_path, source_submission_path):
+        path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    recorder = SubmitAttemptRecorderStub()
+
+    preflight = resolve_submit_preflight_for_run_or_abort(
+        run_dir=run_dir,
+        submission_ledger_path=ledger_path,
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        source_submission_path=source_submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        allow_force=False,
+        run_state={},
+        latest_submit_attempt={},
+        submit_mode="file",
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="wrapper",
+        code_competition=False,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        load_run_state=lambda _run_dir: {},
+        collect_duplicate_submission_sources=lambda **_kwargs: [],
+        decide_duplicate_submission_action=lambda **_kwargs: DuplicateDecisionStub(action="proceed"),
+        check_rules_accepted=lambda: True,
+        cli_error_types=(RuntimeError,),
+        is_missing_credentials_error=lambda _exc: False,
+        rules_not_accepted_exit_code=64,
+        resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
+        decide_notebook_submit_artifact_mode_for_paths=lambda **_kwargs: ArtifactModeDecisionStub(mode="wrapper"),
+        count_csv_data_rows=lambda _path: 1,
+        decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "sha" if path == prepared_submission_path else None,
+        submit_aborter=object(),
+        submit_attempt_recorder=recorder,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=lambda _message: None,
+    )
+
+    assert preflight.duplicate_skip_result is None
+    assert not preflight.same_submission_path_skipped
+    assert preflight.submit_stage_state is not None
+    assert not preflight.submit_stage_state.notebook_submit_required
+    assert preflight.submit_stage_state.submission_artifact_mode == "wrapper"
+    assert not preflight.code_competition
+    assert preflight.seen_fingerprints == set()
+    assert recorder.payloads == []
+
+
+def test_resolve_submit_preflight_for_run_returns_duplicate_skip(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ledger_path = tmp_path / "ledger.jsonl"
+    prepared_submission_path = tmp_path / "prepared.csv"
+    source_submission_path = tmp_path / "iter-2" / "submission.csv"
+    source_submission_path.parent.mkdir()
+    prepared_submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    source_submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    recorder = SubmitAttemptRecorderStub()
+
+    preflight = resolve_submit_preflight_for_run_or_abort(
+        run_dir=run_dir,
+        submission_ledger_path=ledger_path,
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        source_submission_path=source_submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        allow_force=False,
+        run_state={},
+        latest_submit_attempt={},
+        submit_mode="file",
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="wrapper",
+        code_competition=False,
+        sample_submission_path=tmp_path / "sample_submission.csv",
+        fallback_sample_submission_path=tmp_path / "sample_submission.csv",
+        load_run_state=lambda _run_dir: {},
+        collect_duplicate_submission_sources=lambda **_kwargs: ["run_attempts"],
+        decide_duplicate_submission_action=lambda **_kwargs: DuplicateDecisionStub(
+            action="skip",
+            reason="duplicate_submission_sha_seen",
+            message="duplicate",
+            fingerprint="fp",
+            duplicate_sources=["run_attempts"],
+        ),
+        check_rules_accepted=lambda: (_ for _ in ()).throw(AssertionError("rules should not run")),
+        cli_error_types=(RuntimeError,),
+        is_missing_credentials_error=lambda _exc: False,
+        rules_not_accepted_exit_code=64,
+        resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
+        decide_notebook_submit_artifact_mode_for_paths=lambda **_kwargs: ArtifactModeDecisionStub(mode="wrapper"),
+        count_csv_data_rows=lambda _path: 1,
+        decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "sha" if path == prepared_submission_path else None,
+        submit_aborter=object(),
+        submit_attempt_recorder=recorder,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=lambda _message: None,
+    )
+
+    assert preflight.duplicate_skip_result is not None
+    assert preflight.duplicate_skip_result["skipped"] is True
+    assert preflight.submit_stage_state is None
+    assert recorder.payloads
 
 
 def test_build_kaggle_credentials_missing_abort_spec_preserves_error_details() -> None:

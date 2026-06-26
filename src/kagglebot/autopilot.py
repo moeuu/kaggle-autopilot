@@ -4294,83 +4294,55 @@ def _attempt_submit(
     )
     prepared_submission_path = prepared_context.prepared_submission_path
 
-    duplicate_skip_result = _submit_stage.resolve_duplicate_submission_for_run(
+    constraints = _competition_rules.load_competition_rule_constraints(config.paths)
+    preflight_context = _submit_stage.resolve_submit_preflight_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
         slug=config.slug,
         run_id=run_id,
         message=message,
         submitted_at=submitted_at,
-        submission_path=submission_path,
+        source_submission_path=submission_path,
         prepared_submission_path=prepared_submission_path,
         prepared_submission_sha=prepared_context.prepared_submission_sha,
         code_fingerprint=submit_code_fingerprint,
         allow_force=allow_force,
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        submit_mode=submit_mode,
+        notebook_submissions_only=constraints.notebook_submissions_only,
+        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
+        code_competition=infer_code_competition_from_paths(config.paths),
+        sample_submission_path=config.paths.sample_submission_path,
+        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
         load_run_state=_autopilot_state._load_run_state,
         collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
         decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
-        compute_error_fingerprint=compute_error_fingerprint,
-        record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        on_message=print,
-    )
-    if duplicate_skip_result is not None:
-        return duplicate_skip_result
-
-    rules_resolution = _submit_stage.resolve_rules_acceptance_for_submit(
         check_rules_accepted=lambda: check_rules_accepted(config.slug, dry_run=config.dry_run),
         cli_error_types=(KaggleCliError,),
         is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
         rules_not_accepted_exit_code=RulesNotAcceptedError.exit_code,
-        compute_error_fingerprint=compute_error_fingerprint,
-    )
-    if rules_resolution.abort_spec is not None:
-        return submit_aborter.abort(
-            submission_ref=prepared_submission_path,
-            code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(rules_resolution.abort_spec),
-            submit_attempt_recorder=submit_attempt_recorder,
-        )
-
-    constraints = _competition_rules.load_competition_rule_constraints(config.paths)
-    code_competition = infer_code_competition_from_paths(config.paths)
-    submit_stage_state = _submit_stage.resolve_initial_submit_stage_runtime_state(
-        submit_mode=submit_mode,
-        notebook_submissions_only=constraints.notebook_submissions_only,
-        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
-        code_competition=code_competition,
-        sample_submission_path=config.paths.sample_submission_path,
-        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-        submission_path=prepared_submission_path,
         resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
         count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
-        on_message=print,
-    )
-
-    if _submit_stage.resolve_same_submission_path_for_run(
-        run_id=run_id,
-        run_state=run_state,
-        latest_submit_attempt=latest_submit_attempt,
-        prepared_submission_path=prepared_submission_path,
-        current_submission_sha=str(_sha256_or_none(prepared_submission_path) or "").strip(),
-        submit_code_fingerprint=submit_code_fingerprint,
-        allow_force=allow_force,
-        notebook_submit_required=submit_stage_state.notebook_submit_required,
         decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
+        compute_error_fingerprint=compute_error_fingerprint,
         compute_submission_sha256=_sha256_or_none,
+        submit_aborter=submit_aborter,
         submit_attempt_recorder=submit_attempt_recorder,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         on_message=print,
-    ):
-        return None
-
-    seen_fingerprints = _submit_attempts.build_seen_submit_fingerprint_set_for_run(
-        run_dir=run_dir,
-        run_state=run_state,
     )
+    if preflight_context.duplicate_skip_result is not None:
+        return preflight_context.duplicate_skip_result
+    if preflight_context.same_submission_path_skipped:
+        return None
+    submit_stage_state = preflight_context.submit_stage_state
+    if submit_stage_state is None:
+        raise SubmitAbortedError("Submit preflight did not produce submit stage state.")
+    code_competition = preflight_context.code_competition
+    seen_fingerprints = preflight_context.seen_fingerprints
     max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)
     submission_result = None
     submission_reference = str(prepared_submission_path)

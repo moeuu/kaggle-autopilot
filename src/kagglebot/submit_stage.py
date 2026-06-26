@@ -500,6 +500,15 @@ class SubmitPreparedRunContext:
 
 
 @dataclass(frozen=True)
+class SubmitPreflightContext:
+    duplicate_skip_result: dict[str, object] | None
+    same_submission_path_skipped: bool
+    submit_stage_state: SubmitStageRuntimeState | None
+    code_competition: bool
+    seen_fingerprints: set[str]
+
+
+@dataclass(frozen=True)
 class SubmitRulesAcceptanceResolution:
     rules_accepted: bool
     abort_spec: SubmitAbortSpec | None = None
@@ -1059,6 +1068,133 @@ def resolve_duplicate_submission_for_run(
         stdout_tail_chars=stdout_tail_chars,
         stderr_tail_chars=stderr_tail_chars,
         on_message=on_message,
+    )
+
+
+def resolve_submit_preflight_for_run_or_abort(
+    *,
+    run_dir: Path,
+    submission_ledger_path: Path,
+    slug: str,
+    run_id: str,
+    message: str,
+    submitted_at: datetime,
+    source_submission_path: Path,
+    prepared_submission_path: Path,
+    prepared_submission_sha: str,
+    code_fingerprint: str,
+    allow_force: bool,
+    run_state: dict[str, object],
+    latest_submit_attempt: dict[str, object],
+    submit_mode: object,
+    notebook_submissions_only: bool,
+    notebook_submit_artifact_mode: str | None,
+    code_competition: bool,
+    sample_submission_path: Path,
+    fallback_sample_submission_path: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+    collect_duplicate_submission_sources: Callable[..., list[str]],
+    decide_duplicate_submission_action: Callable[..., object],
+    check_rules_accepted: Callable[[], bool],
+    cli_error_types: tuple[type[BaseException], ...],
+    is_missing_credentials_error: Callable[[BaseException], bool],
+    rules_not_accepted_exit_code: int | None,
+    resolve_notebook_submit_artifact_mode: Callable[..., str],
+    decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
+    count_csv_data_rows: Callable[[Path], int | None],
+    decide_same_submission_path_action: Callable[..., object],
+    compute_error_fingerprint: Callable[[str, str], str],
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    submit_aborter: object,
+    submit_attempt_recorder: object,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> SubmitPreflightContext:
+    duplicate_skip_result = resolve_duplicate_submission_for_run(
+        run_dir=run_dir,
+        submission_ledger_path=submission_ledger_path,
+        slug=slug,
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_path=source_submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha=prepared_submission_sha,
+        code_fingerprint=code_fingerprint,
+        allow_force=allow_force,
+        load_run_state=load_run_state,
+        collect_duplicate_submission_sources=collect_duplicate_submission_sources,
+        decide_duplicate_submission_action=decide_duplicate_submission_action,
+        compute_error_fingerprint=compute_error_fingerprint,
+        record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+    if duplicate_skip_result is not None:
+        return SubmitPreflightContext(
+            duplicate_skip_result=duplicate_skip_result,
+            same_submission_path_skipped=False,
+            submit_stage_state=None,
+            code_competition=code_competition,
+            seen_fingerprints=set(),
+        )
+
+    rules_resolution = resolve_rules_acceptance_for_submit(
+        check_rules_accepted=check_rules_accepted,
+        cli_error_types=cli_error_types,
+        is_missing_credentials_error=is_missing_credentials_error,
+        rules_not_accepted_exit_code=rules_not_accepted_exit_code,
+        compute_error_fingerprint=compute_error_fingerprint,
+    )
+    if rules_resolution.abort_spec is not None:
+        return submit_aborter.abort(
+            submission_ref=prepared_submission_path,
+            code_fingerprint=code_fingerprint,
+            **build_submit_abort_spec_kwargs(rules_resolution.abort_spec),
+            submit_attempt_recorder=submit_attempt_recorder,
+        )
+
+    submit_stage_state = resolve_initial_submit_stage_runtime_state(
+        submit_mode=submit_mode,
+        notebook_submissions_only=notebook_submissions_only,
+        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
+        code_competition=code_competition,
+        sample_submission_path=sample_submission_path,
+        fallback_sample_submission_path=fallback_sample_submission_path,
+        submission_path=prepared_submission_path,
+        resolve_notebook_submit_artifact_mode=resolve_notebook_submit_artifact_mode,
+        decide_notebook_submit_artifact_mode_for_paths=decide_notebook_submit_artifact_mode_for_paths,
+        count_csv_data_rows=count_csv_data_rows,
+        on_message=on_message,
+    )
+
+    same_submission_path_skipped = resolve_same_submission_path_for_run(
+        run_id=run_id,
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        prepared_submission_path=prepared_submission_path,
+        current_submission_sha=prepared_submission_sha,
+        submit_code_fingerprint=code_fingerprint,
+        allow_force=allow_force,
+        notebook_submit_required=submit_stage_state.notebook_submit_required,
+        decide_same_submission_path_action=decide_same_submission_path_action,
+        compute_submission_sha256=compute_submission_sha256,
+        submit_attempt_recorder=submit_attempt_recorder,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+    return SubmitPreflightContext(
+        duplicate_skip_result=None,
+        same_submission_path_skipped=same_submission_path_skipped,
+        submit_stage_state=submit_stage_state,
+        code_competition=code_competition,
+        seen_fingerprints=_submit_attempts.build_seen_submit_fingerprint_set_for_run(
+            run_dir=run_dir,
+            run_state=run_state,
+        ),
     )
 
 
