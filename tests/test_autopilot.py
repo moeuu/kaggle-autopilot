@@ -36,11 +36,11 @@ from kagglebot.autopilot import (
     run_autopilot,
 )
 from kagglebot.autopilot_state import (
-    _load_run_state,
     _load_submit_retry_artifacts,
     _resolve_iteration_submission_artifact,
     _resume_iteration_state,
     _write_iteration_state_marker,
+    load_run_state,
 )
 from kagglebot.competition_rules import load_competition_rule_constraints
 from kagglebot.eval import EvaluationReport
@@ -173,7 +173,7 @@ def _run_notebook_submission_for_config(
 def _resolve_submit_abort_autofixable_for_config(*, config: AutopilotConfig, run_id: str) -> bool:
     decision = resolve_submit_abort_autofixability_for_run(
         run_dir=config.paths.run_dir(run_id),
-        load_run_state=_load_run_state,
+        load_run_state=load_run_state,
     )
     return decision.autofixable
 
@@ -1878,7 +1878,7 @@ def test_attempt_submit_allows_one_repeated_fingerprint_after_code_change(monkey
 
     assert result is not None
     assert calls["count"] == 2
-    run_state = _load_run_state(run_dir)
+    run_state = load_run_state(run_dir)
     assert run_state["same_fp_allowance_code_fingerprint"] == "new-code"
     assert run_state["same_fp_allowance_error_fingerprint"] == repeated_fp
 
@@ -2017,7 +2017,7 @@ def test_attempt_submit_allows_one_repeated_fingerprint_for_legacy_state_without
 
     assert result is not None
     assert calls["count"] == 2
-    run_state = _load_run_state(run_dir)
+    run_state = load_run_state(run_dir)
     assert run_state["same_fp_allowance_code_fingerprint"] == "new-code"
     assert run_state["same_fp_allowance_error_fingerprint"] == repeated_fp
 
@@ -3285,7 +3285,7 @@ def test_attempt_submit_does_not_reuse_stale_repaired_submit_artifact(monkeypatc
 
     assert result is not None
     assert seen["path"] == new_submission
-    run_state = _load_run_state(run_dir)
+    run_state = load_run_state(run_dir)
     assert run_state.get("submit_autofix_submission_path") == ""
     context = load_submit_failure_context(run_dir)
     assert context["superseded_by_submission_path"] == str(new_submission)
@@ -3680,7 +3680,7 @@ def test_load_run_state_infers_submit_ok_from_submit_attempts(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    state = _load_run_state(run_dir)
+    state = load_run_state(run_dir)
     assert state["submit_attempted"] is True
     assert state["submit_ok"] is True
 

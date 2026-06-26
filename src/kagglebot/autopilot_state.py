@@ -668,7 +668,7 @@ def _load_submit_retry_artifacts(
     return None
 
 
-def _load_run_state(run_dir: Path) -> dict[str, object]:
+def load_run_state(run_dir: Path) -> dict[str, object]:
     state_path = run_dir / "run_state.json"
     if not state_path.exists():
         attempted = _submit_attempts.has_submit_attempt_records(run_dir)
@@ -688,8 +688,8 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
     return payload
 
 
-def _save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
-    state = _load_run_state(run_dir)
+def save_run_state(run_dir: Path, updates: dict[str, object]) -> None:
+    state = load_run_state(run_dir)
     state.update(updates)
     state["submit_attempted"] = bool(state.get("submit_attempted")) or _submit_attempts.has_submit_attempt_records(
         run_dir

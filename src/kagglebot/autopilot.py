@@ -287,7 +287,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 run_dir = config.paths.run_dir(run_id)
                 submit_abort_autofix = _submit_failure_context.resolve_submit_abort_autofixability_for_run(
                     run_dir=run_dir,
-                    load_run_state=_autopilot_state._load_run_state,
+                    load_run_state=_autopilot_state.load_run_state,
                 )
                 if submit_abort_autofix.message:
                     print(submit_abort_autofix.message)
@@ -302,7 +302,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 )
                 if _submit_failure_context.should_force_resubmit_after_submit_abort_for_run(
                     run_dir=run_dir,
-                    load_run_state=_autopilot_state._load_run_state,
+                    load_run_state=_autopilot_state.load_run_state,
                     has_successful_submit_attempt=_submit_attempts.has_successful_submit_attempt,
                 ):
                     os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
@@ -3915,7 +3915,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     if submit_autofix:
         submit_autofix_context = _submit_failure_context.load_submit_autofix_run_context(
             run_dir=run_dir,
-            load_run_state=_autopilot_state._load_run_state,
+            load_run_state=_autopilot_state.load_run_state,
         )
         failure_context = submit_autofix_context.failure_context
         run_state = submit_autofix_context.run_state
@@ -3931,7 +3931,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             _submit_failure_context.save_submit_autofix_repaired_path_for_run(
                 run_dir=run_dir,
                 repaired_path=fixed,
-                save_run_state_for_run=_autopilot_state._save_run_state,
+                save_run_state_for_run=_autopilot_state.save_run_state,
             )
 
         if submit_file_fix_required:
@@ -4132,7 +4132,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
 
         if submit_file_fix_required and not _submit_failure_context.submit_file_fix_contract_satisfied_for_run(
             run_dir=run_dir,
-            load_run_state=_autopilot_state._load_run_state,
+            load_run_state=_autopilot_state.load_run_state,
             baseline_path=submit_file_fix_baseline_path,
             baseline_sha256=submit_file_fix_baseline_sha256,
             sha256_or_none=_sha256_or_none,
@@ -4231,8 +4231,8 @@ def _attempt_submit(
         problem_types=problem_types,
         force_submit=config.force_submit,
         force_resubmit=_env_utils.env_truthy("KAGGLEBOT_FORCE_RESUBMIT"),
-        load_run_state=_autopilot_state._load_run_state,
-        save_run_state_for_run=_autopilot_state._save_run_state,
+        load_run_state=_autopilot_state.load_run_state,
+        save_run_state_for_run=_autopilot_state.save_run_state,
         compute_submit_code_fingerprint=_submit_retry_policy.compute_submit_code_fingerprint,
         compute_submission_sha256=_sha256_or_none,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
@@ -4309,7 +4309,7 @@ def _attempt_submit(
         code_competition=infer_code_competition_from_paths(config.paths),
         sample_submission_path=config.paths.sample_submission_path,
         fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-        load_run_state=_autopilot_state._load_run_state,
+        load_run_state=_autopilot_state.load_run_state,
         collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
         decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
         check_rules_accepted=lambda: check_rules_accepted(config.slug, dry_run=config.dry_run),
@@ -4410,7 +4410,7 @@ def _attempt_submit(
                 seen_fingerprints=seen_fingerprints,
                 run_state=run_state,
                 code_fingerprint=submit_code_fingerprint,
-                save_run_state_for_run=_autopilot_state._save_run_state,
+                save_run_state_for_run=_autopilot_state.save_run_state,
                 on_message=print,
             )
             submit_error_classification = submit_error_resolution.classification
@@ -4508,7 +4508,7 @@ def _attempt_submit(
         normalize_detail=lambda text: normalize_error_text(text, max_chars=1200),
         submit_aborter=submit_aborter,
         submit_attempt_recorder=submit_attempt_recorder,
-        load_run_state=_autopilot_state._load_run_state,
+        load_run_state=_autopilot_state.load_run_state,
         compute_error_fingerprint=compute_error_fingerprint,
         compute_submission_sha256=_sha256_or_none,
         record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,

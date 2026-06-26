@@ -11,14 +11,14 @@ from kagglebot.autopilot_state import (
     _apply_run_status,
     _build_run_payload,
     _build_run_summary_payload,
-    _load_run_state,
     _load_submitted_iteration_tracking_score,
-    _save_run_state,
     _write_iteration_state_marker,
     _write_run_payload,
     find_latest_run_id,
     list_run_ids,
+    load_run_state,
     resolve_resume_run_id,
+    save_run_state,
 )
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
@@ -184,16 +184,16 @@ def test_load_run_state_defaults_for_missing_invalid_or_non_object_state(tmp_pat
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    missing = _load_run_state(run_dir)
+    missing = load_run_state(run_dir)
     assert missing == {"submit_attempted": False, "submit_ok": False}
 
     state_path = run_dir / "run_state.json"
     state_path.write_text("{", encoding="utf-8")
-    invalid = _load_run_state(run_dir)
+    invalid = load_run_state(run_dir)
     assert invalid == {"submit_attempted": False, "submit_ok": False}
 
     state_path.write_text("[]", encoding="utf-8")
-    non_object = _load_run_state(run_dir)
+    non_object = load_run_state(run_dir)
     assert non_object == {"submit_attempted": False, "submit_ok": False}
 
 
@@ -205,7 +205,7 @@ def test_save_run_state_merges_existing_state_and_writes_json_object(tmp_path: P
         encoding="utf-8",
     )
 
-    _save_run_state(run_dir, {"last_reason": "validation_failed"})
+    save_run_state(run_dir, {"last_reason": "validation_failed"})
 
     payload = json.loads((run_dir / "run_state.json").read_text(encoding="utf-8"))
     assert payload["submit_attempted"] is True
