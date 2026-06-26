@@ -30,6 +30,7 @@ from kagglebot.submit_stage import (
     build_submit_abort_spec_kwargs,
     build_submit_run_aborter_for_run,
     build_submit_run_context,
+    build_submit_runtime_context,
     build_submit_stage_error_action_abort_spec,
     build_submit_stage_runtime_state,
     build_submit_stage_success_record,
@@ -1546,6 +1547,46 @@ def test_build_submit_run_context_wires_attempt_autofix_and_retry_helpers(tmp_pa
         }
     ]
     assert saved_updates == []
+
+
+def test_build_submit_runtime_context_wires_message_service_and_timestamp(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    context_dir.mkdir()
+    data_dir.mkdir()
+    sample_path = data_dir / "sample_submission.csv"
+    ledger_path = tmp_path / "ledger.jsonl"
+    submission = tmp_path / "iter-3" / "submission.csv"
+    submission.parent.mkdir(parents=True)
+    sample_path.write_text("id,pred\n1,0\n", encoding="utf-8")
+    submission.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    submitted_at = datetime(2026, 6, 26, tzinfo=UTC)
+    messages: list[str] = []
+
+    context = build_submit_runtime_context(
+        slug="demo",
+        context_dir=context_dir,
+        run_id="run-1",
+        best_score=0.42,
+        explicit_message="",
+        submission_path=submission,
+        campaign_mode="off",
+        target_direction="max",
+        data_dir=data_dir,
+        sample_submission_path=sample_path,
+        submission_ledger_path=ledger_path,
+        dry_run=False,
+        force_submit=True,
+        now=lambda: submitted_at,
+        on_message=messages.append,
+    )
+
+    assert "run-1" in context.message
+    assert "offline=0.4200" in context.message
+    assert context.submitted_at == submitted_at
+    assert context.submission_service._config.slug == "demo"  # noqa: SLF001
+    assert context.submission_service._config.force_submit is True  # noqa: SLF001
+    assert messages == ["[cyan]submit[/cyan]: demo"]
 
 
 def test_submit_run_aborter_binds_run_state_save_for_created_recorder(tmp_path: Path) -> None:

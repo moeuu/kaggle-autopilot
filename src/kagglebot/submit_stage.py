@@ -23,6 +23,7 @@ from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.score_utils import score_gap, should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submission_policy import meets_target
+from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
 
@@ -322,6 +323,13 @@ class SubmitRunContext:
     submit_retry_recorder: SubmitRunRetryRecorder
 
 
+@dataclass(frozen=True)
+class SubmitRuntimeContext:
+    message: str
+    submission_service: SubmissionService
+    submitted_at: datetime
+
+
 def build_submit_run_context(
     *,
     run_dir: Path,
@@ -403,6 +411,52 @@ def build_submit_run_context(
         latest_submit_attempt=autofix_attempt_context.latest_submit_attempt,
         submit_aborter=submit_aborter,
         submit_retry_recorder=submit_retry_recorder,
+    )
+
+
+def build_submit_runtime_context(
+    *,
+    slug: str,
+    context_dir: Path,
+    run_id: str,
+    best_score: float | None,
+    explicit_message: str | None,
+    submission_path: Path,
+    campaign_mode: str,
+    target_direction: str,
+    data_dir: Path,
+    sample_submission_path: Path,
+    submission_ledger_path: Path,
+    dry_run: bool,
+    force_submit: bool,
+    now: Callable[[], datetime],
+    on_message: Callable[[str], object],
+) -> SubmitRuntimeContext:
+    message = resolve_submission_message(
+        context_dir=context_dir,
+        run_id=run_id,
+        best_score=best_score,
+        explicit_message=explicit_message,
+        submission_path=submission_path,
+        campaign_mode=campaign_mode,
+        target_direction=target_direction,
+    )
+    submission_service = SubmissionService(
+        SubmissionConfig(
+            slug=slug,
+            data_dir=data_dir,
+            sample_submission_path=sample_submission_path,
+            submission_ledger_path=submission_ledger_path,
+            dry_run=dry_run,
+            force_submit=force_submit,
+            bypass_rate_limit=False,
+        )
+    )
+    on_message(f"[cyan]submit[/cyan]: {slug}")
+    return SubmitRuntimeContext(
+        message=message,
+        submission_service=submission_service,
+        submitted_at=now(),
     )
 
 

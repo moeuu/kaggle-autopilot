@@ -4256,7 +4256,8 @@ def _attempt_submit(
     allow_force = submit_run_context.allow_force
     input_submission_path = submit_run_context.input_submission_path
 
-    message = _submit_stage.resolve_submission_message(
+    submit_runtime_context = _submit_stage.build_submit_runtime_context(
+        slug=config.slug,
         context_dir=config.paths.context_dir,
         run_id=run_id,
         best_score=best_score,
@@ -4264,20 +4265,17 @@ def _attempt_submit(
         submission_path=input_submission_path,
         campaign_mode=config.campaign_mode,
         target_direction=config.target_direction,
+        data_dir=config.paths.data_dir,
+        sample_submission_path=config.paths.sample_submission_path,
+        submission_ledger_path=config.paths.submission_ledger_path,
+        dry_run=config.dry_run,
+        force_submit=config.force_submit,
+        now=lambda: datetime.now(UTC),
+        on_message=print,
     )
-    submission_service = SubmissionService(
-        SubmissionConfig(
-            slug=config.slug,
-            data_dir=config.paths.data_dir,
-            sample_submission_path=config.paths.sample_submission_path,
-            submission_ledger_path=config.paths.submission_ledger_path,
-            dry_run=config.dry_run,
-            force_submit=config.force_submit,
-            bypass_rate_limit=False,
-        )
-    )
-    print(f"[cyan]submit[/cyan]: {config.slug}")
-    submitted_at = datetime.now(UTC)
+    message = submit_runtime_context.message
+    submission_service = submit_runtime_context.submission_service
+    submitted_at = submit_runtime_context.submitted_at
 
     submit_aborter = submit_run_context.submit_aborter
     submit_retry_recorder = submit_run_context.submit_retry_recorder
