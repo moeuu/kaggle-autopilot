@@ -64,6 +64,7 @@ from kagglebot.submit_stage import (
     resolve_notebook_fallback_after_file_submit_error,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
+    resolve_same_submission_path_for_run,
     resolve_same_submission_path_for_submit,
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
@@ -508,6 +509,43 @@ def test_resolve_same_submission_path_for_submit_skips_policy_for_notebook_submi
     assert skipped is False
     assert recorded == []
     assert messages == []
+
+
+def test_resolve_same_submission_path_for_run_binds_recorder(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    recorder = SubmitAttemptRecorderStub()
+    messages: list[str] = []
+    policy_calls: list[dict[str, object]] = []
+
+    skipped = resolve_same_submission_path_for_run(
+        run_id="run-1",
+        run_state={"last_submission_path": str(submission_path), "last_submit_fingerprint": "known-fp"},
+        latest_submit_attempt={"sub_sha256": "sha"},
+        prepared_submission_path=submission_path,
+        current_submission_sha="sha",
+        submit_code_fingerprint="code-fp",
+        allow_force=False,
+        notebook_submit_required=False,
+        decide_same_submission_path_action=lambda **kwargs: policy_calls.append(kwargs)
+        or SamePathDecisionStub(
+            action="skip",
+            reason="same_submission_path_reused_in_run",
+            message="[yellow]submit skipped[/yellow]: same submission file already attempted in this run",
+            fingerprint="known-fp",
+        ),
+        compute_submission_sha256=lambda path: "sha" if path == submission_path else None,
+        submit_attempt_recorder=recorder,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert skipped is True
+    assert policy_calls
+    assert recorder.payloads[0]["action_taken"] == "skip"
+    assert recorder.payloads[0]["reason"] == "same_submission_path_reused_in_run"
+    assert messages == ["[yellow]submit skipped[/yellow]: same submission file already attempted in this run"]
 
 
 def test_apply_duplicate_submission_decision_records_skip_and_returns_payload(tmp_path: Path) -> None:

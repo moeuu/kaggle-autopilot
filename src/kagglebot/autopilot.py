@@ -4468,7 +4468,8 @@ def _attempt_submit(
         on_message=print,
     )
 
-    if _submit_stage.resolve_same_submission_path_for_submit(
+    if _submit_stage.resolve_same_submission_path_for_run(
+        run_id=run_id,
         run_state=run_state,
         latest_submit_attempt=latest_submit_attempt,
         prepared_submission_path=prepared_submission_path,
@@ -4477,9 +4478,8 @@ def _attempt_submit(
         allow_force=allow_force,
         notebook_submit_required=submit_stage_state.notebook_submit_required,
         decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
-        run_id=run_id,
         compute_submission_sha256=_sha256_or_none,
-        record_submit_attempt=submit_attempt_recorder.append,
+        submit_attempt_recorder=submit_attempt_recorder,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         on_message=print,

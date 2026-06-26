@@ -577,6 +577,41 @@ def resolve_same_submission_path_for_submit(
     )
 
 
+def resolve_same_submission_path_for_run(
+    *,
+    run_id: str,
+    run_state: dict[str, object],
+    latest_submit_attempt: dict[str, object],
+    prepared_submission_path: Path,
+    current_submission_sha: str,
+    submit_code_fingerprint: str,
+    allow_force: bool,
+    notebook_submit_required: bool,
+    decide_same_submission_path_action: Callable[..., object],
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    submit_attempt_recorder: object,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> bool:
+    return resolve_same_submission_path_for_submit(
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        prepared_submission_path=prepared_submission_path,
+        current_submission_sha=current_submission_sha,
+        submit_code_fingerprint=submit_code_fingerprint,
+        allow_force=allow_force,
+        notebook_submit_required=notebook_submit_required,
+        decide_same_submission_path_action=decide_same_submission_path_action,
+        run_id=run_id,
+        compute_submission_sha256=compute_submission_sha256,
+        record_submit_attempt=submit_attempt_recorder.append,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+
+
 def apply_duplicate_submission_decision(
     *,
     decision: object,
