@@ -489,6 +489,8 @@ Recommended extraction order:
    `submit_preflight.py`.
    Successful submit attempt payloads, outcome ledger recording, failure-context resolution, and final success payload
    construction now live in `submit_success.py`.
+   Submission outcome polling, post-poll abort handling, and final submit outcome orchestration now live in
+   `submit_outcome.py`.
    Submit retry attempt/knowledge recording, submit-abort recorder construction, and submit-abort exception raising now
    live in `submit_abort.py`; standard submit-abort helper wiring is built by
    `submit_abort.build_submit_run_aborter_for_run`, so the main loop does
@@ -513,7 +515,7 @@ Recommended extraction order:
    retry recording, notebook fallback application, local guardrail aborts, and Kaggle CLI aborts share one typed loop
    boundary instead of being open-coded in autopilot orchestration.
    Submission outcome polling, post-poll abort handling, and successful submit ledger/attempt/failure-context recording
-   now use `submit_stage.finalize_submit_outcome_for_run_or_abort`, so final persistence choreography stays in the
+   now use `submit_outcome.finalize_submit_outcome_for_run_or_abort`, so final persistence choreography stays in the
    submit service after the retry loop succeeds.
    duplicate-submit run-state snapshots are loaded inside the run-level submit helpers, and successful submit
    ledger/outcome/failure-context finalization uses `submit_success.record_successful_submit_for_run`.

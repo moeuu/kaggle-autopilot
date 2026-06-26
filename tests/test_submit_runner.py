@@ -168,7 +168,7 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
         ),
     )
     monkeypatch.setattr(
-        submit_runner._submit_stage,
+        submit_runner._submit_outcome,
         "finalize_submit_outcome_for_run_or_abort",
         lambda **kwargs: calls.append("finalize") or {"ok": True, "submission_ref": kwargs["submission_ref"]},
     )

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from kagglebot import submit_outcome as _submit_outcome
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
 from kagglebot.exceptions import (
@@ -272,7 +273,7 @@ def attempt_submit_for_run(
         on_message=deps.on_message,
     )
     submit_stage_state = submit_attempt_loop_result.submit_stage_state
-    return _submit_stage.finalize_submit_outcome_for_run_or_abort(
+    return _submit_outcome.finalize_submit_outcome_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
         slug=config.slug,
