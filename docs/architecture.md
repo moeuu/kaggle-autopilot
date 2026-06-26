@@ -377,8 +377,8 @@ Recommended extraction order:
    context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file
    repair preparation, same-fingerprint retry allowance, and submit retry decisions are now extracted.
    Lightweight runtime-fix artifact writers for missing columns, column aliases, object dtype coercion, device coercion,
-   blocked modules, deterministic strategy-skip decisions, and kernel-first non-autofixable runtime checks are now in
-   `runtime_fixes.py`.
+   blocked modules, autofix note persistence, deterministic strategy-skip decisions, and kernel-first non-autofixable
+   runtime checks are now in `runtime_fixes.py`.
    Code-reference score extraction, reference notebook lookup, implementation marker construction, and reference
    implementation validation are now in `code_reference.py`; keep additional code-reference policy there unless it needs
    direct agent prompt rendering.

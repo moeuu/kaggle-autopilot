@@ -130,6 +130,15 @@ def is_non_autofixable_runtime_error(error: Exception) -> bool:
     return "requires kernel.py" in text or "kernel-first training" in text
 
 
+def write_lightweight_autofix_note(*, note_path: Path, artifact_name: str, reason: str) -> str:
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note = (
+        f"autofix_note: {artifact_name} created for {reason}.\nautofix will retry without modifying kernel sources.\n"
+    )
+    note_path.write_text(note, encoding="utf-8")
+    return note
+
+
 def maybe_write_column_fill(config: object, error_text: str) -> bool:
     raw_error = error_text or ""
     file_name: str | None = None

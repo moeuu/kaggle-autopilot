@@ -4282,12 +4282,11 @@ def _maybe_apply_lightweight_runtime_fix(
             changed = False
         if not changed:
             continue
-        note_path.parent.mkdir(parents=True, exist_ok=True)
-        note = (
-            f"autofix_note: {artifact_name} created for {reason}.\n"
-            "autofix will retry without modifying kernel sources.\n"
+        _runtime_fixes.write_lightweight_autofix_note(
+            note_path=note_path,
+            artifact_name=artifact_name,
+            reason=reason,
         )
-        note_path.write_text(note, encoding="utf-8")
         print(
             f"[yellow]{stage_label}[/yellow]: wrote {artifact_name}; "
             f"retrying without {IMPLEMENTATION_AGENT.log_alias} edits"

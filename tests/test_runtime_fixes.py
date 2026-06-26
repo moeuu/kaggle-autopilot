@@ -18,6 +18,7 @@ from kagglebot.runtime_fixes import (
     record_blocked_module,
     save_blocked_modules,
     scan_tabular_headers,
+    write_lightweight_autofix_note,
 )
 
 
@@ -72,6 +73,20 @@ def test_is_non_autofixable_runtime_error_detects_kernel_first_failures() -> Non
     assert is_non_autofixable_runtime_error(RuntimeError("This mode requires kernel.py")) is True
     assert is_non_autofixable_runtime_error(RuntimeError("Kernel-first training is required")) is True
     assert is_non_autofixable_runtime_error(RuntimeError("transient")) is False
+
+
+def test_write_lightweight_autofix_note_creates_parent_and_records_reason(tmp_path: Path) -> None:
+    note_path = tmp_path / "agent" / "kernel_fix_note.txt"
+
+    note = write_lightweight_autofix_note(
+        note_path=note_path,
+        artifact_name="column_fill.json",
+        reason="missing column error",
+    )
+
+    assert note_path.read_text(encoding="utf-8") == note
+    assert "column_fill.json created for missing column error" in note
+    assert "retry without modifying kernel sources" in note
 
 
 def test_maybe_write_column_fill_from_missing_columns_error(tmp_path: Path) -> None:
