@@ -2738,11 +2738,10 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
-    _verify_artifacts.run_verify(
+    _verify_artifacts.run_repo_verify(
         verify_cmd,
         dry_run=dry_run,
         artifacts_dir=artifacts_dir,
-        repo_root=Path.cwd(),
         run_command_fn=run_command,
     )
 

@@ -239,9 +239,9 @@ The next high-value modernization work is:
    `SubmitStageRunner` that composes `submit_stage`, `submit_attempts`, `submit_notebook`, `submit_failure_context`,
    and `submission_service`. The loop should receive one typed result with outcome, artifact reference, retry summary,
    and persistence payloads.
-2. **Plan resolution service**: finish moving `_resolve_plan` into a typed plan-resolution module. The output should be
-   one immutable resolved-plan object consumed by training, evaluation, submission, and prompts instead of a mutable
-   dictionary with repeated ad hoc coercion.
+2. **Plan resolution service**: resolved-plan orchestration now lives in `plan_resolution.py`. The next step is to
+   reduce downstream dependence on mutable resolved-plan dictionaries by passing the typed `ResolvedPlan` data through
+   training, evaluation, submission, and prompts where practical.
 3. **Kernel/run adapter split**: keep runner implementations behind `runners/` and prevent `kernel_runner.py` from
    accumulating unrelated hardware, parsing, and local-runtime policy. Shared runtime parsing belongs in small helpers;
    local training-progress parsing is now in `kernel_progress.py`, and kernel output/submission discovery is now in
@@ -456,8 +456,8 @@ Recommended extraction order:
 8. Context artifacts: keep dataset-profile loading, evaluation-spec validation/override normalization, and capped CSV
    row-count helpers in `context_artifacts.py`; loop code should not open these context files directly.
 9. Verify execution/staging: keep verify command execution policy, repo-root default wiring, local/external artifact
-   mirroring, pytest environment isolation, and competition-specific compatibility shims in `verify_artifacts.py`; avoid
-   adding generated shim strings or pytest-specific execution rules back into `autopilot.py` or CLI commands.
+   mirroring, pytest environment isolation, and competition-specific compatibility shims in `verify_artifacts.py`;
+   `autopilot.py` and CLI commands should call the repo-level verify adapter instead of rebuilding those defaults.
 10. Kernel error policy: keep exception formatting, same-error fingerprinting, pushed-kernel registration failure
    classification, kernel-error artifact writing, and repeated-error abort policy in `kernel_errors.py`; `autopilot.py`
    should only decide when to invoke that policy.
