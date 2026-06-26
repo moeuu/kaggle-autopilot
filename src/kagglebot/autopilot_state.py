@@ -9,8 +9,7 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
-from kagglebot.json_utils import load_json_object as _load_json_object
-from kagglebot.json_utils import write_json_object
+from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 from kagglebot.score_utils import should_update_best_score
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
@@ -202,7 +201,7 @@ def _write_iteration_state_marker(
 
 
 def _load_iteration_state_marker(path: Path) -> dict[str, object]:
-    return _load_json_object(path) or {}
+    return load_json_object_or_empty(path)
 
 
 def _is_iteration_marker_complete(payload: dict[str, object], *, require_submit_phase: bool) -> bool:
@@ -282,7 +281,7 @@ def _load_submitted_iteration_tracking_score(
     target_metric: str,
     load_kernel_metrics: Callable[[Path, str, str], EvaluationResult | None],
 ) -> float | None:
-    payload = _load_json_object(metrics_path)
+    payload = load_json_object(metrics_path)
     if isinstance(payload, dict):
         submission_score = tolerant_finite_float(payload.get("submission_score"))
         if isinstance(submission_score, float) and math.isfinite(submission_score):
@@ -553,7 +552,7 @@ def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
 
 
 def _is_submit_only_metrics_payload(metrics_path: Path) -> bool:
-    payload = _load_json_object(metrics_path)
+    payload = load_json_object(metrics_path)
     if not isinstance(payload, dict):
         return False
     return str(payload.get("kind") or "").strip().lower() == "submit_only"
@@ -693,7 +692,7 @@ def _load_run_state(run_dir: Path) -> dict[str, object]:
     if not state_path.exists():
         attempted = _submit_attempts.has_submit_attempt_records(run_dir)
         return {"submit_attempted": attempted, "submit_ok": False}
-    payload = _load_json_object(state_path) or {}
+    payload = load_json_object_or_empty(state_path)
     if not payload.get("submit_attempted"):
         payload["submit_attempted"] = _submit_attempts.has_submit_attempt_records(run_dir)
     if "submit_ok" not in payload:
