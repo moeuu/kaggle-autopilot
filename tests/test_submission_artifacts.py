@@ -9,6 +9,7 @@ from kagglebot.submission_artifacts import (
     load_submission_manifest,
     normalize_artifact_class,
     resolve_manifest_references,
+    store_submission_artifact,
 )
 
 
@@ -58,3 +59,18 @@ def test_resolve_manifest_references_resolves_relative_paths(tmp_path: Path) -> 
 def test_normalize_artifact_class_defaults_unknown_values() -> None:
     assert normalize_artifact_class("multi file zip") == "multi_file_zip"
     assert normalize_artifact_class("unsupported") == ARTIFACT_CLASS_UNKNOWN
+
+
+def test_store_submission_artifact_copies_with_run_id_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "output" / "submission.csv"
+    source.parent.mkdir()
+    source.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    stored = store_submission_artifact(
+        source=source,
+        destination_dir=tmp_path / "submissions",
+        run_id="run-123",
+    )
+
+    assert stored == tmp_path / "submissions" / "run-123_submission.csv"
+    assert stored.read_text(encoding="utf-8") == "id,target\n1,0.1\n"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_artifacts_
 from kagglebot.score_sources import normalize_generalizable_score_source
 from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.submission_artifacts import store_submission_artifact
 from kagglebot.submission_policy import normalize_watch_submit_policy
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 from kagglebot.supervisor import WatchConfig, run_watch_forever, run_watch_once, run_watch_self_improvement
@@ -258,7 +258,7 @@ def train(
             _print_rules(slug)
             raise typer.Exit(code=2)
         if kernel_result.submission_path:
-            submission_path = _store_submission_artifact(
+            submission_path = store_submission_artifact(
                 source=kernel_result.submission_path,
                 destination_dir=paths.submissions_dir,
                 run_id=run_id,
@@ -285,7 +285,7 @@ def train(
             hardware_profile=hardware_profile,
         )
         if kernel_result.submission_path:
-            submission_path = _store_submission_artifact(
+            submission_path = store_submission_artifact(
                 source=kernel_result.submission_path,
                 destination_dir=paths.submissions_dir,
                 run_id=run_id,
@@ -1151,14 +1151,6 @@ def _list_run_ids(paths: CompetitionPaths) -> list[str]:
 
 def _print_rules(slug: str) -> None:
     print(f"[red]Rules not accepted[/red]. Visit: https://www.kaggle.com/competitions/{slug}/rules")
-
-
-def _store_submission_artifact(*, source: Path, destination_dir: Path, run_id: str) -> Path:
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    suffix = source.suffix
-    destination = destination_dir / f"{run_id}_submission{suffix}"
-    shutil.copy2(source, destination)
-    return destination
 
 
 def _default_metric(paths: CompetitionPaths) -> str:

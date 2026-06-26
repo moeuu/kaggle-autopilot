@@ -269,8 +269,9 @@ The next high-value modernization work is:
    `kernel_contracts.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
-   `submit_attempts.jsonl`, candidate manifests, and self-improvement outputs. New artifact readers should use schema
-   helpers rather than open-coding tolerant dictionary access in orchestration modules.
+   `submit_attempts.jsonl`, submission manifests/artifact copies, candidate manifests, and self-improvement outputs.
+   New artifact readers should use schema helpers rather than open-coding tolerant dictionary access in orchestration
+   modules.
 5. **Compatibility wrapper retirement**: after call sites move to extracted modules, remove private wrappers in
    `autopilot.py` and sibling orchestrators instead of preserving multiple names for the same policy. Obsolete
    autopilot wrappers around kernel capacity/data-tier inference have been removed; new call sites should use

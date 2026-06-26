@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_object
@@ -64,6 +65,13 @@ def resolve_manifest_references(
         staging_dir = None
     members = _resolve_manifest_members(base_dir, payload.get("members"))
     return artifact_class, submission_path, staging_dir, members
+
+
+def store_submission_artifact(*, source: Path, destination_dir: Path, run_id: str) -> Path:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / f"{run_id}_submission{source.suffix}"
+    shutil.copy2(source, destination)
+    return destination
 
 
 def _resolve_manifest_path(base_dir: Path, value: object) -> Path | None:
