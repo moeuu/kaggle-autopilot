@@ -71,6 +71,7 @@ from kagglebot.kernel_status import (
     is_kernel_status_running,
     parse_kernel_status,
 )
+from kagglebot.kernel_submit_accelerator import resolve_submit_kernel_accelerator as _resolve_submit_accelerator
 from kagglebot.kernel_submit_inference import (
     sanitize_submit_inference_output_roots as _sanitize_submit_inference_output_roots,
 )
@@ -84,7 +85,6 @@ from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
-_SUBMIT_KERNEL_ACCELERATOR_ENV = "KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR"
 _BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
     r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
     r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
@@ -183,16 +183,7 @@ class KernelSubmitBuildConfig:
 
 
 def _resolve_submit_kernel_accelerator(requested: str) -> str:
-    override = os.getenv(_SUBMIT_KERNEL_ACCELERATOR_ENV)
-    value = str(override if override is not None else "cpu").strip().lower()
-    if value in {"none", "no", "false", "0"}:
-        return "cpu"
-    if value in {"cpu", "gpu", "tpu"}:
-        return value
-    if override is not None:
-        raise ValueError(f"{_SUBMIT_KERNEL_ACCELERATOR_ENV} must be one of cpu, gpu, or tpu; got {override!r}.")
-    requested_value = str(requested or "cpu").strip().lower()
-    return requested_value if requested_value in {"cpu", "gpu", "tpu"} else "cpu"
+    return _resolve_submit_accelerator(requested, env_get=os.getenv)
 
 
 @dataclass(frozen=True)

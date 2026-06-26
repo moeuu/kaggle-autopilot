@@ -273,7 +273,8 @@ The next high-value modernization work is:
    should call those groups instead of enumerating individual shim functions; static submit
    wrapper rendering and code-competition tiny-submission rejection are now in `kernel_submit_wrapper.py`; Kaggle push
    source validation is now in `kernel_push_validation.py`; notebook submit-inference validation and output-root
-   sanitization are now in `kernel_submit_inference.py`; competition-specific local-kernel contract checks are now in
+   sanitization are now in `kernel_submit_inference.py`; submit-kernel accelerator override parsing now lives in
+   `kernel_submit_accelerator.py`; competition-specific local-kernel contract checks are now in
    `kernel_contracts.py`; remote kernel registration, kernel-id resolution, push-log persistence, stale-output cleanup,
    and best-effort output fetch helpers now live in `kernel_remote_ops.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
