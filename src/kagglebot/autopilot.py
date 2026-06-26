@@ -46,6 +46,7 @@ from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
+from kagglebot import submit_rank as _submit_rank
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
 from kagglebot import submit_stage_messages as _submit_stage_messages
@@ -1912,7 +1913,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                         float(top1_score),
                                         metric_direction,
                                     )
-                            rank_payload = _submit_stage.resolve_submission_rank_payload(
+                            rank_payload = _submit_rank.resolve_submission_rank_payload(
                                 slug=config.slug,
                                 context_dir=config.paths.context_dir,
                                 direction=metric_direction,
@@ -1921,7 +1922,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 leaderboard_rank_for_score=leaderboard_rank_for_score,
                             )
                             if rank_payload:
-                                rank_state = _submit_stage.resolve_submission_rank_state(
+                                rank_state = _submit_rank.resolve_submission_rank_state(
                                     rank_payload=rank_payload,
                                     rank_force_major_max_percentile=rank_force_major_max_percentile,
                                     rank_force_major_min_teams=rank_force_major_min_teams,

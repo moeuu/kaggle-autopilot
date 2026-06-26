@@ -473,6 +473,8 @@ Recommended extraction order:
    `submit_stage_messages.py`; submit-stage internals and loop status reporting call those helpers directly instead of
    preserving submit-status wrapper functions in `submit_stage.py`.
    Run-bound duplicate-submission and same-path skip handling now live in `submit_stage_duplicate.py`.
+   Submission rank payload normalization, rank display formatting, and rank-guard state resolution now live in
+   `submit_rank.py`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does

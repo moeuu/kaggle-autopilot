@@ -90,7 +90,8 @@ from kagglebot.submit_failure_context import (
     load_submit_failure_context,
     resolve_submit_abort_autofixability_for_run,
 )
-from kagglebot.submit_stage import resolve_submission_message, resolve_submission_rank_payload
+from kagglebot.submit_rank import resolve_submission_rank_payload
+from kagglebot.submit_stage import resolve_submission_message
 from kagglebot.submit_stage_duplicate import infer_iteration_from_submission_path
 from kagglebot.types import PlanConfig
 
@@ -3574,7 +3575,7 @@ def test_autopilot_uses_spare_daily_slots_for_non_improving_soft_quality_guard(
     monkeypatch.setattr("kagglebot.submission_policy.submission_count_for_daily_limit", lambda **kwargs: 1)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.submit_stage.wait_for_submission_outcome", lambda **kwargs: None)
-    monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
+    monkeypatch.setattr("kagglebot.submit_rank.resolve_submission_rank_payload", lambda **kwargs: {})
 
     config = _make_config(
         tmp_path, paths=paths, submit=True, max_iterations=3, force_submit=False, submit_policy="improved"
@@ -3641,7 +3642,7 @@ def test_autopilot_submit_improvement_prefers_online_submission_score(monkeypatc
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
     monkeypatch.setattr("kagglebot.submit_stage.wait_for_submission_outcome", lambda **kwargs: outcomes.pop(0))
-    monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
+    monkeypatch.setattr("kagglebot.submit_rank.resolve_submission_rank_payload", lambda **kwargs: {})
     monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
 
     config = _make_config(tmp_path, submit=True, max_iterations=3, force_submit=False)
@@ -7432,7 +7433,7 @@ def test_autopilot_forces_major_overhaul_on_online_mismatch(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.submission_policy.should_attempt_submit_for_readiness", lambda **kwargs: True)
-    monkeypatch.setattr("kagglebot.submit_stage.resolve_submission_rank_payload", lambda **kwargs: {})
+    monkeypatch.setattr("kagglebot.submit_rank.resolve_submission_rank_payload", lambda **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.93})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(
