@@ -7,7 +7,7 @@ import os
 import re
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -837,18 +837,17 @@ def _build_kaggle_download_session() -> object:
     return session
 
 
-def _kaggle_api_credentials() -> tuple[str, str]:
+def _kaggle_api_credentials(*, config_candidates: Iterable[Path] | None = None) -> tuple[str, str]:
     try:
-        return resolve_kaggle_api_credentials(config_candidates=_kaggle_config_file_candidates())
+        candidates = config_candidates
+        if candidates is None:
+            candidates = kaggle_json_candidates(config_dir_env=os.getenv("KAGGLE_CONFIG_DIR"))
+        return resolve_kaggle_api_credentials(config_candidates=candidates)
     except ValueError as exc:
         raise KaggleCliError(
             f"{KAGGLE_CREDENTIALS_ERROR} Required for streaming download.",
             ["kaggle", "competitions", "download"],
         ) from exc
-
-
-def _kaggle_config_file_candidates() -> list[Path]:
-    return kaggle_json_candidates(config_dir_env=os.getenv("KAGGLE_CONFIG_DIR"))
 
 
 def _is_rate_limited_download_error(exc: KaggleCliError) -> bool:

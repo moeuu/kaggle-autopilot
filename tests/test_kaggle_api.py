@@ -65,9 +65,11 @@ def test_kaggle_api_credentials_skips_invalid_and_non_object_config_candidates(
     array_payload.write_text("[]", encoding="utf-8")
     valid = tmp_path / "valid.json"
     valid.write_text('{"username": "cfg-user", "key": "cfg-key"}', encoding="utf-8")
-    monkeypatch.setattr(kaggle_api, "_kaggle_config_file_candidates", lambda: [invalid, array_payload, valid])
 
-    assert kaggle_api._kaggle_api_credentials() == ("cfg-user", "cfg-key")
+    assert kaggle_api._kaggle_api_credentials(config_candidates=[invalid, array_payload, valid]) == (
+        "cfg-user",
+        "cfg-key",
+    )
 
 
 def test_entered_competition_optional_int_fields_reject_bool_and_fractional_values() -> None:
