@@ -3793,7 +3793,7 @@ def _rerun_kernel_for_metric_recheck(
 
     rechecked_submission_path = submission_path
     if not rechecked_submission_path.exists():
-        resolved_submission = _autopilot_state._resolve_iteration_submission_artifact(iter_dir)
+        resolved_submission = _autopilot_state.resolve_iteration_submission_artifact(iter_dir)
         if resolved_submission is None:
             raise RuntimeError(
                 "Metric recheck failed: submission artifact is missing for same-iteration metric-only recheck."
@@ -3822,7 +3822,7 @@ def _rerun_kernel_for_metric_recheck(
     add_metrics_candidate(metrics_artifact_path)
     add_metrics_candidate(iter_dir / "metrics.json")
     add_metrics_candidate(output_metrics_path)
-    add_metrics_candidate(_autopilot_state._resolve_iteration_artifact(iter_dir, "metrics.json"))
+    add_metrics_candidate(_autopilot_state.resolve_iteration_artifact(iter_dir, "metrics.json"))
 
     loaded_candidates: list[tuple[Path, dict[str, object], EvaluationResult | None]] = []
     for metrics_candidate in metrics_candidates:
@@ -3883,7 +3883,7 @@ def _rerun_kernel_for_metric_recheck(
             payload=payload,
             target_metric=target_metric,
             metric_direction=metric_direction,
-            resolve_iteration_artifact=_autopilot_state._resolve_iteration_artifact,
+            resolve_iteration_artifact=_autopilot_state.resolve_iteration_artifact,
         )
         if recomputed is not None:
             evaluation, payload = recomputed
@@ -3940,7 +3940,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
                 latest_submit_attempt=latest_submit_attempt,
                 failure_context=failure_context,
                 fallback_iteration_dirs=fallback_iteration_dirs(),
-                resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
+                resolve_iteration_submission_artifact=_autopilot_state.resolve_iteration_submission_artifact,
             )
             submit_file_fix_baseline_sha256 = _sha256_or_none(submit_file_fix_baseline_path)
         repair_service = SubmissionService(
@@ -3959,7 +3959,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             run_state=run_state,
             failure_context=failure_context,
             fallback_iteration_dirs=fallback_iteration_dirs,
-            resolve_iteration_submission_artifact=_autopilot_state._resolve_iteration_submission_artifact,
+            resolve_iteration_submission_artifact=_autopilot_state.resolve_iteration_submission_artifact,
             validate_and_prepare=repair_service.validate_and_prepare_submission,
             save_repaired_path=save_repaired_submit_path,
         )

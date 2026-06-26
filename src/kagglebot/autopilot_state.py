@@ -389,7 +389,7 @@ def _resume_best_submittable_iteration_state(
             continue
         if iteration > max_iterations:
             continue
-        submission_path = _resolve_iteration_submission_artifact(iter_dir)
+        submission_path = resolve_iteration_submission_artifact(iter_dir)
         metrics_path = iter_dir / "metrics.json"
         if submission_path is None or not metrics_path.exists():
             continue
@@ -436,7 +436,7 @@ def _resume_iteration_state(
             continue
         if iteration > max_iterations:
             continue
-        submission_path = _resolve_iteration_submission_artifact(iter_dir)
+        submission_path = resolve_iteration_submission_artifact(iter_dir)
         metrics_path = iter_dir / "metrics.json"
         if submission_path is None and not metrics_path.exists():
             continue
@@ -499,7 +499,7 @@ def _resume_iteration_state(
     return next_iter, best_score, best_submission
 
 
-def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
+def resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
     primary = find_newest_existing_path(
         [
             iter_dir / filename,
@@ -538,7 +538,7 @@ def _resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
     return find_newest_existing_path(fallback_candidates)
 
 
-def _resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
+def resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
     return find_submission_file(iter_dir)
 
 
@@ -555,7 +555,7 @@ def _submit_retry_metrics_candidates(iter_dir: Path, marker_payload: dict[str, o
     if isinstance(marker_metrics_path, str) and marker_metrics_path.strip():
         candidates.append(Path(marker_metrics_path))
     candidates.append(iter_dir / "metrics.json")
-    resolved_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
+    resolved_path = resolve_iteration_artifact(iter_dir, "metrics.json")
     if resolved_path is not None:
         candidates.append(resolved_path)
 
@@ -602,8 +602,8 @@ def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: 
             continue
         if iteration > max_iterations:
             continue
-        submission_path = _resolve_iteration_submission_artifact(iter_dir)
-        metrics_path = _resolve_iteration_artifact(iter_dir, "metrics.json")
+        submission_path = resolve_iteration_submission_artifact(iter_dir)
+        metrics_path = resolve_iteration_artifact(iter_dir, "metrics.json")
         if submission_path is None or metrics_path is None:
             continue
         if _is_submit_only_metrics_payload(metrics_path):
@@ -654,7 +654,7 @@ def _load_submit_retry_artifacts(
     if not (marker_pending or legacy_pending):
         return None
 
-    submission_path = _resolve_iteration_submission_artifact(iter_dir)
+    submission_path = resolve_iteration_submission_artifact(iter_dir)
     if submission_path is None:
         return None
     for metrics_path in _submit_retry_metrics_candidates(iter_dir, marker_payload):

@@ -37,9 +37,9 @@ from kagglebot.autopilot import (
 )
 from kagglebot.autopilot_state import (
     _load_submit_retry_artifacts,
-    _resolve_iteration_submission_artifact,
     _resume_iteration_state,
     load_run_state,
+    resolve_iteration_submission_artifact,
     write_iteration_state_marker,
 )
 from kagglebot.competition_rules import load_competition_rule_constraints
@@ -3308,7 +3308,7 @@ def test_resolve_iteration_submission_artifact_prefers_manifest_when_bundle_stag
         encoding="utf-8",
     )
 
-    assert _resolve_iteration_submission_artifact(iter_dir) == manifest_path
+    assert resolve_iteration_submission_artifact(iter_dir) == manifest_path
 
 
 def test_resolve_iteration_submission_artifact_uses_latest_fold_intermediate(tmp_path: Path) -> None:
@@ -3322,7 +3322,7 @@ def test_resolve_iteration_submission_artifact_uses_latest_fold_intermediate(tmp
     os.utime(fold1, (1000, 1000))
     os.utime(fold2, (2000, 2000))
 
-    assert _resolve_iteration_submission_artifact(iter_dir) == fold2
+    assert resolve_iteration_submission_artifact(iter_dir) == fold2
 
 
 def test_copy_submission_artifact_to_iteration_dir_skips_same_path(tmp_path: Path) -> None:
