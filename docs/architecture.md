@@ -389,7 +389,7 @@ Recommended extraction order:
    decisions, file/notebook submit attempt dispatch, successful
    submit result normalization, submit-stage runtime state transitions, initial submit runtime-state resolution,
    initial artifact-mode decision application,
-   submit-error classification normalization, submit CLI error resolution, classification-driven retry/abort decisions,
+   submit-error classification normalization, submit CLI error resolution/run binding, classification-driven retry/abort decisions,
    submit-error action abort specs,
    submit-retry attempt/knowledge recording orchestration, abort-spec kwargs mapping,
    duplicate-submit resolution/decision application, local validation/prepared-path resolution,

@@ -4551,7 +4551,8 @@ def _attempt_submit(
             submission_reference = submit_attempt_result.submission_reference
             submission_artifact_path = submit_attempt_result.submission_artifact_path
         except SubmissionCliError as exc:
-            submit_error_resolution = _submit_stage.resolve_submit_cli_error(
+            submit_error_resolution = _submit_stage.resolve_submit_cli_error_for_run(
+                run_dir=run_dir,
                 state=submit_stage_state,
                 stdout=exc.stdout,
                 stderr=exc.stderr or "",
@@ -4575,7 +4576,7 @@ def _attempt_submit(
                 seen_fingerprints=seen_fingerprints,
                 run_state=run_state,
                 code_fingerprint=submit_code_fingerprint,
-                save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
+                save_run_state_for_run=_autopilot_state._save_run_state,
                 on_message=print,
             )
             submit_error_classification = submit_error_resolution.classification
