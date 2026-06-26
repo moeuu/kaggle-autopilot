@@ -125,6 +125,36 @@ def test_validate_submission_reports_multiple_problems(tmp_path: Path) -> None:
     assert "- prediction column 'target' contains NaN/non-numeric values:" in message
 
 
+def test_validate_submission_rejects_tiny_static_hidden_test_notebook_submission(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    sample = context_dir / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "id": [136060, 211333, 1233961],
+            "winner_model_a": [1 / 3, 1 / 3, 1 / 3],
+            "winner_model_b": [1 / 3, 1 / 3, 1 / 3],
+            "winner_tie": [1 / 3, 1 / 3, 1 / 3],
+        }
+    ).to_csv(sample, index=False)
+    pd.DataFrame(
+        {
+            "id": [136060, 211333, 1233961],
+            "winner_model_a": [0.2, 0.3, 0.4],
+            "winner_model_b": [0.3, 0.4, 0.3],
+            "winner_tie": [0.5, 0.3, 0.3],
+        }
+    ).to_csv(submission, index=False)
+    (context_dir / "overview.md").write_text(
+        "This is a Code Competition. The public test set is dummy data and hidden/full test runs in Kaggle.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SubmissionValidationError, match="tiny static submission"):
+        validate_submission(str(submission), str(sample), data_dir=tmp_path / "data")
+
+
 def test_validate_submission_uses_overview_hint_when_sample_is_header_only(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     context_dir = data_dir / "context"

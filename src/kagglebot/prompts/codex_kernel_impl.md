@@ -71,8 +71,10 @@ Implementation contract for `kernel.py`:
     `oof_preds_<name>_fold<N>.npy`, `test_preds_<name>_fold<N>.npy`,
     `preds_<name>_fold<N>_metadata.json`, `candidate_<name>_fold<N>.json`, and a fold-level
     `submission_<name>_fold<N>.csv`.
-    The fold-level submission must be valid against `sample_submission.csv` and usable if the remaining folds are
-    stopped. Do not keep completed-fold predictions only in memory.
+    The fold-level submission must be valid against `sample_submission.csv`, and when public `sample_submission.csv`
+    is tiny/header-only/dummy for a hidden/full-test notebook rerun, it must expand to runtime `test.csv` ids before
+    writing. It must be usable if the remaining folds are stopped. Do not keep completed-fold predictions only in
+    memory.
 - Evaluation:
   - CV with deterministic seeds where feasible
   - Print per-pipeline CV summary for the plan primary metric
@@ -96,7 +98,9 @@ Implementation contract for `kernel.py`:
 - Submission:
   - Write `submission.csv` into a writable output dir
   - Mirror to `/kaggle/working/submission.csv` only when writable
-  - Validate columns and row count against sample submission
+  - Validate columns against sample submission
+  - Validate row count and id order against runtime `test.csv` ids when `sample_submission.csv` is tiny/header-only/dummy
+    for a hidden/full-test notebook rerun; never emit a 3-row public placeholder submission on Kaggle hidden/full test
   - Ensure no NaN/inf in predictions; clip to safe bounds when needed
   - If `KAGGLEBOT_LOCAL_KERNEL=1`, avoid hard-failing on `/kaggle/working` writes
 - Optional model backends:

@@ -91,6 +91,7 @@ Submission behavior:
 - static wrapper submit kernels fail fast for detected code competitions when the embedded CSV has only tiny public-test rows, preventing accidental 3-row notebook submissions
 - submit-only wrapper kernels also re-check runtime `test.csv`; when Kaggle exposes a hidden/full test set with more rows than the tiny public `sample_submission.csv`, the wrapper expands the output to the runtime test ids and fills unknown ids with a deterministic fallback
 - submission writers and fold-intermediate artifact writers expand tiny public `sample_submission.csv` templates to the actual `test.csv` ids during notebook reruns, so completed folds can produce row-count-valid `submission_<candidate>_fold<N>.csv` artifacts
+- local submission validation rejects tiny static submissions when context identifies a hidden/full-test notebook/code competition, so public 3-row placeholder outputs do not pass preflight
 - heuristic `writeup` inference is conservative and ignores negative mentions such as `not a judged/writeup competition`
 - leaderboard runs default to `target_medal=winner` and `target_rank_percentile=0.001`; until that near-first-place band is reached, autopilot will not collapse into `minor_tuning`
 - for large tabular binary datasets with meaningful categoricals, planning quality gates require multi-family search plus at least one OOF blend candidate

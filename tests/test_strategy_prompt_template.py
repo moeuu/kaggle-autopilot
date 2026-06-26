@@ -36,6 +36,8 @@ def test_prompts_require_fold_intermediate_submissions() -> None:
     assert "submission_<candidate>_fold<N>.csv" in improve_template
     assert "candidate_<candidate>_fold<N>.json" in improve_template
     assert "sample_submission.csv" in combined
+    assert "runtime `test.csv` ids" in kernel_template
+    assert "never emit a 3-row public placeholder submission" in kernel_template
     assert "completed folds only in memory" in combined
 
 

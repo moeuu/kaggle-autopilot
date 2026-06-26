@@ -19,6 +19,15 @@ _IMAGE_TEST_ID_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".w
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
 _FILENAME_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?P<ext>[A-Za-z0-9]{2,8})\b")
 _COORD_COL_RE = re.compile(r"^(?:x|y|z)_\d+$", re.IGNORECASE)
+_HIDDEN_FULL_TEST_CONTEXT_RE = re.compile(
+    r"\bhidden(?:/|\s+or\s+|\s+and\s+|\s+)?(?:full\s+)?test\b"
+    r"|\bfull\s+test\b"
+    r"|\bpublic\s+test\s+set\s+is\s+dummy\b"
+    r"|\bdummy\s+(?:public\s+)?test\b"
+    r"|\bcode\s+competition\b"
+    r"|\bnotebook(?:-only)?\s+submission",
+    re.IGNORECASE,
+)
 
 
 def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path | None = None) -> None:
@@ -127,6 +136,17 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                 placeholder_sample = True
                 expected_row_count = len(test_ids)
                 expected_id_values = set(test_ids)
+
+    if (
+        sample_has_data_rows
+        and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
+        and len(submission) <= len(sample)
+        and _has_hidden_full_test_context(sample_csv)
+    ):
+        problems.append(
+            "tiny static submission appears to use public placeholder rows for a hidden/full-test notebook "
+            "competition; generate submission.csv from runtime test.csv ids or use notebook inference mode"
+        )
 
     if expected_row_count is not None and len(submission) != expected_row_count:
         problems.append(f"row count mismatch:\n  expected: {expected_row_count}\n  actual:   {len(submission)}")
@@ -610,6 +630,21 @@ def _resolve_expected_columns_from_context(sample_csv: Path) -> list[str] | None
             if hint.columns and columns_look_plausible(list(hint.columns)):
                 return list(hint.columns)
     return None
+
+
+def _has_hidden_full_test_context(sample_csv: Path) -> bool:
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "overview.md", "data.md", "rules.md", "discussion.md"):
+            path = context_dir / name
+            if not path.exists():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if _HIDDEN_FULL_TEST_CONTEXT_RE.search(text):
+                return True
+    return False
 
 
 def _candidate_context_dirs(sample_csv: Path) -> list[Path]:
