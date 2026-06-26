@@ -3939,14 +3939,14 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         if error.output:
             error_text = f"{error_text}\n\nKaggle CLI output:\n{error.output}"
     if submit_autofix:
-        failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
-        run_state = _autopilot_state._load_run_state(run_dir)
-        latest_submit_attempt = _submit_attempts.load_latest_submit_attempt(run_dir)
-        submit_context = _submit_failure_context.format_submit_autofix_context(
-            failure_context=failure_context,
-            run_state=run_state,
-            latest_submit_attempt=latest_submit_attempt,
+        submit_autofix_context = _submit_failure_context.load_submit_autofix_run_context(
+            run_dir=run_dir,
+            load_run_state=_autopilot_state._load_run_state,
         )
+        failure_context = submit_autofix_context.failure_context
+        run_state = submit_autofix_context.run_state
+        latest_submit_attempt = submit_autofix_context.latest_submit_attempt
+        submit_context = submit_autofix_context.formatted_context
         submit_file_fix_required = _submit_autofix.submit_file_fix_required_for_attempt(latest_submit_attempt)
         max_search_iteration = MAX_AUTOFIX_ATTEMPTS + MAX_KERNEL_FIX_ATTEMPTS + MAX_AUTOFIX_CODEX_PASSES
 

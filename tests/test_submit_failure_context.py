@@ -15,6 +15,7 @@ from kagglebot.submit_failure_context import (
     format_submit_autofix_context,
     format_submit_file_repair_contract_prompt,
     format_submit_file_repair_contract_retry_feedback,
+    load_submit_autofix_run_context,
     load_submit_failure_context,
     mark_submit_failure_context_duplicate_skipped,
     mark_submit_failure_context_resolved,
@@ -506,6 +507,38 @@ def test_resolve_submit_autofix_context_for_run_loads_latest_attempt(tmp_path: P
     assert context.latest_submit_attempt["stderr_tail"] == "previous failure"
     assert context.latest_submit_attempt["fingerprint"] == "fp-1"
     assert context.input_submission_path == original
+
+
+def test_load_submit_autofix_run_context_loads_and_formats_context(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "reason": "local_submission_validation_failed",
+            "submission_ref": "submission.csv",
+        },
+    )
+    append_submit_attempt(
+        run_dir=run_dir,
+        payload={"stderr_tail": "validation failed", "fingerprint": "fp-1"},
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+    load_state_calls: list[Path] = []
+
+    context = load_submit_autofix_run_context(
+        run_dir=run_dir,
+        load_run_state=lambda state_run_dir: load_state_calls.append(state_run_dir)
+        or {"last_error_kind": "validation"},
+    )
+
+    assert load_state_calls == [run_dir]
+    assert context.failure_context["reason"] == "local_submission_validation_failed"
+    assert context.run_state == {"last_error_kind": "validation"}
+    assert context.latest_submit_attempt["stderr_tail"] == "validation failed"
+    assert "submit_failure_context:" in context.formatted_context
+    assert "latest_submit_attempt:" in context.formatted_context
 
 
 def test_decide_submit_abort_autofixability_allows_repairable_failure_context() -> None:

@@ -45,6 +45,14 @@ class SubmitAutofixAttemptContext:
 
 
 @dataclass(frozen=True)
+class SubmitAutofixRunContext:
+    failure_context: dict[str, object]
+    run_state: dict[str, object]
+    latest_submit_attempt: dict[str, object]
+    formatted_context: str
+
+
+@dataclass(frozen=True)
 class SubmitAbortAutofixDecision:
     autofixable: bool
     message: str
@@ -398,6 +406,27 @@ def resolve_submit_autofix_context_for_run(
         load_latest_submit_attempt=load_latest_submit_attempt,
         save_run_state=lambda updates: save_run_state_for_run(run_dir, updates),
         now_iso=now_iso,
+    )
+
+
+def load_submit_autofix_run_context(
+    *,
+    run_dir: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+) -> SubmitAutofixRunContext:
+    failure_context = load_submit_failure_context(run_dir)
+    run_state = load_run_state(run_dir)
+    latest_submit_attempt = load_latest_submit_attempt(run_dir)
+    formatted_context = format_submit_autofix_context(
+        failure_context=failure_context,
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+    )
+    return SubmitAutofixRunContext(
+        failure_context=failure_context,
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        formatted_context=formatted_context,
     )
 
 
