@@ -301,6 +301,40 @@ def test_run_submit_kernel_wrapper_aligns_to_runtime_sample_submission(
     )
 
 
+def test_run_submit_kernel_wrapper_runtime_validation_rejects_column_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,prediction\n1,0.2\n2,0.8\n", encoding="utf-8")
+    run_submit_kernel(
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=False,
+        submission_path=submission_path,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    input_dir = tmp_path / "input" / "demo"
+    input_dir.mkdir(parents=True)
+    (input_dir / "sample_submission.csv").write_text("id,target\n1,0.0\n2,0.0\n", encoding="utf-8")
+    monkeypatch.setenv("KAGGLEBOT_INPUT_ROOT", str(tmp_path / "input"))
+    monkeypatch.setenv("KAGGLEBOT_WORKING_DIR", str(tmp_path / "working"))
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1" / "submit-iter-1"
+    with pytest.raises(RuntimeError, match="columns mismatch"):
+        runpy.run_path(str(kernel_dir / "kernel.py"), run_name="__main__")
+
+
 def test_run_submit_kernel_wrapper_expands_tiny_runtime_sample_to_hidden_test(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

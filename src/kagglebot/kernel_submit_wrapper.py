@@ -246,6 +246,78 @@ def _aligned_submission_bytes(payload: bytes) -> bytes:
     return out[sample_cols].to_csv(index=False).encode("utf-8")
 
 
+def _validate_runtime_submission_bytes(payload: bytes) -> None:
+    try:
+        import pandas as pd
+
+        submission = _read_embedded_submission(payload)
+    except Exception as exc:
+        raise RuntimeError("Runtime submission validation failed: unable to read submission.csv.") from exc
+
+    if submission.empty:
+        raise RuntimeError("Runtime submission validation failed: submission.csv has no data rows.")
+
+    submission.columns = [str(col) for col in submission.columns]
+    sample_path = _find_sample_submission()
+    if sample_path is None:
+        if submission.isna().any(axis=None):
+            raise RuntimeError("Runtime submission validation failed: submission.csv contains empty values.")
+        return
+
+    try:
+        import pandas as pd
+
+        sample = pd.read_csv(sample_path)
+    except Exception as exc:
+        raise RuntimeError(f"Runtime submission validation failed: unable to read {sample_path}.") from exc
+
+    sample.columns = [str(col) for col in sample.columns]
+    expected_columns = list(sample.columns)
+    if list(submission.columns) != expected_columns:
+        raise RuntimeError(
+            "Runtime submission validation failed: columns mismatch. "
+            f"expected={expected_columns} actual={list(submission.columns)}"
+        )
+    if not expected_columns:
+        raise RuntimeError("Runtime submission validation failed: sample_submission.csv has no columns.")
+
+    id_col = expected_columns[0]
+    if id_col not in submission.columns:
+        raise RuntimeError(f"Runtime submission validation failed: id column missing: {id_col}")
+
+    expected_ids = None
+    expected_source = "sample_submission.csv"
+    test_path = _find_test_csv()
+    if test_path is not None:
+        try:
+            test = pd.read_csv(test_path)
+            test.columns = [str(col) for col in test.columns]
+            if id_col in test.columns and len(test) > 0:
+                expected_ids = test[id_col].astype(str).tolist()
+                expected_source = "test.csv"
+        except Exception as exc:
+            print(f"Runtime test-id validation skipped: {exc}")
+
+    if expected_ids is None and id_col in sample.columns and len(sample) > 0:
+        expected_ids = sample[id_col].astype(str).tolist()
+
+    if expected_ids is not None:
+        actual_ids = submission[id_col].astype(str).tolist()
+        if len(actual_ids) != len(expected_ids):
+            raise RuntimeError(
+                "Runtime submission validation failed: row count mismatch. "
+                f"expected {len(expected_ids)} from {expected_source}, actual {len(actual_ids)}."
+            )
+        if actual_ids != expected_ids:
+            raise RuntimeError(
+                "Runtime submission validation failed: id order/value mismatch. "
+                f"expected first ids from {expected_source}: {expected_ids[:5]}, actual: {actual_ids[:5]}."
+            )
+
+    if submission.isna().any(axis=None):
+        raise RuntimeError("Runtime submission validation failed: submission.csv contains empty values.")
+
+
 def main() -> None:
     dst = Path(os.environ.get("KAGGLEBOT_WORKING_DIR", "/kaggle/working")) / "submission.csv"
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +326,7 @@ def main() -> None:
     except Exception as exc:
         raise RuntimeError("Failed to decode embedded submission payload.") from exc
     payload = _aligned_submission_bytes(payload)
+    _validate_runtime_submission_bytes(payload)
     dst.write_bytes(payload)
     print(f\"Wrote {dst} (bytes={dst.stat().st_size})\")
 
