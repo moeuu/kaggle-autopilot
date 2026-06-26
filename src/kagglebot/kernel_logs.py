@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich import print
 
+from kagglebot.json_utils import parse_json_array_text, parse_json_object_text
 from kagglebot.logging_utils import truncate_lines
 
 
@@ -154,18 +154,12 @@ def parse_json_log(text: str) -> list[dict[str, object]] | None:
     if not stripped:
         return None
     if stripped.startswith("["):
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            return None
+        payload = parse_json_array_text(stripped)
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         return None
     if stripped.startswith("{"):
-        try:
-            payload = json.loads(stripped)
-        except json.JSONDecodeError:
-            return None
+        payload = parse_json_object_text(stripped)
         if isinstance(payload, dict) and isinstance(payload.get("logs"), list):
             return [item for item in payload["logs"] if isinstance(item, dict)]
         return None

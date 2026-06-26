@@ -11,6 +11,8 @@ from kagglebot.json_utils import (
     load_json_object,
     load_json_object_or_empty,
     load_jsonl_records,
+    parse_json_array_text,
+    parse_json_object_bytes,
     parse_json_object_text,
     read_json_object,
     write_json_array,
@@ -73,6 +75,18 @@ def test_parse_json_object_text_returns_only_object_payloads() -> None:
     assert parse_json_object_text('{"ok": true}') == {"ok": True}
     assert parse_json_object_text("[1, 2, 3]") is None
     assert parse_json_object_text("{") is None
+
+
+def test_parse_json_object_bytes_decodes_utf8_objects() -> None:
+    assert parse_json_object_bytes(b'{"ok": true}') == {"ok": True}
+    assert parse_json_object_bytes(b'{"ok": true}\xff') is None
+    assert parse_json_object_bytes(b'{"ok": true}\xff', errors="ignore") == {"ok": True}
+
+
+def test_parse_json_array_text_returns_only_array_payloads() -> None:
+    assert parse_json_array_text('[1, "x"]') == [1, "x"]
+    assert parse_json_array_text('{"ok": true}') is None
+    assert parse_json_array_text("[") is None
 
 
 def test_load_json_array_returns_list_payload(tmp_path) -> None:

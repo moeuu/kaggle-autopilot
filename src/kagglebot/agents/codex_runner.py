@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess
@@ -17,6 +16,7 @@ from kagglebot.agents.sandbox_fallback import (
     resolve_agent_sandbox_mode,
 )
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import parse_json_object_text
 
 _COMMAND_LOG_FIRST_WIDTH = 100
 _COMMAND_LOG_SECOND_WIDTH = 100
@@ -327,11 +327,10 @@ def _heartbeat(
 
 
 def _emit_codex_event(line: str) -> None:
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError:
+    payload = parse_json_object_text(line)
+    if payload is None:
         return
-    item = payload.get("item") if isinstance(payload, dict) else None
+    item = payload.get("item")
     if not isinstance(item, dict):
         return
     item_type = item.get("type")

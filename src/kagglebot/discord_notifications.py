@@ -14,7 +14,12 @@ from uuid import uuid4
 from rich import print
 
 from kagglebot.datetime_utils import parse_iso_datetime_utc
-from kagglebot.json_utils import load_json_object_or_empty, load_jsonl_records, write_json_object
+from kagglebot.json_utils import (
+    load_json_object_or_empty,
+    load_jsonl_records,
+    parse_json_object_bytes,
+    write_json_object,
+)
 from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 
@@ -79,11 +84,8 @@ class DiscordEventNotifier:
         except (OSError, urllib.error.HTTPError, urllib.error.URLError) as exc:
             print(f"[yellow]discord notify failed[/yellow]: {exc}")
             return False
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            parsed = {}
-        if isinstance(parsed, dict) and int(parsed.get("matched_routes") or 0) <= 0:
+        parsed = parse_json_object_bytes(raw) or {}
+        if int(parsed.get("matched_routes") or 0) <= 0:
             print("[yellow]discord notify accepted but matched no routes[/yellow]")
         return True
 

@@ -33,16 +33,30 @@ def parse_json_object_text(text: str) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def parse_json_object_bytes(raw: bytes, *, errors: str = "strict") -> dict[str, object] | None:
+    try:
+        text = raw.decode("utf-8", errors=errors)
+    except UnicodeDecodeError:
+        return None
+    return parse_json_object_text(text)
+
+
+def parse_json_array_text(text: str) -> list[object] | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, list) else None
+
+
 def load_json_array(path: Path, *, errors: str = "strict") -> list[object] | None:
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8", errors=errors))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        text = path.read_text(encoding="utf-8", errors=errors)
+    except (OSError, UnicodeDecodeError):
         return None
-    if isinstance(payload, list):
-        return payload
-    return None
+    return parse_json_array_text(text)
 
 
 def load_jsonl_records(
