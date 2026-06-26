@@ -58,19 +58,32 @@ class AutopilotSubmitConfig(Protocol):
 
 def build_autopilot_submit_dependencies(
     *,
-    check_rules_accepted_func: Callable[..., bool] = check_rules_accepted,
-    infer_code_competition_from_paths_func: Callable[..., bool] = infer_code_competition_from_paths,
-    resolve_kaggle_username_func: Callable[..., str] = resolve_kaggle_username,
-    run_submit_kernel_func: Callable[..., object] = run_submit_kernel,
-    run_kaggle_submit_kernel_func: Callable[..., object] = run_kaggle_submit_kernel,
-    classify_submit_error_func: Callable[..., dict[str, object]] = classify_submit_error,
-    compute_error_fingerprint_func: Callable[..., str] = compute_error_fingerprint,
-    normalize_error_text_func: Callable[..., str] = normalize_error_text,
-    record_error_fix_insight_func: Callable[..., object] = record_error_fix_insight,
-    list_competition_submissions_func: Callable[..., list[dict[str, object]]] = list_competition_submissions,
-    deliverable_mode_func: Callable[..., str] = infer_deliverable_mode_from_paths,
+    check_rules_accepted_func: Callable[..., bool] | None = None,
+    infer_code_competition_from_paths_func: Callable[..., bool] | None = None,
+    resolve_kaggle_username_func: Callable[..., str] | None = None,
+    run_submit_kernel_func: Callable[..., object] | None = None,
+    run_kaggle_submit_kernel_func: Callable[..., object] | None = None,
+    classify_submit_error_func: Callable[..., dict[str, object]] | None = None,
+    compute_error_fingerprint_func: Callable[..., str] | None = None,
+    normalize_error_text_func: Callable[..., str] | None = None,
+    record_error_fix_insight_func: Callable[..., object] | None = None,
+    list_competition_submissions_func: Callable[..., list[dict[str, object]]] | None = None,
+    deliverable_mode_func: Callable[..., str] | None = None,
 ) -> _submit_runner.SubmitRunnerDependencies:
     """Build concrete side-effect dependencies for the submit runner."""
+    resolved_check_rules_accepted = check_rules_accepted_func or check_rules_accepted
+    resolved_infer_code_competition_from_paths = (
+        infer_code_competition_from_paths_func or infer_code_competition_from_paths
+    )
+    resolved_resolve_kaggle_username = resolve_kaggle_username_func or resolve_kaggle_username
+    resolved_run_submit_kernel = run_submit_kernel_func or run_submit_kernel
+    resolved_run_kaggle_submit_kernel = run_kaggle_submit_kernel_func or run_kaggle_submit_kernel
+    resolved_classify_submit_error = classify_submit_error_func or classify_submit_error
+    resolved_compute_error_fingerprint = compute_error_fingerprint_func or compute_error_fingerprint
+    resolved_normalize_error_text = normalize_error_text_func or normalize_error_text
+    resolved_record_error_fix_insight = record_error_fix_insight_func or record_error_fix_insight
+    resolved_list_competition_submissions = list_competition_submissions_func or list_competition_submissions
+    resolved_deliverable_mode = deliverable_mode_func or infer_deliverable_mode_from_paths
     return _submit_runner.SubmitRunnerDependencies(
         load_competition_rule_constraints=_competition_rules.load_competition_rule_constraints,
         env_truthy=_env_utils.env_truthy,
@@ -80,32 +93,32 @@ def build_autopilot_submit_dependencies(
         compute_submission_sha256=_sha256_or_none,
         now_iso=lambda: datetime.now(UTC).isoformat(),
         now_datetime=lambda: datetime.now(UTC),
-        normalize_error_text=normalize_error_text_func,
-        record_error_fix_insight=record_error_fix_insight_func,
+        normalize_error_text=resolved_normalize_error_text,
+        record_error_fix_insight=resolved_record_error_fix_insight,
         build_error=SubmitAbortedError,
-        check_rules_accepted=check_rules_accepted_func,
-        infer_code_competition_from_paths=infer_code_competition_from_paths_func,
+        check_rules_accepted=resolved_check_rules_accepted,
+        infer_code_competition_from_paths=resolved_infer_code_competition_from_paths,
         collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
         decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
         decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
         resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
         count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
-        resolve_kaggle_username=resolve_kaggle_username_func,
-        run_submit_kernel=run_submit_kernel_func,
-        run_kaggle_submit_kernel=run_kaggle_submit_kernel_func,
+        resolve_kaggle_username=resolved_resolve_kaggle_username,
+        run_submit_kernel=resolved_run_submit_kernel,
+        run_kaggle_submit_kernel=resolved_run_kaggle_submit_kernel,
         copy_submission_artifact_to_iteration_dir=_autopilot_state.copy_submission_artifact_to_iteration_dir,
-        classify_submit_error=classify_submit_error_func,
+        classify_submit_error=resolved_classify_submit_error,
         should_retry_ambiguous_notebook_submit_error=(
             _submit_failure_policy.should_retry_ambiguous_notebook_submit_error
         ),
         should_use_notebook_submit_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
-        compute_error_fingerprint=compute_error_fingerprint_func,
+        compute_error_fingerprint=resolved_compute_error_fingerprint,
         decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
         compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
         is_missing_kaggle_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
-        deliverable_mode=lambda paths: deliverable_mode_func(paths, default="leaderboard"),
-        list_competition_submissions=list_competition_submissions_func,
+        deliverable_mode=lambda paths: resolved_deliverable_mode(paths, default="leaderboard"),
+        list_competition_submissions=resolved_list_competition_submissions,
         sleep=time.sleep,
         on_message=print,
     )

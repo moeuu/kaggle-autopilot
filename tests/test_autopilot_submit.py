@@ -63,6 +63,22 @@ def test_attempt_submit_for_autopilot_run_supplies_runner_dependencies(monkeypat
     assert limits.stdout_tail_chars == 1200
 
 
+def test_build_autopilot_submit_dependencies_resolves_defaults_at_call_time(monkeypatch) -> None:
+    def fake_check_rules(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    def fake_resolve_username(*_args: object, **_kwargs: object) -> str:
+        return "patched-user"
+
+    monkeypatch.setattr(autopilot_submit, "check_rules_accepted", fake_check_rules)
+    monkeypatch.setattr(autopilot_submit, "resolve_kaggle_username", fake_resolve_username)
+
+    deps = autopilot_submit.build_autopilot_submit_dependencies()
+
+    assert deps.check_rules_accepted is fake_check_rules
+    assert deps.resolve_kaggle_username is fake_resolve_username
+
+
 def test_autopilot_private_attempt_submit_delegates_to_autopilot_submit(monkeypatch, tmp_path: Path) -> None:
     from kagglebot import autopilot
 

@@ -507,7 +507,8 @@ Recommended extraction order:
    The remaining `_attempt_submit` side-effect orchestration now lives in `submit_runner.py` behind
    `attempt_submit_for_run`, which coordinates `submit_stage`, `submit_notebook`, `submission_service`,
    `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. Production dependency
-   and limit construction now lives in `autopilot_submit.py`, leaving `autopilot.py`'s private `_attempt_submit` as a
+   and limit construction now lives in `autopilot_submit.py`; its default dependencies are resolved at call time so tests
+   and extensions can patch the public submit boundary directly, leaving `autopilot.py`'s private `_attempt_submit` as a
    thin compatibility wrapper. Session-level submit construction now calls `autopilot_submit.attempt_submit_for_autopilot_run`
    directly, so `SubmissionPhase` no longer imports the private wrapper. Next, continue shrinking the compatibility
    wrapper surface by moving remaining tests/extensions to the public submit service where they no longer need the private
