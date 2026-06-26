@@ -10,7 +10,7 @@ from kagglebot.agents.strategy_runner import StrategyResult, run_strategy
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.eval.core import MetricRegistry
 from kagglebot.exec_utils import run_command
-from kagglebot.json_utils import load_json_object_or_empty, write_json_object
+from kagglebot.json_utils import load_json_object_or_empty, parse_json_object_text, write_json_object
 from kagglebot.medals import (
     MEDAL_TARGET_PERCENTILES,
     TARGET_MEDAL_ERROR,
@@ -632,31 +632,21 @@ def _parse_json_response(text: str) -> dict[str, object] | None:
     raw = text.strip()
     if not raw:
         return None
-    try:
-        payload = json.loads(raw)
-        return payload if isinstance(payload, dict) else None
-    except json.JSONDecodeError:
-        pass
+    payload = parse_json_object_text(raw)
+    if payload is not None:
+        return payload
 
     fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, flags=re.DOTALL | re.IGNORECASE)
     if fence_match:
         candidate = fence_match.group(1).strip()
-        try:
-            payload = json.loads(candidate)
-            return payload if isinstance(payload, dict) else None
-        except json.JSONDecodeError:
-            return None
+        return parse_json_object_text(candidate)
 
     first = raw.find("{")
     last = raw.rfind("}")
     if first == -1 or last == -1 or first >= last:
         return None
     candidate = raw[first : last + 1]
-    try:
-        payload = json.loads(candidate)
-        return payload if isinstance(payload, dict) else None
-    except json.JSONDecodeError:
-        return None
+    return parse_json_object_text(candidate)
 
 
 def _advisor_response_schema_text() -> str:

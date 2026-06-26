@@ -17,7 +17,7 @@ from kagglebot.agents.identity import (
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
-from kagglebot.json_utils import load_json_array, load_json_object, write_json_object
+from kagglebot.json_utils import load_json_array, load_json_object, parse_json_object_text, write_json_object
 from kagglebot.knowledge import (
     derive_problem_types,
     record_research_artifacts,
@@ -614,11 +614,7 @@ def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:
     raw = _read_text(paths.dataset_profile_path).strip()
     if not raw:
         return {}
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return parse_json_object_text(raw) or {}
 
 
 def _has_data_rows(path: Path) -> bool:
@@ -776,15 +772,7 @@ def _persist_research_to_knowledge(
     research_sources_text: str,
     research_summary_text: str,
 ) -> dict[str, object]:
-    profile: dict[str, object] = {}
-    profile_text = _read_text(paths.dataset_profile_path)
-    if profile_text:
-        try:
-            parsed = json.loads(profile_text)
-            if isinstance(parsed, dict):
-                profile = parsed
-        except json.JSONDecodeError:
-            profile = {}
+    profile = _load_dataset_profile_payload(paths)
     problem_types = derive_problem_types(profile)
     persisted = record_research_artifacts(
         knowledge_paths=knowledge_paths,
@@ -1499,11 +1487,8 @@ def _summarize_dataset_profile(raw: str) -> str:
     text = raw.strip()
     if not text:
         return ""
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return _truncate(text, 1600)
-    if not isinstance(payload, dict):
+    payload = parse_json_object_text(text)
+    if payload is None:
         return _truncate(text, 1600)
     lines: list[str] = []
     for key in (
