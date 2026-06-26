@@ -16,7 +16,6 @@ from kagglebot import autofix_context as _autofix_context
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import autopilot_loop_settings as _autopilot_loop_settings
 from kagglebot import autopilot_state as _autopilot_state
-from kagglebot import autopilot_submit as _autopilot_submit
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import diagnostics as _diagnostics
@@ -86,12 +85,11 @@ from kagglebot.hardware import render_hardware_constraints, resolve_hardware_pro
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
 from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import (
-    check_rules_accepted,
     leaderboard_rank_for_score,
     leaderboard_top1,
     list_competition_submissions,
 )
-from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local, run_submit_kernel
+from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
 from kagglebot.knowledge import (
     record_error_fix_insight,
     record_improvement,
@@ -105,12 +103,6 @@ from kagglebot.planning_phase import PlanningPhase
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
-from kagglebot.submission.guard import (
-    classify_submit_error,
-    compute_error_fingerprint,
-    normalize_error_text,
-    run_kaggle_submit_kernel,
-)
 from kagglebot.top1_campaign import (
     build_blend_report,
     build_candidate_portfolio_plan,
@@ -134,7 +126,7 @@ from kagglebot.write_guard import (
     _snapshot_tree,
     build_repair_write_policy,
 )
-from kagglebot.writeup import build_writeup_bundle, infer_code_competition_from_paths, infer_deliverable_mode_from_paths
+from kagglebot.writeup import build_writeup_bundle
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -3268,37 +3260,3 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         return
 
     raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
-
-
-def _attempt_submit(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    submission_path: Path,
-    best_score: float | None,
-    problem_types: list[str],
-    submit_mode: str = "file",
-    notebook_submit_artifact_mode: str = "wrapper",
-) -> dict[str, object] | None:
-    return _autopilot_submit.attempt_submit_for_autopilot_run(
-        config=config,
-        run_id=run_id,
-        submission_path=submission_path,
-        best_score=best_score,
-        problem_types=problem_types,
-        submit_mode=submit_mode,
-        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
-        deps=_autopilot_submit.build_autopilot_submit_dependencies(
-            check_rules_accepted_func=check_rules_accepted,
-            infer_code_competition_from_paths_func=infer_code_competition_from_paths,
-            resolve_kaggle_username_func=resolve_kaggle_username,
-            run_submit_kernel_func=run_submit_kernel,
-            run_kaggle_submit_kernel_func=run_kaggle_submit_kernel,
-            classify_submit_error_func=classify_submit_error,
-            compute_error_fingerprint_func=compute_error_fingerprint,
-            normalize_error_text_func=normalize_error_text,
-            record_error_fix_insight_func=record_error_fix_insight,
-            list_competition_submissions_func=list_competition_submissions,
-            deliverable_mode_func=infer_deliverable_mode_from_paths,
-        ),
-    )

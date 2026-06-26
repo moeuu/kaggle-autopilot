@@ -239,10 +239,9 @@ environment parsing now calls `env_utils.py` directly, and submission-outcome ta
 
 The next high-value modernization work is:
 
-1. **Typed submit service**: move the remaining `_attempt_submit` side-effect choreography into a `SubmitService` or
-   `SubmitStageRunner` that composes `submit_stage`, `submit_attempts`, `submit_notebook`, `submit_failure_context`,
-   and `submission_service`. The loop should receive one typed result with outcome, artifact reference, retry summary,
-   and persistence payloads.
+1. **Typed submit service hardening**: submit side-effect choreography now lives in `submit_runner.py` and
+   `autopilot_submit.py`; continue tightening the public submit result shape so the loop receives one typed result with
+   outcome, artifact reference, retry summary, and persistence payloads.
 2. **Plan resolution service**: resolved-plan orchestration now lives in `plan_resolution.py`. The next step is to
    reduce downstream dependence on mutable resolved-plan dictionaries by passing the typed `ResolvedPlan` data through
    training, evaluation, submission, and prompts where practical. Autopilot loop bootstrap now resolves the normalized
@@ -332,9 +331,8 @@ The next high-value modernization work is:
    fallbacks.
    Planning-phase orchestration and knowledge-refresh/profile derivation now live in `planning_phase.py` and
    `knowledge_phase.py`, keeping `autopilot.py` focused on session and iteration-loop wiring.
-   Session-level planning/knowledge/submit phase wrappers now live in `autopilot_session.py`; `autopilot.py` keeps the
-   legacy `_attempt_submit` and loop entrypoint names as compatibility delegates while the phase object boundary is
-   reusable.
+   Session-level planning/knowledge/submit phase wrappers now live in `autopilot_session.py`; submit execution uses
+   `autopilot_submit.py` directly, while `autopilot.py` keeps only the loop entrypoint compatibility delegate.
    Autofix error transcript creation, submit failure context loading, deterministic submit-file repair preparation,
    prompt planning, and strategy-prompt rendering now live in `autofix_context.py`, leaving the autofix loop to focus
    on strategy execution and implementation passes.
@@ -480,39 +478,36 @@ Recommended extraction order:
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does
    not enumerate submit-failure persistence, latest-attempt loading, or success-check callbacks directly.
    Run-bound submit context wiring for attempt recording, submit autofix input resolution, code fingerprinting, abort
-   handling, and retry recording now lives behind `submit_stage.build_submit_run_context`, reducing `_attempt_submit`
-   to submit decision flow instead of helper construction.
-   Submit message/service/timestamp initialization now lives behind `submit_stage.build_submit_runtime_context`, so
-   `_attempt_submit` receives typed runtime state instead of constructing `SubmissionService` inline.
+   handling, and retry recording now lives behind `submit_stage.build_submit_run_context`, so submit decision flow no
+   longer constructs helper wiring inline.
+   Submit message/service/timestamp initialization now lives behind `submit_stage.build_submit_runtime_context`, so the
+   public submit runner receives typed runtime state instead of constructing `SubmissionService` inline.
    Notebook submit runner construction now uses `submit_notebook.build_notebook_submit_runner_for_run`, keeping
-   capacity/push-error detector wiring with the notebook submit adapter instead of in `_attempt_submit`.
+   capacity/push-error detector wiring with the notebook submit adapter instead of in autopilot loop code.
    Local validation/prepared-submission resolution and prepared SHA calculation now use
-   `submit_stage.prepare_submission_for_run_or_abort`, so `_attempt_submit` no longer open-codes validation abort
-   handling.
+   `submit_stage.prepare_submission_for_run_or_abort`, so validation abort handling stays outside the autopilot loop.
    Prepared-submission resolution and preflight orchestration can also be consumed together through
    `submit_stage.prepare_and_resolve_submit_preflight_for_run_or_abort`, keeping validation, duplicate/rules checks,
    same-path policy, and initial submit runtime state assembly behind one run-level boundary.
    Duplicate-submit checks, rules-acceptance checks, initial submit runtime-state resolution, same-path skip handling,
-   and seen-fingerprint assembly now flow through `submit_stage.resolve_submit_preflight_for_run_or_abort`, leaving
-   `_attempt_submit` to consume one typed preflight context before entering the retry loop.
+   and seen-fingerprint assembly now flow through `submit_stage.resolve_submit_preflight_for_run_or_abort`, leaving the
+   public submit runner to consume one typed preflight context before entering the retry loop.
    Submit-stage retry-loop orchestration now flows through
    `submit_stage.run_submit_stage_attempts_until_success_or_abort`, so file-vs-notebook submit dispatch, transient
    retry recording, notebook fallback application, local guardrail aborts, and Kaggle CLI aborts share one typed loop
-   boundary instead of being open-coded in `_attempt_submit`.
+   boundary instead of being open-coded in autopilot orchestration.
    Submission outcome polling, post-poll abort handling, and successful submit ledger/attempt/failure-context recording
-   now use `submit_stage.finalize_submit_outcome_for_run_or_abort`, so `_attempt_submit` no longer owns final
-   persistence choreography after the retry loop succeeds.
+   now use `submit_stage.finalize_submit_outcome_for_run_or_abort`, so final persistence choreography stays in the
+   submit service after the retry loop succeeds.
    duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
-   The remaining `_attempt_submit` side-effect orchestration now lives in `submit_runner.py` behind
-   `attempt_submit_for_run`, which coordinates `submit_stage`, `submit_notebook`, `submission_service`,
+   Submit side-effect orchestration now lives in `submit_runner.py` behind `attempt_submit_for_run`, which coordinates
+   `submit_stage`, `submit_notebook`, `submission_service`,
    `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. Production dependency
    and limit construction now lives in `autopilot_submit.py`; its default dependencies are resolved at call time so tests
-   and extensions can patch the public submit boundary directly, leaving `autopilot.py`'s private `_attempt_submit` as a
-   thin compatibility wrapper. Session-level submit construction now calls `autopilot_submit.attempt_submit_for_autopilot_run`
-   directly, so `SubmissionPhase` no longer imports the private wrapper. Submit retry fingerprint tests now exercise the
-   public submit service directly; next, continue moving remaining submit tests/extensions there until the private symbol
-   can be removed.
+   and extensions can patch the public submit boundary directly. `autopilot.py`'s private `_attempt_submit`
+   compatibility wrapper has been removed; session-level submit construction and submit tests now call
+   `autopilot_submit.attempt_submit_for_autopilot_run` directly.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to
