@@ -485,6 +485,8 @@ Recommended extraction order:
    in `submit_outcome_decisions.py`.
    Initial submit mode, artifact-mode state application, and iteration submit-phase state decisions now live in
    `submit_stage_modes.py`.
+   Prepared-submission validation/preparation and rules-acceptance preflight decisions now live in
+   `submit_preflight.py`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does
