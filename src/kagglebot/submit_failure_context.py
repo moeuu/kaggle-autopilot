@@ -563,6 +563,21 @@ def should_defer_submit_abort_to_next_iteration(
     return bool(failure_context.get("active")) and bool(failure_context.get("repairable"))
 
 
+def should_defer_submit_abort_to_next_iteration_for_run(
+    *,
+    run_dir: Path,
+    compute: str,
+    iteration: int,
+    max_iterations: int,
+) -> bool:
+    return should_defer_submit_abort_to_next_iteration(
+        compute=compute,
+        failure_context=load_submit_failure_context(run_dir),
+        iteration=iteration,
+        max_iterations=max_iterations,
+    )
+
+
 def format_submit_file_repair_contract_prompt() -> str:
     return """
 
@@ -646,6 +661,13 @@ def build_submit_failure_improvement_context(
             ]
         )
     return notes, "Previous iteration failed Kaggle submission contract; repair submit format before further tuning."
+
+
+def build_submit_failure_improvement_context_for_run(*, run_dir: Path) -> tuple[list[str], str | None]:
+    return build_submit_failure_improvement_context(
+        failure_context=load_submit_failure_context(run_dir),
+        latest_submit_attempt=load_latest_submit_attempt(run_dir),
+    )
 
 
 def resolve_submit_autofix_submission_artifact(

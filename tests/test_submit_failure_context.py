@@ -9,6 +9,7 @@ from kagglebot.submit_failure_context import (
     build_submit_failure_context_payload,
     build_submit_failure_context_payload_from_error,
     build_submit_failure_improvement_context,
+    build_submit_failure_improvement_context_for_run,
     decide_stale_submit_autofix_artifact,
     decide_submit_abort_autofixability,
     decide_submit_autofix_input_submission,
@@ -30,6 +31,7 @@ from kagglebot.submit_failure_context import (
     save_submit_autofix_repaired_path_for_run,
     save_submit_failure_context,
     should_defer_submit_abort_to_next_iteration,
+    should_defer_submit_abort_to_next_iteration_for_run,
     should_force_resubmit_after_submit_abort,
     should_force_resubmit_after_submit_abort_for_run,
     submit_failure_context_path,
@@ -683,6 +685,25 @@ def test_should_defer_submit_abort_to_next_iteration_requires_kaggle_gpu_repaira
     )
 
 
+def test_should_defer_submit_abort_to_next_iteration_for_run_loads_failure_context(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_submit_failure_context(run_dir, {"active": True, "repairable": True})
+
+    assert should_defer_submit_abort_to_next_iteration_for_run(
+        run_dir=run_dir,
+        compute="kaggle_gpu",
+        iteration=1,
+        max_iterations=3,
+    )
+    assert not should_defer_submit_abort_to_next_iteration_for_run(
+        run_dir=run_dir,
+        compute="local_gpu",
+        iteration=1,
+        max_iterations=3,
+    )
+
+
 def test_format_submit_autofix_context_includes_latest_attempt() -> None:
     context = format_submit_autofix_context(
         failure_context={
@@ -770,6 +791,39 @@ def test_build_submit_failure_improvement_context_for_file_issue() -> None:
     assert "failed_submission_artifact=/tmp/submission.csv" in notes
     assert any("Submission must have 132133 rows" in note for note in notes)
     assert any("authoritative `kernel.py`" in note for note in notes)
+
+
+def test_build_submit_failure_improvement_context_for_run_loads_context_and_latest_attempt(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "repairable": True,
+            "repair_target": "submission_artifact",
+            "reason": "submission_poll_status_error",
+            "error_kind": "validation",
+            "submission_artifact_path": "/tmp/submission.csv",
+            "summary": "Kaggle reported a submission row-count mismatch.",
+        },
+    )
+    append_submit_attempt(
+        run_dir=run_dir,
+        payload={
+            "stderr_tail": "Evaluation Exception: Submission must have 132133 rows",
+            "reason": "submission_poll_status_error",
+            "error_kind": "validation",
+        },
+        now_iso="2026-02-15T00:00:00+00:00",
+    )
+
+    notes, reason = build_submit_failure_improvement_context_for_run(run_dir=run_dir)
+
+    assert reason is not None
+    assert "repair submit format" in reason.lower()
+    assert "failed_submission_artifact=/tmp/submission.csv" in notes
+    assert any("Submission must have 132133 rows" in note for note in notes)
 
 
 def test_build_submit_failure_improvement_context_ignores_manual_or_non_file_issue() -> None:

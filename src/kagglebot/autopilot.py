@@ -2020,9 +2020,9 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         best_score=decision_score,
                     )
                 except SubmitAbortedError:
-                    if _submit_failure_context.should_defer_submit_abort_to_next_iteration(
+                    if _submit_failure_context.should_defer_submit_abort_to_next_iteration_for_run(
+                        run_dir=run_dir,
                         compute=config.compute,
-                        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
                         iteration=iteration,
                         max_iterations=max_iterations,
                     ):
@@ -2881,10 +2881,7 @@ def _run_improvement(
     (
         submit_failure_notes,
         submit_failure_force_reason,
-    ) = _submit_failure_context.build_submit_failure_improvement_context(
-        failure_context=_submit_failure_context.load_submit_failure_context(run_dir),
-        latest_submit_attempt=_submit_attempts.load_latest_submit_attempt(run_dir),
-    )
+    ) = _submit_failure_context.build_submit_failure_improvement_context_for_run(run_dir=run_dir)
     top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
     effective_current_score = evaluation.value if current_score is None else current_score
     improvement_mode, top1_gap = _score_progress.classify_improvement_mode(
