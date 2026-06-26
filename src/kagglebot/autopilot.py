@@ -29,6 +29,7 @@ from kagglebot import json_utils as _json_utils
 from kagglebot import kaggle_cli_errors as _kaggle_cli_errors
 from kagglebot import kernel_errors as _kernel_errors
 from kagglebot import kernel_metrics as _kernel_metrics
+from kagglebot import kernel_preflight as _kernel_preflight
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
 from kagglebot import knowledge_context as _knowledge_context
@@ -149,7 +150,6 @@ from kagglebot.top1_exhaustive import (
 )
 from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
-from kagglebot.validators import kernel_source_preflight_error
 from kagglebot.write_guard import (
     _backup_guarded_files,
     _diff_snapshots,
@@ -850,12 +850,21 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
 
             if evaluation is None:
                 _watch_state.update_watch_phase(config, run_id, "kernel_preflight", iteration=iteration)
-                _run_kernel_source_preflight_fixes(
-                    config=config,
-                    run_id=run_id,
-                    iteration=iteration,
-                    iter_dir=iter_dir,
-                    pending_error_fixes=pending_error_fixes,
+                _kernel_preflight.run_kernel_source_preflight_fixes(
+                    kernel_source_dir=config.paths.kernel_source_dir,
+                    dry_run=config.dry_run,
+                    max_attempts=_MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS,
+                    format_error=_kernel_errors.format_kernel_error,
+                    implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
+                    run_kernel_fix=lambda preflight_error, attempt: _run_kernel_fix(
+                        config=config,
+                        run_id=run_id,
+                        iteration=iteration,
+                        iter_dir=iter_dir,
+                        error_message=preflight_error,
+                        attempt=attempt,
+                        pending_error_fixes=pending_error_fixes,
+                    ),
                 )
 
             if evaluation is None and config.compute.startswith("kaggle_"):
@@ -2768,50 +2777,6 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         artifacts_dir=config.paths.artifacts_dir,
         run_command_fn=run_command,
     )
-
-
-def _run_kernel_source_preflight_fixes(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    iteration: int,
-    iter_dir: Path,
-    pending_error_fixes: list[dict[str, object]] | None = None,
-) -> None:
-    """Fix deterministic kernel source issues before launching a kernel run."""
-    attempt = 0
-    while True:
-        preflight_error = kernel_source_preflight_error(
-            config.paths.kernel_source_dir,
-            require_kaggle_input=False,
-            format_error=_kernel_errors.format_kernel_error,
-        )
-        if preflight_error is None:
-            return
-        lowered = preflight_error.lower()
-        if "requires kernel.py" in lowered:
-            message = preflight_error
-            if message.startswith("RuntimeError:"):
-                message = message.split(":", 1)[1].strip()
-            raise RuntimeError(message)
-        attempt += 1
-        if config.dry_run:
-            raise KernelFailedError(preflight_error)
-        if attempt > _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS:
-            raise KernelFailedError(f"Kernel source preflight failed after automatic fixes.\n{preflight_error}")
-        print(
-            "[yellow]kernel preflight[/yellow]: source contract check failed; "
-            f"invoking {IMPLEMENTATION_AGENT.log_alias} fix (attempt {attempt}/{_MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS})"
-        )
-        _run_kernel_fix(
-            config=config,
-            run_id=run_id,
-            iteration=iteration,
-            iter_dir=iter_dir,
-            error_message=preflight_error,
-            attempt=attempt,
-            pending_error_fixes=pending_error_fixes,
-        )
 
 
 def _run_improvement(

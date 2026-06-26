@@ -307,9 +307,9 @@ The next high-value modernization work is:
    Autopilot, iteration metrics, kernel quality, autopilot state, campaign metrics,
    submission history, iteration signals, score progress, kernel metrics, submission outcome, and code-reference scalar
    parsing wrappers have also been removed in favor of public helpers in `scalar_utils.py`.
-   Kernel source preflight error construction now calls `validators.py` directly; `autopilot.py` keeps only the fix loop
-   policy. Top1 public-score display formatting and `top1_public.json` snapshot persistence now call
-   `top1_exhaustive.py` directly.
+   Kernel source preflight error construction stays in `validators.py`, while preflight fix-loop retry policy now calls
+   `kernel_preflight.py` directly. Top1 public-score display formatting and `top1_public.json` snapshot persistence now
+   call `top1_exhaustive.py` directly.
    Agent/autopilot plan payload normalization, validation, high-accuracy suite repair, guardrail application, plan
    persistence, and resolved-plan-to-`PlanConfig` conversion now call `plan_policy.py` directly instead of living inside
    orchestration modules; obsolete autopilot plan load/write/resolved conversion wrappers have been retired.
