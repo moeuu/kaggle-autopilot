@@ -17,9 +17,7 @@ from kagglebot.supervisor import (
     _build_autopilot_config,
     _estimate_training_minutes,
     _load_state,
-    _parse_kaggle_gpu_quota_text,
     _plan_max_iterations,
-    _read_kaggle_gpu_quota_file,
     run_watch_once,
     select_next_competition,
 )
@@ -599,49 +597,7 @@ def test_run_watch_once_skips_when_watch_resource_is_locked(monkeypatch, tmp_pat
     assert any(record.get("event") == "locked" for record in records)
 
 
-def test_parse_kaggle_gpu_quota_text_available_of_total() -> None:
-    quota = _parse_kaggle_gpu_quota_text("14h 36m available of 30h", source="test")
-
-    assert quota is not None
-    assert quota.available_minutes == 876
-    assert quota.total_minutes == 1800
-    assert quota.used_minutes == 924
-    assert quota.source == "test"
-
-
-def test_read_kaggle_gpu_quota_file_ignores_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
-    assert _read_kaggle_gpu_quota_file(tmp_path / "missing.json") is None
-
-    invalid = tmp_path / "invalid.json"
-    invalid.write_text("{", encoding="utf-8")
-    assert _read_kaggle_gpu_quota_file(invalid) is None
-
-    array_payload = tmp_path / "array.json"
-    array_payload.write_text("[]", encoding="utf-8")
-    assert _read_kaggle_gpu_quota_file(array_payload) is None
-
-
-def test_read_kaggle_gpu_quota_file_ignores_stale_cache(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.delenv("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS", raising=False)
-    quota_path = tmp_path / "quota.json"
-    quota_path.write_text(
-        json.dumps(
-            {
-                "available_minutes": 876,
-                "total_minutes": 1800,
-                "updated_at": "2000-01-01T00:00:00+00:00",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    assert _read_kaggle_gpu_quota_file(quota_path) is None
-
-
 def test_watch_env_hour_parsers_fallback_for_invalid_and_non_finite(monkeypatch) -> None:
-    monkeypatch.setenv("KAGGLEBOT_KAGGLE_GPU_QUOTA_FILE_MAX_AGE_HOURS", "nan")
-    assert supervisor._kaggle_gpu_quota_file_max_age_hours() == 24.0  # noqa: SLF001
-
     monkeypatch.setenv("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS", "nan")
     assert supervisor._resource_block_ttl_hours() == 168.0  # noqa: SLF001
 
@@ -650,26 +606,6 @@ def test_watch_env_hour_parsers_fallback_for_invalid_and_non_finite(monkeypatch)
 
     monkeypatch.setenv("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS", "bad")
     assert supervisor._active_run_stale_hours() == 24.0  # noqa: SLF001
-
-
-def test_read_kaggle_gpu_quota_file_honors_explicit_expiry(tmp_path: Path) -> None:
-    quota_path = tmp_path / "quota.json"
-    quota_path.write_text(
-        json.dumps(
-            {
-                "available_minutes": 1800,
-                "total_minutes": 1800,
-                "updated_at": "2000-01-01T00:00:00+00:00",
-                "expires_at": "2999-01-01T00:00:00+00:00",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    quota = _read_kaggle_gpu_quota_file(quota_path)
-
-    assert quota is not None
-    assert quota.available_minutes == 1800
 
 
 def test_load_state_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:

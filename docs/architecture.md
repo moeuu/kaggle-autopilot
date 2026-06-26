@@ -337,7 +337,9 @@ The next high-value modernization work is:
    compatibility call sites and self-improvement run summaries on the shared score policy. Timestamp parsing for ISO
    values and Kaggle CLI date formats now normalizes values to UTC in `datetime_utils.py`, so bootstrap, Kaggle API
    adapters, notification, supervisor, submission ledger, submission quota policy, and submission-outcome code share one
-   timezone policy.
+   timezone policy. Kaggle GPU quota status parsing, cache-file parsing/staleness checks, human duration parsing, and
+   quota-display formatting now live in `kaggle_gpu_quota.py`; `supervisor.py` keeps only watch orchestration and the
+   optional web-cookie fetch adapter.
 
 Each modernization step should come with focused tests for the extracted module plus the standard full gate. Prefer
 small extractions that make import direction clearer over broad refactors that only move code.
