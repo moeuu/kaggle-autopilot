@@ -918,14 +918,6 @@ def run_kernel_local(
     )
 
 
-LOG_POLL_INTERVAL = 2.0
-HEARTBEAT_INTERVAL = 30.0
-STATUS_ERROR_SLEEP = 10.0
-MAX_STATUS_ERRORS = 6
-KERNEL_REGISTER_RETRIES = 24
-KERNEL_REGISTER_SLEEP = 5.0
-
-
 def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
     _kernel_wait.raise_kernel_timeout(kernel_id, last_status)
 
@@ -1039,12 +1031,6 @@ def _wait_for_kernel(
             remote_kernel_queued_timeout_sec=_remote_kernel_state.remote_kernel_queued_timeout_sec,
             raise_kernel_queued_timeout=_remote_kernel_state.raise_kernel_queued_timeout,
         ),
-        limits=_kernel_wait.KernelWaitLimits(
-            log_poll_interval=LOG_POLL_INTERVAL,
-            heartbeat_interval=HEARTBEAT_INTERVAL,
-            status_error_sleep=STATUS_ERROR_SLEEP,
-            max_status_errors=MAX_STATUS_ERRORS,
-        ),
     )
 
 
@@ -1058,8 +1044,6 @@ def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | Non
             kernel_id_by_title=kernel_id_by_title,
             sleep=time.sleep,
         ),
-        retries=KERNEL_REGISTER_RETRIES,
-        sleep_interval=KERNEL_REGISTER_SLEEP,
     )
 
 
