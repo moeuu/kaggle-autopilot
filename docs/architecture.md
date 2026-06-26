@@ -54,9 +54,10 @@ Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 ## 3) Iteration Loop
 
 Main loop is in `src/kagglebot/autopilot.py`.
-Supporting state/resume helpers now live in `src/kagglebot/autopilot_state.py`; score, leaderboard/online-best-score,
-and iteration-signal policy helpers live in `src/kagglebot/score_utils.py`, `src/kagglebot/leaderboard_policy.py`, and
-`src/kagglebot/iteration_signals.py`, so the main file stays focused on orchestration.
+Supporting state/resume helpers, including CLI resume run-id and latest-run resolution, now live in
+`src/kagglebot/autopilot_state.py`; score, leaderboard/online-best-score, and iteration-signal policy helpers live in
+`src/kagglebot/score_utils.py`, `src/kagglebot/leaderboard_policy.py`, and `src/kagglebot/iteration_signals.py`, so the
+main file stays focused on orchestration.
 Competition rule parsing now lives in `src/kagglebot/competition_rules.py`; the loop calls that public module directly
 instead of carrying private rule-parsing aliases in `autopilot.py`.
 Offline score-source normalization, user-selectable score-source validation, and trust checks live in
@@ -283,10 +284,10 @@ The next high-value modernization work is:
    `submit_retry_policy.py` and `submit_failure_context.py` directly, same-fingerprint retry allowance now calls
    `submit_retry_policy.py` directly, and submit-abort deferral now calls `submit_failure_context.py` directly.
    Planning necessity and resume-skip checks now call `plan_policy.py` directly.
-   Iteration resume, submit-retry artifact resume, best-submission resume paths, run payload/summary construction,
-   run-state reads, iteration-state marker writes, and iteration submission-artifact resolution now call
-   `autopilot_state.py` directly. Submit-attempt status/fingerprint lookups now call `submit_attempts.py` directly
-   instead of passing through state wrappers. Submit autofix context formatting, stale repaired-artifact decisions and
+   Iteration resume, CLI resume run-id/latest-run resolution, submit-retry artifact resume, best-submission resume paths,
+   run payload/summary construction, run-state reads, iteration-state marker writes, and iteration submission-artifact
+   resolution now call `autopilot_state.py` directly. Submit-attempt status/fingerprint lookups now call
+   `submit_attempts.py` directly instead of passing through state wrappers. Submit autofix context formatting, stale repaired-artifact decisions and
    application,
    autofix artifact
    resolution, submit-failure improvement context, and submit-file repair contract checks now call

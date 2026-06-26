@@ -10,6 +10,7 @@ from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
+from kagglebot.autopilot_state import ResumeRunResolutionError, resolve_resume_run_id
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.campaign import normalize_campaign_mode
 from kagglebot.competition import parse_competition_slug
@@ -468,11 +469,14 @@ def autopilot(
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
 
     resolved_accelerator = _resolve_accelerator(compute.value, accelerator)
-    requested_resume_id = _resolve_resume_run_id(
-        paths=paths,
-        resume_run_id=resume_run_id,
-        resume_latest=resume_latest,
-    )
+    try:
+        requested_resume_id = resolve_resume_run_id(
+            paths=paths,
+            resume_run_id=resume_run_id,
+            resume_latest=resume_latest,
+        )
+    except ResumeRunResolutionError as exc:
+        raise typer.BadParameter(str(exc), param_hint=exc.param_hint) from exc
     resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
     resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
     resume_run = bool(resume_id and resume_slug == slug)
@@ -1075,78 +1079,6 @@ def _resolve_accelerator(compute: str, accelerator: str) -> str:
         return resolve_accelerator(compute, accelerator)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--accelerator") from exc
-
-
-def _resolve_resume_run_id(
-    *,
-    paths: CompetitionPaths,
-    resume_run_id: str | None,
-    resume_latest: bool,
-) -> str | None:
-    if resume_run_id and resume_latest:
-        raise typer.BadParameter(
-            "Use either --resume-run-id or --resume-latest, not both.",
-            param_hint="--resume-run-id",
-        )
-    if resume_run_id:
-        candidate = resume_run_id.strip()
-        if not candidate:
-            raise typer.BadParameter("--resume-run-id cannot be empty.", param_hint="--resume-run-id")
-        if paths.run_dir(candidate).exists():
-            return candidate
-        run_ids = sorted(_list_run_ids(paths))
-        prefix_matches = [run_id for run_id in run_ids if run_id.startswith(candidate)]
-        if len(prefix_matches) == 1:
-            return prefix_matches[0]
-        if len(prefix_matches) > 1:
-            options = ", ".join(prefix_matches[:5])
-            raise typer.BadParameter(
-                f"Run ID prefix is ambiguous: {candidate} ({options})",
-                param_hint="--resume-run-id",
-            )
-        if run_ids:
-            hints = ", ".join(run_ids[-3:])
-            raise typer.BadParameter(
-                f"Run ID not found: {candidate}. Recent run IDs: {hints}",
-                param_hint="--resume-run-id",
-            )
-        raise typer.BadParameter(f"Run ID not found: {candidate}", param_hint="--resume-run-id")
-    if not resume_latest:
-        return None
-    latest = _find_latest_run_id(paths)
-    if latest is None:
-        raise typer.BadParameter(f"No prior runs found under {paths.runs_dir}", param_hint="--resume-latest")
-    return latest
-
-
-def _find_latest_run_id(paths: CompetitionPaths) -> str | None:
-    runs_dir = paths.runs_dir
-    if not runs_dir.exists():
-        return None
-    latest_name: str | None = None
-    latest_mtime: float | None = None
-    for run_dir in runs_dir.iterdir():
-        if not run_dir.is_dir():
-            continue
-        try:
-            mtime = run_dir.stat().st_mtime
-        except OSError:
-            continue
-        if latest_mtime is None or mtime > latest_mtime:
-            latest_name = run_dir.name
-            latest_mtime = mtime
-    return latest_name
-
-
-def _list_run_ids(paths: CompetitionPaths) -> list[str]:
-    runs_dir = paths.runs_dir
-    if not runs_dir.exists():
-        return []
-    run_ids: list[str] = []
-    for run_dir in runs_dir.iterdir():
-        if run_dir.is_dir():
-            run_ids.append(run_dir.name)
-    return run_ids
 
 
 def _print_rules(slug: str) -> None:

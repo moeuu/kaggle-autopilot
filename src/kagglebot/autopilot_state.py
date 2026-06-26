@@ -24,6 +24,84 @@ if TYPE_CHECKING:
 _ITERATION_STATE_FILENAME = "iteration_state.json"
 
 
+class ResumeRunResolutionError(ValueError):
+    def __init__(self, message: str, *, param_hint: str) -> None:
+        super().__init__(message)
+        self.param_hint = param_hint
+
+
+def resolve_resume_run_id(
+    *,
+    paths: CompetitionPaths,
+    resume_run_id: str | None,
+    resume_latest: bool,
+) -> str | None:
+    if resume_run_id and resume_latest:
+        raise ResumeRunResolutionError(
+            "Use either --resume-run-id or --resume-latest, not both.",
+            param_hint="--resume-run-id",
+        )
+    if resume_run_id:
+        candidate = resume_run_id.strip()
+        if not candidate:
+            raise ResumeRunResolutionError("--resume-run-id cannot be empty.", param_hint="--resume-run-id")
+        if paths.run_dir(candidate).exists():
+            return candidate
+        run_ids = sorted(list_run_ids(paths))
+        prefix_matches = [run_id for run_id in run_ids if run_id.startswith(candidate)]
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+        if len(prefix_matches) > 1:
+            options = ", ".join(prefix_matches[:5])
+            raise ResumeRunResolutionError(
+                f"Run ID prefix is ambiguous: {candidate} ({options})",
+                param_hint="--resume-run-id",
+            )
+        if run_ids:
+            hints = ", ".join(run_ids[-3:])
+            raise ResumeRunResolutionError(
+                f"Run ID not found: {candidate}. Recent run IDs: {hints}",
+                param_hint="--resume-run-id",
+            )
+        raise ResumeRunResolutionError(f"Run ID not found: {candidate}", param_hint="--resume-run-id")
+    if not resume_latest:
+        return None
+    latest = find_latest_run_id(paths)
+    if latest is None:
+        raise ResumeRunResolutionError(f"No prior runs found under {paths.runs_dir}", param_hint="--resume-latest")
+    return latest
+
+
+def find_latest_run_id(paths: CompetitionPaths) -> str | None:
+    runs_dir = paths.runs_dir
+    if not runs_dir.exists():
+        return None
+    latest_name: str | None = None
+    latest_mtime: float | None = None
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        try:
+            mtime = run_dir.stat().st_mtime
+        except OSError:
+            continue
+        if latest_mtime is None or mtime > latest_mtime:
+            latest_name = run_dir.name
+            latest_mtime = mtime
+    return latest_name
+
+
+def list_run_ids(paths: CompetitionPaths) -> list[str]:
+    runs_dir = paths.runs_dir
+    if not runs_dir.exists():
+        return []
+    run_ids: list[str] = []
+    for run_dir in runs_dir.iterdir():
+        if run_dir.is_dir():
+            run_ids.append(run_dir.name)
+    return run_ids
+
+
 def _build_run_payload(
     *,
     run_id: str,

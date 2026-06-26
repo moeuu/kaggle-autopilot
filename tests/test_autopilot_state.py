@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 from kagglebot.autopilot_state import (
+    ResumeRunResolutionError,
     _apply_final_run_status,
     _apply_run_status,
     _build_run_payload,
@@ -14,7 +16,11 @@ from kagglebot.autopilot_state import (
     _save_run_state,
     _write_iteration_state_marker,
     _write_run_payload,
+    find_latest_run_id,
+    list_run_ids,
+    resolve_resume_run_id,
 )
+from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
 
 
@@ -238,6 +244,60 @@ def test_write_iteration_state_marker_writes_json_object(tmp_path: Path) -> None
     assert payload["submission_exists"] is True
     assert payload["submit_phase_finished"] is True
     assert payload["readiness_score"] == 0.42
+
+
+def test_resolve_resume_run_id_accepts_exact_and_unique_prefix(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_id = "20260216T000000Z-abcd1234"
+    paths.run_dir(run_id).mkdir(parents=True)
+
+    assert resolve_resume_run_id(paths=paths, resume_run_id=run_id, resume_latest=False) == run_id
+    assert resolve_resume_run_id(paths=paths, resume_run_id="20260216T000000Z-abcd", resume_latest=False) == run_id
+
+
+def test_resolve_resume_run_id_selects_latest_by_mtime(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    older = paths.run_dir("run-old")
+    newer = paths.run_dir("run-new")
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    older_file = older / "not-a-run-dir.txt"
+    older_file.write_text("ignored", encoding="utf-8")
+    (paths.runs_dir / "not-a-dir").write_text("ignored", encoding="utf-8")
+    older_mtime = 1
+    newer_mtime = 2
+    os.utime(older, (older_mtime, older_mtime))
+    os.utime(newer, (newer_mtime, newer_mtime))
+
+    assert sorted(list_run_ids(paths)) == ["run-new", "run-old"]
+    assert find_latest_run_id(paths) == "run-new"
+    assert resolve_resume_run_id(paths=paths, resume_run_id=None, resume_latest=True) == "run-new"
+
+
+def test_resolve_resume_run_id_reports_ambiguous_prefix(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.run_dir("20260216T000000Z-abcd1111").mkdir(parents=True)
+    paths.run_dir("20260216T000000Z-abcd2222").mkdir(parents=True)
+
+    try:
+        resolve_resume_run_id(paths=paths, resume_run_id="20260216T000000Z-abcd", resume_latest=False)
+    except ResumeRunResolutionError as exc:
+        assert exc.param_hint == "--resume-run-id"
+        assert "ambiguous" in str(exc)
+    else:
+        raise AssertionError("expected ambiguous prefix to raise")
+
+
+def test_resolve_resume_run_id_rejects_conflicting_flags(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+
+    try:
+        resolve_resume_run_id(paths=paths, resume_run_id="run-1", resume_latest=True)
+    except ResumeRunResolutionError as exc:
+        assert exc.param_hint == "--resume-run-id"
+        assert "either --resume-run-id or --resume-latest" in str(exc)
+    else:
+        raise AssertionError("expected conflicting flags to raise")
 
 
 def test_load_submitted_iteration_tracking_score_ignores_non_finite_submission_score(tmp_path: Path) -> None:
