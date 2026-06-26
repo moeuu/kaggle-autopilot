@@ -683,6 +683,65 @@ def resolve_duplicate_submission_for_submit(
     )
 
 
+def resolve_duplicate_submission_for_run(
+    *,
+    run_dir: Path,
+    submission_ledger_path: Path,
+    slug: str,
+    run_id: str,
+    message: str,
+    submitted_at: datetime,
+    submission_path: Path,
+    prepared_submission_path: Path,
+    prepared_submission_sha: str,
+    code_fingerprint: str,
+    allow_force: bool,
+    prior_state: dict[str, object],
+    collect_duplicate_submission_sources: Callable[..., list[str]],
+    decide_duplicate_submission_action: Callable[..., object],
+    compute_error_fingerprint: Callable[[str, str], str],
+    record_submit_attempt_payloads: Callable[[object], object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> dict[str, object] | None:
+    return resolve_duplicate_submission_for_submit(
+        slug=slug,
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_path=submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha=prepared_submission_sha,
+        code_fingerprint=code_fingerprint,
+        allow_force=allow_force,
+        prior_state=prior_state,
+        collect_duplicate_submission_sources=collect_duplicate_submission_sources,
+        decide_duplicate_submission_action=decide_duplicate_submission_action,
+        submission_attempt_sha_seen=lambda submission_sha: _submit_attempts.submit_attempt_sha_seen(
+            run_dir=run_dir,
+            submission_sha=submission_sha,
+        ),
+        submission_ledger_duplicate=lambda: SubmissionLedger(submission_ledger_path).is_duplicate(
+            slug=slug,
+            message=message,
+            submission_path=prepared_submission_path,
+        ),
+        compute_error_fingerprint=compute_error_fingerprint,
+        record_submit_attempt_payloads=record_submit_attempt_payloads,
+        mark_duplicate_skipped=lambda submission_ref, reason: (
+            _submit_failure_context.mark_submit_failure_context_duplicate_skipped(
+                run_dir=run_dir,
+                submission_ref=submission_ref,
+                reason=reason,
+            )
+        ),
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+
+
 def submission_score_for_tracking(*, offline_score: float, online_score: float | None) -> tuple[float, str]:
     if isinstance(online_score, (int, float)):
         value = float(online_score)

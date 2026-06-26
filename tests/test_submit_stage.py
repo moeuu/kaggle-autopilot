@@ -4,7 +4,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
+from kagglebot.history import SubmissionLedger
 from kagglebot.json_utils import load_jsonl_records
+from kagglebot.submit_attempts import append_submit_attempt
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
@@ -53,6 +55,7 @@ from kagglebot.submit_stage import (
     record_successful_submit_for_run,
     record_successful_submit_stage_result,
     require_prepared_submission_path,
+    resolve_duplicate_submission_for_run,
     resolve_duplicate_submission_for_submit,
     resolve_initial_submit_stage_runtime_state,
     resolve_iteration_submit_phase_state,
@@ -676,6 +679,85 @@ def test_resolve_duplicate_submission_for_submit_ignores_non_duplicate(tmp_path:
     assert recorded_payloads == []
     assert marked == []
     assert messages == []
+
+
+def test_resolve_duplicate_submission_for_run_binds_attempt_ledger_and_failure_context(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    prepared_submission_path = tmp_path / "prepared.csv"
+    prepared_submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    source_submission_path = tmp_path / "iter-6" / "submission.csv"
+    source_submission_path.parent.mkdir(parents=True)
+    source_submission_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    submitted_at = datetime(2026, 6, 25, tzinfo=UTC)
+    append_submit_attempt(run_dir=run_dir, payload={"sub_sha256": "sha", "action_taken": "submit"})
+    ledger_path = tmp_path / "ledger.jsonl"
+    SubmissionLedger(ledger_path).record(
+        slug="demo",
+        message="submit message",
+        submission_path=prepared_submission_path,
+        run_id="run-1",
+    )
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "reason": "previous_submission_error",
+            "submission_ref": "old-submission.csv",
+        },
+    )
+    recorded_payloads: list[object] = []
+    messages: list[str] = []
+    collect_calls: list[dict[str, object]] = []
+
+    def collect_duplicate_submission_sources(**kwargs: object) -> list[str]:
+        collect_calls.append(kwargs)
+        sources: list[str] = []
+        if kwargs["submission_attempt_sha_seen"]("sha"):
+            sources.append("run_attempts")
+        if kwargs["submission_ledger_duplicate"]():
+            sources.append("submission_ledger")
+        return sources
+
+    result = resolve_duplicate_submission_for_run(
+        run_dir=run_dir,
+        submission_ledger_path=ledger_path,
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=submitted_at,
+        submission_path=source_submission_path,
+        prepared_submission_path=prepared_submission_path,
+        prepared_submission_sha="sha",
+        code_fingerprint="code-fp",
+        allow_force=False,
+        prior_state={"submit_attempts_count": 1},
+        collect_duplicate_submission_sources=collect_duplicate_submission_sources,
+        decide_duplicate_submission_action=lambda **kwargs: DuplicateDecisionStub(
+            action="skip",
+            reason="duplicate_submission_sha_seen",
+            message="[yellow]submit skipped[/yellow]: duplicate",
+            fingerprint="fp",
+            duplicate_sources=kwargs["duplicate_sources"],
+        ),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        record_submit_attempt_payloads=recorded_payloads.append,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=messages.append,
+    )
+
+    assert collect_calls
+    assert collect_calls[0]["prepared_submission_sha"] == "sha"
+    assert result is not None
+    assert result["skipped"] is True
+    assert result["duplicate_sources"] == ["run_attempts", "submission_ledger"]
+    assert recorded_payloads[0].attempt_payload["duplicate_sources"] == ["run_attempts", "submission_ledger"]
+    failure_context = load_submit_failure_context(run_dir)
+    assert failure_context["active"] is False
+    assert failure_context["resolution"] == "duplicate_submission_sha_seen"
+    assert failure_context["resolved_submission_ref"] == str(prepared_submission_path)
+    assert messages == ["[yellow]submit skipped[/yellow]: duplicate"]
 
 
 def test_build_kaggle_credentials_missing_abort_spec_preserves_error_details() -> None:

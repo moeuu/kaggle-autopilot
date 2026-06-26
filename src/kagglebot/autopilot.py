@@ -96,7 +96,7 @@ from kagglebot.experiment_graph import (
 )
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.hashing import sha256_file_or_none as _sha256_or_none
-from kagglebot.history import SubmissionLedger, new_run_id
+from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     leaderboard_rank_for_score,
@@ -4413,7 +4413,9 @@ def _attempt_submit(
     )
 
     prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
-    duplicate_skip_result = _submit_stage.resolve_duplicate_submission_for_submit(
+    duplicate_skip_result = _submit_stage.resolve_duplicate_submission_for_run(
+        run_dir=run_dir,
+        submission_ledger_path=config.paths.submission_ledger_path,
         slug=config.slug,
         run_id=run_id,
         message=message,
@@ -4426,24 +4428,8 @@ def _attempt_submit(
         prior_state=_autopilot_state._load_run_state(run_dir),
         collect_duplicate_submission_sources=_submit_retry_policy.collect_duplicate_submission_sources,
         decide_duplicate_submission_action=_submit_retry_policy.decide_duplicate_submission_action,
-        submission_attempt_sha_seen=lambda submission_sha: _submit_attempts.submit_attempt_sha_seen(
-            run_dir=run_dir,
-            submission_sha=submission_sha,
-        ),
-        submission_ledger_duplicate=lambda: SubmissionLedger(config.paths.submission_ledger_path).is_duplicate(
-            slug=config.slug,
-            message=message,
-            submission_path=prepared_submission_path,
-        ),
         compute_error_fingerprint=compute_error_fingerprint,
         record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
-        mark_duplicate_skipped=lambda submission_ref, reason: (
-            _submit_failure_context.mark_submit_failure_context_duplicate_skipped(
-                run_dir=run_dir,
-                submission_ref=submission_ref,
-                reason=reason,
-            )
-        ),
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         on_message=print,
