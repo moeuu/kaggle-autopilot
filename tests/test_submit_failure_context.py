@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kagglebot.submit_attempts import SubmitAttemptRecorder, load_latest_submit_attempt
+from kagglebot.submit_attempts import SubmitAttemptRecorder, append_submit_attempt, load_latest_submit_attempt
 from kagglebot.submit_failure_context import (
     apply_stale_submit_autofix_decision,
     build_submit_failure_context_payload,
@@ -24,6 +24,7 @@ from kagglebot.submit_failure_context import (
     resolve_submit_abort_artifact_path,
     resolve_submit_abort_autofixability_for_run,
     resolve_submit_autofix_context_for_attempt,
+    resolve_submit_autofix_context_for_run,
     resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
     should_defer_submit_abort_to_next_iteration,
@@ -478,6 +479,33 @@ def test_resolve_submit_autofix_context_for_attempt_uses_matching_repaired_artif
     assert context.latest_submit_attempt == {}
     assert context.input_submission_path == repaired
     assert str(repaired) in context.message
+
+
+def test_resolve_submit_autofix_context_for_run_loads_latest_attempt(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    original = tmp_path / "iter-1" / "submission.csv"
+    original.parent.mkdir(parents=True)
+    original.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    append_payload = {"stderr_tail": "previous failure", "fingerprint": "fp-1"}
+    append_submit_attempt(
+        run_dir=run_dir,
+        payload=append_payload,
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+
+    context = resolve_submit_autofix_context_for_run(
+        run_dir=run_dir,
+        submission_path=original,
+        load_run_state=lambda path: {"submit_ok": False} if path == run_dir else {},
+        save_run_state=lambda _updates: None,
+        now_iso="2026-06-25T00:01:00+00:00",
+    )
+
+    assert context.run_state == {"submit_ok": False}
+    assert context.latest_submit_attempt["stderr_tail"] == "previous failure"
+    assert context.latest_submit_attempt["fingerprint"] == "fp-1"
+    assert context.input_submission_path == original
 
 
 def test_decide_submit_abort_autofixability_allows_repairable_failure_context() -> None:

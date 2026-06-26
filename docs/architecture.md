@@ -102,7 +102,7 @@ Submit failure classification, notebook-submit fallback detection, and repair-ta
 longer owns the pure decision table for whether a failed submit should repair the artifact, submit mode/kernel, platform
 polling path, or wait for manual intervention.
 Submit failure context persistence, reference parsing, prompt formatting, stale repaired-artifact decisions/application,
-submit-attempt autofix input resolution, and submit autofix artifact resolution live in
+run-level submit-attempt autofix context/input resolution, and submit autofix artifact resolution live in
 `src/kagglebot/submit_failure_context.py`, keeping submit recovery state handling out of the main loop. Submit
 failure-context payload creation plus submitted/duplicate-skip resolution marking also live there; the loop supplies
 repair decisions and runtime state snapshots.
@@ -379,8 +379,8 @@ Recommended extraction order:
 4. Submit state persistence: submit attempt JSONL writing/reading, duplicate SHA lookup, submit attempt/run-state payloads,
    submit-abort artifact path resolution, repair-classified submit failure-context payloads, submit knowledge-record
    payloads/orchestration, same-submission-path skip payloads, submit-abort attempt/context persistence, submit result
-   payload construction, resume-time submit attempt completion/iteration inference, and run-level submit-abort
-   autofixability resolution are now centralized.
+   payload construction, resume-time submit attempt completion/iteration inference, run-level submit autofix context
+   resolution, and run-level submit-abort autofixability resolution are now centralized.
    Seen-fingerprint set assembly/run loading, duplicate-submit source collection, and skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, initial artifact-mode resolution, tiny public

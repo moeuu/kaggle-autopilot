@@ -7,7 +7,11 @@ from pathlib import Path
 
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.submission.guard import normalize_error_text
-from kagglebot.submit_attempts import SubmitAttemptRecorder, build_submit_abort_record_payloads
+from kagglebot.submit_attempts import (
+    SubmitAttemptRecorder,
+    build_submit_abort_record_payloads,
+    load_latest_submit_attempt,
+)
 from kagglebot.submit_failure_policy import (
     SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT,
     SubmitFailureRepairDecision,
@@ -376,6 +380,24 @@ def resolve_submit_autofix_context_for_attempt(
         latest_submit_attempt=latest_submit_attempt,
         input_submission_path=input_decision.input_submission_path,
         message=input_decision.message,
+    )
+
+
+def resolve_submit_autofix_context_for_run(
+    *,
+    run_dir: Path,
+    submission_path: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+    save_run_state: Callable[[dict[str, object]], object],
+    now_iso: str,
+) -> SubmitAutofixAttemptContext:
+    return resolve_submit_autofix_context_for_attempt(
+        run_dir=run_dir,
+        submission_path=submission_path,
+        load_run_state=load_run_state,
+        load_latest_submit_attempt=load_latest_submit_attempt,
+        save_run_state=save_run_state,
+        now_iso=now_iso,
     )
 
 

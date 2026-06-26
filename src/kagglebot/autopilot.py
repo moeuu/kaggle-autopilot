@@ -4328,11 +4328,10 @@ def _attempt_submit(
         run_dir=run_dir,
         save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
     )
-    autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_attempt(
+    autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_run(
         run_dir=run_dir,
         submission_path=submission_path,
         load_run_state=_autopilot_state._load_run_state,
-        load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
         save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
         now_iso=datetime.now(UTC).isoformat(),
     )
