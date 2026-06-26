@@ -459,7 +459,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             resolved=resolved,
             status="missing_target",
         )
-        _json_utils.write_json_object(run_dir / "run.json", run_payload)
+        _autopilot_state._write_run_payload(run_dir, run_payload)
         return
 
     metric_direction = infer_direction(target_metric, resolved["target_direction"])
@@ -509,7 +509,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         resolved=resolved,
         status="running",
     )
-    _json_utils.write_json_object(run_dir / "run.json", run_payload)
+    _autopilot_state._write_run_payload(run_dir, run_payload)
     _kernel_snapshot.ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
     record_run(
@@ -2034,7 +2034,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                     else:
                         run_payload["status"] = "submit_failed"
-                        _json_utils.write_json_object(run_dir / "run.json", run_payload)
+                        _autopilot_state._write_run_payload(run_dir, run_payload)
                         raise
                 if submission_result:
                     if bool(submission_result.get("skipped")):
@@ -2592,7 +2592,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
-        _json_utils.write_json_object(run_dir / "run.json", run_payload)
+        _autopilot_state._write_run_payload(run_dir, run_payload)
         print("[yellow]run interrupted[/yellow]")
         return
 
@@ -2642,7 +2642,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             except SubmitAbortedError:
                 run_payload["status"] = "submit_failed"
-                _json_utils.write_json_object(run_dir / "run.json", run_payload)
+                _autopilot_state._write_run_payload(run_dir, run_payload)
                 raise
             if fallback_result:
                 if bool(fallback_result.get("skipped")):
@@ -2723,7 +2723,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         fallback_submit_blocked_reason=fallback_submit_blocked_reason,
     )
 
-    _json_utils.write_json_object(run_dir / "run.json", run_payload)
+    _autopilot_state._write_run_payload(run_dir, run_payload)
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:

@@ -13,6 +13,7 @@ from kagglebot.autopilot_state import (
     _load_submitted_iteration_tracking_score,
     _save_run_state,
     _write_iteration_state_marker,
+    _write_run_payload,
 )
 from kagglebot.solver.evaluate import EvaluationResult
 
@@ -52,6 +53,16 @@ def test_build_run_payload_records_config_and_resolved_state() -> None:
     assert payload["config"]["target_score"] == 0.5
     assert payload["config"]["submit"] is True
     assert payload["config"]["evaluation_contract"] == {"metric_name": "rmse"}
+
+
+def test_write_run_payload_writes_run_json(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    _write_run_payload(run_dir, {"run_id": "run-1", "status": "running"})
+
+    payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert payload == {"run_id": "run-1", "status": "running"}
 
 
 def test_apply_run_status_sets_status_and_optional_stop_reason() -> None:

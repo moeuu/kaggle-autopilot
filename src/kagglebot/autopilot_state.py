@@ -155,6 +155,10 @@ def _apply_final_run_status(
     return payload
 
 
+def _write_run_payload(run_dir: Path, payload: dict[str, object]) -> None:
+    write_json_object(run_dir / "run.json", payload)
+
+
 def _write_iteration_state_marker(
     *,
     iter_dir: Path,
