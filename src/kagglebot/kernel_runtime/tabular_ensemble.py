@@ -91,6 +91,9 @@ def set_global_seed(seed: int) -> None:
 
 
 def safe_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    y_true_arr = np.asarray(y_true)
+    if np.unique(y_true_arr).size < 2:
+        return 0.5
     return float(roc_auc_score(y_true, y_score))
 
 

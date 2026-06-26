@@ -11,6 +11,7 @@ from kagglebot.kernel_runtime.tabular_ensemble import (
     build_prediction_correlation_summary,
     maybe_apply_pseudo_labels,
     resolve_component_models,
+    safe_auc,
     train_catboost_model,
     train_xgb_model,
     write_fold_intermediate_artifacts,
@@ -62,6 +63,10 @@ def test_build_prediction_correlation_summary_uses_single_models_only() -> None:
     assert summary["mean_abs_corr"] is not None
     assert summary["max_abs_corr"] is not None
     assert summary["min_abs_corr"] is not None
+
+
+def test_safe_auc_returns_neutral_score_for_single_class_fold() -> None:
+    assert safe_auc(np.array([1, 1], dtype=np.int8), np.array([0.2, 0.8], dtype=np.float64)) == 0.5
 
 
 def test_write_fold_intermediate_artifacts_writes_valid_submission_and_manifest(tmp_path) -> None:
