@@ -146,10 +146,6 @@ class KernelSubmitBuildConfig:
     hardware_profile: str | None = "auto"
 
 
-def _resolve_submit_kernel_accelerator(requested: str) -> str:
-    return _resolve_submit_accelerator(requested, env_get=os.getenv)
-
-
 @dataclass(frozen=True)
 class KernelPackageBuilder:
     def prepare(self, config: KernelBuildConfig) -> KernelPreparation:
@@ -324,7 +320,7 @@ class KernelSubmitPackageBuilder:
             _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
             _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
             ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
-        submit_accelerator = _resolve_submit_kernel_accelerator(config.accelerator)
+        submit_accelerator = _resolve_submit_accelerator(config.accelerator, env_get=os.getenv)
         _kernel_metadata.write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
@@ -859,10 +855,6 @@ def run_kernel_local(
         submission_path=submission_dst,
         metrics_path=metrics_dst,
     )
-
-
-def _raise_kernel_timeout(kernel_id: str, last_status: str | None) -> None:
-    _kernel_wait.raise_kernel_timeout(kernel_id, last_status)
 
 
 def _wait_for_kernel_and_record_pending(
