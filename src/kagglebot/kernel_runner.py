@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,41 +89,6 @@ _BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
     r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
     re.IGNORECASE,
 )
-
-
-_LocalKernelExecResult = _local_kernel_process.LocalKernelExecResult
-_LocalKernelLogFilterState = _local_kernel_process.LocalKernelLogFilterState
-
-
-def _should_suppress_local_kernel_log_line(line: str, *, state: _LocalKernelLogFilterState) -> bool:
-    return _local_kernel_process.should_suppress_local_kernel_log_line(line, state=state)
-
-
-def _terminate_local_kernel_process(proc: subprocess.Popen[str]) -> None:
-    _local_kernel_process.terminate_local_kernel_process(proc)
-
-
-def _terminate_local_kernel_process_group(proc: subprocess.Popen[str]) -> None:
-    _local_kernel_process.terminate_local_kernel_process_group(proc)
-
-
-def _run_local_kernel_once(
-    *,
-    kernel_path: Path,
-    kernel_stage_dir: Path,
-    current_env: dict[str, str],
-    timeout_sec: int | None,
-    line_callback: Callable[[str], None] | None,
-    progress_tracker: _local_kernel_progress.LocalKernelProgressTracker | None,
-) -> _LocalKernelExecResult:
-    return _local_kernel_process.run_local_kernel_once(
-        kernel_path=kernel_path,
-        kernel_stage_dir=kernel_stage_dir,
-        current_env=current_env,
-        timeout_sec=timeout_sec,
-        line_callback=line_callback,
-        progress_tracker=progress_tracker,
-    )
 
 
 @dataclass(frozen=True)
@@ -746,8 +710,8 @@ def run_kernel_local(
     heartbeat.start()
     try:
 
-        def run_once_with_watchdog(*, current_env: dict[str, str]) -> _LocalKernelExecResult:
-            return _run_local_kernel_once(
+        def run_once_with_watchdog(*, current_env: dict[str, str]) -> _local_kernel_process.LocalKernelExecResult:
+            return _local_kernel_process.run_local_kernel_once(
                 kernel_path=kernel_path,
                 kernel_stage_dir=kernel_stage_dir,
                 current_env=current_env,

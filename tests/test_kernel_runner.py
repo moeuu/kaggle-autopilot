@@ -21,13 +21,15 @@ from kagglebot.kernel_package_files import (
     sync_plan_snapshot,
 )
 from kagglebot.kernel_runner import (
-    _LocalKernelLogFilterState,
-    _run_local_kernel_once,
-    _should_suppress_local_kernel_log_line,
     resolve_kaggle_username,
     run_kernel,
     run_kernel_local,
     run_submit_kernel,
+)
+from kagglebot.local_kernel_process import (
+    LocalKernelLogFilterState,
+    run_local_kernel_once,
+    should_suppress_local_kernel_log_line,
 )
 from kagglebot.local_kernel_progress import build_local_kernel_progress_tracker
 from kagglebot.local_kernel_shims import (
@@ -976,7 +978,7 @@ def test_run_local_kernel_once_does_not_wait_for_inherited_stdout_holders(tmp_pa
     )
 
     started = time.monotonic()
-    result = _run_local_kernel_once(
+    result = run_local_kernel_once(
         kernel_path=kernel_path,
         kernel_stage_dir=tmp_path,
         current_env=os.environ.copy(),
@@ -993,7 +995,7 @@ def test_run_local_kernel_once_does_not_wait_for_inherited_stdout_holders(tmp_pa
 
 
 def test_should_suppress_local_kernel_log_line_filters_fragmentation_and_catboost_noise() -> None:
-    state = _LocalKernelLogFilterState()
+    state = LocalKernelLogFilterState()
     lines = [
         "/tmp/kernel.py:1036: PerformanceWarning: DataFrame is highly fragmented.\n",
         "  out[ratio_col] = out[t1] / (out[t2].abs() + 1e-6)\n",
@@ -1001,7 +1003,7 @@ def test_should_suppress_local_kernel_log_line_filters_fragmentation_and_catboos
         "training fold=1\n",
     ]
 
-    suppressed = [_should_suppress_local_kernel_log_line(line, state=state) for line in lines]
+    suppressed = [should_suppress_local_kernel_log_line(line, state=state) for line in lines]
 
     assert suppressed == [True, True, True, False]
 
@@ -1018,7 +1020,7 @@ def test_run_local_kernel_once_suppresses_known_warning_noise(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    result = _run_local_kernel_once(
+    result = run_local_kernel_once(
         kernel_path=kernel_path,
         kernel_stage_dir=tmp_path,
         current_env=os.environ.copy(),
@@ -1053,7 +1055,7 @@ def test_run_local_kernel_once_counts_partial_stdout_as_activity(
     )
     tracker = build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo", watch_dirs=[])
 
-    result = _run_local_kernel_once(
+    result = run_local_kernel_once(
         kernel_path=kernel_path,
         kernel_stage_dir=tmp_path,
         current_env=os.environ.copy(),
