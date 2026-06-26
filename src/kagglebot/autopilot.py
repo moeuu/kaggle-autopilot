@@ -4372,18 +4372,14 @@ def _attempt_submit(
     print(f"[cyan]submit[/cyan]: {config.slug}")
     submitted_at = datetime.now(UTC)
 
-    submit_aborter = _submit_stage.SubmitRunAborter(
+    submit_aborter = _submit_stage.build_submit_run_aborter_for_run(
         run_dir=run_dir,
         run_id=run_id,
         slug=config.slug,
         knowledge_paths=config.knowledge_paths,
         problem_types=problem_types,
         save_run_state_for_run=_autopilot_state._save_run_state,
-        resolve_submit_abort_artifact_path=_submit_failure_context.resolve_submit_abort_artifact_path,
-        persist_submit_abort_failure=_submit_failure_context.persist_submit_abort_failure,
         load_run_state=_autopilot_state._load_run_state,
-        load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
-        has_successful_submit_attempt=_submit_attempts.has_successful_submit_attempt,
         compute_submission_sha256=_sha256_or_none,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
