@@ -64,6 +64,10 @@ def format_top1_public_score_message(top1_info: dict[str, object] | None) -> str
     return f"[cyan]top1 public score[/cyan]: {score}{suffix}"
 
 
+def write_top1_public_snapshot(path: Path, top1_info: dict[str, object] | None) -> None:
+    write_json_object(path, top1_info if isinstance(top1_info, dict) else {})
+
+
 def build_win_contract(
     *,
     context_dir: Path,

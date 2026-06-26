@@ -145,6 +145,7 @@ from kagglebot.top1_exhaustive import (
     build_win_contract,
     format_top1_public_score_message,
     normalize_top1_submit_policy,
+    write_top1_public_snapshot,
 )
 from kagglebot.types import PlanConfig
 from kagglebot.validation_lab import normalize_validation_lab_mode, run_validation_lab
@@ -442,7 +443,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         dry_run=config.dry_run,
         metric_hint=metric_hint,
     )
-    _json_utils.write_json_object(config.paths.top1_public_path, top1_info)
+    write_top1_public_snapshot(config.paths.top1_public_path, top1_info)
     print(format_top1_public_score_message(top1_info))
     _watch_state.update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()

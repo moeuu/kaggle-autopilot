@@ -15,6 +15,7 @@ from kagglebot.top1_exhaustive import (
     private_robustness_report_path,
     top1_exhaustion_report_path,
     win_contract_path,
+    write_top1_public_snapshot,
 )
 
 
@@ -24,6 +25,18 @@ def test_format_top1_public_score_message() -> None:
     )
     assert format_top1_public_score_message({"score": None}) == "[yellow]top1 public score[/yellow]: unavailable"
     assert format_top1_public_score_message(None) == "[yellow]top1 public score[/yellow]: unavailable"
+
+
+def test_write_top1_public_snapshot_writes_json_object(tmp_path: Path) -> None:
+    path = tmp_path / "top1_public.json"
+
+    write_top1_public_snapshot(path, {"score": 0.123, "source": "leaderboard"})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"score": 0.123, "source": "leaderboard"}
+
+    write_top1_public_snapshot(path, None)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {}
 
 
 def test_win_contract_records_baselines_sources_and_guardrails(tmp_path: Path) -> None:
