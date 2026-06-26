@@ -26,6 +26,7 @@ from kagglebot.submit_knowledge import (
     resolve_submission_knowledge_context,
     resolve_submission_knowledge_iteration,
 )
+from kagglebot.submit_message import find_campaign_candidate_for_submission, resolve_submission_message
 from kagglebot.submit_rank import (
     format_rank_force_reason,
     format_submission_rank_message,
@@ -56,7 +57,6 @@ from kagglebot.submit_stage import (
     decide_submission_outcome_abort,
     evaluate_submission_outcome_after_poll,
     finalize_submit_outcome_for_run_or_abort,
-    find_campaign_candidate_for_submission,
     normalize_submission_outcome_status,
     prepare_and_resolve_submit_preflight_for_run_or_abort,
     prepare_submission_for_run_or_abort,
@@ -71,7 +71,6 @@ from kagglebot.submit_stage import (
     resolve_local_submission_guardrail_abort_spec,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
-    resolve_submission_message,
     resolve_submission_outcome_after_submit,
     resolve_submit_preflight_for_run_or_abort,
     run_submit_stage_attempt,

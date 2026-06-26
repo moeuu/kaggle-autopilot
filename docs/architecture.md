@@ -479,6 +479,7 @@ Recommended extraction order:
    `submit_tracking.py`.
    Fallback-submit and per-iteration submit-improvement gate decisions now live in `submit_gate.py`.
    Submission outcome classification and submission knowledge recording orchestration now live in `submit_knowledge.py`.
+   Campaign-aware submission message resolution now lives in `submit_message.py`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does

@@ -90,8 +90,8 @@ from kagglebot.submit_failure_context import (
     load_submit_failure_context,
     resolve_submit_abort_autofixability_for_run,
 )
+from kagglebot.submit_message import resolve_submission_message
 from kagglebot.submit_rank import resolve_submission_rank_payload
-from kagglebot.submit_stage import resolve_submission_message
 from kagglebot.submit_stage_duplicate import infer_iteration_from_submission_path
 from kagglebot.types import PlanConfig
 
