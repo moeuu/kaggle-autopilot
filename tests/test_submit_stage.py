@@ -39,6 +39,7 @@ from kagglebot.submit_cli_error_resolution import (
     decide_notebook_fallback_after_file_submit_error,
     decide_submit_stage_error_action,
 )
+from kagglebot.submit_context import build_submit_run_context, build_submit_runtime_context
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_gate import decide_fallback_submit_gate, decide_iteration_submit_improvement_gate
 from kagglebot.submit_knowledge import (
@@ -76,8 +77,6 @@ from kagglebot.submit_rank import (
     resolve_submission_rank_state,
 )
 from kagglebot.submit_stage import (
-    build_submit_run_context,
-    build_submit_runtime_context,
     prepare_and_resolve_submit_preflight_for_run_or_abort,
     resolve_submit_preflight_for_run_or_abort,
 )

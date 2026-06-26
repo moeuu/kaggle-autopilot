@@ -493,14 +493,16 @@ Recommended extraction order:
    `submit_outcome.py`.
    File-vs-notebook submit attempt dispatch and transient retry/abort loop orchestration now live in
    `submit_attempt_loop.py`.
+   Submit run context construction, autofix attempt context binding, retry/abort helper wiring, and runtime
+   message/service/timestamp initialization now live in `submit_context.py`.
    Submit retry attempt/knowledge recording, submit-abort recorder construction, and submit-abort exception raising now
    live in `submit_abort.py`; standard submit-abort helper wiring is built by
    `submit_abort.build_submit_run_aborter_for_run`, so the main loop does
    not enumerate submit-failure persistence, latest-attempt loading, or success-check callbacks directly.
    Run-bound submit context wiring for attempt recording, submit autofix input resolution, code fingerprinting, abort
-   handling, and retry recording now lives behind `submit_stage.build_submit_run_context`, so submit decision flow no
+   handling, and retry recording now lives behind `submit_context.build_submit_run_context`, so submit decision flow no
    longer constructs helper wiring inline.
-   Submit message/service/timestamp initialization now lives behind `submit_stage.build_submit_runtime_context`, so the
+   Submit message/service/timestamp initialization now lives behind `submit_context.build_submit_runtime_context`, so the
    public submit runner receives typed runtime state instead of constructing `SubmissionService` inline.
    Notebook submit runner construction now uses `submit_notebook.build_notebook_submit_runner_for_run`, keeping
    capacity/push-error detector wiring with the notebook submit adapter instead of in autopilot loop code.

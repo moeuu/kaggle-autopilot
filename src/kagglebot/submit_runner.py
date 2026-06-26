@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kagglebot import submit_attempt_loop as _submit_attempt_loop
+from kagglebot import submit_context as _submit_context
 from kagglebot import submit_outcome as _submit_outcome
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
@@ -111,7 +112,7 @@ def attempt_submit_for_run(
     if not config.submit or config.dry_run:
         return None
     run_dir = config.paths.run_dir(run_id)
-    submit_run_context = _submit_stage.build_submit_run_context(
+    submit_run_context = _submit_context.build_submit_run_context(
         run_dir=run_dir,
         run_id=run_id,
         slug=config.slug,
@@ -141,7 +142,7 @@ def attempt_submit_for_run(
     allow_force = submit_run_context.allow_force
     input_submission_path = submit_run_context.input_submission_path
 
-    submit_runtime_context = _submit_stage.build_submit_runtime_context(
+    submit_runtime_context = _submit_context.build_submit_runtime_context(
         slug=config.slug,
         context_dir=config.paths.context_dir,
         run_id=run_id,

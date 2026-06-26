@@ -112,7 +112,7 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
     recorder = SimpleNamespace(record_payloads=lambda _payloads: None)
 
     monkeypatch.setattr(
-        submit_runner._submit_stage,
+        submit_runner._submit_context,
         "build_submit_run_context",
         lambda **kwargs: calls.append("run_context")
         or SimpleNamespace(
@@ -127,7 +127,7 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
         ),
     )
     monkeypatch.setattr(
-        submit_runner._submit_stage,
+        submit_runner._submit_context,
         "build_submit_runtime_context",
         lambda **kwargs: calls.append("runtime_context")
         or SimpleNamespace(
