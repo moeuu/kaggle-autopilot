@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from kagglebot.exceptions import KaggleCliError, SubmissionCliError
+from kagglebot.exceptions import KaggleCliError, KernelCapacityError, SubmissionCliError
 from kagglebot.submit_notebook import (
     NotebookSubmitRunner,
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_output_reference,
     build_notebook_submit_reference,
+    build_notebook_submit_runner_for_run,
     build_submit_kernel_run_kwargs,
     decide_ambiguous_notebook_submit_retry,
     decide_notebook_submit_artifact_mode,
@@ -124,6 +125,40 @@ def test_build_notebook_submit_reference_uses_kernel_path_and_default_version() 
 
     assert reference.output_file == "submission.csv"
     assert reference.version == "1"
+
+
+def test_build_notebook_submit_runner_for_run_wires_standard_error_detectors(tmp_path: Path) -> None:
+    class Paths:
+        base_dir = tmp_path / "artifacts" / "demo"
+
+        @staticmethod
+        def iter_dir(run_id: str, iteration: int) -> Path:
+            return tmp_path / "artifacts" / "demo" / "runs" / run_id / f"iter-{iteration}"
+
+    runner = build_notebook_submit_runner_for_run(
+        slug="demo",
+        run_id="run-1",
+        paths=Paths(),
+        kaggle_username="user",
+        kernel_name="submit-kernel",
+        accelerator="gpu",
+        strict_accelerator=False,
+        dry_run=True,
+        timeout_minutes=30,
+        infer_iteration_from_submission_path=lambda path: 1,
+        resolve_kaggle_username=lambda value: str(value or ""),
+        run_submit_kernel=lambda **kwargs: object(),
+        run_kaggle_submit_kernel=lambda **kwargs: object(),
+        copy_submission_artifact_to_iteration_dir=lambda **kwargs: tmp_path / "submission.csv",
+        classify_submit_error=lambda stdout, stderr, exit_code: {},
+        should_retry_ambiguous=lambda **kwargs: False,
+        sleep=lambda seconds: None,
+        on_message=lambda message: None,
+    )
+
+    assert isinstance(runner, NotebookSubmitRunner)
+    assert runner.is_capacity_error(KernelCapacityError("capacity"))
+    assert runner.is_push_error(KaggleCliError("Kernel push error: failed", command=[]))
 
 
 def test_build_notebook_submit_output_reference_copies_kernel_submission(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kagglebot.exceptions import KaggleCliError, SubmissionCliError
+from kagglebot.exceptions import KaggleCliError, KernelCapacityError, SubmissionCliError
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
 
@@ -108,6 +108,51 @@ class NotebookSubmitRunner:
             is_capacity_error=self.is_capacity_error,
             is_push_error=self.is_push_error,
         )
+
+
+def build_notebook_submit_runner_for_run(
+    *,
+    slug: str,
+    run_id: str,
+    paths: CompetitionPaths,
+    kaggle_username: str | None,
+    kernel_name: str | None,
+    accelerator: str,
+    strict_accelerator: bool,
+    dry_run: bool,
+    timeout_minutes: int | None,
+    infer_iteration_from_submission_path: Callable[[Path], int | None],
+    resolve_kaggle_username: Callable[[str | None], str],
+    run_submit_kernel: Callable[..., object],
+    run_kaggle_submit_kernel: Callable[..., object],
+    copy_submission_artifact_to_iteration_dir: Callable[..., Path],
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]],
+    should_retry_ambiguous: Callable[..., bool],
+    sleep: Callable[[float], None],
+    on_message: Callable[[str], None],
+) -> NotebookSubmitRunner:
+    return NotebookSubmitRunner(
+        slug=slug,
+        run_id=run_id,
+        paths=paths,
+        kaggle_username=kaggle_username,
+        kernel_name=kernel_name,
+        accelerator=accelerator,
+        strict_accelerator=strict_accelerator,
+        dry_run=dry_run,
+        timeout_minutes=timeout_minutes,
+        infer_iteration_from_submission_path=infer_iteration_from_submission_path,
+        resolve_kaggle_username=resolve_kaggle_username,
+        run_submit_kernel=run_submit_kernel,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        copy_submission_artifact_to_iteration_dir=copy_submission_artifact_to_iteration_dir,
+        classify_submit_error=classify_submit_error,
+        should_retry_ambiguous=should_retry_ambiguous,
+        sleep=sleep,
+        on_message=on_message,
+        is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
+        is_push_error=lambda exc: isinstance(exc, KaggleCliError) and is_submit_kernel_push_error(exc),
+    )
 
 
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:

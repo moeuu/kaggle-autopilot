@@ -4382,7 +4382,7 @@ def _attempt_submit(
     submission_reference = str(prepared_submission_path)
     submission_artifact_path: Path | None = prepared_submission_path
 
-    notebook_submitter = _submit_notebook.NotebookSubmitRunner(
+    notebook_submitter = _submit_notebook.build_notebook_submit_runner_for_run(
         slug=config.slug,
         run_id=run_id,
         paths=config.paths,
@@ -4401,8 +4401,6 @@ def _attempt_submit(
         should_retry_ambiguous=_submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
         sleep=time.sleep,
         on_message=print,
-        is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
-        is_push_error=lambda exc: isinstance(exc, KaggleCliError) and _submit_notebook.is_submit_kernel_push_error(exc),
     )
 
     for attempt in range(1, max_attempts + 1):
