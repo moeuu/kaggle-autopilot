@@ -333,8 +333,9 @@ The next high-value modernization work is:
    summary payload construction now live in `autopilot_state.py`, keeping run-state schema assembly with the rest of the
    state/artifact helpers. Iteration resume submission-artifact lookup now delegates to `kernel_outputs.find_submission_file`,
    so resume handling uses the same manifest, archive, final submission, and fold-intermediate fallback policy as kernel
-   output collection. Iteration artifact copy paths now use `artifact_io.copy_artifact_if_needed`, keeping same-path
-   copy avoidance centralized with artifact staging. Iteration resume metrics/support artifact lookup
+   output collection. Iteration artifact copy paths now use public `autopilot_state` artifact-copy helpers backed by
+   `artifact_io.copy_artifact_if_needed`, keeping same-path copy avoidance centralized with artifact staging. Iteration
+   resume metrics/support artifact lookup
    now also uses `kernel_outputs.find_newest_existing_path`, so newest-artifact selection is no longer duplicated in
    run-state code.
    Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so

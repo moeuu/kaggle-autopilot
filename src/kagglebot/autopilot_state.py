@@ -573,12 +573,12 @@ def _submit_retry_metrics_candidates(iter_dir: Path, marker_payload: dict[str, o
     return unique_candidates
 
 
-def _copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
+def copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
     destination = iter_dir / source.name
     return copy_artifact_if_needed(source=source, destination=destination)
 
 
-def _copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, iter_dir: Path) -> None:
+def copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, iter_dir: Path) -> None:
     if not kernel_output_dir.exists():
         return
     output_dir = iter_dir / "output"

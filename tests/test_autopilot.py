@@ -159,7 +159,7 @@ def _run_notebook_submission_for_config(
         resolve_kaggle_username=autopilot_mod.resolve_kaggle_username,
         run_submit_kernel=autopilot_mod.run_submit_kernel,
         run_kaggle_submit_kernel=autopilot_mod.run_kaggle_submit_kernel,
-        copy_submission_artifact_to_iteration_dir=_autopilot_state_test._copy_submission_artifact_to_iteration_dir,
+        copy_submission_artifact_to_iteration_dir=_autopilot_state_test.copy_submission_artifact_to_iteration_dir,
         classify_submit_error=autopilot_mod.classify_submit_error,
         should_retry_ambiguous=autopilot_mod._submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
         sleep=autopilot_mod.time.sleep,
@@ -3331,7 +3331,7 @@ def test_copy_submission_artifact_to_iteration_dir_skips_same_path(tmp_path: Pat
     submission = iter_dir / "submission.csv"
     submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
 
-    copied = _autopilot_state_test._copy_submission_artifact_to_iteration_dir(source=submission, iter_dir=iter_dir)
+    copied = _autopilot_state_test.copy_submission_artifact_to_iteration_dir(source=submission, iter_dir=iter_dir)
 
     assert copied == submission
     assert submission.read_text(encoding="utf-8") == "id,target\n1,0.1\n"

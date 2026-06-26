@@ -833,7 +833,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             if submit_retry_resume is not None:
                 resume_submission_path, resume_metrics_path, resume_evaluation = submit_retry_resume
                 if resume_submission_path != submission_path:
-                    submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
+                    submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                         source=resume_submission_path,
                         iter_dir=iter_dir,
                     )
@@ -885,11 +885,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
-                            submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
+                            submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
                                 iter_dir=iter_dir,
                             )
-                        _autopilot_state._copy_kernel_support_artifacts_to_iteration_dir(
+                        _autopilot_state.copy_kernel_support_artifacts_to_iteration_dir(
                             kernel_output_dir=kernel_result.output_dir,
                             iter_dir=iter_dir,
                         )
@@ -1061,11 +1061,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
-                            submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
+                            submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
                                 iter_dir=iter_dir,
                             )
-                        _autopilot_state._copy_kernel_support_artifacts_to_iteration_dir(
+                        _autopilot_state.copy_kernel_support_artifacts_to_iteration_dir(
                             kernel_output_dir=kernel_result.output_dir,
                             iter_dir=iter_dir,
                         )
@@ -1286,11 +1286,11 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                             hardware_profile=config.hardware_profile,
                         )
                         if kernel_result.submission_path:
-                            submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
+                            submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
                                 iter_dir=iter_dir,
                             )
-                        _autopilot_state._copy_kernel_support_artifacts_to_iteration_dir(
+                        _autopilot_state.copy_kernel_support_artifacts_to_iteration_dir(
                             kernel_output_dir=kernel_result.output_dir,
                             iter_dir=iter_dir,
                         )
@@ -3795,7 +3795,7 @@ def _rerun_kernel_for_metric_recheck(
             raise RuntimeError(
                 "Metric recheck failed: submission artifact is missing for same-iteration metric-only recheck."
             )
-        rechecked_submission_path = _autopilot_state._copy_submission_artifact_to_iteration_dir(
+        rechecked_submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
             source=resolved_submission,
             iter_dir=iter_dir,
         )
@@ -4362,7 +4362,7 @@ def _attempt_submit(
         resolve_kaggle_username=resolve_kaggle_username,
         run_submit_kernel=run_submit_kernel,
         run_kaggle_submit_kernel=run_kaggle_submit_kernel,
-        copy_submission_artifact_to_iteration_dir=_autopilot_state._copy_submission_artifact_to_iteration_dir,
+        copy_submission_artifact_to_iteration_dir=_autopilot_state.copy_submission_artifact_to_iteration_dir,
         classify_submit_error=classify_submit_error,
         should_retry_ambiguous=_submit_failure_policy.should_retry_ambiguous_notebook_submit_error,
         sleep=time.sleep,
