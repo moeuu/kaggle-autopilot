@@ -483,6 +483,8 @@ Recommended extraction order:
    Submit abort-spec dataclass construction and abort-spec kwargs mapping now live in `submit_abort_specs.py`.
    Submission outcome status normalization, polling-result abort decisions, and Kaggle row detail construction now live
    in `submit_outcome_decisions.py`.
+   Initial submit mode, artifact-mode state application, and iteration submit-phase state decisions now live in
+   `submit_stage_modes.py`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does

@@ -49,9 +49,9 @@ from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_gate as _submit_gate
 from kagglebot import submit_knowledge as _submit_knowledge
 from kagglebot import submit_rank as _submit_rank
-from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
 from kagglebot import submit_stage_messages as _submit_stage_messages
+from kagglebot import submit_stage_modes as _submit_stage_modes
 from kagglebot import submit_tracking as _submit_tracking
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
@@ -1786,7 +1786,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 )
             submit_phase_required = submit_enabled and not config.dry_run
             submit_allowed_by_gate = submit_enabled and allow_submit
-            pre_submit_phase_state = _submit_stage.resolve_iteration_submit_phase_state(
+            pre_submit_phase_state = _submit_stage_modes.resolve_iteration_submit_phase_state(
                 submit_enabled=submit_enabled,
                 daily_submission_limit_reached=daily_submission_limit_reached,
                 force_initial_submit=force_initial_submit,
