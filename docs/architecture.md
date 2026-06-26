@@ -381,7 +381,7 @@ Recommended extraction order:
    payloads/orchestration, same-submission-path skip payloads, submit-abort attempt/context persistence, submit result
    payload construction, resume-time submit attempt completion/iteration inference, and run-level submit-abort
    autofixability resolution are now centralized.
-   Seen-fingerprint set assembly, duplicate-submit source collection, and skip decisions are extracted.
+   Seen-fingerprint set assembly/run loading, duplicate-submit source collection, and skip decisions are extracted.
    Submit success outcome/ledger recording decisions, notebook submit kernel reference handling, ambiguous notebook submit
    retry decisions, CPU fallback decisions, push-error text detection, initial artifact-mode resolution, tiny public
    sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,

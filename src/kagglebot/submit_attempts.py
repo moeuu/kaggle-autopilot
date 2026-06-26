@@ -121,6 +121,13 @@ def build_seen_submit_fingerprint_set(
     return fingerprints
 
 
+def build_seen_submit_fingerprint_set_for_run(*, run_dir: Path, run_state: dict[str, object]) -> set[str]:
+    return build_seen_submit_fingerprint_set(
+        attempt_fingerprints=load_submit_fingerprints(run_dir),
+        run_state=run_state,
+    )
+
+
 def load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
     rows = load_submit_attempt_rows(run_dir)
     if not rows:

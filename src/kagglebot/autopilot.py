@@ -4498,8 +4498,8 @@ def _attempt_submit(
     ):
         return None
 
-    seen_fingerprints = _submit_attempts.build_seen_submit_fingerprint_set(
-        attempt_fingerprints=_submit_attempts.load_submit_fingerprints(run_dir),
+    seen_fingerprints = _submit_attempts.build_seen_submit_fingerprint_set_for_run(
+        run_dir=run_dir,
         run_state=run_state,
     )
     max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)

@@ -12,6 +12,7 @@ from kagglebot.submit_attempts import (
     build_duplicate_submit_skip_result_payload,
     build_same_submission_path_skip_attempt_payload,
     build_seen_submit_fingerprint_set,
+    build_seen_submit_fingerprint_set_for_run,
     build_submit_abort_record_payloads,
     build_submit_attempt_payload,
     build_submit_knowledge_payload,
@@ -199,6 +200,31 @@ def test_build_seen_submit_fingerprint_set_merges_attempts_and_run_state() -> No
         attempt_fingerprints=[],
         run_state={"last_submit_fingerprint": "submit-fp", "last_fingerprint": "legacy-fp"},
     ) == {"submit-fp"}
+
+
+def test_build_seen_submit_fingerprint_set_for_run_loads_attempt_rows(tmp_path: Path) -> None:
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"fingerprint": " fp-1 "},
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"fingerprint": ""},
+        now_iso="2026-06-25T00:01:00+00:00",
+    )
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"fingerprint": "fp-2"},
+        now_iso="2026-06-25T00:02:00+00:00",
+    )
+
+    seen = build_seen_submit_fingerprint_set_for_run(
+        run_dir=tmp_path,
+        run_state={"last_fingerprint": "legacy-fp"},
+    )
+
+    assert seen == {"fp-1", "fp-2", "legacy-fp"}
 
 
 def test_submit_attempt_resume_completion_policy_handles_submit_and_terminal_skip() -> None:
