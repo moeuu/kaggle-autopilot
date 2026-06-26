@@ -29,9 +29,7 @@ from kagglebot.history import new_run_id
 from kagglebot.json_utils import (
     append_jsonl_record,
     load_json_object,
-    load_json_object_or_empty,
     load_jsonl_records,
-    write_json_object,
 )
 from kagglebot.kaggle_api import (
     EnteredCompetition,
@@ -49,6 +47,13 @@ from kagglebot.kaggle_gpu_quota import (
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.watch_state import (
+    active_state_is_stale,
+    load_watch_state,
+    safe_state_scope,
+    set_resume_env,
+    write_watch_state,
+)
 
 _TERMINAL_RUN_STATUSES = {
     "completed",
@@ -63,7 +68,6 @@ _REWARD_AMOUNT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _DEFAULT_RESOURCE_BLOCK_TTL_HOURS = 168.0
-_DEFAULT_ACTIVE_RUN_STALE_HOURS = 24.0
 
 
 @dataclass(frozen=True)
@@ -124,7 +128,7 @@ class WatchConfig:
 
     @property
     def watch_dir(self) -> Path:
-        scope = _safe_state_scope(self.state_scope)
+        scope = safe_state_scope(self.state_scope)
         return self.root_watch_dir / scope if scope else self.root_watch_dir
 
     @property
@@ -212,13 +216,13 @@ def _watch_resource_lock_path(config: WatchConfig) -> Path:
 
 
 def _watch_resource_lock_name(config: WatchConfig) -> str:
-    compute = _safe_state_scope(config.compute or "default").lower() or "default"
+    compute = safe_state_scope(config.compute or "default").lower() or "default"
     if compute == "local_gpu":
         return compute
-    scope = _safe_state_scope(config.state_scope).lower()
+    scope = safe_state_scope(config.state_scope).lower()
     if scope:
         return f"{compute}-{scope}"
-    profile = _safe_state_scope(str(config.hardware_profile or "")).lower()
+    profile = safe_state_scope(str(config.hardware_profile or "")).lower()
     if profile and profile != "auto":
         return f"{compute}-{profile}"
     return compute
@@ -261,7 +265,7 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
 
 
 def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchCycleResult:
-    state = _load_state(config.state_path)
+    state = load_watch_state(config.state_path)
     active_slug = str(state.get("active_slug") or "").strip()
     active_run_id = str(state.get("active_run_id") or "").strip()
 
@@ -271,9 +275,9 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         resume = True
         ledger.append("selected", slug=active_slug, run_id=run_id, reason="resume_active")
     else:
-        if active_slug and active_run_id and _active_state_is_stale(state):
+        if active_slug and active_run_id and active_state_is_stale(state):
             ledger.append("stale_active_cleared", slug=active_slug, run_id=active_run_id, reason="stale_watch_state")
-            _write_state(
+            write_watch_state(
                 config.state_path,
                 {
                     "active_slug": None,
@@ -295,14 +299,14 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
                 "updated_at": datetime.now(UTC).isoformat(),
             }
             state.update({key: value for key, value in quota_block.items() if value is not None})
-            _write_state(config.state_path, state)
+            write_watch_state(config.state_path, state)
             print(f"[yellow]watch[/yellow]: {quota_block['message']}")
             return WatchCycleResult(status="no_capacity", slug=None, run_id=None, reason=str(quota_block["reason"]))
 
         candidates = select_next_competition(config, ledger=ledger)
         if not candidates:
             ledger.append("skipped", reason="no_candidates")
-            _write_state(
+            write_watch_state(
                 config.state_path,
                 {"active_slug": None, "active_run_id": None, "last_status": "no_candidates"},
             )
@@ -318,7 +322,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         print(f"[yellow]DRY RUN[/yellow]: would run autopilot for {candidate.slug} ({run_id})")
         return WatchCycleResult(status="dry_run", slug=candidate.slug, run_id=run_id)
 
-    _write_state(
+    write_watch_state(
         config.state_path,
         {
             "active_slug": candidate.slug,
@@ -336,7 +340,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
     os.environ["KAGGLEBOT_WATCH_STATE_PATH"] = str(config.state_path)
     try:
         _prepare_competition(config=config, candidate=candidate, paths=paths, knowledge_paths=knowledge_paths)
-        _write_state(
+        write_watch_state(
             config.state_path,
             {
                 "active_slug": candidate.slug,
@@ -354,25 +358,25 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
             run_id=None if resume else run_id,
         )
         if resume:
-            _set_resume_env(slug=candidate.slug, run_id=run_id)
+            set_resume_env(slug=candidate.slug, run_id=run_id)
         run_autopilot(autopilot_config)
     except RulesNotAcceptedError as exc:
         ledger.append("skipped", slug=candidate.slug, run_id=run_id, reason="rules_not_accepted")
-        _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "skipped"})
+        write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "skipped"})
         return WatchCycleResult(status="skipped", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except SubmitAbortedError as exc:
         ledger.append("failed", slug=candidate.slug, run_id=run_id, reason="submit_aborted", error=str(exc))
-        _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
+        write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
         return WatchCycleResult(status="failed", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except KernelCapacityError as exc:
         ledger.append("no_capacity", slug=candidate.slug, run_id=run_id, reason="kaggle_gpu_capacity", error=str(exc))
-        _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "no_capacity"})
+        write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "no_capacity"})
         print("[yellow]watch[/yellow]: kaggle_gpu capacity unavailable; leaving local_gpu as the only active runner")
         return WatchCycleResult(status="no_capacity", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except KaggleCliResourceError as exc:
         reason = "kaggle_cli_resource_limit"
         ledger.append("resource_blocked", slug=candidate.slug, run_id=run_id, reason=reason, error=str(exc))
-        _write_state(
+        write_watch_state(
             config.state_path,
             {
                 "active_slug": None,
@@ -386,7 +390,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         return WatchCycleResult(status="skipped", slug=candidate.slug, run_id=run_id, reason=reason)
     except Exception as exc:  # noqa: BLE001
         ledger.append("failed", slug=candidate.slug, run_id=run_id, reason=type(exc).__name__, error=str(exc))
-        _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
+        write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
         return WatchCycleResult(status="failed", slug=candidate.slug, run_id=run_id, reason=str(exc))
     finally:
         if previous_state_path is None:
@@ -395,7 +399,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
             os.environ["KAGGLEBOT_WATCH_STATE_PATH"] = previous_state_path
 
     ledger.append("finished", slug=candidate.slug, run_id=run_id)
-    _write_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "finished"})
+    write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "finished"})
     return WatchCycleResult(status="finished", slug=candidate.slug, run_id=run_id)
 
 
@@ -1144,7 +1148,7 @@ def _active_slugs(config: WatchConfig) -> set[str]:
         if resolved in seen:
             continue
         seen.add(resolved)
-        state = _load_state(path)
+        state = load_watch_state(path)
         slug = str(state.get("active_slug") or "").strip().lower()
         run_id = str(state.get("active_run_id") or "").strip()
         if slug and run_id and _run_can_resume(config, slug, run_id, state=state):
@@ -1153,7 +1157,7 @@ def _active_slugs(config: WatchConfig) -> set[str]:
 
 
 def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[str, object] | None = None) -> bool:
-    if state is not None and _active_state_is_stale(state):
+    if state is not None and active_state_is_stale(state):
         return False
     run_dir = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).run_dir(run_id)
     if not run_dir.exists():
@@ -1166,31 +1170,6 @@ def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[
         return True
     status = str(payload.get("status") or "").strip().lower()
     return status not in _TERMINAL_RUN_STATUSES
-
-
-def _active_state_is_stale(state: dict[str, object]) -> bool:
-    slug = str(state.get("active_slug") or "").strip()
-    run_id = str(state.get("active_run_id") or "").strip()
-    if not slug or not run_id:
-        return False
-    timestamp = _parse_ts(state.get("updated_at")) or _parse_ts(state.get("started_at"))
-    if timestamp is None:
-        return False
-    max_age_hours = _active_run_stale_hours()
-    if max_age_hours <= 0:
-        return False
-    return timestamp + timedelta(hours=max_age_hours) <= datetime.now(UTC)
-
-
-def _active_run_stale_hours() -> float:
-    value = parse_float_value(os.environ.get("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS"))
-    if value is None:
-        return _DEFAULT_ACTIVE_RUN_STALE_HOURS
-    return max(0.0, value)
-
-
-def _safe_state_scope(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-")
 
 
 def _candidate_from_slug(slug: str) -> EnteredCompetition:
@@ -1211,23 +1190,6 @@ def _candidate_from_slug(slug: str) -> EnteredCompetition:
         submissions_disabled=False,
         source="state",
     )
-
-
-def _load_state(path: Path) -> dict[str, object]:
-    return load_json_object_or_empty(path)
-
-
-def _write_state(path: Path, payload: dict[str, object]) -> None:
-    payload = dict(payload)
-    payload.setdefault("updated_at", datetime.now(UTC).isoformat())
-    write_json_object(path, payload, sort_keys=True)
-
-
-def _set_resume_env(*, slug: str, run_id: str) -> None:
-    import os
-
-    os.environ["KAGGLEBOT_RESUME_RUN_ID"] = run_id
-    os.environ["KAGGLEBOT_RESUME_SLUG"] = slug
 
 
 def _parse_ts(value: object) -> datetime | None:

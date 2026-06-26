@@ -16,7 +16,6 @@ from kagglebot.supervisor import (
     WatchLedger,
     _build_autopilot_config,
     _estimate_training_minutes,
-    _load_state,
     _plan_max_iterations,
     run_watch_once,
     select_next_competition,
@@ -603,21 +602,6 @@ def test_watch_env_hour_parsers_fallback_for_invalid_and_non_finite(monkeypatch)
 
     monkeypatch.setenv("KAGGLEBOT_RESOURCE_BLOCK_TTL_HOURS", "-1")
     assert supervisor._resource_block_ttl_hours() == 0.0  # noqa: SLF001
-
-    monkeypatch.setenv("KAGGLEBOT_WATCH_ACTIVE_RUN_STALE_HOURS", "bad")
-    assert supervisor._active_run_stale_hours() == 24.0  # noqa: SLF001
-
-
-def test_load_state_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:
-    assert _load_state(tmp_path / "missing.json") == {}
-
-    invalid = tmp_path / "invalid.json"
-    invalid.write_text("{", encoding="utf-8")
-    assert _load_state(invalid) == {}
-
-    array_payload = tmp_path / "array.json"
-    array_payload.write_text("[]", encoding="utf-8")
-    assert _load_state(array_payload) == {}
 
 
 def test_plan_max_iterations_ignores_invalid_or_non_object_payload(tmp_path: Path) -> None:

@@ -326,8 +326,9 @@ The next high-value modernization work is:
    Agent write-guard policy, repair edit-scope construction, snapshots, repairs, and secret prompt checks now live in
    `write_guard.py`; agent and autopilot orchestration import that shared module instead of sharing guard internals
    through `agent_pipeline.py`.
-   Watch-state phase updates now live in `watch_state.py`; autopilot orchestration reports phase transitions without
-   owning the state-file environment lookup or JSON update details.
+   Watch-state phase updates, active-run state IO, state-scope sanitizing, stale active-run detection, and resume-env
+   setup now live in `watch_state.py`; watch orchestration reports lifecycle transitions without owning the state-file
+   JSON policy.
    Initial `run.json` payload construction, run status/stop-reason application, final status resolution, and final run
    summary payload construction now live in `autopilot_state.py`, keeping run-state schema assembly with the rest of the
    state/artifact helpers.
