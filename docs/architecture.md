@@ -514,7 +514,7 @@ Recommended extraction order:
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to
    `kernel_outputs.find_submission_file`, so notebook runs share the same manifest, archive, final submission, and
    fold-intermediate fallback policy as local kernel runs. Shared artifact copy/no-op behavior now lives in
-   `artifact_io.copy_artifact_if_needed`; `kernel_outputs` keeps a compatibility import for older call sites. Notebook
+   `artifact_io.copy_artifact_if_needed`; kernel output code calls that public helper directly. Notebook
    runner local submission preservation, submit artifact storage, TSV submit-format staging, bootstrap sample-submission
    caching/mirroring, local sample submission and auxiliary-input file staging, kernel package source/runtime/external
    asset staging, plan snapshots, local kernel shim config files, local dataset-profile context staging, and local-kernel

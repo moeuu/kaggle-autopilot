@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.kernel_outputs import (
-    copy_artifact_if_needed,
     copy_local_kernel_primary_artifacts,
     copy_optional_local_kernel_artifacts,
     find_intermediate_submission_file,

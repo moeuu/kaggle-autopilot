@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from kagglebot.artifact_io import copy_artifact_if_needed as _copy_artifact_if_needed
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 _INTERMEDIATE_SUBMISSION_RE = re.compile(r"^submission(?:_[A-Za-z0-9_.-]+)?_fold(?P<fold>\d+)\.csv$", re.IGNORECASE)
@@ -163,10 +163,6 @@ def find_newest_existing_path(paths: list[Path], *, min_mtime: float | None = No
 
 def pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
     return find_newest_existing_path(paths, min_mtime=min_mtime)
-
-
-def copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
-    return _copy_artifact_if_needed(source=source, destination=destination)
 
 
 def copy_local_kernel_primary_artifacts(
