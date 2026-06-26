@@ -11,6 +11,7 @@ from kagglebot.submit_failure_context import load_submit_failure_context, save_s
 from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
     SubmitRunAborter,
+    SubmitRunRetryRecorder,
     abort_submit_for_run,
     apply_duplicate_submission_decision,
     apply_initial_submit_stage_artifact_mode,
@@ -1199,6 +1200,56 @@ def test_record_submit_stage_retry_attempt_records_attempt_and_knowledge(tmp_pat
     ]
     assert calls[0]["iteration"] == 4
     assert calls[0]["fix_summary"] == "submit_action=retry; detail=attempt=1; wait=3.2s"
+
+
+def test_submit_run_retry_recorder_binds_run_callbacks(tmp_path: Path) -> None:
+    recorder = SubmitAttemptRecorderStub()
+    calls: list[dict[str, object]] = []
+    artifact_path = tmp_path / "iter-4" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    action = decide_submit_stage_error_action(
+        fingerprint_seen=False,
+        same_fingerprint_retry_allowed=False,
+        classification_kind="transient",
+        classification_reason="network_or_timeout",
+        attempt=1,
+        max_attempts=2,
+        retry_after_seconds=0.0,
+        backoff_seconds=2.5,
+    )
+    run_recorder = SubmitRunRetryRecorder(
+        submit_attempt_recorder=recorder,
+        run_id="run-1",
+        slug="demo",
+        problem_types=["tabular"],
+        knowledge_paths=object(),
+        compute_submission_sha256=lambda path: "sha" if path == artifact_path else None,
+        stdout_tail_chars=3,
+        stderr_tail_chars=4,
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **kwargs: calls.append(kwargs),
+    )
+
+    recorded = run_recorder.record(
+        submission_ref="submission.csv",
+        submission_artifact_path=artifact_path,
+        fallback_submission_path=tmp_path / "fallback.csv",
+        exit_code=1,
+        fingerprint="fp",
+        action=action,
+        stdout="abcdef",
+        stderr="uvwxyz",
+        attempt=1,
+    )
+
+    assert recorded is True
+    assert recorder.payloads[0]["sub_sha256"] == "sha"
+    assert recorder.payloads[0]["reason"] == "network_or_timeout"
+    assert recorder.payloads[0]["stdout_tail"] == "def"
+    assert recorder.payloads[0]["stderr_tail"] == "wxyz"
+    assert calls[0]["iteration"] == 4
+    assert calls[0]["fix_summary"] == "submit_action=retry; detail=attempt=1; wait=2.5s"
 
 
 def test_record_submit_abort_for_run_persists_context_and_records_knowledge(tmp_path: Path) -> None:

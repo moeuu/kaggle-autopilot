@@ -219,6 +219,55 @@ class SubmitRunAborter:
 
 
 @dataclass(frozen=True)
+class SubmitRunRetryRecorder:
+    submit_attempt_recorder: object
+    run_id: str
+    slug: str
+    problem_types: list[str]
+    knowledge_paths: object
+    compute_submission_sha256: Callable[[Path | None], str | None]
+    stdout_tail_chars: int
+    stderr_tail_chars: int
+    normalize_detail: Callable[..., str]
+    record_error_fix_insight: Callable[..., object]
+
+    def record(
+        self,
+        *,
+        submission_ref: str,
+        submission_artifact_path: Path | None,
+        fallback_submission_path: Path,
+        exit_code: int | None,
+        fingerprint: str,
+        action: SubmitStageErrorActionDecision,
+        stdout: str,
+        stderr: str,
+        attempt: int,
+    ) -> bool:
+        return record_submit_stage_retry_attempt(
+            submit_attempt_recorder=self.submit_attempt_recorder,
+            run_id=self.run_id,
+            slug=self.slug,
+            problem_types=self.problem_types,
+            submission_ref=submission_ref,
+            submission_artifact_path=submission_artifact_path,
+            fallback_submission_path=fallback_submission_path,
+            compute_submission_sha256=self.compute_submission_sha256,
+            exit_code=exit_code,
+            fingerprint=fingerprint,
+            action=action,
+            stdout=stdout,
+            stderr=stderr,
+            attempt=attempt,
+            stdout_tail_chars=self.stdout_tail_chars,
+            stderr_tail_chars=self.stderr_tail_chars,
+            knowledge_paths=self.knowledge_paths,
+            normalize_detail=self.normalize_detail,
+            record_error_fix_insight=self.record_error_fix_insight,
+        )
+
+
+@dataclass(frozen=True)
 class SubmissionKnowledgeContext:
     online_score: float
     outcome_bucket: str

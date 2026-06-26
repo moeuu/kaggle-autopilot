@@ -4392,6 +4392,18 @@ def _attempt_submit(
         on_message=print,
         build_error=SubmitAbortedError,
     )
+    submit_retry_recorder = _submit_stage.SubmitRunRetryRecorder(
+        submit_attempt_recorder=submit_attempt_recorder,
+        run_id=run_id,
+        slug=config.slug,
+        problem_types=problem_types,
+        knowledge_paths=config.knowledge_paths,
+        compute_submission_sha256=_sha256_or_none,
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        normalize_detail=normalize_error_text,
+        record_error_fix_insight=record_error_fix_insight,
+    )
 
     prepared_resolution = _submit_stage.resolve_prepared_submission_for_submit(
         input_submission_path=input_submission_path,
@@ -4594,26 +4606,16 @@ def _attempt_submit(
                 )
             seen_fingerprints.add(fingerprint)
             if error_action.action == "retry":
-                _submit_stage.record_submit_stage_retry_attempt(
-                    submit_attempt_recorder=submit_attempt_recorder,
-                    run_id=run_id,
-                    slug=config.slug,
-                    problem_types=problem_types,
+                submit_retry_recorder.record(
                     submission_ref=submission_reference,
                     submission_artifact_path=submission_artifact_path,
                     fallback_submission_path=prepared_submission_path,
-                    compute_submission_sha256=_sha256_or_none,
                     exit_code=exc.exit_code,
                     fingerprint=fingerprint,
                     action=error_action,
                     stdout=exc.stdout,
                     stderr=submit_error_classification.stderr,
                     attempt=attempt,
-                    stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-                    stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-                    knowledge_paths=config.knowledge_paths,
-                    normalize_detail=normalize_error_text,
-                    record_error_fix_insight=record_error_fix_insight,
                 )
                 time.sleep(error_action.wait_seconds)
                 continue
