@@ -8,6 +8,7 @@ from kagglebot.json_utils import load_jsonl_records
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
+    SubmitRunAborter,
     abort_submit_for_run,
     apply_duplicate_submission_decision,
     apply_initial_submit_stage_artifact_mode,
@@ -1189,6 +1190,67 @@ def test_abort_submit_for_run_records_and_raises(tmp_path: Path) -> None:
     assert persisted["submission_ref"] == str(submission)
     assert persisted["submission_sha256"] == "sha"
     assert persisted["code_fingerprint"] == ""
+    assert messages == ["[red]submit aborted[/red]: Local validation failed."]
+
+
+def test_submit_run_aborter_binds_run_callbacks_and_raises(tmp_path: Path) -> None:
+    recorder = SubmitAttemptRecorderStub()
+    run_dir = tmp_path / "run"
+    submission = tmp_path / "iter-5" / "submission.csv"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    persisted: dict[str, object] = {}
+    messages: list[str] = []
+
+    class SubmitAbortStubError(RuntimeError):
+        pass
+
+    aborter = SubmitRunAborter(
+        run_dir=run_dir,
+        run_id="run-1",
+        slug="demo",
+        knowledge_paths=object(),
+        problem_types=["tabular"],
+        save_run_state=lambda _updates: None,
+        resolve_submit_abort_artifact_path=lambda **kwargs: kwargs["submission_ref"],
+        persist_submit_abort_failure=lambda **kwargs: persisted.update(kwargs),
+        load_run_state=lambda _run_dir: {"submit_ok": False},
+        load_latest_submit_attempt=lambda _run_dir: {},
+        has_successful_submit_attempt=lambda _run_dir: False,
+        compute_submission_sha256=lambda path: "sha" if path == submission else None,
+        stdout_tail_chars=10,
+        stderr_tail_chars=11,
+        now_iso=lambda: "2026-06-25T00:00:00+00:00",
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **_kwargs: None,
+        on_message=messages.append,
+        build_error=SubmitAbortStubError,
+    )
+
+    try:
+        aborter.abort(
+            submission_ref=submission,
+            submission_artifact_path=None,
+            artifact_mode="wrapper",
+            code_fingerprint=None,
+            fingerprint="fp",
+            error_kind="validation",
+            reason="local_submission_validation_failed",
+            message="Local validation failed.",
+            stdout_tail="stdout",
+            stderr_tail="stderr",
+            exit_code=6,
+            submit_attempt_recorder=recorder,
+        )
+    except SubmitAbortStubError as exc:
+        assert str(exc) == "Local validation failed."
+    else:
+        raise AssertionError("SubmitRunAborter.abort did not raise")
+
+    assert persisted["submission_ref"] == str(submission)
+    assert persisted["submission_sha256"] == "sha"
+    assert persisted["code_fingerprint"] == ""
+    assert persisted["now_iso"] == "2026-06-25T00:00:00+00:00"
     assert messages == ["[red]submit aborted[/red]: Local validation failed."]
 
 

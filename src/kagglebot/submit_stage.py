@@ -146,6 +146,79 @@ class SubmitStageSuccessRecord:
 
 
 @dataclass(frozen=True)
+class SubmitRunAborter:
+    run_dir: Path
+    run_id: str
+    slug: str
+    knowledge_paths: object
+    problem_types: list[str]
+    save_run_state: Callable[[dict[str, object]], object]
+    resolve_submit_abort_artifact_path: Callable[..., Path | None]
+    persist_submit_abort_failure: Callable[..., object]
+    load_run_state: Callable[[Path], dict[str, object]]
+    load_latest_submit_attempt: Callable[[Path], dict[str, object]]
+    has_successful_submit_attempt: Callable[[Path], bool]
+    compute_submission_sha256: Callable[[Path | None], str | None]
+    stdout_tail_chars: int
+    stderr_tail_chars: int
+    now_iso: Callable[[], str]
+    normalize_detail: Callable[..., str]
+    record_error_fix_insight: Callable[..., object]
+    on_message: Callable[[str], object]
+    build_error: Callable[[str], BaseException]
+
+    def abort(
+        self,
+        *,
+        submission_ref: str | Path,
+        submission_artifact_path: Path | None = None,
+        artifact_mode: str | None = None,
+        code_fingerprint: str | None = None,
+        fingerprint: str,
+        error_kind: str,
+        reason: str,
+        message: str,
+        stdout_tail: str,
+        stderr_tail: str,
+        exit_code: int | None,
+        submit_attempt_recorder: object | None,
+    ) -> None:
+        abort_submit_for_run(
+            run_dir=self.run_dir,
+            run_id=self.run_id,
+            slug=self.slug,
+            knowledge_paths=self.knowledge_paths,
+            problem_types=self.problem_types,
+            submission_ref=submission_ref,
+            submission_artifact_path=submission_artifact_path,
+            artifact_mode=artifact_mode,
+            code_fingerprint=code_fingerprint,
+            fingerprint=fingerprint,
+            error_kind=error_kind,
+            reason=reason,
+            message=message,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+            exit_code=exit_code,
+            submit_attempt_recorder=submit_attempt_recorder,
+            save_run_state=self.save_run_state,
+            resolve_submit_abort_artifact_path=self.resolve_submit_abort_artifact_path,
+            persist_submit_abort_failure=self.persist_submit_abort_failure,
+            load_run_state=self.load_run_state,
+            load_latest_submit_attempt=self.load_latest_submit_attempt,
+            has_successful_submit_attempt=self.has_successful_submit_attempt,
+            compute_submission_sha256=self.compute_submission_sha256,
+            stdout_tail_chars=self.stdout_tail_chars,
+            stderr_tail_chars=self.stderr_tail_chars,
+            now_iso=self.now_iso(),
+            normalize_detail=self.normalize_detail,
+            record_error_fix_insight=self.record_error_fix_insight,
+            on_message=self.on_message,
+            build_error=self.build_error,
+        )
+
+
+@dataclass(frozen=True)
 class SubmissionKnowledgeContext:
     online_score: float
     outcome_bucket: str

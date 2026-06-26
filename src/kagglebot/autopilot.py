@@ -4371,54 +4371,27 @@ def _attempt_submit(
     print(f"[cyan]submit[/cyan]: {config.slug}")
     submitted_at = datetime.now(UTC)
 
-    def abort_submit_for_run(
-        *,
-        submission_ref: str | Path,
-        submission_artifact_path: Path | None = None,
-        artifact_mode: str | None = None,
-        code_fingerprint: str | None = None,
-        fingerprint: str,
-        error_kind: str,
-        reason: str,
-        message: str,
-        stdout_tail: str,
-        stderr_tail: str,
-        exit_code: int | None,
-        submit_attempt_recorder: _submit_attempts.SubmitAttemptRecorder | None = submit_attempt_recorder,
-    ) -> None:
-        _submit_stage.abort_submit_for_run(
-            run_dir=run_dir,
-            run_id=run_id,
-            slug=config.slug,
-            knowledge_paths=config.knowledge_paths,
-            problem_types=problem_types,
-            submission_ref=submission_ref,
-            submission_artifact_path=submission_artifact_path,
-            artifact_mode=artifact_mode,
-            code_fingerprint=code_fingerprint,
-            fingerprint=fingerprint,
-            error_kind=error_kind,
-            reason=reason,
-            message=message,
-            stdout_tail=stdout_tail,
-            stderr_tail=stderr_tail,
-            exit_code=exit_code,
-            submit_attempt_recorder=submit_attempt_recorder,
-            save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
-            resolve_submit_abort_artifact_path=_submit_failure_context.resolve_submit_abort_artifact_path,
-            persist_submit_abort_failure=_submit_failure_context.persist_submit_abort_failure,
-            load_run_state=_autopilot_state._load_run_state,
-            load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
-            has_successful_submit_attempt=_submit_attempts.has_successful_submit_attempt,
-            compute_submission_sha256=_sha256_or_none,
-            stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-            stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-            now_iso=datetime.now(UTC).isoformat(),
-            normalize_detail=normalize_error_text,
-            record_error_fix_insight=record_error_fix_insight,
-            on_message=print,
-            build_error=SubmitAbortedError,
-        )
+    submit_aborter = _submit_stage.SubmitRunAborter(
+        run_dir=run_dir,
+        run_id=run_id,
+        slug=config.slug,
+        knowledge_paths=config.knowledge_paths,
+        problem_types=problem_types,
+        save_run_state=lambda updates: _autopilot_state._save_run_state(run_dir, updates),
+        resolve_submit_abort_artifact_path=_submit_failure_context.resolve_submit_abort_artifact_path,
+        persist_submit_abort_failure=_submit_failure_context.persist_submit_abort_failure,
+        load_run_state=_autopilot_state._load_run_state,
+        load_latest_submit_attempt=_submit_attempts.load_latest_submit_attempt,
+        has_successful_submit_attempt=_submit_attempts.has_successful_submit_attempt,
+        compute_submission_sha256=_sha256_or_none,
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        now_iso=lambda: datetime.now(UTC).isoformat(),
+        normalize_detail=normalize_error_text,
+        record_error_fix_insight=record_error_fix_insight,
+        on_message=print,
+        build_error=SubmitAbortedError,
+    )
 
     prepared_resolution = _submit_stage.resolve_prepared_submission_for_submit(
         input_submission_path=input_submission_path,
@@ -4428,7 +4401,7 @@ def _attempt_submit(
         compute_error_fingerprint=compute_error_fingerprint,
     )
     if prepared_resolution.abort_spec is not None:
-        return abort_submit_for_run(
+        return submit_aborter.abort(
             submission_ref=input_submission_path,
             code_fingerprint=submit_code_fingerprint,
             **_submit_stage.build_submit_abort_spec_kwargs(prepared_resolution.abort_spec),
@@ -4486,7 +4459,7 @@ def _attempt_submit(
         compute_error_fingerprint=compute_error_fingerprint,
     )
     if rules_resolution.abort_spec is not None:
-        return abort_submit_for_run(
+        return submit_aborter.abort(
             submission_ref=prepared_submission_path,
             code_fingerprint=submit_code_fingerprint,
             **_submit_stage.build_submit_abort_spec_kwargs(rules_resolution.abort_spec),
@@ -4626,7 +4599,7 @@ def _attempt_submit(
                     stderr=submit_error_classification.stderr,
                     exit_code=exc.exit_code,
                 )
-                return abort_submit_for_run(
+                return submit_aborter.abort(
                     submission_ref=submission_reference,
                     submission_artifact_path=submission_artifact_path,
                     artifact_mode=submit_stage_state.submission_artifact_mode,
@@ -4664,7 +4637,7 @@ def _attempt_submit(
                 error=exc,
                 compute_error_fingerprint=compute_error_fingerprint,
             )
-            return abort_submit_for_run(
+            return submit_aborter.abort(
                 submission_ref=submission_reference,
                 submission_artifact_path=submission_artifact_path,
                 code_fingerprint=submit_code_fingerprint,
@@ -4679,7 +4652,7 @@ def _attempt_submit(
             )
             if abort_spec is None:
                 raise
-            return abort_submit_for_run(
+            return submit_aborter.abort(
                 submission_ref=submission_reference,
                 submission_artifact_path=submission_artifact_path,
                 artifact_mode=submit_stage_state.submission_artifact_mode,
@@ -4706,7 +4679,7 @@ def _attempt_submit(
         compute_error_fingerprint=compute_error_fingerprint,
     )
     if outcome_resolution.abort_spec is not None:
-        return abort_submit_for_run(
+        return submit_aborter.abort(
             submission_ref=submission_ref,
             submission_artifact_path=submission_for_submit_path,
             artifact_mode=submit_stage_state.submission_artifact_mode,
