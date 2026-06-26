@@ -14,6 +14,7 @@ import pandas as pd
 
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.env_utils import parse_int_value
+from kagglebot.json_utils import parse_json_array_text
 from kagglebot.knowledge.classification import (
     classify_cause_category,
     classify_error_category,
@@ -1625,10 +1626,7 @@ def resolve_research_artifacts(
         sources_path = knowledge_paths.knowledge_dir / str(record.get("sources_path") or "")
         summary_path = knowledge_paths.knowledge_dir / str(record.get("summary_path") or "")
         problem_types_json = str(record.get("problem_types_json") or "[]")
-        try:
-            record["problem_types"] = json.loads(problem_types_json)
-        except json.JSONDecodeError:
-            record["problem_types"] = []
+        record["problem_types"] = parse_json_array_text(problem_types_json) or []
         record["sources_path"] = str(sources_path)
         record["summary_path"] = str(summary_path)
         results.append(record)

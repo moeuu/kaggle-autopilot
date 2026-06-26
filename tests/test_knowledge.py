@@ -24,6 +24,7 @@ from kagglebot.knowledge import (
     record_run,
     resolve_error_fix_insights,
     resolve_problem_type_insights,
+    resolve_research_artifacts,
 )
 from kagglebot.knowledge.repositories import InsightRepository
 from kagglebot.knowledge_context import (
@@ -352,6 +353,27 @@ def test_load_problem_type_knowledge_text_can_skip_research(tmp_path) -> None:
     assert "No prior problem-type insights available." in text
     assert "No prior error-fix insights available." in text
     assert "Cross-competition research artifacts" not in text
+
+
+def test_resolve_research_artifacts_ignores_invalid_problem_types_json(tmp_path) -> None:
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    record_research_artifacts(
+        knowledge_paths=knowledge_paths,
+        slug="comp-a",
+        problem_types=["tabular", "binary"],
+        research_sources_jsonl='{"url":"https://example.com"}',
+        research_summary_md="Research summary.",
+    )
+    with sqlite3.connect(knowledge_paths.kb_path) as conn:
+        conn.execute(
+            "UPDATE competition_research SET problem_types_json = ? WHERE slug = ?",
+            ("{", "comp-a"),
+        )
+
+    records = resolve_research_artifacts(knowledge_paths=knowledge_paths, problem_types=["tabular"])
+
+    assert records
+    assert records[0]["problem_types"] == []
 
 
 def test_resolve_problem_types_from_profile_handles_json_profile(tmp_path) -> None:

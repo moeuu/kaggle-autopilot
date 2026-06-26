@@ -435,9 +435,10 @@ Recommended extraction order:
    helpers. Forward and reverse JSONL history reads now share the same tolerant loader, so duration histories and
    crawled submission-format records do not open-code line parsing. JSON object/array parsing from already-read text or
    response bytes also lives in `json_utils.py`, so metadata readers, notebook input discovery, taxonomy loading,
-   notifier responses, Codex event lines, advisor responses, dataset-profile summaries, and kernel-log parsing share the
-   same typed parse contracts. New modules should avoid ad hoc JSON parsing/serialization for artifact files unless
-   they need generated kernel code that runs outside the package or intentionally strict parser behavior.
+   research artifact metadata, notifier responses, Codex event lines, advisor responses, dataset-profile summaries, and
+   kernel-log parsing share the same typed parse contracts. New modules should avoid ad hoc JSON parsing/serialization
+   for artifact files unless they need generated kernel code that runs outside the package or intentionally strict parser
+   behavior.
 
 Each extraction should preserve private compatibility names only where downstream tests/extensions still import them.
 New code should call the smaller public modules directly, and obsolete private wrappers in `autopilot.py` should be
