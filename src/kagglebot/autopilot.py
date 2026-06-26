@@ -3225,10 +3225,12 @@ def _run_improvement(
         detail="GPT is drafting the next improvement strategy.",
         iteration=iteration,
     )
-    strategy_text = _run_improvement_strategy(
+    strategy_text = _agent_strategy.run_improvement_strategy_prompt(
         prompt_text=strategy_prompt,
         output_dir=strategy_dir,
         dry_run=config.dry_run,
+        implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
+        run_strategy_func=run_strategy,
     )
 
     prompt_text = base_prompt_text
@@ -3400,27 +3402,6 @@ def _run_improvement(
     )
 
 
-def _run_improvement_strategy(*, prompt_text: str, output_dir: Path, dry_run: bool) -> str:
-    return _agent_strategy.run_strategy_prompt(
-        prompt_text=prompt_text,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        config=_agent_strategy.StrategyPromptRunConfig(
-            prompt_filename="gpt_improvement_prompt.md",
-            start_message="[cyan]improve[/cyan]: gpt drafting improvement prompt",
-            failure_message=(
-                f"[yellow]improve[/yellow]: gpt improvement strategy failed, "
-                f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
-            ),
-            empty_message=(
-                f"[yellow]improve[/yellow]: gpt improvement strategy empty, "
-                f"falling back to direct {IMPLEMENTATION_AGENT.log_alias} prompt"
-            ),
-        ),
-        run_strategy_func=run_strategy,
-    )
-
-
 def _run_kernel_fix(
     *,
     config: AutopilotConfig,
@@ -3547,11 +3528,15 @@ def _run_kernel_fix(
             codex_prompt=prompt_text,
         )
         strategy_dir = agent_dir / f"kernel_fix_strategy-{attempt:02d}"
-        strategy_text = _run_error_strategy(
+        strategy_text = _agent_strategy.run_error_strategy_prompt(
             prompt_text=strategy_prompt,
             output_dir=strategy_dir,
             dry_run=config.dry_run,
             stage_label="kernel fix",
+            implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
+            strategy_model=_ERROR_STRATEGY_MODEL,
+            reasoning_effort=_ERROR_STRATEGY_REASONING_EFFORT,
+            run_strategy_func=run_strategy,
         )
     if strategy_text:
         prompt_text += (
@@ -4028,11 +4013,15 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         error_text=error_text,
         codex_prompt=prompt_text,
     )
-    strategy_text = _run_error_strategy(
+    strategy_text = _agent_strategy.run_error_strategy_prompt(
         prompt_text=strategy_prompt,
         output_dir=autofix_dir / "gpt_strategy",
         dry_run=config.dry_run,
         stage_label=strategy_label,
+        implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
+        strategy_model=_ERROR_STRATEGY_MODEL,
+        reasoning_effort=_ERROR_STRATEGY_REASONING_EFFORT,
+        run_strategy_func=run_strategy,
     )
     if not strategy_text.strip():
         print(
@@ -4143,37 +4132,6 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         return
 
     raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
-
-
-def _run_error_strategy(
-    *,
-    prompt_text: str,
-    output_dir: Path,
-    dry_run: bool,
-    stage_label: str,
-) -> str:
-    return _agent_strategy.run_strategy_prompt(
-        prompt_text=prompt_text,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        config=_agent_strategy.StrategyPromptRunConfig(
-            prompt_filename="gpt_strategy_prompt.md",
-            start_message=f"[cyan]{stage_label}[/cyan]: gpt analyzing error",
-            detail_message=(
-                f"[cyan]{stage_label}[/cyan]: strategy model={_ERROR_STRATEGY_MODEL} "
-                f"reasoning={_ERROR_STRATEGY_REASONING_EFFORT}"
-            ),
-            failure_message=(
-                f"[yellow]{stage_label}[/yellow]: gpt strategy failed, "
-                f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
-            ),
-            empty_message=(
-                f"[yellow]{stage_label}[/yellow]: gpt strategy empty, "
-                f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
-            ),
-        ),
-        run_strategy_func=run_strategy,
-    )
 
 
 def _maybe_regenerate_kernel_sources_once(

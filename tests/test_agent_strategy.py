@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from kagglebot.agent_strategy import StrategyPromptRunConfig, run_strategy_prompt
+from kagglebot.agent_strategy import (
+    StrategyPromptRunConfig,
+    run_error_strategy_prompt,
+    run_improvement_strategy_prompt,
+    run_strategy_prompt,
+)
 
 
 @dataclass(frozen=True)
@@ -84,3 +89,52 @@ def test_run_strategy_prompt_returns_empty_for_blank_response(tmp_path: Path) ->
     )
 
     assert text == ""
+
+
+def test_run_improvement_strategy_prompt_uses_stage_defaults(tmp_path: Path) -> None:
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool) -> DummyStrategyResult:
+        calls.append((prompt_path, output_dir, dry_run))
+        last_message = output_dir / "last.txt"
+        last_message.write_text(" improve plan ", encoding="utf-8")
+        return DummyStrategyResult(last_message)
+
+    text = run_improvement_strategy_prompt(
+        prompt_text="improve prompt",
+        output_dir=tmp_path / "improve",
+        dry_run=True,
+        implementation_agent_alias="Codex",
+        run_strategy_func=fake_run_strategy,
+    )
+
+    prompt_path = tmp_path / "improve" / "gpt_improvement_prompt.md"
+    assert prompt_path.read_text(encoding="utf-8") == "improve prompt"
+    assert calls == [(prompt_path, tmp_path / "improve", True)]
+    assert text == "improve plan"
+
+
+def test_run_error_strategy_prompt_uses_stage_defaults(tmp_path: Path) -> None:
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool) -> DummyStrategyResult:
+        calls.append((prompt_path, output_dir, dry_run))
+        last_message = output_dir / "last.txt"
+        last_message.write_text(" fix plan ", encoding="utf-8")
+        return DummyStrategyResult(last_message)
+
+    text = run_error_strategy_prompt(
+        prompt_text="error prompt",
+        output_dir=tmp_path / "error",
+        dry_run=False,
+        stage_label="kernel fix",
+        implementation_agent_alias="Codex",
+        strategy_model="gpt-x",
+        reasoning_effort="high",
+        run_strategy_func=fake_run_strategy,
+    )
+
+    prompt_path = tmp_path / "error" / "gpt_strategy_prompt.md"
+    assert prompt_path.read_text(encoding="utf-8") == "error prompt"
+    assert calls == [(prompt_path, tmp_path / "error", False)]
+    assert text == "fix plan"

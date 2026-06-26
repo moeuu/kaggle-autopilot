@@ -339,7 +339,8 @@ small extractions that make import direction clearer over broad refactors that o
 
 Recommended extraction order:
 
-1. Plan resolution: continue moving `_resolve_plan` into `plan_policy.py`; split strategy normalization/override,
+1. Plan resolution: keep resolved-plan orchestration in `plan_resolution.py` and pure policy decisions in
+   `plan_policy.py`; split strategy normalization/override,
    target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, metric/direction override policy, plan score-source normalization, evaluation-spec value extraction,
    local-GPU evaluation budget/max-iteration policy, submit/runtime constraint application, planning
@@ -442,8 +443,9 @@ Recommended extraction order:
    orchestration code should pass identity/path context only.
    Strategy, improvement, autofix, error-repair, and mandatory code-reference repair prompt rendering now lives in
    `agent_prompts.py`, keeping long prompt templates out of `autopilot.py`.
-   Strategy prompt file persistence, runner invocation, response loading, and failed/empty fallback handling now lives in
-   `agent_strategy.py`; orchestration wrappers should only supply stage-specific labels and fallback messages.
+   Strategy prompt file persistence, runner invocation, response loading, failed/empty fallback handling, and
+   stage-specific improvement/error strategy prompt defaults now live in `agent_strategy.py`; orchestration code should
+   pass only identity/path context.
    Problem-type knowledge context rendering and knowledge-hints file generation are shared through
    `knowledge_context.py`, so planning and improvement prompts do not duplicate insight/research lookup policy.
    Dataset-profile-to-problem-type resolution also lives there, keeping orchestration code from directly owning profile

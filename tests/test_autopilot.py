@@ -3917,7 +3917,7 @@ def test_run_autofix_submit_error_falls_back_to_direct_codex_when_strategy_empty
         last_msg.write_text("submit fix applied\n", encoding="utf-8")
         return DummyResult(last_msg)
 
-    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
@@ -3960,7 +3960,7 @@ def test_run_autofix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_pat
         if calls["verify"] == 1:
             raise RuntimeError("Verification failed: first pass")
 
-    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "1) fix root cause\n")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "1) fix root cause\n")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", flaky_verify)
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
@@ -4005,7 +4005,7 @@ def test_run_kernel_fix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_
         if calls["verify"] == 1:
             raise RuntimeError("Verification failed: first kernel-fix pass")
 
-    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", flaky_verify)
     monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
@@ -4068,7 +4068,7 @@ def test_run_kernel_fix_includes_subgroup_prompt_context(monkeypatch, tmp_path: 
         last_msg.write_text("kernel fix applied\n", encoding="utf-8")
         return DummyResult(last_msg)
 
-    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
@@ -5883,7 +5883,7 @@ def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path:
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -5956,7 +5956,7 @@ def test_run_improvement_retries_transient_agent_capacity(monkeypatch, tmp_path:
         return DummyResult(last_msg, returncode=0)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6145,7 +6145,7 @@ def test_run_improvement_appends_code_reference_gate_when_underperforming(monkey
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6204,7 +6204,7 @@ def test_run_improvement_appends_additional_policy_notes(monkeypatch, tmp_path: 
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6307,7 +6307,7 @@ def test_run_improvement_appends_competition_policy_override(monkeypatch, tmp_pa
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6407,7 +6407,7 @@ def test_run_improvement_retries_when_code_reference_impl_is_missing(monkeypatch
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6493,7 +6493,7 @@ def test_run_improvement_code_reference_repair_allows_src_edits(monkeypatch, tmp
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -8401,7 +8401,7 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
     def fail_if_called(*args, **kwargs):  # noqa: ARG001
         raise AssertionError("allowlist enforcement must not run when no file changes are detected")
 
-    monkeypatch.setattr("kagglebot.autopilot._run_error_strategy", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", fake_replan)
     monkeypatch.setattr("kagglebot.autopilot._run_verify", lambda *args, **kwargs: None)
