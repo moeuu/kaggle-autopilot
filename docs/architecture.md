@@ -451,7 +451,7 @@ Recommended extraction order:
    manual local validation/submit-blocker abort specs,
    submission polling/outcome abort specs, submission outcome
    classification and poll-result post-processing decisions, rank
-   payload/guard/display/state normalization, iteration submit-status formatting,
+   payload/guard/display/state normalization,
    campaign-aware submission message resolution, submission iteration inference, iteration/fallback submit improvement
    gate decisions, tracking score selection/update, submission knowledge orchestration/context/default-insight
    preparation/record dispatch resolution, successful submit attempt/outcome/failure-context recording orchestration,
@@ -465,6 +465,8 @@ Recommended extraction order:
    resolution/run binding, classification-driven retry/abort decisions, and file-submit-to-notebook fallback
    runtime-state/message assembly now live in `submit_cli_error_resolution.py`; `submit_stage.py` re-exports the
    compatibility names while the retry loop consumes the focused module boundary.
+   Pure submit-status/detail message rendering and submission-row message extraction now live in
+   `submit_stage_messages.py`; `submit_stage.py` keeps compatibility wrappers for older call sites.
    Run-bound duplicate-submission and same-path skip handling now use
    `submit_stage.resolve_duplicate_submission_for_run` and `submit_stage.resolve_same_submission_path_for_run`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
