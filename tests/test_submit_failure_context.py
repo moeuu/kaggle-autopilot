@@ -22,6 +22,7 @@ from kagglebot.submit_failure_context import (
     path_from_submit_reference,
     persist_submit_abort_failure,
     resolve_submit_abort_artifact_path,
+    resolve_submit_abort_autofixability_for_run,
     resolve_submit_autofix_context_for_attempt,
     resolve_submit_autofix_submission_artifact,
     save_submit_failure_context,
@@ -533,6 +534,30 @@ def test_decide_submit_abort_autofixability_uses_legacy_run_state() -> None:
     assert repeated.autofixable is True
     assert permanent.autofixable is False
     assert "not safely auto-fixable" in permanent.message
+
+
+def test_resolve_submit_abort_autofixability_for_run_loads_context_and_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "repairable": False,
+            "repair_target": "manual",
+            "reason": "rules_not_accepted",
+            "manual_next_step": "Accept rules.",
+        },
+    )
+
+    decision = resolve_submit_abort_autofixability_for_run(
+        run_dir=run_dir,
+        load_run_state=lambda path: {"last_error_kind": "validation"} if path == run_dir else {},
+    )
+
+    assert decision.autofixable is False
+    assert "manual intervention" in decision.message
+    assert "Accept rules." in decision.message
 
 
 def test_should_force_resubmit_after_submit_abort_only_for_polling_or_scoring_failures() -> None:

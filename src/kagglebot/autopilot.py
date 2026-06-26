@@ -5020,11 +5020,9 @@ def _abort_submit_for_run(
 
 def _is_submit_abort_autofixable(*, config: AutopilotConfig, run_id: str) -> bool:
     run_dir = config.paths.run_dir(run_id)
-    failure_context = _submit_failure_context.load_submit_failure_context(run_dir)
-    state = _autopilot_state._load_run_state(run_dir)
-    decision = _submit_failure_context.decide_submit_abort_autofixability(
-        failure_context=failure_context,
-        run_state=state,
+    decision = _submit_failure_context.resolve_submit_abort_autofixability_for_run(
+        run_dir=run_dir,
+        load_run_state=_autopilot_state._load_run_state,
     )
     if decision.message:
         print(decision.message)

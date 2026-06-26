@@ -467,6 +467,17 @@ def decide_submit_abort_autofixability(
     )
 
 
+def resolve_submit_abort_autofixability_for_run(
+    *,
+    run_dir: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+) -> SubmitAbortAutofixDecision:
+    return decide_submit_abort_autofixability(
+        failure_context=load_submit_failure_context(run_dir),
+        run_state=load_run_state(run_dir),
+    )
+
+
 def should_force_resubmit_after_submit_abort(run_state: dict[str, object]) -> bool:
     reason = str(run_state.get("last_reason") or "").strip().lower()
     if not reason:
