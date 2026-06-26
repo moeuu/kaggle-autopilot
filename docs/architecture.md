@@ -469,9 +469,10 @@ Recommended extraction order:
    `kernel_outputs.find_submission_file`, so notebook runs share the same manifest, archive, final submission, and
    fold-intermediate fallback policy as local kernel runs. Shared artifact copy/no-op behavior now lives in
    `artifact_io.copy_artifact_if_needed`; `kernel_outputs` keeps a compatibility import for older call sites. Notebook
-   runner local submission preservation, submit artifact storage, TSV submit-format staging, local sample submission and
-   auxiliary-input file staging, kernel package source/runtime/external asset staging, plan snapshots, local kernel shim
-   config files, and local dataset-profile context staging use that helper for file-copy paths.
+   runner local submission preservation, submit artifact storage, TSV submit-format staging, bootstrap sample-submission
+   caching/mirroring, local sample submission and auxiliary-input file staging, kernel package source/runtime/external
+   asset staging, plan snapshots, local kernel shim config files, and local dataset-profile context staging use that
+   helper for file-copy paths.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
    compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
 7. Agent I/O helpers: keep prompt/error transcript file persistence, prompt/response transcript display,

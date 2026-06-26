@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -951,3 +952,15 @@ def test_mirror_sample_submission_to_data_overwrites_stale_destination(tmp_path)
     _mirror_sample_submission_to_data(paths)
 
     assert data_sample.read_text(encoding="utf-8") == paths.sample_submission_path.read_text(encoding="utf-8")
+
+
+def test_mirror_sample_submission_to_data_noops_when_source_is_destination(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    sample_path = data_dir / "sample_submission.csv"
+    sample_path.write_text("ID,Pred\n2026_1_2,0.5\n", encoding="utf-8")
+    paths = SimpleNamespace(sample_submission_path=sample_path, data_dir=data_dir)
+
+    _mirror_sample_submission_to_data(paths)
+
+    assert sample_path.read_text(encoding="utf-8") == "ID,Pred\n2026_1_2,0.5\n"

@@ -5,7 +5,6 @@ import io
 import json
 import os
 import re
-import shutil
 import time
 import urllib.error
 import urllib.request
@@ -13,6 +12,7 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.competition import rules_url_for_slug
 from kagglebot.competition_policy import NotebookSelectionPolicy, load_competition_policy
@@ -1583,7 +1583,7 @@ def _cache_sample_submission(paths: CompetitionPaths) -> None:
             _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
         return
     if candidate.suffix.lower() == ".csv":
-        shutil.copy2(candidate, paths.sample_submission_path)
+        copy_artifact_if_needed(source=candidate, destination=paths.sample_submission_path)
     else:
         try:
             frame = _read_table(candidate, format_hint=format_hint)
@@ -1605,7 +1605,7 @@ def _mirror_sample_submission_to_data(paths: CompetitionPaths) -> None:
                 return
         except OSError:
             pass
-    shutil.copy2(source, destination)
+    copy_artifact_if_needed(source=source, destination=destination)
 
 
 def _find_tabular_files(root: Path) -> list[Path]:
