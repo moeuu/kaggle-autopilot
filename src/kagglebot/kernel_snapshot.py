@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
+from kagglebot.kernel_outputs import copy_artifact_if_needed
 from kagglebot.paths import CompetitionPaths
 
 BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"
@@ -17,9 +17,8 @@ def capture_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> b
     if not kernel_path.exists():
         return False
     snapshot_path = best_kernel_snapshot_path(run_dir)
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copy2(kernel_path, snapshot_path)
+        copy_artifact_if_needed(source=kernel_path, destination=snapshot_path)
     except OSError:
         return False
     return True
@@ -38,7 +37,7 @@ def restore_best_kernel_snapshot(*, paths: CompetitionPaths, run_dir: Path) -> b
     if not snapshot_path.exists():
         return False
     try:
-        shutil.copy2(snapshot_path, kernel_path)
+        copy_artifact_if_needed(source=snapshot_path, destination=kernel_path)
     except OSError:
         return False
     return True

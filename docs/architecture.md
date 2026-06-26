@@ -398,7 +398,8 @@ Recommended extraction order:
    Code-reference score extraction, reference notebook lookup, implementation marker construction, and reference
    implementation validation are now in `code_reference.py`; keep additional code-reference policy there unless it needs
    direct agent prompt rendering.
-   Best-kernel snapshot capture/restore helpers are now in `kernel_snapshot.py`.
+   Best-kernel snapshot capture/restore helpers are now in `kernel_snapshot.py`, and snapshot file copies use
+   `kernel_outputs.copy_artifact_if_needed` instead of local copy logic.
 4. Submit state persistence: submit attempt JSONL writing/reading, run-bound submit attempt recorder/aborter callback binding,
    duplicate SHA lookup, submit attempt/run-state payloads, submit-abort artifact path resolution, repair-classified submit failure-context payloads, submit knowledge-record
    payloads/orchestration, same-submission-path skip payloads, submit-abort attempt/context persistence, submit result
