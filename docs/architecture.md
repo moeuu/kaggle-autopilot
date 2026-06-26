@@ -437,16 +437,14 @@ Recommended extraction order:
    sample guards, notebook submit kernel-run kwargs construction, notebook submit result artifact/reference handling,
    submit-kernel error wrapping, and notebook submit exception/retry orchestration are extracted. Initial submit-stage mode
    decisions, file/notebook submit attempt dispatch, successful
-   submit result normalization, submit-stage runtime state transitions, initial submit runtime-state resolution,
+   submit result normalization, initial submit runtime-state resolution,
    initial artifact-mode decision application,
-   submit-error classification normalization, submit CLI error resolution/run binding, classification-driven retry/abort decisions,
    submit-error action abort specs,
    submit-retry attempt/knowledge recording orchestration, abort-spec kwargs mapping,
    duplicate-submit resolution/decision application, local validation/prepared-path resolution,
    rules-acceptance blocker resolution,
    local/Kaggle submit blocker abort-spec resolution,
-   same-submission-path resolution/decision application, notebook fallback runtime-state resolution and decision
-   application/state/message assembly,
+   same-submission-path resolution/decision application,
    manual local validation/submit-blocker abort specs,
    submission polling/outcome abort specs, submission outcome
    classification and poll-result post-processing decisions, rank
@@ -460,6 +458,10 @@ Recommended extraction order:
    recording now calls the submit-stage helper directly from the loop. Notebook kernel submit execution, run-specific
    iteration/log path resolution, output-reference construction, kernel-output submit retry orchestration, and run-bound
    notebook submit callback wiring now live together in `submit_notebook.py`.
+   Submit-stage runtime state dataclasses, submit-error classification normalization, submit CLI error
+   resolution/run binding, classification-driven retry/abort decisions, and file-submit-to-notebook fallback
+   runtime-state/message assembly now live in `submit_cli_error_resolution.py`; `submit_stage.py` re-exports the
+   compatibility names while the retry loop consumes the focused module boundary.
    Run-bound duplicate-submission and same-path skip handling now use
    `submit_stage.resolve_duplicate_submission_for_run` and `submit_stage.resolve_same_submission_path_for_run`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
