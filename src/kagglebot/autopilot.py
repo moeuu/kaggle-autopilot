@@ -637,7 +637,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
         infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
     )
-    best_submitted_score = _autopilot_state._resume_best_submitted_offline_score(
+    best_submitted_score = _autopilot_state.resume_best_submitted_offline_score(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
@@ -761,7 +761,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
     if resumed_best_readiness is not None and best_score is None:
         best_score = resumed_best_readiness
-    best_submittable_score, best_submittable_submission = _autopilot_state._resume_best_submittable_iteration_state(
+    best_submittable_score, best_submittable_submission = _autopilot_state.resume_best_submittable_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,

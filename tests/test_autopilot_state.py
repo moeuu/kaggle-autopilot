@@ -16,6 +16,8 @@ from kagglebot.autopilot_state import (
     list_run_ids,
     load_run_state,
     resolve_resume_run_id,
+    resume_best_submittable_iteration_state,
+    resume_best_submitted_offline_score,
     save_run_state,
     write_iteration_state_marker,
     write_run_payload,
@@ -327,3 +329,68 @@ def test_load_submitted_iteration_tracking_score_ignores_non_finite_submission_s
     )
 
     assert score == 0.37
+
+
+def test_resume_best_submitted_offline_score_uses_submitted_iteration_marker(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter1 = run_dir / "iter-1"
+    iter2 = run_dir / "iter-2"
+    iter3 = run_dir / "iter-3"
+    for iter_dir in (iter1, iter2, iter3):
+        iter_dir.mkdir(parents=True)
+        (iter_dir / "metrics.json").write_text(json.dumps({"submission_score": 0.5}), encoding="utf-8")
+    (iter1 / "iteration_state.json").write_text(json.dumps({"submitted": True}), encoding="utf-8")
+    (iter2 / "iteration_state.json").write_text(json.dumps({"submitted": False}), encoding="utf-8")
+    (iter3 / "iteration_state.json").write_text(json.dumps({"submitted": True}), encoding="utf-8")
+    (iter3 / "metrics.json").write_text(json.dumps({"submission_score": 0.4}), encoding="utf-8")
+
+    score = resume_best_submitted_offline_score(
+        paths=paths,
+        run_id="run-1",
+        metric_direction="minimize",
+        target_metric="rmse",
+        max_iterations=2,
+        load_kernel_metrics=lambda path, direction, target_metric: None,
+    )
+
+    assert score == 0.5
+
+
+def test_resume_best_submittable_iteration_state_uses_submission_artifact_and_gate(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    run_dir = paths.run_dir("run-1")
+    iter1 = run_dir / "iter-1"
+    iter2 = run_dir / "iter-2"
+    for iter_dir in (iter1, iter2):
+        iter_dir.mkdir(parents=True)
+        (iter_dir / "submission.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+        (iter_dir / "metrics.json").write_text("{}", encoding="utf-8")
+
+    def load_kernel_metrics(path: Path, direction: str, target_metric: str) -> EvaluationResult:
+        assert direction == "maximize"
+        assert target_metric == "auc"
+        value = 0.7 if path.parent.name == "iter-1" else 0.9
+        return EvaluationResult(
+            score_source="cv",
+            metric="auc",
+            direction="maximize",
+            value=value,
+            std=None,
+            train_score=None,
+            val_score=None,
+            fold_scores=None,
+        )
+
+    score, submission = resume_best_submittable_iteration_state(
+        paths=paths,
+        run_id="run-1",
+        metric_direction="maximize",
+        target_metric="auc",
+        max_iterations=2,
+        load_kernel_metrics=load_kernel_metrics,
+        iteration_metrics_allow_submit=lambda path, evaluation: path.parent.name == "iter-1",
+    )
+
+    assert score == 0.7
+    assert submission == iter1 / "submission.csv"

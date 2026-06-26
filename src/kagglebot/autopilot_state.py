@@ -323,7 +323,7 @@ def _load_submitted_iteration_tracking_score(
     return float(evaluation.value)
 
 
-def _resume_best_submitted_offline_score(
+def resume_best_submitted_offline_score(
     *,
     paths: CompetitionPaths,
     run_id: str,
@@ -365,7 +365,7 @@ def _resume_best_submitted_offline_score(
     return best_score
 
 
-def _resume_best_submittable_iteration_state(
+def resume_best_submittable_iteration_state(
     *,
     paths: CompetitionPaths,
     run_id: str,

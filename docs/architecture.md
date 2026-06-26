@@ -381,10 +381,10 @@ Recommended extraction order:
    data-cache/fingerprint helpers, iteration submit eligibility, submit-phase completion decisions, iteration record
    kwargs construction, and run evaluation-report resume/persistence are now in `iteration_metrics.py`.
    Public run payload/status/summary helpers for `run.json`, the iteration-state marker writer, iteration artifact
-   resolvers, resume iteration-state resolution, submit-retry artifact loading, and public `run_state.json` load/save
-   helpers now live in `autopilot_state.py`, so orchestration code no longer open-codes state file paths when writing
-   lifecycle status, resolving iteration artifacts, iteration completion markers, summaries, resume state, or submit
-   state.
+   resolvers, resume iteration-state/best-submission resolution, submit-retry artifact loading, and public
+   `run_state.json` load/save helpers now live in `autopilot_state.py`, so orchestration code no longer open-codes state
+   file paths when writing lifecycle status, resolving iteration artifacts, iteration completion markers, summaries,
+   resume state, or submit state.
    Submit failure context lookups for abort deferral and repair-prompt notes now live behind run-level helpers in
    `submit_failure_context.py`, keeping the main loop from loading failure context and latest-attempt artifacts directly.
    Iteration repair-signal collection/extraction and next-iteration policy/knowledge payload assembly/dispatch are now
