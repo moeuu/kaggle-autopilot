@@ -4916,7 +4916,7 @@ def test_metric_mismatch_keeps_competition_metric_in_strict_mode(monkeypatch, tm
         return evaluation, payload, submission_path
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
-    monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
+    monkeypatch.setattr("kagglebot.metric_fix.run_metric_only_competition_metric_fix", fake_metric_only_fix)
     monkeypatch.setattr("kagglebot.metric_recheck.recheck_kernel_metrics_from_artifacts", fake_metric_recheck)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
@@ -5117,7 +5117,7 @@ def test_metric_only_fix_reruns_local_kernel_to_materialize_metric_outputs(monke
             metrics_path=metrics_path,
         )
 
-    monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
+    monkeypatch.setattr("kagglebot.metric_fix.run_metric_only_competition_metric_fix", fake_metric_only_fix)
     monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
 
     config = _make_config(tmp_path, submit=False, max_iterations=1)
@@ -5482,7 +5482,7 @@ def test_local_kernel_oof_artifact_is_synced_for_metric_recheck(monkeypatch, tmp
         calls["metric_fix"] += 1
 
     monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fake_run_kernel_local)
-    monkeypatch.setattr("kagglebot.autopilot._run_metric_only_competition_metric_fix", fake_metric_only_fix)
+    monkeypatch.setattr("kagglebot.metric_fix.run_metric_only_competition_metric_fix", fake_metric_only_fix)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)

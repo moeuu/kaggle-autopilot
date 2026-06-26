@@ -374,7 +374,8 @@ Recommended extraction order:
    Kernel metrics payload parsing, evaluation-result normalization, CV fallback extraction, metric-recheck OOF column
    helpers, OOF metric recomputation, and payload persistence, fold-score list parsing, baseline score extraction, and
    kernel-log metric scraping are now in `kernel_metrics.py`. Same-iteration metric artifact selection/recheck now
-   lives in `metric_recheck.py`, so the main loop does not own stale/output metrics precedence or OOF recompute dispatch.
+   lives in `metric_recheck.py`, and metric-only repair request construction lives in `metric_fix.py`, so the main loop
+   does not own stale/output metrics precedence, OOF recompute dispatch, or metric-only repair prompt policy.
    Kernel quality guard constants, payload-level detectors for subgroup collapse, external test-label transfer,
    candidate-selection mismatch, prediction-distribution collapse, and the aggregate submit quality-guard payload builder
    are now in `kernel_quality.py`.

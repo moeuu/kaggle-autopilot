@@ -36,6 +36,7 @@ from kagglebot import knowledge_context as _knowledge_context
 from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
 from kagglebot import method_scout as _method_scout
+from kagglebot import metric_fix as _metric_fix
 from kagglebot import metric_matching as _metric_matching
 from kagglebot import metric_recheck as _metric_recheck
 from kagglebot import plan_policy as _plan_policy
@@ -1234,14 +1235,20 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         f"metric-only {IMPLEMENTATION_AGENT.display_name} fix "
                         f"(attempt {metric_fix_attempts}/{_MAX_METRIC_FIX_ATTEMPTS}) and re-running evaluation."
                     )
-                    _run_metric_only_competition_metric_fix(
-                        config=config,
-                        run_id=run_id,
-                        iteration=iteration,
-                        iter_dir=iter_dir,
+                    _metric_fix.run_metric_only_competition_metric_fix(
                         mismatch_reason=metric_mismatch_reason,
                         attempt=metric_fix_attempts,
-                        pending_error_fixes=pending_error_fixes,
+                        codex_model=_METRIC_FIX_CODEX_MODEL,
+                        codex_reasoning_effort=_METRIC_FIX_REASONING_EFFORT,
+                        max_codex_passes=_MAX_METRIC_FIX_CODEX_PASSES,
+                        run_kernel_fix=lambda **kwargs: _run_kernel_fix(
+                            config=config,
+                            run_id=run_id,
+                            iteration=iteration,
+                            iter_dir=iter_dir,
+                            pending_error_fixes=pending_error_fixes,
+                            **kwargs,
+                        ),
                     )
                     evaluation, kernel_metrics_payload, submission_path = (
                         _metric_recheck.recheck_kernel_metrics_from_artifacts(
@@ -3670,45 +3677,6 @@ def _run_kernel_fix(
 
     raise RuntimeError(
         f"Kernel fix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error."
-    )
-
-
-def _run_metric_only_competition_metric_fix(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    iteration: int,
-    iter_dir: Path,
-    mismatch_reason: str,
-    attempt: int,
-    pending_error_fixes: list[dict[str, object]] | None = None,
-) -> None:
-    """Apply a metric-only kernel fix using the implementation agent without GPT strategy mediation."""
-    policy_prefix = (
-        "Metric-only repair policy:\n"
-        "- Edit ONLY competition metric selection/reporting logic in kernel outputs.\n"
-        "- Do NOT change model architecture, features, training schedule, folds, seeds, or ensembling.\n"
-        "- Ensure metrics.json reports the official competition metric exactly.\n"
-        "- Ensure submission.csv format stays unchanged.\n"
-    )
-    metric_fix_error = (
-        "Competition metric mismatch detected in strict mode.\n"
-        f"Details: {mismatch_reason}\n"
-        "Apply a minimal metric-only fix and stop."
-    )
-    _run_kernel_fix(
-        config=config,
-        run_id=run_id,
-        iteration=iteration,
-        iter_dir=iter_dir,
-        error_message=metric_fix_error,
-        attempt=attempt,
-        pending_error_fixes=pending_error_fixes,
-        use_gpt_strategy=False,
-        codex_model=_METRIC_FIX_CODEX_MODEL,
-        codex_reasoning_effort=_METRIC_FIX_REASONING_EFFORT,
-        prompt_prefix=policy_prefix,
-        max_codex_passes=_MAX_METRIC_FIX_CODEX_PASSES,
     )
 
 
