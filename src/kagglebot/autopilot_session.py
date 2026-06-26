@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from kagglebot import autopilot_submit as _autopilot_submit
 from kagglebot.knowledge_phase import KnowledgePhase
 from kagglebot.planning_phase import PlanningPhase
 
@@ -21,9 +22,7 @@ class SubmissionPhase:
     notebook_submit_artifact_mode: str = "wrapper"
 
     def attempt(self, *, submission_path: Path, best_score: float | None) -> dict[str, object] | None:
-        from kagglebot.autopilot import _attempt_submit
-
-        return _attempt_submit(
+        return _autopilot_submit.attempt_submit_for_autopilot_run(
             config=self.config,
             run_id=self.run_id,
             submission_path=submission_path,

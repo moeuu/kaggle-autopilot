@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from kagglebot.autopilot_session import AutopilotSession, SubmissionPhase
 
 
-def test_submission_phase_delegates_to_autopilot_attempt_submit(monkeypatch, tmp_path: Path) -> None:
+def test_submission_phase_delegates_to_public_autopilot_submit(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     config = SimpleNamespace(slug="demo")
     submission_path = tmp_path / "submission.csv"
@@ -16,7 +16,7 @@ def test_submission_phase_delegates_to_autopilot_attempt_submit(monkeypatch, tmp
         captured.update(kwargs)
         return {"ok": True}
 
-    monkeypatch.setattr("kagglebot.autopilot._attempt_submit", fake_attempt_submit)
+    monkeypatch.setattr("kagglebot.autopilot_submit.attempt_submit_for_autopilot_run", fake_attempt_submit)
 
     result = SubmissionPhase(
         config=config,

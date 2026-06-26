@@ -497,8 +497,10 @@ Recommended extraction order:
    `attempt_submit_for_run`, which coordinates `submit_stage`, `submit_notebook`, `submission_service`,
    `submit_attempts`, and `submit_failure_context` through explicit dependency and limit objects. Production dependency
    and limit construction now lives in `autopilot_submit.py`, leaving `autopilot.py`'s private `_attempt_submit` as a
-   thin compatibility wrapper. Next, continue shrinking the compatibility wrapper surface by moving tests/extensions and
-   session-level submit construction to the public submit service where they no longer need the private symbol.
+   thin compatibility wrapper. Session-level submit construction now calls `autopilot_submit.attempt_submit_for_autopilot_run`
+   directly, so `SubmissionPhase` no longer imports the private wrapper. Next, continue shrinking the compatibility
+   wrapper surface by moving remaining tests/extensions to the public submit service where they no longer need the private
+   symbol.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to
