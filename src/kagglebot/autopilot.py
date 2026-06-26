@@ -286,7 +286,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
             os.environ.pop("KAGGLEBOT_FORCE_RESUBMIT", None)
 
 
-def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
+def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     _watch_state.update_watch_phase(config, run_id, "autopilot_starting")

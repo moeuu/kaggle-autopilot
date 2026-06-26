@@ -38,7 +38,7 @@ def test_submission_phase_delegates_to_public_autopilot_submit(monkeypatch, tmp_
     }
 
 
-def test_autopilot_session_run_delegates_to_autopilot_core(monkeypatch) -> None:
+def test_autopilot_session_run_delegates_to_public_autopilot_core(monkeypatch) -> None:
     captured: dict[str, object] = {}
     config = SimpleNamespace(slug="demo")
 
@@ -47,7 +47,7 @@ def test_autopilot_session_run_delegates_to_autopilot_core(monkeypatch) -> None:
         captured["run_id"] = run_id_arg
         captured["resume_run"] = resume_run
 
-    monkeypatch.setattr("kagglebot.autopilot._run_autopilot_core", fake_run_autopilot_core)
+    monkeypatch.setattr("kagglebot.autopilot.run_autopilot_core", fake_run_autopilot_core)
 
     AutopilotSession(config=config, run_id="run-1", resume_run=True).run()
 

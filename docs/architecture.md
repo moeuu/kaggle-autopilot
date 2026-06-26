@@ -332,7 +332,8 @@ The next high-value modernization work is:
    Planning-phase orchestration and knowledge-refresh/profile derivation now live in `planning_phase.py` and
    `knowledge_phase.py`, keeping `autopilot.py` focused on session and iteration-loop wiring.
    Session-level planning/knowledge/submit phase wrappers now live in `autopilot_session.py`; submit execution uses
-   `autopilot_submit.py` directly, while `autopilot.py` keeps only the loop entrypoint compatibility delegate.
+   `autopilot_submit.py` directly, while session execution calls the public `autopilot.run_autopilot_core` loop
+   entrypoint.
    Autofix error transcript creation, submit failure context loading, deterministic submit-file repair preparation,
    prompt planning, and strategy-prompt rendering now live in `autofix_context.py`, leaving the autofix loop to focus
    on strategy execution and implementation passes.

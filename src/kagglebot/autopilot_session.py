@@ -48,6 +48,6 @@ class AutopilotSession:
         return KnowledgePhase(config=self.config)
 
     def run(self) -> None:
-        from kagglebot.autopilot import _run_autopilot_core
+        from kagglebot.autopilot import run_autopilot_core
 
-        _run_autopilot_core(self.config, self.run_id, resume_run=self.resume_run)
+        run_autopilot_core(self.config, self.run_id, resume_run=self.resume_run)
