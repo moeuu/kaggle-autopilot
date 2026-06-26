@@ -276,7 +276,8 @@ The next high-value modernization work is:
    sanitization are now in `kernel_submit_inference.py`; submit-kernel accelerator override parsing now lives in
    `kernel_submit_accelerator.py`; competition-specific local-kernel contract checks are now in
    `kernel_contracts.py`; remote kernel registration, kernel-id resolution, push-log persistence, stale-output cleanup,
-   and best-effort output fetch helpers now live in `kernel_remote_ops.py`;
+   and best-effort output fetch helpers now live in `kernel_remote_ops.py`; Kaggle username discovery from explicit
+   options, `KAGGLE_USERNAME`, `KAGGLE_CONFIG_DIR`, and user config files now lives in `kaggle_credentials.py`;
    competition-specific generated code belongs in `kernel_runtime/`.
 4. **Artifact schema registry**: centralize durable artifact shapes for `metrics.json`, `diagnostics.md`,
    `submit_attempts.jsonl`, submission manifests/artifact copies, candidate manifests, and self-improvement outputs.

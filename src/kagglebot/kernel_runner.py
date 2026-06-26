@@ -46,7 +46,6 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
 )
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
-from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -56,6 +55,7 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
+from kagglebot.kaggle_credentials import resolve_kaggle_username as _resolve_kaggle_username
 from kagglebot.kernel_outputs import find_output_file as _find_output_file
 from kagglebot.kernel_outputs import find_submission_file
 from kagglebot.kernel_outputs import resolve_local_kernel_artifact_file as _resolve_local_kernel_artifact_file
@@ -466,44 +466,7 @@ class KernelLogParser:
 
 
 def resolve_kaggle_username(explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    env_user = os.getenv("KAGGLE_USERNAME")
-    if env_user:
-        return env_user
-
-    config_dir_env = os.getenv("KAGGLE_CONFIG_DIR")
-    candidates: list[Path] = []
-    if config_dir_env:
-        config_path = Path(config_dir_env).expanduser()
-        # Support KAGGLE_CONFIG_DIR pointing to either a directory or kaggle.json file.
-        if config_path.suffix.lower() == ".json":
-            candidates.append(config_path)
-        else:
-            candidates.extend([config_path / "kaggle.json", config_path / "kaggle" / "kaggle.json"])
-    else:
-        candidates.append(Path("~/.kaggle/kaggle.json").expanduser())
-
-    candidates.extend(
-        [
-            Path.home() / ".kaggle" / "kaggle.json",
-            Path.home() / ".config" / "kaggle" / "kaggle.json",
-        ]
-    )
-    candidates = list(dict.fromkeys(candidates))
-
-    for kaggle_json in candidates:
-        data = load_json_object(kaggle_json)
-        if data is None:
-            continue
-        username = data.get("username")
-        if username:
-            return str(username)
-    raise ValueError(
-        "Kaggle username is required for kaggle_* compute modes. "
-        "Set --kaggle-username, KAGGLE_USERNAME, or point KAGGLE_CONFIG_DIR "
-        "to a directory (or kaggle.json file) containing a username."
-    )
+    return _resolve_kaggle_username(explicit)
 
 
 def run_kernel(

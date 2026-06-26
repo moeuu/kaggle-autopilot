@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import time
 from datetime import UTC, datetime
@@ -13,6 +12,7 @@ from kagglebot import kernel_outputs as _kernel_outputs
 from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.env_utils import env_flag
 from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.kaggle_credentials import resolve_kaggle_username as _resolve_kaggle_username
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.kernel_status import parse_kernel_status
 from kagglebot.runners.base import RunContext, RunResult
@@ -622,24 +622,7 @@ def render_kernel_main(competition_slug: str, accelerator: str) -> str:
 
 
 def resolve_kaggle_username(explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    env = os.getenv("KAGGLE_USERNAME")
-    if env:
-        return env
-    config_dir = Path(os.getenv("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser()
-    config_path = config_dir / "kaggle.json"
-    if config_path.exists():
-        payload = load_json_object(config_path)
-        if payload is None:
-            raise ValueError(f"Kaggle config is not a JSON object: {config_path}")
-        username = payload.get("username")
-        if username:
-            return str(username)
-    raise ValueError(
-        "Kaggle username is required for kaggle_* compute modes. "
-        "Set --kaggle-username, KAGGLE_USERNAME, or ~/.kaggle/kaggle.json."
-    )
+    return _resolve_kaggle_username(explicit)
 
 
 def find_submission_file(output_dir: Path) -> Path:
