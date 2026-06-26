@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kagglebot import submit_stage as _submit_stage
+from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
 from kagglebot.exceptions import (
     DuplicateSubmissionError,
     KaggleCliError,
@@ -315,7 +316,7 @@ def _build_notebook_submit_runner(*, config: SubmitRunnerConfig, run_id: str, de
         strict_accelerator=config.strict_accelerator,
         dry_run=config.dry_run,
         timeout_minutes=config.time_budget_min,
-        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
+        infer_iteration_from_submission_path=_submit_stage_duplicate.infer_iteration_from_submission_path,
         resolve_kaggle_username=deps.resolve_kaggle_username,
         run_submit_kernel=deps.run_submit_kernel,
         run_kaggle_submit_kernel=deps.run_kaggle_submit_kernel,

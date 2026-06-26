@@ -47,6 +47,7 @@ from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_stage as _submit_stage
+from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
 from kagglebot import submit_stage_messages as _submit_stage_messages
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot import watch_state as _watch_state
@@ -471,7 +472,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         max_iterations=max_iterations,
         require_submit_phase=submit_enabled and not config.dry_run,
         load_kernel_metrics=_kernel_metrics.load_kernel_metrics,
-        infer_iteration_from_submission_path=_submit_stage.infer_iteration_from_submission_path,
+        infer_iteration_from_submission_path=_submit_stage_duplicate.infer_iteration_from_submission_path,
     )
     best_submitted_score = _autopilot_state.resume_best_submitted_offline_score(
         paths=config.paths,
@@ -2480,7 +2481,9 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         if fallback_submit_gate.message:
             print(fallback_submit_gate.message)
         if allow_fallback_submit:
-            fallback_iteration = _submit_stage.infer_iteration_from_submission_path(best_submittable_submission)
+            fallback_iteration = _submit_stage_duplicate.infer_iteration_from_submission_path(
+                best_submittable_submission
+            )
             score_text = (
                 f" score={best_submittable_score:.6f}" if isinstance(best_submittable_score, (int, float)) else ""
             )
