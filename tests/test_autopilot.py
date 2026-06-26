@@ -36,10 +36,10 @@ from kagglebot.autopilot import (
     run_autopilot,
 )
 from kagglebot.autopilot_state import (
-    _load_submit_retry_artifacts,
-    _resume_iteration_state,
     load_run_state,
+    load_submit_retry_artifacts,
     resolve_iteration_submission_artifact,
+    resume_iteration_state,
     write_iteration_state_marker,
 )
 from kagglebot.competition_rules import load_competition_rule_constraints
@@ -7348,7 +7348,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_is_outlier(monkeypa
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
-        "kagglebot.autopilot_state._resume_iteration_state",
+        "kagglebot.autopilot_state.resume_iteration_state",
         lambda **kwargs: (1, 0.999511, None),  # stale outlier best
     )
 
@@ -7709,7 +7709,7 @@ def test_autopilot_skips_no_improve_major_override_when_best_anchor_is_outlier(m
     monkeypatch.setattr("kagglebot.autopilot._run_plan_and_initial", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.78})
     monkeypatch.setattr(
-        "kagglebot.autopilot_state._resume_iteration_state",
+        "kagglebot.autopilot_state.resume_iteration_state",
         lambda **kwargs: (1, 0.999511, None),  # noqa: ARG005
     )
 
@@ -7789,7 +7789,7 @@ def test_resume_iteration_state_does_not_complete_with_submission_only(tmp_path:
     iter_dir.mkdir(parents=True, exist_ok=True)
     (iter_dir / "submission.csv").write_text("id,target\n1,0.1\n", encoding="utf-8")
 
-    start, best_score, best_submission = _resume_iteration_state(
+    start, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -7814,7 +7814,7 @@ def test_resume_iteration_state_accepts_zip_submission_artifact(tmp_path: Path) 
         archive.writestr("1.tif", b"dummy")
     _write_kernel_metrics(iter_dir / "metrics.json", value=0.2222)
 
-    start, best_score, best_submission = _resume_iteration_state(
+    start, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -7931,7 +7931,7 @@ def test_load_submit_retry_artifacts_prefers_training_metrics_over_submit_only_o
         encoding="utf-8",
     )
 
-    result = _load_submit_retry_artifacts(
+    result = load_submit_retry_artifacts(
         run_dir=run_dir,
         iter_dir=iter_dir,
         iteration=1,
@@ -7972,7 +7972,7 @@ def test_load_submit_retry_artifacts_ignores_later_submit_only_metrics_for_legac
     )
     os.utime(submit_only_metrics, (iter1_metrics.stat().st_mtime + 10, iter1_metrics.stat().st_mtime + 10))
 
-    result = _load_submit_retry_artifacts(
+    result = load_submit_retry_artifacts(
         run_dir=run_dir,
         iter_dir=iter1_dir,
         iteration=1,
@@ -8046,7 +8046,7 @@ def test_load_submit_retry_artifacts_ignores_prior_success_for_latest_failed_sub
         encoding="utf-8",
     )
 
-    result = _load_submit_retry_artifacts(
+    result = load_submit_retry_artifacts(
         run_dir=run_dir,
         iter_dir=iter2_dir,
         iteration=2,
@@ -8107,7 +8107,7 @@ def test_load_submit_retry_artifacts_treats_duplicate_skip_as_terminal(
         encoding="utf-8",
     )
 
-    result = _load_submit_retry_artifacts(
+    result = load_submit_retry_artifacts(
         run_dir=run_dir,
         iter_dir=iter_dir,
         iteration=1,
@@ -8129,7 +8129,7 @@ def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: 
     submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
     _write_kernel_metrics(iter_dir / "metrics.json", value=0.4321)
 
-    start_before, _, _ = _resume_iteration_state(
+    start_before, _, _ = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -8156,7 +8156,7 @@ def test_resume_iteration_state_requires_submit_phase_for_legacy_runs(tmp_path: 
         encoding="utf-8",
     )
 
-    start_after, best_score, best_submission = _resume_iteration_state(
+    start_after, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -8195,7 +8195,7 @@ def test_resume_iteration_state_accepts_legacy_duplicate_skip(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    start, best_score, best_submission = _resume_iteration_state(
+    start, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -8232,7 +8232,7 @@ def test_resume_iteration_state_uses_iteration_marker_for_submit_phase(tmp_path:
         encoding="utf-8",
     )
 
-    start, best_score, best_submission = _resume_iteration_state(
+    start, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -8271,7 +8271,7 @@ def test_resume_iteration_state_requires_submit_when_gate_allows(tmp_path: Path)
         encoding="utf-8",
     )
 
-    start, best_score, best_submission = _resume_iteration_state(
+    start, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",
@@ -8310,7 +8310,7 @@ def test_resume_iteration_state_accepts_duplicate_submission_skip_marker(tmp_pat
         encoding="utf-8",
     )
 
-    start, best_score, best_submission = _resume_iteration_state(
+    start, best_score, best_submission = resume_iteration_state(
         paths=paths,
         run_id="run-1",
         metric_direction="minimize",

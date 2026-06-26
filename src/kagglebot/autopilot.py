@@ -627,7 +627,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         run_dir=config.paths.run_dir(run_id),
         max_iterations=max_iterations,
     )
-    start_iteration, best_score, best_submission = _autopilot_state._resume_iteration_state(
+    start_iteration, best_score, best_submission = _autopilot_state.resume_iteration_state(
         paths=config.paths,
         run_id=run_id,
         metric_direction=metric_direction,
@@ -820,7 +820,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
-            submit_retry_resume = _autopilot_state._load_submit_retry_artifacts(
+            submit_retry_resume = _autopilot_state.load_submit_retry_artifacts(
                 run_dir=run_dir,
                 iter_dir=iter_dir,
                 iteration=iteration,

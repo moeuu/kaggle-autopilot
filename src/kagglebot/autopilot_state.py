@@ -402,7 +402,7 @@ def _resume_best_submittable_iteration_state(
     return best_score, best_submission
 
 
-def _resume_iteration_state(
+def resume_iteration_state(
     *,
     paths: CompetitionPaths,
     run_id: str,
@@ -613,7 +613,7 @@ def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: 
     return latest
 
 
-def _load_submit_retry_artifacts(
+def load_submit_retry_artifacts(
     *,
     run_dir: Path,
     iter_dir: Path,
