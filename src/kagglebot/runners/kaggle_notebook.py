@@ -19,7 +19,7 @@ from kagglebot.submission_artifacts import find_submission_manifest, resolve_man
 
 KERNEL_TEMPLATE = r"""
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -435,7 +435,7 @@ def main() -> None:
         "task": task,
         "metric": metric,
         "score": float(score),
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(UTC).isoformat(),
     }
     try:
         METRICS_PATH.write_text(json.dumps(payload, indent=2))
