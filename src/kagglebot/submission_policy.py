@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from kagglebot.datetime_utils import parse_iso_datetime_utc
+from kagglebot.datetime_utils import parse_datetime_utc
 
 SPARE_SUBMIT_RELAXABLE_QUALITY_REASONS = frozenset(
     {
@@ -483,31 +483,7 @@ def decide_limited_submission_holdback(
 
 
 def parse_kaggle_submission_timestamp(value: str | None) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-
-    text = value.strip()
-    assume_utc = False
-    if text.upper().endswith(" UTC"):
-        text = text[:-4].strip()
-        assume_utc = True
-
-    parsed = parse_iso_datetime_utc(text)
-    if parsed is not None and not assume_utc:
-        return parsed
-    if parsed is None:
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-            try:
-                parsed = datetime.strptime(text, fmt)
-                break
-            except ValueError:
-                continue
-        else:
-            return None
-
-    if parsed.tzinfo is None or assume_utc:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+    return parse_datetime_utc(value, formats=("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"))
 
 
 def submission_row_timestamp(row: dict[str, str]) -> datetime | None:
