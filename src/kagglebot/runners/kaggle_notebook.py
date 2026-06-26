@@ -12,10 +12,10 @@ from rich import print
 from kagglebot import kaggle_cli
 from kagglebot.env_utils import env_flag
 from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.kernel_outputs import find_submission_file as _find_kernel_submission_file
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.kernel_status import parse_kernel_status
 from kagglebot.runners.base import RunContext, RunResult
-from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 KERNEL_TEMPLATE = r"""
 import json
@@ -643,19 +643,10 @@ def resolve_kaggle_username(explicit: str | None) -> str:
 
 
 def find_submission_file(output_dir: Path) -> Path:
-    manifest_path = find_submission_manifest(output_dir)
-    if manifest_path is not None:
-        _, submission_path, staging_dir, members = resolve_manifest_references(manifest_path)
-        if submission_path is not None and submission_path.exists() and submission_path.is_file():
-            return submission_path
-        if staging_dir is not None or members:
-            return manifest_path
-    matches = [path for path in output_dir.rglob("submission.csv") if path.is_file()]
-    if not matches:
-        raise FileNotFoundError(f"No submission.csv found under {output_dir}")
-    if len(matches) > 1:
-        raise ValueError(f"Multiple submission.csv files found under {output_dir}")
-    return matches[0]
+    submission_path = _find_kernel_submission_file(output_dir)
+    if submission_path is None:
+        raise FileNotFoundError(f"No submission artifact found under {output_dir}")
+    return submission_path
 
 
 def _wait_for_kernel(kernel_id: str, *, logs_dir: Path, slug: str, kernel_dir: Path) -> None:

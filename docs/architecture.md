@@ -459,7 +459,9 @@ Recommended extraction order:
    adding more private wrappers in `autopilot.py`.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
-   CLI stdout/stderr parsing or ad hoc pending-run files.
+   CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to
+   `kernel_outputs.find_submission_file`, so notebook runs share the same manifest, archive, final submission, and
+   fold-intermediate fallback policy as local kernel runs.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
    compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
 7. Agent I/O helpers: keep prompt/error transcript file persistence, prompt/response transcript display,

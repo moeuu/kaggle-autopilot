@@ -8,7 +8,12 @@ import pytest
 
 from kagglebot.kernel_sources import KernelSourceConfig
 from kagglebot.runners import kaggle_notebook
-from kagglebot.runners.kaggle_notebook import KERNEL_TEMPLATE, _wait_for_kernel, build_kernel_metadata
+from kagglebot.runners.kaggle_notebook import (
+    KERNEL_TEMPLATE,
+    _wait_for_kernel,
+    build_kernel_metadata,
+    find_submission_file,
+)
 
 
 def test_build_kernel_metadata_uses_plan_driven_sources() -> None:
@@ -161,3 +166,15 @@ def test_generated_kernel_regression_uses_rmse_without_squared_argument(tmp_path
     submission = pd.read_csv(working_dir / "submission.csv")
     assert metrics["metric"] == "rmse"
     assert submission["id"].tolist() == [100, 101, 102]
+
+
+def test_runner_submission_discovery_uses_fold_intermediate_when_final_missing(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fold1 = output_dir / "submission_model_fold1.csv"
+    fold2 = output_dir / "nested" / "submission_model_fold2.csv"
+    fold2.parent.mkdir()
+    fold1.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    fold2.write_text("id,target\n1,0.2\n", encoding="utf-8")
+
+    assert find_submission_file(output_dir) == fold2
