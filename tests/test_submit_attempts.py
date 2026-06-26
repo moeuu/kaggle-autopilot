@@ -27,9 +27,13 @@ from kagglebot.submit_attempts import (
     format_submit_retry_knowledge_details,
     has_submit_attempt_records,
     has_successful_submit_attempt,
+    infer_iteration_from_submit_attempt,
+    is_submit_attempt_complete_for_resume,
+    latest_submit_attempt_for_iteration,
     load_latest_submit_attempt,
     load_submit_attempt_rows,
     load_submit_fingerprints,
+    load_submit_phase_completed_iterations,
     record_submit_outcome_if_available,
     record_submit_reason_knowledge,
     record_submit_retry_attempt_and_knowledge,
@@ -195,6 +199,57 @@ def test_build_seen_submit_fingerprint_set_merges_attempts_and_run_state() -> No
         attempt_fingerprints=[],
         run_state={"last_submit_fingerprint": "submit-fp", "last_fingerprint": "legacy-fp"},
     ) == {"submit-fp"}
+
+
+def test_submit_attempt_resume_completion_policy_handles_submit_and_terminal_skip() -> None:
+    assert is_submit_attempt_complete_for_resume({"action_taken": "submit"})
+    assert is_submit_attempt_complete_for_resume({"action_taken": "skip", "reason": "duplicate_submission_sha_seen"})
+    assert not is_submit_attempt_complete_for_resume({"action_taken": "skip", "reason": "quality_blocked"})
+    assert not is_submit_attempt_complete_for_resume({"action_taken": "abort", "reason": "submit_failed"})
+
+
+def test_infer_iteration_from_submit_attempt_uses_explicit_iteration_then_path() -> None:
+    assert infer_iteration_from_submit_attempt({"iteration": 3, "sub_path": "runs/run-1/iter-2/submission.csv"}) == 3
+    assert infer_iteration_from_submit_attempt({"sub_path": "runs/run-1/iter-12/output/submission.csv"}) == 12
+    assert infer_iteration_from_submit_attempt({"iteration": 0, "sub_path": "submission.csv"}) is None
+    assert infer_iteration_from_submit_attempt({"sub_path": ""}) is None
+
+
+def test_load_completed_submit_phase_iterations_and_latest_attempt_for_iteration(tmp_path: Path) -> None:
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"action_taken": "submit", "iteration": 1, "sub_path": "iter-1/submission.csv"},
+        now_iso="2026-06-25T00:00:00+00:00",
+    )
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"action_taken": "abort", "iteration": 2, "sub_path": "iter-2/submission.csv"},
+        now_iso="2026-06-25T00:01:00+00:00",
+    )
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={
+            "action_taken": "skip",
+            "reason": "duplicate_submission_sha_seen",
+            "sub_path": "iter-3/submission.csv",
+        },
+        now_iso="2026-06-25T00:02:00+00:00",
+    )
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"action_taken": "submit", "sub_path": "iter-3/output/submission.csv", "fingerprint": "latest"},
+        now_iso="2026-06-25T00:03:00+00:00",
+    )
+
+    completed = load_submit_phase_completed_iterations(
+        tmp_path,
+        infer_iteration_from_submission_path=lambda path: infer_iteration_from_submit_attempt({"sub_path": str(path)}),
+    )
+
+    assert completed == {1, 3}
+    assert latest_submit_attempt_for_iteration(tmp_path, 2)["action_taken"] == "abort"
+    assert latest_submit_attempt_for_iteration(tmp_path, 3)["fingerprint"] == "latest"
+    assert latest_submit_attempt_for_iteration(tmp_path, 4) is None
 
 
 def test_build_submit_run_state_update_sets_common_last_submit_fields() -> None:

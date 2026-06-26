@@ -6,6 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.json_utils import append_jsonl_record, load_jsonl_records
+from kagglebot.scalar_utils import tolerant_int
+
+LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS = frozenset({"submit"})
+TERMINAL_UNSUBMITTED_PHASE_STATES = frozenset({"duplicate_submission_sha_seen"})
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,62 @@ def load_latest_submit_attempt(run_dir: Path) -> dict[str, object]:
     if not rows:
         return {}
     return rows[-1]
+
+
+def is_submit_attempt_complete_for_resume(payload: dict[str, object]) -> bool:
+    action = str(payload.get("action_taken") or "").strip().lower()
+    if action in LEGACY_SUBMIT_PHASE_COMPLETE_ACTIONS:
+        return True
+    if action != "skip":
+        return False
+    reason = str(payload.get("reason") or "").strip().lower()
+    return reason in TERMINAL_UNSUBMITTED_PHASE_STATES
+
+
+def infer_iteration_from_submit_attempt(payload: dict[str, object]) -> int | None:
+    iteration = tolerant_int(payload.get("iteration"))
+    if iteration is not None and iteration > 0:
+        return iteration
+    sub_path = str(payload.get("sub_path") or "").strip()
+    if not sub_path:
+        return None
+    try:
+        parts = Path(sub_path).parts
+    except (TypeError, ValueError):
+        return None
+    for part in parts:
+        if not part.startswith("iter-"):
+            continue
+        parsed = tolerant_int(part.split("-", 1)[1])
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def load_submit_phase_completed_iterations(
+    run_dir: Path,
+    *,
+    infer_iteration_from_submission_path: Callable[[Path], int | None],
+) -> set[int]:
+    completed: set[int] = set()
+    for payload in load_submit_attempt_rows(run_dir):
+        if not is_submit_attempt_complete_for_resume(payload):
+            continue
+        iteration = tolerant_int(payload.get("iteration"))
+        if iteration is None:
+            sub_path = str(payload.get("sub_path") or "").strip()
+            if sub_path:
+                iteration = infer_iteration_from_submission_path(Path(sub_path))
+        if iteration is not None and iteration > 0:
+            completed.add(iteration)
+    return completed
+
+
+def latest_submit_attempt_for_iteration(run_dir: Path, iteration: int) -> dict[str, object] | None:
+    for payload in reversed(load_submit_attempt_rows(run_dir)):
+        if infer_iteration_from_submit_attempt(payload) == iteration:
+            return payload
+    return None
 
 
 def build_submit_attempt_payload(
