@@ -441,6 +441,9 @@ Recommended extraction order:
    `_attempt_submit` receives typed runtime state instead of constructing `SubmissionService` inline.
    Notebook submit runner construction now uses `submit_notebook.build_notebook_submit_runner_for_run`, keeping
    capacity/push-error detector wiring with the notebook submit adapter instead of in `_attempt_submit`.
+   Local validation/prepared-submission resolution and prepared SHA calculation now use
+   `submit_stage.prepare_submission_for_run_or_abort`, so `_attempt_submit` no longer open-codes validation abort
+   handling.
    duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects

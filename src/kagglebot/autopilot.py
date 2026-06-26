@@ -4280,26 +4280,20 @@ def _attempt_submit(
     submit_aborter = submit_run_context.submit_aborter
     submit_retry_recorder = submit_run_context.submit_retry_recorder
 
-    prepared_resolution = _submit_stage.resolve_prepared_submission_for_submit(
+    prepared_context = _submit_stage.prepare_submission_for_run_or_abort(
         input_submission_path=input_submission_path,
         validate_and_prepare=submission_service.validate_and_prepare_submission,
         validation_error_types=(SubmissionValidationError,),
         validation_exit_code=SubmissionValidationError.exit_code,
         compute_error_fingerprint=compute_error_fingerprint,
-    )
-    if prepared_resolution.abort_spec is not None:
-        return submit_aborter.abort(
-            submission_ref=input_submission_path,
-            code_fingerprint=submit_code_fingerprint,
-            **_submit_stage.build_submit_abort_spec_kwargs(prepared_resolution.abort_spec),
-            submit_attempt_recorder=submit_attempt_recorder,
-        )
-    prepared_submission_path = _submit_stage.require_prepared_submission_path(
-        prepared_resolution,
+        submit_aborter=submit_aborter,
+        submit_attempt_recorder=submit_attempt_recorder,
+        code_fingerprint=submit_code_fingerprint,
+        compute_submission_sha256=_sha256_or_none,
         build_error=SubmitAbortedError,
     )
+    prepared_submission_path = prepared_context.prepared_submission_path
 
-    prepared_submission_sha = str(_sha256_or_none(prepared_submission_path) or "").strip()
     duplicate_skip_result = _submit_stage.resolve_duplicate_submission_for_run(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
@@ -4309,7 +4303,7 @@ def _attempt_submit(
         submitted_at=submitted_at,
         submission_path=submission_path,
         prepared_submission_path=prepared_submission_path,
-        prepared_submission_sha=prepared_submission_sha,
+        prepared_submission_sha=prepared_context.prepared_submission_sha,
         code_fingerprint=submit_code_fingerprint,
         allow_force=allow_force,
         load_run_state=_autopilot_state._load_run_state,

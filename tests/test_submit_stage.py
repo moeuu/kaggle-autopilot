@@ -52,6 +52,7 @@ from kagglebot.submit_stage import (
     format_submission_rank_message,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
+    prepare_submission_for_run_or_abort,
     record_submission_knowledge,
     record_submission_knowledge_entries,
     record_submit_abort_for_run,
@@ -1005,6 +1006,62 @@ def test_resolve_prepared_submission_for_submit_returns_prepared_path(tmp_path: 
 
     assert resolution.prepared_submission_path == prepared_path
     assert resolution.abort_spec is None
+
+
+def test_prepare_submission_for_run_or_abort_returns_prepared_context(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.csv"
+    prepared_path = tmp_path / "prepared.csv"
+
+    context = prepare_submission_for_run_or_abort(
+        input_submission_path=input_path,
+        validate_and_prepare=lambda path: prepared_path if path == input_path else path,
+        validation_error_types=(SubmitValidationStubError,),
+        validation_exit_code=65,
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        submit_aborter=object(),
+        submit_attempt_recorder=object(),
+        code_fingerprint="code-fp",
+        compute_submission_sha256=lambda path: "sha" if path == prepared_path else None,
+        build_error=RuntimeError,
+    )
+
+    assert context.prepared_submission_path == prepared_path
+    assert context.prepared_submission_sha == "sha"
+
+
+def test_prepare_submission_for_run_or_abort_delegates_validation_abort(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.csv"
+    abort_calls: list[dict[str, object]] = []
+
+    class Aborter:
+        @staticmethod
+        def abort(**kwargs: object) -> None:
+            abort_calls.append(kwargs)
+            raise RuntimeError("aborted")
+
+    try:
+        prepare_submission_for_run_or_abort(
+            input_submission_path=input_path,
+            validate_and_prepare=lambda path: (_ for _ in ()).throw(SubmitValidationStubError("bad rows")),
+            validation_error_types=(SubmitValidationStubError,),
+            validation_exit_code=65,
+            compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+            submit_aborter=Aborter(),
+            submit_attempt_recorder=object(),
+            code_fingerprint="code-fp",
+            compute_submission_sha256=lambda path: None,
+            build_error=RuntimeError,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "aborted"
+    else:
+        raise AssertionError("aborter did not raise")
+
+    assert abort_calls
+    assert abort_calls[0]["submission_ref"] == input_path
+    assert abort_calls[0]["code_fingerprint"] == "code-fp"
+    assert abort_calls[0]["fingerprint"] == "fp::bad rows"
+    assert abort_calls[0]["reason"] == "local_submission_validation_failed"
 
 
 def test_require_prepared_submission_path_returns_path(tmp_path: Path) -> None:
