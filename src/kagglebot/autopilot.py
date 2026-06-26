@@ -4716,13 +4716,10 @@ def _attempt_submit(
         )
     outcome = outcome_resolution.outcome
 
-    def mark_submit_failure_context_submitted(submitted_ref: str) -> None:
-        _submit_failure_context.mark_submit_failure_context_submitted(
-            run_dir=run_dir,
-            submission_ref=submitted_ref,
-        )
-
-    return _submit_stage.record_successful_submit_stage_result(
+    return _submit_stage.record_successful_submit_for_run(
+        run_dir=run_dir,
+        submission_ledger_path=config.paths.submission_ledger_path,
+        slug=config.slug,
         run_id=run_id,
         message=message,
         submitted_at=submitted_at,
@@ -4736,16 +4733,6 @@ def _attempt_submit(
         compute_error_fingerprint=compute_error_fingerprint,
         compute_submission_sha256=_sha256_or_none,
         record_submit_attempt_payloads=submit_attempt_recorder.record_payloads,
-        record_outcome=lambda path, ledger_outcome: SubmissionLedger(
-            config.paths.submission_ledger_path
-        ).record_outcome(
-            slug=config.slug,
-            message=message,
-            submission_path=path,
-            run_id=run_id,
-            outcome=ledger_outcome,
-        ),
-        mark_failure_context_submitted=mark_submit_failure_context_submitted,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
         on_message=print,

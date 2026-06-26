@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kagglebot import submit_attempts as _submit_attempts
+from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot.campaign import (
     CampaignCandidate,
     campaign_state_path,
@@ -16,6 +17,7 @@ from kagglebot.campaign import (
     list_candidates,
     normalize_campaign_mode,
 )
+from kagglebot.history import SubmissionLedger
 from kagglebot.json_utils import load_json_object
 from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.score_utils import score_gap, should_update_best_score
@@ -1922,6 +1924,65 @@ def record_successful_submit_stage_result(
         submission_path=submission_path,
         outcome=outcome,
         infer_iteration=infer_iteration_from_submission_path,
+    )
+
+
+def record_successful_submit_for_run(
+    *,
+    run_dir: Path,
+    submission_ledger_path: Path,
+    slug: str,
+    run_id: str,
+    message: str,
+    submitted_at: datetime,
+    submission_ref: str,
+    submission_result: object,
+    submission_path: Path,
+    submission_artifact_path: Path | None,
+    outcome: object,
+    code_fingerprint: str,
+    prior_state: dict[str, object],
+    compute_error_fingerprint: Callable[[str, str], str],
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    record_submit_attempt_payloads: Callable[[object], object],
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    on_message: Callable[[str], object],
+) -> dict[str, object]:
+    def record_outcome(path: Path, ledger_outcome: dict[str, object]) -> None:
+        SubmissionLedger(submission_ledger_path).record_outcome(
+            slug=slug,
+            message=message,
+            submission_path=path,
+            run_id=run_id,
+            outcome=ledger_outcome,
+        )
+
+    def mark_failure_context_submitted(submitted_ref: str) -> None:
+        _submit_failure_context.mark_submit_failure_context_submitted(
+            run_dir=run_dir,
+            submission_ref=submitted_ref,
+        )
+
+    return record_successful_submit_stage_result(
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        submission_ref=submission_ref,
+        submission_result=submission_result,
+        submission_path=submission_path,
+        submission_artifact_path=submission_artifact_path,
+        outcome=outcome,
+        code_fingerprint=code_fingerprint,
+        prior_state=prior_state,
+        compute_error_fingerprint=compute_error_fingerprint,
+        compute_submission_sha256=compute_submission_sha256,
+        record_submit_attempt_payloads=record_submit_attempt_payloads,
+        record_outcome=record_outcome,
+        mark_failure_context_submitted=mark_failure_context_submitted,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
     )
 
 

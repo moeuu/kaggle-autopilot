@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
+from kagglebot.json_utils import load_jsonl_records
+from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
     abort_submit_for_run,
@@ -47,6 +49,7 @@ from kagglebot.submit_stage import (
     record_submission_knowledge_entries,
     record_submit_abort_for_run,
     record_submit_stage_retry_attempt,
+    record_successful_submit_for_run,
     record_successful_submit_stage_result,
     require_prepared_submission_path,
     resolve_duplicate_submission_for_submit,
@@ -2365,6 +2368,58 @@ def test_record_successful_submit_stage_result_records_attempt_outcome_and_paylo
         "iteration": 7,
         "outcome": outcome,
     }
+
+
+def test_record_successful_submit_for_run_records_ledger_and_resolves_failure_context(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    save_submit_failure_context(
+        run_dir,
+        {
+            "active": True,
+            "reason": "submission_poll_status_complete_no_score",
+            "submission_ref": "old-submission.csv",
+        },
+    )
+    submission_path = run_dir / "iter-2" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    artifact_path = tmp_path / "kernel-output" / "submission.csv"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("id,prediction\n1,0.5\n", encoding="utf-8")
+    recorded_payloads: list[object] = []
+
+    result = record_successful_submit_for_run(
+        run_dir=run_dir,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        submission_ref="kernel:user/demo/submission.csv",
+        submission_result=SubmitResultStub(stdout="ok", stderr="", exit_code=0),
+        submission_path=submission_path,
+        submission_artifact_path=artifact_path,
+        outcome={"status": "complete", "score": 0.25},
+        code_fingerprint="code-fp",
+        prior_state={},
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "sha256" if path == artifact_path else None,
+        record_submit_attempt_payloads=recorded_payloads.append,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        on_message=lambda message: None,
+    )
+
+    ledger_records = load_jsonl_records(tmp_path / "ledger.jsonl")
+    assert ledger_records[0]["event"] == "outcome"
+    assert ledger_records[0]["slug"] == "demo"
+    assert ledger_records[0]["outcome"] == {"status": "complete", "score": 0.25}
+    failure_context = load_submit_failure_context(run_dir)
+    assert failure_context["active"] is False
+    assert failure_context["resolution"] == "submitted"
+    assert failure_context["resolved_submission_ref"] == "kernel:user/demo/submission.csv"
+    assert recorded_payloads[0].attempt_payload["sub_sha256"] == "sha256"
+    assert result["submission_path"] == "kernel:user/demo/submission.csv"
 
 
 def test_classify_submit_stage_error_uses_output_fallback() -> None:
