@@ -19,6 +19,7 @@ from kagglebot import kernel_metadata as _kernel_metadata
 from kagglebot import kernel_module_inliner as _kernel_module_inliner
 from kagglebot import kernel_package_files as _kernel_package_files
 from kagglebot import kernel_plan_validation as _kernel_plan_validation
+from kagglebot import kernel_remote_ops as _kernel_remote_ops
 from kagglebot import kernel_wait as _kernel_wait
 from kagglebot import local_kernel_aux_inputs as _local_kernel_aux_inputs
 from kagglebot import local_kernel_context as _local_kernel_context
@@ -1094,60 +1095,40 @@ def _wait_for_kernel(
 
 
 def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | None:
-    for attempt in range(1, KERNEL_REGISTER_RETRIES + 1):
-        try:
-            kernels_status(kernel_id, dry_run=False)
-            return kernel_id
-        except KaggleCliError as exc:
-            detail = (exc.output or str(exc)).strip().replace("\n", " ")
-            if detail:
-                print(f"[yellow]kernel status unavailable[/yellow]: {detail} (attempt {attempt})")
-        try:
-            if kernel_exists(kernel_id):
-                return kernel_id
-            resolved = kernel_id_by_title(kernel_slug)
-            if resolved:
-                return resolved
-        except KaggleCliError as exc:
-            detail = (exc.output or str(exc)).strip().replace("\n", " ")
-            if detail:
-                print(f"[yellow]kernel list failed[/yellow]: {detail} (attempt {attempt})")
-        time.sleep(KERNEL_REGISTER_SLEEP)
-    return None
+    return _kernel_remote_ops.wait_for_kernel_registration(
+        kernel_id,
+        kernel_slug,
+        deps=_kernel_remote_ops.KernelRegistrationDependencies(
+            kernels_status=kernels_status,
+            kernel_exists=kernel_exists,
+            kernel_id_by_title=kernel_id_by_title,
+            sleep=time.sleep,
+        ),
+        retries=KERNEL_REGISTER_RETRIES,
+        sleep_interval=KERNEL_REGISTER_SLEEP,
+    )
 
 
 def _resolve_kernel_id(kernel_id: str, kernel_slug: str) -> str:
-    try:
-        resolved = kernel_id_by_title(kernel_slug)
-    except KaggleCliError:
-        return kernel_id
-    if resolved and resolved != kernel_id:
-        print(f"[cyan]kernel id[/cyan]: {resolved}")
-        return resolved
-    return kernel_id
+    return _kernel_remote_ops.resolve_kernel_id(
+        kernel_id,
+        kernel_slug,
+        kernel_id_by_title_func=kernel_id_by_title,
+    )
 
 
 def _write_push_log(logs_dir: Path, attempt: int, output: str) -> None:
-    path = logs_dir / f"kernel_push-{attempt:02d}.txt"
-    path.write_text(output.strip() + "\n", encoding="utf-8")
+    _kernel_remote_ops.write_push_log(logs_dir, attempt, output)
 
 
 def _clear_stale_kernel_output(output_dir: Path) -> None:
-    """Remove stale files from prior kernel runs in the same output directory."""
-    if not output_dir.exists():
-        return
-    for path in output_dir.iterdir():
-        try:
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-                continue
-            path.unlink()
-        except OSError:
-            continue
+    _kernel_remote_ops.clear_stale_kernel_output(output_dir)
 
 
 def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> None:
-    try:
-        kernels_output(kernel_id, output_dir, slug=slug, dry_run=False, force=True, quiet=True)
-    except KaggleCliError:
-        return
+    _kernel_remote_ops.try_fetch_kernel_output(
+        kernel_id,
+        output_dir=output_dir,
+        slug=slug,
+        kernels_output_func=kernels_output,
+    )
