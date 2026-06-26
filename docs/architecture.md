@@ -376,6 +376,7 @@ Recommended extraction order:
 3. Kernel repair/autofix policy: continue isolating submit-error recovery from the loop. Submit failure classification,
    context formatting, submit-file repair contract prompts/retry feedback, artifact resolution, deterministic file
    repair preparation, same-fingerprint retry allowance, and submit retry decisions are now extracted.
+   Autofix restart and one-shot kernel regeneration marker/note persistence are now in `autofix_restart.py`.
    Lightweight runtime-fix artifact writers for missing columns, column aliases, object dtype coercion, device coercion,
    blocked modules, autofix note persistence, deterministic strategy-skip decisions, and kernel-first non-autofixable
    runtime checks are now in `runtime_fixes.py`.

@@ -258,7 +258,6 @@ _DEFAULT_LIMITED_SUBMISSION_GATE = "readiness_or_final"
 _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
 _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
-_KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 
 
@@ -4212,19 +4211,16 @@ def _maybe_regenerate_kernel_sources_once(
     if config.dry_run:
         return False
     agent_dir = iter_dir / "agent"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    marker_path = agent_dir / _KERNEL_REGENERATE_MARKER_FILENAME
-    if marker_path.exists():
+    if _autofix_restart.kernel_regeneration_already_marked(agent_dir):
         return False
 
-    marker_payload = {
-        "created_at": datetime.now(UTC).isoformat(),
-        "trigger_reason": trigger_reason,
-        "attempt": int(attempt),
-        "iteration": int(iteration),
-        "run_id": run_id,
-    }
-    _json_utils.write_json_object(marker_path, marker_payload)
+    _autofix_restart.write_kernel_regeneration_marker(
+        agent_dir=agent_dir,
+        run_id=run_id,
+        iteration=iteration,
+        attempt=attempt,
+        trigger_reason=trigger_reason,
+    )
     print(
         "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
         "regenerating kernel sources once before retry."
@@ -4232,16 +4228,17 @@ def _maybe_regenerate_kernel_sources_once(
     try:
         _run_plan_and_initial(config, run_id)
     except Exception as exc:  # noqa: BLE001
-        note_path = agent_dir / f"kernel_regen_note-{attempt:02d}.txt"
-        note_path.write_text(
-            (f"kernel_regen_failed: regeneration fallback failed.\ntrigger_reason: {trigger_reason}\nerror: {exc}\n"),
-            encoding="utf-8",
+        _autofix_restart.write_kernel_regeneration_note(
+            agent_dir=agent_dir,
+            attempt=attempt,
+            trigger_reason=trigger_reason,
+            error=exc,
         )
         return False
-    note_path = agent_dir / f"kernel_regen_note-{attempt:02d}.txt"
-    note_path.write_text(
-        (f"kernel_regen_applied: regeneration fallback succeeded.\ntrigger_reason: {trigger_reason}\n"),
-        encoding="utf-8",
+    _autofix_restart.write_kernel_regeneration_note(
+        agent_dir=agent_dir,
+        attempt=attempt,
+        trigger_reason=trigger_reason,
     )
     return True
 

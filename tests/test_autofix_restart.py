@@ -3,7 +3,52 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kagglebot.autofix_restart import maybe_restart_for_src_changes
+from kagglebot.autofix_restart import (
+    kernel_regenerate_marker_path,
+    kernel_regeneration_already_marked,
+    maybe_restart_for_src_changes,
+    write_kernel_regeneration_marker,
+    write_kernel_regeneration_note,
+)
+
+
+def test_kernel_regeneration_marker_and_notes_round_trip(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "iter-1" / "agent"
+
+    assert kernel_regeneration_already_marked(agent_dir) is False
+    marker_path = write_kernel_regeneration_marker(
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=2,
+        attempt=3,
+        trigger_reason="repeated_error",
+    )
+
+    assert marker_path == kernel_regenerate_marker_path(agent_dir)
+    assert kernel_regeneration_already_marked(agent_dir) is True
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["run_id"] == "run-1"
+    assert marker["iteration"] == 2
+    assert marker["attempt"] == 3
+    assert marker["trigger_reason"] == "repeated_error"
+    assert marker["created_at"]
+
+    success_note = write_kernel_regeneration_note(
+        agent_dir=agent_dir,
+        attempt=3,
+        trigger_reason="repeated_error",
+    )
+    assert "kernel_regen_applied" in success_note.read_text(encoding="utf-8")
+
+    failure_note = write_kernel_regeneration_note(
+        agent_dir=agent_dir,
+        attempt=4,
+        trigger_reason="repeated_error",
+        error=RuntimeError("boom"),
+    )
+    failure_text = failure_note.read_text(encoding="utf-8")
+    assert "kernel_regen_failed" in failure_text
+    assert "error: boom" in failure_text
 
 
 def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_restart(

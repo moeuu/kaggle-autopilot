@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 
 RESTART_STATE_FILENAME = "autofix_restart.json"
+KERNEL_REGENERATE_MARKER_FILENAME = "kernel_regenerated_once.json"
 NO_RESTART_ENV = "KAGGLEBOT_NO_RESTART"
 RESUME_RUN_ID_ENV = "KAGGLEBOT_RESUME_RUN_ID"
 RESUME_SLUG_ENV = "KAGGLEBOT_RESUME_SLUG"
@@ -59,6 +61,54 @@ def restart_stage_family(stage: str) -> str:
     if not normalized:
         return "unknown"
     return normalized.split("_attempt_", 1)[0]
+
+
+def kernel_regenerate_marker_path(agent_dir: Path) -> Path:
+    return agent_dir / KERNEL_REGENERATE_MARKER_FILENAME
+
+
+def kernel_regeneration_already_marked(agent_dir: Path) -> bool:
+    return kernel_regenerate_marker_path(agent_dir).exists()
+
+
+def write_kernel_regeneration_marker(
+    *,
+    agent_dir: Path,
+    run_id: str,
+    iteration: int,
+    attempt: int,
+    trigger_reason: str,
+) -> Path:
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = kernel_regenerate_marker_path(agent_dir)
+    write_json_object(
+        marker_path,
+        {
+            "created_at": datetime.now(UTC).isoformat(),
+            "trigger_reason": trigger_reason,
+            "attempt": int(attempt),
+            "iteration": int(iteration),
+            "run_id": run_id,
+        },
+    )
+    return marker_path
+
+
+def write_kernel_regeneration_note(
+    *,
+    agent_dir: Path,
+    attempt: int,
+    trigger_reason: str,
+    error: Exception | None = None,
+) -> Path:
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    note_path = agent_dir / f"kernel_regen_note-{attempt:02d}.txt"
+    if error is None:
+        text = f"kernel_regen_applied: regeneration fallback succeeded.\ntrigger_reason: {trigger_reason}\n"
+    else:
+        text = f"kernel_regen_failed: regeneration fallback failed.\ntrigger_reason: {trigger_reason}\nerror: {error}\n"
+    note_path.write_text(text, encoding="utf-8")
+    return note_path
 
 
 def _load_restart_state(path: Path) -> dict[str, object]:
