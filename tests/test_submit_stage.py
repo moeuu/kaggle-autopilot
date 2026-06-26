@@ -1921,6 +1921,7 @@ def test_decide_iteration_submit_improvement_gate_allows_improved_score() -> Non
 
 def test_classify_submission_outcome_uses_target_score() -> None:
     assert classify_submission_outcome(score=0.4, direction="minimize", target_score=0.5, top1_score=None) == "good"
+    assert classify_submission_outcome(score=0.4, direction="MINIMIZE", target_score=0.5, top1_score=None) == "good"
     assert classify_submission_outcome(score=0.6, direction="minimize", target_score=0.5, top1_score=None) == "low"
     assert classify_submission_outcome(score=0.8, direction="maximize", target_score=0.7, top1_score=None) == "good"
     assert classify_submission_outcome(score=0.6, direction="maximize", target_score=0.7, top1_score=None) == "low"

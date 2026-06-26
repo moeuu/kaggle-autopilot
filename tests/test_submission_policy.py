@@ -34,9 +34,11 @@ from kagglebot.submission_policy import (
 
 def test_target_and_top1_tier_direction_checks() -> None:
     assert meets_target(0.4, 0.5, "minimize") is True
+    assert meets_target(0.4, 0.5, "MINIMIZE") is True
     assert meets_target(0.6, 0.5, "minimize") is False
     assert meets_target(0.9, 0.8, "maximize") is True
     assert is_top1_tier(0.4, 0.5, "minimize") is True
+    assert is_top1_tier(0.4, 0.5, "MINIMIZE") is True
     assert is_top1_tier(0.7, 0.8, "maximize") is False
     assert is_top1_tier(0.7, None, "maximize") is False
 

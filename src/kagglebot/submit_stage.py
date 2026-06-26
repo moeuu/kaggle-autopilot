@@ -22,6 +22,7 @@ from kagglebot.json_utils import load_json_object
 from kagglebot.scalar_utils import parse_finite_float, parse_int
 from kagglebot.score_utils import score_gap, should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
+from kagglebot.submission_policy import meets_target
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
 
@@ -1031,7 +1032,7 @@ def classify_submission_outcome(
     target_score: float | None,
     top1_score: float | None,
 ) -> str:
-    if target_score is not None and _meets_target(score, target_score, direction):
+    if target_score is not None and meets_target(score, target_score, direction):
         return "good"
     if top1_score is not None:
         gap = -(score_gap(current=score, reference=top1_score, direction=direction) or 0.0)
@@ -1211,9 +1212,9 @@ def resolve_submission_rank_payload(
     leaderboard_rank_for_score: Callable[..., dict[str, object]],
 ) -> dict[str, object]:
     payload: dict[str, object] = {}
-    rank = _to_int(outcome.get("rank"))
-    total_teams = _to_int(outcome.get("total_teams"))
-    rank_percentile = _to_float(outcome.get("rank_percentile"))
+    rank = parse_int(outcome.get("rank"), allow_float=True)
+    total_teams = parse_int(outcome.get("total_teams"), allow_float=True)
+    rank_percentile = parse_finite_float(outcome.get("rank_percentile"))
     rank_source = outcome.get("rank_source")
 
     if rank is not None:
@@ -1226,7 +1227,7 @@ def resolve_submission_rank_payload(
         payload["rank_source"] = rank_source.strip()
 
     if rank is None or total_teams is None:
-        score = _to_float(outcome.get("score"))
+        score = parse_finite_float(outcome.get("score"))
         if score is not None:
             try:
                 estimate = leaderboard_rank_for_score(
@@ -1238,9 +1239,9 @@ def resolve_submission_rank_payload(
                 )
             except Exception:  # noqa: BLE001
                 estimate = {}
-            est_rank = _to_int(estimate.get("rank"))
-            est_total = _to_int(estimate.get("total_teams"))
-            est_percentile = _to_float(estimate.get("rank_percentile"))
+            est_rank = parse_int(estimate.get("rank"), allow_float=True)
+            est_total = parse_int(estimate.get("total_teams"), allow_float=True)
+            est_percentile = parse_finite_float(estimate.get("rank_percentile"))
             if est_rank is not None:
                 payload["estimated_rank"] = est_rank
             if est_total is not None:
@@ -1250,8 +1251,8 @@ def resolve_submission_rank_payload(
             if est_rank is not None and isinstance(estimate.get("source"), str):
                 payload["rank_estimate_source"] = "leaderboard_score_estimate"
 
-    resolved_rank = _to_int(payload.get("rank"))
-    resolved_total = _to_int(payload.get("total_teams"))
+    resolved_rank = parse_int(payload.get("rank"), allow_float=True)
+    resolved_total = parse_int(payload.get("total_teams"), allow_float=True)
     if resolved_rank is not None and resolved_total is not None and resolved_total > 0:
         payload.setdefault("rank_percentile", resolved_rank / resolved_total)
     return payload
@@ -1298,12 +1299,12 @@ def resolve_submission_rank_state(
     rank_force_major_min_teams: int,
     should_force_major_overhaul_by_rank: Callable[..., bool],
 ) -> SubmissionRankState:
-    submission_rank = _to_int(rank_payload.get("rank"))
-    submission_total_teams = _to_int(rank_payload.get("total_teams"))
-    submission_rank_percentile = _to_float(rank_payload.get("rank_percentile"))
-    submission_rank_estimate = _to_int(rank_payload.get("estimated_rank"))
-    submission_total_teams_estimate = _to_int(rank_payload.get("estimated_total_teams"))
-    submission_rank_percentile_estimate = _to_float(rank_payload.get("estimated_rank_percentile"))
+    submission_rank = parse_int(rank_payload.get("rank"), allow_float=True)
+    submission_total_teams = parse_int(rank_payload.get("total_teams"), allow_float=True)
+    submission_rank_percentile = parse_finite_float(rank_payload.get("rank_percentile"))
+    submission_rank_estimate = parse_int(rank_payload.get("estimated_rank"), allow_float=True)
+    submission_total_teams_estimate = parse_int(rank_payload.get("estimated_total_teams"), allow_float=True)
+    submission_rank_percentile_estimate = parse_finite_float(rank_payload.get("estimated_rank_percentile"))
 
     estimate_source_raw = rank_payload.get("rank_estimate_source")
     submission_rank_estimate_source = (
@@ -1417,18 +1418,6 @@ def _format_competition_faithfulness_detail(competition_faithfulness: dict[str, 
     dataset_mode = str(competition_faithfulness.get("dataset_mode") or "").strip()
     dataset_detail = f" dataset_mode={dataset_mode}" if dataset_mode else ""
     return f"{metric_detail}{split_detail}{dataset_detail}"
-
-
-def _meets_target(value: float, target: float, direction: str) -> bool:
-    return value <= target if str(direction).lower() == "minimize" else value >= target
-
-
-def _to_float(value: object) -> float | None:
-    return parse_finite_float(value)
-
-
-def _to_int(value: object) -> int | None:
-    return parse_int(value, allow_float=True)
 
 
 def find_campaign_candidate_for_submission(

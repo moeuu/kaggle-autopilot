@@ -23,7 +23,7 @@ from kagglebot.types import PlanConfig
 
 
 class TestMeetsTarget:
-    """Test the _meets_target function for direction-aware comparison."""
+    """Test the shared meets_target function for direction-aware comparison."""
 
     def test_minimize_target_met(self) -> None:
         """For minimize metrics, value <= target should return True."""

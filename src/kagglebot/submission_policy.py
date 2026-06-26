@@ -54,7 +54,7 @@ class MajorOverhaulPolicyDecision:
 
 
 def meets_target(value: float, target: float, direction: str) -> bool:
-    if direction == "minimize":
+    if str(direction).lower() == "minimize":
         return value <= target
     return value >= target
 
@@ -62,7 +62,7 @@ def meets_target(value: float, target: float, direction: str) -> bool:
 def is_top1_tier(value: float, top1_score: float | None, direction: str) -> bool:
     if top1_score is None:
         return False
-    if direction == "minimize":
+    if str(direction).lower() == "minimize":
         return value <= top1_score
     return value >= top1_score
 
