@@ -55,6 +55,7 @@ from kagglebot.submit_stage import (
     format_submission_rank_message,
     infer_iteration_from_submission_path,
     normalize_submission_outcome_status,
+    prepare_and_resolve_submit_preflight_for_run_or_abort,
     prepare_submission_for_run_or_abort,
     record_submission_knowledge,
     record_submission_knowledge_entries,
@@ -876,6 +877,77 @@ def test_resolve_submit_preflight_for_run_returns_runtime_state(tmp_path: Path) 
     assert not preflight.code_competition
     assert preflight.seen_fingerprints == set()
     assert recorder.payloads == []
+
+
+def test_prepare_and_resolve_submit_preflight_returns_prepared_bundle(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ledger_path = tmp_path / "ledger.jsonl"
+    sample_path = tmp_path / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data" / "sample_submission.csv"
+    fallback_sample_path.parent.mkdir()
+    input_submission_path = tmp_path / "input.csv"
+    prepared_submission_path = tmp_path / "prepared.csv"
+    source_submission_path = tmp_path / "iter-2" / "submission.csv"
+    source_submission_path.parent.mkdir()
+    for path in (
+        sample_path,
+        fallback_sample_path,
+        input_submission_path,
+        prepared_submission_path,
+        source_submission_path,
+    ):
+        path.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    recorder = SubmitAttemptRecorderStub()
+
+    context = prepare_and_resolve_submit_preflight_for_run_or_abort(
+        run_dir=run_dir,
+        submission_ledger_path=ledger_path,
+        slug="demo",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        source_submission_path=source_submission_path,
+        input_submission_path=input_submission_path,
+        validate_and_prepare=lambda path: prepared_submission_path if path == input_submission_path else path,
+        validation_error_types=(SubmitValidationStubError,),
+        validation_exit_code=65,
+        code_fingerprint="code-fp",
+        allow_force=False,
+        run_state={},
+        latest_submit_attempt={},
+        submit_mode="file",
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="wrapper",
+        code_competition=False,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        load_run_state=lambda _run_dir: {},
+        collect_duplicate_submission_sources=lambda **_kwargs: [],
+        decide_duplicate_submission_action=lambda **_kwargs: DuplicateDecisionStub(action="proceed"),
+        check_rules_accepted=lambda: True,
+        cli_error_types=(RuntimeError,),
+        is_missing_credentials_error=lambda _exc: False,
+        rules_not_accepted_exit_code=64,
+        resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
+        decide_notebook_submit_artifact_mode_for_paths=lambda **_kwargs: ArtifactModeDecisionStub(mode="wrapper"),
+        count_csv_data_rows=lambda _path: 1,
+        decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "sha" if path == prepared_submission_path else None,
+        submit_aborter=object(),
+        submit_attempt_recorder=recorder,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        build_error=RuntimeError,
+        on_message=lambda _message: None,
+    )
+
+    assert context.prepared_context.prepared_submission_path == prepared_submission_path
+    assert context.prepared_context.prepared_submission_sha == "sha"
+    assert context.preflight_context.duplicate_skip_result is None
+    assert context.preflight_context.submit_stage_state is not None
+    assert context.preflight_context.submit_stage_state.submission_artifact_mode == "wrapper"
 
 
 def test_resolve_submit_preflight_for_run_returns_duplicate_skip(tmp_path: Path) -> None:

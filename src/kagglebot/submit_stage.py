@@ -517,6 +517,12 @@ class SubmitPreflightContext:
 
 
 @dataclass(frozen=True)
+class SubmitPreparedPreflightContext:
+    prepared_context: SubmitPreparedRunContext
+    preflight_context: SubmitPreflightContext
+
+
+@dataclass(frozen=True)
 class SubmitRulesAcceptanceResolution:
     rules_accepted: bool
     abort_spec: SubmitAbortSpec | None = None
@@ -1203,6 +1209,106 @@ def resolve_submit_preflight_for_run_or_abort(
             run_dir=run_dir,
             run_state=run_state,
         ),
+    )
+
+
+def prepare_and_resolve_submit_preflight_for_run_or_abort(
+    *,
+    run_dir: Path,
+    submission_ledger_path: Path,
+    slug: str,
+    run_id: str,
+    message: str,
+    submitted_at: datetime,
+    source_submission_path: Path,
+    input_submission_path: Path,
+    validate_and_prepare: Callable[[Path], Path],
+    validation_error_types: tuple[type[BaseException], ...],
+    validation_exit_code: int | None,
+    code_fingerprint: str,
+    allow_force: bool,
+    run_state: dict[str, object],
+    latest_submit_attempt: dict[str, object],
+    submit_mode: object,
+    notebook_submissions_only: bool,
+    notebook_submit_artifact_mode: str | None,
+    code_competition: bool,
+    sample_submission_path: Path,
+    fallback_sample_submission_path: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+    collect_duplicate_submission_sources: Callable[..., list[str]],
+    decide_duplicate_submission_action: Callable[..., object],
+    check_rules_accepted: Callable[[], bool],
+    cli_error_types: tuple[type[BaseException], ...],
+    is_missing_credentials_error: Callable[[BaseException], bool],
+    rules_not_accepted_exit_code: int | None,
+    resolve_notebook_submit_artifact_mode: Callable[..., str],
+    decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
+    count_csv_data_rows: Callable[[Path], int | None],
+    decide_same_submission_path_action: Callable[..., object],
+    compute_error_fingerprint: Callable[[str, str], str],
+    compute_submission_sha256: Callable[[Path | None], str | None],
+    submit_aborter: object,
+    submit_attempt_recorder: object,
+    stdout_tail_chars: int,
+    stderr_tail_chars: int,
+    build_error: Callable[[str], BaseException],
+    on_message: Callable[[str], object],
+) -> SubmitPreparedPreflightContext:
+    prepared_context = prepare_submission_for_run_or_abort(
+        input_submission_path=input_submission_path,
+        validate_and_prepare=validate_and_prepare,
+        validation_error_types=validation_error_types,
+        validation_exit_code=validation_exit_code,
+        compute_error_fingerprint=compute_error_fingerprint,
+        submit_aborter=submit_aborter,
+        submit_attempt_recorder=submit_attempt_recorder,
+        code_fingerprint=code_fingerprint,
+        compute_submission_sha256=compute_submission_sha256,
+        build_error=build_error,
+    )
+    preflight_context = resolve_submit_preflight_for_run_or_abort(
+        run_dir=run_dir,
+        submission_ledger_path=submission_ledger_path,
+        slug=slug,
+        run_id=run_id,
+        message=message,
+        submitted_at=submitted_at,
+        source_submission_path=source_submission_path,
+        prepared_submission_path=prepared_context.prepared_submission_path,
+        prepared_submission_sha=prepared_context.prepared_submission_sha,
+        code_fingerprint=code_fingerprint,
+        allow_force=allow_force,
+        run_state=run_state,
+        latest_submit_attempt=latest_submit_attempt,
+        submit_mode=submit_mode,
+        notebook_submissions_only=notebook_submissions_only,
+        notebook_submit_artifact_mode=notebook_submit_artifact_mode,
+        code_competition=code_competition,
+        sample_submission_path=sample_submission_path,
+        fallback_sample_submission_path=fallback_sample_submission_path,
+        load_run_state=load_run_state,
+        collect_duplicate_submission_sources=collect_duplicate_submission_sources,
+        decide_duplicate_submission_action=decide_duplicate_submission_action,
+        check_rules_accepted=check_rules_accepted,
+        cli_error_types=cli_error_types,
+        is_missing_credentials_error=is_missing_credentials_error,
+        rules_not_accepted_exit_code=rules_not_accepted_exit_code,
+        resolve_notebook_submit_artifact_mode=resolve_notebook_submit_artifact_mode,
+        decide_notebook_submit_artifact_mode_for_paths=decide_notebook_submit_artifact_mode_for_paths,
+        count_csv_data_rows=count_csv_data_rows,
+        decide_same_submission_path_action=decide_same_submission_path_action,
+        compute_error_fingerprint=compute_error_fingerprint,
+        compute_submission_sha256=compute_submission_sha256,
+        submit_aborter=submit_aborter,
+        submit_attempt_recorder=submit_attempt_recorder,
+        stdout_tail_chars=stdout_tail_chars,
+        stderr_tail_chars=stderr_tail_chars,
+        on_message=on_message,
+    )
+    return SubmitPreparedPreflightContext(
+        prepared_context=prepared_context,
+        preflight_context=preflight_context,
     )
 
 

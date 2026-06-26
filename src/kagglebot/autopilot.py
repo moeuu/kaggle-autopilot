@@ -3399,22 +3399,8 @@ def _attempt_submit(
     submit_aborter = submit_run_context.submit_aborter
     submit_retry_recorder = submit_run_context.submit_retry_recorder
 
-    prepared_context = _submit_stage.prepare_submission_for_run_or_abort(
-        input_submission_path=input_submission_path,
-        validate_and_prepare=submission_service.validate_and_prepare_submission,
-        validation_error_types=(SubmissionValidationError,),
-        validation_exit_code=SubmissionValidationError.exit_code,
-        compute_error_fingerprint=compute_error_fingerprint,
-        submit_aborter=submit_aborter,
-        submit_attempt_recorder=submit_attempt_recorder,
-        code_fingerprint=submit_code_fingerprint,
-        compute_submission_sha256=_sha256_or_none,
-        build_error=SubmitAbortedError,
-    )
-    prepared_submission_path = prepared_context.prepared_submission_path
-
     constraints = _competition_rules.load_competition_rule_constraints(config.paths)
-    preflight_context = _submit_stage.resolve_submit_preflight_for_run_or_abort(
+    prepared_preflight_context = _submit_stage.prepare_and_resolve_submit_preflight_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
         slug=config.slug,
@@ -3422,8 +3408,10 @@ def _attempt_submit(
         message=message,
         submitted_at=submitted_at,
         source_submission_path=submission_path,
-        prepared_submission_path=prepared_submission_path,
-        prepared_submission_sha=prepared_context.prepared_submission_sha,
+        input_submission_path=input_submission_path,
+        validate_and_prepare=submission_service.validate_and_prepare_submission,
+        validation_error_types=(SubmissionValidationError,),
+        validation_exit_code=SubmissionValidationError.exit_code,
         code_fingerprint=submit_code_fingerprint,
         allow_force=allow_force,
         run_state=run_state,
@@ -3451,8 +3439,12 @@ def _attempt_submit(
         submit_attempt_recorder=submit_attempt_recorder,
         stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
         stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        build_error=SubmitAbortedError,
         on_message=print,
     )
+    prepared_context = prepared_preflight_context.prepared_context
+    prepared_submission_path = prepared_context.prepared_submission_path
+    preflight_context = prepared_preflight_context.preflight_context
     if preflight_context.duplicate_skip_result is not None:
         return preflight_context.duplicate_skip_result
     if preflight_context.same_submission_path_skipped:

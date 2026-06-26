@@ -474,6 +474,9 @@ Recommended extraction order:
    Local validation/prepared-submission resolution and prepared SHA calculation now use
    `submit_stage.prepare_submission_for_run_or_abort`, so `_attempt_submit` no longer open-codes validation abort
    handling.
+   Prepared-submission resolution and preflight orchestration can also be consumed together through
+   `submit_stage.prepare_and_resolve_submit_preflight_for_run_or_abort`, keeping validation, duplicate/rules checks,
+   same-path policy, and initial submit runtime state assembly behind one run-level boundary.
    Duplicate-submit checks, rules-acceptance checks, initial submit runtime-state resolution, same-path skip handling,
    and seen-fingerprint assembly now flow through `submit_stage.resolve_submit_preflight_for_run_or_abort`, leaving
    `_attempt_submit` to consume one typed preflight context before entering the retry loop.
