@@ -3325,6 +3325,18 @@ def test_resolve_iteration_submission_artifact_uses_latest_fold_intermediate(tmp
     assert _resolve_iteration_submission_artifact(iter_dir) == fold2
 
 
+def test_copy_submission_artifact_to_iteration_dir_skips_same_path(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    iter_dir.mkdir()
+    submission = iter_dir / "submission.csv"
+    submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    copied = _autopilot_state_test._copy_submission_artifact_to_iteration_dir(source=submission, iter_dir=iter_dir)
+
+    assert copied == submission
+    assert submission.read_text(encoding="utf-8") == "id,target\n1,0.1\n"
+
+
 def test_attempt_submit_aborts_when_polling_raises_error(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path, submit=True, max_iterations=1)
     run_id = config.run_id or "run-1"

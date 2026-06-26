@@ -333,7 +333,8 @@ The next high-value modernization work is:
    summary payload construction now live in `autopilot_state.py`, keeping run-state schema assembly with the rest of the
    state/artifact helpers. Iteration resume submission-artifact lookup now delegates to `kernel_outputs.find_submission_file`,
    so resume handling uses the same manifest, archive, final submission, and fold-intermediate fallback policy as kernel
-   output collection.
+   output collection. Iteration artifact copy paths now use `kernel_outputs.copy_artifact_if_needed`, keeping same-path
+   copy avoidance centralized with kernel-output artifact collection.
    Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
    solver and kernel-runtime submission writers share one row-count contract. Direction-aware score gaps, best-score
    selection, and candidate-vs-baseline comparisons now live in `score_utils.py`, leaving campaign modules as

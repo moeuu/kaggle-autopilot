@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,7 +9,7 @@ from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
-from kagglebot.kernel_outputs import find_submission_file
+from kagglebot.kernel_outputs import copy_artifact_if_needed, find_submission_file
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
 
@@ -591,14 +590,7 @@ def _submit_retry_metrics_candidates(iter_dir: Path, marker_payload: dict[str, o
 
 def _copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
     destination = iter_dir / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if source.resolve() == destination.resolve():
-            return destination
-    except OSError:
-        pass
-    shutil.copy2(source, destination)
-    return destination
+    return copy_artifact_if_needed(source=source, destination=destination)
 
 
 def _copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, iter_dir: Path) -> None:
@@ -611,12 +603,7 @@ def _copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, 
         if not source.exists() or not source.is_file():
             continue
         destination = output_dir / filename
-        try:
-            if source.resolve() == destination.resolve():
-                continue
-        except OSError:
-            pass
-        shutil.copy2(source, destination)
+        copy_artifact_if_needed(source=source, destination=destination)
 
 
 def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: int) -> int | None:
