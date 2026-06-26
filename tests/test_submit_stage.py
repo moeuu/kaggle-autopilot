@@ -29,6 +29,7 @@ from kagglebot.submit_stage import (
     build_submission_polling_error_abort_spec,
     build_submit_abort_spec_kwargs,
     build_submit_run_aborter_for_run,
+    build_submit_run_context,
     build_submit_stage_error_action_abort_spec,
     build_submit_stage_runtime_state,
     build_submit_stage_success_record,
@@ -1487,6 +1488,64 @@ def test_build_submit_run_aborter_for_run_wires_standard_failure_helpers(tmp_pat
     assert saved_updates
     assert saved_updates[0]["last_reason"] == "local_submission_validation_failed"
     assert messages == ["[red]submit aborted[/red]: Local validation failed."]
+
+
+def test_build_submit_run_context_wires_attempt_autofix_and_retry_helpers(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    submission = tmp_path / "iter-2" / "submission.csv"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    src_root = tmp_path / "src"
+    kernel_source_dir = tmp_path / "kernel"
+    src_root.mkdir()
+    kernel_source_dir.mkdir()
+    saved_updates: list[dict[str, object]] = []
+    fingerprint_calls: list[dict[str, object]] = []
+
+    class SubmitAbortStubError(RuntimeError):
+        pass
+
+    context = build_submit_run_context(
+        run_dir=run_dir,
+        run_id="run-1",
+        slug="demo",
+        submission_path=submission,
+        src_root=src_root,
+        kernel_source_dir=kernel_source_dir,
+        knowledge_paths=object(),
+        problem_types=["tabular"],
+        force_submit=False,
+        force_resubmit=True,
+        save_run_state_for_run=lambda _run_dir, updates: saved_updates.append(updates),
+        load_run_state=lambda _run_dir: {"status": "running"},
+        compute_submit_code_fingerprint=lambda **kwargs: fingerprint_calls.append(kwargs) or "code-fp",
+        compute_submission_sha256=lambda path: "sha" if path == submission else None,
+        stdout_tail_chars=10,
+        stderr_tail_chars=11,
+        now_iso=lambda: "2026-06-25T00:00:00+00:00",
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **_kwargs: None,
+        on_message=lambda _message: None,
+        build_error=SubmitAbortStubError,
+    )
+
+    assert context.submit_attempt_recorder is not None
+    assert context.input_submission_path == submission
+    assert context.run_state == {"status": "running"}
+    assert context.latest_submit_attempt == {}
+    assert context.submit_code_fingerprint == "code-fp"
+    assert context.allow_force is True
+    assert context.submit_aborter.run_id == "run-1"
+    assert context.submit_retry_recorder.run_id == "run-1"
+    assert fingerprint_calls == [
+        {
+            "src_root": src_root,
+            "kernel_source_dir": kernel_source_dir,
+            "sha256_or_none": context.submit_retry_recorder.compute_submission_sha256,
+        }
+    ]
+    assert saved_updates == []
 
 
 def test_submit_run_aborter_binds_run_state_save_for_created_recorder(tmp_path: Path) -> None:

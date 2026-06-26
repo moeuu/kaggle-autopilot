@@ -4226,28 +4226,35 @@ def _attempt_submit(
     if not config.submit or config.dry_run:
         return None
     run_dir = config.paths.run_dir(run_id)
-    submit_attempt_recorder = _submit_attempts.build_submit_attempt_recorder_for_run(
+    submit_run_context = _submit_stage.build_submit_run_context(
         run_dir=run_dir,
-        save_run_state_for_run=_autopilot_state._save_run_state,
-    )
-    autofix_attempt_context = _submit_failure_context.resolve_submit_autofix_context_for_run(
-        run_dir=run_dir,
+        run_id=run_id,
+        slug=config.slug,
         submission_path=submission_path,
-        load_run_state=_autopilot_state._load_run_state,
-        save_run_state_for_run=_autopilot_state._save_run_state,
-        now_iso=datetime.now(UTC).isoformat(),
-    )
-    run_state = autofix_attempt_context.run_state
-    latest_submit_attempt = autofix_attempt_context.latest_submit_attempt
-    submit_code_fingerprint = _submit_retry_policy.compute_submit_code_fingerprint(
         src_root=Path(__file__).resolve().parent,
         kernel_source_dir=config.paths.kernel_source_dir,
-        sha256_or_none=_sha256_or_none,
+        knowledge_paths=config.knowledge_paths,
+        problem_types=problem_types,
+        force_submit=config.force_submit,
+        force_resubmit=_env_utils.env_truthy("KAGGLEBOT_FORCE_RESUBMIT"),
+        load_run_state=_autopilot_state._load_run_state,
+        save_run_state_for_run=_autopilot_state._save_run_state,
+        compute_submit_code_fingerprint=_submit_retry_policy.compute_submit_code_fingerprint,
+        compute_submission_sha256=_sha256_or_none,
+        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
+        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
+        now_iso=lambda: datetime.now(UTC).isoformat(),
+        normalize_detail=normalize_error_text,
+        record_error_fix_insight=record_error_fix_insight,
+        on_message=print,
+        build_error=SubmitAbortedError,
     )
-    allow_force = config.force_submit or _env_utils.env_truthy("KAGGLEBOT_FORCE_RESUBMIT")
-    input_submission_path = autofix_attempt_context.input_submission_path
-    if autofix_attempt_context.message:
-        print(autofix_attempt_context.message)
+    submit_attempt_recorder = submit_run_context.submit_attempt_recorder
+    run_state = submit_run_context.run_state
+    latest_submit_attempt = submit_run_context.latest_submit_attempt
+    submit_code_fingerprint = submit_run_context.submit_code_fingerprint
+    allow_force = submit_run_context.allow_force
+    input_submission_path = submit_run_context.input_submission_path
 
     message = _submit_stage.resolve_submission_message(
         context_dir=config.paths.context_dir,
@@ -4272,35 +4279,8 @@ def _attempt_submit(
     print(f"[cyan]submit[/cyan]: {config.slug}")
     submitted_at = datetime.now(UTC)
 
-    submit_aborter = _submit_stage.build_submit_run_aborter_for_run(
-        run_dir=run_dir,
-        run_id=run_id,
-        slug=config.slug,
-        knowledge_paths=config.knowledge_paths,
-        problem_types=problem_types,
-        save_run_state_for_run=_autopilot_state._save_run_state,
-        load_run_state=_autopilot_state._load_run_state,
-        compute_submission_sha256=_sha256_or_none,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        now_iso=lambda: datetime.now(UTC).isoformat(),
-        normalize_detail=normalize_error_text,
-        record_error_fix_insight=record_error_fix_insight,
-        on_message=print,
-        build_error=SubmitAbortedError,
-    )
-    submit_retry_recorder = _submit_stage.SubmitRunRetryRecorder(
-        submit_attempt_recorder=submit_attempt_recorder,
-        run_id=run_id,
-        slug=config.slug,
-        problem_types=problem_types,
-        knowledge_paths=config.knowledge_paths,
-        compute_submission_sha256=_sha256_or_none,
-        stdout_tail_chars=_SUBMIT_STDOUT_TAIL_CHARS,
-        stderr_tail_chars=_SUBMIT_STDERR_TAIL_CHARS,
-        normalize_detail=normalize_error_text,
-        record_error_fix_insight=record_error_fix_insight,
-    )
+    submit_aborter = submit_run_context.submit_aborter
+    submit_retry_recorder = submit_run_context.submit_retry_recorder
 
     prepared_resolution = _submit_stage.resolve_prepared_submission_for_submit(
         input_submission_path=input_submission_path,

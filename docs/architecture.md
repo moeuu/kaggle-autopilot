@@ -434,6 +434,9 @@ Recommended extraction order:
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    standard submit-abort helper wiring is built by `submit_stage.build_submit_run_aborter_for_run`, so the main loop does
    not enumerate submit-failure persistence, latest-attempt loading, or success-check callbacks directly.
+   Run-bound submit context wiring for attempt recording, submit autofix input resolution, code fingerprinting, abort
+   handling, and retry recording now lives behind `submit_stage.build_submit_run_context`, reducing `_attempt_submit`
+   to submit decision flow instead of helper construction.
    duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects
