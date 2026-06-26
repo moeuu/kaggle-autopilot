@@ -157,7 +157,7 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
         lambda **kwargs: SimpleNamespace(submit=lambda **_kwargs: ("notebook", "ref", None)),
     )
     monkeypatch.setattr(
-        submit_runner._submit_stage,
+        submit_runner._submit_attempt_loop,
         "run_submit_stage_attempts_until_success_or_abort",
         lambda **kwargs: calls.append("attempt_loop")
         or SimpleNamespace(

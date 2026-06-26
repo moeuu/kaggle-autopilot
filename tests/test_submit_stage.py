@@ -27,6 +27,10 @@ from kagglebot.submit_abort_specs import (
     resolve_kaggle_cli_submit_abort_spec,
     resolve_local_submission_guardrail_abort_spec,
 )
+from kagglebot.submit_attempt_loop import (
+    run_submit_stage_attempt,
+    run_submit_stage_attempts_until_success_or_abort,
+)
 from kagglebot.submit_attempts import SubmitAttemptStatePayloads, append_submit_attempt
 from kagglebot.submit_cli_error_resolution import (
     SubmitStageRuntimeState,
@@ -76,8 +80,6 @@ from kagglebot.submit_stage import (
     build_submit_runtime_context,
     prepare_and_resolve_submit_preflight_for_run_or_abort,
     resolve_submit_preflight_for_run_or_abort,
-    run_submit_stage_attempt,
-    run_submit_stage_attempts_until_success_or_abort,
 )
 from kagglebot.submit_stage_duplicate import (
     apply_duplicate_submission_decision,
