@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.history import SubmissionLedger
@@ -83,6 +84,7 @@ from kagglebot.submit_stage import (
     resolve_submit_cli_error_for_run,
     resolve_submit_preflight_for_run_or_abort,
     run_submit_stage_attempt,
+    run_submit_stage_attempts_until_success_or_abort,
     submission_score_for_tracking,
     update_submit_stage_artifact_mode,
     wait_for_submission_outcome,
@@ -3073,6 +3075,146 @@ def test_run_submit_stage_attempt_uses_notebook_submit_tuple(tmp_path: Path) -> 
     assert result.submission_result == "notebook-result"
     assert result.submission_reference == "kernel:user/demo"
     assert result.submission_artifact_path == notebook_artifact
+
+
+def test_run_submit_stage_attempts_until_success_returns_file_submit_result(tmp_path: Path) -> None:
+    prepared_path = tmp_path / "prepared.csv"
+    submitted_path = tmp_path / "submitted.csv"
+
+    result = run_submit_stage_attempts_until_success_or_abort(
+        run_dir=tmp_path,
+        run_id="run-1",
+        state=SubmitStageRuntimeState(False, False, "wrapper"),
+        prepared_submission_path=prepared_path,
+        message="submit message",
+        code_competition=False,
+        max_attempts=2,
+        backoff_base_seconds=0.0,
+        sample_submission_path=tmp_path / "sample_submission.csv",
+        fallback_sample_submission_path=tmp_path / "data" / "sample_submission.csv",
+        submit_code_fingerprint="code-fp",
+        run_state={},
+        seen_fingerprints=set(),
+        run_notebook_submit=lambda _state: (_ for _ in ()).throw(AssertionError("notebook should not run")),
+        run_file_submit=lambda: FileSubmitResult(submitted_path),
+        submit_aborter=object(),
+        submit_attempt_recorder=SubmitAttemptRecorderStub(),
+        submit_retry_recorder=SubmitRunRetryRecorder(
+            submit_attempt_recorder=SubmitAttemptRecorderStub(),
+            run_id="run-1",
+            slug="demo",
+            problem_types=[],
+            knowledge_paths=object(),
+            compute_submission_sha256=lambda _path: None,
+            stdout_tail_chars=100,
+            stderr_tail_chars=100,
+            normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+            record_error_fix_insight=lambda **kwargs: None,
+        ),
+        submission_cli_error_types=(SubmitCliStubError,),
+        local_guardrail_error_types=(ValueError,),
+        kaggle_cli_error_types=(KeyError,),
+        classify_submit_error=lambda stdout, stderr, exit_code: {"kind": "permanent", "reason": "bad_request"},
+        should_use_notebook_fallback=lambda **kwargs: False,
+        resolve_notebook_submit_artifact_mode=lambda **kwargs: "wrapper",
+        decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: ArtifactModeDecisionStub(mode="wrapper"),
+        count_csv_data_rows=lambda _path: 0,
+        compute_error_fingerprint=lambda stdout, stderr: f"{stdout}:{stderr}",
+        decide_submit_fingerprint_reuse=lambda **kwargs: SimpleNamespace(
+            fingerprint_seen=False,
+            same_fingerprint_retry_allowed=False,
+        ),
+        compute_submit_backoff=lambda **kwargs: 0.0,
+        save_run_state_for_run=lambda _run_dir, _updates: None,
+        is_missing_credentials_error=lambda _error: False,
+        build_submit_aborted_error=RuntimeError,
+        sleep=lambda _seconds: None,
+        on_message=lambda _message: None,
+    )
+
+    assert isinstance(result.submission_result, FileSubmitResult)
+    assert result.submission_reference == str(submitted_path)
+    assert result.submission_artifact_path == submitted_path
+    assert result.submit_stage_state.submission_artifact_mode == "wrapper"
+
+
+def test_run_submit_stage_attempts_until_success_records_transient_retry(tmp_path: Path) -> None:
+    prepared_path = tmp_path / "prepared.csv"
+    submitted_path = tmp_path / "submitted.csv"
+    recorder = SubmitAttemptRecorderStub()
+    sleeps: list[float] = []
+    calls = {"file_submit": 0}
+
+    def run_file_submit():
+        calls["file_submit"] += 1
+        if calls["file_submit"] == 1:
+            raise SubmitCliStubError(
+                "temporary failure",
+                stdout="temporary stdout",
+                stderr="temporary stderr",
+                exit_code=4,
+            )
+        return FileSubmitResult(submitted_path)
+
+    result = run_submit_stage_attempts_until_success_or_abort(
+        run_dir=tmp_path,
+        run_id="run-1",
+        state=SubmitStageRuntimeState(False, False, "wrapper"),
+        prepared_submission_path=prepared_path,
+        message="submit message",
+        code_competition=False,
+        max_attempts=2,
+        backoff_base_seconds=3.5,
+        sample_submission_path=tmp_path / "sample_submission.csv",
+        fallback_sample_submission_path=tmp_path / "data" / "sample_submission.csv",
+        submit_code_fingerprint="code-fp",
+        run_state={},
+        seen_fingerprints=set(),
+        run_notebook_submit=lambda _state: (_ for _ in ()).throw(AssertionError("notebook should not run")),
+        run_file_submit=run_file_submit,
+        submit_aborter=object(),
+        submit_attempt_recorder=recorder,
+        submit_retry_recorder=SubmitRunRetryRecorder(
+            submit_attempt_recorder=recorder,
+            run_id="run-1",
+            slug="demo",
+            problem_types=["tabular"],
+            knowledge_paths=object(),
+            compute_submission_sha256=lambda path: "sha" if path == prepared_path else None,
+            stdout_tail_chars=100,
+            stderr_tail_chars=100,
+            normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+            record_error_fix_insight=lambda **kwargs: None,
+        ),
+        submission_cli_error_types=(SubmitCliStubError,),
+        local_guardrail_error_types=(ValueError,),
+        kaggle_cli_error_types=(KeyError,),
+        classify_submit_error=lambda stdout, stderr, exit_code: {
+            "kind": "transient",
+            "reason": "network_or_timeout",
+        },
+        should_use_notebook_fallback=lambda **kwargs: False,
+        resolve_notebook_submit_artifact_mode=lambda **kwargs: "wrapper",
+        decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: ArtifactModeDecisionStub(mode="wrapper"),
+        count_csv_data_rows=lambda _path: 0,
+        compute_error_fingerprint=lambda stdout, stderr: "retry-fp",
+        decide_submit_fingerprint_reuse=lambda **kwargs: SimpleNamespace(
+            fingerprint_seen=False,
+            same_fingerprint_retry_allowed=False,
+        ),
+        compute_submit_backoff=lambda **kwargs: 3.5,
+        save_run_state_for_run=lambda _run_dir, _updates: None,
+        is_missing_credentials_error=lambda _error: False,
+        build_submit_aborted_error=RuntimeError,
+        sleep=sleeps.append,
+        on_message=lambda _message: None,
+    )
+
+    assert calls["file_submit"] == 2
+    assert result.submission_reference == str(submitted_path)
+    assert sleeps == [3.5]
+    assert recorder.payloads[0]["action_taken"] == "retry"
+    assert recorder.payloads[0]["fingerprint"] == "retry-fp"
 
 
 def test_build_submit_stage_success_record_prefers_exit_code() -> None:

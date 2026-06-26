@@ -3462,10 +3462,6 @@ def _attempt_submit(
         raise SubmitAbortedError("Submit preflight did not produce submit stage state.")
     code_competition = preflight_context.code_competition
     seen_fingerprints = preflight_context.seen_fingerprints
-    max_attempts = max(1, _SUBMIT_MAX_TRANSIENT_RETRIES)
-    submission_result = None
-    submission_reference = str(prepared_submission_path)
-    submission_artifact_path: Path | None = prepared_submission_path
 
     notebook_submitter = _submit_notebook.build_notebook_submit_runner_for_run(
         slug=config.slug,
@@ -3488,130 +3484,55 @@ def _attempt_submit(
         on_message=print,
     )
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            submit_attempt_result = _submit_stage.run_submit_stage_attempt(
-                notebook_submit_required=submit_stage_state.notebook_submit_required,
-                file_submission_path=prepared_submission_path,
-                run_notebook_submit=lambda: notebook_submitter.submit(
-                    submission_path=prepared_submission_path,
-                    message=message,
-                    artifact_mode=submit_stage_state.submission_artifact_mode,
-                ),
-                run_file_submit=lambda: submission_service.submit_prepared(
-                    prepared_path=prepared_submission_path,
-                    message=message,
-                    run_id=run_id,
-                    offline_score=best_score,
-                    score_source="offline",
-                ),
-            )
-            submission_result = submit_attempt_result.submission_result
-            submission_reference = submit_attempt_result.submission_reference
-            submission_artifact_path = submit_attempt_result.submission_artifact_path
-        except SubmissionCliError as exc:
-            submit_error_resolution = _submit_stage.resolve_submit_cli_error_for_run(
-                run_dir=run_dir,
-                state=submit_stage_state,
-                stdout=exc.stdout,
-                stderr=exc.stderr or "",
-                output=exc.output or "",
-                exit_code=exc.exit_code,
-                attempt=attempt,
-                max_attempts=max_attempts,
-                backoff_base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
-                classify_submit_error=classify_submit_error,
-                should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
-                code_competition=code_competition,
-                sample_submission_path=config.paths.sample_submission_path,
-                fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
-                submission_path=prepared_submission_path,
-                resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
-                decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-                count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
-                compute_error_fingerprint=compute_error_fingerprint,
-                decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
-                compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
-                seen_fingerprints=seen_fingerprints,
-                run_state=run_state,
-                code_fingerprint=submit_code_fingerprint,
-                save_run_state_for_run=_autopilot_state.save_run_state,
-                on_message=print,
-            )
-            submit_error_classification = submit_error_resolution.classification
-            fallback_application = submit_error_resolution.fallback_application
-            submit_stage_state = fallback_application.state
-            if fallback_application.retry_as_notebook:
-                continue
-            fingerprint = submit_error_resolution.fingerprint
-            error_action = submit_error_resolution.error_action
-            if error_action is None:
-                raise SubmitAbortedError("Submit error resolution did not produce a retry or abort action.")
-            if error_action.action == "abort":
-                abort_spec = _submit_stage.build_submit_stage_error_action_abort_spec(
-                    action=error_action,
-                    fingerprint=fingerprint,
-                    stdout=exc.stdout,
-                    stderr=submit_error_classification.stderr,
-                    exit_code=exc.exit_code,
-                )
-                return submit_aborter.abort(
-                    submission_ref=submission_reference,
-                    submission_artifact_path=submission_artifact_path,
-                    artifact_mode=submit_stage_state.submission_artifact_mode,
-                    code_fingerprint=submit_code_fingerprint,
-                    **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
-                    submit_attempt_recorder=submit_attempt_recorder,
-                )
-            seen_fingerprints.add(fingerprint)
-            if error_action.action == "retry":
-                submit_retry_recorder.record(
-                    submission_ref=submission_reference,
-                    submission_artifact_path=submission_artifact_path,
-                    fallback_submission_path=prepared_submission_path,
-                    exit_code=exc.exit_code,
-                    fingerprint=fingerprint,
-                    action=error_action,
-                    stdout=exc.stdout,
-                    stderr=submit_error_classification.stderr,
-                    attempt=attempt,
-                )
-                time.sleep(error_action.wait_seconds)
-                continue
-        except (DuplicateSubmissionError, SubmissionRateLimitError) as exc:
-            abort_spec = _submit_stage.resolve_local_submission_guardrail_abort_spec(
-                error=exc,
-                compute_error_fingerprint=compute_error_fingerprint,
-            )
-            return submit_aborter.abort(
-                submission_ref=submission_reference,
-                submission_artifact_path=submission_artifact_path,
-                code_fingerprint=submit_code_fingerprint,
-                **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
-                submit_attempt_recorder=submit_attempt_recorder,
-            )
-        except KaggleCliError as exc:
-            abort_spec = _submit_stage.resolve_kaggle_cli_submit_abort_spec(
-                error=exc,
-                is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
-                compute_error_fingerprint=compute_error_fingerprint,
-            )
-            if abort_spec is None:
-                raise
-            return submit_aborter.abort(
-                submission_ref=submission_reference,
-                submission_artifact_path=submission_artifact_path,
-                artifact_mode=submit_stage_state.submission_artifact_mode,
-                code_fingerprint=submit_code_fingerprint,
-                **_submit_stage.build_submit_abort_spec_kwargs(abort_spec),
-                submit_attempt_recorder=submit_attempt_recorder,
-            )
-        break
-
-    if submission_result is None:
-        raise SubmitAbortedError("Submit failed before producing a submission result.")
-    submission_ref = submission_reference
-    submission_for_submit_path = submission_artifact_path
+    submit_attempt_loop_result = _submit_stage.run_submit_stage_attempts_until_success_or_abort(
+        run_dir=run_dir,
+        run_id=run_id,
+        state=submit_stage_state,
+        prepared_submission_path=prepared_submission_path,
+        message=message,
+        code_competition=code_competition,
+        max_attempts=_SUBMIT_MAX_TRANSIENT_RETRIES,
+        backoff_base_seconds=_SUBMIT_BACKOFF_BASE_SEC,
+        sample_submission_path=config.paths.sample_submission_path,
+        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+        submit_code_fingerprint=submit_code_fingerprint,
+        run_state=run_state,
+        seen_fingerprints=seen_fingerprints,
+        run_notebook_submit=lambda current_state: notebook_submitter.submit(
+            submission_path=prepared_submission_path,
+            message=message,
+            artifact_mode=current_state.submission_artifact_mode,
+        ),
+        run_file_submit=lambda: submission_service.submit_prepared(
+            prepared_path=prepared_submission_path,
+            message=message,
+            run_id=run_id,
+            offline_score=best_score,
+            score_source="offline",
+        ),
+        submit_aborter=submit_aborter,
+        submit_attempt_recorder=submit_attempt_recorder,
+        submit_retry_recorder=submit_retry_recorder,
+        submission_cli_error_types=(SubmissionCliError,),
+        local_guardrail_error_types=(DuplicateSubmissionError, SubmissionRateLimitError),
+        kaggle_cli_error_types=(KaggleCliError,),
+        classify_submit_error=classify_submit_error,
+        should_use_notebook_fallback=_submit_failure_policy.should_use_notebook_submit_fallback,
+        resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
+        decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
+        count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
+        compute_error_fingerprint=compute_error_fingerprint,
+        decide_submit_fingerprint_reuse=_submit_retry_policy.decide_submit_fingerprint_reuse,
+        compute_submit_backoff=_submit_retry_policy.compute_submit_backoff,
+        save_run_state_for_run=_autopilot_state.save_run_state,
+        is_missing_credentials_error=_kaggle_cli_errors.is_missing_kaggle_credentials_error,
+        build_submit_aborted_error=SubmitAbortedError,
+        sleep=time.sleep,
+        on_message=print,
+    )
+    submit_stage_state = submit_attempt_loop_result.submit_stage_state
+    submission_ref = submit_attempt_loop_result.submission_reference
+    submission_for_submit_path = submit_attempt_loop_result.submission_artifact_path
     return _submit_stage.finalize_submit_outcome_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
@@ -3620,7 +3541,7 @@ def _attempt_submit(
         message=message,
         submitted_at=submitted_at,
         submission_ref=submission_ref,
-        submission_result=submission_result,
+        submission_result=submit_attempt_loop_result.submission_result,
         source_submission_path=submission_path,
         submission_artifact_path=submission_for_submit_path,
         submit_stage_state=submit_stage_state,

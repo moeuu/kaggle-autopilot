@@ -477,6 +477,10 @@ Recommended extraction order:
    Duplicate-submit checks, rules-acceptance checks, initial submit runtime-state resolution, same-path skip handling,
    and seen-fingerprint assembly now flow through `submit_stage.resolve_submit_preflight_for_run_or_abort`, leaving
    `_attempt_submit` to consume one typed preflight context before entering the retry loop.
+   Submit-stage retry-loop orchestration now flows through
+   `submit_stage.run_submit_stage_attempts_until_success_or_abort`, so file-vs-notebook submit dispatch, transient
+   retry recording, notebook fallback application, local guardrail aborts, and Kaggle CLI aborts share one typed loop
+   boundary instead of being open-coded in `_attempt_submit`.
    Submission outcome polling, post-poll abort handling, and successful submit ledger/attempt/failure-context recording
    now use `submit_stage.finalize_submit_outcome_for_run_or_abort`, so `_attempt_submit` no longer owns final
    persistence choreography after the retry loop succeeds.
