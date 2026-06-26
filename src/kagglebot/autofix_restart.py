@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -109,6 +110,52 @@ def write_kernel_regeneration_note(
         text = f"kernel_regen_failed: regeneration fallback failed.\ntrigger_reason: {trigger_reason}\nerror: {error}\n"
     note_path.write_text(text, encoding="utf-8")
     return note_path
+
+
+def maybe_regenerate_kernel_sources_once(
+    *,
+    dry_run: bool,
+    agent_dir: Path,
+    run_id: str,
+    iteration: int,
+    attempt: int,
+    trigger_reason: str,
+    regenerate_kernel_sources: Callable[[], None],
+    on_message: Callable[[str], None] = print,
+) -> bool:
+    """Regenerate authoritative kernel sources once when fix loops are stuck."""
+    if dry_run:
+        return False
+    if kernel_regeneration_already_marked(agent_dir):
+        return False
+
+    write_kernel_regeneration_marker(
+        agent_dir=agent_dir,
+        run_id=run_id,
+        iteration=iteration,
+        attempt=attempt,
+        trigger_reason=trigger_reason,
+    )
+    on_message(
+        "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
+        "regenerating kernel sources once before retry."
+    )
+    try:
+        regenerate_kernel_sources()
+    except Exception as exc:  # noqa: BLE001
+        write_kernel_regeneration_note(
+            agent_dir=agent_dir,
+            attempt=attempt,
+            trigger_reason=trigger_reason,
+            error=exc,
+        )
+        return False
+    write_kernel_regeneration_note(
+        agent_dir=agent_dir,
+        attempt=attempt,
+        trigger_reason=trigger_reason,
+    )
+    return True
 
 
 def _load_restart_state(path: Path) -> dict[str, object]:

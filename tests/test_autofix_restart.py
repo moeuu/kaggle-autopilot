@@ -6,6 +6,7 @@ from pathlib import Path
 from kagglebot.autofix_restart import (
     kernel_regenerate_marker_path,
     kernel_regeneration_already_marked,
+    maybe_regenerate_kernel_sources_once,
     maybe_restart_for_src_changes,
     write_kernel_regeneration_marker,
     write_kernel_regeneration_note,
@@ -49,6 +50,77 @@ def test_kernel_regeneration_marker_and_notes_round_trip(tmp_path: Path) -> None
     failure_text = failure_note.read_text(encoding="utf-8")
     assert "kernel_regen_failed" in failure_text
     assert "error: boom" in failure_text
+
+
+def test_maybe_regenerate_kernel_sources_once_runs_callback_and_writes_note(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "iter-1" / "agent"
+    calls: list[str] = []
+    messages: list[str] = []
+
+    regenerated = maybe_regenerate_kernel_sources_once(
+        dry_run=False,
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=2,
+        trigger_reason="repeated_error",
+        regenerate_kernel_sources=lambda: calls.append("regenerate"),
+        on_message=messages.append,
+    )
+
+    assert regenerated is True
+    assert calls == ["regenerate"]
+    assert messages
+    assert kernel_regeneration_already_marked(agent_dir) is True
+    assert "kernel_regen_applied" in (agent_dir / "kernel_regen_note-02.txt").read_text(encoding="utf-8")
+
+
+def test_maybe_regenerate_kernel_sources_once_skips_after_marker(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "iter-1" / "agent"
+    write_kernel_regeneration_marker(
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=1,
+        trigger_reason="prior",
+    )
+    calls: list[str] = []
+
+    regenerated = maybe_regenerate_kernel_sources_once(
+        dry_run=False,
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=2,
+        trigger_reason="repeated_error",
+        regenerate_kernel_sources=lambda: calls.append("regenerate"),
+    )
+
+    assert regenerated is False
+    assert calls == []
+
+
+def test_maybe_regenerate_kernel_sources_once_records_failure_note(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "iter-1" / "agent"
+
+    def fail() -> None:
+        raise RuntimeError("boom")
+
+    regenerated = maybe_regenerate_kernel_sources_once(
+        dry_run=False,
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=3,
+        trigger_reason="repeated_error",
+        regenerate_kernel_sources=fail,
+    )
+
+    assert regenerated is False
+    assert kernel_regeneration_already_marked(agent_dir) is True
+    note = (agent_dir / "kernel_regen_note-03.txt").read_text(encoding="utf-8")
+    assert "kernel_regen_failed" in note
+    assert "error: boom" in note
 
 
 def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_restart(

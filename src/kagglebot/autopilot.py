@@ -1003,13 +1003,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 output_dir=output_dir,
                             )
                         except KernelFailedError:
-                            if _maybe_regenerate_kernel_sources_once(
-                                config=config,
+                            if _autofix_restart.maybe_regenerate_kernel_sources_once(
+                                dry_run=config.dry_run,
+                                agent_dir=iter_dir / "agent",
                                 run_id=run_id,
                                 iteration=iteration,
-                                iter_dir=iter_dir,
                                 attempt=kernel_attempts,
                                 trigger_reason="repeated_error_fingerprint",
+                                regenerate_kernel_sources=lambda: _run_plan_and_initial(config, run_id),
                             ):
                                 error_fingerprints.clear()
                                 continue
@@ -1096,13 +1097,14 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                                 output_dir=output_dir,
                             )
                         except KernelFailedError:
-                            if _maybe_regenerate_kernel_sources_once(
-                                config=config,
+                            if _autofix_restart.maybe_regenerate_kernel_sources_once(
+                                dry_run=config.dry_run,
+                                agent_dir=iter_dir / "agent",
                                 run_id=run_id,
                                 iteration=iteration,
-                                iter_dir=iter_dir,
                                 attempt=kernel_attempts,
                                 trigger_reason="repeated_error_fingerprint",
+                                regenerate_kernel_sources=lambda: _run_plan_and_initial(config, run_id),
                             ):
                                 error_fingerprints.clear()
                                 continue
@@ -3639,13 +3641,14 @@ def _run_kernel_fix(
             raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} kernel-fix step failed.")
 
         if not changed:
-            regenerated = _maybe_regenerate_kernel_sources_once(
-                config=config,
+            regenerated = _autofix_restart.maybe_regenerate_kernel_sources_once(
+                dry_run=config.dry_run,
+                agent_dir=iter_dir / "agent",
                 run_id=run_id,
                 iteration=iteration,
-                iter_dir=iter_dir,
                 attempt=attempt,
                 trigger_reason="codex_no_changes",
+                regenerate_kernel_sources=lambda: _run_plan_and_initial(config, run_id),
             )
             if not regenerated:
                 raise KernelFailedError(
@@ -4007,51 +4010,6 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         return
 
     raise RuntimeError(f"Autofix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error.")
-
-
-def _maybe_regenerate_kernel_sources_once(
-    *,
-    config: AutopilotConfig,
-    run_id: str,
-    iteration: int,
-    iter_dir: Path,
-    attempt: int,
-    trigger_reason: str,
-) -> bool:
-    """Regenerate authoritative kernel sources once when fix loops are stuck."""
-    if config.dry_run:
-        return False
-    agent_dir = iter_dir / "agent"
-    if _autofix_restart.kernel_regeneration_already_marked(agent_dir):
-        return False
-
-    _autofix_restart.write_kernel_regeneration_marker(
-        agent_dir=agent_dir,
-        run_id=run_id,
-        iteration=iteration,
-        attempt=attempt,
-        trigger_reason=trigger_reason,
-    )
-    print(
-        "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
-        "regenerating kernel sources once before retry."
-    )
-    try:
-        _run_plan_and_initial(config, run_id)
-    except Exception as exc:  # noqa: BLE001
-        _autofix_restart.write_kernel_regeneration_note(
-            agent_dir=agent_dir,
-            attempt=attempt,
-            trigger_reason=trigger_reason,
-            error=exc,
-        )
-        return False
-    _autofix_restart.write_kernel_regeneration_note(
-        agent_dir=agent_dir,
-        attempt=attempt,
-        trigger_reason=trigger_reason,
-    )
-    return True
 
 
 def _attempt_submit(
