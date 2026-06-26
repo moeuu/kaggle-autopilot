@@ -47,6 +47,7 @@ from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_gate as _submit_gate
+from kagglebot import submit_knowledge as _submit_knowledge
 from kagglebot import submit_rank as _submit_rank
 from kagglebot import submit_stage as _submit_stage
 from kagglebot import submit_stage_duplicate as _submit_stage_duplicate
@@ -2547,7 +2548,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         def load_submission_diagnostics(iteration: int) -> str:
             return _diagnostics.load_iteration_diagnostics_text(config.paths.iter_dir(run_id, iteration))
 
-        _submit_stage.record_submission_knowledge(
+        _submit_knowledge.record_submission_knowledge(
             knowledge_paths=config.knowledge_paths,
             slug=config.slug,
             run_id=run_id,

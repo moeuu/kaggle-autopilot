@@ -17,6 +17,15 @@ from kagglebot.submit_cli_error_resolution import (
 )
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_gate import decide_fallback_submit_gate, decide_iteration_submit_improvement_gate
+from kagglebot.submit_knowledge import (
+    build_default_submission_problem_insight,
+    classify_submission_outcome,
+    ensure_submission_problem_insights,
+    record_submission_knowledge,
+    record_submission_knowledge_entries,
+    resolve_submission_knowledge_context,
+    resolve_submission_knowledge_iteration,
+)
 from kagglebot.submit_rank import (
     format_rank_force_reason,
     format_submission_rank_message,
@@ -29,7 +38,6 @@ from kagglebot.submit_stage import (
     SubmitRunRetryRecorder,
     abort_submit_for_run,
     apply_initial_submit_stage_artifact_mode,
-    build_default_submission_problem_insight,
     build_kaggle_credentials_missing_abort_spec,
     build_local_submission_guardrail_abort_spec,
     build_local_submission_validation_abort_spec,
@@ -44,18 +52,14 @@ from kagglebot.submit_stage import (
     build_submit_stage_error_action_abort_spec,
     build_submit_stage_runtime_state,
     build_submit_stage_success_record,
-    classify_submission_outcome,
     decide_initial_submit_stage_mode,
     decide_submission_outcome_abort,
-    ensure_submission_problem_insights,
     evaluate_submission_outcome_after_poll,
     finalize_submit_outcome_for_run_or_abort,
     find_campaign_candidate_for_submission,
     normalize_submission_outcome_status,
     prepare_and_resolve_submit_preflight_for_run_or_abort,
     prepare_submission_for_run_or_abort,
-    record_submission_knowledge,
-    record_submission_knowledge_entries,
     record_submit_abort_for_run,
     record_submit_stage_retry_attempt,
     record_successful_submit_for_run,
@@ -67,8 +71,6 @@ from kagglebot.submit_stage import (
     resolve_local_submission_guardrail_abort_spec,
     resolve_prepared_submission_for_submit,
     resolve_rules_acceptance_for_submit,
-    resolve_submission_knowledge_context,
-    resolve_submission_knowledge_iteration,
     resolve_submission_message,
     resolve_submission_outcome_after_submit,
     resolve_submit_preflight_for_run_or_abort,
