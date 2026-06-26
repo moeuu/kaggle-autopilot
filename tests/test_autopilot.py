@@ -3844,7 +3844,9 @@ def test_run_autofix_submit_error_always_runs_strategy_then_codex(monkeypatch, t
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
     monkeypatch.setattr("kagglebot.autopilot._enforce_allowlist_changes", fail_if_called)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_autofix(
         config=config,
@@ -3911,7 +3913,9 @@ def test_run_autofix_submit_error_still_runs_strategy_for_internet_policy(monkey
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_autofix(
         config=config,
@@ -3948,7 +3952,9 @@ def test_run_autofix_submit_error_falls_back_to_direct_codex_when_strategy_empty
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_autofix(
         config=config,
@@ -3991,7 +3997,9 @@ def test_run_autofix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", flaky_verify)
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_autofix(
         config=config,
@@ -4038,7 +4046,9 @@ def test_run_kernel_fix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: ["src/kagglebot/autopilot.py"])
     monkeypatch.setattr("kagglebot.autopilot._enforce_allowlist_changes", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_kernel_fix(
         config=config,
@@ -4101,7 +4111,9 @@ def test_run_kernel_fix_includes_subgroup_prompt_context(monkeypatch, tmp_path: 
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: ["src/kagglebot/autopilot.py"])
     monkeypatch.setattr("kagglebot.autopilot._enforce_allowlist_changes", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_kernel_fix(
         config=config,
@@ -8435,7 +8447,9 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
     monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
     monkeypatch.setattr("kagglebot.autopilot._diff_snapshots", lambda *args, **kwargs: [])
     monkeypatch.setattr("kagglebot.autopilot._enforce_allowlist_changes", fail_if_called)
-    monkeypatch.setattr("kagglebot.autopilot._maybe_restart_for_src_changes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
+    )
 
     _run_kernel_fix(
         config=config,

@@ -3625,11 +3625,14 @@ def _run_kernel_fix(
                 guard_snapshot=guard_snapshot,
                 auto_repair=True,
             )
-            _maybe_restart_for_src_changes(
-                config=config,
+            _autofix_restart.maybe_restart_for_src_changes(
+                dry_run=config.dry_run,
+                run_dir=config.paths.run_dir(run_id),
                 run_id=run_id,
+                slug=config.slug,
                 changed=changed,
                 stage=f"kernel_fix_attempt_{attempt}",
+                max_restarts=MAX_AUTOFIX_RESTARTS,
             )
         response_text = _agent_io.read_agent_response(result.last_message_path)
         _agent_io.print_agent_response(
@@ -4100,11 +4103,14 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         changed = _diff_snapshots(before, after)
         # Autofix often needs to regenerate staged outputs under artifacts/*/kernels and
         # run-level state files; do not apply write-guard restrictions in this stage.
-        _maybe_restart_for_src_changes(
-            config=config,
+        _autofix_restart.maybe_restart_for_src_changes(
+            dry_run=config.dry_run,
+            run_dir=config.paths.run_dir(run_id),
             run_id=run_id,
+            slug=config.slug,
             changed=changed,
             stage=f"autofix_attempt_{attempt}",
+            max_restarts=MAX_AUTOFIX_RESTARTS,
         )
         response_text = _agent_io.read_agent_response(result.last_message_path)
         _agent_io.print_agent_response(
@@ -4199,18 +4205,6 @@ def _maybe_regenerate_kernel_sources_once(
         trigger_reason=trigger_reason,
     )
     return True
-
-
-def _maybe_restart_for_src_changes(*, config: AutopilotConfig, run_id: str, changed: list[str], stage: str) -> None:
-    _autofix_restart.maybe_restart_for_src_changes(
-        dry_run=config.dry_run,
-        run_dir=config.paths.run_dir(run_id),
-        run_id=run_id,
-        slug=config.slug,
-        changed=changed,
-        stage=stage,
-        max_restarts=MAX_AUTOFIX_RESTARTS,
-    )
 
 
 def _attempt_submit(
