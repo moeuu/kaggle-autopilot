@@ -260,6 +260,8 @@ The next high-value modernization work is:
    local generated-kernel data-dir resolver injection is now in `local_kernel_data_resolver.py`; local generated-kernel
    pipeline-config fallback injection is now in `local_kernel_pipeline_cfg.py`; local progress tracking, stall
    detection, and heartbeat formatting is now in `local_kernel_progress.py`;
+   local subprocess execution, stdout drain, process-group termination, memory/stall watchdog dispatch, and noisy-log
+   filtering are now in `local_kernel_process.py`;
    local runtime env defaults, optional-backend downgrades, and CUDA-OOM fallback env policy are now in
    `local_kernel_runtime_env.py`; local metrics normalization for competition-specific full-data guards is now in
    `local_kernel_metrics_normalization.py`; local model-cache discovery and staging is now in `local_kernel_models.py`;
