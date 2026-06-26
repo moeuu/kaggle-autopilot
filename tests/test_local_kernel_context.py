@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kagglebot.local_kernel_context import (
     load_dataset_profile_identity,
+    stage_local_kernel_context_profile,
     stage_local_kernel_data_dir,
 )
 
@@ -49,3 +50,29 @@ def test_stage_local_kernel_data_dir_replaces_stale_file_target(tmp_path: Path) 
     assert compat_target.is_dir() or compat_target.is_symlink()
     assert (compat_target / "sample_submission.csv").exists()
     assert (compat_target / "images" / "a.jpg").exists()
+
+
+def test_stage_local_kernel_context_profile_copies_dataset_profile(tmp_path: Path) -> None:
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True)
+    (context_dir / "dataset_profile.json").write_text('{"target_column": "label"}\n', encoding="utf-8")
+
+    run_dir = tmp_path / "demo" / "kernels" / "run-1"
+    stale_target = run_dir / "context" / "dataset_profile.json"
+    stale_target.parent.mkdir(parents=True)
+    stale_target.write_text("stale", encoding="utf-8")
+
+    stage_local_kernel_context_profile(base_dir=tmp_path, slug="demo", run_dir=run_dir)
+
+    assert stale_target.read_text(encoding="utf-8") == '{"target_column": "label"}\n'
+
+
+def test_stage_local_kernel_context_profile_noops_when_target_is_source(tmp_path: Path) -> None:
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True)
+    profile_path = context_dir / "dataset_profile.json"
+    profile_path.write_text('{"id_column": "id"}\n', encoding="utf-8")
+
+    stage_local_kernel_context_profile(base_dir=tmp_path, slug="demo", run_dir=tmp_path / "demo")
+
+    assert profile_path.read_text(encoding="utf-8") == '{"id_column": "id"}\n'

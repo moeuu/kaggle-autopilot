@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_object
+from kagglebot.kernel_outputs import copy_artifact_if_needed
 
 
 def stage_local_kernel_data_dir(*, base_dir: Path, slug: str, run_dir: Path) -> None:
@@ -38,12 +39,14 @@ def stage_local_kernel_context_profile(*, base_dir: Path, slug: str, run_dir: Pa
     context_dir.mkdir(parents=True, exist_ok=True)
 
     target_path = context_dir / "dataset_profile.json"
+    if source_path.resolve() == target_path.resolve():
+        return
     if target_path.exists() or target_path.is_symlink():
         if target_path.is_dir() and not target_path.is_symlink():
             shutil.rmtree(target_path, ignore_errors=True)
         else:
             target_path.unlink(missing_ok=True)
-    shutil.copy2(source_path, target_path)
+    copy_artifact_if_needed(source=source_path, destination=target_path)
 
 
 def stage_local_data_alias(*, source_dir: Path, target_dir: Path) -> None:

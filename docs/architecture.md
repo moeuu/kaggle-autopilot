@@ -471,8 +471,8 @@ Recommended extraction order:
    `kernel_outputs.copy_artifact_if_needed`, keeping copy/no-op behavior consistent across runtime adapters. Local sample
    submission and auxiliary-input file staging use the same copy helper when symlinks or canonical files require a
    physical copy. Kernel package source/runtime/external asset staging and plan snapshots now use that helper for
-   file-copy paths as well. Local kernel shim config files use the same helper when copying context-derived JSON guards
-   into staged kernels.
+   file-copy paths as well. Local kernel shim config files and local dataset-profile context staging use the same helper
+   when copying context-derived JSON into staged kernels.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
    compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
 7. Agent I/O helpers: keep prompt/error transcript file persistence, prompt/response transcript display,
