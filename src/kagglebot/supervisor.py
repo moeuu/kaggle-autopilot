@@ -17,7 +17,7 @@ from rich import print
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.datetime_utils import parse_iso_datetime_utc
-from kagglebot.env_utils import parse_float_value, parse_int_value
+from kagglebot.env_utils import env_optional_int, parse_float_value, parse_int_value, read_env_or_file
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import (
     KaggleCliResourceError,
@@ -490,11 +490,11 @@ def _new_kaggle_gpu_competition_quota_block(
 
 
 def _resolve_kaggle_gpu_quota_status(config: WatchConfig) -> KaggleGpuQuotaStatus | None:
-    explicit_minutes = _env_int("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES")
+    explicit_minutes = env_optional_int("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES", allow_float=True)
     if explicit_minutes is not None:
         return KaggleGpuQuotaStatus(
             available_minutes=explicit_minutes,
-            total_minutes=_env_int("KAGGLEBOT_KAGGLE_GPU_TOTAL_MINUTES"),
+            total_minutes=env_optional_int("KAGGLEBOT_KAGGLE_GPU_TOTAL_MINUTES", allow_float=True),
             source="env:KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES",
         )
 
@@ -583,9 +583,9 @@ def _kaggle_gpu_quota_file_max_age_hours() -> float:
 
 
 def _fetch_kaggle_gpu_quota_from_web_cookie() -> KaggleGpuQuotaStatus | None:
-    cookie = _read_env_or_file("KAGGLEBOT_KAGGLE_WEB_COOKIE", "KAGGLEBOT_KAGGLE_WEB_COOKIE_FILE")
+    cookie = read_env_or_file("KAGGLEBOT_KAGGLE_WEB_COOKIE", "KAGGLEBOT_KAGGLE_WEB_COOKIE_FILE")
     if not cookie:
-        cookie = _read_env_or_file("KAGGLE_WEB_COOKIE", "KAGGLE_WEB_COOKIE_FILE")
+        cookie = read_env_or_file("KAGGLE_WEB_COOKIE", "KAGGLE_WEB_COOKIE_FILE")
     if not cookie:
         return None
     try:
@@ -735,23 +735,6 @@ def _coerce_minutes(value: object) -> int | None:
     try:
         return int(float(value))
     except (TypeError, ValueError):
-        return None
-
-
-def _env_int(name: str) -> int | None:
-    return parse_int_value(os.environ.get(name), allow_float=True)
-
-
-def _read_env_or_file(env_name: str, file_env_name: str) -> str | None:
-    direct = os.environ.get(env_name)
-    if direct and direct.strip():
-        return direct.strip()
-    file_value = os.environ.get(file_env_name)
-    if not file_value:
-        return None
-    try:
-        return Path(file_value).expanduser().read_text(encoding="utf-8").strip() or None
-    except OSError:
         return None
 
 

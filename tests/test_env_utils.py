@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from kagglebot.env_utils import env_flag, env_int, env_truthy, parse_bool_value, parse_float_value, parse_int_value
+from kagglebot.env_utils import (
+    env_flag,
+    env_int,
+    env_optional_int,
+    env_truthy,
+    parse_bool_value,
+    parse_float_value,
+    parse_int_value,
+    read_env_or_file,
+)
 
 
 def test_env_flag_parses_boolean_values(monkeypatch) -> None:
@@ -36,6 +45,29 @@ def test_env_int_parses_with_minimum_and_default(monkeypatch) -> None:
 
     monkeypatch.setenv("KAGGLEBOT_TEST_INT", "bad")
     assert env_int("KAGGLEBOT_TEST_INT", default=3) == 3
+
+
+def test_env_optional_int_accepts_integral_float_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("KAGGLEBOT_TEST_INT", "90.0")
+    assert env_optional_int("KAGGLEBOT_TEST_INT", allow_float=True) == 90
+
+    monkeypatch.setenv("KAGGLEBOT_TEST_INT", "90.5")
+    assert env_optional_int("KAGGLEBOT_TEST_INT", allow_float=True) is None
+
+
+def test_read_env_or_file_prefers_direct_env_and_falls_back_to_file(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "cookie.txt"
+    path.write_text(" from-file \n", encoding="utf-8")
+
+    monkeypatch.setenv("KAGGLEBOT_TEST_VALUE", " direct ")
+    monkeypatch.setenv("KAGGLEBOT_TEST_VALUE_FILE", str(path))
+    assert read_env_or_file("KAGGLEBOT_TEST_VALUE", "KAGGLEBOT_TEST_VALUE_FILE") == "direct"
+
+    monkeypatch.setenv("KAGGLEBOT_TEST_VALUE", " ")
+    assert read_env_or_file("KAGGLEBOT_TEST_VALUE", "KAGGLEBOT_TEST_VALUE_FILE") == "from-file"
+
+    monkeypatch.setenv("KAGGLEBOT_TEST_VALUE_FILE", str(tmp_path / "missing.txt"))
+    assert read_env_or_file("KAGGLEBOT_TEST_VALUE", "KAGGLEBOT_TEST_VALUE_FILE") is None
 
 
 def test_env_truthy_checks_true_values(monkeypatch) -> None:
