@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.exceptions import KernelFailedError
-from kagglebot.kernel_outputs import copy_artifact_if_needed
 from kagglebot.local_kernel_drift_guard import ZERO_OVERLAP_DRIFT_GUARD_FILENAME
 
 COLUMN_MAP_FILENAME = "column_map.json"

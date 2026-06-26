@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from kagglebot.kernel_outputs import copy_artifact_if_needed
+from kagglebot.artifact_io import copy_artifact_if_needed
 
 
 def copy_kernel_sources(source_dir: Path, dest_dir: Path) -> None:

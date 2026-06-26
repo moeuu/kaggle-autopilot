@@ -4,8 +4,8 @@ import shutil
 from pathlib import Path
 
 from kagglebot import local_kernel_context as _local_kernel_context
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.exceptions import KernelFailedError
-from kagglebot.kernel_outputs import copy_artifact_if_needed
 from kagglebot.kernel_sources import load_kernel_source_config
 
 

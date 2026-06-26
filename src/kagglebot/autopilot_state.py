@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
-from kagglebot.kernel_outputs import copy_artifact_if_needed, find_newest_existing_path, find_submission_file
+from kagglebot.kernel_outputs import find_newest_existing_path, find_submission_file
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
 

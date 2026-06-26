@@ -10,6 +10,7 @@ from rich import print
 
 from kagglebot import kaggle_cli
 from kagglebot import kernel_outputs as _kernel_outputs
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.env_utils import env_flag
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
@@ -538,7 +539,7 @@ class KaggleNotebookRunner:
         submission_path = find_submission_file(output_dir)
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)
         local_submission = paths.submissions_dir / f"{run_id}_{submission_path.name}"
-        _kernel_outputs.copy_artifact_if_needed(source=submission_path, destination=local_submission)
+        copy_artifact_if_needed(source=submission_path, destination=local_submission)
 
         summary["submission_path"] = str(local_submission)
         write_json_object(summary_path, summary)

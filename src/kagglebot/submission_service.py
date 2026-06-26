@@ -3,11 +3,11 @@ from __future__ import annotations
 import csv
 import os
 import re
-import shutil
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.exceptions import SubmissionValidationError
 from kagglebot.history import SubmissionLedger
 from kagglebot.submission.guard import run_kaggle_submit
@@ -661,7 +661,7 @@ class SubmissionService:
         if sample_delim == "\t" and submission_delim == "\t" and submission_path.suffix.lower() != ".tsv":
             tsv_path = submission_path.with_suffix(".tsv")
             if tsv_path != submission_path:
-                shutil.copy2(submission_path, tsv_path)
+                copy_artifact_if_needed(source=submission_path, destination=tsv_path)
             return tsv_path
         return submission_path
 

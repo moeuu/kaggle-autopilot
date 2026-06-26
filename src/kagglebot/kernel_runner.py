@@ -37,6 +37,7 @@ from kagglebot import local_kernel_runtime_env as _local_kernel_runtime_env
 from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
 from kagglebot import remote_kernel_state as _remote_kernel_state
+from kagglebot.artifact_io import copy_artifact_if_needed as _copy_artifact_if_needed
 from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
     KaggleCliError,
@@ -58,7 +59,6 @@ from kagglebot.kaggle_api import (
     kernels_push,
     kernels_status,
 )
-from kagglebot.kernel_outputs import copy_artifact_if_needed as _copy_artifact_if_needed
 from kagglebot.kernel_outputs import find_output_file as _find_output_file
 from kagglebot.kernel_outputs import find_submission_file
 from kagglebot.kernel_outputs import resolve_local_kernel_artifact_file as _resolve_local_kernel_artifact_file

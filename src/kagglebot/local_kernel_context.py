@@ -3,8 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.json_utils import load_json_object
-from kagglebot.kernel_outputs import copy_artifact_if_needed
 
 
 def stage_local_kernel_data_dir(*, base_dir: Path, slug: str, run_dir: Path) -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.json_utils import load_json_object
 
 SUBMISSION_MANIFEST_FILENAME = "submission_manifest.json"
@@ -68,10 +68,8 @@ def resolve_manifest_references(
 
 
 def store_submission_artifact(*, source: Path, destination_dir: Path, run_id: str) -> Path:
-    destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / f"{run_id}_submission{source.suffix}"
-    shutil.copy2(source, destination)
-    return destination
+    return copy_artifact_if_needed(source=source, destination=destination)
 
 
 def _resolve_manifest_path(base_dir: Path, value: object) -> Path | None:

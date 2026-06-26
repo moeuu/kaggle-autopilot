@@ -5,8 +5,8 @@ import shlex
 from collections.abc import Callable
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.exec_utils import run_command
-from kagglebot.kernel_outputs import copy_artifact_if_needed
 
 VERIFY_COMPAT_SHIM_MARKER = "# KAGGLEBOT_VERIFY_COMPAT_SHIM"
 

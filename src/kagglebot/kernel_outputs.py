@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
+from kagglebot.artifact_io import copy_artifact_if_needed as _copy_artifact_if_needed
 from kagglebot.submission_artifacts import find_submission_manifest, resolve_manifest_references
 
 _INTERMEDIATE_SUBMISSION_RE = re.compile(r"^submission(?:_[A-Za-z0-9_.-]+)?_fold(?P<fold>\d+)\.csv$", re.IGNORECASE)
@@ -156,13 +156,7 @@ def pick_latest_artifact(paths: list[Path], *, min_mtime: float) -> Path | None:
 
 
 def copy_artifact_if_needed(*, source: Path, destination: Path) -> Path:
-    source_resolved = source.resolve()
-    destination_resolved = destination.resolve()
-    if source_resolved == destination_resolved:
-        return destination
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
-    return destination
+    return _copy_artifact_if_needed(source=source, destination=destination)
 
 
 def _find_submission_by_extension(output_dir: Path) -> Path | None:

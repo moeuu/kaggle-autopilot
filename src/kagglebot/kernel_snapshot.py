@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.kernel_outputs import copy_artifact_if_needed
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.paths import CompetitionPaths
 
 BEST_KERNEL_SNAPSHOT_FILENAME = "best_kernel.py"

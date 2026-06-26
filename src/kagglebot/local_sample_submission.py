@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.kernel_outputs import copy_artifact_if_needed
+from kagglebot.artifact_io import copy_artifact_if_needed
 
 
 def ensure_local_sample_submission_file(*, base_dir: Path, slug: str) -> Path | None:

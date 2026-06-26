@@ -333,8 +333,8 @@ The next high-value modernization work is:
    summary payload construction now live in `autopilot_state.py`, keeping run-state schema assembly with the rest of the
    state/artifact helpers. Iteration resume submission-artifact lookup now delegates to `kernel_outputs.find_submission_file`,
    so resume handling uses the same manifest, archive, final submission, and fold-intermediate fallback policy as kernel
-   output collection. Iteration artifact copy paths now use `kernel_outputs.copy_artifact_if_needed`, keeping same-path
-   copy avoidance centralized with kernel-output artifact collection. Iteration resume metrics/support artifact lookup
+   output collection. Iteration artifact copy paths now use `artifact_io.copy_artifact_if_needed`, keeping same-path
+   copy avoidance centralized with artifact staging. Iteration resume metrics/support artifact lookup
    now also uses `kernel_outputs.find_newest_existing_path`, so newest-artifact selection is no longer duplicated in
    run-state code.
    Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
@@ -399,7 +399,7 @@ Recommended extraction order:
    implementation validation are now in `code_reference.py`; keep additional code-reference policy there unless it needs
    direct agent prompt rendering.
    Best-kernel snapshot capture/restore helpers are now in `kernel_snapshot.py`, and snapshot file copies use
-   `kernel_outputs.copy_artifact_if_needed` instead of local copy logic.
+   `artifact_io.copy_artifact_if_needed` instead of local copy logic.
 4. Submit state persistence: submit attempt JSONL writing/reading, run-bound submit attempt recorder/aborter callback binding,
    duplicate SHA lookup, submit attempt/run-state payloads, submit-abort artifact path resolution, repair-classified submit failure-context payloads, submit knowledge-record
    payloads/orchestration, same-submission-path skip payloads, submit-abort attempt/context persistence, submit result
@@ -467,12 +467,11 @@ Recommended extraction order:
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to
    `kernel_outputs.find_submission_file`, so notebook runs share the same manifest, archive, final submission, and
-   fold-intermediate fallback policy as local kernel runs. Notebook runner local submission preservation also uses
-   `kernel_outputs.copy_artifact_if_needed`, keeping copy/no-op behavior consistent across runtime adapters. Local sample
-   submission and auxiliary-input file staging use the same copy helper when symlinks or canonical files require a
-   physical copy. Kernel package source/runtime/external asset staging and plan snapshots now use that helper for
-   file-copy paths as well. Local kernel shim config files and local dataset-profile context staging use the same helper
-   when copying context-derived JSON into staged kernels.
+   fold-intermediate fallback policy as local kernel runs. Shared artifact copy/no-op behavior now lives in
+   `artifact_io.copy_artifact_if_needed`; `kernel_outputs` keeps a compatibility import for older call sites. Notebook
+   runner local submission preservation, submit artifact storage, TSV submit-format staging, local sample submission and
+   auxiliary-input file staging, kernel package source/runtime/external asset staging, plan snapshots, local kernel shim
+   config files, and local dataset-profile context staging use that helper for file-copy paths.
 6. Runtime policy: keep shared compute/modality/time-budget policy in `runtime_policy.py` and compute/accelerator
    compatibility in `compute.py` so agent plan guardrails, CLI commands, and autopilot execution cannot drift.
 7. Agent I/O helpers: keep prompt/error transcript file persistence, prompt/response transcript display,

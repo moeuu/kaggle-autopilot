@@ -74,3 +74,18 @@ def test_store_submission_artifact_copies_with_run_id_prefix(tmp_path: Path) -> 
 
     assert stored == tmp_path / "submissions" / "run-123_submission.csv"
     assert stored.read_text(encoding="utf-8") == "id,target\n1,0.1\n"
+
+
+def test_store_submission_artifact_noops_when_destination_is_source(tmp_path: Path) -> None:
+    source = tmp_path / "submissions" / "run-123_submission.csv"
+    source.parent.mkdir()
+    source.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    stored = store_submission_artifact(
+        source=source,
+        destination_dir=source.parent,
+        run_id="run-123",
+    )
+
+    assert stored == source
+    assert source.read_text(encoding="utf-8") == "id,target\n1,0.1\n"
