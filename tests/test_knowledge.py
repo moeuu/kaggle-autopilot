@@ -96,6 +96,7 @@ def test_profile_max_table_bytes_env_uses_shared_number_parsing(monkeypatch) -> 
     monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "nan")
     assert knowledge_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
     assert knowledge_init_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
+    assert knowledge_init_mod.build_dataset_profile is knowledge_mod.build_dataset_profile
 
     monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "0")
     assert knowledge_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
