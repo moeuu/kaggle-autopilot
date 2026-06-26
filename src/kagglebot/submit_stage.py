@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from kagglebot import submit_abort_specs as _submit_abort_specs
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_message as _submit_message
@@ -14,6 +15,7 @@ from kagglebot import submit_stage_messages as _submit_stage_messages
 from kagglebot.history import SubmissionLedger
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
+from kagglebot.submit_abort_specs import SubmitAbortSpec
 from kagglebot.submit_cli_error_resolution import (
     SubmitStageErrorActionDecision,
     SubmitStageRuntimeState,
@@ -376,17 +378,6 @@ class SubmitOutcomeAbortDecision:
 
 
 @dataclass(frozen=True)
-class SubmitAbortSpec:
-    fingerprint: str
-    error_kind: str
-    reason: str
-    message: str
-    stdout_tail: str
-    stderr_tail: str
-    exit_code: int | None
-
-
-@dataclass(frozen=True)
 class SubmitPreparedSubmissionResolution:
     prepared_submission_path: Path | None
     abort_spec: SubmitAbortSpec | None = None
@@ -419,18 +410,6 @@ class SubmitRulesAcceptanceResolution:
     abort_spec: SubmitAbortSpec | None = None
 
 
-def build_submit_abort_spec_kwargs(spec: SubmitAbortSpec) -> dict[str, object]:
-    return {
-        "fingerprint": spec.fingerprint,
-        "error_kind": spec.error_kind,
-        "reason": spec.reason,
-        "message": spec.message,
-        "stdout_tail": spec.stdout_tail,
-        "stderr_tail": spec.stderr_tail,
-        "exit_code": spec.exit_code,
-    }
-
-
 def resolve_prepared_submission_for_submit(
     *,
     input_submission_path: Path,
@@ -444,7 +423,7 @@ def resolve_prepared_submission_for_submit(
     except validation_error_types as exc:
         return SubmitPreparedSubmissionResolution(
             prepared_submission_path=None,
-            abort_spec=build_local_submission_validation_abort_spec(
+            abort_spec=_submit_abort_specs.build_local_submission_validation_abort_spec(
                 error=exc,
                 exit_code=validation_exit_code,
                 compute_error_fingerprint=compute_error_fingerprint,
@@ -486,7 +465,7 @@ def prepare_submission_for_run_or_abort(
         return submit_aborter.abort(
             submission_ref=input_submission_path,
             code_fingerprint=code_fingerprint,
-            **build_submit_abort_spec_kwargs(prepared_resolution.abort_spec),
+            **_submit_abort_specs.build_submit_abort_spec_kwargs(prepared_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
     prepared_submission_path = require_prepared_submission_path(
@@ -514,7 +493,7 @@ def resolve_rules_acceptance_for_submit(
             raise
         return SubmitRulesAcceptanceResolution(
             rules_accepted=False,
-            abort_spec=build_kaggle_credentials_missing_abort_spec(
+            abort_spec=_submit_abort_specs.build_kaggle_credentials_missing_abort_spec(
                 stdout=str(getattr(exc, "stdout", "") or ""),
                 stderr=str(getattr(exc, "stderr", "") or ""),
                 output=str(getattr(exc, "output", "") or ""),
@@ -526,7 +505,7 @@ def resolve_rules_acceptance_for_submit(
     if not rules_accepted:
         return SubmitRulesAcceptanceResolution(
             rules_accepted=False,
-            abort_spec=build_rules_not_accepted_abort_spec(
+            abort_spec=_submit_abort_specs.build_rules_not_accepted_abort_spec(
                 exit_code=rules_not_accepted_exit_code,
                 compute_error_fingerprint=compute_error_fingerprint,
             ),
@@ -759,7 +738,7 @@ def resolve_submit_preflight_for_run_or_abort(
         return submit_aborter.abort(
             submission_ref=prepared_submission_path,
             code_fingerprint=code_fingerprint,
-            **build_submit_abort_spec_kwargs(rules_resolution.abort_spec),
+            **_submit_abort_specs.build_submit_abort_spec_kwargs(rules_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
 
@@ -931,163 +910,6 @@ def decide_initial_submit_stage_mode(
         notebook_fallback_activated=notebook_submit_required,
         submission_artifact_mode=submission_artifact_mode,
         messages=tuple(messages),
-    )
-
-
-def build_kaggle_credentials_missing_abort_spec(
-    *,
-    stdout: str,
-    stderr: str,
-    output: str,
-    exit_code: int | None,
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec:
-    stderr_tail = stderr or output
-    return SubmitAbortSpec(
-        fingerprint=compute_error_fingerprint(stdout, stderr_tail),
-        error_kind="permanent",
-        reason="kaggle_credentials_missing",
-        message="Kaggle credentials not configured. Set ~/.kaggle/kaggle.json or KAGGLE_USERNAME/KAGGLE_KEY.",
-        stdout_tail=stdout,
-        stderr_tail=stderr_tail,
-        exit_code=exit_code,
-    )
-
-
-def build_rules_not_accepted_abort_spec(
-    *,
-    exit_code: int | None,
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec:
-    return SubmitAbortSpec(
-        fingerprint=compute_error_fingerprint("", "rules_not_accepted"),
-        error_kind="permanent",
-        reason="rules_not_accepted",
-        message="Competition rules are not accepted; aborting submit stage for this run.",
-        stdout_tail="",
-        stderr_tail="rules_not_accepted",
-        exit_code=exit_code,
-    )
-
-
-def build_local_submission_guardrail_abort_spec(
-    *,
-    error: object,
-    exit_code: int | None,
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec:
-    stderr_tail = str(error)
-    return SubmitAbortSpec(
-        fingerprint=compute_error_fingerprint("", stderr_tail),
-        error_kind="permanent",
-        reason="local_submission_guardrail",
-        message=f"Local submission guardrail blocked submit: {stderr_tail}",
-        stdout_tail="",
-        stderr_tail=stderr_tail,
-        exit_code=exit_code,
-    )
-
-
-def resolve_local_submission_guardrail_abort_spec(
-    *,
-    error: object,
-    compute_error_fingerprint: Callable[[str, str], str],
-    default_exit_code: int = 1,
-) -> SubmitAbortSpec:
-    return build_local_submission_guardrail_abort_spec(
-        error=error,
-        exit_code=getattr(error, "exit_code", default_exit_code),
-        compute_error_fingerprint=compute_error_fingerprint,
-    )
-
-
-def resolve_kaggle_cli_submit_abort_spec(
-    *,
-    error: BaseException,
-    is_missing_credentials_error: Callable[[BaseException], bool],
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec | None:
-    if not is_missing_credentials_error(error):
-        return None
-    return build_kaggle_credentials_missing_abort_spec(
-        stdout=str(getattr(error, "stdout", "") or ""),
-        stderr=str(getattr(error, "stderr", "") or ""),
-        output=str(getattr(error, "output", "") or ""),
-        exit_code=getattr(error, "exit_code", None),
-        compute_error_fingerprint=compute_error_fingerprint,
-    )
-
-
-def build_local_submission_validation_abort_spec(
-    *,
-    error: object,
-    exit_code: int | None,
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec:
-    stderr_tail = str(error)
-    return SubmitAbortSpec(
-        fingerprint=compute_error_fingerprint("", stderr_tail),
-        error_kind="validation",
-        reason="local_submission_validation_failed",
-        message="Local submission validation failed; Kaggle CLI submit is skipped.",
-        stdout_tail="",
-        stderr_tail=stderr_tail,
-        exit_code=exit_code,
-    )
-
-
-def build_submission_polling_error_abort_spec(
-    *,
-    error: object,
-    detail: object,
-    normalize_detail: Callable[[str], str],
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec:
-    normalized_detail = normalize_detail(str(detail or error))
-    stderr_tail = normalized_detail or str(error)
-    return SubmitAbortSpec(
-        fingerprint=compute_error_fingerprint("", stderr_tail),
-        error_kind="transient",
-        reason="submission_polling_error",
-        message="Submission outcome polling failed; aborting submit stage for this run.",
-        stdout_tail="",
-        stderr_tail=stderr_tail,
-        exit_code=None,
-    )
-
-
-def build_submission_outcome_abort_spec(
-    *,
-    decision: SubmitOutcomeAbortDecision,
-    compute_error_fingerprint: Callable[[str, str], str],
-) -> SubmitAbortSpec:
-    return SubmitAbortSpec(
-        fingerprint=compute_error_fingerprint("", decision.detail),
-        error_kind=decision.error_kind,
-        reason=decision.reason,
-        message=decision.message,
-        stdout_tail="",
-        stderr_tail=decision.detail,
-        exit_code=None,
-    )
-
-
-def build_submit_stage_error_action_abort_spec(
-    *,
-    action: SubmitStageErrorActionDecision,
-    fingerprint: str,
-    stdout: str,
-    stderr: str,
-    exit_code: int | None,
-) -> SubmitAbortSpec:
-    return SubmitAbortSpec(
-        fingerprint=fingerprint,
-        error_kind=action.error_kind,
-        reason=action.reason,
-        message=action.abort_message,
-        stdout_tail=stdout,
-        stderr_tail=stderr,
-        exit_code=exit_code,
     )
 
 
@@ -1435,7 +1257,7 @@ def resolve_submission_outcome_after_submit(
     except SubmissionOutcomePollingError as exc:
         return SubmitOutcomeResolution(
             outcome=None,
-            abort_spec=build_submission_polling_error_abort_spec(
+            abort_spec=_submit_abort_specs.build_submission_polling_error_abort_spec(
                 error=exc,
                 detail=exc.detail,
                 normalize_detail=normalize_detail,
@@ -1455,7 +1277,7 @@ def resolve_submission_outcome_after_submit(
     if outcome_post_poll.abort_decision.should_abort:
         return SubmitOutcomeResolution(
             outcome=outcome_post_poll.outcome,
-            abort_spec=build_submission_outcome_abort_spec(
+            abort_spec=_submit_abort_specs.build_submission_outcome_abort_spec(
                 decision=outcome_post_poll.abort_decision,
                 compute_error_fingerprint=compute_error_fingerprint,
             ),
@@ -1511,7 +1333,7 @@ def finalize_submit_outcome_for_run_or_abort(
             submission_artifact_path=submission_artifact_path,
             artifact_mode=submit_stage_state.submission_artifact_mode,
             code_fingerprint=code_fingerprint,
-            **build_submit_abort_spec_kwargs(outcome_resolution.abort_spec),
+            **_submit_abort_specs.build_submit_abort_spec_kwargs(outcome_resolution.abort_spec),
             submit_attempt_recorder=submit_attempt_recorder,
         )
     return record_successful_submit_for_run(
@@ -1829,7 +1651,7 @@ def run_submit_stage_attempts_until_success_or_abort(
             if error_action is None:
                 raise build_submit_aborted_error("Submit error resolution did not produce a retry or abort action.")
             if error_action.action == "abort":
-                abort_spec = build_submit_stage_error_action_abort_spec(
+                abort_spec = _submit_abort_specs.build_submit_stage_error_action_abort_spec(
                     action=error_action,
                     fingerprint=fingerprint,
                     stdout=stdout,
@@ -1841,7 +1663,7 @@ def run_submit_stage_attempts_until_success_or_abort(
                     submission_artifact_path=submission_artifact_path,
                     artifact_mode=submit_stage_state.submission_artifact_mode,
                     code_fingerprint=submit_code_fingerprint,
-                    **build_submit_abort_spec_kwargs(abort_spec),
+                    **_submit_abort_specs.build_submit_abort_spec_kwargs(abort_spec),
                     submit_attempt_recorder=submit_attempt_recorder,
                 )
             seen_fingerprints.add(fingerprint)
@@ -1860,7 +1682,7 @@ def run_submit_stage_attempts_until_success_or_abort(
                 sleep(error_action.wait_seconds)
                 continue
         except local_guardrail_error_types as exc:
-            abort_spec = resolve_local_submission_guardrail_abort_spec(
+            abort_spec = _submit_abort_specs.resolve_local_submission_guardrail_abort_spec(
                 error=exc,
                 compute_error_fingerprint=compute_error_fingerprint,
             )
@@ -1868,11 +1690,11 @@ def run_submit_stage_attempts_until_success_or_abort(
                 submission_ref=submission_reference,
                 submission_artifact_path=submission_artifact_path,
                 code_fingerprint=submit_code_fingerprint,
-                **build_submit_abort_spec_kwargs(abort_spec),
+                **_submit_abort_specs.build_submit_abort_spec_kwargs(abort_spec),
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         except kaggle_cli_error_types as exc:
-            abort_spec = resolve_kaggle_cli_submit_abort_spec(
+            abort_spec = _submit_abort_specs.resolve_kaggle_cli_submit_abort_spec(
                 error=exc,
                 is_missing_credentials_error=is_missing_credentials_error,
                 compute_error_fingerprint=compute_error_fingerprint,
@@ -1884,7 +1706,7 @@ def run_submit_stage_attempts_until_success_or_abort(
                 submission_artifact_path=submission_artifact_path,
                 artifact_mode=submit_stage_state.submission_artifact_mode,
                 code_fingerprint=submit_code_fingerprint,
-                **build_submit_abort_spec_kwargs(abort_spec),
+                **_submit_abort_specs.build_submit_abort_spec_kwargs(abort_spec),
                 submit_attempt_recorder=submit_attempt_recorder,
             )
         break
