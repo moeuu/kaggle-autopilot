@@ -1237,6 +1237,11 @@ Before changing the model, read overview.md/data.md and respect any constraints 
 - Use one consistent evaluation path for training-time selection and final offline scoring.
   If you print `val_*` during training, it must be computed under the same split/rollout/aggregation
   assumptions as the final reported metric.
+- If the previous run failed because of timeout or local GPU budget, keep the highest-ceiling pipeline but
+  reduce multiplicative runtime first: one full fine-tune seed, fewer full-training folds for heavy backbones,
+  cached embeddings or lightweight heads for extra seeds, earlier stopping, and checkpoint reuse. Do not replace
+  a working strong model with a weak baseline only to finish faster.
+- local_gpu has no default wall-clock limit unless a stricter competition runtime cap applies.
 - Evaluate at least one simple baseline (mean/majority/persistence as appropriate) with the same
   validation protocol, and do not select/submit a learned pipeline that underperforms that baseline.
 - If `code_reference_status` is `underperforming_code_reference`, you MUST inspect `{code_md}` and `{code_index}`

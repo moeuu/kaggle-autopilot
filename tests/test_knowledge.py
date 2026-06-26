@@ -263,6 +263,41 @@ def test_build_plan_and_initial_prompt_handles_unknown_train_dimensions(tmp_path
     assert "**Dataset**: train table unavailable; sample/test view: 2 rows × 2 columns" in prompt
 
 
+def test_legacy_initial_prompt_matches_current_winner_mode_directives() -> None:
+    profile = {
+        "task": "classification",
+        "metric": "accuracy",
+        "rows": 10,
+        "cols": 3,
+        "target": "label",
+        "tags": ["tabular", "classification"],
+    }
+
+    current_prompt = knowledge_mod.build_plan_and_initial_prompt(
+        slug="demo",
+        rules_url="https://www.kaggle.com/competitions/demo/rules",
+        profile=profile,
+        taxonomy={},
+        similar_improvements=[],
+        self_improvement_context="Keep high-ceiling candidates.",
+    )
+    legacy_prompt = knowledge_init_mod.build_plan_and_initial_prompt(
+        slug="demo",
+        rules_url="https://www.kaggle.com/competitions/demo/rules",
+        profile=profile,
+        taxonomy={},
+        similar_improvements=[],
+        self_improvement_context="Keep high-ceiling candidates.",
+    )
+
+    assert legacy_prompt == current_prompt
+    assert "## System Self-Improvement Directives" in legacy_prompt
+    assert "Keep high-ceiling candidates." in legacy_prompt
+    assert '"target_medal": "winner"' in legacy_prompt
+    assert '"target_rank_percentile": 0.001' in legacy_prompt
+    assert "time_budget_min" not in legacy_prompt
+
+
 def test_problem_type_insight_record_and_resolve(tmp_path) -> None:
     knowledge_paths = KnowledgePaths(workdir=tmp_path)
     profile = {"modality": "tabular", "task": "regression", "tags": ["tabular", "regression"]}

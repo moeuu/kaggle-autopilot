@@ -980,6 +980,7 @@ def build_plan_and_initial_prompt(
     profile: dict[str, object],
     taxonomy: dict[str, object],
     similar_improvements: list[dict[str, object]],
+    self_improvement_context: str = "",
 ) -> str:
     tags = profile.get("tags", [])
     task = profile.get("task", "unknown")
@@ -1036,6 +1037,12 @@ def build_plan_and_initial_prompt(
     else:
         lines.append("No similar competitions found in knowledge base (this is the first run).")
 
+    lines.extend(["", "## System Self-Improvement Directives", ""])
+    if self_improvement_context.strip():
+        lines.append(self_improvement_context.strip())
+    else:
+        lines.append("No system self-improvement report is available yet.")
+
     lines += [
         "",
         "---",
@@ -1055,7 +1062,8 @@ def build_plan_and_initial_prompt(
         '  "holdout_frac": 0.2,',
         '  "cv_folds": 5,',
         '  "seed": 42,',
-        '  "time_budget_min": null,',
+        '  "target_medal": "winner",',
+        '  "target_rank_percentile": 0.001,',
         '  "internet": "on",',
         '  "max_iterations": 5,',
         '  "submit_policy": "always"',
@@ -1070,12 +1078,9 @@ def build_plan_and_initial_prompt(
         "  to identify data format.",
         "- Use web search to choose the strongest initial approach; prefer official docs and competition discussions.",
         "- Use top1_public.json to set a realistic target_score; avoid generic metric heuristics.",
+        "- Default to winner-mode search: target_medal=winner and target_rank_percentile=0.001 unless rules/runtime "
+        "make that impossible.",
         "- Prefer CV by default for stronger model ranking; use holdout only when CV is infeasible.",
-        (
-            "- local_gpu has no default wall-clock limit; for image/video/audio/text, use one "
-            "strong full-training seed and at most 3 full-training folds, then use cached "
-            "embeddings/TTA/lightweight heads for extra validation."
-        ),
         "- Actively use preinstalled dependencies before introducing new ones:",
         "  torch/timm/torchvision/opencv, xgboost/lightgbm/catboost, transformers/tabicl, sklearn.",
         "- If one backend import fails, disable only that path and keep other high-capacity backends active.",
