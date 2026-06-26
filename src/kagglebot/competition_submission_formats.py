@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 from kagglebot.exec_utils import run_command
-from kagglebot.json_utils import append_jsonl_record, write_json_object, write_jsonl_records
+from kagglebot.json_utils import append_jsonl_record, load_jsonl_records, write_json_object, write_jsonl_records
 from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_BUNDLE,
     ARTIFACT_CLASS_MULTI_FILE_ZIP,
@@ -725,15 +725,7 @@ def load_raw_records(path: Path) -> list[CrawlRecord]:
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if not path.exists():
-        return rows
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
+    return [dict(row) for row in load_jsonl_records(path)]
 
 
 def write_csv(path: Path, records: list[CrawlRecord]) -> None:

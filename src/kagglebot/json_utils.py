@@ -37,31 +37,48 @@ def load_json_array(path: Path, *, errors: str = "strict") -> list[object] | Non
     return None
 
 
-def load_jsonl_records(path: Path, *, errors: str = "strict", limit: int | None = None) -> list[dict[str, object]]:
+def load_jsonl_records(
+    path: Path,
+    *,
+    errors: str = "strict",
+    limit: int | None = None,
+    reverse: bool = False,
+) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     max_records = max(0, int(limit)) if limit is not None else None
     if max_records == 0:
         return records
     try:
-        with path.open("rb") as handle:
-            for raw_line in handle:
-                try:
-                    line = raw_line.decode("utf-8", errors=errors)
-                except UnicodeDecodeError:
-                    return records
-                if not line.strip():
+        raw_lines = path.read_bytes().splitlines() if reverse else path.open("rb")
+        try:
+            iterable = reversed(raw_lines) if reverse else raw_lines
+            for raw_line in iterable:
+                record = _parse_jsonl_dict_line(raw_line, errors=errors)
+                if record is None:
                     continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(payload, dict):
-                    records.append(payload)
-                    if max_records is not None and len(records) >= max_records:
-                        break
+                records.append(record)
+                if max_records is not None and len(records) >= max_records:
+                    break
+        finally:
+            if not reverse:
+                raw_lines.close()
     except OSError:
         return records
     return records
+
+
+def _parse_jsonl_dict_line(raw_line: bytes, *, errors: str) -> dict[str, object] | None:
+    try:
+        line = raw_line.decode("utf-8", errors=errors)
+    except UnicodeDecodeError:
+        return None
+    if not line.strip():
+        return None
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def write_json_object(

@@ -134,6 +134,24 @@ def test_load_jsonl_records_limit_counts_valid_dict_rows(tmp_path) -> None:
     assert load_jsonl_records(path, limit=0) == []
 
 
+def test_load_jsonl_records_reverse_returns_recent_valid_rows(tmp_path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"first": true}',
+                "not-json",
+                "[1, 2]",
+                '{"second": true}',
+                '{"third": true}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_jsonl_records(path, reverse=True, limit=2) == [{"third": True}, {"second": True}]
+
+
 def test_load_jsonl_records_limit_stops_before_later_decode_error(tmp_path) -> None:
     path = tmp_path / "records.jsonl"
     path.write_bytes(b'{"first": true}\n\xff{"bad": true}\n')

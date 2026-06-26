@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
-from kagglebot.json_utils import append_jsonl_record
+from kagglebot.json_utils import append_jsonl_record, load_jsonl_records
 
 LOCAL_KERNEL_DURATION_HISTORY_LIMIT = 20
 
@@ -18,14 +17,7 @@ def estimate_local_kernel_duration_seconds(*, base_dir: Path, slug: str) -> tupl
     if not path.exists():
         return None, 0
     durations: list[float] = []
-    for raw in reversed(path.read_text(encoding="utf-8", errors="ignore").splitlines()):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+    for payload in load_jsonl_records(path, errors="ignore", reverse=True):
         value = payload.get("duration_sec")
         if isinstance(value, (int, float)) and value > 0:
             durations.append(float(value))

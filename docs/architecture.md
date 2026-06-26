@@ -432,8 +432,10 @@ Recommended extraction order:
    classification, kernel-error artifact writing, and repeated-error abort policy in `kernel_errors.py`; `autopilot.py`
    should only decide when to invoke that policy.
 11. Artifact serialization: keep JSON object, array, and JSONL reads/writes for durable artifacts behind `json_utils`
-   helpers. New modules should avoid ad hoc JSON parsing/serialization for artifact files unless they need generated
-   kernel code that runs outside the package or intentionally strict parser behavior.
+   helpers. Forward and reverse JSONL history reads now share the same tolerant loader, so duration histories and
+   crawled submission-format records do not open-code line parsing. New modules should avoid ad hoc JSON
+   parsing/serialization for artifact files unless they need generated kernel code that runs outside the package or
+   intentionally strict parser behavior.
 
 Each extraction should preserve private compatibility names only where downstream tests/extensions still import them.
 New code should call the smaller public modules directly, and obsolete private wrappers in `autopilot.py` should be
