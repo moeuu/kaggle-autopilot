@@ -684,6 +684,31 @@ def submit_file_fix_contract_satisfied(
     return candidate != baseline_path or candidate_sha256 != baseline_sha256
 
 
+def save_submit_autofix_repaired_path_for_run(
+    *,
+    run_dir: Path,
+    repaired_path: Path,
+    save_run_state_for_run: Callable[[Path, dict[str, object]], object],
+) -> None:
+    save_run_state_for_run(run_dir, {"submit_autofix_submission_path": str(repaired_path)})
+
+
+def submit_file_fix_contract_satisfied_for_run(
+    *,
+    run_dir: Path,
+    load_run_state: Callable[[Path], dict[str, object]],
+    baseline_path: Path | None,
+    baseline_sha256: str | None,
+    sha256_or_none: Callable[[Path | None], str | None],
+) -> bool:
+    return submit_file_fix_contract_satisfied(
+        run_state=load_run_state(run_dir),
+        baseline_path=baseline_path,
+        baseline_sha256=baseline_sha256,
+        sha256_or_none=sha256_or_none,
+    )
+
+
 def format_submit_autofix_context(
     *,
     failure_context: dict[str, object],

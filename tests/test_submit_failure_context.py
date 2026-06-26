@@ -27,11 +27,13 @@ from kagglebot.submit_failure_context import (
     resolve_submit_autofix_context_for_attempt,
     resolve_submit_autofix_context_for_run,
     resolve_submit_autofix_submission_artifact,
+    save_submit_autofix_repaired_path_for_run,
     save_submit_failure_context,
     should_defer_submit_abort_to_next_iteration,
     should_force_resubmit_after_submit_abort,
     submit_failure_context_path,
     submit_file_fix_contract_satisfied,
+    submit_file_fix_contract_satisfied_for_run,
 )
 from kagglebot.submit_failure_policy import SubmitFailureRepairDecision
 
@@ -824,6 +826,40 @@ def test_submit_file_fix_contract_satisfied_requires_changed_artifact(tmp_path: 
         baseline_sha256="old",
         sha256_or_none=lambda path: hashes.get(path),
     )
+
+
+def test_save_submit_autofix_repaired_path_for_run_binds_run_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    fixed = tmp_path / "submission-fixed.csv"
+    saved_updates: list[tuple[Path, dict[str, object]]] = []
+
+    save_submit_autofix_repaired_path_for_run(
+        run_dir=run_dir,
+        repaired_path=fixed,
+        save_run_state_for_run=lambda state_run_dir, updates: saved_updates.append((state_run_dir, updates)),
+    )
+
+    assert saved_updates == [(run_dir, {"submit_autofix_submission_path": str(fixed)})]
+
+
+def test_submit_file_fix_contract_satisfied_for_run_loads_run_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    baseline = tmp_path / "submission.csv"
+    fixed = tmp_path / "submission-fixed.csv"
+    baseline.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    fixed.write_text("id,target\n1,0.2\n", encoding="utf-8")
+    load_state_calls: list[Path] = []
+    hashes = {baseline: "old", fixed: "new"}
+
+    assert submit_file_fix_contract_satisfied_for_run(
+        run_dir=run_dir,
+        load_run_state=lambda state_run_dir: load_state_calls.append(state_run_dir)
+        or {"submit_autofix_submission_path": str(fixed)},
+        baseline_path=baseline,
+        baseline_sha256="old",
+        sha256_or_none=lambda path: hashes.get(path),
+    )
+    assert load_state_calls == [run_dir]
 
 
 def test_submit_file_repair_contract_text_and_retry_feedback(tmp_path: Path) -> None:

@@ -3954,7 +3954,11 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             return (config.paths.iter_dir(run_id, iteration) for iteration in range(max_search_iteration, 0, -1))
 
         def save_repaired_submit_path(fixed: Path) -> None:
-            _autopilot_state._save_run_state(run_dir, {"submit_autofix_submission_path": str(fixed)})
+            _submit_failure_context.save_submit_autofix_repaired_path_for_run(
+                run_dir=run_dir,
+                repaired_path=fixed,
+                save_run_state_for_run=_autopilot_state._save_run_state,
+            )
 
         if submit_file_fix_required:
             submit_file_fix_baseline_path = _submit_failure_context.resolve_submit_autofix_submission_artifact(
@@ -4145,8 +4149,9 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
                 continue
             raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} autofix step failed.")
 
-        if submit_file_fix_required and not _submit_failure_context.submit_file_fix_contract_satisfied(
-            run_state=_autopilot_state._load_run_state(run_dir),
+        if submit_file_fix_required and not _submit_failure_context.submit_file_fix_contract_satisfied_for_run(
+            run_dir=run_dir,
+            load_run_state=_autopilot_state._load_run_state,
             baseline_path=submit_file_fix_baseline_path,
             baseline_sha256=submit_file_fix_baseline_sha256,
             sha256_or_none=_sha256_or_none,
