@@ -322,6 +322,9 @@ The next high-value modernization work is:
    fallbacks.
    Planning-phase orchestration and knowledge-refresh/profile derivation now live in `planning_phase.py` and
    `knowledge_phase.py`, keeping `autopilot.py` focused on session and iteration-loop wiring.
+   Session-level planning/knowledge/submit phase wrappers now live in `autopilot_session.py`; `autopilot.py` keeps the
+   legacy `_attempt_submit` and loop entrypoint names as compatibility delegates while the phase object boundary is
+   reusable.
    Target request selection, base evaluation request selection, runtime request selection, loop-control submit request
    selection, readiness, drift, no-improvement stop-policy, and rank-force threshold resolution now also live in
    `plan_policy.py`. Resolved-plan payload schema assembly now also lives there through `ResolvedPlan`, leaving the

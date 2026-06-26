@@ -64,6 +64,7 @@ from kagglebot.agents.identity import (
     render_prompt_identity,
 )
 from kagglebot.agents.strategy_runner import run_strategy
+from kagglebot.autopilot_session import AutopilotSession, SubmissionPhase
 from kagglebot.campaign import (
     TOP1_TARGET_RANK_PERCENTILE,
     allocate_submission,
@@ -326,44 +327,6 @@ def run_autopilot(config: AutopilotConfig) -> None:
     finally:
         if submit_force_override:
             os.environ.pop("KAGGLEBOT_FORCE_RESUBMIT", None)
-
-
-@dataclass(frozen=True)
-class SubmissionPhase:
-    config: AutopilotConfig
-    run_id: str
-    problem_types: list[str]
-    submit_mode: str
-    notebook_submit_artifact_mode: str = "wrapper"
-
-    def attempt(self, *, submission_path: Path, best_score: float | None) -> dict[str, object] | None:
-        return _attempt_submit(
-            config=self.config,
-            run_id=self.run_id,
-            submission_path=submission_path,
-            best_score=best_score,
-            problem_types=self.problem_types,
-            submit_mode=self.submit_mode,
-            notebook_submit_artifact_mode=self.notebook_submit_artifact_mode,
-        )
-
-
-@dataclass(frozen=True)
-class AutopilotSession:
-    config: AutopilotConfig
-    run_id: str
-    resume_run: bool = False
-
-    @property
-    def planning(self) -> PlanningPhase:
-        return PlanningPhase(config=self.config, run_id=self.run_id, resume_run=self.resume_run)
-
-    @property
-    def knowledge(self) -> KnowledgePhase:
-        return KnowledgePhase(config=self.config)
-
-    def run(self) -> None:
-        _run_autopilot_core(self.config, self.run_id, resume_run=self.resume_run)
 
 
 def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
