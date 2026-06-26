@@ -15,14 +15,22 @@ import pytest
 from kagglebot import autopilot as autopilot_mod
 from kagglebot import autopilot_state as _autopilot_state_test
 from kagglebot import kernel_metrics as _kernel_metrics
+from kagglebot import plan_resolution as _plan_resolution_test
 from kagglebot import submit_notebook as _submit_notebook_test
 from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
 from kagglebot.autopilot import (
+    _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+    _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+    _DEFAULT_LIMITED_SUBMISSION_GATE,
     _DEFAULT_MAX_ITERATIONS,
+    _DEFAULT_STRICT_COMPETITION_METRIC,
+    _DEFAULT_TARGET_MEDAL,
+    _HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
+    _LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
+    _LONG_LOCAL_GPU_MAX_ITERATIONS,
     AutopilotConfig,
     SubmissionPhase,
     _attempt_submit,
-    _resolve_plan,
     _run_autofix,
     _run_kernel_fix,
     run_autopilot,
@@ -105,6 +113,25 @@ def _write_sample_submission(path: Path) -> None:
     df = pd.DataFrame({"id": [1, 2], "target": [0.5, 0.5]})
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
+    return _plan_resolution_test.resolve_plan_for_autopilot_config(
+        plan=plan,
+        config=config,
+        defaults=_plan_resolution_test.AutopilotPlanResolutionDefaults(
+            strict_competition_metric=_DEFAULT_STRICT_COMPETITION_METRIC,
+            target_medal=_DEFAULT_TARGET_MEDAL,
+            limited_submission_gate=_DEFAULT_LIMITED_SUBMISSION_GATE,
+            max_iterations=_DEFAULT_MAX_ITERATIONS,
+            heavy_local_gpu_max_cv_folds=_HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
+            long_local_gpu_iteration_budget_min=_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
+            long_local_gpu_max_iterations=_LONG_LOCAL_GPU_MAX_ITERATIONS,
+            force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+            force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+        ),
+        on_message=lambda _message: None,
+    )
 
 
 def _run_notebook_submission_for_config(

@@ -449,7 +449,22 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     plan = planning_phase.execute(plan)
 
     _watch_state.update_watch_phase(config, run_id, "resolving_plan")
-    resolved = _resolve_plan(plan, config)
+    resolved = _plan_resolution.resolve_plan_for_autopilot_config(
+        plan=plan,
+        config=config,
+        defaults=_plan_resolution.AutopilotPlanResolutionDefaults(
+            strict_competition_metric=_DEFAULT_STRICT_COMPETITION_METRIC,
+            target_medal=_DEFAULT_TARGET_MEDAL,
+            limited_submission_gate=_DEFAULT_LIMITED_SUBMISSION_GATE,
+            max_iterations=_DEFAULT_MAX_ITERATIONS,
+            heavy_local_gpu_max_cv_folds=_HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
+            long_local_gpu_iteration_budget_min=_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
+            long_local_gpu_max_iterations=_LONG_LOCAL_GPU_MAX_ITERATIONS,
+            force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
+            force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
+        ),
+        on_message=print,
+    )
     target_metric = resolved["target_metric"]
     target_score = resolved["target_score"]
     if target_metric is None or target_score is None:
@@ -2721,39 +2736,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     )
 
     _autopilot_state._write_run_payload(run_dir, run_payload)
-
-
-def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:
-    return _plan_resolution.resolve_plan_for_autopilot(
-        plan=plan,
-        paths=config.paths,
-        compute=config.compute,
-        target_metric=config.target_metric,
-        target_score=config.target_score,
-        target_direction=config.target_direction,
-        score_source=config.score_source,
-        holdout_frac=config.holdout_frac,
-        cv_folds=config.cv_folds,
-        seed=config.seed,
-        time_budget_min=config.time_budget_min,
-        kernel_name=config.kernel_name,
-        internet=config.internet,
-        max_iterations=config.max_iterations,
-        max_total_min=config.max_total_min,
-        patience=config.patience,
-        min_improvement=config.min_improvement,
-        submit_policy=config.submit_policy,
-        default_strict_competition_metric=_DEFAULT_STRICT_COMPETITION_METRIC,
-        default_target_medal=_DEFAULT_TARGET_MEDAL,
-        default_limited_submission_gate=_DEFAULT_LIMITED_SUBMISSION_GATE,
-        default_max_iterations=_DEFAULT_MAX_ITERATIONS,
-        heavy_local_gpu_max_cv_folds=_HEAVY_LOCAL_GPU_MAX_CV_FOLDS,
-        long_local_gpu_iteration_budget_min=_LONG_LOCAL_GPU_ITERATION_BUDGET_MIN,
-        long_local_gpu_max_iterations=_LONG_LOCAL_GPU_MAX_ITERATIONS,
-        default_force_major_rank_max_percentile=_DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
-        default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
-        on_message=print,
-    )
 
 
 def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:

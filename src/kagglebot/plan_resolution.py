@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
 
 from kagglebot import (
     competition_rules,
@@ -19,6 +21,78 @@ from kagglebot.writeup import (
     infer_deliverable_mode_from_paths,
     infer_submit_mode_from_paths,
 )
+
+
+class AutopilotPlanResolutionConfig(Protocol):
+    paths: CompetitionPaths
+    compute: str
+    target_metric: str | None
+    target_score: float | None
+    target_direction: str | None
+    score_source: str | None
+    holdout_frac: float | None
+    cv_folds: int | None
+    seed: int
+    time_budget_min: int | None
+    kernel_name: str | None
+    internet: str
+    max_iterations: int | None
+    max_total_min: int | None
+    patience: int
+    min_improvement: float
+    submit_policy: str
+
+
+@dataclass(frozen=True)
+class AutopilotPlanResolutionDefaults:
+    strict_competition_metric: bool
+    target_medal: str
+    limited_submission_gate: str
+    max_iterations: int
+    heavy_local_gpu_max_cv_folds: int
+    long_local_gpu_iteration_budget_min: int
+    long_local_gpu_max_iterations: int
+    force_major_rank_max_percentile: float
+    force_major_rank_min_teams: int
+
+
+def resolve_plan_for_autopilot_config(
+    *,
+    plan: PlanConfig,
+    config: AutopilotPlanResolutionConfig,
+    defaults: AutopilotPlanResolutionDefaults,
+    on_message: Callable[[str], None],
+) -> dict[str, object]:
+    return resolve_plan_for_autopilot(
+        plan=plan,
+        paths=config.paths,
+        compute=config.compute,
+        target_metric=config.target_metric,
+        target_score=config.target_score,
+        target_direction=config.target_direction,
+        score_source=config.score_source,
+        holdout_frac=config.holdout_frac,
+        cv_folds=config.cv_folds,
+        seed=config.seed,
+        time_budget_min=config.time_budget_min,
+        kernel_name=config.kernel_name,
+        internet=config.internet,
+        max_iterations=config.max_iterations,
+        max_total_min=config.max_total_min,
+        patience=config.patience,
+        min_improvement=config.min_improvement,
+        submit_policy=config.submit_policy,
+        default_strict_competition_metric=defaults.strict_competition_metric,
+        default_target_medal=defaults.target_medal,
+        default_limited_submission_gate=defaults.limited_submission_gate,
+        default_max_iterations=defaults.max_iterations,
+        heavy_local_gpu_max_cv_folds=defaults.heavy_local_gpu_max_cv_folds,
+        long_local_gpu_iteration_budget_min=defaults.long_local_gpu_iteration_budget_min,
+        long_local_gpu_max_iterations=defaults.long_local_gpu_max_iterations,
+        default_force_major_rank_max_percentile=defaults.force_major_rank_max_percentile,
+        default_force_major_rank_min_teams=defaults.force_major_rank_min_teams,
+        on_message=on_message,
+    )
 
 
 def resolve_plan_for_autopilot(
