@@ -120,3 +120,44 @@ def test_generated_kernel_expands_tiny_public_sample_to_test_ids(tmp_path: Path)
     submission = pd.read_csv(working_dir / "submission.csv")
     assert submission["id"].tolist() == [100, 101, 102, 103, 104]
     assert list(submission.columns) == ["id", "target"]
+
+
+def test_generated_kernel_regression_uses_rmse_without_squared_argument(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+
+    input_root = tmp_path / "input"
+    data_dir = input_root / "demo"
+    working_dir = tmp_path / "working"
+    data_dir.mkdir(parents=True)
+    working_dir.mkdir()
+    pd.DataFrame(
+        {
+            "id": range(30),
+            "feature": [float(idx) for idx in range(30)],
+            "target": [float(idx) * 1.5 for idx in range(30)],
+        }
+    ).to_csv(data_dir / "train.csv", index=False)
+    pd.DataFrame({"id": [100, 101, 102], "feature": [1.0, 2.0, 3.0]}).to_csv(
+        data_dir / "test.csv",
+        index=False,
+    )
+    pd.DataFrame({"id": [100, 101, 102], "target": [0.0, 0.0, 0.0]}).to_csv(
+        data_dir / "sample_submission.csv",
+        index=False,
+    )
+
+    script = (
+        KERNEL_TEMPLATE.replace("__COMPETITION_SLUG__", "demo")
+        .replace("__ACCELERATOR__", "none")
+        .replace('Path("/kaggle/input")', f'Path("{input_root}")')
+        .replace('Path("/kaggle/working")', f'Path("{working_dir}")')
+    )
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(script, encoding="utf-8")
+
+    runpy.run_path(str(kernel_path), run_name="__main__")
+
+    metrics = json.loads((working_dir / "metrics.json").read_text(encoding="utf-8"))
+    submission = pd.read_csv(working_dir / "submission.csv")
+    assert metrics["metric"] == "rmse"
+    assert submission["id"].tolist() == [100, 101, 102]

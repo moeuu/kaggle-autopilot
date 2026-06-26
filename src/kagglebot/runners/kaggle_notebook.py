@@ -32,6 +32,12 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
+try:
+    from sklearn.metrics import root_mean_squared_error
+except ImportError:  # pragma: no cover - compatibility for older Kaggle images
+    def root_mean_squared_error(y_true, y_pred):
+        return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
 COMPETITION_SLUG = "__COMPETITION_SLUG__"
 ACCELERATOR = "__ACCELERATOR__"
 INPUT_ROOT = Path("/kaggle/input") / COMPETITION_SLUG
@@ -401,7 +407,7 @@ def main() -> None:
         score = accuracy_score(y_valid, preds_eval)
     else:
         metric = "rmse"
-        score = mean_squared_error(y_valid, preds_valid, squared=False)
+        score = root_mean_squared_error(y_valid, preds_valid)
     print(f"validation {metric}: {score:.4f}")
 
     if ACCELERATOR == "tpu":
