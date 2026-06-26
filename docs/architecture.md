@@ -408,8 +408,8 @@ Recommended extraction order:
    outcome polling orchestration, post-poll abort-spec resolution, and submit-abort persistence/knowledge recording are
    now in `submit_stage.py`; submission knowledge
    recording now calls the submit-stage helper directly from the loop. Notebook kernel submit execution, run-specific
-   iteration/log path resolution, output-reference construction, and kernel-output submit retry orchestration now live
-   together in `submit_notebook.py`; the loop only binds configuration values and callbacks.
+   iteration/log path resolution, output-reference construction, kernel-output submit retry orchestration, and run-bound
+   notebook submit callback wiring now live together in `submit_notebook.py`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects

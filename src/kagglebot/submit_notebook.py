@@ -53,6 +53,63 @@ class NotebookSubmitArtifactModeDecision:
     message: str
 
 
+@dataclass(frozen=True)
+class NotebookSubmitRunner:
+    slug: str
+    run_id: str
+    paths: CompetitionPaths
+    kaggle_username: str | None
+    kernel_name: str | None
+    accelerator: str
+    strict_accelerator: bool
+    dry_run: bool
+    timeout_minutes: int | None
+    infer_iteration_from_submission_path: Callable[[Path], int | None]
+    resolve_kaggle_username: Callable[[str | None], str]
+    run_submit_kernel: Callable[..., object]
+    run_kaggle_submit_kernel: Callable[..., object]
+    copy_submission_artifact_to_iteration_dir: Callable[..., Path]
+    classify_submit_error: Callable[[str, str, int | None], dict[str, object]]
+    should_retry_ambiguous: Callable[..., bool]
+    sleep: Callable[[float], None]
+    on_message: Callable[[str], None]
+    is_capacity_error: Callable[[BaseException], bool]
+    is_push_error: Callable[[BaseException], bool]
+
+    def submit(
+        self,
+        *,
+        submission_path: Path,
+        message: str,
+        artifact_mode: str | None,
+    ) -> tuple[object, str, Path | None]:
+        return run_notebook_kernel_submission_for_run(
+            slug=self.slug,
+            run_id=self.run_id,
+            paths=self.paths,
+            kaggle_username=self.kaggle_username,
+            kernel_name=self.kernel_name,
+            accelerator=self.accelerator,
+            strict_accelerator=self.strict_accelerator,
+            submission_path=submission_path,
+            message=message,
+            artifact_mode=artifact_mode,
+            dry_run=self.dry_run,
+            timeout_minutes=self.timeout_minutes,
+            infer_iteration_from_submission_path=self.infer_iteration_from_submission_path,
+            resolve_kaggle_username=self.resolve_kaggle_username,
+            run_submit_kernel=self.run_submit_kernel,
+            run_kaggle_submit_kernel=self.run_kaggle_submit_kernel,
+            copy_submission_artifact_to_iteration_dir=self.copy_submission_artifact_to_iteration_dir,
+            classify_submit_error=self.classify_submit_error,
+            should_retry_ambiguous=self.should_retry_ambiguous,
+            sleep=self.sleep,
+            on_message=self.on_message,
+            is_capacity_error=self.is_capacity_error,
+            is_push_error=self.is_push_error,
+        )
+
+
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:
     return str(value or "wrapper").strip().lower() or "wrapper"
 

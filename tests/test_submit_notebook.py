@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from kagglebot.exceptions import KaggleCliError, SubmissionCliError
 from kagglebot.submit_notebook import (
+    NotebookSubmitRunner,
     build_kaggle_submit_kernel_kwargs,
     build_notebook_submit_output_reference,
     build_notebook_submit_reference,
@@ -290,6 +291,74 @@ def test_run_notebook_kernel_submission_for_run_resolves_iteration_and_paths(tmp
     assert calls["copy_iter_dir"] == tmp_path / "artifacts" / "demo" / "runs" / "run-1" / "iter-4"
     assert calls["submit_kwargs"]["kernel"] == "user/demo-kernel"
     assert calls["submit_kwargs"]["output_file"] == "submission.csv"
+
+
+def test_notebook_submit_runner_binds_run_callbacks(tmp_path: Path) -> None:
+    calls: dict[str, object] = {}
+    submission_path = tmp_path / "runs" / "run-1" / "iter-3" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    kernel_submission_path = Path("/kaggle/working/submission.csv")
+    copied_submission_path = tmp_path / "copied" / "submission.csv"
+    submit_result = object()
+
+    class Paths:
+        base_dir = tmp_path / "artifacts" / "demo"
+
+        @staticmethod
+        def iter_dir(run_id: str, iteration: int) -> Path:
+            return tmp_path / "artifacts" / "demo" / "runs" / run_id / f"iter-{iteration}"
+
+    def fake_run_submit_kernel(**kwargs: object) -> SimpleNamespace:
+        calls["kernel_kwargs"] = kwargs
+        return SimpleNamespace(kernel_id="user/demo-kernel", submission_path=kernel_submission_path)
+
+    def fake_submit_kernel(**kwargs: object) -> object:
+        calls["submit_kwargs"] = kwargs
+        return submit_result
+
+    def fake_copy_submission_artifact(*, source: Path, iter_dir: Path) -> Path:
+        calls["copy_source"] = source
+        calls["copy_iter_dir"] = iter_dir
+        return copied_submission_path
+
+    runner = NotebookSubmitRunner(
+        slug="demo",
+        run_id="run-1",
+        paths=Paths(),
+        kaggle_username="raw-user",
+        kernel_name="submit-kernel",
+        accelerator="gpu",
+        strict_accelerator=False,
+        dry_run=True,
+        timeout_minutes=60,
+        infer_iteration_from_submission_path=lambda path: 3 if path == submission_path else None,
+        resolve_kaggle_username=lambda value: f"resolved-{value}",
+        run_submit_kernel=fake_run_submit_kernel,
+        run_kaggle_submit_kernel=fake_submit_kernel,
+        copy_submission_artifact_to_iteration_dir=fake_copy_submission_artifact,
+        classify_submit_error=lambda stdout, stderr, exit_code: {},
+        should_retry_ambiguous=lambda **kwargs: False,
+        sleep=lambda seconds: None,
+        on_message=lambda message: calls.setdefault("message", message),
+        is_capacity_error=lambda exc: False,
+        is_push_error=lambda exc: False,
+    )
+
+    result, reference, artifact_path = runner.submit(
+        submission_path=submission_path,
+        message="submit message",
+        artifact_mode="wrapper",
+    )
+
+    assert result is submit_result
+    assert reference == "kernel:user/demo-kernel"
+    assert artifact_path == copied_submission_path
+    assert calls["kernel_kwargs"]["iteration"] == 3
+    assert calls["kernel_kwargs"]["base_dir"] == tmp_path / "artifacts"
+    assert calls["kernel_kwargs"]["kaggle_username"] == "resolved-raw-user"
+    assert calls["copy_iter_dir"] == tmp_path / "artifacts" / "demo" / "runs" / "run-1" / "iter-3"
+    assert calls["submit_kwargs"]["kernel"] == "user/demo-kernel"
 
 
 def test_decide_notebook_submit_artifact_mode_forces_inference_for_code_competition() -> None:
