@@ -410,6 +410,8 @@ Recommended extraction order:
    recording now calls the submit-stage helper directly from the loop. Notebook kernel submit execution, run-specific
    iteration/log path resolution, output-reference construction, and kernel-output submit retry orchestration now live
    together in `submit_notebook.py`; the loop only binds configuration values and callbacks.
+   Submit-abort recorder construction and exception raising now also run through `submit_stage.abort_submit_for_run`,
+   leaving `autopilot.py` to bind run-specific callbacks instead of owning a module-level abort wrapper.
    Next, move the remaining `_attempt_submit` side-effect orchestration into a typed service that coordinates the
    existing `submit_attempts`, `submit_stage`, `submit_notebook`, and `submit_failure_context` modules rather than
    adding more private wrappers in `autopilot.py`.
