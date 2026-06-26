@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,9 +9,9 @@ from pathlib import Path
 from rich import print
 
 from kagglebot import kaggle_cli
+from kagglebot import kernel_outputs as _kernel_outputs
 from kagglebot.env_utils import env_flag
 from kagglebot.json_utils import load_json_object, write_json_object
-from kagglebot.kernel_outputs import find_submission_file as _find_kernel_submission_file
 from kagglebot.kernel_sources import KernelSourceConfig, load_kernel_source_config
 from kagglebot.kernel_status import parse_kernel_status
 from kagglebot.runners.base import RunContext, RunResult
@@ -539,7 +538,7 @@ class KaggleNotebookRunner:
         submission_path = find_submission_file(output_dir)
         paths.submissions_dir.mkdir(parents=True, exist_ok=True)
         local_submission = paths.submissions_dir / f"{run_id}_{submission_path.name}"
-        shutil.copy2(submission_path, local_submission)
+        _kernel_outputs.copy_artifact_if_needed(source=submission_path, destination=local_submission)
 
         summary["submission_path"] = str(local_submission)
         write_json_object(summary_path, summary)
@@ -643,7 +642,7 @@ def resolve_kaggle_username(explicit: str | None) -> str:
 
 
 def find_submission_file(output_dir: Path) -> Path:
-    submission_path = _find_kernel_submission_file(output_dir)
+    submission_path = _kernel_outputs.find_submission_file(output_dir)
     if submission_path is None:
         raise FileNotFoundError(f"No submission artifact found under {output_dir}")
     return submission_path
