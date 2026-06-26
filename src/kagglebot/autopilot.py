@@ -804,7 +804,12 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             knowledge_phase.refresh()
 
             _watch_state.update_watch_phase(config, run_id, "verifying", iteration=iteration)
-            _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
+            _verify_artifacts.run_repo_verify(
+                config.verify_cmd,
+                dry_run=config.dry_run,
+                artifacts_dir=config.paths.artifacts_dir,
+                run_command_fn=run_command,
+            )
 
             submission_path = iter_dir / "submission.csv"
             metrics_path = iter_dir / "metrics.json"
@@ -2737,15 +2742,6 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     _autopilot_state._write_run_payload(run_dir, run_payload)
 
 
-def _run_verify(verify_cmd: str, *, dry_run: bool, artifacts_dir: Path | None = None) -> None:
-    _verify_artifacts.run_repo_verify(
-        verify_cmd,
-        dry_run=dry_run,
-        artifacts_dir=artifacts_dir,
-        run_command_fn=run_command,
-    )
-
-
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
     print(f"[cyan]plan[/cyan]: {planning_flow_summary()}")
     _watch_state.update_watch_phase(
@@ -2779,7 +2775,12 @@ def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:
         "verifying",
         detail="Verifying the generated plan and kernel scaffold.",
     )
-    _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
+    _verify_artifacts.run_repo_verify(
+        config.verify_cmd,
+        dry_run=config.dry_run,
+        artifacts_dir=config.paths.artifacts_dir,
+        run_command_fn=run_command,
+    )
 
 
 def _run_kernel_source_preflight_fixes(
@@ -3380,7 +3381,12 @@ def _run_improvement(
                 )
             response_text = f"{response_text}\n\n{repair_response}".strip()
 
-    _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
+    _verify_artifacts.run_repo_verify(
+        config.verify_cmd,
+        dry_run=config.dry_run,
+        artifacts_dir=config.paths.artifacts_dir,
+        run_command_fn=run_command,
+    )
     summary = response_text
     diagnostics_text = _diagnostics.load_iteration_diagnostics_text(iter_dir)
     record_improvement(
@@ -3658,7 +3664,12 @@ def _run_kernel_fix(
                     "Kernel fix agent produced no file changes and regeneration fallback was already used."
                 )
             try:
-                _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
+                _verify_artifacts.run_repo_verify(
+                    config.verify_cmd,
+                    dry_run=config.dry_run,
+                    artifacts_dir=config.paths.artifacts_dir,
+                    run_command_fn=run_command,
+                )
             except Exception as exc:  # noqa: BLE001
                 retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
                 if codex_pass < codex_pass_limit:
@@ -3679,7 +3690,12 @@ def _run_kernel_fix(
             return
 
         try:
-            _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
+            _verify_artifacts.run_repo_verify(
+                config.verify_cmd,
+                dry_run=config.dry_run,
+                artifacts_dir=config.paths.artifacts_dir,
+                run_command_fn=run_command,
+            )
         except Exception as exc:  # noqa: BLE001
             retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             if codex_pass < codex_pass_limit:
@@ -4124,7 +4140,12 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             raise RuntimeError("Submit autofix did not repair the submission artifact required by Kaggle.")
 
         try:
-            _run_verify(config.verify_cmd, dry_run=config.dry_run, artifacts_dir=config.paths.artifacts_dir)
+            _verify_artifacts.run_repo_verify(
+                config.verify_cmd,
+                dry_run=config.dry_run,
+                artifacts_dir=config.paths.artifacts_dir,
+                run_command_fn=run_command,
+            )
         except Exception as exc:  # noqa: BLE001
             retry_feedback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             if codex_pass < MAX_AUTOFIX_CODEX_PASSES:
