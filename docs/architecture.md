@@ -414,6 +414,7 @@ Recommended extraction order:
    `submit_stage.resolve_duplicate_submission_for_run` and `submit_stage.resolve_same_submission_path_for_run`.
    Submit retry attempt/knowledge recording is bound by `submit_stage.SubmitRunRetryRecorder`.
    Submit-abort recorder construction and exception raising now also run through `submit_stage.SubmitRunAborter`;
+   duplicate-submit and successful-submit run-state snapshots are loaded inside the run-level submit helpers, and
    successful submit ledger/outcome/failure-context finalization uses `submit_stage.record_successful_submit_for_run`.
    This removes the old private submit-abort wrapper from `autopilot.py` and keeps run-specific submit side effects
    behind typed submit-stage helpers.

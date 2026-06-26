@@ -749,6 +749,7 @@ def test_resolve_duplicate_submission_for_run_binds_attempt_ledger_and_failure_c
     recorded_payloads: list[object] = []
     messages: list[str] = []
     collect_calls: list[dict[str, object]] = []
+    load_state_calls: list[Path] = []
 
     def collect_duplicate_submission_sources(**kwargs: object) -> list[str]:
         collect_calls.append(kwargs)
@@ -771,7 +772,7 @@ def test_resolve_duplicate_submission_for_run_binds_attempt_ledger_and_failure_c
         prepared_submission_sha="sha",
         code_fingerprint="code-fp",
         allow_force=False,
-        prior_state={"submit_attempts_count": 1},
+        load_run_state=lambda state_run_dir: load_state_calls.append(state_run_dir) or {"submit_attempts_count": 1},
         collect_duplicate_submission_sources=collect_duplicate_submission_sources,
         decide_duplicate_submission_action=lambda **kwargs: DuplicateDecisionStub(
             action="skip",
@@ -788,6 +789,7 @@ def test_resolve_duplicate_submission_for_run_binds_attempt_ledger_and_failure_c
     )
 
     assert collect_calls
+    assert load_state_calls == [run_dir]
     assert collect_calls[0]["prepared_submission_sha"] == "sha"
     assert result is not None
     assert result["skipped"] is True
@@ -2687,6 +2689,7 @@ def test_record_successful_submit_for_run_records_ledger_and_resolves_failure_co
     artifact_path.parent.mkdir(parents=True)
     artifact_path.write_text("id,prediction\n1,0.5\n", encoding="utf-8")
     recorded_payloads: list[object] = []
+    load_state_calls: list[Path] = []
 
     result = record_successful_submit_for_run(
         run_dir=run_dir,
@@ -2701,7 +2704,7 @@ def test_record_successful_submit_for_run_records_ledger_and_resolves_failure_co
         submission_artifact_path=artifact_path,
         outcome={"status": "complete", "score": 0.25},
         code_fingerprint="code-fp",
-        prior_state={},
+        load_run_state=lambda state_run_dir: load_state_calls.append(state_run_dir) or {},
         compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         compute_submission_sha256=lambda path: "sha256" if path == artifact_path else None,
         record_submit_attempt_payloads=recorded_payloads.append,
@@ -2711,6 +2714,7 @@ def test_record_successful_submit_for_run_records_ledger_and_resolves_failure_co
     )
 
     ledger_records = load_jsonl_records(tmp_path / "ledger.jsonl")
+    assert load_state_calls == [run_dir]
     assert ledger_records[0]["event"] == "outcome"
     assert ledger_records[0]["slug"] == "demo"
     assert ledger_records[0]["outcome"] == {"status": "complete", "score": 0.25}
