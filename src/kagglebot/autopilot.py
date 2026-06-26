@@ -3555,9 +3555,6 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     run_dir = prepared_context.run_dir
     autofix_dir = prepared_context.autofix_dir
     error_text = prepared_context.error_text
-    error_path = prepared_context.error_path
-    submit_autofix = prepared_context.submit_autofix
-    submit_context = prepared_context.submit_context
     submit_file_fix_required = prepared_context.submit_file_fix_required
     submit_file_fix_baseline_path = prepared_context.submit_file_fix_baseline_path
     submit_file_fix_baseline_sha256 = prepared_context.submit_file_fix_baseline_sha256
@@ -3568,55 +3565,37 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         kernels_dir=config.paths.kernels_dir,
         module_file=Path(__file__),
     )
-    prompt_text = _agent_prompts.build_autofix_prompt(
-        slug=config.slug,
+    prompt_plan = _autofix_context.build_autofix_prompt_plan(
+        config=config,
         run_id=run_id,
         attempt=attempt,
-        compute=config.compute,
-        accelerator=config.accelerator,
-        error_text=error_text,
-        error_path=error_path,
-        repo_root=config.paths.repo_root,
-        run_dir=config.paths.run_dir(run_id),
-        kernel_dir=config.paths.kernel_source_dir,
-        context_dir=config.paths.context_dir,
-        data_dir=config.paths.data_dir,
-        prompts_dir=config.paths.prompts_dir,
+        prepared_context=prepared_context,
+        allowed_prefixes=allowed_prefixes,
         autopilot_path=Path(__file__).resolve(),
-        allowed_prefixes=allowed_prefixes.allowed_prefixes,
-        denied_prefixes=allowed_prefixes.denied_prefixes,
-        submit_context=submit_context,
     )
-    if submit_file_fix_required:
-        prompt_text += _submit_failure_context.format_submit_file_repair_contract_prompt()
-    strategy_stage = "submit_autofix" if submit_autofix else "autofix"
-    strategy_label = "submit autofix" if submit_autofix else "autofix"
+    prompt_text = prompt_plan.prompt_text
+    strategy_label = prompt_plan.strategy_label
     print(
         f"[cyan]{strategy_label}[/cyan]: strategy={_ERROR_STRATEGY_MODEL}({_ERROR_STRATEGY_REASONING_EFFORT}) "
         f"-> fixer={_ERROR_FIX_CODEX_MODEL}({_ERROR_FIX_REASONING_EFFORT})"
     )
-    thinking_phase = "gpt_submit_autofix_thinking" if submit_autofix else "gpt_autofix_thinking"
-    fixing_phase = "gpt_submit_autofix_fixing" if submit_autofix else "gpt_autofix_fixing"
     _watch_state.update_watch_phase(
         config,
         run_id,
-        thinking_phase,
+        prompt_plan.thinking_phase,
         detail=f"GPT is analyzing the {strategy_label} failure and drafting a fix strategy.",
     )
-    strategy_prompt = _agent_prompts.build_error_strategy_prompt(
-        stage=strategy_stage,
-        slug=config.slug,
+    strategy_prompt = _autofix_context.build_autofix_strategy_prompt(
+        config=config,
         run_id=run_id,
         attempt=attempt,
-        compute=config.compute,
-        accelerator=config.accelerator,
+        prompt_plan=prompt_plan,
         hardware_constraints=render_hardware_constraints(
             resolve_hardware_profile(config.hardware_profile, compute=config.compute),
             compute=config.compute,
             time_budget_min=config.time_budget_min,
         ),
         error_text=error_text,
-        codex_prompt=prompt_text,
     )
     strategy_text = _agent_strategy.run_error_strategy_prompt(
         prompt_text=strategy_prompt,
@@ -3673,7 +3652,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         _watch_state.update_watch_phase(
             config,
             run_id,
-            fixing_phase,
+            prompt_plan.fixing_phase,
             detail=f"{IMPLEMENTATION_AGENT.display_name} is applying the {strategy_label} fix.",
         )
         result = run_codex(

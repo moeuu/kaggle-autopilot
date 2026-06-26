@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from kagglebot.autofix_context import prepare_autofix_context
+from kagglebot.autofix_context import (
+    AutofixPreparedContext,
+    build_autofix_prompt_plan,
+    build_autofix_strategy_prompt,
+    prepare_autofix_context,
+)
 from kagglebot.exceptions import KaggleCliError, SubmitAbortedError
 from kagglebot.submit_autofix import SubmitFileAutofixPreparation
 from kagglebot.submit_failure_context import SubmitAutofixRunContext
@@ -13,6 +18,10 @@ class DummyPaths:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.data_dir = root / "data"
+        self.repo_root = root
+        self.kernel_source_dir = root / "kernel"
+        self.context_dir = root / "context"
+        self.prompts_dir = root / "prompts"
         self.sample_submission_path = self.data_dir / "sample_submission.csv"
         self.submission_ledger_path = root / "submission_ledger.jsonl"
 
@@ -102,3 +111,75 @@ def test_prepare_autofix_context_appends_submit_repair_summary(monkeypatch, tmp_
     text = prepared.error_path.read_text(encoding="utf-8")
     assert "Deterministic Submit File Autofix:" in text
     assert "Submit Failure Context:" in text
+
+
+def test_build_autofix_prompt_plan_adds_submit_contract(tmp_path: Path) -> None:
+    paths = DummyPaths(tmp_path)
+    config = SimpleNamespace(slug="demo", compute="local_gpu", accelerator="gpu", time_budget_min=30, paths=paths)
+    prepared = AutofixPreparedContext(
+        run_dir=paths.run_dir("run-1"),
+        autofix_dir=paths.run_dir("run-1") / "autofix" / "attempt-1",
+        error_text="Local submission validation failed",
+        error_path=tmp_path / "error.txt",
+        submit_autofix=True,
+        submit_context="submit context",
+        submit_file_fix_required=True,
+        submit_file_fix_baseline_path=tmp_path / "bad.csv",
+        submit_file_fix_baseline_sha256="abc",
+    )
+    allowed = SimpleNamespace(allowed_prefixes=[tmp_path / "kernel"], denied_prefixes=[tmp_path / "data"])
+
+    prompt_plan = build_autofix_prompt_plan(
+        config=config,
+        run_id="run-1",
+        attempt=1,
+        prepared_context=prepared,
+        allowed_prefixes=allowed,
+        autopilot_path=tmp_path / "autopilot.py",
+    )
+
+    assert prompt_plan.strategy_stage == "submit_autofix"
+    assert prompt_plan.strategy_label == "submit autofix"
+    assert prompt_plan.thinking_phase == "gpt_submit_autofix_thinking"
+    assert prompt_plan.fixing_phase == "gpt_submit_autofix_fixing"
+    assert "Submit Context" in prompt_plan.prompt_text
+    assert "Submission File Repair Contract" in prompt_plan.prompt_text
+
+
+def test_build_autofix_strategy_prompt_uses_prompt_plan_stage(tmp_path: Path) -> None:
+    paths = DummyPaths(tmp_path)
+    config = SimpleNamespace(slug="demo", compute="local_cpu", accelerator="cpu", time_budget_min=None, paths=paths)
+    prepared = AutofixPreparedContext(
+        run_dir=paths.run_dir("run-1"),
+        autofix_dir=paths.run_dir("run-1") / "autofix" / "attempt-1",
+        error_text="RuntimeError: failed",
+        error_path=tmp_path / "error.txt",
+        submit_autofix=False,
+        submit_context="",
+        submit_file_fix_required=False,
+        submit_file_fix_baseline_path=None,
+        submit_file_fix_baseline_sha256=None,
+    )
+    allowed = SimpleNamespace(allowed_prefixes=[tmp_path / "kernel"], denied_prefixes=[])
+    prompt_plan = build_autofix_prompt_plan(
+        config=config,
+        run_id="run-1",
+        attempt=1,
+        prepared_context=prepared,
+        allowed_prefixes=allowed,
+        autopilot_path=tmp_path / "autopilot.py",
+    )
+
+    strategy_prompt = build_autofix_strategy_prompt(
+        config=config,
+        run_id="run-1",
+        attempt=1,
+        prompt_plan=prompt_plan,
+        hardware_constraints="CPU only",
+        error_text=prepared.error_text,
+    )
+
+    assert prompt_plan.strategy_stage == "autofix"
+    assert prompt_plan.thinking_phase == "gpt_autofix_thinking"
+    assert "Stage: autofix" in strategy_prompt
+    assert "CPU only" in strategy_prompt

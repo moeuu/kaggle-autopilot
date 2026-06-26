@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from kagglebot import agent_io as _agent_io
+from kagglebot import agent_prompts as _agent_prompts
 from kagglebot import autopilot_state as _autopilot_state
 from kagglebot import submit_autofix as _submit_autofix
 from kagglebot import submit_failure_context as _submit_failure_context
@@ -17,7 +18,15 @@ from kagglebot.submission_service import SubmissionConfig, SubmissionService
 
 class AutofixContextConfig(Protocol):
     slug: str
+    compute: str
+    accelerator: str
+    time_budget_min: int | None
     paths: object
+
+
+class AutofixAllowedPrefixes(Protocol):
+    allowed_prefixes: list[Path]
+    denied_prefixes: list[Path]
 
 
 @dataclass(frozen=True)
@@ -31,6 +40,15 @@ class AutofixPreparedContext:
     submit_file_fix_required: bool
     submit_file_fix_baseline_path: Path | None
     submit_file_fix_baseline_sha256: str | None
+
+
+@dataclass(frozen=True)
+class AutofixPromptPlan:
+    prompt_text: str
+    strategy_stage: str
+    strategy_label: str
+    thinking_phase: str
+    fixing_phase: str
 
 
 def prepare_autofix_context(
@@ -132,4 +150,68 @@ def prepare_autofix_context(
         submit_file_fix_required=submit_file_fix_required,
         submit_file_fix_baseline_path=submit_file_fix_baseline_path,
         submit_file_fix_baseline_sha256=submit_file_fix_baseline_sha256,
+    )
+
+
+def build_autofix_prompt_plan(
+    *,
+    config: AutofixContextConfig,
+    run_id: str,
+    attempt: int,
+    prepared_context: AutofixPreparedContext,
+    allowed_prefixes: AutofixAllowedPrefixes,
+    autopilot_path: Path,
+) -> AutofixPromptPlan:
+    prompt_text = _agent_prompts.build_autofix_prompt(
+        slug=config.slug,
+        run_id=run_id,
+        attempt=attempt,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        error_text=prepared_context.error_text,
+        error_path=prepared_context.error_path,
+        repo_root=config.paths.repo_root,
+        run_dir=config.paths.run_dir(run_id),
+        kernel_dir=config.paths.kernel_source_dir,
+        context_dir=config.paths.context_dir,
+        data_dir=config.paths.data_dir,
+        prompts_dir=config.paths.prompts_dir,
+        autopilot_path=autopilot_path,
+        allowed_prefixes=allowed_prefixes.allowed_prefixes,
+        denied_prefixes=allowed_prefixes.denied_prefixes,
+        submit_context=prepared_context.submit_context,
+    )
+    if prepared_context.submit_file_fix_required:
+        prompt_text += _submit_failure_context.format_submit_file_repair_contract_prompt()
+
+    strategy_stage = "submit_autofix" if prepared_context.submit_autofix else "autofix"
+    strategy_label = "submit autofix" if prepared_context.submit_autofix else "autofix"
+    return AutofixPromptPlan(
+        prompt_text=prompt_text,
+        strategy_stage=strategy_stage,
+        strategy_label=strategy_label,
+        thinking_phase="gpt_submit_autofix_thinking" if prepared_context.submit_autofix else "gpt_autofix_thinking",
+        fixing_phase="gpt_submit_autofix_fixing" if prepared_context.submit_autofix else "gpt_autofix_fixing",
+    )
+
+
+def build_autofix_strategy_prompt(
+    *,
+    config: AutofixContextConfig,
+    run_id: str,
+    attempt: int,
+    prompt_plan: AutofixPromptPlan,
+    hardware_constraints: str,
+    error_text: str,
+) -> str:
+    return _agent_prompts.build_error_strategy_prompt(
+        stage=prompt_plan.strategy_stage,
+        slug=config.slug,
+        run_id=run_id,
+        attempt=attempt,
+        compute=config.compute,
+        accelerator=config.accelerator,
+        hardware_constraints=hardware_constraints,
+        error_text=error_text,
+        codex_prompt=prompt_plan.prompt_text,
     )
