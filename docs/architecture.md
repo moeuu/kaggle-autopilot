@@ -467,8 +467,8 @@ Recommended extraction order:
    notebook submit callback wiring now live together in `submit_notebook.py`.
    Submit-stage runtime state dataclasses, submit-error classification normalization, submit CLI error
    resolution/run binding, classification-driven retry/abort decisions, and file-submit-to-notebook fallback
-   runtime-state/message assembly now live in `submit_cli_error_resolution.py`; `submit_stage.py` re-exports the
-   compatibility names while the retry loop consumes the focused module boundary.
+   runtime-state/message assembly now live in `submit_cli_error_resolution.py`; `submit_stage.py` imports only the
+   runtime state/action types and run-bound resolver it consumes directly.
    Pure submit-status/detail message rendering and submission-row message extraction now live in
    `submit_stage_messages.py`; submit-stage internals and loop status reporting call those helpers directly instead of
    preserving submit-status wrapper functions in `submit_stage.py`.

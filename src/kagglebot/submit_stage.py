@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 from kagglebot import submit_attempts as _submit_attempts
-from kagglebot import submit_cli_error_resolution as _submit_cli_error_resolution
 from kagglebot import submit_failure_context as _submit_failure_context
 from kagglebot import submit_stage_messages as _submit_stage_messages
 from kagglebot.campaign import (
@@ -26,31 +25,12 @@ from kagglebot.score_utils import score_gap, should_update_best_score
 from kagglebot.submission.outcome_service import SubmissionOutcomePollingError, SubmissionOutcomeService
 from kagglebot.submission_policy import meets_target
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
+from kagglebot.submit_cli_error_resolution import (
+    SubmitStageErrorActionDecision,
+    SubmitStageRuntimeState,
+    resolve_submit_cli_error_for_run,
+)
 from kagglebot.writeup import normalize_submit_mode
-
-SubmitCliErrorResolution = _submit_cli_error_resolution.SubmitCliErrorResolution
-SubmitStageErrorActionDecision = _submit_cli_error_resolution.SubmitStageErrorActionDecision
-SubmitStageErrorClassification = _submit_cli_error_resolution.SubmitStageErrorClassification
-SubmitStageFallbackApplication = _submit_cli_error_resolution.SubmitStageFallbackApplication
-SubmitStageNotebookFallbackDecision = _submit_cli_error_resolution.SubmitStageNotebookFallbackDecision
-SubmitStageNotebookFallbackRetryState = _submit_cli_error_resolution.SubmitStageNotebookFallbackRetryState
-SubmitStageRuntimeState = _submit_cli_error_resolution.SubmitStageRuntimeState
-apply_notebook_fallback_decision = _submit_cli_error_resolution.apply_notebook_fallback_decision
-apply_notebook_fallback_retry_state = _submit_cli_error_resolution.apply_notebook_fallback_retry_state
-build_notebook_fallback_retry_state = _submit_cli_error_resolution.build_notebook_fallback_retry_state
-classify_submit_stage_error = _submit_cli_error_resolution.classify_submit_stage_error
-decide_notebook_fallback_after_file_submit_error = (
-    _submit_cli_error_resolution.decide_notebook_fallback_after_file_submit_error
-)
-decide_submit_stage_error_action = _submit_cli_error_resolution.decide_submit_stage_error_action
-decide_submit_stage_error_action_from_classification = (
-    _submit_cli_error_resolution.decide_submit_stage_error_action_from_classification
-)
-resolve_notebook_fallback_after_file_submit_error = (
-    _submit_cli_error_resolution.resolve_notebook_fallback_after_file_submit_error
-)
-resolve_submit_cli_error = _submit_cli_error_resolution.resolve_submit_cli_error
-resolve_submit_cli_error_for_run = _submit_cli_error_resolution.resolve_submit_cli_error_for_run
 
 
 @dataclass(frozen=True)
