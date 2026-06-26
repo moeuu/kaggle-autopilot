@@ -152,7 +152,7 @@ class SubmitRunAborter:
     slug: str
     knowledge_paths: object
     problem_types: list[str]
-    save_run_state: Callable[[dict[str, object]], object]
+    save_run_state_for_run: Callable[[Path, dict[str, object]], object]
     resolve_submit_abort_artifact_path: Callable[..., Path | None]
     persist_submit_abort_failure: Callable[..., object]
     load_run_state: Callable[[Path], dict[str, object]]
@@ -201,7 +201,7 @@ class SubmitRunAborter:
             stderr_tail=stderr_tail,
             exit_code=exit_code,
             submit_attempt_recorder=submit_attempt_recorder,
-            save_run_state=self.save_run_state,
+            save_run_state=lambda updates: self.save_run_state_for_run(self.run_dir, updates),
             resolve_submit_abort_artifact_path=self.resolve_submit_abort_artifact_path,
             persist_submit_abort_failure=self.persist_submit_abort_failure,
             load_run_state=self.load_run_state,

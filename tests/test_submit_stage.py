@@ -6,7 +6,7 @@ from pathlib import Path
 from kagglebot.campaign import CampaignCandidate, campaign_state_path, candidate_registry_path, upsert_candidate
 from kagglebot.history import SubmissionLedger
 from kagglebot.json_utils import load_jsonl_records
-from kagglebot.submit_attempts import append_submit_attempt
+from kagglebot.submit_attempts import SubmitAttemptStatePayloads, append_submit_attempt
 from kagglebot.submit_failure_context import load_submit_failure_context, save_submit_failure_context
 from kagglebot.submit_stage import (
     SubmitPreparedSubmissionResolution,
@@ -1382,7 +1382,7 @@ def test_submit_run_aborter_binds_run_callbacks_and_raises(tmp_path: Path) -> No
         slug="demo",
         knowledge_paths=object(),
         problem_types=["tabular"],
-        save_run_state=lambda _updates: None,
+        save_run_state_for_run=lambda _run_dir, _updates: None,
         resolve_submit_abort_artifact_path=lambda **kwargs: kwargs["submission_ref"],
         persist_submit_abort_failure=lambda **kwargs: persisted.update(kwargs),
         load_run_state=lambda _run_dir: {"submit_ok": False},
@@ -1423,6 +1423,72 @@ def test_submit_run_aborter_binds_run_callbacks_and_raises(tmp_path: Path) -> No
     assert persisted["code_fingerprint"] == ""
     assert persisted["now_iso"] == "2026-06-25T00:00:00+00:00"
     assert messages == ["[red]submit aborted[/red]: Local validation failed."]
+
+
+def test_submit_run_aborter_binds_run_state_save_for_created_recorder(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    submission = tmp_path / "iter-5" / "submission.csv"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("id,pred\n1,0.1\n", encoding="utf-8")
+    saved_updates: list[tuple[Path, dict[str, object]]] = []
+
+    class SubmitAbortStubError(RuntimeError):
+        pass
+
+    def persist_submit_abort_failure(**kwargs: object) -> None:
+        recorder = kwargs["submit_attempt_recorder"]
+        recorder.record_payloads(
+            SubmitAttemptStatePayloads(
+                attempt_payload={"run_id": "run-1", "ok": False},
+                run_state_update={"submit_ok": False, "last_error_kind": "validation"},
+            )
+        )
+
+    aborter = SubmitRunAborter(
+        run_dir=run_dir,
+        run_id="run-1",
+        slug="demo",
+        knowledge_paths=object(),
+        problem_types=["tabular"],
+        save_run_state_for_run=lambda run_path, updates: saved_updates.append((run_path, updates)),
+        resolve_submit_abort_artifact_path=lambda **kwargs: kwargs["submission_ref"],
+        persist_submit_abort_failure=persist_submit_abort_failure,
+        load_run_state=lambda _run_dir: {"submit_ok": False},
+        load_latest_submit_attempt=lambda _run_dir: {},
+        has_successful_submit_attempt=lambda _run_dir: False,
+        compute_submission_sha256=lambda path: "sha" if path == submission else None,
+        stdout_tail_chars=10,
+        stderr_tail_chars=11,
+        now_iso=lambda: "2026-06-25T00:00:00+00:00",
+        normalize_detail=lambda text, max_chars: str(text)[:max_chars],
+        record_error_fix_insight=lambda **_kwargs: None,
+        on_message=lambda _message: None,
+        build_error=SubmitAbortStubError,
+    )
+
+    try:
+        aborter.abort(
+            submission_ref=submission,
+            submission_artifact_path=None,
+            artifact_mode="wrapper",
+            code_fingerprint=None,
+            fingerprint="fp",
+            error_kind="validation",
+            reason="local_submission_validation_failed",
+            message="Local validation failed.",
+            stdout_tail="stdout",
+            stderr_tail="stderr",
+            exit_code=6,
+            submit_attempt_recorder=None,
+        )
+    except SubmitAbortStubError:
+        pass
+    else:
+        raise AssertionError("SubmitRunAborter.abort did not raise")
+
+    assert saved_updates == [(run_dir, {"submit_ok": False, "last_error_kind": "validation"})]
+    rows = load_jsonl_records(run_dir / "submit_attempts.jsonl")
+    assert rows[0]["run_id"] == "run-1"
 
 
 def test_normalize_submission_outcome_status_strips_enum_prefix() -> None:
