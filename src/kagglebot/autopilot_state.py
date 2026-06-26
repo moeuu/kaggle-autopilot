@@ -102,7 +102,7 @@ def list_run_ids(paths: CompetitionPaths) -> list[str]:
     return run_ids
 
 
-def _build_run_payload(
+def build_run_payload(
     *,
     run_id: str,
     config: object,
@@ -174,7 +174,7 @@ def _build_run_payload(
     }
 
 
-def _build_run_summary_payload(
+def build_run_summary_payload(
     *,
     best_score: float | None,
     best_submission: Path | None,
@@ -203,7 +203,7 @@ def _build_run_summary_payload(
     }
 
 
-def _apply_run_status(
+def apply_run_status(
     payload: dict[str, object],
     *,
     status: str,
@@ -215,7 +215,7 @@ def _apply_run_status(
     return payload
 
 
-def _apply_final_run_status(
+def apply_final_run_status(
     payload: dict[str, object],
     *,
     submitted: bool,
@@ -224,16 +224,16 @@ def _apply_final_run_status(
     writeup_bundle_meta: dict[str, object] | None,
 ) -> dict[str, object]:
     if submitted and has_submission_result:
-        return _apply_run_status(payload, status="submitted")
+        return apply_run_status(payload, status="submitted")
     if writeup_mode and writeup_bundle_meta:
         payload["writeup_bundle"] = writeup_bundle_meta
-        return _apply_run_status(payload, status="manual_finalization_required")
+        return apply_run_status(payload, status="manual_finalization_required")
     if payload.get("status") not in {"interrupted", "submit_failed"}:
-        return _apply_run_status(payload, status="completed")
+        return apply_run_status(payload, status="completed")
     return payload
 
 
-def _write_run_payload(run_dir: Path, payload: dict[str, object]) -> None:
+def write_run_payload(run_dir: Path, payload: dict[str, object]) -> None:
     write_json_object(run_dir / "run.json", payload)
 
 

@@ -380,8 +380,9 @@ Recommended extraction order:
    Iteration metrics payload/final guard-section composition, metrics/report persistence, evaluation-result serialization, evaluation
    data-cache/fingerprint helpers, iteration submit eligibility, submit-phase completion decisions, iteration record
    kwargs construction, and run evaluation-report resume/persistence are now in `iteration_metrics.py`.
-   Run payload persistence for `run.json` and public `run_state.json` load/save helpers now live in `autopilot_state.py`,
-   so orchestration code no longer open-codes state file paths when writing lifecycle status or submit state.
+   Public run payload/status/summary helpers for `run.json` and public `run_state.json` load/save helpers now live in
+   `autopilot_state.py`, so orchestration code no longer open-codes state file paths when writing lifecycle status,
+   summaries, or submit state.
    Submit failure context lookups for abort deferral and repair-prompt notes now live behind run-level helpers in
    `submit_failure_context.py`, keeping the main loop from loading failure context and latest-attempt artifacts directly.
    Iteration repair-signal collection/extraction and next-iteration policy/knowledge payload assembly/dispatch are now

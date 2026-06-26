@@ -467,13 +467,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
     target_metric = resolved["target_metric"]
     target_score = resolved["target_score"]
     if target_metric is None or target_score is None:
-        run_payload = _autopilot_state._build_run_payload(
+        run_payload = _autopilot_state.build_run_payload(
             run_id=run_id,
             config=config,
             resolved=resolved,
             status="missing_target",
         )
-        _autopilot_state._write_run_payload(run_dir, run_payload)
+        _autopilot_state.write_run_payload(run_dir, run_payload)
         return
 
     metric_direction = infer_direction(target_metric, resolved["target_direction"])
@@ -517,13 +517,13 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         default_force_major_rank_min_teams=_DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
     )
     _watch_state.update_watch_phase(config, run_id, "initializing_iterations")
-    run_payload = _autopilot_state._build_run_payload(
+    run_payload = _autopilot_state.build_run_payload(
         run_id=run_id,
         config=config,
         resolved=resolved,
         status="running",
     )
-    _autopilot_state._write_run_payload(run_dir, run_payload)
+    _autopilot_state.write_run_payload(run_dir, run_payload)
     _kernel_snapshot.ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
     record_run(
@@ -785,7 +785,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 max_total_min=max_total_min,
             )
             if max_total_stop.should_stop:
-                _autopilot_state._apply_run_status(
+                _autopilot_state.apply_run_status(
                     run_payload,
                     status=max_total_stop.status,
                     stop_reason=max_total_stop.stop_reason,
@@ -2053,7 +2053,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                         )
                     else:
                         run_payload["status"] = "submit_failed"
-                        _autopilot_state._write_run_payload(run_dir, run_payload)
+                        _autopilot_state.write_run_payload(run_dir, run_payload)
                         raise
                 if submission_result:
                     if bool(submission_result.get("skipped")):
@@ -2537,7 +2537,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 same_config_patience=stop_same_config_patience,
             )
             if stagnation_stop.should_stop:
-                _autopilot_state._apply_run_status(run_payload, status="stopped", stop_reason=stagnation_stop.reason)
+                _autopilot_state.apply_run_status(run_payload, status="stopped", stop_reason=stagnation_stop.reason)
                 print(f"[yellow]stop[/yellow]: {run_payload['stop_reason']}")
                 break
 
@@ -2552,7 +2552,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 allow_max_iteration_stop=False,
             )
             if terminal_stop.should_stop:
-                _autopilot_state._apply_run_status(
+                _autopilot_state.apply_run_status(
                     run_payload,
                     status=terminal_stop.status,
                     stop_reason=terminal_stop.stop_reason,
@@ -2571,7 +2571,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 submitted=submitted,
             )
             if terminal_stop.should_stop:
-                _autopilot_state._apply_run_status(
+                _autopilot_state.apply_run_status(
                     run_payload,
                     status=terminal_stop.status,
                     stop_reason=terminal_stop.stop_reason,
@@ -2611,7 +2611,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             )
     except KeyboardInterrupt:
         run_payload["status"] = "interrupted"
-        _autopilot_state._write_run_payload(run_dir, run_payload)
+        _autopilot_state.write_run_payload(run_dir, run_payload)
         print("[yellow]run interrupted[/yellow]")
         return
 
@@ -2661,7 +2661,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
                 )
             except SubmitAbortedError:
                 run_payload["status"] = "submit_failed"
-                _autopilot_state._write_run_payload(run_dir, run_payload)
+                _autopilot_state.write_run_payload(run_dir, run_payload)
                 raise
             if fallback_result:
                 if bool(fallback_result.get("skipped")):
@@ -2719,7 +2719,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
             record_problem_type_insight=record_problem_type_insight,
             record_error_fix_insight=record_error_fix_insight,
         )
-    _autopilot_state._apply_final_run_status(
+    _autopilot_state.apply_final_run_status(
         run_payload,
         submitted=submitted,
         has_submission_result=bool(last_submission_result),
@@ -2727,7 +2727,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         writeup_bundle_meta=writeup_bundle_meta,
     )
 
-    run_payload["summary"] = _autopilot_state._build_run_summary_payload(
+    run_payload["summary"] = _autopilot_state.build_run_summary_payload(
         best_score=best_score,
         best_submission=best_submission,
         best_submittable_score=best_submittable_score,
@@ -2739,7 +2739,7 @@ def _run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: boo
         fallback_submit_blocked_reason=fallback_submit_blocked_reason,
     )
 
-    _autopilot_state._write_run_payload(run_dir, run_payload)
+    _autopilot_state.write_run_payload(run_dir, run_payload)
 
 
 def _run_plan_and_initial(config: AutopilotConfig, run_id: str) -> None:

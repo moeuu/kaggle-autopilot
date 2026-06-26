@@ -7,18 +7,18 @@ from types import SimpleNamespace
 
 from kagglebot.autopilot_state import (
     ResumeRunResolutionError,
-    _apply_final_run_status,
-    _apply_run_status,
-    _build_run_payload,
-    _build_run_summary_payload,
     _load_submitted_iteration_tracking_score,
     _write_iteration_state_marker,
-    _write_run_payload,
+    apply_final_run_status,
+    apply_run_status,
+    build_run_payload,
+    build_run_summary_payload,
     find_latest_run_id,
     list_run_ids,
     load_run_state,
     resolve_resume_run_id,
     save_run_state,
+    write_run_payload,
 )
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
@@ -48,7 +48,7 @@ def test_build_run_payload_records_config_and_resolved_state() -> None:
         "evaluation_contract": {"metric_name": "rmse"},
     }
 
-    payload = _build_run_payload(run_id="run-1", config=config, resolved=resolved, status="running")
+    payload = build_run_payload(run_id="run-1", config=config, resolved=resolved, status="running")
 
     assert payload["run_id"] == "run-1"
     assert payload["slug"] == "demo"
@@ -65,7 +65,7 @@ def test_write_run_payload_writes_run_json(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    _write_run_payload(run_dir, {"run_id": "run-1", "status": "running"})
+    write_run_payload(run_dir, {"run_id": "run-1", "status": "running"})
 
     payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert payload == {"run_id": "run-1", "status": "running"}
@@ -74,7 +74,7 @@ def test_write_run_payload_writes_run_json(tmp_path: Path) -> None:
 def test_apply_run_status_sets_status_and_optional_stop_reason() -> None:
     payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
 
-    returned = _apply_run_status(payload, status="stopped", stop_reason="max_total_min reached")
+    returned = apply_run_status(payload, status="stopped", stop_reason="max_total_min reached")
 
     assert returned is payload
     assert payload["status"] == "stopped"
@@ -84,7 +84,7 @@ def test_apply_run_status_sets_status_and_optional_stop_reason() -> None:
 def test_apply_run_status_omits_empty_stop_reason() -> None:
     payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
 
-    _apply_run_status(payload, status="completed", stop_reason="")
+    apply_run_status(payload, status="completed", stop_reason="")
 
     assert payload == {"run_id": "run-1", "status": "completed"}
 
@@ -92,7 +92,7 @@ def test_apply_run_status_omits_empty_stop_reason() -> None:
 def test_apply_final_run_status_marks_submitted_when_submission_result_exists() -> None:
     payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
 
-    _apply_final_run_status(
+    apply_final_run_status(
         payload,
         submitted=True,
         has_submission_result=True,
@@ -107,7 +107,7 @@ def test_apply_final_run_status_marks_manual_finalization_for_writeup_bundle() -
     payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
     bundle = {"path": "writeup.md"}
 
-    _apply_final_run_status(
+    apply_final_run_status(
         payload,
         submitted=False,
         has_submission_result=False,
@@ -124,7 +124,7 @@ def test_apply_final_run_status_preserves_terminal_failure_states() -> None:
     submit_failed: dict[str, object] = {"status": "submit_failed"}
 
     for payload in (interrupted, submit_failed):
-        _apply_final_run_status(
+        apply_final_run_status(
             payload,
             submitted=False,
             has_submission_result=False,
@@ -139,7 +139,7 @@ def test_apply_final_run_status_preserves_terminal_failure_states() -> None:
 def test_apply_final_run_status_defaults_to_completed() -> None:
     payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
 
-    _apply_final_run_status(
+    apply_final_run_status(
         payload,
         submitted=False,
         has_submission_result=False,
@@ -155,7 +155,7 @@ def test_build_run_summary_payload_stringifies_paths(tmp_path: Path) -> None:
     faithful = tmp_path / "faithful.csv"
     high_potential = tmp_path / "high.csv"
 
-    payload = _build_run_summary_payload(
+    payload = build_run_summary_payload(
         best_score=0.9,
         best_submission=trusted,
         best_submittable_score=0.8,
