@@ -14,6 +14,7 @@ import pytest
 
 from kagglebot import autopilot as autopilot_mod
 from kagglebot import autopilot_state as _autopilot_state_test
+from kagglebot import autopilot_submit as autopilot_submit_mod
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import plan_resolution as _plan_resolution_test
 from kagglebot import submit_notebook as _submit_notebook_test
@@ -563,7 +564,7 @@ def test_autopilot_uses_plan_from_agent(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         "kagglebot.submission_service.run_kaggle_submit",
         lambda *args, **kwargs: type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
@@ -1291,7 +1292,7 @@ def test_autopilot_submit_when_top1_tier_single_iteration(monkeypatch, tmp_path:
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         "kagglebot.submission_service.run_kaggle_submit",
         lambda *args, **kwargs: (
@@ -1344,7 +1345,7 @@ def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monke
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
 
     config = _make_config(tmp_path, submit=False, max_iterations=2)
@@ -1859,16 +1860,16 @@ def test_attempt_submit_allows_one_repeated_fingerprint_after_code_change(monkey
         "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
         lambda self, path: path,  # noqa: ARG005
     )
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fail_then_succeed)
     monkeypatch.setattr("kagglebot.submit_stage.wait_for_submission_outcome", lambda **kwargs: None)
     monkeypatch.setattr(
         "kagglebot.submit_retry_policy.compute_submit_code_fingerprint",
         lambda *args, **kwargs: "new-code",
     )
-    monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot_submit.time.sleep", lambda *_args, **_kwargs: None)
 
-    result = _attempt_submit(
+    result = autopilot_submit_mod.attempt_submit_for_autopilot_run(
         config=config,
         run_id=run_id,
         submission_path=submission_path,
@@ -1926,16 +1927,16 @@ def test_attempt_submit_consumes_repeated_fingerprint_allowance_once(monkeypatch
         "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
         lambda self, path: path,  # noqa: ARG005
     )
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", always_fail)
     monkeypatch.setattr(
         "kagglebot.submit_retry_policy.compute_submit_code_fingerprint",
         lambda *args, **kwargs: "new-code",
     )
-    monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot_submit.time.sleep", lambda *_args, **_kwargs: None)
 
     with pytest.raises(SubmitAbortedError):
-        _attempt_submit(
+        autopilot_submit_mod.attempt_submit_for_autopilot_run(
             config=config,
             run_id=run_id,
             submission_path=submission_path,
@@ -1998,16 +1999,16 @@ def test_attempt_submit_allows_one_repeated_fingerprint_for_legacy_state_without
         "kagglebot.submission_service.SubmissionService.validate_and_prepare_submission",
         lambda self, path: path,  # noqa: ARG005
     )
-    monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
+    monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fail_then_succeed)
     monkeypatch.setattr("kagglebot.submit_stage.wait_for_submission_outcome", lambda **kwargs: None)
     monkeypatch.setattr(
         "kagglebot.submit_retry_policy.compute_submit_code_fingerprint",
         lambda *args, **kwargs: "new-code",
     )
-    monkeypatch.setattr("kagglebot.autopilot.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot_submit.time.sleep", lambda *_args, **_kwargs: None)
 
-    result = _attempt_submit(
+    result = autopilot_submit_mod.attempt_submit_for_autopilot_run(
         config=config,
         run_id=run_id,
         submission_path=submission_path,

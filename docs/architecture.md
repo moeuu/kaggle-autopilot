@@ -510,9 +510,9 @@ Recommended extraction order:
    and limit construction now lives in `autopilot_submit.py`; its default dependencies are resolved at call time so tests
    and extensions can patch the public submit boundary directly, leaving `autopilot.py`'s private `_attempt_submit` as a
    thin compatibility wrapper. Session-level submit construction now calls `autopilot_submit.attempt_submit_for_autopilot_run`
-   directly, so `SubmissionPhase` no longer imports the private wrapper. Next, continue shrinking the compatibility
-   wrapper surface by moving remaining tests/extensions to the public submit service where they no longer need the private
-   symbol.
+   directly, so `SubmissionPhase` no longer imports the private wrapper. Submit retry fingerprint tests now exercise the
+   public submit service directly; next, continue moving remaining submit tests/extensions there until the private symbol
+   can be removed.
 5. Runtime adapters: keep Kaggle CLI subprocess execution in adapter modules, and keep loop code dependent on typed result
    objects and shared `kaggle_cli_errors.py`, `kernel_status.py`, and `remote_kernel_state.py` helpers rather than raw
    CLI stdout/stderr parsing or ad hoc pending-run files. Kaggle notebook runner output discovery now delegates to
