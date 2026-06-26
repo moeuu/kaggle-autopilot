@@ -6,7 +6,6 @@ import json
 import sqlite3
 
 import kagglebot.knowledge as knowledge_mod
-import kagglebot.knowledge_init as knowledge_init_mod
 from kagglebot.knowledge import (
     build_dataset_profile,
     build_plan_and_initial_prompt,
@@ -95,8 +94,6 @@ def test_build_dataset_profile_samples_oversized_tables(tmp_path, monkeypatch) -
 def test_profile_max_table_bytes_env_uses_shared_number_parsing(monkeypatch) -> None:
     monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "nan")
     assert knowledge_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
-    assert knowledge_init_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
-    assert knowledge_init_mod.build_dataset_profile is knowledge_mod.build_dataset_profile
 
     monkeypatch.setenv("KAGGLEBOT_PROFILE_MAX_TABLE_BYTES", "0")
     assert knowledge_mod._profile_max_table_bytes() == 256 * 1024 * 1024  # noqa: SLF001
@@ -135,41 +132,6 @@ def test_build_dataset_profile_handles_json_list_features(tmp_path) -> None:
     )
 
     profile = build_dataset_profile(data_dir)
-
-    assert profile["status"] == "ok"
-    assert profile["file_extension_counts"] == {".json": 3}
-
-
-def test_legacy_build_dataset_profile_handles_json_list_features(tmp_path) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "train.json").write_text(
-        json.dumps(
-            [
-                {"id": "a", "grid": [[1, 2], [3, 4]], "target": 0},
-                {"id": "b", "grid": [[4, 3], [2, 1]], "target": 1},
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (data_dir / "test.json").write_text(
-        json.dumps(
-            [
-                {"id": "c", "grid": [[1, 1], [1, 1]]},
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (data_dir / "sample_submission.json").write_text(
-        json.dumps(
-            [
-                {"id": "c", "target": 0},
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    profile = knowledge_init_mod.build_dataset_profile(data_dir)
 
     assert profile["status"] == "ok"
     assert profile["file_extension_counts"] == {".json": 3}
@@ -264,7 +226,7 @@ def test_build_plan_and_initial_prompt_handles_unknown_train_dimensions(tmp_path
     assert "**Dataset**: train table unavailable; sample/test view: 2 rows × 2 columns" in prompt
 
 
-def test_legacy_initial_prompt_matches_current_winner_mode_directives() -> None:
+def test_initial_prompt_includes_current_winner_mode_directives() -> None:
     profile = {
         "task": "classification",
         "metric": "accuracy",
@@ -274,15 +236,7 @@ def test_legacy_initial_prompt_matches_current_winner_mode_directives() -> None:
         "tags": ["tabular", "classification"],
     }
 
-    current_prompt = knowledge_mod.build_plan_and_initial_prompt(
-        slug="demo",
-        rules_url="https://www.kaggle.com/competitions/demo/rules",
-        profile=profile,
-        taxonomy={},
-        similar_improvements=[],
-        self_improvement_context="Keep high-ceiling candidates.",
-    )
-    legacy_prompt = knowledge_init_mod.build_plan_and_initial_prompt(
+    prompt = knowledge_mod.build_plan_and_initial_prompt(
         slug="demo",
         rules_url="https://www.kaggle.com/competitions/demo/rules",
         profile=profile,
@@ -291,12 +245,11 @@ def test_legacy_initial_prompt_matches_current_winner_mode_directives() -> None:
         self_improvement_context="Keep high-ceiling candidates.",
     )
 
-    assert legacy_prompt == current_prompt
-    assert "## System Self-Improvement Directives" in legacy_prompt
-    assert "Keep high-ceiling candidates." in legacy_prompt
-    assert '"target_medal": "winner"' in legacy_prompt
-    assert '"target_rank_percentile": 0.001' in legacy_prompt
-    assert "time_budget_min" not in legacy_prompt
+    assert "## System Self-Improvement Directives" in prompt
+    assert "Keep high-ceiling candidates." in prompt
+    assert '"target_medal": "winner"' in prompt
+    assert '"target_rank_percentile": 0.001' in prompt
+    assert "time_budget_min" not in prompt
 
 
 def test_problem_type_insight_record_and_resolve(tmp_path) -> None:

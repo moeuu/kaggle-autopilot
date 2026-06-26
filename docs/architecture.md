@@ -540,8 +540,8 @@ Recommended extraction order:
    Dataset-profile-to-problem-type resolution also lives there, keeping orchestration code from directly owning profile
    parsing for knowledge lookup. Improvement orchestration calls these public helpers directly instead of preserving
    private problem-type knowledge wrappers in `autopilot.py`. Dataset-profile cardinality helpers now live in
-   `knowledge/profile_utils.py`. The legacy `knowledge_init.py` module is only a compatibility shim that re-exports
-   `kagglebot.knowledge`; do not add behavior back to that old mirror.
+   `knowledge/profile_utils.py`, and the old `knowledge_init.py` mirror has been removed; call `kagglebot.knowledge`
+   directly.
 8. Context artifacts: keep dataset-profile loading, evaluation-spec validation/override normalization, and capped CSV
    row-count helpers in `context_artifacts.py`; loop code should not open these context files directly.
 9. Verify execution/staging: keep verify command execution policy, repo-root default wiring, local/external artifact
