@@ -25,7 +25,7 @@ Decision rule:
 
 Before submission, autopilot applies:
 - rules acceptance check
-- file format validation against `sample_submission.csv` (with `submission_format.md` / `overview.md` fallback hints when sample is placeholder/header-only)
+- file format validation against the published sample submission file, such as `sample_submission.csv`, `.tsv`, `.jsonl`, `.parquet`, `.avro`, `.feather`, or compressed tabular variants like `.csv.zst` (with `submission_format.md` / `overview.md` fallback hints when sample is placeholder/header-only)
 - duplicate submission hash check
 - local submission cooldown/rate limit (`KAGGLEBOT_SUBMISSION_MIN_HOURS_BETWEEN`, default 5 minutes)
 - bounded Kaggle submit CLI timeout (`KAGGLEBOT_SUBMIT_TIMEOUT_SEC`, default 300s)

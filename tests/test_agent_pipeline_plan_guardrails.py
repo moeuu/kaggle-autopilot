@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kagglebot.paths import CompetitionPaths
 from kagglebot.plan_policy import validate_plan_payload, write_plan_payload
 
@@ -99,6 +101,54 @@ def test_write_plan_payload_enables_pretrained_when_rules_allow(tmp_path: Path) 
     payload["score_source"] = "cv"
     write_plan_payload(paths, payload)
     persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+    assert persisted["toggles"]["ALLOW_PRETRAINED_WEIGHTS"] is True
+
+
+@pytest.mark.parametrize(
+    "modality",
+    [
+        "point_cloud",
+        "array",
+        "medical_imaging",
+        "geospatial",
+        "bio",
+        "graph",
+        "signal",
+        "document",
+        "annotation",
+        "model_artifact",
+        "point-cloud-3D",
+    ],
+)
+def test_write_plan_payload_treats_asset_modalities_as_heavy(modality: str, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps(
+            {
+                "task": "regression",
+                "modality": modality,
+                "train_rows": 2000,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+
+    payload = _base_payload()
+    payload["score_source"] = "cv"
+    payload["cv_folds"] = 5
+    payload["evaluation_protocol"]["n_folds"] = 5
+    payload["eval_seeds"] = [42, 2024, 777]
+
+    write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["cv_folds"] == 3
+    assert persisted["evaluation_protocol"]["n_folds"] == 3
+    assert persisted["eval_seeds"] == [42]
+    assert persisted["evaluation_protocol"]["seeds"] == [42]
     assert persisted["toggles"]["ALLOW_PRETRAINED_WEIGHTS"] is True
 
 

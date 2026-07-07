@@ -35,14 +35,22 @@ from kagglebot.knowledge import (
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.self_improvement import load_self_improvement_context
-from kagglebot.solver.io import ensure_sample_submission
+from kagglebot.solver.io import ensure_sample_submission, materialize_sqlite_tables, read_table, write_table
 from kagglebot.submission_format import (
     extract_submission_section,
     load_submission_format_hint,
     parse_submission_format,
 )
+from kagglebot.submission_sample_discovery import (
+    TABULAR_TEXT_SUFFIXES,
+    is_tabular_data_path,
+    open_tabular_text,
+    sniff_tabular_text_delimiter,
+    tabular_suffix,
+)
+from kagglebot.table_columns import normalize_table_column_names
 from kagglebot.types import BootstrapMeta, PlanConfig, RulesInfo
-from kagglebot.validators import safe_extract_zip
+from kagglebot.validators import extract_data_archives
 
 
 def bootstrap_competition(
@@ -1582,20 +1590,22 @@ def _cache_sample_submission(paths: CompetitionPaths) -> None:
         if paths.sample_submission_path.exists() and not paths.sample_submission_head_path.exists():
             _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
         return
-    if candidate.suffix.lower() == ".csv":
-        copy_artifact_if_needed(source=candidate, destination=paths.sample_submission_path)
+    candidate_suffix = tabular_suffix(candidate)
+    destination = paths.context_sample_submission_path_for_suffix(candidate_suffix)
+    if tabular_suffix(destination) == candidate_suffix:
+        copy_artifact_if_needed(source=candidate, destination=destination)
     else:
         try:
             frame = _read_table(candidate, format_hint=format_hint)
         except Exception:
             return
-        frame.to_csv(paths.sample_submission_path, index=False)
-    _write_sample_head(paths.sample_submission_path, paths.sample_submission_head_path)
+        write_table(frame, destination)
+    _write_sample_head(destination, paths.context_sample_submission_head_path_for_suffix(tabular_suffix(destination)))
 
 
 def _mirror_sample_submission_to_data(paths: CompetitionPaths) -> None:
     source = paths.sample_submission_path
-    destination = paths.data_dir / "sample_submission.csv"
+    destination = paths.data_dir / f"sample_submission{tabular_suffix(source) or '.csv'}"
     if not source.exists():
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1609,31 +1619,26 @@ def _mirror_sample_submission_to_data(paths: CompetitionPaths) -> None:
 
 
 def _find_tabular_files(root: Path) -> list[Path]:
-    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
-    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
+    materialize_sqlite_tables(root)
+    return [p for p in root.rglob("*") if p.is_file() and is_tabular_data_path(p)]
 
 
 def _read_table(path: Path, *, format_hint=None):
-    try:
-        import pandas as pd
-    except Exception:  # pragma: no cover - optional dependency in tests
-        raise
-    suffix = path.suffix.lower()
-    if suffix == ".parquet":
-        return pd.read_parquet(path)
-    if suffix in {".json", ".jsonl"}:
-        try:
-            return pd.read_json(path, lines=True)
-        except ValueError:
-            return pd.read_json(path)
-    if suffix == ".tsv":
-        return _read_delimited_table(path, sep="\t", format_hint=format_hint)
-    if suffix == ".txt":
+    suffix = tabular_suffix(path)
+    if suffix not in TABULAR_TEXT_SUFFIXES:
+        return read_table(path)
+    if suffix.startswith(".tsv"):
+        return _read_delimited_table(path, sep=sniff_tabular_text_delimiter(path), format_hint=format_hint)
+    if suffix.startswith(".txt"):
         hint_sep = getattr(format_hint, "delimiter", None) if format_hint is not None else None
-        return _read_delimited_table(path, sep=hint_sep or "\t", format_hint=format_hint)
-    if suffix == ".csv":
-        return _read_delimited_table(path, sep=",", format_hint=format_hint)
-    return pd.read_csv(path)
+        return _read_delimited_table(
+            path,
+            sep=hint_sep or sniff_tabular_text_delimiter(path),
+            format_hint=format_hint,
+        )
+    if suffix.startswith(".csv"):
+        return _read_delimited_table(path, sep=sniff_tabular_text_delimiter(path), format_hint=format_hint)
+    return _read_delimited_table(path, sep=sniff_tabular_text_delimiter(path), format_hint=format_hint)
 
 
 def _read_delimited_table(path: Path, *, sep: str, format_hint=None):
@@ -1642,13 +1647,13 @@ def _read_delimited_table(path: Path, *, sep: str, format_hint=None):
     except Exception:  # pragma: no cover - optional dependency in tests
         raise
     try:
-        return pd.read_csv(path, sep=sep)
+        return _finalize_delimited_table_columns(pd.read_csv(path, sep=sep))
     except Exception:
         pass
     columns = getattr(format_hint, "columns", None) if format_hint is not None else None
     expected_cols = len(columns) if columns else _infer_column_count(path, sep)
     if expected_cols is None:
-        return pd.read_csv(path, sep=sep, engine="python", on_bad_lines="skip")
+        return _finalize_delimited_table_columns(pd.read_csv(path, sep=sep, engine="python", on_bad_lines="skip"))
     names = columns or [f"col{i}" for i in range(expected_cols)]
     filtered = _filter_delimited_text(path, sep=sep, expected_cols=expected_cols)
     if filtered is None:
@@ -1671,7 +1676,12 @@ def _read_delimited_table(path: Path, *, sep: str, format_hint=None):
         )
     if columns and not df.empty and list(df.iloc[0].astype(str)) == columns:
         df = df.iloc[1:].reset_index(drop=True)
-    return df
+    return _finalize_delimited_table_columns(df)
+
+
+def _finalize_delimited_table_columns(frame):
+    frame.columns = normalize_table_column_names(frame.columns)
+    return frame
 
 
 def _infer_column_count(path: Path, sep: str, max_lines: int = 200) -> int | None:
@@ -1679,7 +1689,7 @@ def _infer_column_count(path: Path, sep: str, max_lines: int = 200) -> int | Non
 
     counts: Counter[int] = Counter()
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with open_tabular_text(path) as handle:
             for line in handle:
                 if not line.strip():
                     continue
@@ -1696,7 +1706,7 @@ def _infer_column_count(path: Path, sep: str, max_lines: int = 200) -> int | Non
 def _filter_delimited_text(path: Path, *, sep: str, expected_cols: int, max_lines: int | None = None) -> str | None:
     lines: list[str] = []
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with open_tabular_text(path) as handle:
             for line in handle:
                 if not line.strip():
                     continue
@@ -1714,14 +1724,14 @@ def _filter_delimited_text(path: Path, *, sep: str, expected_cols: int, max_line
 
 def _write_sample_head(sample_path: Path, head_path: Path, rows: int = 5) -> None:
     try:
-        import pandas as pd
-    except Exception:  # pragma: no cover - optional dependency in tests
-        return
-    try:
-        sample = pd.read_csv(sample_path, nrows=rows)
+        sample = read_table(sample_path, nrows=rows)
     except Exception:
         return
-    head_path.write_text(sample.head(rows).to_csv(index=False), encoding="utf-8")
+    if tabular_suffix(head_path).startswith(".txt"):
+        head_path.parent.mkdir(parents=True, exist_ok=True)
+        sample.head(rows).to_csv(head_path, index=False)
+        return
+    write_table(sample.head(rows), head_path)
 
 
 def _write_knowledge_hints(
@@ -1750,5 +1760,4 @@ def _write_knowledge_hints(
 
 
 def _unzip_downloads(data_dir: Path) -> None:
-    for zip_path in data_dir.glob("*.zip"):
-        safe_extract_zip(zip_path, data_dir)
+    extract_data_archives(data_dir, overwrite=True)

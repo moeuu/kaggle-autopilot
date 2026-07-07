@@ -785,15 +785,24 @@ def _profile_has_temporal_signal(profile: dict[str, object]) -> bool:
     dtype_map_raw = profile.get("dtype_by_column")
     if not isinstance(dtype_map_raw, dict):
         return False
-    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
     for name, dtype in dtype_map_raw.items():
         column_name = str(name)
         dtype_name = str(dtype).lower()
         if "datetime" in dtype_name or "timedelta" in dtype_name:
             return True
-        if temporal_name.search(column_name):
+        if _column_name_has_temporal_token(column_name):
             return True
     return False
+
+
+def _column_name_has_temporal_token(name: str) -> bool:
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", name.lower()) if token]
+    if any(
+        token in {"date", "datetime", "timestamp", "time", "day", "daynum", "week", "month", "year"} for token in tokens
+    ):
+        return True
+    compact = "".join(tokens)
+    return compact in {"dateblocknum", "daynum", "weekofyear"}
 
 
 def _normalize_metric_name(name: str) -> str:

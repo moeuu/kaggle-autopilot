@@ -49,6 +49,15 @@ def stage_local_kernel_context_profile(*, base_dir: Path, slug: str, run_dir: Pa
     copy_artifact_if_needed(source=source_path, destination=target_path)
 
 
+def stage_local_kernel_reference_inputs(*, base_dir: Path, slug: str, run_dir: Path) -> None:
+    """Stage cached public reference inputs for local kernels that resolve context from run_dir."""
+    source_dir = (base_dir / slug / "context" / "reference_inputs").resolve()
+    if not source_dir.exists():
+        return
+
+    stage_local_data_alias(source_dir=source_dir, target_dir=run_dir / "context" / "reference_inputs")
+
+
 def stage_local_data_alias(*, source_dir: Path, target_dir: Path) -> None:
     """Create a symlink/copy alias from target_dir to source_dir."""
     target_dir.parent.mkdir(parents=True, exist_ok=True)

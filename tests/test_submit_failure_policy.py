@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from kagglebot.submit_failure_policy import (
     SUBMIT_FAILURE_REPAIR_TARGET_MANUAL,
     SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM,
@@ -47,6 +49,327 @@ def test_classify_submit_failure_repair_detects_scoring_file_issue() -> None:
     assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
     assert decision.repairable is True
     assert decision.manual_next_step == ""
+
+
+def test_classify_submit_failure_repair_detects_compressed_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.jsonl.gz has invalid JSON lines.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_zstd_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.csv.zst has invalid columns.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_archive_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.tar.gz is missing required files.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_external_archive_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.rar is missing required files.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_excel_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.xlsx has invalid workbook contents.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+@pytest.mark.parametrize("suffix", [".tar.xz", ".tar.zst"])
+def test_classify_submit_failure_repair_detects_compressed_tar_submission_artifact_issue(suffix: str) -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail=f"Kaggle scoring error: submission{suffix} is missing required files.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_plain_tar_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.tar is missing required files.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_array_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.npy has an invalid output shape.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_generic_array_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: predictions.npy has an invalid output shape.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_generic_model_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: results.onnx failed model artifact validation.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_compound_model_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.safetensors.index.json failed model artifact validation.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_medical_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.svs is not a valid whole-slide image.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_compound_wsi_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.ome.tif is not a valid tiled image.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_microscopy_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.czi could not be parsed as a microscopy image.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "submission.avif",
+        "submission.heic",
+        "submission.heif",
+        "results.aiff",
+        "submission.opus",
+        "submission.m4v",
+        "predictions.wmv",
+    ],
+)
+def test_classify_submit_failure_repair_detects_modern_media_submission_artifact_issue(filename: str) -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail=f"Kaggle scoring error: {filename} could not be parsed.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_document_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.pdf could not be parsed.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_geospatial_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.geojson has invalid geometry.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_bio_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.pdb has invalid atom coordinates.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_graph_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.graphml has invalid graph structure.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_point_cloud_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.e57 has invalid point cloud coordinates.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_scientific_array_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.nc has invalid NetCDF dimensions.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_array_store_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.h5ad has invalid AnnData contents.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_model_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.tflite failed model artifact validation.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_detects_compressed_pickle_submission_artifact_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Kaggle scoring error: submission.pkl.zst could not be decoded.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "submission.nrrd.zst",
+        "submission.dicom.bz2",
+        "submission.fastq.bz2",
+        "results.ply.gz",
+        "predictions.graphml.gz",
+        "answers.geojson.zst",
+    ],
+)
+def test_classify_submit_failure_repair_detects_registry_backed_compound_artifact_issue(filename: str) -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail=f"Kaggle scoring error: {filename} could not be parsed.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_does_not_treat_sample_only_detail_as_file_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Observed sample_submission.csv.gz while inspecting input data.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM
+    assert decision.repairable is True
+
+
+def test_classify_submit_failure_repair_does_not_treat_input_generic_prediction_as_file_issue() -> None:
+    decision = classify_submit_failure_repair(
+        reason="submission_poll_status_error",
+        error_kind="validation",
+        detail="Observed train_predictions.npy while inspecting input data.",
+    )
+
+    assert decision.repair_target == SUBMIT_FAILURE_REPAIR_TARGET_PLATFORM
+    assert decision.repairable is True
 
 
 def test_classify_submit_failure_repair_routes_notebook_mode_errors() -> None:

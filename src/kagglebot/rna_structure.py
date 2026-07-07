@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-_TABULAR_SUFFIXES = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
+from kagglebot.solver.io import read_table, write_table
+from kagglebot.submission_sample_discovery import is_tabular_data_path, sample_candidate_key, sample_name_score
+
 _COORD_COL_RE = re.compile(r"^(?P<axis>[xyz])_(?P<copy>\d+)$", re.IGNORECASE)
 
 
@@ -68,9 +70,7 @@ def find_rna_structure_files(data_dir: Path) -> RnaStructureFiles | None:
     if not data_dir.exists():
         return None
 
-    tabular_files = [
-        path for path in data_dir.rglob("*") if path.is_file() and path.suffix.lower() in _TABULAR_SUFFIXES
-    ]
+    tabular_files = [path for path in data_dir.rglob("*") if path.is_file() and is_tabular_data_path(path)]
     if not tabular_files:
         return None
 
@@ -227,6 +227,8 @@ def write_rna_structure_submission(
 
     coordinate_columns = [col for triplet in triplets for col in (triplet.x_col, triplet.y_col, triplet.z_col)]
     submission = sample_submission.copy()
+    for column in coordinate_columns:
+        submission[column] = pd.to_numeric(submission[column], errors="coerce").astype(float)
     default_prediction = _default_coordinate_prediction(coordinate_columns)
 
     for index, row in submission.iterrows():
@@ -241,8 +243,7 @@ def write_rna_structure_submission(
             submission.at[index, column] = value
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    submission.to_csv(output_path, index=False)
-    return output_path
+    return write_table(submission, output_path)
 
 
 def evaluate_coordinate_predictions(
@@ -350,45 +351,18 @@ def _normalize_coordinate_row(values: np.ndarray | list[float], *, coordinate_co
 
 
 def _read_table_head(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".parquet":
-        return pd.read_parquet(path).head(5)
-    if suffix in {".json", ".jsonl"}:
-        try:
-            return pd.read_json(path, lines=True, nrows=5)
-        except ValueError:
-            return pd.read_json(path).head(5)
-    if suffix in {".tsv", ".txt"}:
-        return pd.read_csv(path, sep="\t", nrows=5)
-    return pd.read_csv(path, nrows=5)
+    return read_table(path, nrows=5)
 
 
 def _read_table(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".parquet":
-        return pd.read_parquet(path)
-    if suffix in {".json", ".jsonl"}:
-        try:
-            return pd.read_json(path, lines=True)
-        except ValueError:
-            return pd.read_json(path)
-    if suffix in {".tsv", ".txt"}:
-        return pd.read_csv(path, sep="\t")
-    return pd.read_csv(path)
+    return read_table(path)
 
 
 def _pick_best_sample_submission(paths: list[Path]) -> Path | None:
-    candidates = sorted(paths, key=_sample_priority_key)
-    return candidates[0] if candidates else None
-
-
-def _sample_priority_key(path: Path) -> tuple[int, str]:
-    lowered = path.name.lower()
-    if "sample_submission" in lowered or "samplesubmission" in lowered.replace("_", ""):
-        return (0, lowered)
-    if "sample" in lowered and "submission" in lowered:
-        return (1, lowered)
-    return (2, lowered)
+    candidates = [path for path in paths if sample_name_score(path) > 0]
+    if not candidates:
+        return None
+    return max(candidates, key=sample_candidate_key)
 
 
 def _pick_best_path(paths: list[Path], *, include_tokens: tuple[str, ...]) -> Path | None:

@@ -21,9 +21,35 @@ _LOCAL_KERNEL_LOG_NAMES = (
     "local_kernel_stderr_oom_retry.log",
 )
 
+KERNEL_CONTRACTS_BY_SLUG_PREFIX = {
+    _BVS_KERNEL_CONTRACT_SLUG_PREFIX: "bvs_timm_size_ensemble",
+}
+BVS_KERNEL_CONTRACT_NAME = "bvs_timm_size_ensemble"
+
+
+def normalize_kernel_contract_name(value: object) -> str | None:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "bvs": BVS_KERNEL_CONTRACT_NAME,
+        "bvs_kernel_contract": BVS_KERNEL_CONTRACT_NAME,
+        "bvs_timm_size_ensemble": BVS_KERNEL_CONTRACT_NAME,
+    }
+    return aliases.get(normalized)
+
 
 def requires_bvs_kernel_contract(slug: str) -> bool:
-    return slug.strip().lower().startswith(_BVS_KERNEL_CONTRACT_SLUG_PREFIX)
+    return resolve_kernel_contract(slug=slug) == BVS_KERNEL_CONTRACT_NAME
+
+
+def resolve_kernel_contract(*, slug: str, policy_contract: object | None = None) -> str | None:
+    policy_name = normalize_kernel_contract_name(policy_contract)
+    if policy_name is not None:
+        return policy_name
+    normalized_slug = str(slug or "").strip().lower()
+    for prefix, contract_name in KERNEL_CONTRACTS_BY_SLUG_PREFIX.items():
+        if normalized_slug.startswith(prefix):
+            return contract_name
+    return None
 
 
 def collect_local_kernel_log_text(logs_dir: Path) -> str:
@@ -57,9 +83,13 @@ def enforce_competition_kernel_contract(
     slug: str,
     logs_dir: Path,
     metrics_path: Path | None,
+    policy_contract: object | None = None,
 ) -> None:
     """Enforce competition-specific quality contracts to prevent silent regressions."""
-    if not requires_bvs_kernel_contract(slug):
+    contract = resolve_kernel_contract(slug=slug, policy_contract=policy_contract)
+    if contract is None:
+        return
+    if contract != BVS_KERNEL_CONTRACT_NAME:
         return
 
     errors: list[str] = []

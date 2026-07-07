@@ -41,9 +41,34 @@ def metrics_equivalent(left: str | None, right: str | None) -> bool:
 
 def infer_metric_direction_for_mismatch(metric: str, fallback_direction: str) -> tuple[str, bool]:
     metric_name = canonical_metric(metric)
-    if metric_name in {"rmse", "rmsle", "mae", "mape", "mse", "logloss"}:
+    if metric_name in {
+        "rmse",
+        "rmsle",
+        "mae",
+        "mape",
+        "mse",
+        "logloss",
+        "mcrmse",
+        "smape",
+        "pinball_loss",
+        "interval_score",
+    }:
         return "minimize", True
-    if metric_name in {"auc", "accuracy", "f1", "precision", "recall", "average_precision", "r2", "r_squared"}:
+    if metric_name in {
+        "auc",
+        "accuracy",
+        "f1",
+        "precision",
+        "recall",
+        "average_precision",
+        "r2",
+        "r_squared",
+        "ndcg",
+        "concordance_index",
+        "pearson",
+        "spearman",
+        "quadratic_weighted_kappa",
+    }:
         return "maximize", True
     metric_lower = metric.lower()
     if any(key in metric_lower for key in ["loss", "error"]):

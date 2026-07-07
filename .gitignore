@@ -63,6 +63,7 @@ kaggle.json
 .coverage
 .coverage.*
 htmlcov/
+unsloth_compiled_cache/
 
 # Type checking
 .pytype/

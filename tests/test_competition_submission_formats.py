@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from kagglebot.competition_submission_formats import (
     CompetitionListing,
     CrawlRecord,
@@ -119,6 +121,618 @@ def test_crawl_competition_submission_format_parses_csv_submission() -> None:
     assert record.detected_columns == ["PassengerId", "Survived"]
 
 
+def test_crawl_competition_submission_format_parses_zstd_csv_submission() -> None:
+    listing = CompetitionListing(
+        slug="demo-zstd",
+        title="Demo Zstd",
+        url="https://www.kaggle.com/competitions/demo-zstd",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="LogLoss",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission File Format</h2>
+      <p>Upload <code>submission.csv.zst</code> with columns id,target.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/demo-zstd/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [".csv.zst"]
+
+
+def test_crawl_competition_submission_format_parses_feather_submission() -> None:
+    listing = CompetitionListing(
+        slug="demo-feather",
+        title="Demo Feather",
+        url="https://www.kaggle.com/competitions/demo-feather",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="RMSE",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission File Format</h2>
+      <p>Upload <code>submission.feather</code> with columns id,target.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/demo-feather/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [".feather"]
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        (".jsonl", ".jsonl"),
+        (".jsonl.zst", ".jsonl.zst"),
+        (".jsonlines", ".jsonlines"),
+        (".jsonlines.zst", ".jsonlines.zst"),
+        (".ndjson", ".ndjson"),
+    ],
+)
+def test_crawl_competition_submission_format_classifies_json_lines_submission_as_tabular(
+    suffix: str,
+    expected: str,
+) -> None:
+    listing = CompetitionListing(
+        slug="demo-json-lines",
+        title="Demo JSON Lines",
+        url="https://www.kaggle.com/competitions/demo-json-lines",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="LogLoss",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission File Format</h2>
+      <p>Upload <code>submission{suffix}</code> for scoring.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/demo-json-lines/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{expected} file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [expected]
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("Upload a gzip-compressed NDJSON file for scoring.", ".ndjson.gz"),
+        ("Upload a bzip2-compressed NDJSON file for scoring.", ".ndjson.bz2"),
+        ("Upload an xz-compressed JSONLines file for scoring.", ".jsonlines.xz"),
+        ("Upload a zstd-compressed JSON Lines file for scoring.", ".jsonl.zst"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_compressed_json_lines_keyword(
+    description: str,
+    expected: str,
+) -> None:
+    listing = CompetitionListing(
+        slug="demo-compressed-json-lines",
+        title="Demo Compressed JSON Lines",
+        url="https://www.kaggle.com/competitions/demo-compressed-json-lines",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="LogLoss",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission File Format</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher(
+            {"https://www.kaggle.com/competitions/demo-compressed-json-lines/overview": overview_html}
+        ),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{expected} file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [expected]
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("Upload a gzip-compressed YAML file for scoring.", ".yaml.gz"),
+        ("Upload a zstd-compressed XML file for scoring.", ".xml.zst"),
+        ("Upload a bzip2-compressed HTML file with columns id,target for scoring.", ".html.bz2"),
+        ("Upload an xz-compressed PSV file for scoring.", ".psv.xz"),
+        ("Upload a zstd-compressed TAB file for scoring.", ".tab.zst"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_compressed_structured_tabular_keyword(
+    description: str,
+    expected: str,
+) -> None:
+    listing = CompetitionListing(
+        slug="demo-compressed-structured-tabular",
+        title="Demo Compressed Structured Tabular",
+        url="https://www.kaggle.com/competitions/demo-compressed-structured-tabular",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="LogLoss",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission File Format</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher(
+            {"https://www.kaggle.com/competitions/demo-compressed-structured-tabular/overview": overview_html}
+        ),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{expected} file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [expected]
+
+
+@pytest.mark.parametrize(
+    ("description", "suffix"),
+    [
+        ("Participants must upload a NIfTI file for each case for scoring.", ".nii.gz"),
+        ("Participants must upload a file named submission.svs for scoring.", ".svs"),
+        ("Participants must upload a file named submission.ome.tif for scoring.", ".ome.tif"),
+        ("Participants must upload a JPEG XL image file for scoring.", ".jxl"),
+        ("Participants must upload a HEIC image file for scoring.", ".heic"),
+        ("Participants must upload an OpenEXR image file for scoring.", ".exr"),
+        ("Participants must upload an EPUB document for scoring.", ".epub"),
+        ("Participants must upload a PowerPoint file for scoring.", ".pptx"),
+        ("Participants must upload a Scalable Vector Graphics file for scoring.", ".svg"),
+        ("Participants must upload a gzip-compressed SVG file for scoring.", ".svg.gz"),
+        ("Participants must upload a MIDI audio file for scoring.", ".mid"),
+        ("Participants must upload an OPUS audio file for scoring.", ".opus"),
+        ("Participants must upload an MPEG video file for scoring.", ".mpg"),
+        ("Participants must upload an M4V video file for scoring.", ".m4v"),
+        ("Participants must upload an E57 point cloud file for scoring.", ".e57"),
+        ("Participants must upload an OFF mesh file for scoring.", ".off"),
+        ("Participants must upload a MATLAB file for scoring.", ".mat"),
+        ("Participants must upload a SMILES file for scoring.", ".smiles"),
+        ("Participants must upload an InChI file for scoring.", ".inchi"),
+        ("Participants must upload COCO annotations for scoring.", ".json"),
+        ("Participants must upload COCO keypoints JSON for scoring.", ".json"),
+        ("Participants must upload YOLO labels for scoring.", ".txt"),
+        ("Participants must upload YOLOv5 labels for scoring.", ".txt"),
+        ("Participants must upload a SQLite database for scoring.", ".sqlite"),
+        ("Participants must upload a SQLite3 database for scoring.", ".sqlite3"),
+        ("Participants must upload a European Data Format signal file for scoring.", ".edf"),
+        ("Participants must upload a WFDB header file for scoring.", ".hea"),
+        ("Participants must upload a Neurodata Without Borders file for scoring.", ".nwb"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_non_tabular_keyword_without_heading(
+    description: str,
+    suffix: str,
+) -> None:
+    listing = CompetitionListing(
+        slug="medical-volume-demo",
+        title="Medical Volume Demo",
+        url="https://www.kaggle.com/competitions/medical-volume-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Dice",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/medical-volume-demo/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{suffix} single file"
+    assert record.artifact_class == "single_file"
+    assert record.detected_extensions == [suffix]
+
+
+@pytest.mark.parametrize(
+    ("description", "suffix"),
+    [
+        ("Participants must upload an ORC file for scoring.", ".orc"),
+        ("Participants must upload an HDF5 file for scoring.", ".hdf5"),
+        ("Participants must upload Pascal VOC annotations for scoring.", ".xml"),
+        ("Participants must upload Pascal VOC XML files for scoring.", ".xml"),
+        ("Participants must upload Open Images annotations for scoring.", ".csv"),
+        ("Participants must upload Open Images CSV files for scoring.", ".csv"),
+        ("Participants must upload RLE masks for scoring.", ".csv"),
+        ("Participants must upload run length encoding masks for scoring.", ".csv"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_tabular_keyword_without_heading(
+    description: str,
+    suffix: str,
+) -> None:
+    listing = CompetitionListing(
+        slug="structured-table-demo",
+        title="Structured Table Demo",
+        url="https://www.kaggle.com/competitions/structured-table-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="LogLoss",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/structured-table-demo/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{suffix} file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [suffix]
+
+
+def test_crawl_competition_submission_format_detects_non_tabular_direct_extension_without_heading() -> None:
+    listing = CompetitionListing(
+        slug="model-artifact-demo",
+        title="Model Artifact Demo",
+        url="https://www.kaggle.com/competitions/model-artifact-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <p>The final submission should upload <code>submission.onnx</code> for scoring.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/model-artifact-demo/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == ".onnx single file"
+    assert record.artifact_class == "single_file"
+    assert record.detected_extensions == [".onnx"]
+
+
+def test_crawl_competition_submission_format_detects_single_file_artifact_direct_extensions() -> None:
+    suffixes = [
+        ".safetensors",
+        ".xgb",
+        ".cbm",
+        ".gguf",
+        ".msgpack",
+        ".tflite",
+        ".pb",
+        ".joblib",
+        ".pdf",
+        ".md.gz",
+        ".vtt.zst",
+        ".geojson",
+        ".gpkg",
+        ".pdb",
+        ".mmcif",
+        ".sdf",
+        ".fasta",
+        ".graphml",
+        ".gexf",
+        ".edgelist",
+        ".nc",
+        ".grib2",
+        ".fits",
+        ".h5ad",
+        ".loom",
+        ".zarr",
+        ".czi",
+        ".mrxs",
+        ".qptiff",
+        ".avif",
+        ".heic",
+        ".heif",
+        ".opus",
+        ".aiff",
+        ".m4v",
+        ".wmv",
+        ".e57",
+        ".xyz",
+        ".pts",
+        ".ptx",
+        ".off",
+    ]
+    for suffix in suffixes:
+        slug = f"{suffix.lstrip('.')}-artifact-demo"
+        listing = CompetitionListing(
+            slug=slug,
+            title="Model Artifact Demo",
+            url=f"https://www.kaggle.com/competitions/{slug}",
+            description="",
+            category="Research",
+            reward="",
+            evaluation_metric="Runtime",
+            team_count=100,
+            max_daily_submissions=5,
+            is_kernels_submissions_only=False,
+            submissions_disabled=False,
+            source="test",
+        )
+        overview_html = f"""
+        <html><body>
+          <p>The final submission should upload <code>submission{suffix}</code> for scoring.</p>
+        </body></html>
+        """
+
+        record = crawl_competition_submission_format(
+            listing=listing,
+            fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+            fetch_rules_page=False,
+        )
+
+        assert record.submission_mode == "direct_file_upload"
+        assert record.required_artifact == f"{suffix} single file"
+        assert record.artifact_class == "single_file"
+        assert record.detected_extensions == [suffix]
+
+
+@pytest.mark.parametrize(
+    ("description", "suffix"),
+    [
+        ("Participants must upload a gzip-compressed FASTA sequence file for scoring.", ".fasta.gz"),
+        ("Participants must upload a bzip2-compressed GraphML file for scoring.", ".graphml.bz2"),
+        ("Participants must upload a zstd-compressed PLY point cloud file for scoring.", ".ply.zst"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_compressed_text_like_artifact_prose(
+    description: str,
+    suffix: str,
+) -> None:
+    slug = "compressed-text-asset-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="Compressed Text Asset Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{suffix} single file"
+    assert record.artifact_class == "single_file"
+    assert record.detected_extensions == [suffix]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Participants must upload a NumPy archive file for scoring.",
+        "Participants must upload a compressed NumPy array for scoring.",
+        "Participants must upload a SciPy sparse matrix archive for scoring.",
+    ],
+)
+def test_crawl_competition_submission_format_detects_numpy_archive_prose(
+    description: str,
+) -> None:
+    slug = "numpy-archive-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="NumPy Archive Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == ".npz single file"
+    assert record.artifact_class == "single_file"
+    assert record.detected_extensions == [".npz"]
+
+
+@pytest.mark.parametrize(
+    ("description", "suffix"),
+    [
+        ("Participants must upload an XGBoost model file for scoring.", ".xgb"),
+        ("Participants must upload a CatBoost model file for scoring.", ".cbm"),
+        ("Participants must upload a pickle model file for scoring.", ".pkl"),
+        ("Participants must upload a Python script file for scoring.", ".py"),
+        ("Participants must upload an R script file for scoring.", ".r"),
+        ("Participants must upload a Julia script file for scoring.", ".jl"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_framework_model_artifact_prose(
+    description: str,
+    suffix: str,
+) -> None:
+    slug = "framework-model-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="Framework Model Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == f"{suffix} single file"
+    assert record.artifact_class == "single_file"
+    assert record.detected_extensions == [suffix]
+
+
+def test_crawl_competition_submission_format_detects_hdf5_model_artifact_prose() -> None:
+    slug = "hdf5-model-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="HDF5 Model Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>Participants must upload an HDF5 model file for scoring.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == ".h5 single file"
+    assert record.artifact_class == "single_file"
+    assert record.detected_extensions == [".h5", ".hdf5"]
+
+
 def test_crawl_competition_submission_format_filters_topology_json_false_positive() -> None:
     listing = CompetitionListing(
         slug="quantum-quest",
@@ -160,6 +774,413 @@ def test_crawl_competition_submission_format_filters_topology_json_false_positiv
     assert ".json" not in record.detected_extensions
 
 
+def test_crawl_competition_submission_format_filters_json_metadata_false_positive() -> None:
+    listing = CompetitionListing(
+        slug="metadata-bundle",
+        title="Metadata Bundle",
+        url="https://www.kaggle.com/competitions/metadata-bundle",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>
+        Include JSON metadata in your methods note, but upload a ZIP archive
+        containing model weights and the inference script.
+      </p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/metadata-bundle/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "bundle"
+    assert record.required_artifact == "ZIP bundle containing model assets and inference code"
+    assert record.detected_extensions == [".zip"]
+
+
+@pytest.mark.parametrize(
+    ("description", "suffix"),
+    [
+        ("Upload a safetensors index JSON file for scoring.", ".safetensors.index.json"),
+        ("Upload a PyTorch model bin index JSON file for scoring.", ".bin.index.json"),
+        ("Upload a TensorFlow checkpoint index file for scoring.", ".ckpt.index"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_model_index_suffix_from_prose(
+    description: str,
+    suffix: str,
+) -> None:
+    slug = "model-index-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="Model Index Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.detected_extensions == [suffix]
+    assert record.required_artifact == f"{suffix} single file"
+    assert record.artifact_class == "single_file"
+
+
+@pytest.mark.parametrize(
+    ("description", "suffix"),
+    [
+        ("Upload a TensorFlow SavedModel directory for scoring.", ".savedmodel"),
+        ("Upload a Hugging Face model directory for scoring.", ".hfmodel"),
+        ("Upload an MLflow model directory for scoring.", ".mlflowmodel"),
+        ("Upload a Core ML package for scoring.", ".mlpackage"),
+        ("Upload a compiled Core ML model package for scoring.", ".mlmodelc"),
+        ("Upload a TensorFlow checkpoint directory for scoring.", ".tfcheckpoint"),
+    ],
+)
+def test_crawl_competition_submission_format_detects_model_directory_suffix_from_prose(
+    description: str,
+    suffix: str,
+) -> None:
+    slug = "model-directory-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="Model Directory Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Runtime",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>{description}</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.detected_extensions == [suffix]
+    assert record.required_artifact == f"{suffix} single file"
+    assert record.artifact_class == "single_file"
+
+
+@pytest.mark.parametrize("suffix", [".keras", ".mlmodelc", ".onnx", ".tflite"])
+def test_crawl_competition_submission_format_describes_model_suffix_archive_as_bundle(suffix: str) -> None:
+    listing = CompetitionListing(
+        slug="model-bundle-demo",
+        title="Model Bundle Demo",
+        url="https://www.kaggle.com/competitions/model-bundle-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = f"""
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>Submit a ZIP archive containing a trained model ({suffix}) and the inference script.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/model-bundle-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "bundle"
+    assert record.required_artifact == "ZIP bundle containing model assets and inference code"
+
+
+def test_crawl_competition_submission_format_describes_tar_model_bundle() -> None:
+    listing = CompetitionListing(
+        slug="tar-bundle-demo",
+        title="Tar Bundle Demo",
+        url="https://www.kaggle.com/competitions/tar-bundle-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>Submit a submission.tar.xz archive containing model weights (.pt) and the inference script.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/tar-bundle-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "bundle"
+    assert record.artifact_container == "tar"
+    assert record.required_artifact == "TAR bundle containing model assets and inference code"
+    assert record.detected_extensions == [".tar.xz"]
+
+
+def test_crawl_competition_submission_format_describes_tar_zst_model_bundle() -> None:
+    listing = CompetitionListing(
+        slug="tar-zst-bundle-demo",
+        title="Tar Zstd Bundle Demo",
+        url="https://www.kaggle.com/competitions/tar-zst-bundle-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>Submit a submission.tar.zst archive containing model weights (.pt) and the inference script.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/tar-zst-bundle-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "bundle"
+    assert record.artifact_container == "tar"
+    assert record.required_artifact == "TAR bundle containing model assets and inference code"
+    assert record.detected_extensions == [".tar.zst"]
+
+
+def test_crawl_competition_submission_format_describes_zstd_tarball_model_bundle() -> None:
+    listing = CompetitionListing(
+        slug="zstd-tarball-bundle-demo",
+        title="Zstd Tarball Bundle Demo",
+        url="https://www.kaggle.com/competitions/zstd-tarball-bundle-demo",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>Submit a zstd-compressed tarball containing model weights (.pt) and the inference script.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/zstd-tarball-bundle-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.artifact_class == "bundle"
+    assert record.artifact_container == "tar"
+    assert record.required_artifact == "TAR bundle containing model assets and inference code"
+    assert record.detected_extensions == [".tar.zst"]
+
+
+def test_crawl_competition_submission_format_parses_excel_submission() -> None:
+    listing = CompetitionListing(
+        slug="spreadsheet-demo",
+        title="Spreadsheet Demo",
+        url="https://www.kaggle.com/competitions/spreadsheet-demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>You must upload `submission.xlsx` with columns id,target.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/spreadsheet-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == ".xlsx file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [".xlsx"]
+
+
+def test_crawl_competition_submission_format_detects_compressed_pickle_tabular_submission() -> None:
+    listing = CompetitionListing(
+        slug="pickle-demo",
+        title="Pickle Demo",
+        url="https://www.kaggle.com/competitions/pickle-demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>You must upload `submission.pkl.zst` for scoring.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/pickle-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.required_artifact == ".pkl.zst file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [".pkl.zst"]
+
+
+def test_crawl_competition_submission_format_detects_pickle_xz_extension_from_text() -> None:
+    listing = CompetitionListing(
+        slug="pickle-xz-demo",
+        title="Pickle XZ Demo",
+        url="https://www.kaggle.com/competitions/pickle-xz-demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>The required file is named submission.pickle.xz.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/pickle-xz-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.required_artifact == ".pickle.xz file"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [".pickle.xz"]
+
+
 def test_crawl_competition_submission_format_detects_multi_file_zip() -> None:
     listing = CompetitionListing(
         slug="vesuvius-demo",
@@ -196,6 +1217,123 @@ def test_crawl_competition_submission_format_detects_multi_file_zip() -> None:
     assert record.artifact_class == "multi_file_zip"
     assert record.artifact_container == "zip"
     assert record.required_artifact == "ZIP archive containing multiple prediction files"
+
+
+def test_crawl_competition_submission_format_detects_tar_archive() -> None:
+    listing = CompetitionListing(
+        slug="archive-demo",
+        title="Archive Demo",
+        url="https://www.kaggle.com/competitions/archive-demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>You must upload `submission.tar.xz` for scoring.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/archive-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.required_artifact == "TAR archive"
+    assert record.artifact_class == "single_file"
+    assert record.artifact_container == "tar"
+    assert record.detected_extensions == [".tar.xz"]
+
+
+def test_crawl_competition_submission_format_detects_plain_tar_archive() -> None:
+    listing = CompetitionListing(
+        slug="archive-demo",
+        title="Archive Demo",
+        url="https://www.kaggle.com/competitions/archive-demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>You must upload `submission.tar` for scoring.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/archive-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.required_artifact == "TAR archive"
+    assert record.artifact_class == "single_file"
+    assert record.artifact_container == "tar"
+    assert record.detected_extensions == [".tar"]
+
+
+def test_crawl_competition_submission_format_detects_7z_archive() -> None:
+    listing = CompetitionListing(
+        slug="archive-demo",
+        title="Archive Demo",
+        url="https://www.kaggle.com/competitions/archive-demo",
+        description="",
+        category="Featured",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Format:</h2>
+      <p>You must upload `submission.7z` for scoring.</p>
+    </body></html>
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://www.kaggle.com/competitions/archive-demo/overview": overview_html,
+        }
+    )
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=fetcher,  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.required_artifact == "7Z archive"
+    assert record.artifact_class == "single_file"
+    assert record.artifact_container == "7z"
+    assert record.detected_extensions == [".7z"]
 
 
 def test_find_submission_text_block_returns_empty_without_submission_markers() -> None:

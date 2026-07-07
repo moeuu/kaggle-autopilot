@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from kagglebot.training.vision_yolo import derive_right_place, format_prediction_string, infer_head_shemagh_classes
+from kagglebot.training.vision_yolo import (
+    derive_right_place,
+    format_prediction_string,
+    infer_head_shemagh_classes,
+    infer_pairwise_object_classes,
+)
 
 
 def test_format_prediction_string_empty() -> None:
@@ -89,3 +94,32 @@ def test_infer_head_shemagh_classes_prefers_smaller_box_for_head(tmp_path) -> No
     assert head_cls == 0
     assert shemagh_cls == 1
     assert "class_stats" in details
+
+
+def test_infer_pairwise_object_classes_uses_generic_roles(tmp_path) -> None:
+    labels_dir = tmp_path / "labels" / "train"
+    labels_dir.mkdir(parents=True)
+
+    (labels_dir / "a.txt").write_text("7 0.5 0.5 0.2 0.2\n3 0.5 0.5 0.7 0.6\n", encoding="utf-8")
+    (labels_dir / "b.txt").write_text("7 0.4 0.4 0.18 0.18\n3 0.6 0.6 0.65 0.55\n", encoding="utf-8")
+
+    inferred = infer_pairwise_object_classes(labels_dir, primary_role="anchor", secondary_role="container")
+
+    assert inferred.primary_cls == 7
+    assert inferred.secondary_cls == 3
+    assert inferred.details["roles"] == {"primary": "anchor", "secondary": "container"}
+    assert inferred.details["selection"] == "smallest_median_area_vs_largest_other_median_area"
+
+
+def test_infer_pairwise_object_classes_reads_nested_label_files(tmp_path) -> None:
+    labels_dir = tmp_path / "labels" / "train"
+    nested = labels_dir / "fold_a"
+    nested.mkdir(parents=True)
+    (nested / "a.txt").write_text("7 0.5 0.5 0.2 0.2\n3 0.5 0.5 0.7 0.6\n", encoding="utf-8")
+    (nested / "b.txt").write_text("7 0.4 0.4 0.18 0.18\n3 0.6 0.6 0.65 0.55\n", encoding="utf-8")
+
+    inferred = infer_pairwise_object_classes(labels_dir, primary_role="anchor", secondary_role="container")
+
+    assert inferred.primary_cls == 7
+    assert inferred.secondary_cls == 3
+    assert inferred.details["class_stats"][7]["count"] == 2

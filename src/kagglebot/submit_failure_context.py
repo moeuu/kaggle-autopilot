@@ -657,7 +657,7 @@ def build_submit_failure_improvement_context(
             [
                 "This competition is notebook-only and scored on hidden/full test in Kaggle runtime.",
                 "Do not rely on an embedded local submission artifact for submit.",
-                "Kernel must write `/kaggle/working/submission.csv` during notebook execution.",
+                "Kernel must write a supported submission artifact under `/kaggle/working/` during notebook execution.",
             ]
         )
     return notes, "Previous iteration failed Kaggle submission contract; repair submit format before further tuning."

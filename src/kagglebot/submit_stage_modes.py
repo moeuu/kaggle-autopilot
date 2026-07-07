@@ -98,7 +98,7 @@ def resolve_initial_submit_stage_runtime_state(
     submission_path: Path,
     resolve_notebook_submit_artifact_mode: Callable[..., str],
     decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
-    count_csv_data_rows: Callable[[Path], int | None],
+    count_tabular_data_rows: Callable[[Path], int | None],
     on_message: Callable[[str], object],
 ) -> SubmitStageRuntimeState:
     requested_notebook_submit = normalize_submit_mode(submit_mode, default="file") == "notebook"
@@ -126,7 +126,7 @@ def resolve_initial_submit_stage_runtime_state(
                 sample_submission_path=sample_submission_path,
                 fallback_sample_submission_path=fallback_sample_submission_path,
                 submission_path=submission_path,
-                count_csv_data_rows=count_csv_data_rows,
+                count_tabular_data_rows=count_tabular_data_rows,
             )
         ),
         on_message=on_message,
@@ -146,11 +146,14 @@ def decide_initial_submit_stage_mode(
         notebook_submit_required = True
         messages.append("[yellow]submit mode[/yellow]: notebook-only competition detected; forcing notebook submit")
 
-    submission_artifact_mode = (
-        str(resolved_notebook_artifact_mode or "wrapper")
-        if notebook_submit_required
-        else str(notebook_submit_artifact_mode or "wrapper")
-    )
+    requested_artifact_mode = str(notebook_submit_artifact_mode or "").strip().lower()
+    if notebook_submit_required:
+        if requested_artifact_mode == "inference":
+            submission_artifact_mode = "inference"
+        else:
+            submission_artifact_mode = str(resolved_notebook_artifact_mode or requested_artifact_mode or "wrapper")
+    else:
+        submission_artifact_mode = str(notebook_submit_artifact_mode or "wrapper")
     if notebook_submit_required:
         messages.append("[yellow]submit mode[/yellow]: using notebook submit")
 

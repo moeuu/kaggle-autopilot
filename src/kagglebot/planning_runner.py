@@ -4,6 +4,7 @@ from typing import Protocol
 
 from kagglebot import verify_artifacts as _verify_artifacts
 from kagglebot.agents.identity import planning_flow_summary
+from kagglebot.agents.strategy_runner import resolve_strategy_engine
 from kagglebot.campaign import normalize_campaign_mode
 from kagglebot.exec_utils import run_command
 from kagglebot.method_scout import effective_method_scout_mode
@@ -28,12 +29,16 @@ class PlanningRunConfig(Protocol):
 
 
 def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
-    print(f"[cyan]plan[/cyan]: {planning_flow_summary()}")
+    strategy_engine = _pipeline_strategy_engine_request()
+    resolved_strategy_engine = resolve_strategy_engine(strategy_engine)
+    strategy_token = "oracle(gpt-5.5-pro)" if resolved_strategy_engine == "oracle" else None
+    flow_summary = planning_flow_summary(strategy_token=strategy_token)
+    print(f"[cyan]plan[/cyan]: {flow_summary}")
     update_watch_phase(
         config,
         run_id,
         "gpt_planning",
-        detail=planning_flow_summary(),
+        detail=flow_summary,
     )
     planning_campaign_mode = normalize_campaign_mode(config.campaign_mode, deliverable_mode="leaderboard")
     pipeline_config = AgentPipelineConfig(
@@ -52,6 +57,7 @@ def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
         method_scout_max_sources=int(config.method_scout_max_sources or 12),
         hardware_profile=config.hardware_profile,
         time_budget_min=config.time_budget_min,
+        strategy_engine=strategy_engine,
     )
     run_agent_pipeline(paths=config.paths, config=pipeline_config)
     update_watch_phase(
@@ -66,3 +72,10 @@ def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
         artifacts_dir=config.paths.artifacts_dir,
         run_command_fn=run_command,
     )
+
+
+def _pipeline_strategy_engine_request() -> str:
+    import os
+
+    requested = os.environ.get("KAGGLEBOT_STRATEGY_ENGINE", "auto").strip().lower()
+    return requested if requested in {"auto", "oracle", "codex"} else "auto"

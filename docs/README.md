@@ -17,4 +17,4 @@ Notes:
 
 - Legacy planning/task docs were removed to reduce maintenance overhead.
 - The files above are the supported documentation set.
-- Planning pipeline is `gpt -> gpt -> gpt` and persists research artifacts to `knowledge/research/<problem_type>/<slug>/` (with working copies under `artifacts/<slug>/context/`).
+- Planning pipeline is `codex -> oracle(gpt-5.5-pro) -> codex` when Oracle is available and persists research artifacts to `knowledge/research/<problem_type>/<slug>/` (with working copies under `artifacts/<slug>/context/`).

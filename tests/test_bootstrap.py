@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
+import tarfile
+import zipfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from kagglebot.bootstrap import (
@@ -16,8 +21,12 @@ from kagglebot.bootstrap import (
     _write_sample_head,
     bootstrap_competition,
 )
+from kagglebot.bootstrap import (
+    _read_table as _bootstrap_read_table,
+)
 from kagglebot.bootstrap_reference_inputs import stage_reference_notebook_inputs
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.solver.io import read_table, write_table
 
 pytestmark = pytest.mark.slow
 
@@ -885,6 +894,72 @@ def test_stage_reference_inputs_policy_proactively_downloads_required_datasets(t
     assert staged[0]["status"] == "staged_dataset"
 
 
+def test_stage_reference_inputs_extracts_downloaded_tar_xz_dataset(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.code_notebooks_dir.mkdir(parents=True, exist_ok=True)
+    notebook_dir = paths.code_notebooks_dir / "required"
+    notebook_dir.mkdir(parents=True, exist_ok=True)
+    (notebook_dir / "kernel-metadata.json").write_text(
+        json.dumps({"dataset_sources": ["alice/original-data"]}),
+        encoding="utf-8",
+    )
+    (notebook_dir / "notebook.ipynb").write_text(json.dumps({"cells": []}), encoding="utf-8")
+    paths.competition_policy_path.write_text(
+        json.dumps(
+            {
+                "reference_inputs": {
+                    "proactive": True,
+                    "required_datasets": ["alice/original-data"],
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    paths.code_notebooks_index_path.write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/ref-kernel",
+                "notebooks": [
+                    {
+                        "kernel_id": "alice/ref-kernel",
+                        "title": "Required",
+                        "local_dir": str(notebook_dir),
+                        "source_file": str(notebook_dir / "notebook.ipynb"),
+                        "summary": "",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_download_dataset(ref, output_dir, *, slug, dry_run, force, quiet):  # noqa: ANN001, ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = b"id,target\n1,0\n"
+        with tarfile.open(output_dir / "original-data.tar.xz", "w:xz") as archive:
+            info = tarfile.TarInfo("train.csv")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+    stage_reference_notebook_inputs(
+        paths=paths,
+        slug="demo",
+        download=False,
+        quiet=True,
+        dry_run=False,
+        download_dataset_fn=fake_download_dataset,
+    )
+
+    stage_dir = paths.reference_inputs_dir / "dataset__alice__original-data"
+    assert (stage_dir / "train.csv").read_text(encoding="utf-8") == "id,target\n1,0\n"
+    manifest = json.loads(paths.reference_inputs_manifest_path.read_text(encoding="utf-8"))
+    staged = manifest["reference_notebooks"][0]["staged_sources"]
+    assert staged[0]["status"] == "staged_dataset"
+
+
 def test_mirror_sample_submission_to_data(tmp_path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
@@ -903,20 +978,38 @@ def test_write_sample_head_reads_limited_rows(tmp_path, monkeypatch) -> None:
     sample_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
     head_path = tmp_path / "sample_submission_head.csv"
 
-    import pandas as pd
-
     called: dict[str, int | None] = {"nrows": None}
-    real_read_csv = pd.read_csv
+    real_read_table = read_table
 
-    def _spy_read_csv(*args, **kwargs):  # noqa: ANN002, ANN003
-        called["nrows"] = kwargs.get("nrows")
-        return real_read_csv(*args, **kwargs)
+    def _spy_read_table(path, *, nrows=None):
+        called["nrows"] = nrows
+        return real_read_table(path, nrows=nrows)
 
-    monkeypatch.setattr(pd, "read_csv", _spy_read_csv)
+    monkeypatch.setattr("kagglebot.bootstrap.read_table", _spy_read_table)
 
     _write_sample_head(sample_path, head_path, rows=2)
 
     assert called["nrows"] == 2
+    assert head_path.read_text(encoding="utf-8").strip().splitlines() == [
+        "id,target",
+        "1,0.1",
+        "2,0.2",
+    ]
+
+
+def test_write_sample_head_reads_jsonl_gz_via_shared_reader(tmp_path) -> None:
+    sample_path = tmp_path / "sample_submission.jsonl.gz"
+    with gzip.open(sample_path, "wt", encoding="utf-8") as handle:
+        for row in (
+            {"id": 1, "target": 0.1},
+            {"id": 2, "target": 0.2},
+            {"id": 3, "target": 0.3},
+        ):
+            handle.write(json.dumps(row) + "\n")
+    head_path = tmp_path / "sample_submission_head.csv"
+
+    _write_sample_head(sample_path, head_path, rows=2)
+
     assert head_path.read_text(encoding="utf-8").strip().splitlines() == [
         "id,target",
         "1,0.1",
@@ -939,6 +1032,161 @@ def test_cache_sample_submission_prefers_stage2_for_multistage_competition(tmp_p
 
     assert paths.sample_submission_path.read_text(encoding="utf-8") == stage2.read_text(encoding="utf-8")
     assert "2026_1_2" in paths.sample_submission_head_path.read_text(encoding="utf-8")
+
+
+def test_cache_sample_submission_preserves_semicolon_txt_sample(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.txt"
+    sample.write_text("id;target\n1;0.1\n2;0.2\n", encoding="utf-8")
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.txt"
+    assert paths.sample_submission_path.read_text(encoding="utf-8") == "id;target\n1;0.1\n2;0.2\n"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+def test_bootstrap_read_table_normalizes_blank_delimited_headers(tmp_path) -> None:
+    sample = tmp_path / "sample_submission.txt"
+    sample.write_text("id;;target\n1;-;0.1\n2;-;0.2\n", encoding="utf-8")
+
+    frame = _bootstrap_read_table(sample)
+
+    assert list(frame.columns) == ["id", "column_2", "target"]
+
+
+def test_cache_sample_submission_preserves_jsonl_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.jsonl"
+    sample.write_text('{"id":1,"target":0.1}\n{"id":2,"target":0.2}\n', encoding="utf-8")
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.jsonl"
+    assert paths.sample_submission_path.read_text(encoding="utf-8") == sample.read_text(encoding="utf-8")
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+def test_cache_sample_submission_preserves_compressed_csv_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.csv.gz"
+    with gzip.open(sample, "wt", encoding="utf-8") as handle:
+        handle.write("id,target\n1,0.1\n2,0.2\n")
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.csv.gz"
+    assert paths.sample_submission_path.read_bytes() == sample.read_bytes()
+    assert not (paths.context_dir / "sample_submission.csv").exists()
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+def test_cache_sample_submission_preserves_compressed_jsonl_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.jsonl.gz"
+    with gzip.open(sample, "wt", encoding="utf-8") as handle:
+        handle.write('{"id":1,"target":0.1}\n{"id":2,"target":0.2}\n')
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.jsonl.gz"
+    assert paths.sample_submission_path.read_bytes() == sample.read_bytes()
+    assert not (paths.context_dir / "sample_submission.jsonl").exists()
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+def test_cache_sample_submission_preserves_excel_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.xlsx"
+    pd.DataFrame({"id": [1, 2], "target": [0.1, 0.2]}).to_excel(sample, index=False)
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.xlsx"
+    assert paths.sample_submission_path.read_bytes() == sample.read_bytes()
+    assert pd.read_excel(paths.sample_submission_path).to_dict("list") == {"id": [1, 2], "target": [0.1, 0.2]}
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+def test_cache_sample_submission_preserves_stata_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.dta"
+    pd.DataFrame({"id": ["001", "002"], "target": [0.1, 0.2]}).to_stata(sample, write_index=False)
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.dta"
+    assert paths.sample_submission_path.read_bytes() == sample.read_bytes()
+    assert pd.read_stata(paths.sample_submission_path).to_dict("list") == {"id": ["001", "002"], "target": [0.1, 0.2]}
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        ".parquet",
+        ".feather",
+        ".orc",
+        ".hdf",
+        ".hdf5",
+        ".html",
+        ".html.zst",
+        ".xml",
+        ".pkl.zst",
+        ".json.zst",
+        ".csv.zst",
+    ],
+)
+def test_cache_sample_submission_preserves_generalized_sample_suffixes(tmp_path, suffix: str) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / f"sample_submission{suffix}"
+    frame = pd.DataFrame({"id": [1, 2], "target": [0, 1]})
+    write_table(frame, sample)
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == f"sample_submission{suffix}"
+    assert read_table(paths.sample_submission_path).to_dict("list") == {"id": [1, 2], "target": [0, 1]}
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
+
+
+def test_cache_sample_submission_preserves_zip_wrapped_parquet_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    sample = paths.data_dir / "sample_submission.parquet.zip"
+    payload = io.BytesIO()
+    pd.DataFrame({"id": [1, 2], "target": [0, 1]}).to_parquet(payload, index=False)
+    with zipfile.ZipFile(sample, "w") as archive:
+        archive.writestr("nested/sample_submission.parquet", payload.getvalue())
+
+    _cache_sample_submission(paths)
+
+    assert paths.sample_submission_path.name == "sample_submission.parquet.zip"
+    assert paths.sample_submission_path.read_bytes() == sample.read_bytes()
+    assert read_table(paths.sample_submission_path).to_dict("list") == {"id": [1, 2], "target": [0, 1]}
+    assert paths.sample_submission_head_path.name == "sample_submission_head.csv"
+    assert paths.sample_submission_head_path.read_text(encoding="utf-8").startswith("id,target\n")
 
 
 def test_mirror_sample_submission_to_data_overwrites_stale_destination(tmp_path) -> None:
@@ -964,3 +1212,50 @@ def test_mirror_sample_submission_to_data_noops_when_source_is_destination(tmp_p
     _mirror_sample_submission_to_data(paths)
 
     assert sample_path.read_text(encoding="utf-8") == "ID,Pred\n2026_1_2,0.5\n"
+
+
+def test_mirror_sample_submission_to_data_preserves_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    context_sample = paths.context_sample_submission_path_for_suffix(".jsonl")
+    context_sample.write_text('{"id":1,"target":0.1}\n', encoding="utf-8")
+
+    _mirror_sample_submission_to_data(paths)
+
+    mirrored = paths.data_dir / "sample_submission.jsonl"
+    assert mirrored.read_text(encoding="utf-8") == context_sample.read_text(encoding="utf-8")
+    assert not (paths.data_dir / "sample_submission.csv").exists()
+
+
+def test_mirror_sample_submission_to_data_preserves_compressed_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    context_sample = paths.context_sample_submission_path_for_suffix(".csv.gz")
+    with gzip.open(context_sample, "wt", encoding="utf-8") as handle:
+        handle.write("id,target\n1,0.1\n")
+
+    _mirror_sample_submission_to_data(paths)
+
+    mirrored = paths.data_dir / "sample_submission.csv.gz"
+    assert mirrored.read_bytes() == context_sample.read_bytes()
+    assert not (paths.data_dir / "sample_submission.gz").exists()
+
+
+def test_mirror_sample_submission_to_data_preserves_zip_wrapped_parquet_suffix(tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    context_sample = paths.context_sample_submission_path_for_suffix(".parquet.zip")
+    payload = io.BytesIO()
+    pd.DataFrame({"id": [1], "target": [0.1]}).to_parquet(payload, index=False)
+    with zipfile.ZipFile(context_sample, "w") as archive:
+        archive.writestr("sample_submission.parquet", payload.getvalue())
+
+    _mirror_sample_submission_to_data(paths)
+
+    mirrored = paths.data_dir / "sample_submission.parquet.zip"
+    assert mirrored.read_bytes() == context_sample.read_bytes()
+    assert read_table(mirrored).to_dict("list") == {"id": [1], "target": [0.1]}
+    assert not (paths.data_dir / "sample_submission.zip").exists()

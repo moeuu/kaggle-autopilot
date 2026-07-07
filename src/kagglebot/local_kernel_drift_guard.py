@@ -7,6 +7,8 @@ from pathlib import Path
 from kagglebot import local_kernel_context as _local_kernel_context
 from kagglebot.env_utils import env_truthy
 from kagglebot.json_utils import write_json_object
+from kagglebot.solver.io import materialize_sqlite_tables, read_table
+from kagglebot.submission_sample_discovery import is_tabular_data_path, path_mentions_role, tabular_suffix
 
 ZERO_OVERLAP_DRIFT_GUARD_FILENAME = "zero_overlap_drift_guard.json"
 ZERO_OVERLAP_DRIFT_MIN_TVD = 0.20
@@ -168,19 +170,15 @@ def prepare_zero_overlap_drift_guard(*, base_dir: Path, slug: str, context_dir: 
         "KAGGLEBOT_ENABLE_ZERO_OVERLAP_DRIFT_GUARD"
     ):
         return None
-    try:
-        import pandas as pd  # noqa: PLC0415
-    except Exception:
-        return None
-
     data_dir = base_dir / slug / "data"
-    train_path = data_dir / "train.csv"
-    test_path = data_dir / "test.csv"
+    materialize_sqlite_tables(data_dir)
+    train_path = _find_named_tabular_file(data_dir, "train")
+    test_path = _find_named_tabular_file(data_dir, "test")
     if not train_path.exists() or not test_path.exists():
         return None
     try:
-        train_df = pd.read_csv(train_path)
-        test_df = pd.read_csv(test_path)
+        train_df = read_table(train_path)
+        test_df = read_table(test_path)
     except Exception:
         return None
     if train_df.empty or test_df.empty:
@@ -205,3 +203,69 @@ def prepare_zero_overlap_drift_guard(*, base_dir: Path, slug: str, context_dir: 
     guard_path = context_dir / ZERO_OVERLAP_DRIFT_GUARD_FILENAME
     write_json_object(guard_path, payload)
     return guard_path
+
+
+def _find_named_tabular_file(data_dir: Path, stem: str) -> Path:
+    if not data_dir.exists():
+        return data_dir / f"{stem}.csv"
+    direct_matches: list[Path] = []
+    try:
+        for path in data_dir.iterdir():
+            if path.is_file() and is_tabular_data_path(path) and _tabular_stem(path).lower() == stem:
+                direct_matches.append(path)
+    except OSError:
+        direct_matches = []
+    if direct_matches:
+        return sorted(direct_matches, key=lambda path: (len(path.parts), str(path)))[0]
+    matches = _named_tabular_file_matches(data_dir=data_dir, stem=stem, include_cache=False)
+    if not matches:
+        matches = _named_tabular_file_matches(data_dir=data_dir, stem=stem, include_cache=True)
+    if not matches:
+        return data_dir / f"{stem}.csv"
+    return max(
+        matches,
+        key=lambda item: (
+            item[0],
+            -len(item[1].relative_to(data_dir).parts),
+            str(item[1]).lower(),
+        ),
+    )[1]
+
+
+def _named_tabular_file_matches(*, data_dir: Path, stem: str, include_cache: bool) -> list[tuple[int, Path]]:
+    matches: list[tuple[int, Path]] = []
+    try:
+        paths = data_dir.rglob("*")
+        for path in paths:
+            if not path.is_file() or not is_tabular_data_path(path):
+                continue
+            if not include_cache and ".kagglebot_cache" in {part.lower() for part in path.parts}:
+                continue
+            score = _named_tabular_file_score(path, stem=stem)
+            if score > 0:
+                matches.append((score, path))
+    except OSError:
+        return []
+    return matches
+
+
+def _named_tabular_file_score(path: Path, *, stem: str) -> int:
+    normalized_stem = stem.lower()
+    path_stem = _tabular_stem(path).lower()
+    if path_stem == normalized_stem:
+        return 4
+    if normalized_stem == "train" and path_mentions_role(path, "test"):
+        return 0
+    if normalized_stem == "test" and path_mentions_role(path, "train"):
+        return 0
+    if normalized_stem in {"train", "test"} and path_mentions_role(path, normalized_stem):
+        return 3
+    return 0
+
+
+def _tabular_stem(path: Path) -> str:
+    suffix = tabular_suffix(path)
+    name = path.name
+    if suffix and name.lower().endswith(suffix):
+        return name[: -len(suffix)]
+    return path.stem

@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from kagglebot.datetime_utils import parse_iso_datetime_utc
-from kagglebot.hashing import sha256_file
+from kagglebot.hashing import sha256_path
 from kagglebot.json_utils import append_jsonl_record, load_jsonl_records
 
 
@@ -16,7 +16,7 @@ def new_run_id() -> str:
 
 
 def submission_fingerprint(slug: str, message: str, submission_path: Path) -> str:
-    file_hash = sha256_file(str(submission_path))
+    file_hash = sha256_path(submission_path)
     combined = f"{slug}\n{message}\n{file_hash}".encode()
     return sha256_file_bytes(combined)
 
@@ -47,7 +47,7 @@ class SubmissionLedger:
 
     def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
         fingerprint = submission_fingerprint(slug, message, submission_path)
-        submission_sha = sha256_file(str(submission_path))
+        submission_sha = sha256_path(submission_path)
         for rec in self._iter_records():
             if rec.get("fingerprint") == fingerprint:
                 return True
@@ -75,7 +75,7 @@ class SubmissionLedger:
         source_iteration: int | None = None,
     ) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        submission_sha = sha256_file(str(submission_path))
+        submission_sha = sha256_path(submission_path)
         record = {
             "ts": datetime.now(UTC).isoformat(),
             "event": "submit",
@@ -117,7 +117,7 @@ class SubmissionLedger:
             "slug": slug,
             "message": message,
             "submission_path": str(submission_path),
-            "sha256": sha256_file(str(submission_path)),
+            "sha256": sha256_path(submission_path),
             "run_id": run_id,
             "outcome": outcome,
             "submission_kind": submission_kind,

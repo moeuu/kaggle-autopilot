@@ -26,13 +26,18 @@ Common options:
 - `--max-iterations`, `--patience`, `--min-improvement`, `--max-total-min`
 - `--internet auto|off|on`
 
-## 2. Planning Contract (`gpt -> gpt -> gpt`)
+## 2. Planning Contract (`codex -> oracle(gpt-5.5-pro) -> codex`)
 
 Autopilot planning is fixed to:
 
-1. GPT brief (`gpt-5.5`, xhigh)
-2. GPT strategy (`gpt-5.5`, xhigh)
-3. GPT kernel implementation (`gpt-5.5`, xhigh)
+1. Codex brief: collect and summarize competition context.
+2. Oracle/GPT-5.5 Pro strategy: produce the frozen strategy plan from the brief and attached context bundle.
+3. Codex kernel implementation: implement from frozen instructions.
+
+`KAGGLEBOT_STRATEGY_ENGINE=auto` is the default and uses Oracle when the configured command is available; otherwise
+the strategy stage falls back to the Codex runner. Use `oracle` to require Oracle or `codex` to force the legacy path.
+Oracle strategy runs default to `--engine browser --wait`; set `KAGGLEBOT_ORACLE_ENGINE=api` or
+`KAGGLEBOT_ORACLE_ENGINE=auto` when API routing is intentional.
 
 GPT strategy output must include:
 - `===STRATEGY===`
@@ -139,7 +144,7 @@ artifacts/<slug>/
   runs/<run-id>/iter-<k>/
     metrics.json
     diagnostics.md
-    submission.csv
+    submission.<suffix>
 
 knowledge/
   kb.sqlite

@@ -30,17 +30,170 @@ class DetectorBundle:
     weights_path: str | None = None
 
 
+@dataclass(frozen=True)
+class PairwiseObjectClasses:
+    primary_cls: int
+    secondary_cls: int
+    details: dict[str, object]
+
+
+@dataclass(frozen=True)
+class DetectionSubmissionSchema:
+    image_column: str
+    prediction_column: str
+    right_place_column: str | None
+    columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class YoloDataLayout:
+    train_images_dir: Path
+    test_images_dir: Path
+    train_labels_dir: Path
+
+
+_DETECTION_IMAGE_COLUMN_ALIASES = (
+    "filename",
+    "imageid",
+    "imagepath",
+    "imagefile",
+    "imagename",
+    "image",
+    "imgid",
+    "imgpath",
+    "imgfile",
+    "imgname",
+    "img",
+    "photoid",
+    "photopath",
+    "photofile",
+    "photoname",
+    "photo",
+    "pictureid",
+    "picturepath",
+    "picturefile",
+    "picturename",
+    "picture",
+    "file",
+    "filepath",
+    "path",
+    "id",
+)
+
+
 def detect_yolo_submission_task(data_dir: Path, sample_df: pd.DataFrame) -> bool:
-    required = {"filename", "right_place", "prediction_string"}
-    if set(sample_df.columns) != required:
+    if infer_detection_submission_schema(sample_df) is None:
         return False
-    return all(
-        [
-            (data_dir / "images" / "train").is_dir(),
-            (data_dir / "images" / "test").is_dir(),
-            (data_dir / "labels" / "train").is_dir(),
-        ]
+    layout = find_yolo_data_layout(data_dir)
+    return layout is not None and layout.test_images_dir.is_dir()
+
+
+def find_yolo_data_layout(data_dir: Path) -> YoloDataLayout | None:
+    candidates = (
+        YoloDataLayout(
+            train_images_dir=data_dir / "images" / "train",
+            test_images_dir=data_dir / "images" / "test",
+            train_labels_dir=data_dir / "labels" / "train",
+        ),
+        YoloDataLayout(
+            train_images_dir=data_dir / "train" / "images",
+            test_images_dir=data_dir / "test" / "images",
+            train_labels_dir=data_dir / "train" / "labels",
+        ),
+        YoloDataLayout(
+            train_images_dir=data_dir / "train" / "images",
+            test_images_dir=data_dir / "test",
+            train_labels_dir=data_dir / "train" / "labels",
+        ),
+        YoloDataLayout(
+            train_images_dir=data_dir / "train_images",
+            test_images_dir=data_dir / "test_images",
+            train_labels_dir=data_dir / "train_labels",
+        ),
+        YoloDataLayout(
+            train_images_dir=data_dir / "train_images",
+            test_images_dir=data_dir / "test_images",
+            train_labels_dir=data_dir / "labels" / "train",
+        ),
     )
+    for layout in candidates:
+        if layout.train_images_dir.is_dir() and layout.train_labels_dir.is_dir():
+            return layout
+    return None
+
+
+def infer_detection_submission_schema(sample_df: pd.DataFrame) -> DetectionSubmissionSchema | None:
+    columns = [str(col) for col in sample_df.columns]
+    normalized = {_normalize_schema_column(col): col for col in columns}
+
+    prediction_column = next(
+        (
+            normalized[key]
+            for key in (
+                "predictionstring",
+                "predstring",
+                "detections",
+                "labels",
+                "prediction",
+            )
+            if key in normalized
+        ),
+        None,
+    )
+    if prediction_column is None:
+        return None
+
+    image_column = next(
+        (
+            normalized[key]
+            for key in _DETECTION_IMAGE_COLUMN_ALIASES
+            if key in normalized and normalized[key] != prediction_column
+        ),
+        None,
+    )
+    if image_column is None:
+        return None
+
+    right_place_column = next(
+        (
+            normalized[key]
+            for key in (
+                "rightplace",
+                "placement",
+                "isrightplace",
+                "validplacement",
+            )
+            if key in normalized
+        ),
+        None,
+    )
+
+    return DetectionSubmissionSchema(
+        image_column=image_column,
+        prediction_column=prediction_column,
+        right_place_column=right_place_column,
+        columns=tuple(columns),
+    )
+
+
+def resolve_yolo_image_reference(value: object, *, images_dir: Path, data_dir: Path) -> Path:
+    text = str(value).strip().replace("\\", "/")
+    ref = Path(text)
+    if ref.is_absolute():
+        return ref
+    candidates = [
+        images_dir / ref,
+        data_dir / ref,
+        images_dir / ref.name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return images_dir / ref
+
+
+def _normalize_schema_column(value: object) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
 def train_val_split(
@@ -85,6 +238,9 @@ def prepare_ultralytics_dataset(
     train_files: list[str],
     val_files: list[str],
 ) -> Path:
+    layout = find_yolo_data_layout(data_dir)
+    if layout is None:
+        raise FileNotFoundError(f"Unable to resolve YOLO image/label directories under {data_dir}.")
     ds_root = root_out / "yolo_ds"
     images_train = ds_root / "images" / "train"
     images_val = ds_root / "images" / "val"
@@ -94,20 +250,27 @@ def prepare_ultralytics_dataset(
     for directory in [images_train, images_val, labels_train, labels_val]:
         directory.mkdir(parents=True, exist_ok=True)
 
-    src_images = data_dir / "images" / "train"
-    src_labels = data_dir / "labels" / "train"
-
     for filename in sorted({str(item) for item in train_files}):
-        _link_or_copy(src_images / filename, images_train / filename)
-        label_name = f"{Path(filename).stem}.txt"
-        _link_or_copy_or_empty(src_labels / label_name, labels_train / label_name)
+        _stage_yolo_image_and_label(
+            filename,
+            data_dir=data_dir,
+            source_images_dir=layout.train_images_dir,
+            source_labels_dir=layout.train_labels_dir,
+            staged_images_dir=images_train,
+            staged_labels_dir=labels_train,
+        )
 
     for filename in sorted({str(item) for item in val_files}):
-        _link_or_copy(src_images / filename, images_val / filename)
-        label_name = f"{Path(filename).stem}.txt"
-        _link_or_copy_or_empty(src_labels / label_name, labels_val / label_name)
+        _stage_yolo_image_and_label(
+            filename,
+            data_dir=data_dir,
+            source_images_dir=layout.train_images_dir,
+            source_labels_dir=layout.train_labels_dir,
+            staged_images_dir=images_val,
+            staged_labels_dir=labels_val,
+        )
 
-    class_ids = _discover_class_ids(src_labels)
+    class_ids = _discover_class_ids(layout.train_labels_dir)
     names = _dataset_names_for_class_ids(class_ids)
     dataset_yaml = ds_root / "dataset.yaml"
     yaml_text = "\n".join(
@@ -121,6 +284,29 @@ def prepare_ultralytics_dataset(
     )
     dataset_yaml.write_text(yaml_text, encoding="utf-8")
     return dataset_yaml
+
+
+def _stage_yolo_image_and_label(
+    reference: object,
+    *,
+    data_dir: Path,
+    source_images_dir: Path,
+    source_labels_dir: Path,
+    staged_images_dir: Path,
+    staged_labels_dir: Path,
+) -> None:
+    source_image = resolve_yolo_image_reference(reference, images_dir=source_images_dir, data_dir=data_dir)
+    staged_rel = _yolo_staged_relative_image_path(source_image, images_dir=source_images_dir, reference=reference)
+    _link_or_copy(source_image, staged_images_dir / staged_rel)
+    label_rel = staged_rel.with_suffix(".txt")
+    _link_or_copy_or_empty(source_labels_dir / label_rel, staged_labels_dir / label_rel)
+
+
+def _yolo_staged_relative_image_path(source_image: Path, *, images_dir: Path, reference: object) -> Path:
+    try:
+        return source_image.resolve().relative_to(images_dir.resolve())
+    except ValueError:
+        return Path(Path(str(reference).replace("\\", "/")).name)
 
 
 def train_detector(
@@ -349,11 +535,16 @@ def evaluate_combined_metric(
     }
 
 
-def infer_head_shemagh_classes(labels_dir: Path) -> tuple[int, int, dict[str, object]]:
+def infer_pairwise_object_classes(
+    labels_dir: Path,
+    *,
+    primary_role: str = "small_object",
+    secondary_role: str = "large_object",
+) -> PairwiseObjectClasses:
     class_areas: dict[int, list[float]] = defaultdict(list)
     class_aspects: dict[int, list[float]] = defaultdict(list)
 
-    for label_file in sorted(labels_dir.glob("*.txt")):
+    for label_file in sorted(labels_dir.rglob("*.txt")):
         rows = _read_yolo_label_rows(label_file)
         for cls, _cx, _cy, w, h in rows:
             class_id = int(cls)
@@ -362,20 +553,36 @@ def infer_head_shemagh_classes(labels_dir: Path) -> tuple[int, int, dict[str, ob
                 class_aspects[class_id].append(float(w / h))
 
     if not class_areas:
-        return 0, 1, {"reason": "no_labels", "class_stats": {}}
+        return PairwiseObjectClasses(
+            primary_cls=0,
+            secondary_cls=1,
+            details={
+                "reason": "no_labels",
+                "class_stats": {},
+                "roles": {"primary": primary_role, "secondary": secondary_role},
+            },
+        )
 
     area_medians = {cid: float(np.median(vals)) for cid, vals in class_areas.items() if vals}
     if not area_medians:
-        return 0, 1, {"reason": "empty_labels", "class_stats": {}}
+        return PairwiseObjectClasses(
+            primary_cls=0,
+            secondary_cls=1,
+            details={
+                "reason": "empty_labels",
+                "class_stats": {},
+                "roles": {"primary": primary_role, "secondary": secondary_role},
+            },
+        )
 
     sorted_by_area = sorted(area_medians.items(), key=lambda item: item[1])
-    head_cls = int(sorted_by_area[0][0])
+    primary_cls = int(sorted_by_area[0][0])
 
-    other_classes = [cid for cid in area_medians if cid != head_cls]
+    other_classes = [cid for cid in area_medians if cid != primary_cls]
     if other_classes:
-        shemagh_cls = int(max(other_classes, key=lambda cid: area_medians[cid]))
+        secondary_cls = int(max(other_classes, key=lambda cid: area_medians[cid]))
     else:
-        shemagh_cls = int(head_cls + 1)
+        secondary_cls = int(primary_cls + 1)
 
     class_stats = {}
     for cid in sorted(area_medians):
@@ -386,7 +593,17 @@ def infer_head_shemagh_classes(labels_dir: Path) -> tuple[int, int, dict[str, ob
             "count": int(len(class_areas[cid])),
         }
 
-    return head_cls, shemagh_cls, {"class_stats": class_stats}
+    details = {
+        "class_stats": class_stats,
+        "roles": {"primary": primary_role, "secondary": secondary_role},
+        "selection": "smallest_median_area_vs_largest_other_median_area",
+    }
+    return PairwiseObjectClasses(primary_cls=primary_cls, secondary_cls=secondary_cls, details=details)
+
+
+def infer_head_shemagh_classes(labels_dir: Path) -> tuple[int, int, dict[str, object]]:
+    inferred = infer_pairwise_object_classes(labels_dir, primary_role="head", secondary_role="shemagh")
+    return inferred.primary_cls, inferred.secondary_cls, inferred.details
 
 
 def compute_map50_95(
@@ -395,12 +612,20 @@ def compute_map50_95(
     filenames: list[str],
     dets_by_file: dict[str, np.ndarray],
 ) -> float:
-    labels_dir = data_dir / "labels" / "train"
+    layout = find_yolo_data_layout(data_dir)
+    if layout is None:
+        return 0.0
+    labels_dir = layout.train_labels_dir
     gt_by_file: dict[str, np.ndarray] = {}
     class_ids: set[int] = set()
 
     for filename in filenames:
-        label_path = labels_dir / f"{Path(filename).stem}.txt"
+        label_path = _resolve_yolo_label_reference(
+            filename,
+            images_dir=layout.train_images_dir,
+            labels_dir=labels_dir,
+            data_dir=data_dir,
+        )
         rows = _read_yolo_label_rows(label_path)
         if rows:
             arr = np.asarray(rows, dtype=float)
@@ -432,6 +657,24 @@ def compute_map50_95(
     if not threshold_maps:
         return 0.0
     return float(np.mean(threshold_maps))
+
+
+def _resolve_yolo_label_reference(
+    value: object,
+    *,
+    images_dir: Path,
+    labels_dir: Path,
+    data_dir: Path,
+) -> Path:
+    source_image = resolve_yolo_image_reference(value, images_dir=images_dir, data_dir=data_dir)
+    try:
+        image_rel = source_image.resolve().relative_to(images_dir.resolve())
+    except ValueError:
+        image_rel = Path(Path(str(value).replace("\\", "/")).name)
+    label_path = labels_dir / image_rel.with_suffix(".txt")
+    if label_path.exists():
+        return label_path
+    return labels_dir / f"{Path(str(value)).stem}.txt"
 
 
 def _ultralytics_available() -> bool:
@@ -510,8 +753,10 @@ def _train_torchvision_detector(
 
     ds_spec = _read_dataset_spec(dataset_yaml)
     ds_root = Path(ds_spec["path"])
-    train_images = sorted((ds_root / ds_spec["train"]).glob("*"))
-    train_labels = [ds_root / "labels" / "train" / f"{item.stem}.txt" for item in train_images]
+    train_images, train_labels = _torchvision_training_image_label_paths(
+        images_dir=ds_root / ds_spec["train"],
+        labels_dir=ds_root / "labels" / "train",
+    )
 
     if not train_images:
         raise RuntimeError("No training images found for detection dataset.")
@@ -579,6 +824,23 @@ def _train_torchvision_detector(
     return DetectorBundle(backend="torchvision", model=model, device=resolved_device)
 
 
+def _torchvision_training_image_label_paths(*, images_dir: Path, labels_dir: Path) -> tuple[list[Path], list[Path]]:
+    image_paths = sorted(path for path in images_dir.rglob("*") if path.is_file())
+    label_paths = [
+        _torchvision_label_path_for_staged_image(path, images_dir=images_dir, labels_dir=labels_dir)
+        for path in image_paths
+    ]
+    return image_paths, label_paths
+
+
+def _torchvision_label_path_for_staged_image(image_path: Path, *, images_dir: Path, labels_dir: Path) -> Path:
+    try:
+        relative_image = image_path.relative_to(images_dir)
+    except ValueError:
+        relative_image = Path(image_path.name)
+    return labels_dir / relative_image.with_suffix(".txt")
+
+
 def _predict_with_ultralytics(bundle: DetectorBundle, image_paths: list[Path]) -> dict[str, np.ndarray]:
     if not image_paths:
         return {}
@@ -595,7 +857,7 @@ def _predict_with_ultralytics(bundle: DetectorBundle, image_paths: list[Path]) -
     for path, result in zip(image_paths, results, strict=False):
         boxes = getattr(result, "boxes", None)
         if boxes is None or len(boxes) == 0:
-            out[path.name] = np.empty((0, 6), dtype=float)
+            _store_detection_result(out, path, np.empty((0, 6), dtype=float))
             continue
         cls = boxes.cls.detach().cpu().numpy().astype(float)
         score = boxes.conf.detach().cpu().numpy().astype(float)
@@ -603,7 +865,7 @@ def _predict_with_ultralytics(bundle: DetectorBundle, image_paths: list[Path]) -
         dets = np.column_stack([cls, score, xywhn]).astype(float)
         dets = _sanitize_detections(dets)
         dets = _apply_classwise_nms(dets, iou_thr=bundle.nms_iou)
-        out[path.name] = dets
+        _store_detection_result(out, path, dets)
     return out
 
 
@@ -631,7 +893,7 @@ def _predict_with_torchvision(bundle: DetectorBundle, image_paths: list[Path]) -
             boxes_abs = prediction["boxes"].detach().cpu().numpy().astype(float)
 
             if boxes_abs.size == 0:
-                out[path.name] = np.empty((0, 6), dtype=float)
+                _store_detection_result(out, path, np.empty((0, 6), dtype=float))
                 continue
 
             boxes_norm = boxes_abs.copy()
@@ -641,9 +903,14 @@ def _predict_with_torchvision(bundle: DetectorBundle, image_paths: list[Path]) -
             dets = np.column_stack([labels.astype(float), scores, cxcywh]).astype(float)
             dets = _sanitize_detections(dets)
             dets = _apply_classwise_nms(dets, iou_thr=bundle.nms_iou)
-            out[path.name] = dets
+            _store_detection_result(out, path, dets)
 
     return out
+
+
+def _store_detection_result(out: dict[str, np.ndarray], path: Path, dets: np.ndarray) -> None:
+    out[str(path)] = dets
+    out.setdefault(path.name, dets)
 
 
 def _average_precision_for_class(
@@ -672,6 +939,8 @@ def _average_precision_for_class(
 
     predictions: list[tuple[float, str, np.ndarray]] = []
     for filename, dets in dets_by_file.items():
+        if filename not in gt_boxes:
+            continue
         arr = np.asarray(dets, dtype=float)
         if arr.size == 0:
             continue
@@ -854,21 +1123,16 @@ def _read_dataset_spec(dataset_yaml: Path) -> dict[str, str]:
 
 
 def _dataset_names_for_class_ids(class_ids: list[int]) -> list[str]:
-    if class_ids == [0, 1] or class_ids == [0] or class_ids == [1]:
-        return ["head", "shemagh"]
     if not class_ids:
-        return ["head", "shemagh"]
+        return ["class_0", "class_1"]
     upper = max(class_ids)
     names = [f"class_{idx}" for idx in range(max(upper + 1, 2))]
-    names[0] = "head"
-    if len(names) > 1:
-        names[1] = "shemagh"
     return names
 
 
 def _discover_class_ids(labels_dir: Path) -> list[int]:
     classes: set[int] = set()
-    for path in labels_dir.glob("*.txt"):
+    for path in labels_dir.rglob("*.txt"):
         for row in _read_yolo_label_rows(path):
             classes.add(int(row[0]))
     return sorted(classes)
@@ -877,6 +1141,7 @@ def _discover_class_ids(labels_dir: Path) -> list[int]:
 def _link_or_copy(src: Path, dst: Path) -> None:
     if not src.exists():
         return
+    dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
         dst.unlink()
     try:
@@ -889,6 +1154,7 @@ def _link_or_copy_or_empty(src: Path, dst: Path) -> None:
     if src.exists():
         _link_or_copy(src, dst)
         return
+    dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text("", encoding="utf-8")
 
 

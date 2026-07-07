@@ -57,9 +57,10 @@ def resolve_submission_outcome_after_submit(
     max_fetch_errors: int,
     normalize_detail: Callable[[str], str],
     compute_error_fingerprint: Callable[[str, str], str],
+    wait_for_submission_outcome_func: Callable[..., dict[str, object] | None] | None = None,
 ) -> SubmitOutcomeResolution:
     try:
-        outcome = wait_for_submission_outcome(
+        outcome = (wait_for_submission_outcome_func or wait_for_submission_outcome)(
             slug=slug,
             message=message,
             submitted_at=submitted_at,
@@ -128,6 +129,7 @@ def finalize_submit_outcome_for_run_or_abort(
     stdout_tail_chars: int,
     stderr_tail_chars: int,
     on_message: Callable[[str], object],
+    wait_for_submission_outcome_func: Callable[..., dict[str, object] | None] | None = None,
 ) -> dict[str, object]:
     outcome_resolution = resolve_submission_outcome_after_submit(
         slug=slug,
@@ -140,6 +142,7 @@ def finalize_submit_outcome_for_run_or_abort(
         max_fetch_errors=max_fetch_errors,
         normalize_detail=normalize_detail,
         compute_error_fingerprint=compute_error_fingerprint,
+        wait_for_submission_outcome_func=wait_for_submission_outcome_func,
     )
     if outcome_resolution.abort_spec is not None:
         return submit_aborter.abort(

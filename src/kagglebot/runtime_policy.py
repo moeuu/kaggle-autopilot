@@ -3,7 +3,31 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
-HEAVY_DEEP_LEARNING_MODALITIES = frozenset({"image", "video", "audio", "text", "rna_structure"})
+HEAVY_DEEP_LEARNING_MODALITIES = frozenset(
+    {
+        "3d",
+        "annotation",
+        "image",
+        "video",
+        "audio",
+        "text",
+        "document",
+        "medical_imaging",
+        "array",
+        "point_cloud",
+        "point_cloud_3d",
+        "geospatial",
+        "bio",
+        "sequence",
+        "structure",
+        "rna",
+        "rna_structure",
+        "graph",
+        "signal",
+        "model_artifact",
+        "artifact",
+    }
+)
 
 
 def is_local_gpu_compute(compute: object) -> bool:
@@ -11,7 +35,11 @@ def is_local_gpu_compute(compute: object) -> bool:
 
 
 def is_heavy_deep_learning_modality(modality: object) -> bool:
-    return str(modality or "").strip().lower() in HEAVY_DEEP_LEARNING_MODALITIES
+    return _normalize_modality_key(modality) in HEAVY_DEEP_LEARNING_MODALITIES
+
+
+def _normalize_modality_key(modality: object) -> str:
+    return str(modality or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def local_gpu_time_budget_limit_min(

@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from kagglebot.analyzer.types import CompetitionSchema
-from kagglebot.solver.io import infer_submission_layout
+from kagglebot.solver.io import infer_submission_layout, read_table
 
 
 @dataclass(frozen=True)
@@ -19,9 +19,9 @@ class SchemaFrames:
 
 def load_schema_frames(train_path: Path, test_path: Path, sample_path: Path) -> SchemaFrames:
     return SchemaFrames(
-        train=pd.read_csv(train_path),
-        test=pd.read_csv(test_path),
-        sample=pd.read_csv(sample_path),
+        train=read_table(train_path),
+        test=read_table(test_path),
+        sample=read_table(sample_path),
     )
 
 
@@ -42,19 +42,25 @@ def infer_schema(
         sample=sample,
     )
     if not target_columns:
-        raise ValueError("Unable to infer target columns from train/test/sample files.")
+        raise ValueError(
+            "Unable to infer target columns from "
+            f"train={train_path.name!r}, test={test_path.name!r}, sample={sample_path.name!r}."
+        )
 
     train_columns = list(frames.train.columns)
     missing_targets = [col for col in target_columns if col not in train_columns]
     if missing_targets:
-        raise ValueError(f"Target columns missing from train.csv: {missing_targets}")
+        raise ValueError(f"Target columns missing from training file {train_path.name!r}: {missing_targets}")
 
     if not feature_columns:
-        raise ValueError("No feature columns detected after removing target and id columns.")
+        raise ValueError(
+            "No feature columns detected after removing target and id columns from "
+            f"train={train_path.name!r} and test={test_path.name!r}."
+        )
 
     missing_features = [col for col in feature_columns if col not in frames.test.columns]
     if missing_features:
-        raise ValueError(f"Feature columns missing from test.csv: {missing_features}")
+        raise ValueError(f"Feature columns missing from test file {test_path.name!r}: {missing_features}")
 
     numeric_columns: list[str] = []
     categorical_columns: list[str] = []

@@ -793,6 +793,25 @@ def test_build_submit_failure_improvement_context_for_file_issue() -> None:
     assert any("authoritative `kernel.py`" in note for note in notes)
 
 
+def test_build_submit_failure_improvement_context_for_inference_mode_uses_general_artifact_note() -> None:
+    notes, reason = build_submit_failure_improvement_context(
+        failure_context={
+            "active": True,
+            "repairable": True,
+            "repair_target": "submission_artifact",
+            "artifact_mode": "inference",
+            "reason": "submission_poll_status_error",
+            "error_kind": "validation",
+            "summary": "Kaggle reported a submission row-count mismatch.",
+        },
+        latest_submit_attempt={"stderr_tail": "Evaluation Exception: Submission must have 132133 rows"},
+    )
+
+    assert reason is not None
+    assert any("supported submission artifact" in note for note in notes)
+    assert not any("submission.csv` during notebook execution" in note for note in notes)
+
+
 def test_build_submit_failure_improvement_context_for_run_loads_context_and_latest_attempt(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()

@@ -1,21 +1,37 @@
 from __future__ import annotations
 
 import re
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from kagglebot.asset_modality import DATA_ASSET_SUFFIXES, TABULAR_DATA_SUFFIXES, asset_suffix, is_data_asset_path
+from kagglebot.baseline_tokens import (
+    EMPTY_TEXT_PREDICTION_NAME_TOKENS,
+    ID_LIKE_COLUMN_NAMES,
+    TEXT_PREDICTION_NAME_TOKENS,
+)
 from kagglebot.exceptions import SubmissionValidationError
+from kagglebot.solver.io import read_table
 from kagglebot.submission_format import (
     columns_look_plausible,
     extract_submission_section,
     load_submission_format_hint,
     parse_submission_format,
 )
+from kagglebot.submission_sample_discovery import (
+    TABULAR_TEXT_SUFFIXES,
+    default_delimited_text_separator,
+    open_tabular_text,
+    sniff_tabular_text_delimiter,
+    tabular_file_has_data_rows,
+    tabular_suffix,
+)
+from kagglebot.table_columns import normalize_table_column_names
 
 _PLACEHOLDER_SAMPLE_MAX_ROWS = 10
-_IMAGE_TEST_ID_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
 _FILENAME_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?P<ext>[A-Za-z0-9]{2,8})\b")
 _COORD_COL_RE = re.compile(r"^(?:x|y|z)_\d+$", re.IGNORECASE)
@@ -28,6 +44,7 @@ _HIDDEN_FULL_TEST_CONTEXT_RE = re.compile(
     r"|\bnotebook(?:-only)?\s+submission",
     re.IGNORECASE,
 )
+_FILE_ID_ASSET_SUFFIXES = DATA_ASSET_SUFFIXES - TABULAR_DATA_SUFFIXES
 
 
 def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path | None = None) -> None:
@@ -38,9 +55,9 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
     problems: list[str] = []
 
     if not sample_csv.exists():
-        problems.append(f"sample_submission.csv not found: {sample_csv}")
+        problems.append(f"sample submission file not found: {sample_csv}")
     if not submission_csv.exists():
-        problems.append(f"submission.csv not found: {submission_csv}")
+        problems.append(f"submission file not found: {submission_csv}")
     if problems:
         raise SubmissionValidationError(_format_validation_message(problems))
 
@@ -49,37 +66,55 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
     # Read sample header first so we can preserve id-column formatting (e.g., leading zeros).
     try:
-        sample_header = pd.read_csv(sample_csv, sep=sample_delim, nrows=0)
-        sample_columns = list(sample_header.columns)
+        sample_columns = _read_tabular_columns(sample_csv, sep=sample_delim)
     except Exception as exc:  # noqa: BLE001
         raise SubmissionValidationError(f"unable to read sample submission header: {sample_csv}") from exc
+    if _columns_look_like_markdown(sample_columns):
+        sample_columns = []
 
     sample_has_data_rows = _has_data_rows(sample_csv)
     expected_columns = sample_columns
-    expected_source = "sample_submission.csv"
+    expected_source = sample_csv.name
     hint_columns = _resolve_expected_columns_from_context(sample_csv)
+    sample_headerless = False
     if hint_columns and _should_prefer_hint_columns(
         sample_has_data_rows=sample_has_data_rows,
         sample_columns=expected_columns,
         hint_columns=hint_columns,
         sample_csv=sample_csv,
     ):
+        sample_headerless = bool(sample_columns and _columns_look_headerless(sample_columns))
         expected_columns = hint_columns
         expected_source = "submission_format/overview hint"
+    elif sample_columns and _columns_look_headerless(sample_columns):
+        sample_headerless = True
+        expected_columns = [f"col{idx}" for idx in range(len(sample_columns))]
+        expected_source = f"{sample_csv.name} inferred headerless columns"
 
     if not expected_columns:
         raise SubmissionValidationError(_format_validation_message(["sample_submission has no columns"]))
 
-    id_col = expected_columns[0]
+    data_dir_path = Path(data_dir) if data_dir is not None else None
+    id_col = _resolve_validation_id_column(expected_columns, data_dir_path=data_dir_path)
     # Read frames with id_col forced to string to avoid losing leading zeros.
-    try:
-        sample = pd.read_csv(sample_csv, sep=sample_delim, dtype={id_col: str})
-    except Exception:  # noqa: BLE001
-        sample = pd.read_csv(sample_csv, sep=sample_delim)
-    try:
-        submission = pd.read_csv(submission_csv, sep=submission_delim, dtype={id_col: str})
-    except Exception:  # noqa: BLE001
-        submission = pd.read_csv(submission_csv, sep=submission_delim)
+    sample = _read_tabular_frame(
+        sample_csv,
+        sep=sample_delim,
+        id_col=id_col,
+        expected_columns=expected_columns,
+        allow_headerless_fallback=sample_headerless,
+    )
+    sample_duplicate_ids = bool(sample_has_data_rows and id_col in sample.columns and sample[id_col].duplicated().any())
+    submission_headerless_allowed = sample_headerless or (
+        sample_duplicate_ids and not _columns_are_generic_placeholders(expected_columns)
+    )
+    submission = _read_tabular_frame(
+        submission_csv,
+        sep=submission_delim,
+        id_col=id_col,
+        expected_columns=expected_columns,
+        allow_headerless_fallback=submission_headerless_allowed,
+    )
 
     if len(submission) == 0:
         problems.append("submission has no data rows")
@@ -93,7 +128,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
         if expected_with_anchor is not None:
             expected_columns = expected_with_anchor
             expected_source = f"{expected_source} plus leading anchor column"
-            id_col = expected_columns[0]
+            id_col = _resolve_validation_id_column(expected_columns, data_dir_path=data_dir_path)
 
     if expected_columns != actual_columns:
         problems.append(
@@ -108,20 +143,32 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
             )
 
     expected_row_count = len(sample) if sample_has_data_rows else None
+    if id_col is not None and sample_duplicate_ids:
+        expected_row_count = None
     expected_id_values: set[str] | None = None
     expected_ids_source: str | None = None
     placeholder_sample = False
 
-    data_dir_path = Path(data_dir) if data_dir is not None else None
     if data_dir_path is not None and not sample_has_data_rows:
-        eval_ids = _maybe_load_evaluation_ids(data_dir_path)
+        eval_ids = _maybe_load_evaluation_ids(data_dir_path) if id_col is not None else None
         if eval_ids is not None:
             expected_row_count = len(eval_ids)
             expected_id_values = set(eval_ids)
             expected_ids_source = "evaluation directory ids"
+        elif id_col is None:
+            test_row_count = discover_test_row_count(data_dir_path)
+            if test_row_count is not None:
+                expected_row_count = test_row_count
+        else:
+            test_ids = discover_test_ids(data_dir_path, id_col=id_col)
+            if test_ids is not None:
+                expected_row_count = len(test_ids)
+                expected_id_values = set(test_ids)
+                expected_ids_source = "test data ids"
 
     if (
-        data_dir_path is not None
+        id_col is not None
+        and data_dir_path is not None
         and sample_has_data_rows
         and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
         and (id_col in sample.columns)
@@ -136,16 +183,27 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                 placeholder_sample = True
                 expected_row_count = len(test_ids)
                 expected_id_values = set(test_ids)
+    elif (
+        id_col is None
+        and data_dir_path is not None
+        and sample_has_data_rows
+        and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
+    ):
+        test_row_count = discover_test_row_count(data_dir_path)
+        if test_row_count is not None and test_row_count > len(sample):
+            placeholder_sample = True
+            expected_row_count = test_row_count
 
     if (
         sample_has_data_rows
         and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
         and len(submission) <= len(sample)
+        and not _looks_like_wide_single_row_submission(sample=sample, expected_columns=expected_columns)
         and _has_hidden_full_test_context(sample_csv)
     ):
         problems.append(
             "tiny static submission appears to use public placeholder rows for a hidden/full-test notebook "
-            "competition; generate submission.csv from runtime test.csv ids or use notebook inference mode"
+            "competition; generate the submission artifact from runtime test ids or use notebook inference mode"
         )
 
     if expected_row_count is not None and len(submission) != expected_row_count:
@@ -162,10 +220,12 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                 continue
             if not sample_values.equals(submission_values):
                 problems.append(
-                    f"anchor column '{column}' must match sample_submission.csv exactly for structured outputs."
+                    f"anchor column '{column}' must match {sample_csv.name} exactly for structured outputs."
                 )
 
-    if id_col not in submission.columns:
+    if id_col is None:
+        sub_ids: list[str] = []
+    elif id_col not in submission.columns:
         if len(expected_columns) == len(actual_columns):
             # Most commonly: headerless submissions where the first data row becomes the header.
             problems.append(f"expected id column '{id_col}' is missing (submission appears to be missing a header row)")
@@ -201,13 +261,28 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                 problems.append(
                     f"id values mismatch ({source_msg}):\n  missing (first 5): {missing}\n  extra (first 5):   {extra}"
                 )
+        elif sample_has_data_rows and enforce_unique_id and id_col in sample.columns:
+            sample_id_values = sample[id_col]
+            if sample_id_values.isna().any():
+                nan_count = int(sample_id_values.isna().sum())
+                problems.append(f"sample id column '{id_col}' contains NaN values: {nan_count}")
+            else:
+                sample_ids = [str(value).strip() for value in sample_id_values.tolist()]
+                if set(sub_ids) != set(sample_ids):
+                    missing = sorted(set(sample_ids) - set(sub_ids))[:5]
+                    extra = sorted(set(sub_ids) - set(sample_ids))[:5]
+                    problems.append(
+                        "id values mismatch (sample submission ids):\n"
+                        f"  missing (first 5): {missing}\n"
+                        f"  extra (first 5):   {extra}"
+                    )
         required_id_suffix = infer_required_id_suffix(
             sample_csv=sample_csv,
             data_dir=data_dir_path,
             submission_ids=sub_ids,
         )
         if required_id_suffix:
-            suffix_mismatches = [sid for sid in sub_ids if sid and Path(sid).suffix.lower() != required_id_suffix]
+            suffix_mismatches = [sid for sid in sub_ids if sid and asset_suffix(Path(sid)) != required_id_suffix]
             if suffix_mismatches:
                 preview = suffix_mismatches[:5]
                 problems.append(
@@ -215,7 +290,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                     f"(first 5 mismatches: {preview})"
                 )
 
-    prediction_columns = [col for col in expected_columns if col != id_col]
+    prediction_columns = [col for col in expected_columns if id_col is None or col != id_col]
     for col in prediction_columns:
         if col not in submission.columns:
             continue
@@ -239,6 +314,8 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
         nan_count = int(submission_col.isna().sum())
         if nan_count > 0:
+            if _prediction_column_allows_empty_text_values(column=col, sample_csv=sample_csv):
+                continue
             problems.append(f"prediction column '{col}' contains NaN values: {nan_count}")
             continue
 
@@ -248,7 +325,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
 
 def _prediction_column_allows_text_values(*, column: str, sample_csv: Path) -> bool:
     lowered_column = column.strip().lower()
-    if any(token in lowered_column for token in ("citation", "citations", "answer", "answers")):
+    if any(token in lowered_column for token in TEXT_PREDICTION_NAME_TOKENS):
         return True
     for context_dir in _candidate_context_dirs(sample_csv):
         for name in ("submission_format.md", "data.md", "overview.md"):
@@ -262,6 +339,30 @@ def _prediction_column_allows_text_values(*, column: str, sample_csv: Path) -> b
     return False
 
 
+def _prediction_column_allows_empty_text_values(*, column: str, sample_csv: Path) -> bool:
+    lowered_column = column.strip().lower()
+    if not _prediction_column_allows_text_values(column=column, sample_csv=sample_csv):
+        return False
+    if any(token in lowered_column for token in EMPTY_TEXT_PREDICTION_NAME_TOKENS):
+        return True
+    empty_markers = (
+        "empty string",
+        "empty values",
+        "blank",
+        "missing prediction",
+        "no prediction",
+    )
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "data.md", "overview.md"):
+            path = context_dir / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+            if lowered_column in text and any(marker in text for marker in empty_markers):
+                return True
+    return False
+
+
 def _is_prefix(prefix: list[str], values: list[str]) -> bool:
     if not prefix:
         return False
@@ -270,19 +371,83 @@ def _is_prefix(prefix: list[str], values: list[str]) -> bool:
     return all(a == b for a, b in zip(prefix, values, strict=False))
 
 
-def discover_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
-    """Discover expected test ids from tabular test files or image test assets."""
+def _looks_like_wide_single_row_submission(*, sample: pd.DataFrame, expected_columns: list[str]) -> bool:
+    if len(sample) != 1 or len(expected_columns) <= _PLACEHOLDER_SAMPLE_MAX_ROWS:
+        return False
+    return not _looks_like_validation_id_column(str(expected_columns[0]))
+
+
+def _looks_like_validation_id_column(column: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(column).strip().lower()).strip("_")
+    if not normalized:
+        return False
+    compact = normalized.replace("_", "")
+    if normalized in ID_LIKE_COLUMN_NAMES or compact in ID_LIKE_COLUMN_NAMES:
+        return True
+    if compact in {
+        "id",
+        "idx",
+        "index",
+        "rowid",
+        "recordid",
+        "sampleid",
+        "imageid",
+        "fileid",
+        "filename",
+        "file",
+        "path",
+        "name",
+        "caseid",
+        "patientid",
+        "objectid",
+        "seriesid",
+    }:
+        return True
+    return compact.endswith("id") or compact.endswith("identifier")
+
+
+def _resolve_validation_id_column(expected_columns: list[str], *, data_dir_path: Path | None) -> str | None:
+    if not expected_columns:
+        return None
+    candidate = str(expected_columns[0])
+    if _looks_like_validation_id_column(candidate):
+        return candidate
+    if len(expected_columns) == 1:
+        return None
+    test = _maybe_load_tabular_test_frame(data_dir_path) if data_dir_path is not None else None
+    if test is not None and candidate in [str(col) for col in test.columns]:
+        return candidate
+    if data_dir_path is not None:
+        return None
+    return candidate
+
+
+def discover_test_row_count(data_dir: Path) -> int | None:
+    """Discover expected test row count from tabular test files or recognized test assets."""
     if not data_dir.exists():
         return None
-    tabular_ids = _maybe_load_tabular_test_ids(data_dir, id_col=id_col)
-    if tabular_ids is not None:
-        return tabular_ids
+    test = _maybe_load_tabular_test_frame(data_dir)
+    if test is not None:
+        return len(test)
+    asset_ids = _maybe_load_test_asset_ids(data_dir)
+    return len(asset_ids) if asset_ids is not None else None
+
+
+def discover_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
+    """Discover expected test ids from tabular test files or recognized test assets."""
+    if not data_dir.exists():
+        return None
+    test = _maybe_load_tabular_test_frame(data_dir)
+    if test is not None and id_col in test.columns:
+        return [str(value) for value in test[id_col].astype(str).tolist()]
     return _maybe_load_test_asset_ids(data_dir)
 
 
-def _maybe_load_tabular_test_ids(data_dir: Path, *, id_col: str) -> list[str] | None:
+def _maybe_load_tabular_test_frame(data_dir: Path | None) -> pd.DataFrame | None:
+    if data_dir is None:
+        return None
     try:
-        from kagglebot.solver.io import find_competition_files
+        from kagglebot.solver.io import find_competition_files, read_table
     except Exception:
         return None
     try:
@@ -292,21 +457,17 @@ def _maybe_load_tabular_test_ids(data_dir: Path, *, id_col: str) -> list[str] | 
     if not test_path.exists():
         return None
     try:
-        delim = _sniff_delimiter(test_path, default=_default_delimiter_for_path(test_path))
-        test = pd.read_csv(test_path, sep=delim, usecols=[id_col], dtype={id_col: str})
+        test = read_table(test_path)
     except Exception:  # noqa: BLE001
         return None
-    if id_col not in test.columns:
-        return None
-    return [str(value) for value in test[id_col].tolist()]
+    test.columns = [str(col) for col in test.columns]
+    return test
 
 
 def _maybe_load_test_asset_ids(data_dir: Path) -> list[str] | None:
     ids: set[str] = set()
     for path in data_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in _IMAGE_TEST_ID_SUFFIXES:
+        if not _is_file_id_asset_path(path):
             continue
         try:
             parts = path.relative_to(data_dir).parts
@@ -318,6 +479,12 @@ def _maybe_load_test_asset_ids(data_dir: Path) -> list[str] | None:
     if not ids:
         return None
     return sorted(ids)
+
+
+def _is_file_id_asset_path(path: Path) -> bool:
+    if not is_data_asset_path(path):
+        return False
+    return asset_suffix(path) in _FILE_ID_ASSET_SUFFIXES
 
 
 def _maybe_load_evaluation_ids(data_dir: Path) -> list[str] | None:
@@ -354,22 +521,24 @@ def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submiss
     """Infer a required id-file suffix (e.g., '.tif') when evidence is strong."""
     if data_dir is None or not data_dir.exists():
         return None
-    ids_without_suffix = {
-        value for value in (str(raw).strip() for raw in submission_ids) if value and not Path(value).suffix
+    id_stems = {
+        stem
+        for value in (str(raw).strip() for raw in submission_ids)
+        if (stem := _submission_id_stem_for_suffix_inference(value))
     }
-    if not ids_without_suffix:
+    if not id_stems:
         return None
     if _real_sample_has_suffixless_primary_ids(sample_csv):
         return None
 
     suffix_counts: dict[str, int] = {}
     for path in data_dir.rglob("*"):
-        if not path.is_file():
+        if not _is_file_id_asset_path(path):
             continue
-        stem = path.stem
-        if stem not in ids_without_suffix:
+        suffix = asset_suffix(path)
+        stem = _remove_suffix(path.name, suffix)
+        if stem not in id_stems:
             continue
-        suffix = path.suffix.lower()
         if not suffix:
             continue
         suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
@@ -377,7 +546,7 @@ def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submiss
     if not suffix_counts:
         return None
 
-    required_matches = len(ids_without_suffix)
+    required_matches = len(id_stems)
     full_coverage = sorted(suffix for suffix, count in suffix_counts.items() if count >= required_matches)
     if not full_coverage:
         return None
@@ -390,17 +559,52 @@ def infer_required_id_suffix(*, sample_csv: Path, data_dir: Path | None, submiss
     return None
 
 
+def normalize_id_with_required_suffix(value: object, required_suffix: str) -> str:
+    raw = str(value).strip()
+    if not raw or not required_suffix:
+        return raw
+    current_suffix = asset_suffix(Path(raw))
+    if current_suffix == required_suffix:
+        return raw
+    if current_suffix in _FILE_ID_ASSET_SUFFIXES:
+        stem = _remove_suffix(raw, current_suffix)
+        return f"{stem}{required_suffix}" if stem else raw
+    if Path(raw).suffix:
+        return raw
+    return f"{raw}{required_suffix}"
+
+
+def _submission_id_stem_for_suffix_inference(value: str) -> str | None:
+    if not value:
+        return None
+    current_suffix = asset_suffix(Path(value))
+    if current_suffix in _FILE_ID_ASSET_SUFFIXES:
+        stem = _remove_suffix(value, current_suffix)
+        return stem or None
+    if Path(value).suffix:
+        return None
+    return value
+
+
+def _remove_suffix(name: str, suffix: str) -> str:
+    if suffix and name.lower().endswith(suffix):
+        return name[: -len(suffix)]
+    return Path(name).stem
+
+
 def _real_sample_has_suffixless_primary_ids(sample_csv: Path) -> bool:
     if not _has_data_rows(sample_csv) or _is_synthesized_sample_submission(sample_csv):
         return False
     try:
         delim = _sniff_delimiter(sample_csv, default=_default_delimiter_for_path(sample_csv))
-        sample_header = pd.read_csv(sample_csv, sep=delim, nrows=0)
-        sample_columns = list(sample_header.columns)
+        sample_columns = _read_tabular_columns(sample_csv, sep=delim)
         if not sample_columns:
             return False
         id_col = sample_columns[0]
-        sample_ids = pd.read_csv(sample_csv, sep=delim, usecols=[id_col], dtype={id_col: str})[id_col]
+        sample = _read_tabular_frame(sample_csv, sep=delim, id_col=id_col)
+        if id_col not in sample.columns:
+            return False
+        sample_ids = sample[id_col]
     except Exception:  # noqa: BLE001
         return False
     for raw in sample_ids.tolist():
@@ -434,19 +638,29 @@ def _preferred_id_suffix_from_context(sample_csv: Path) -> str | None:
 def _extract_suffix_tokens(section: str) -> list[str]:
     suffixes: list[str] = []
     for token in _BACKTICK_TOKEN_RE.findall(section):
-        suffix = Path(token.strip()).suffix.lower()
+        suffix = _context_token_suffix(token)
         if _suffix_looks_plausible(suffix):
             suffixes.append(suffix)
     for match in _FILENAME_TOKEN_RE.finditer(section):
-        suffix = f".{match.group('ext').lower()}"
+        suffix = _context_token_suffix(match.group(0))
         if _suffix_looks_plausible(suffix):
             suffixes.append(suffix)
     return suffixes
 
 
+def _context_token_suffix(token: str) -> str:
+    name = Path(str(token or "").strip())
+    suffix = asset_suffix(name)
+    if suffix in DATA_ASSET_SUFFIXES:
+        return suffix
+    return name.suffix.lower()
+
+
 def _suffix_looks_plausible(suffix: str) -> bool:
     if not suffix.startswith("."):
         return False
+    if suffix in DATA_ASSET_SUFFIXES:
+        return True
     ext = suffix[1:]
     return 2 <= len(ext) <= 8 and ext.isalnum()
 
@@ -474,14 +688,14 @@ def _should_prefer_hint_columns(
 ) -> bool:
     if not hint_columns:
         return False
-    if sample_has_data_rows:
-        return False
     if not sample_columns:
         return True
     if list(sample_columns) == list(hint_columns):
         return False
-    if not columns_look_plausible(sample_columns):
+    if _columns_look_headerless(sample_columns):
         return True
+    if sample_has_data_rows:
+        return False
     if not _sample_header_looks_placeholder(sample_columns):
         return False
     if _hint_columns_strong_enough_to_override_placeholder(hint_columns):
@@ -553,38 +767,149 @@ def _normalized_columns(columns: list[str]) -> list[str]:
     return [str(col).strip().lower() for col in columns]
 
 
+def _columns_look_like_markdown(columns: list[str]) -> bool:
+    if not columns:
+        return False
+    for col in columns:
+        text = str(col).strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if text.startswith("#") or "kaggle" in lowered:
+            return True
+        if "welcome to" in lowered or "competition" in lowered:
+            return True
+        if len(text) > 30 and " " in text:
+            return True
+    return False
+
+
 def _has_data_rows(path: Path) -> bool:
-    non_empty = 0
+    return tabular_file_has_data_rows(path)
+
+
+def _read_tabular_columns(path: Path, *, sep: str) -> list[str]:
+    if _is_delimited_text_table(path):
+        return list(_read_delimited_text_frame(path, sep=sep, nrows=0).columns)
+    return list(_read_tabular_frame(path, sep=sep).columns)
+
+
+def _read_tabular_frame(
+    path: Path,
+    *,
+    sep: str,
+    id_col: str | None = None,
+    expected_columns: list[str] | None = None,
+    allow_headerless_fallback: bool = False,
+) -> pd.DataFrame:
+    if _is_delimited_text_table(path):
+        try:
+            frame = _read_delimited_text_frame(path, sep=sep, dtype={id_col: str} if id_col else None)
+        except Exception:  # noqa: BLE001
+            frame = _read_delimited_text_frame(path, sep=sep)
+        if (
+            allow_headerless_fallback
+            and expected_columns
+            and list(frame.columns) != list(expected_columns)
+            and _columns_look_headerless([str(column) for column in frame.columns])
+        ):
+            try:
+                return _read_delimited_text_frame(
+                    path,
+                    sep=sep,
+                    header=None,
+                    names=expected_columns,
+                    dtype={id_col: str} if id_col else None,
+                    engine="python",
+                    on_bad_lines="skip",
+                )
+            except Exception:  # noqa: BLE001
+                return frame
+        return frame
+    frame = read_table(path)
+    if id_col and id_col in frame.columns:
+        frame[id_col] = frame[id_col].astype(str)
+    return frame
+
+
+def _read_delimited_text_frame(path: Path, **kwargs) -> pd.DataFrame:
+    with open_tabular_text(path) as handle:
+        frame = pd.read_csv(StringIO(handle.read()), **kwargs)
+    frame.columns = normalize_table_column_names(frame.columns)
+    return frame
+
+
+def _columns_look_headerless(columns: list[str]) -> bool:
+    if not columns:
+        return False
+    if len(columns) == 1 and _column_name_looks_like_prediction_header(columns[0]):
+        return False
+    if not columns_look_plausible(columns):
+        return True
+    data_value_count = sum(1 for column in columns if _column_name_looks_like_data_value(str(column)))
+    return data_value_count >= max(1, len(columns) // 2)
+
+
+def _column_name_looks_like_prediction_header(column: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", str(column).strip().lower())
+    return compact in {
+        "target",
+        "prediction",
+        "pred",
+        "label",
+        "score",
+        "probability",
+        "prob",
+        "value",
+        "y",
+    }
+
+
+def _column_name_looks_like_data_value(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                non_empty += 1
-                if non_empty >= 2:
-                    return True
-    except OSError:
+        float(text)
+    except ValueError:
+        pass
+    else:
+        return True
+    if re.fullmatch(r"[A-Z]{1,10}:\d{3,}", text):
+        return True
+    if re.fullmatch(r"(?:col|column)\d+", text, re.IGNORECASE):
+        return False
+    if re.fullmatch(r"[xyz]_\d+", text, re.IGNORECASE):
+        return False
+    if re.fullmatch(r"[A-Za-z]*\d+[A-Za-z0-9_.:-]*", text):
         return True
     return False
 
 
+def _columns_are_generic_placeholders(columns: list[str]) -> bool:
+    return all(re.fullmatch(r"col\d+", str(column).strip(), re.IGNORECASE) for column in columns)
+
+
 def _default_delimiter_for_path(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix in {".tsv", ".txt"}:
-        return "\t"
-    return ","
+    return default_delimited_text_separator(tabular_suffix(path))
 
 
 def _sniff_delimiter(path: Path, *, default: str = ",", max_lines: int = 100) -> str:
+    if not _is_delimited_text_table(path):
+        return default
+    try:
+        return sniff_tabular_text_delimiter(path)
+    except Exception:  # noqa: BLE001
+        pass
     candidates: list[str] = []
-    for sep in (default, "\t", ",", ";"):
+    for sep in (default, "\t", ",", ";", "|"):
         if sep and sep not in candidates:
             candidates.append(sep)
     counts = {sep: 0 for sep in candidates}
     first_counts: dict[str, int] | None = None
     lines_seen = 0
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with open_tabular_text(path) as handle:
             for line in handle:
                 if not line.strip():
                     continue
@@ -611,6 +936,10 @@ def _sniff_delimiter(path: Path, *, default: str = ",", max_lines: int = 100) ->
     if counts.get(default, 0) >= counts[best]:
         return default
     return best
+
+
+def _is_delimited_text_table(path: Path) -> bool:
+    return tabular_suffix(path) in TABULAR_TEXT_SUFFIXES
 
 
 def _resolve_expected_columns_from_context(sample_csv: Path) -> list[str] | None:

@@ -5,6 +5,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.submission_sample_discovery import (
+    is_tabular_data_path,
+    path_mentions_role,
+    select_sample_submission_path,
+    tabular_data_row_count_capped,
+    tabular_suffix,
+)
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths
@@ -224,8 +231,14 @@ def _looks_like_notebook_hidden_test_contract(paths: CompetitionPaths) -> bool:
     """
     if not _evaluation_spec_submit_mode_is_notebook(paths):
         return False
-    test_rows = _csv_data_row_count_at_most(paths.data_dir / "test.csv", limit=10)
-    sample_rows = _csv_data_row_count_at_most(paths.data_dir / "sample_submission.csv", limit=10)
+    test_path = _find_named_tabular_file(paths.data_dir, stem="test")
+    sample_path = _find_sample_submission_path(paths.data_dir) or _find_sample_submission_path(paths.context_dir)
+    if sample_path is None and paths.sample_submission_path.is_file():
+        sample_path = paths.sample_submission_path
+    if test_path is None or sample_path is None:
+        return False
+    test_rows = _tabular_data_row_count_at_most(test_path, limit=10)
+    sample_rows = _tabular_data_row_count_at_most(sample_path, limit=10)
     return test_rows is True and sample_rows is True
 
 
@@ -237,16 +250,55 @@ def _evaluation_spec_submit_mode_is_notebook(paths: CompetitionPaths) -> bool:
     return False
 
 
-def _csv_data_row_count_at_most(path: Path, *, limit: int) -> bool | None:
+def _tabular_data_row_count_at_most(path: Path, *, limit: int) -> bool | None:
+    row_count = tabular_data_row_count_capped(path, cap=limit)
+    if row_count is None:
+        return None
+    return row_count <= limit
+
+
+def _find_named_tabular_file(data_dir: Path, *, stem: str) -> Path | None:
+    lowered_stem = stem.lower()
+    if not data_dir.exists():
+        return None
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            # Header plus at most `limit` data rows may be present.
-            for index, _line in enumerate(handle):
-                if index > limit:
-                    return False
+        candidates = [
+            path
+            for path in data_dir.rglob("*")
+            if path.is_file()
+            and is_tabular_data_path(path)
+            and (_tabular_stem(path).lower() == lowered_stem or path_mentions_role(path, lowered_stem))
+            and ".kagglebot_cache" not in {part.lower() for part in path.parts}
+        ]
     except OSError:
         return None
-    return True
+    if not candidates:
+        return None
+    return min(candidates, key=lambda path: (len(path.relative_to(data_dir).parts), str(path).lower()))
+
+
+def _find_sample_submission_path(data_dir: Path) -> Path | None:
+    if not data_dir.exists():
+        return None
+    try:
+        files = [
+            path
+            for path in data_dir.rglob("*")
+            if path.is_file()
+            and is_tabular_data_path(path)
+            and ".kagglebot_cache" not in {part.lower() for part in path.parts}
+        ]
+    except OSError:
+        return None
+    return select_sample_submission_path(files)
+
+
+def _tabular_stem(path: Path) -> str:
+    suffix = tabular_suffix(path)
+    name = path.name
+    if suffix and name.lower().endswith(suffix):
+        return name[: -len(suffix)]
+    return path.stem
 
 
 def summarize_writeup_requirements(paths: CompetitionPaths, *, max_lines: int = 8) -> str:

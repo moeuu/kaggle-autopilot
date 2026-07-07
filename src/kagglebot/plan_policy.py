@@ -30,6 +30,7 @@ DEFAULT_EVAL_SEEDS = (42, 2024, 777)
 DEFAULT_EVAL_REPEATS = 2
 EVAL_REPEAT_SEED_OFFSET = 1009
 FULL_DATASET_REQUIRED_COMPETITIONS = frozenset({"urban-flood-modelling"})
+FULL_DATASET_REQUIRED_LAYOUTS = frozenset({"flat_full"})
 STOP_POLICY_ABORT_ALIASES = (
     "repeated_error_fingerprint_abort",
     "error_fingerprint_policy",
@@ -69,14 +70,26 @@ ACCURACY_FIRST_MIN_CV_FOLDS = 5
 ACCURACY_FIRST_EVAL_SEEDS = [42, 2024, 777]
 HEAVY_MAX_FULL_TRAIN_FOLDS = 3
 
-COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, str]] = {
+COMPETITION_EVAL_OVERRIDES: dict[str, dict[str, object]] = {
     "deep-past-initiative-machine-translation": {
         "metric_name": "Geometric Mean of the BLEU and the chrF++ scores",
         "direction": "maximize",
         "split_strategy": "group_kfold",
         "group_column_hint": "oare_id",
+        "task": "translation",
+        "task_by_target": {"translation": "translation"},
+        "prediction_kind_by_target": {"translation": "text"},
+        "tags": ["text", "translation", "n_rows_small", "high_cardinality_cats"],
     }
 }
+COMPETITION_PROFILE_OVERRIDE_KEYS = frozenset(
+    {
+        "task",
+        "task_by_target",
+        "prediction_kind_by_target",
+        "tags",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -885,7 +898,7 @@ def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -
                     f"[yellow]plan guardrail[/yellow]: detected severe class imbalance; enabling {classifier_keys[0]}."
                 )
 
-    if toggles is not None and modality in {"image", "video", "audio", "text", "rna_structure"}:
+    if toggles is not None and is_heavy_deep_learning_modality(modality):
         allow_pretrained = toggles.get("ALLOW_PRETRAINED_WEIGHTS")
         if isinstance(allow_pretrained, bool) and not allow_pretrained and not _rules_disallow_external_data(paths):
             toggles["ALLOW_PRETRAINED_WEIGHTS"] = True
@@ -1843,8 +1856,49 @@ def normalize_split_strategy_name(value: object) -> str | None:
     return aliases.get(normalized)
 
 
-def competition_eval_override(slug: str) -> dict[str, str]:
-    return dict(COMPETITION_EVAL_OVERRIDES.get(str(slug).strip().lower(), {}))
+def normalize_competition_eval_override(raw: object) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    metric = _first_non_empty_str(raw, "metric_name", "metric", "target_metric")
+    direction = _first_non_empty_str(raw, "direction", "target_direction").lower()
+    split_strategy = _first_non_empty_str(raw, "split_strategy", "split_strategy_hint")
+    group_column_hint = _first_non_empty_str(raw, "group_column_hint", "group_column")
+    override: dict[str, str] = {}
+    if metric:
+        override["metric_name"] = metric
+    if direction in {"minimize", "maximize"}:
+        override["direction"] = direction
+    normalized_split = normalize_split_strategy_name(split_strategy) or infer_split_strategy_from_hint_text(
+        split_strategy
+    )
+    if normalized_split is not None:
+        override["split_strategy"] = normalized_split
+    if group_column_hint:
+        override["group_column_hint"] = group_column_hint
+    return override
+
+
+def _first_non_empty_str(raw: dict[object, object], *keys: str) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def competition_eval_override(slug: str, fallback_overrides: object | None = None) -> dict[str, str]:
+    override = normalize_competition_eval_override(COMPETITION_EVAL_OVERRIDES.get(str(slug).strip().lower(), {}))
+    policy_override = normalize_competition_eval_override(fallback_overrides)
+    if policy_override:
+        override.update(policy_override)
+    return override
+
+
+def competition_profile_override(slug: str) -> dict[str, object]:
+    raw = COMPETITION_EVAL_OVERRIDES.get(str(slug).strip().lower(), {})
+    if not isinstance(raw, dict):
+        return {}
+    return {key: value for key, value in raw.items() if key in COMPETITION_PROFILE_OVERRIDE_KEYS}
 
 
 def apply_competition_eval_override(
@@ -1857,19 +1911,20 @@ def apply_competition_eval_override(
     if not override:
         return payload
     updated = dict(payload)
-    updated["metric"] = override["metric_name"]
-    updated["direction"] = override["direction"]
-    updated["split_strategy_hint"] = override["split_strategy"]
-    updated["group_column_hint"] = override["group_column_hint"]
-    task = str(updated.get("task") or "").strip().lower()
-    if task in {"classification", "binary", "multiclass", ""}:
-        updated["task"] = "translation"
-    updated["task_by_target"] = {"translation": "translation"}
-    updated["prediction_kind_by_target"] = {"translation": "text"}
-    updated["tags"] = ["text", "translation", "n_rows_small", "high_cardinality_cats"]
+    if override.get("metric_name"):
+        updated["metric"] = override["metric_name"]
+    if override.get("direction"):
+        updated["direction"] = override["direction"]
+    if override.get("split_strategy"):
+        updated["split_strategy_hint"] = override["split_strategy"]
+    if override.get("group_column_hint"):
+        updated["group_column_hint"] = override["group_column_hint"]
+    updated.update(competition_profile_override(slug))
     if include_spec_keys:
-        updated["metric_name"] = override["metric_name"]
-        updated["split_strategy"] = override["split_strategy"]
+        if override.get("metric_name"):
+            updated["metric_name"] = override["metric_name"]
+        if override.get("split_strategy"):
+            updated["split_strategy"] = override["split_strategy"]
     return updated
 
 
@@ -1877,6 +1932,8 @@ def build_evaluation_contract(
     *,
     slug: str,
     eval_spec: dict[str, object],
+    dataset_profile: dict[str, object] | None = None,
+    competition_override: dict[str, str] | None = None,
     target_metric: str | None,
     target_direction: str | None,
     split_strategy: str | None,
@@ -1885,8 +1942,11 @@ def build_evaluation_contract(
     accepted_score_sources = normalize_score_source_list(
         faithfulness.get("accepted_score_sources") if isinstance(faithfulness, dict) else None
     )
-    require_full_dataset_default = str(slug).strip().lower() in FULL_DATASET_REQUIRED_COMPETITIONS
-    competition_override = competition_eval_override(slug)
+    require_full_dataset_default = resolve_require_full_dataset_default(
+        slug=slug,
+        dataset_profile=dataset_profile,
+    )
+    competition_override = competition_override if competition_override is not None else competition_eval_override(slug)
     metric_source = (
         competition_override.get("metric_name") if competition_override.get("metric_name") else target_metric
     )
@@ -1932,6 +1992,31 @@ def build_evaluation_contract(
             else require_full_dataset_default
         ),
     }
+
+
+def resolve_require_full_dataset_default(
+    *,
+    slug: str,
+    dataset_profile: dict[str, object] | None = None,
+) -> bool:
+    if isinstance(dataset_profile, dict):
+        for key in ("require_full_dataset", "full_dataset_required"):
+            value = dataset_profile.get(key)
+            if isinstance(value, bool):
+                return value
+        data_root_layout = str(dataset_profile.get("data_root_layout") or "").strip().lower()
+        if data_root_layout in FULL_DATASET_REQUIRED_LAYOUTS:
+            return True
+        data_resolution = dataset_profile.get("data_resolution")
+        if isinstance(data_resolution, dict):
+            for key in ("require_full_dataset", "full_dataset_required"):
+                value = data_resolution.get(key)
+                if isinstance(value, bool):
+                    return value
+            data_root_layout = str(data_resolution.get("data_root_layout") or "").strip().lower()
+            if data_root_layout in FULL_DATASET_REQUIRED_LAYOUTS:
+                return True
+    return str(slug).strip().lower() in FULL_DATASET_REQUIRED_COMPETITIONS
 
 
 def infer_split_strategy_from_hint_text(text: str) -> str | None:
@@ -1984,15 +2069,24 @@ def profile_has_temporal_signal(profile: dict[str, object]) -> bool:
     dtype_map_raw = profile.get("dtype_by_column")
     if not isinstance(dtype_map_raw, dict):
         return False
-    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
     for name, dtype in dtype_map_raw.items():
         column_name = str(name)
         dtype_name = str(dtype).lower()
         if "datetime" in dtype_name or "timedelta" in dtype_name:
             return True
-        if temporal_name.search(column_name):
+        if _column_name_has_temporal_token(column_name):
             return True
     return False
+
+
+def _column_name_has_temporal_token(name: str) -> bool:
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", name.lower()) if token]
+    if any(
+        token in {"date", "datetime", "timestamp", "time", "day", "daynum", "week", "month", "year"} for token in tokens
+    ):
+        return True
+    compact = "".join(tokens)
+    return compact in {"dateblocknum", "daynum", "weekofyear"}
 
 
 def resolve_split_strategy_from_artifacts(

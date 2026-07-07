@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,12 @@ from kagglebot.autopilot_state import (
     apply_run_status,
     build_run_payload,
     build_run_summary_payload,
+    copy_kernel_support_artifacts_to_iteration_dir,
+    copy_submission_artifact_to_iteration_dir,
     find_latest_run_id,
     list_run_ids,
     load_run_state,
+    resolve_iteration_artifact,
     resolve_resume_run_id,
     resume_best_submittable_iteration_state,
     resume_best_submitted_offline_score,
@@ -71,6 +75,100 @@ def test_write_run_payload_writes_run_json(tmp_path: Path) -> None:
 
     payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert payload == {"run_id": "run-1", "status": "running"}
+
+
+def test_resolve_iteration_artifact_finds_same_stem_tabular_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1"
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True)
+    oof_path = output_dir / "oof_predictions.jsonl"
+    oof_path.write_text('{"y":0,"oof_pred":0.1}\n', encoding="utf-8")
+
+    assert resolve_iteration_artifact(iter_dir, "oof_predictions.csv") == oof_path
+
+
+def test_resolve_iteration_artifact_finds_compressed_same_stem_tabular_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1"
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True)
+    oof_path = output_dir / "oof_predictions.csv.gz"
+    with gzip.open(oof_path, "wt", encoding="utf-8") as handle:
+        handle.write("y,oof_pred\n0,0.1\n")
+
+    assert resolve_iteration_artifact(iter_dir, "oof_predictions.csv") == oof_path
+
+
+def test_resolve_iteration_artifact_finds_excel_same_stem_tabular_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1"
+    output_dir = iter_dir / "output"
+    output_dir.mkdir(parents=True)
+    oof_path = output_dir / "oof_predictions.xlsx"
+    oof_path.write_bytes(b"excel-bytes")
+
+    assert resolve_iteration_artifact(iter_dir, "oof_predictions.csv") == oof_path
+
+
+def test_copy_kernel_support_artifacts_preserves_non_csv_tabular_suffix(tmp_path: Path) -> None:
+    kernel_output_dir = tmp_path / "kernel-output"
+    nested_dir = kernel_output_dir / "nested"
+    iter_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1"
+    nested_dir.mkdir(parents=True)
+    oof_path = nested_dir / "oof_predictions.jsonl.gz"
+    with gzip.open(oof_path, "wt", encoding="utf-8") as handle:
+        handle.write('{"row_id":1,"oof_pred":0.1}\n')
+    feature_path = kernel_output_dir / "feature_suspects.xlsx"
+    feature_path.write_bytes(b"excel-bytes")
+    split_path = kernel_output_dir / "split_diagnostics.json"
+    split_path.write_text('{"folds": 3}\n', encoding="utf-8")
+
+    copy_kernel_support_artifacts_to_iteration_dir(kernel_output_dir=kernel_output_dir, iter_dir=iter_dir)
+
+    assert (iter_dir / "output" / "oof_predictions.jsonl.gz").is_file()
+    assert (iter_dir / "output" / "feature_suspects.xlsx").read_bytes() == b"excel-bytes"
+    assert (iter_dir / "output" / "split_diagnostics.json").read_text(encoding="utf-8") == '{"folds": 3}\n'
+
+
+def test_copy_submission_artifact_to_iteration_dir_preserves_manifest_reference(tmp_path: Path) -> None:
+    output_dir = tmp_path / "kernel-output"
+    iter_dir = tmp_path / "iter-1"
+    output_dir.mkdir()
+    submission = output_dir / "answers.nii.gz"
+    submission.write_bytes(b"volume")
+    manifest = output_dir / "submission_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "artifact_class": "single_file",
+                "submission_path": "answers.nii.gz",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    copied = copy_submission_artifact_to_iteration_dir(source=manifest, iter_dir=iter_dir)
+
+    assert copied == iter_dir / "submission_manifest.json"
+    assert (iter_dir / "answers.nii.gz").read_bytes() == b"volume"
+    copied_manifest = json.loads(copied.read_text(encoding="utf-8"))
+    assert copied_manifest["submission_path"] == "answers.nii.gz"
+
+
+def test_copy_submission_artifact_to_iteration_dir_preserves_sidecars(tmp_path: Path) -> None:
+    output_dir = tmp_path / "kernel-output"
+    iter_dir = tmp_path / "iter-1"
+    output_dir.mkdir()
+    source = output_dir / "submission.shp"
+    source.write_bytes(b"shape")
+    (output_dir / "submission.dbf").write_bytes(b"attributes")
+    (output_dir / "submission.shx").write_bytes(b"index")
+    (output_dir / "submission.prj").write_text("EPSG:4326\n", encoding="utf-8")
+
+    copied = copy_submission_artifact_to_iteration_dir(source=source, iter_dir=iter_dir)
+
+    assert copied == iter_dir / "submission.shp"
+    assert (iter_dir / "submission.dbf").read_bytes() == b"attributes"
+    assert (iter_dir / "submission.shx").read_bytes() == b"index"
+    assert (iter_dir / "submission.prj").read_text(encoding="utf-8") == "EPSG:4326\n"
 
 
 def test_apply_run_status_sets_status_and_optional_stop_reason() -> None:

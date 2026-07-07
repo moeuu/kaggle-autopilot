@@ -6,6 +6,7 @@ import numpy as np
 
 from kagglebot.kernel_runtime.tabular_blend import (
     build_hill_climb_candidates,
+    make_component_blend_result,
     make_logit_blend_result,
     select_blend_candidate_pool,
     select_top_blend_components,
@@ -93,6 +94,36 @@ def test_should_select_blend_candidate_requires_positive_margin_and_seed_support
     assert should_select_blend_candidate(rejected_blend, best_single, min_margin=0.00005) is False
 
 
+def test_should_select_blend_candidate_accepts_regression_seed_scores() -> None:
+    best_single = _result(
+        "ridge_best",
+        cv_score=-2.0,
+        family="ridge",
+        oof_preds=[10.0, 20.0],
+        test_preds=[12.0, 22.0],
+        seed_scores=[{"seed": 42, "score": -2.0, "metric": "rmse"}, {"seed": 2024, "score": -2.2, "metric": "rmse"}],
+    )
+    accepted_blend = _result(
+        "blend_ok",
+        cv_score=-1.8,
+        family="blend",
+        oof_preds=[11.0, 19.0],
+        test_preds=[13.0, 21.0],
+        seed_scores=[{"seed": 42, "score": -1.7, "metric": "rmse"}, {"seed": 2024, "score": -2.2, "metric": "rmse"}],
+    )
+    rejected_blend = _result(
+        "blend_bad",
+        cv_score=-1.8,
+        family="blend",
+        oof_preds=[11.0, 19.0],
+        test_preds=[13.0, 21.0],
+        seed_scores=[{"seed": 42, "score": -2.4, "metric": "rmse"}, {"seed": 2024, "score": -2.3, "metric": "rmse"}],
+    )
+
+    assert should_select_blend_candidate(accepted_blend, best_single, min_margin=0.00005) is True
+    assert should_select_blend_candidate(rejected_blend, best_single, min_margin=0.00005) is False
+
+
 def test_make_logit_blend_result_builds_expected_metadata() -> None:
     bundle = SimpleNamespace(target_values=np.asarray([0, 1], dtype=np.int8))
     artifacts = SimpleNamespace(suite_name="comp_only", train_mode="competition_only", feature_recipe="full")
@@ -121,6 +152,82 @@ def test_make_logit_blend_result_builds_expected_metadata() -> None:
     assert result.metadata["blend_components"] == ["xgb_a", "cat_b"]
     assert np.all(result.oof_preds > 0.0)
     assert np.all(result.oof_preds < 1.0)
+
+
+def test_make_component_blend_result_preserves_regression_predictions() -> None:
+    bundle = SimpleNamespace(
+        target_values=np.asarray([10.0, 30.0], dtype=np.float64),
+        prediction_kind="regression",
+        target_col="target",
+    )
+    artifacts = SimpleNamespace(suite_name="regression_suite", train_mode="competition_only", feature_recipe="full")
+    first = _result(
+        "ridge_a",
+        cv_score=-4.0,
+        family="ridge",
+        oof_preds=[10.0, 20.0],
+        test_preds=[10.0, 40.0],
+    )
+    second = _result(
+        "ridge_b",
+        cv_score=-5.0,
+        family="ridge",
+        oof_preds=[20.0, 40.0],
+        test_preds=[20.0, 60.0],
+    )
+
+    result = make_component_blend_result(
+        bundle=bundle,
+        artifacts=artifacts,
+        results_by_name={"ridge_a": first, "ridge_b": second},
+        component_weights={"ridge_a": 0.5, "ridge_b": 0.5},
+        method="weighted",
+        outer_folds=2,
+    )
+
+    assert result.metadata["metric"] == "rmse"
+    assert result.metadata["prediction_kind"] == "regression"
+    assert result.metadata["prediction_range"] == [15.0, 50.0]
+    assert np.allclose(result.oof_preds, [15.0, 30.0])
+    assert np.allclose(result.test_preds, [15.0, 50.0])
+    assert result.cv_score == -float(np.sqrt(((10.0 - 15.0) ** 2 + (30.0 - 30.0) ** 2) / 2.0))
+
+
+def test_make_component_blend_result_clips_count_regression_predictions() -> None:
+    bundle = SimpleNamespace(
+        target_values=np.asarray([0.0, 20.0], dtype=np.float64),
+        prediction_kind="count_regression",
+        target_col="count",
+    )
+    artifacts = SimpleNamespace(suite_name="count_suite", train_mode="competition_only", feature_recipe="full")
+    first = _result(
+        "count_a",
+        cv_score=-1.0,
+        family="ridge",
+        oof_preds=[-10.0, 12.0],
+        test_preds=[-5.0, 16.0],
+    )
+    second = _result(
+        "count_b",
+        cv_score=-2.0,
+        family="ridge",
+        oof_preds=[-4.0, 24.0],
+        test_preds=[-3.0, 28.0],
+    )
+
+    result = make_component_blend_result(
+        bundle=bundle,
+        artifacts=artifacts,
+        results_by_name={"count_a": first, "count_b": second},
+        component_weights={"count_a": 0.5, "count_b": 0.5},
+        method="weighted",
+        outer_folds=2,
+    )
+
+    assert result.metadata["metric"] == "rmsle"
+    assert result.metadata["prediction_range"] == [0.0, 22.0]
+    assert np.allclose(result.oof_preds, [0.0, 18.0])
+    assert np.allclose(result.test_preds, [0.0, 22.0])
 
 
 def test_select_blend_candidate_pool_keeps_diverse_families_and_suites() -> None:
@@ -169,3 +276,35 @@ def test_build_hill_climb_candidates_emits_three_component_candidate() -> None:
 
     assert generated
     assert any(len(result.metadata["blend_components"]) >= 3 for result in generated)
+
+
+def test_build_hill_climb_candidates_uses_weighted_only_for_regression() -> None:
+    bundle = SimpleNamespace(
+        target_values=np.asarray([10.0, 20.0, 30.0, 40.0], dtype=np.float64),
+        prediction_kind="regression",
+        target_col="target",
+    )
+    artifacts = SimpleNamespace(
+        suite_name="regression_suite",
+        train_mode="competition_only",
+        feature_recipe="full",
+        original_row_weight=None,
+    )
+    results = [
+        _result("ridge_a", cv_score=-2.0, family="ridge", oof_preds=[9.0, 19.0, 31.0, 41.0], test_preds=[12.0, 44.0]),
+        _result("ridge_b", cv_score=-3.0, family="ridge", oof_preds=[12.0, 18.0, 28.0, 42.0], test_preds=[15.0, 48.0]),
+        _result("ridge_c", cv_score=-4.0, family="ridge", oof_preds=[8.0, 22.0, 33.0, 39.0], test_preds=[10.0, 50.0]),
+    ]
+
+    generated = build_hill_climb_candidates(
+        bundle=bundle,
+        artifacts=artifacts,
+        results_by_name={result.name: result for result in results},
+        candidate_results=results,
+        outer_folds=2,
+    )
+
+    assert generated
+    assert {result.metadata["method"] for result in generated} == {"weighted"}
+    assert all(result.metadata["metric"] == "rmse" for result in generated)
+    assert all(result.metadata["prediction_range"][1] > 1.0 for result in generated)

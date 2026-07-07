@@ -243,6 +243,21 @@ def test_leaderboard_top1_extracts_zip(monkeypatch, tmp_path) -> None:
     assert result["score"] == 0.987
 
 
+def test_leaderboard_top1_finds_nested_csv_after_extract(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        zip_path = tmp_path / "leaderboard" / "demo.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        import zipfile
+
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("exports/demo/demo-leaderboard.csv", "Rank,Score\n1,0.876\n")
+        return ""
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+    result = kaggle_api.leaderboard_top1("demo", tmp_path)
+    assert result["score"] == 0.876
+
+
 def test_leaderboard_rank_for_score_maximize(monkeypatch, tmp_path) -> None:
     def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
         csv_path = tmp_path / "leaderboard" / "leaderboard.csv"

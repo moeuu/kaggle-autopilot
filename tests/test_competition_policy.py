@@ -37,7 +37,7 @@ def test_load_competition_policy_normalizes_nested_policy_values(tmp_path: Path)
                 "slug": "from-policy",
                 "archetype_tags": ["text", "", "ensemble"],
                 "required_capabilities": ["requires_oof_blend"],
-                "execution_hints": {"folds": 3},
+                "execution_hints": {"folds": 3, "kernel_contract": "bvs"},
                 "notebook_selection": {
                     "keyword_boosts": {
                         "xgb": "2.5",
@@ -77,6 +77,7 @@ def test_load_competition_policy_normalizes_nested_policy_values(tmp_path: Path)
     assert policy.archetype_tags == ("text", "ensemble")
     assert policy.has_capability("requires_oof_blend") is True
     assert policy.execution_hint("folds") == 3
+    assert policy.execution_hint("kernel_contract") == "bvs"
     assert policy.notebook_selection.keyword_boosts == {"xgb": 2.5}
     assert policy.notebook_selection.required_reference_keywords == ("gold",)
     assert policy.reference_inputs.proactive is True

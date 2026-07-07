@@ -125,6 +125,39 @@ def test_recompute_metric_from_oof_artifact_updates_payload_without_retraining(t
     assert payload["loop_decision"] == {"source": "cv", "value": pytest.approx(1.0)}
 
 
+def test_recompute_metric_from_tsv_oof_artifact_updates_payload_without_retraining(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    oof_path = iter_dir / "output" / "oof_predictions.tsv"
+    oof_path.parent.mkdir(parents=True)
+    oof_path.write_text(
+        "\n".join(
+            [
+                "row_id\ty\toof_pred\toof_proba\tfold",
+                "0\t0\t0\t0.01\t1",
+                "1\t0\t0\t0.10\t1",
+                "2\t1\t1\t0.90\t2",
+                "3\t1\t1\t0.99\t2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = recompute_metric_from_oof_artifact(
+        iter_dir=iter_dir,
+        payload={"score_source": "cv", "metric": "accuracy"},
+        target_metric="auc",
+        metric_direction="maximize",
+        resolve_iteration_artifact=lambda _iter_dir, filename: oof_path if filename == "oof_predictions.csv" else None,
+    )
+
+    assert result is not None
+    evaluation, payload = result
+    assert evaluation.metric == "auc"
+    assert evaluation.value == pytest.approx(1.0)
+    assert payload["metric_recheck_source"] == "oof_predictions:oof_predictions.tsv"
+
+
 def test_recompute_metric_from_oof_artifact_returns_none_without_target_metric(tmp_path: Path) -> None:
     assert (
         recompute_metric_from_oof_artifact(
@@ -302,6 +335,28 @@ def test_extract_kernel_metric_from_oof_dict_respects_selected_key() -> None:
     assert value == 8.76
 
 
+def test_extract_kernel_metric_supports_extended_direct_aliases() -> None:
+    metric, value = extract_kernel_metric({"qwk": 0.812}, "quadratic_weighted_kappa")
+
+    assert metric == "quadratic_weighted_kappa"
+    assert value == 0.812
+
+
+def test_extract_kernel_metric_prefers_lower_for_extended_loss_metrics() -> None:
+    payload = {
+        "oof_smape": {
+            "lgb": 0.19,
+            "catboost": 0.21,
+            "stacked": 0.18,
+        },
+    }
+
+    metric, value = extract_kernel_metric(payload, "smape")
+
+    assert metric == "smape"
+    assert value == 0.18
+
+
 def test_extract_baseline_candidates_from_metrics_payload() -> None:
     payload = {
         "pipelines": [
@@ -360,3 +415,18 @@ def test_extract_baseline_scores_from_log_text_skips_fold_lines() -> None:
     )
 
     assert extract_baseline_scores_from_log_text(log_text) == [0.5, 0.61]
+
+
+def test_extract_baseline_scores_from_log_text_supports_extended_metric_names() -> None:
+    log_text = "\n".join(
+        [
+            "baseline_qwk=0.812",
+            "baseline_smape = 0.19",
+            "baseline_pearson=9.1e-1",
+            "persistence_concordance_index = 0.67",
+            "baseline_pinball_loss=0.11",
+            "fold=1 baseline_qwk=0.3",
+        ]
+    )
+
+    assert extract_baseline_scores_from_log_text(log_text) == [0.812, 0.19, 0.91, 0.67, 0.11]

@@ -225,6 +225,20 @@ def test_decide_initial_submit_stage_mode_uses_requested_notebook_mode() -> None
     assert decision.messages == ("[yellow]submit mode[/yellow]: using notebook submit",)
 
 
+def test_decide_initial_submit_stage_mode_preserves_explicit_inference_when_resolver_returns_wrapper() -> None:
+    decision = decide_initial_submit_stage_mode(
+        requested_notebook_submit=True,
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="inference",
+        resolved_notebook_artifact_mode="wrapper",
+    )
+
+    assert decision.notebook_submit_required is True
+    assert decision.notebook_fallback_activated is True
+    assert decision.submission_artifact_mode == "inference"
+    assert decision.messages == ("[yellow]submit mode[/yellow]: using notebook submit",)
+
+
 def test_decide_initial_submit_stage_mode_forces_notebook_only_competition() -> None:
     decision = decide_initial_submit_stage_mode(
         requested_notebook_submit=False,
@@ -341,7 +355,7 @@ def test_resolve_initial_submit_stage_runtime_state_keeps_file_submit(tmp_path: 
         submission_path=submission_path,
         resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
         decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         on_message=messages.append,
     )
 
@@ -387,7 +401,7 @@ def test_resolve_initial_submit_stage_runtime_state_forces_notebook_only_inferen
         submission_path=submission_path,
         resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
         decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         on_message=messages.append,
     )
 
@@ -865,7 +879,7 @@ def test_resolve_submit_preflight_for_run_returns_runtime_state(tmp_path: Path) 
         rules_not_accepted_exit_code=64,
         resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
         decide_notebook_submit_artifact_mode_for_paths=lambda **_kwargs: ArtifactModeDecisionStub(mode="wrapper"),
-        count_csv_data_rows=lambda _path: 1,
+        count_tabular_data_rows=lambda _path: 1,
         decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
         compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         compute_submission_sha256=lambda path: "sha" if path == prepared_submission_path else None,
@@ -938,7 +952,7 @@ def test_prepare_and_resolve_submit_preflight_returns_prepared_bundle(tmp_path: 
         rules_not_accepted_exit_code=64,
         resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
         decide_notebook_submit_artifact_mode_for_paths=lambda **_kwargs: ArtifactModeDecisionStub(mode="wrapper"),
-        count_csv_data_rows=lambda _path: 1,
+        count_tabular_data_rows=lambda _path: 1,
         decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
         compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         compute_submission_sha256=lambda path: "sha" if path == prepared_submission_path else None,
@@ -955,6 +969,91 @@ def test_prepare_and_resolve_submit_preflight_returns_prepared_bundle(tmp_path: 
     assert context.preflight_context.duplicate_skip_result is None
     assert context.preflight_context.submit_stage_state is not None
     assert context.preflight_context.submit_stage_state.submission_artifact_mode == "wrapper"
+
+
+def test_prepare_and_resolve_submit_preflight_skips_static_validation_for_notebook_inference(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ledger_path = tmp_path / "ledger.jsonl"
+    sample_path = tmp_path / "sample_submission.csv"
+    fallback_sample_path = tmp_path / "data" / "sample_submission.csv"
+    fallback_sample_path.parent.mkdir()
+    input_submission_path = tmp_path / "submission.csv"
+    source_submission_path = tmp_path / "iter-5" / "submission.csv"
+    source_submission_path.parent.mkdir()
+    for path in (sample_path, fallback_sample_path, input_submission_path, source_submission_path):
+        path.write_text("id,prediction\n", encoding="utf-8")
+    validate_calls: list[Path] = []
+    recorder = SubmitAttemptRecorderStub()
+
+    def fail_validation(path: Path) -> Path:
+        validate_calls.append(path)
+        raise SubmitValidationStubError("submission has no data rows")
+
+    def fail_static_duplicate_check(**_kwargs: object) -> list[str]:
+        raise AssertionError("static duplicate check should be skipped for notebook inference")
+
+    artifact_mode_calls: list[dict[str, object]] = []
+
+    def decide_artifact_mode(**kwargs: object) -> ArtifactModeDecisionStub:
+        artifact_mode_calls.append(kwargs)
+        return ArtifactModeDecisionStub(mode=str(kwargs["requested_mode"]))
+
+    context = prepare_and_resolve_submit_preflight_for_run_or_abort(
+        run_dir=run_dir,
+        submission_ledger_path=ledger_path,
+        slug="arc-prize-2026-arc-agi-3",
+        run_id="run-1",
+        message="submit message",
+        submitted_at=datetime(2026, 6, 25, tzinfo=UTC),
+        source_submission_path=source_submission_path,
+        input_submission_path=input_submission_path,
+        validate_and_prepare=fail_validation,
+        validation_error_types=(SubmitValidationStubError,),
+        validation_exit_code=65,
+        code_fingerprint="code-fp",
+        allow_force=False,
+        run_state={},
+        latest_submit_attempt={},
+        submit_mode="notebook",
+        notebook_submissions_only=False,
+        notebook_submit_artifact_mode="inference",
+        code_competition=True,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        load_run_state=lambda _run_dir: {},
+        collect_duplicate_submission_sources=fail_static_duplicate_check,
+        decide_duplicate_submission_action=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("static duplicate action should be skipped for notebook inference")
+        ),
+        check_rules_accepted=lambda: True,
+        cli_error_types=(RuntimeError,),
+        is_missing_credentials_error=lambda _exc: False,
+        rules_not_accepted_exit_code=64,
+        resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
+        decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
+        count_tabular_data_rows=lambda _path: 0,
+        decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
+        compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
+        compute_submission_sha256=lambda path: "input-sha" if path == input_submission_path else None,
+        submit_aborter=object(),
+        submit_attempt_recorder=recorder,
+        stdout_tail_chars=20,
+        stderr_tail_chars=20,
+        build_error=RuntimeError,
+        on_message=lambda _message: None,
+    )
+
+    assert validate_calls == []
+    assert context.prepared_context.prepared_submission_path == input_submission_path
+    assert context.prepared_context.prepared_submission_sha == "input-sha"
+    assert context.preflight_context.submit_stage_state is not None
+    assert context.preflight_context.submit_stage_state.notebook_submit_required
+    assert context.preflight_context.submit_stage_state.submission_artifact_mode == "inference"
+    assert artifact_mode_calls
+    assert {call["requested_mode"] for call in artifact_mode_calls} == {"inference"}
 
 
 def test_resolve_submit_preflight_for_run_returns_duplicate_skip(tmp_path: Path) -> None:
@@ -1003,7 +1102,7 @@ def test_resolve_submit_preflight_for_run_returns_duplicate_skip(tmp_path: Path)
         rules_not_accepted_exit_code=64,
         resolve_notebook_submit_artifact_mode=lambda **_kwargs: "wrapper",
         decide_notebook_submit_artifact_mode_for_paths=lambda **_kwargs: ArtifactModeDecisionStub(mode="wrapper"),
-        count_csv_data_rows=lambda _path: 1,
+        count_tabular_data_rows=lambda _path: 1,
         decide_same_submission_path_action=lambda **_kwargs: SamePathDecisionStub(action="retry"),
         compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         compute_submission_sha256=lambda path: "sha" if path == prepared_submission_path else None,
@@ -2174,6 +2273,8 @@ def test_finalize_submit_outcome_for_run_or_abort_delegates_outcome_abort(tmp_pa
 
 def test_infer_iteration_from_submission_path_reads_iter_parent() -> None:
     assert infer_iteration_from_submission_path(Path("runs/run-1/iter-3/submission.csv")) == 3
+    assert infer_iteration_from_submission_path(Path("runs/run-1/iter-4/output/submission.csv")) == 4
+    assert infer_iteration_from_submission_path(Path("runs/run-1/iter-5/output/predictions.npy")) == 5
     assert infer_iteration_from_submission_path(Path("submission.csv")) is None
 
 
@@ -3150,7 +3251,7 @@ def test_run_submit_stage_attempts_until_success_returns_file_submit_result(tmp_
         should_use_notebook_fallback=lambda **kwargs: False,
         resolve_notebook_submit_artifact_mode=lambda **kwargs: "wrapper",
         decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: ArtifactModeDecisionStub(mode="wrapper"),
-        count_csv_data_rows=lambda _path: 0,
+        count_tabular_data_rows=lambda _path: 0,
         compute_error_fingerprint=lambda stdout, stderr: f"{stdout}:{stderr}",
         decide_submit_fingerprint_reuse=lambda **kwargs: SimpleNamespace(
             fingerprint_seen=False,
@@ -3228,7 +3329,7 @@ def test_run_submit_stage_attempts_until_success_records_transient_retry(tmp_pat
         should_use_notebook_fallback=lambda **kwargs: False,
         resolve_notebook_submit_artifact_mode=lambda **kwargs: "wrapper",
         decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: ArtifactModeDecisionStub(mode="wrapper"),
-        count_csv_data_rows=lambda _path: 0,
+        count_tabular_data_rows=lambda _path: 0,
         compute_error_fingerprint=lambda stdout, stderr: "retry-fp",
         decide_submit_fingerprint_reuse=lambda **kwargs: SimpleNamespace(
             fingerprint_seen=False,

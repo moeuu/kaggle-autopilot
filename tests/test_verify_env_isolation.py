@@ -21,6 +21,7 @@ def test_run_verify_disables_pytest_plugin_autoload(monkeypatch) -> None:
     env = captured.get("env")
     assert isinstance(env, dict)
     assert env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") == "1"
+    assert captured["args"] == ["uv", "run", "pytest", "-p", "xdist.plugin", "-q"]
 
 
 def test_run_verify_respects_existing_pytest_disable_env(monkeypatch) -> None:

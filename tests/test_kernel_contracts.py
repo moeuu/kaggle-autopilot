@@ -9,12 +9,15 @@ from kagglebot.kernel_contracts import (
     enforce_competition_kernel_contract,
     extract_kernel_size_markers,
     requires_bvs_kernel_contract,
+    resolve_kernel_contract,
 )
 
 
 def test_requires_bvs_kernel_contract_matches_family_slug() -> None:
     assert requires_bvs_kernel_contract("beyond-visible-spectrum-ai-for-agriculture-2026p2") is True
     assert requires_bvs_kernel_contract("demo") is False
+    assert resolve_kernel_contract(slug="demo", policy_contract="bvs") == "bvs_timm_size_ensemble"
+    assert resolve_kernel_contract(slug="demo", policy_contract="unknown") is None
 
 
 def test_extract_kernel_size_markers_reads_load_and_img_sizes() -> None:

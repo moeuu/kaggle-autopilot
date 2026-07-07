@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
+from kagglebot.asset_modality import ARCHIVE_SUFFIXES, ZSTD_TAR_ARCHIVE_SUFFIXES, artifact_suffix
 from kagglebot.competition import parse_competition_slug
 from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.env_utils import env_flag, parse_float_value, parse_int_value
@@ -30,7 +31,13 @@ from kagglebot.kaggle_credentials import (
     resolve_kaggle_api_credentials,
 )
 from kagglebot.submission.guard import run_kaggle_submit
-from kagglebot.validators import safe_extract_zip
+from kagglebot.validators import (
+    safe_extract_7z,
+    safe_extract_rar,
+    safe_extract_tar,
+    safe_extract_tar_zst,
+    safe_extract_zip,
+)
 
 _KERNEL_URL_RE = re.compile(
     r"https?://(?:www\.)?kaggle\.com/(?:code/)?(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)",
@@ -1447,7 +1454,7 @@ def _load_leaderboard_rows(
         )
 
     csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
-    _extract_newer_leaderboard_zips(leaderboard_dir, csv_path)
+    _extract_newer_leaderboard_archives(leaderboard_dir, csv_path)
     csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     if csv_path is None or not csv_path.exists():
         return [], csv_path, "No leaderboard CSV file was found after download/extract."
@@ -1464,17 +1471,46 @@ def _load_leaderboard_rows(
     return rows, csv_path, None
 
 
-def _extract_newer_leaderboard_zips(leaderboard_dir: Path, csv_path: Path | None) -> None:
+def _extract_newer_leaderboard_archives(leaderboard_dir: Path, csv_path: Path | None) -> None:
     csv_mtime = csv_path.stat().st_mtime if csv_path is not None and csv_path.exists() else None
-    zip_paths = sorted(leaderboard_dir.glob("*.zip"), key=lambda path: path.stat().st_mtime)
-    for zip_path in zip_paths:
-        if csv_mtime is not None and zip_path.stat().st_mtime <= csv_mtime:
+    archive_paths = sorted(
+        (path for path in leaderboard_dir.iterdir() if path.is_file() and _is_leaderboard_archive(path)),
+        key=lambda path: path.stat().st_mtime,
+    )
+    for archive_path in archive_paths:
+        if csv_mtime is not None and archive_path.stat().st_mtime <= csv_mtime:
             continue
-        safe_extract_zip(zip_path, leaderboard_dir)
+        suffix = _leaderboard_archive_suffix(archive_path)
+        if suffix == ".zip":
+            safe_extract_zip(archive_path, leaderboard_dir)
+        elif suffix == ".7z":
+            safe_extract_7z(archive_path, leaderboard_dir)
+        elif suffix == ".rar":
+            safe_extract_rar(archive_path, leaderboard_dir)
+        elif suffix in ZSTD_TAR_ARCHIVE_SUFFIXES:
+            safe_extract_tar_zst(archive_path, leaderboard_dir)
+        elif suffix:
+            safe_extract_tar(archive_path, leaderboard_dir)
+
+
+def _extract_newer_leaderboard_zips(leaderboard_dir: Path, csv_path: Path | None) -> None:
+    _extract_newer_leaderboard_archives(leaderboard_dir, csv_path)
+
+
+def _is_leaderboard_archive(path: Path) -> bool:
+    return bool(_leaderboard_archive_suffix(path))
+
+
+def _leaderboard_archive_suffix(path: Path) -> str:
+    suffix = artifact_suffix(path)
+    return suffix if suffix in ARCHIVE_SUFFIXES else ""
 
 
 def _find_leaderboard_csv(output_dir: Path, slug: str) -> Path | None:
-    csvs = list(output_dir.glob("*.csv"))
+    try:
+        csvs = [path for path in output_dir.rglob("*.csv") if path.is_file()]
+    except OSError:
+        csvs = []
     if not csvs:
         return None
     slug_lower = slug.lower()

@@ -35,6 +35,7 @@ class KernelSourceConfig:
     dataset_sources: tuple[str, ...] = ()
     kernel_sources: tuple[str, ...] = ()
     model_sources: tuple[str, ...] = ()
+    required_model_sources: tuple[str, ...] = ()
     pipeline_model_hints: dict[str, tuple[str, ...]] = field(default_factory=dict)
     required_local_seq2seq_pipelines: tuple[str, ...] = ()
     domain_adaptation: DomainAdaptationConfig = field(default_factory=DomainAdaptationConfig)
@@ -66,6 +67,7 @@ def load_kernel_source_config(plan_path: Path) -> KernelSourceConfig:
         dataset_sources=_normalize_source_list(raw.get("dataset_sources")),
         kernel_sources=_normalize_source_list(raw.get("kernel_sources")),
         model_sources=_normalize_source_list(raw.get("model_sources")),
+        required_model_sources=_normalize_source_list(raw.get("required_model_sources")),
         pipeline_model_hints=_normalize_pipeline_model_hints(raw.get("pipeline_model_hints")),
         required_local_seq2seq_pipelines=_normalize_source_list(raw.get("required_local_seq2seq_pipelines")),
         domain_adaptation=_normalize_domain_adaptation(raw_domain_adaptation),

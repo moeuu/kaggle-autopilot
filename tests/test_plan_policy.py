@@ -9,16 +9,19 @@ from kagglebot.plan_policy import (
     DEFAULT_EVAL_SEEDS,
     EVAL_REPEAT_SEED_OFFSET,
     FULL_DATASET_REQUIRED_COMPETITIONS,
+    FULL_DATASET_REQUIRED_LAYOUTS,
     ResolvedPlan,
     apply_competition_eval_override,
     build_evaluation_contract,
     competition_eval_override,
+    competition_profile_override,
     expanded_default_eval_seeds,
     expanded_eval_seeds,
     extract_evaluation_spec_values,
     extract_plan_split_strategy_hints,
     infer_split_strategy_from_hint_text,
     needs_planning,
+    normalize_competition_eval_override,
     normalize_default_eval_repeats,
     normalize_default_eval_seeds,
     normalize_eval_repeats,
@@ -37,6 +40,7 @@ from kagglebot.plan_policy import (
     resolve_plan_score_source,
     resolve_rank_force_policy,
     resolve_readiness_stop_policy,
+    resolve_require_full_dataset_default,
     resolve_runtime_request,
     resolve_split_strategy_from_artifacts,
     resolve_split_strategy_override,
@@ -881,6 +885,7 @@ def test_resolve_split_strategy_from_artifacts_uses_profile_classification_defau
 
 def test_competition_eval_override_applies_deep_past_contract() -> None:
     override = competition_eval_override("deep-past-initiative-machine-translation")
+    profile_override = competition_profile_override("deep-past-initiative-machine-translation")
     payload = apply_competition_eval_override(
         slug="deep-past-initiative-machine-translation",
         payload={"task": "classification"},
@@ -891,6 +896,30 @@ def test_competition_eval_override_applies_deep_past_contract() -> None:
     assert payload["task"] == "translation"
     assert payload["metric_name"] == override["metric_name"]
     assert payload["split_strategy"] == "group_kfold"
+    assert profile_override["prediction_kind_by_target"] == {"translation": "text"}
+    assert competition_profile_override("demo") == {}
+
+
+def test_competition_eval_override_accepts_policy_fallback_overrides() -> None:
+    override = competition_eval_override(
+        "demo",
+        fallback_overrides={
+            "metric": "auc",
+            "direction": "maximize",
+            "split_strategy_hint": "GroupKFold(user_id)",
+            "group_column": "user_id",
+        },
+    )
+
+    assert override == {
+        "metric_name": "auc",
+        "direction": "maximize",
+        "split_strategy": "group_kfold",
+        "group_column_hint": "user_id",
+    }
+    assert normalize_competition_eval_override({"metric_name": "rmse", "direction": "sideways"}) == {
+        "metric_name": "rmse"
+    }
 
 
 def test_build_evaluation_contract_applies_competition_override() -> None:
@@ -907,8 +936,28 @@ def test_build_evaluation_contract_applies_competition_override() -> None:
     assert contract["expected_split_strategy"] == "group_kfold"
 
 
+def test_build_evaluation_contract_accepts_external_competition_override() -> None:
+    contract = build_evaluation_contract(
+        slug="demo",
+        eval_spec={},
+        competition_override={
+            "metric_name": "auc",
+            "direction": "maximize",
+            "split_strategy": "group_kfold",
+        },
+        target_metric="accuracy",
+        target_direction="maximize",
+        split_strategy="kfold",
+    )
+
+    assert contract["expected_metric"] == "auc"
+    assert contract["expected_direction"] == "maximize"
+    assert contract["expected_split_strategy"] == "group_kfold"
+
+
 def test_build_evaluation_contract_uses_faithfulness_overrides_and_full_dataset_defaults() -> None:
     assert "urban-flood-modelling" in FULL_DATASET_REQUIRED_COMPETITIONS
+    assert "flat_full" in FULL_DATASET_REQUIRED_LAYOUTS
 
     contract = build_evaluation_contract(
         slug="urban-flood-modelling",
@@ -935,6 +984,38 @@ def test_build_evaluation_contract_uses_faithfulness_overrides_and_full_dataset_
     assert contract["require_metric_match"] is False
     assert contract["require_full_dataset"] is False
     assert default_contract["require_full_dataset"] is True
+
+
+def test_build_evaluation_contract_uses_dataset_profile_full_dataset_hints() -> None:
+    contract = build_evaluation_contract(
+        slug="demo",
+        eval_spec={},
+        dataset_profile={"data_root_layout": "flat_full"},
+        target_metric="rmse",
+        target_direction="minimize",
+        split_strategy="kfold",
+    )
+    explicit_false = build_evaluation_contract(
+        slug="demo",
+        eval_spec={},
+        dataset_profile={"require_full_dataset": False, "data_root_layout": "flat_full"},
+        target_metric="rmse",
+        target_direction="minimize",
+        split_strategy="kfold",
+    )
+    nested = build_evaluation_contract(
+        slug="demo",
+        eval_spec={},
+        dataset_profile={"data_resolution": {"full_dataset_required": True}},
+        target_metric="rmse",
+        target_direction="minimize",
+        split_strategy="kfold",
+    )
+
+    assert contract["require_full_dataset"] is True
+    assert explicit_false["require_full_dataset"] is False
+    assert nested["require_full_dataset"] is True
+    assert resolve_require_full_dataset_default(slug="demo", dataset_profile={}) is False
 
 
 def test_normalize_eval_seeds_deduplicates_and_uses_defaults() -> None:

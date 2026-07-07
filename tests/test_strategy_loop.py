@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from kagglebot.exceptions import KaggleBotError
 from kagglebot.orchestrator.agent_pipeline import (
     _STRATEGY_PROMPT_MAX_CHARS,
     AgentPipelineConfig,
+    _canonicalize_research_sources_jsonl,
     _extract_plan_json,
     run_agent_pipeline,
 )
@@ -67,13 +69,13 @@ def _long_strategy_text() -> str:
 
 def _long_instructions_text() -> str:
     steps = [
-        "1) Update kernel.py with the new model pipeline.",
-        "2) Add helper modules under kernel/ for parsing and preprocessing.",
-        "3) Ensure training/evaluation flow uses the chosen metric.",
-        "4) Write outputs to submission.csv with correct format.",
-        "5) Validate against sample submission and log metrics.",
+        "1) Update kernel.py with the new model pipeline and keep artifacts under the kernel directory.",
+        "2) Add helper modules under kernel/ for parsing, preprocessing, and fold-safe feature generation.",
+        "3) Ensure training/evaluation flow uses the chosen metric with deterministic CV folds.",
+        "4) Write outputs to submission.csv with correct columns, row count, and prediction bounds.",
+        "5) Validate against sample submission, save OOF/test predictions, and log metrics.",
     ]
-    return "\n".join(steps) + "\n" + ("More detail. " * 40)
+    return "\n".join(steps) + "\n" + ("More implementation detail for a serious first run. " * 190)
 
 
 def _long_instructions_without_kernel_text() -> str:
@@ -84,7 +86,7 @@ def _long_instructions_without_kernel_text() -> str:
         "4) Write outputs to submission.csv with correct format.",
         "5) Validate against sample submission and log metrics.",
     ]
-    return "\n".join(steps) + "\n" + ("More detail. " * 40)
+    return "\n".join(steps) + "\n" + ("More implementation detail for a serious first run. " * 190)
 
 
 def _plan_json_text() -> str:
@@ -185,6 +187,46 @@ def _research_sources_jsonl_text() -> str:
     return "\n".join(json.dumps(row, ensure_ascii=True) for row in rows)
 
 
+def test_research_sources_jsonl_repairs_unescaped_query_quotes() -> None:
+    raw = (
+        '{"url": "https://www.kaggle.com/code/example/notebook", '
+        '"title": "Tufa Labs duck harness", '
+        '"date": "2026-07-02", '
+        '"why_relevant": "current ARC-AGI-3 baseline", '
+        '"extracted_technique": "graph memory plus gated reranking", '
+        '"query": ""Tufa Labs duck harness" "ARC-AGI-3" "June 30 milestone"", '
+        '"top_urls": ["https://www.kaggle.com/code/example/notebook"], '
+        '"publish_dates": ["2026-07-02"], '
+        '"takeaway": "Use harness-level engineering."}'
+    )
+
+    canonical, issue = _canonicalize_research_sources_jsonl(raw, min_items=1)
+
+    assert issue is None
+    row = json.loads(canonical)
+    assert row["query"] == '"Tufa Labs duck harness" "ARC-AGI-3" "June 30 milestone"'
+    assert row["top_urls"] == ["https://www.kaggle.com/code/example/notebook"]
+
+
+def test_research_sources_jsonl_normalizes_markdown_bullets_and_missing_dates() -> None:
+    raw = "\n".join(
+        [
+            "```jsonl",
+            '- {"url": "https://example.com/a", "title": "A", "date": "unknown", '
+            '"why_relevant": "x", "extracted_technique": "y", "query": "q", '
+            '"top_urls": "https://example.com/a", "takeaway": "z",}',
+            "```",
+        ]
+    )
+
+    canonical, issue = _canonicalize_research_sources_jsonl(raw, min_items=1)
+
+    assert issue is None
+    row = json.loads(canonical)
+    assert row["top_urls"] == ["https://example.com/a"]
+    assert row["publish_dates"] == ["unknown"]
+
+
 def _research_summary_text() -> str:
     return "\n".join(
         [
@@ -224,6 +266,9 @@ def _write_context(paths: CompetitionPaths) -> None:
 def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    (paths.data_dir / "train.csv").write_text("id,feature,target\n1,a,0\n2,b,1\n", encoding="utf-8")
+    (paths.data_dir / "test.csv").write_text("id,feature\n3,a\n4,c\n", encoding="utf-8")
 
     codex_calls: list[Path] = []
 
@@ -288,6 +333,13 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
     assert str(paths.data_md_path) in brief_prompt
     assert str(paths.rules_md_path) in brief_prompt
     assert "Problem-type knowledge (test fixture)" in brief_prompt
+    strategy_prompt = (agent_dir / "strategy" / "prompt.md").read_text(encoding="utf-8")
+    assert "Competition URL: https://www.kaggle.com/competitions/demo" in strategy_prompt
+    assert "Competition context bundle" in strategy_prompt
+    assert "Data File Structure and Representative Samples" in strategy_prompt
+    assert "train.csv" in strategy_prompt
+    assert "id,feature,target" in strategy_prompt
+    assert (agent_dir / "strategy_context_bundle.md").exists()
 
 
 def test_agent_pipeline_does_not_raise_on_successful_strategy_result(monkeypatch, tmp_path: Path) -> None:
@@ -341,6 +393,69 @@ def test_agent_pipeline_does_not_raise_on_successful_strategy_result(monkeypatch
     assert (paths.context_agent_dir / "codex_instructions.md").exists()
 
 
+def test_agent_pipeline_repairs_research_sources_without_retry(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+    strategy_calls = 0
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if output_dir.name == "implement":
+            kernel_path = paths.kernel_source_dir / "kernel.py"
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+        return DummyCodexResult(output_dir)
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
+        nonlocal strategy_calls
+        strategy_calls += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        research_sources = _research_sources_jsonl_text().replace(
+            '"query": "example kaggle binary classification discussion"',
+            '"query": ""Tufa Labs duck harness" "ARC-AGI-3" "June 30 milestone""',
+            1,
+        )
+        return DummyStrategyResult(
+            "\n".join(
+                [
+                    "===STRATEGY===",
+                    _long_strategy_text(),
+                    "===RESEARCH_SOURCES_JSONL===",
+                    research_sources,
+                    "===RESEARCH_SUMMARY_MD===",
+                    _research_summary_text(),
+                    "===PLAN_JSON===",
+                    _plan_json_text(),
+                    "===CODEX_INSTRUCTIONS===",
+                    _long_instructions_text(),
+                ]
+            )
+        )
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    run_agent_pipeline(paths=paths, config=config)
+
+    assert strategy_calls == 1
+    rows = [
+        json.loads(line)
+        for line in (paths.context_dir / "research_sources.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["query"] == '"Tufa Labs duck harness" "ARC-AGI-3" "June 30 milestone"'
+
+
 def test_agent_pipeline_falls_back_when_strategy_times_out(monkeypatch, tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
@@ -384,6 +499,45 @@ def test_agent_pipeline_falls_back_when_strategy_times_out(monkeypatch, tmp_path
     assert (agent_dir / "strategy_transcript.txt").read_text(encoding="utf-8").find("timed out") != -1
     assert (paths.context_dir / "research_sources.jsonl").exists()
     assert (paths.context_dir / "research_summary.md").exists()
+
+
+def test_agent_pipeline_does_not_fallback_when_oracle_is_required(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+
+    codex_calls: list[Path] = []
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        codex_calls.append(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return DummyCodexResult(output_dir)
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        message = "Oracle strategy runner unavailable: executable not found: oracle"
+        return DummyStrategyResult("", returncode=127, stderr=message)
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+        strategy_engine="oracle",
+    )
+
+    with pytest.raises(KaggleBotError, match="KAGGLEBOT_STRATEGY_ENGINE=oracle requires Oracle"):
+        run_agent_pipeline(paths=paths, config=config)
+
+    assert len(codex_calls) == 1
+    assert not (paths.context_agent_dir / "strategy_plan.md").exists()
+    assert not (paths.context_agent_dir / "codex_instructions.md").exists()
 
 
 def test_agent_pipeline_caps_compact_strategy_prompt(monkeypatch, tmp_path: Path) -> None:

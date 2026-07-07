@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -71,18 +72,36 @@ def build_autopilot_submit_dependencies(
     deliverable_mode_func: Callable[..., str] | None = None,
 ) -> _submit_runner.SubmitRunnerDependencies:
     """Build concrete side-effect dependencies for the submit runner."""
-    resolved_check_rules_accepted = check_rules_accepted_func or check_rules_accepted
+    resolved_check_rules_accepted = check_rules_accepted_func or _resolve_compat_callable(
+        "check_rules_accepted",
+        check_rules_accepted,
+    )
     resolved_infer_code_competition_from_paths = (
         infer_code_competition_from_paths_func or infer_code_competition_from_paths
     )
-    resolved_resolve_kaggle_username = resolve_kaggle_username_func or resolve_kaggle_username
-    resolved_run_submit_kernel = run_submit_kernel_func or run_submit_kernel
-    resolved_run_kaggle_submit_kernel = run_kaggle_submit_kernel_func or run_kaggle_submit_kernel
-    resolved_classify_submit_error = classify_submit_error_func or classify_submit_error
+    resolved_resolve_kaggle_username = resolve_kaggle_username_func or _resolve_compat_callable(
+        "resolve_kaggle_username",
+        resolve_kaggle_username,
+    )
+    resolved_run_submit_kernel = run_submit_kernel_func or _resolve_compat_callable(
+        "run_submit_kernel",
+        run_submit_kernel,
+    )
+    resolved_run_kaggle_submit_kernel = run_kaggle_submit_kernel_func or _resolve_compat_callable(
+        "run_kaggle_submit_kernel",
+        run_kaggle_submit_kernel,
+    )
+    resolved_classify_submit_error = classify_submit_error_func or _resolve_compat_callable(
+        "classify_submit_error",
+        classify_submit_error,
+    )
     resolved_compute_error_fingerprint = compute_error_fingerprint_func or compute_error_fingerprint
     resolved_normalize_error_text = normalize_error_text_func or normalize_error_text
     resolved_record_error_fix_insight = record_error_fix_insight_func or record_error_fix_insight
-    resolved_list_competition_submissions = list_competition_submissions_func or list_competition_submissions
+    resolved_list_competition_submissions = list_competition_submissions_func or _resolve_compat_callable(
+        "list_competition_submissions",
+        list_competition_submissions,
+    )
     resolved_deliverable_mode = deliverable_mode_func or infer_deliverable_mode_from_paths
     return _submit_runner.SubmitRunnerDependencies(
         load_competition_rule_constraints=_competition_rules.load_competition_rule_constraints,
@@ -103,7 +122,7 @@ def build_autopilot_submit_dependencies(
         decide_same_submission_path_action=_submit_retry_policy.decide_same_submission_path_action,
         resolve_notebook_submit_artifact_mode=_submit_notebook.resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=_submit_notebook.decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=_context_artifacts.count_csv_data_rows_capped,
+        count_tabular_data_rows=_context_artifacts.count_tabular_data_rows_capped,
         resolve_kaggle_username=resolved_resolve_kaggle_username,
         run_submit_kernel=resolved_run_submit_kernel,
         run_kaggle_submit_kernel=resolved_run_kaggle_submit_kernel,
@@ -122,6 +141,14 @@ def build_autopilot_submit_dependencies(
         sleep=time.sleep,
         on_message=print,
     )
+
+
+def _resolve_compat_callable(name: str, default: Callable[..., object]) -> Callable[..., object]:
+    autopilot_module = sys.modules.get("kagglebot.autopilot")
+    compat = getattr(autopilot_module, name, None)
+    if callable(compat) and not bool(getattr(compat, "_kagglebot_default_wrapper", False)):
+        return compat
+    return default
 
 
 def build_autopilot_submit_limits() -> _submit_runner.SubmitRunnerLimits:

@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING
 from rich import print
 
 from kagglebot import submit_attempts as _submit_attempts
-from kagglebot.artifact_io import copy_artifact_if_needed
+from kagglebot.artifact_io import copy_artifact_if_needed, same_stem_tabular_artifact_filenames
 from kagglebot.json_utils import load_json_object, load_json_object_or_empty, write_json_object
 from kagglebot.kernel_outputs import find_newest_existing_path, find_submission_file
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_utils import should_update_best_score
+from kagglebot.submission_artifacts import copy_submission_artifact_to_directory
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -500,10 +501,12 @@ def resume_iteration_state(
 
 
 def resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
+    candidate_filenames = same_stem_tabular_artifact_filenames(filename)
     primary = find_newest_existing_path(
         [
-            iter_dir / filename,
-            iter_dir / "output" / filename,
+            path
+            for candidate_filename in candidate_filenames
+            for path in (iter_dir / candidate_filename, iter_dir / "output" / candidate_filename)
         ]
     )
     if primary is not None:
@@ -513,10 +516,14 @@ def resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
     runs_dir = run_dir.parent
     competition_dir = runs_dir.parent
     kernel_run_dir = competition_dir / "kernels" / run_dir.name
-    fallback_candidates: list[Path] = [
-        kernel_run_dir / "outputs" / filename,
-        competition_dir / "kernel" / "outputs" / filename,
-    ]
+    fallback_candidates: list[Path] = []
+    for candidate_filename in candidate_filenames:
+        fallback_candidates.extend(
+            [
+                kernel_run_dir / "outputs" / candidate_filename,
+                competition_dir / "kernel" / "outputs" / candidate_filename,
+            ]
+        )
     try:
         iteration = int(iter_dir.name.split("-", 1)[1])
     except (IndexError, ValueError):
@@ -524,22 +531,32 @@ def resolve_iteration_artifact(iter_dir: Path, filename: str) -> Path | None:
     if iteration is not None:
         fallback_candidates.extend(
             [
-                kernel_run_dir / f"local-iter-{iteration}" / "outputs" / filename,
-                kernel_run_dir / f"submit-iter-{iteration}" / "outputs" / filename,
+                path
+                for candidate_filename in candidate_filenames
+                for path in (
+                    kernel_run_dir / f"local-iter-{iteration}" / "outputs" / candidate_filename,
+                    kernel_run_dir / f"submit-iter-{iteration}" / "outputs" / candidate_filename,
+                )
             ]
         )
     for root in (kernel_run_dir, competition_dir / "kernel" / "outputs"):
         if not root.exists():
             continue
-        try:
-            fallback_candidates.extend(path for path in root.rglob(filename) if path.is_file())
-        except OSError:
-            continue
+        for candidate_filename in candidate_filenames:
+            try:
+                fallback_candidates.extend(path for path in root.rglob(candidate_filename) if path.is_file())
+            except OSError:
+                continue
     return find_newest_existing_path(fallback_candidates)
 
 
 def resolve_iteration_submission_artifact(iter_dir: Path) -> Path | None:
-    return find_submission_file(iter_dir)
+    submission = find_submission_file(iter_dir)
+    if submission is not None and submission.is_dir():
+        nested_submission = find_submission_file(submission)
+        if nested_submission is not None and not nested_submission.is_dir():
+            return nested_submission
+    return submission
 
 
 def _is_submit_only_metrics_payload(metrics_path: Path) -> bool:
@@ -574,8 +591,7 @@ def _submit_retry_metrics_candidates(iter_dir: Path, marker_payload: dict[str, o
 
 
 def copy_submission_artifact_to_iteration_dir(*, source: Path, iter_dir: Path) -> Path:
-    destination = iter_dir / source.name
-    return copy_artifact_if_needed(source=source, destination=destination)
+    return copy_submission_artifact_to_directory(source=source, destination_dir=iter_dir)
 
 
 def copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, iter_dir: Path) -> None:
@@ -584,11 +600,27 @@ def copy_kernel_support_artifacts_to_iteration_dir(*, kernel_output_dir: Path, i
     output_dir = iter_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     for filename in ("oof_predictions.csv", "split_diagnostics.json", "feature_suspects.csv"):
-        source = kernel_output_dir / filename
-        if not source.exists() or not source.is_file():
+        source = _find_kernel_output_support_artifact(kernel_output_dir=kernel_output_dir, filename=filename)
+        if source is None:
             continue
-        destination = output_dir / filename
+        destination = output_dir / source.name
         copy_artifact_if_needed(source=source, destination=destination)
+
+
+def _find_kernel_output_support_artifact(*, kernel_output_dir: Path, filename: str) -> Path | None:
+    candidates: list[Path] = []
+    for candidate_filename in same_stem_tabular_artifact_filenames(filename):
+        candidate = kernel_output_dir / candidate_filename
+        if candidate.exists() and candidate.is_file():
+            candidates.append(candidate)
+    if candidates:
+        return find_newest_existing_path(candidates)
+    for candidate_filename in same_stem_tabular_artifact_filenames(filename):
+        try:
+            candidates.extend(path for path in kernel_output_dir.rglob(candidate_filename) if path.is_file())
+        except OSError:
+            continue
+    return find_newest_existing_path(candidates)
 
 
 def _latest_iteration_with_training_artifacts(*, run_dir: Path, max_iterations: int) -> int | None:

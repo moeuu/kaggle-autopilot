@@ -691,17 +691,17 @@ def watch(
         6.0,
         "--self-improvement-interval-hours",
         min=0.0,
-        help="Run Codex self-improvement at most this often during watch. Use 0 to disable.",
+        help="Run Oracle/Codex self-improvement at most this often during watch. Use 0 to disable.",
     ),
     self_improvement_codex: bool = typer.Option(
         True,
         "--self-improvement-codex/--no-self-improvement-codex",
-        help="Let periodic self-improvement call Codex when the git worktree is clean.",
+        help="Let periodic self-improvement ask Oracle/GPT for a brief and call Codex when the git worktree is clean.",
     ),
     self_improvement_publish: bool = typer.Option(
-        False,
+        True,
         "--self-improvement-publish/--no-self-improvement-publish",
-        help="After Codex self-improvement succeeds, verify, commit, and push repo code changes.",
+        help="After Oracle/Codex self-improvement succeeds, verify, commit, and push repo code changes.",
     ),
     top1_exhaustive: bool = typer.Option(
         True,
@@ -727,7 +727,7 @@ def watch(
     if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run watch with submissions enabled without --force.")
     if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
-        raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+        raise typer.BadParameter("Refusing to run Oracle/Codex self-improvement without --force.")
     if self_improvement_publish and not self_improvement_codex:
         raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
     try:
@@ -841,17 +841,17 @@ def watch_kaggle_gpu_sidecar(
         6.0,
         "--self-improvement-interval-hours",
         min=0.0,
-        help="Run Codex self-improvement at most this often during sidecar watch. Use 0 to disable.",
+        help="Run Oracle/Codex self-improvement at most this often during sidecar watch. Use 0 to disable.",
     ),
     self_improvement_codex: bool = typer.Option(
         True,
         "--self-improvement-codex/--no-self-improvement-codex",
-        help="Let periodic self-improvement call Codex when the git worktree is clean.",
+        help="Let periodic self-improvement ask Oracle/GPT for a brief and call Codex when the git worktree is clean.",
     ),
     self_improvement_publish: bool = typer.Option(
-        False,
+        True,
         "--self-improvement-publish/--no-self-improvement-publish",
-        help="After Codex self-improvement succeeds, verify, commit, and push repo code changes.",
+        help="After Oracle/Codex self-improvement succeeds, verify, commit, and push repo code changes.",
     ),
     hardware_profile: str | None = typer.Option(
         "kaggle_p100",
@@ -867,7 +867,7 @@ def watch_kaggle_gpu_sidecar(
     if normalized_submit_policy != "none" and not cfg.force and not cfg.dry_run:
         raise typer.BadParameter("Refusing to run Kaggle GPU sidecar with submissions enabled without --force.")
     if self_improvement_codex and self_improvement_interval_hours > 0 and not cfg.force and not cfg.dry_run:
-        raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+        raise typer.BadParameter("Refusing to run Oracle/Codex self-improvement without --force.")
     if self_improvement_publish and not self_improvement_codex:
         raise typer.BadParameter("--self-improvement-publish requires --self-improvement-codex.")
     try:
@@ -943,17 +943,17 @@ def self_improve(
     codex: bool = typer.Option(
         True,
         "--codex/--no-codex",
-        help="Call Codex to implement one structural improvement after writing the report.",
+        help="Ask Oracle/GPT for an improvement brief, then call Codex to implement one structural improvement.",
     ),
     publish: bool = typer.Option(
-        False,
+        True,
         "--publish/--no-publish",
-        help="After Codex succeeds, verify, commit, and push repo code changes.",
+        help="After Oracle/Codex self-improvement succeeds, verify, commit, and push repo code changes.",
     ),
 ) -> None:
     cfg = ctx.obj
     if codex and not cfg.force and not cfg.dry_run:
-        raise typer.BadParameter("Refusing to run Codex self-improvement without --force.")
+        raise typer.BadParameter("Refusing to run Oracle/Codex self-improvement without --force.")
     if publish and not codex:
         raise typer.BadParameter("--publish requires --codex.")
     result = run_self_improvement_cycle(

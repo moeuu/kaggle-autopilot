@@ -5,10 +5,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.submission_output_naming import (
+    all_submission_output_suffixes_ordered,
+    configured_submission_filename_is_template,
+    output_suffix,
+)
 from kagglebot.submit_error_classification import classify_submit_error_with_output_fallback
 from kagglebot.writeup import normalize_submit_mode
 
 _KERNEL_PUSH_VERSION_RE = re.compile(r"Kernel version\s+(?P<version>\d+)\s+successfully pushed", re.IGNORECASE)
+_NOTEBOOK_SUBMIT_OUTPUT_SUFFIXES = all_submission_output_suffixes_ordered()
+_NOTEBOOK_SUBMIT_EXCLUDED_OUTPUT_NAMES = {"metrics.json", "plan.json", "submission_manifest.json"}
 
 
 @dataclass(frozen=True)
@@ -103,17 +110,17 @@ def decide_notebook_submit_artifact_mode_for_paths(
     sample_submission_path: Path,
     fallback_sample_submission_path: Path,
     submission_path: Path,
-    count_csv_data_rows: Callable[[Path], int | None],
+    count_tabular_data_rows: Callable[[Path], int | None],
 ) -> NotebookSubmitArtifactModeDecision:
-    sample_rows = count_csv_data_rows(sample_submission_path)
+    sample_rows = count_tabular_data_rows(sample_submission_path)
     if sample_rows is None:
-        sample_rows = count_csv_data_rows(fallback_sample_submission_path)
+        sample_rows = count_tabular_data_rows(fallback_sample_submission_path)
     return decide_notebook_submit_artifact_mode(
         requested_mode=requested_mode,
         notebook_submit_required=notebook_submit_required,
         code_competition=code_competition if notebook_submit_required else False,
         sample_data_rows=sample_rows,
-        submission_data_rows=count_csv_data_rows(submission_path),
+        submission_data_rows=count_tabular_data_rows(submission_path),
     )
 
 
@@ -123,12 +130,13 @@ def build_notebook_submit_reference(
     submission_artifact_path: Path | None,
     kernel_submission_path: Path | None,
     version_label: str | None,
+    expected_output_file: str | None = None,
 ) -> NotebookSubmitReference:
     output_path = kernel_submission_path or submission_artifact_path
     return NotebookSubmitReference(
         kernel_ref=kernel_id,
         submission_ref=f"kernel:{kernel_id}",
-        output_file=output_path.name if output_path is not None else "submission.csv",
+        output_file=output_path.name if output_path is not None else _fallback_output_file(expected_output_file),
         version=str(version_label or "").strip() or "1",
     )
 
@@ -139,6 +147,7 @@ def build_notebook_submit_output_reference(
     kernel_submission_path: Path | None,
     version_label: str | None,
     copy_submission_artifact: Callable[[Path], Path],
+    expected_output_file: str | None = None,
 ) -> NotebookSubmitOutputReference:
     submission_artifact_path = copy_submission_artifact(kernel_submission_path) if kernel_submission_path else None
     return NotebookSubmitOutputReference(
@@ -148,8 +157,21 @@ def build_notebook_submit_output_reference(
             submission_artifact_path=submission_artifact_path,
             kernel_submission_path=kernel_submission_path,
             version_label=version_label,
+            expected_output_file=expected_output_file,
         ),
     )
+
+
+def _fallback_output_file(expected_output_file: str | None) -> str:
+    expected = Path(str(expected_output_file or "").strip()).name
+    if not expected:
+        return "submission.csv"
+    suffix = output_suffix(expected.lower(), allowed_suffixes=_NOTEBOOK_SUBMIT_OUTPUT_SUFFIXES)
+    if expected.lower() in _NOTEBOOK_SUBMIT_EXCLUDED_OUTPUT_NAMES:
+        return "submission.csv"
+    if configured_submission_filename_is_template(expected):
+        return f"submission{suffix}" if suffix else "submission.csv"
+    return expected
 
 
 def infer_kernel_submit_version_label(logs_dir: Path | None) -> str | None:

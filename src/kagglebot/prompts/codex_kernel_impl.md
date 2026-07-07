@@ -70,9 +70,9 @@ Implementation contract for `kernel.py`:
   - For any multi-fold or long-running candidate, save an intermediate candidate after each completed fold:
     `oof_preds_<name>_fold<N>.npy`, `test_preds_<name>_fold<N>.npy`,
     `preds_<name>_fold<N>_metadata.json`, `candidate_<name>_fold<N>.json`, and a fold-level
-    `submission_<name>_fold<N>.csv`.
-    The fold-level submission must be valid against `sample_submission.csv`, and when public `sample_submission.csv`
-    is tiny/header-only/dummy for a hidden/full-test notebook rerun, it must expand to runtime `test.csv` ids before
+    `submission_<name>_fold<N>.<suffix>` using the final tabular submission suffix when inferable.
+    The fold-level submission must be valid against the required submission format, and when public `sample_submission.*`
+    is tiny/header-only/dummy for a hidden/full-test notebook rerun, it must expand to runtime test ids before
     writing. It must be usable if the remaining folds are stopped. Do not keep completed-fold predictions only in
     memory.
 - Evaluation:
@@ -96,10 +96,12 @@ Implementation contract for `kernel.py`:
   - Include at least one simple baseline evaluated on the same folds/windows; never choose a final
     pipeline that is worse than the baseline on the primary offline metric
 - Submission:
-  - Write `submission.csv` into a writable output dir
-  - Mirror to `/kaggle/working/submission.csv` only when writable
-  - Validate columns against sample submission
-  - Validate row count and id order against runtime `test.csv` ids when `sample_submission.csv` is tiny/header-only/dummy
+  - Resolve the required output artifact from `KAGGLEBOT_SUBMISSION_FILENAME`, `sample_submission.*`,
+    `submission_format.md`/`overview.md`, or `submission_manifest.json`; use CSV only when no other format is required
+  - Write the supported submission artifact into a writable output dir
+  - Mirror the chosen artifact to `/kaggle/working/<submission filename>` only when writable
+  - For tabular outputs, validate columns against sample submission
+  - For tabular outputs, validate row count and id order against runtime test ids when `sample_submission.*` is tiny/header-only/dummy
     for a hidden/full-test notebook rerun; never emit a 3-row public placeholder submission on Kaggle hidden/full test
   - Ensure no NaN/inf in predictions; clip to safe bounds when needed
   - If `KAGGLEBOT_LOCAL_KERNEL=1`, avoid hard-failing on `/kaggle/working` writes
@@ -109,9 +111,11 @@ Implementation contract for `kernel.py`:
     explicitly disables them
   - If `KAGGLEBOT_DISABLE_LGBM_GPU=1`, force LightGBM to CPU (no GPU retry loops)
 - Modality coverage:
-  - Add dataset modality detection (tabular/image/video/text/audio/other)
+  - Add dataset modality detection (tabular/image/video/text/audio/document/medical-imaging/point-cloud/3D/geospatial/bio/sequence/graph/signal/annotation/array/model-artifact/other)
   - Keep tabular path robust by default
   - For non-tabular tasks, provide/maintain `custom_main()` route in the same `kernel.py`
+  - Preserve requested non-tabular artifact suffixes, sidecars, directory bundles, and `submission_manifest.json`
+    instead of disguising tabular CSV bytes as the requested artifact
 - Pretrained assets:
   - Provide a helper to download/cache pretrained checkpoints when useful
   - Respect internet/rules constraints and include fallback when download is unavailable

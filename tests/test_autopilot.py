@@ -31,6 +31,7 @@ from kagglebot.autopilot import (
     _LONG_LOCAL_GPU_MAX_ITERATIONS,
     AutopilotConfig,
     SubmissionPhase,
+    _iteration_submission_path,
     _run_autofix,
     _run_kernel_fix,
     run_autopilot,
@@ -111,6 +112,146 @@ def _write_sample_submission(path: Path) -> None:
     df = pd.DataFrame({"id": [1, 2], "target": [0.5, 0.5]})
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def test_iteration_submission_path_uses_sample_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.jsonl",
+        ).name
+        == "submission.jsonl"
+    )
+
+
+def test_iteration_submission_path_uses_compressed_sample_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.csv.gz",
+        ).name
+        == "submission.csv.gz"
+    )
+
+
+def test_iteration_submission_path_uses_excel_sample_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.xlsx",
+        ).name
+        == "submission.xlsx"
+    )
+
+
+def test_iteration_submission_path_uses_html_sample_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.html",
+        ).name
+        == "submission.html"
+    )
+
+
+def test_iteration_submission_path_falls_back_to_csv_for_unknown_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.zip",
+        ).name
+        == "submission.csv"
+    )
+
+
+def test_iteration_submission_path_uses_submission_format_archive_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    format_path = tmp_path / "submission_format.md"
+    format_path.write_text(
+        "## Submission Format\nSubmit a submission.tar.xz archive containing model weights and inference code.\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.csv",
+            submission_format_path=format_path,
+        ).name
+        == "submission.tar.xz"
+    )
+
+
+@pytest.mark.parametrize(
+    ("description", "filename"),
+    [
+        ("Submit a zstd-compressed NDJSON file with columns row_id,target.", "submission.ndjson.zst"),
+        ("Submit a bzip2-compressed HTML file with columns row_id,target.", "submission.html.bz2"),
+    ],
+)
+def test_iteration_submission_path_uses_submission_format_compressed_tabular_keywords(
+    tmp_path: Path,
+    description: str,
+    filename: str,
+) -> None:
+    iter_dir = tmp_path / "iter-1"
+    format_path = tmp_path / "submission_format.md"
+    format_path.write_text(f"## Submission Format\n{description}\n", encoding="utf-8")
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.csv",
+            submission_format_path=format_path,
+        ).name
+        == filename
+    )
+
+
+def test_iteration_submission_path_uses_submission_format_external_archive_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    format_path = tmp_path / "submission_format.md"
+    format_path.write_text(
+        "## Submission Format\nUpload a single `submission.rar` archive for scoring.\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.csv",
+            submission_format_path=format_path,
+        ).name
+        == "submission.rar"
+    )
+
+
+def test_iteration_submission_path_uses_submission_format_single_file_suffix(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    format_path = tmp_path / "submission_format.md"
+    format_path.write_text(
+        "## Submission Format\nSubmit a single NIfTI file named `submission.nii.gz`.\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        _iteration_submission_path(
+            iter_dir=iter_dir,
+            sample_submission_path=tmp_path / "sample_submission.csv",
+            submission_format_path=format_path,
+        ).name
+        == "submission.nii.gz"
+    )
 
 
 def _resolve_plan(plan: PlanConfig, config: AutopilotConfig) -> dict[str, object]:

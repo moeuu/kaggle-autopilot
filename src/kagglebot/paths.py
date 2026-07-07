@@ -3,6 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from kagglebot.compression_suffixes import strip_compression_suffix
+from kagglebot.submission_sample_discovery import (
+    TABULAR_INPUT_SUFFIXES,
+    TABULAR_INPUT_SUFFIXES_ORDERED,
+    TABULAR_TEXT_SUFFIXES,
+    sample_name_score,
+    tabular_stem,
+    tabular_suffix,
+)
+
+_SAMPLE_SUBMISSION_SUFFIXES = TABULAR_INPUT_SUFFIXES_ORDERED
+_SAMPLE_SUBMISSION_SUFFIX_SET = set(TABULAR_INPUT_SUFFIXES)
+_SAMPLE_SUBMISSION_HEAD_SUFFIX_SET = {strip_compression_suffix(suffix) for suffix in TABULAR_TEXT_SUFFIXES}
+
 
 def resolve_artifacts_dir(workdir: Path, artifacts_dir: Path) -> Path:
     """
@@ -136,11 +150,75 @@ class CompetitionPaths:
 
     @property
     def sample_submission_path(self) -> Path:
-        return self.context_dir / "sample_submission.csv"
+        return self._existing_context_sample_submission_artifact() or self.context_dir / "sample_submission.csv"
 
     @property
     def sample_submission_head_path(self) -> Path:
+        existing = self._existing_context_tabular_artifact("sample_submission_head")
+        if existing is not None:
+            return existing
         return self.context_dir / "sample_submission_head.csv"
+
+    def context_sample_submission_path_for_suffix(self, suffix: str) -> Path:
+        normalized = suffix.lower() if suffix.startswith(".") else f".{suffix.lower()}"
+        if normalized not in _SAMPLE_SUBMISSION_SUFFIX_SET:
+            normalized = ".csv"
+        return self.context_dir / f"sample_submission{normalized}"
+
+    def context_sample_submission_head_path_for_suffix(self, suffix: str) -> Path:
+        normalized = suffix.lower() if suffix.startswith(".") else f".{suffix.lower()}"
+        normalized = strip_compression_suffix(normalized)
+        if normalized not in _SAMPLE_SUBMISSION_HEAD_SUFFIX_SET:
+            normalized = ".csv"
+        return self.context_dir / f"sample_submission_head{normalized}"
+
+    def _existing_context_tabular_artifact(self, stem: str) -> Path | None:
+        if not self.context_dir.exists():
+            return None
+        candidates = [
+            path
+            for path in self.context_dir.glob(f"{stem}.*")
+            if path.is_file() and tabular_suffix(path) in _SAMPLE_SUBMISSION_SUFFIX_SET
+        ]
+        if not candidates:
+            return None
+
+        def _key(path: Path) -> tuple[int, int, str]:
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = 0
+            suffix_rank = _SAMPLE_SUBMISSION_SUFFIXES.index(tabular_suffix(path))
+            return (mtime_ns, suffix_rank, path.name)
+
+        return max(candidates, key=_key)
+
+    def _existing_context_sample_submission_artifact(self) -> Path | None:
+        canonical = self._existing_context_tabular_artifact("sample_submission")
+        if canonical is not None:
+            return canonical
+        if not self.context_dir.exists():
+            return None
+        candidates = [
+            path
+            for path in self.context_dir.iterdir()
+            if path.is_file()
+            and tabular_suffix(path) in _SAMPLE_SUBMISSION_SUFFIX_SET
+            and tabular_stem(path).lower() != "sample_submission_head"
+            and sample_name_score(path) >= 2
+        ]
+        if not candidates:
+            return None
+
+        def _key(path: Path) -> tuple[int, int, int, str]:
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = 0
+            suffix_rank = _SAMPLE_SUBMISSION_SUFFIXES.index(tabular_suffix(path))
+            return (sample_name_score(path), mtime_ns, suffix_rank, path.name)
+
+        return max(candidates, key=_key)
 
     @property
     def top1_public_path(self) -> Path:

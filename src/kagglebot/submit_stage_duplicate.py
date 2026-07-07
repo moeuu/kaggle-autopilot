@@ -13,12 +13,19 @@ def infer_iteration_from_submission_path(path: Path | None) -> int | None:
     if path is None:
         return None
     try:
-        name = path.parent.name
-        if not name.startswith("iter-"):
-            return None
-        return int(name.split("-", 1)[1])
+        parts = path.parts
     except Exception:  # noqa: BLE001
         return None
+    for part in parts:
+        if not part.startswith("iter-"):
+            continue
+        try:
+            parsed = int(part.split("-", 1)[1])
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
 
 
 def apply_same_submission_path_decision(

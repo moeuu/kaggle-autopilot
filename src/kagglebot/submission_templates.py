@@ -13,6 +13,14 @@ def build_submission_template_for_test(
     target_cols: Sequence[str] = (),
 ) -> pd.DataFrame:
     """Return a submission template, expanding tiny public samples to test ids."""
+    if id_col is None and is_tiny_public_sample_without_id(sample_submission=sample_submission, test_df=test_df):
+        expanded = pd.DataFrame(index=range(len(test_df)))
+        for col in sample_submission.columns:
+            expanded[col] = sample_column_default(sample_submission, col)
+        for col in target_cols:
+            if col not in expanded.columns:
+                expanded[col] = sample_column_default(sample_submission, col)
+        return expanded[list(sample_submission.columns)]
     if (
         id_col
         and id_col in sample_submission.columns
@@ -30,6 +38,13 @@ def build_submission_template_for_test(
                 expanded[col] = sample_column_default(sample_submission, col)
         return expanded[list(sample_submission.columns)]
     return sample_submission.copy()
+
+
+def is_tiny_public_sample_without_id(*, sample_submission: pd.DataFrame, test_df: pd.DataFrame) -> bool:
+    """Detect placeholder samples for target-only submissions."""
+    if len(sample_submission) <= 0 or len(sample_submission) > 10:
+        return False
+    return len(test_df) > len(sample_submission)
 
 
 def is_tiny_public_sample_for_test(

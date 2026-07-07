@@ -175,6 +175,27 @@ def test_candidate_registry_records_metadata_and_blend_pairs(tmp_path: Path) -> 
     ]
 
 
+def test_build_campaign_candidate_hashes_directory_submission(tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.zarr"
+    (submission_path / "arrays").mkdir(parents=True)
+    (submission_path / ".zgroup").write_text("{}", encoding="utf-8")
+    (submission_path / "arrays" / "0").write_bytes(b"chunk")
+
+    candidate = build_campaign_candidate(
+        run_id="run-1",
+        iteration=1,
+        direction="maximize",
+        category="strong_single",
+        offline_score=0.8,
+        offline_std=None,
+        score_source="cv",
+        submission_path=submission_path,
+        metrics_path=None,
+    )
+
+    assert candidate.submission_sha256
+
+
 def test_submit_allocator_records_information_value_for_validation_candidate() -> None:
     candidate = CampaignCandidate(
         candidate_id="run-1-i002-validation_variant",

@@ -9,7 +9,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kagglebot.json_utils import load_json_array, load_json_object_or_empty, write_json_array, write_json_object
+from kagglebot.solver.io import read_table
 from kagglebot.submission.guard import normalize_error_text
+from kagglebot.submission_sample_discovery import (
+    TABULAR_TEXT_SUFFIXES,
+    default_delimited_text_separator,
+    is_tabular_data_path,
+    open_tabular_text,
+    sniff_tabular_text_delimiter,
+    tabular_suffix,
+)
 
 COLUMN_MAP_FILENAME = "column_map.json"
 COLUMN_FILL_FILENAME = "column_fill.json"
@@ -23,7 +32,9 @@ MISSING_COLUMNS_KEYERROR_RE = re.compile(
     re.IGNORECASE,
 )
 MISSING_COLUMNS_FILE_RE = re.compile(
-    r"([A-Za-z0-9_.-]+\.(?:csv|tsv|txt|parquet|json|jsonl))\s+missing columns",
+    r"([A-Za-z0-9_.-]+\."
+    r"(?:csv|tsv|tab|psv|txt|parquet|parq|pq|feather|ftr|arrow|ipc|avro|dta|xml|jsonlines|jsonl|ndjson|json|yaml|yml|pkl|pickle|xlsm|xlsx|xls|sqlite3|sqlite|db)"
+    r"(?:\.(?:gz|bz2|xz|zst))?)\s+missing columns",
     re.IGNORECASE,
 )
 OBJECT_DTYPE_RE = re.compile(r"numpy\.object_", re.IGNORECASE)
@@ -66,16 +77,24 @@ def error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
 
     common_patterns = (
         (
-            "kernel source validation failed",
-            "deterministic kernel source validation failure",
-        ),
-        (
             "do not reference metrics.json output",
             "missing metrics.json output contract is deterministic",
         ),
         (
             "do not reference submission.csv output",
-            "missing submission.csv output contract is deterministic",
+            "missing supported submission output contract is deterministic",
+        ),
+        (
+            "do not reference submission output",
+            "missing submission output contract is deterministic",
+        ),
+        (
+            "do not reference a supported submission output artifact",
+            "missing submission output contract is deterministic",
+        ),
+        (
+            "kernel source validation failed",
+            "deterministic kernel source validation failure",
         ),
         (
             "unexpected keyword argument 'evaluation_strategy'",
@@ -122,7 +141,7 @@ def error_strategy_skip_reason(*, stage: str, error_text: str) -> str | None:
                 "competition internet policy violation is deterministic",
             ),
             (
-                "submission file must be named submission.csv",
+                "submission file must be named",
                 "submission filename contract violation is deterministic",
             ),
         )
@@ -376,10 +395,12 @@ def scan_tabular_headers(data_dir: Path) -> dict[str, list[str]]:
     for path in data_dir.rglob("*"):
         if not path.is_file():
             continue
-        suffix = path.suffix.lower()
-        if suffix not in {".csv", ".tsv"}:
+        if not is_tabular_data_path(path):
             continue
-        header = read_header(path)
+        if path_is_text_tabular(path):
+            header = read_header(path)
+        else:
+            header = read_structured_header(path)
         if not header:
             continue
         try:
@@ -390,20 +411,42 @@ def scan_tabular_headers(data_dir: Path) -> dict[str, list[str]]:
     return columns
 
 
+def read_structured_header(path: Path) -> list[str]:
+    try:
+        frame = read_table(path)
+    except Exception:
+        return []
+    return [str(col).strip().strip('"').strip("'") for col in frame.columns if str(col).strip()]
+
+
 def read_header(path: Path) -> list[str]:
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with open_tabular_text(path) as handle:
             line = handle.readline()
     except OSError:
         return []
     if not line:
         return []
-    sep = "\t" if "\t" in line and path.suffix.lower() == ".tsv" else ","
+    try:
+        sep = sniff_tabular_text_delimiter(path)
+    except Exception:
+        sep = fallback_header_delimiter(path, line)
     try:
         row = next(csv.reader([line], delimiter=sep))
     except Exception:
         return []
     return [col.strip().strip('"').strip("'") for col in row if col.strip()]
+
+
+def fallback_header_delimiter(path: Path, line: str) -> str:
+    default = default_delimited_text_separator(tabular_suffix(path))
+    counts = {sep: line.count(sep) for sep in (default, ",", "\t", ";", "|")}
+    best = max(counts, key=lambda sep: counts[sep])
+    return best if counts[best] > 0 else default
+
+
+def path_is_text_tabular(path: Path) -> bool:
+    return tabular_suffix(path) in TABULAR_TEXT_SUFFIXES
 
 
 def extract_candidate_groups(error_text: str) -> list[list[str]]:

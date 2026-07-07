@@ -23,6 +23,11 @@ def test_codex_kernel_impl_prompt_requires_safe_pipeline_lookup() -> None:
     assert "maximum score ceiling over guaranteed submitability" in template
     assert "OOF predictions" in template
     assert "explicit blend candidate" in template
+    assert "geospatial" in template
+    assert "bio/sequence" in template
+    assert "model-artifact" in template
+    assert "submission_manifest.json" in template
+    assert "disguising tabular CSV bytes" in template
 
 
 def test_prompts_require_fold_intermediate_submissions() -> None:
@@ -31,12 +36,14 @@ def test_prompts_require_fold_intermediate_submissions() -> None:
     improve_template = (base_dir / "templates" / "improve_iteration.md").read_text(encoding="utf-8")
     combined = kernel_template + "\n" + improve_template
 
-    assert "submission_<name>_fold<N>.csv" in kernel_template
+    assert "submission_<name>_fold<N>.<suffix>" in kernel_template
     assert "candidate_<name>_fold<N>.json" in kernel_template
-    assert "submission_<candidate>_fold<N>.csv" in improve_template
+    assert "submission_<candidate>_fold<N>.<suffix>" in improve_template
     assert "candidate_<candidate>_fold<N>.json" in improve_template
-    assert "sample_submission.csv" in combined
-    assert "runtime `test.csv` ids" in kernel_template
+    assert "KAGGLEBOT_SUBMISSION_FILENAME" in kernel_template
+    assert "/kaggle/working/<submission filename>" in kernel_template
+    assert "sample_submission.*" in combined
+    assert "runtime test ids" in kernel_template
     assert "never emit a 3-row public placeholder submission" in kernel_template
     assert "completed folds only in memory" in combined
 
@@ -50,6 +57,24 @@ def test_strategy_plan_prompt_includes_quality_gate_checklist() -> None:
     assert "{{code_snapshot}}" in template
     assert "{{models_snapshot}}" in template
     assert "{{discussion_snapshot}}" in template
+    assert "{{competition_url}}" in template
+    assert "{{strategy_context_bundle}}" in template
+    assert "{{strategy_context_bundle_path}}" in template
+    assert "You cannot read local files unless their contents are included below." in template
+    assert ">=8000 characters" in template
+    assert "12000-25000 characters" in template
+    assert "There is no 1200-character cap" in template
+    assert "Sample submission preview" in template
+    assert "Sample submission head (CSV" not in template
+
+
+def test_legacy_strategy_template_uses_required_format_preview() -> None:
+    base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts" / "templates"
+    template = (base_dir / "strategy_plan.md").read_text(encoding="utf-8")
+
+    assert "Sample submission preview (required format)" in template
+    assert "not as proof that the artifact must be CSV" in template
+    assert "Sample submission head:" not in template
 
 
 def test_codex_brief_prompt_mentions_community_context_files() -> None:
@@ -82,6 +107,32 @@ def test_improve_template_uses_loop_decision_language() -> None:
     assert "highest realistic score ceiling" in template
 
 
+def test_implementation_templates_use_generalized_table_io() -> None:
+    base_dir = Path(agent_pipeline.__file__).resolve().parents[1]
+    initial_template = (base_dir / "templates" / "initial_plan_and_implement.md").read_text(encoding="utf-8")
+    improve_template = (base_dir / "templates" / "improve_iteration.md").read_text(encoding="utf-8")
+
+    assert "from kagglebot.solver.io import read_table" in initial_template
+    assert "from kagglebot.solver.io import read_table, write_table" in initial_template
+    assert 'train = read_table(Path("{train_path}"))' in initial_template
+    assert 'sample = read_table(Path("{sample_submission_path}"))' in initial_template
+    assert 'write_table(submission, Path("{submission_path}"))' in initial_template
+    assert "pd.read_csv" not in initial_template
+    assert "submission.to_csv" not in initial_template
+    assert "diff <(head" not in initial_template
+    assert "diff <(head" not in improve_template
+    assert 'sample_path = Path("{sample_submission_path}")' in improve_template
+    assert "non-tabular or manifest-based submission check required" in initial_template
+    assert "non-tabular or manifest-based submission check required" in improve_template
+    for template in (initial_template, improve_template):
+        assert "geospatial" in template
+        assert "bio/sequence" in template
+        assert "graph" in template
+        assert "signal" in template
+        assert "annotation" in template
+        assert "model-artifact" in template
+
+
 def test_strategy_plan_prompt_prioritizes_accuracy_over_submitability() -> None:
     base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts"
     template = (base_dir / "strategy_plan.md").read_text(encoding="utf-8")
@@ -89,6 +140,16 @@ def test_strategy_plan_prompt_prioritizes_accuracy_over_submitability() -> None:
     assert "target_medal" in template
     assert "target_rank_percentile" in template
     assert "OOF blend" in template
+    assert "geospatial/bio/sequence/graph/signal/annotation/model-artifact" in template
+    assert "required artifact/manifest handling" in template
+
+
+def test_legacy_strategy_template_lists_broad_non_tabular_modalities() -> None:
+    base_dir = Path(agent_pipeline.__file__).resolve().parents[1] / "prompts" / "templates"
+    template = (base_dir / "strategy_plan.md").read_text(encoding="utf-8")
+
+    assert "geospatial/bio/sequence/graph/signal/annotation/model-artifact" in template
+    assert "geometric/geospatial/structure-feature" in template
 
 
 def test_kernel_fix_template_mentions_dependency_add_path() -> None:
@@ -103,13 +164,18 @@ def test_kernel_fix_template_mentions_dependency_add_path() -> None:
 def test_strategy_prompt_includes_code_models_discussion_context(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.rules_url_path.write_text("https://www.kaggle.com/competitions/demo/rules\n", encoding="utf-8")
     paths.dataset_profile_path.write_text('{"task": "classification"}', encoding="utf-8")
+    paths.overview_md_path.write_text("overview body token", encoding="utf-8")
+    paths.data_md_path.write_text("data page token", encoding="utf-8")
+    paths.rules_md_path.write_text("rules body token", encoding="utf-8")
     paths.submission_format_md_path.write_text("submission format text", encoding="utf-8")
     paths.sample_submission_head_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
     paths.code_md_path.write_text("code snapshot token", encoding="utf-8")
     paths.models_md_path.write_text("models snapshot token", encoding="utf-8")
     paths.discussion_md_path.write_text("discussion snapshot token", encoding="utf-8")
+    (paths.data_dir / "train.csv").write_text("id,feature,target\n1,a,0\n2,b,1\n", encoding="utf-8")
 
     config = AgentPipelineConfig(
         slug="demo",
@@ -135,6 +201,14 @@ def test_strategy_prompt_includes_code_models_discussion_context(tmp_path: Path)
     assert "code snapshot token" in prompt
     assert "models snapshot token" in prompt
     assert "discussion snapshot token" in prompt
+    assert "Competition URL: https://www.kaggle.com/competitions/demo" in prompt
+    assert "overview body token" in prompt
+    assert "data page token" in prompt
+    assert "rules body token" in prompt
+    assert "Data File Structure and Representative Samples" in prompt
+    assert "train.csv" in prompt
+    assert "id,feature,target" in prompt
+    assert (paths.context_agent_dir / "strategy_context_bundle.md").exists()
 
 
 def test_strategy_prompt_includes_selected_hardware_profile(tmp_path: Path) -> None:

@@ -258,7 +258,7 @@ def resolve_notebook_fallback_after_file_submit_error(
     submission_path: Path,
     resolve_notebook_submit_artifact_mode: Callable[..., str],
     decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
-    count_csv_data_rows: Callable[[Path], int | None],
+    count_tabular_data_rows: Callable[[Path], int | None],
     on_message: Callable[[str], object],
 ) -> SubmitStageFallbackApplication:
     resolved_notebook_artifact_mode = (
@@ -287,7 +287,7 @@ def resolve_notebook_fallback_after_file_submit_error(
                 sample_submission_path=sample_submission_path,
                 fallback_sample_submission_path=fallback_sample_submission_path,
                 submission_path=submission_path,
-                count_csv_data_rows=count_csv_data_rows,
+                count_tabular_data_rows=count_tabular_data_rows,
             )
         ),
         on_message=on_message,
@@ -312,7 +312,7 @@ def resolve_submit_cli_error(
     submission_path: Path,
     resolve_notebook_submit_artifact_mode: Callable[..., str],
     decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
-    count_csv_data_rows: Callable[[Path], int | None],
+    count_tabular_data_rows: Callable[[Path], int | None],
     compute_error_fingerprint: Callable[[str, str], str],
     decide_submit_fingerprint_reuse: Callable[..., object],
     compute_submit_backoff: Callable[..., float],
@@ -342,7 +342,7 @@ def resolve_submit_cli_error(
         submission_path=submission_path,
         resolve_notebook_submit_artifact_mode=resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=count_csv_data_rows,
+        count_tabular_data_rows=count_tabular_data_rows,
         on_message=on_message,
     )
     if fallback_application.retry_as_notebook:
@@ -403,7 +403,7 @@ def resolve_submit_cli_error_for_run(
     submission_path: Path,
     resolve_notebook_submit_artifact_mode: Callable[..., str],
     decide_notebook_submit_artifact_mode_for_paths: Callable[..., object],
-    count_csv_data_rows: Callable[[Path], int | None],
+    count_tabular_data_rows: Callable[[Path], int | None],
     compute_error_fingerprint: Callable[[str, str], str],
     decide_submit_fingerprint_reuse: Callable[..., object],
     compute_submit_backoff: Callable[..., float],
@@ -430,7 +430,7 @@ def resolve_submit_cli_error_for_run(
         submission_path=submission_path,
         resolve_notebook_submit_artifact_mode=resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=count_csv_data_rows,
+        count_tabular_data_rows=count_tabular_data_rows,
         compute_error_fingerprint=compute_error_fingerprint,
         decide_submit_fingerprint_reuse=decide_submit_fingerprint_reuse,
         compute_submit_backoff=compute_submit_backoff,

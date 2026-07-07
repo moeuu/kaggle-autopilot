@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kagglebot.exceptions import KaggleBotError
+from kagglebot.submission_sample_discovery import TABULAR_SUBMISSION_SUFFIXES, tabular_suffix
 from kagglebot.validators import scan_text_for_secrets
 
 _MAX_GUARD_FILE_BYTES = 2_000_000
@@ -32,6 +33,7 @@ _NOISE_PREFIXES = (
 )
 _NOISE_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
 _DISCORD_NOTIFIER_STATE_FILENAME = "discord_notifier_state.json"
+_SAMPLE_SUBMISSION_SUFFIXES = set(TABULAR_SUBMISSION_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -328,7 +330,11 @@ def _is_volatile_run_submission_output(path: str) -> bool:
         return False
     if parts[0] != "artifacts" or parts[2] != "runs":
         return False
-    return parts[-1] == "submission.compact.csv"
+    filename = Path(parts[-1])
+    suffix = tabular_suffix(filename)
+    if suffix not in _SAMPLE_SUBMISSION_SUFFIXES:
+        return False
+    return filename.name[: -len(suffix)] == "submission.compact"
 
 
 def _is_protected_path(path: str) -> bool:
@@ -338,7 +344,7 @@ def _is_protected_path(path: str) -> bool:
         # artifacts/<slug>/meta.json or artifacts/<slug>/plan.json
         if len(parts) == 3 and parts[2] in {"meta.json", "plan.json"}:
             return True
-        # artifacts/<slug>/data/sample_submission.csv
+        # artifacts/<slug>/data/sample_submission.*
         if _is_artifact_data_sample_submission(path):
             return True
         # artifacts/<slug>/submissions/ledger.jsonl
@@ -393,14 +399,20 @@ def _filter_restored_paths(root: Path, unauthorized: list[str], guard_snapshot: 
 
 def _is_artifact_data_sample_submission(path: str) -> bool:
     parts = path.split("/")
-    return len(parts) == 4 and parts[0] == "artifacts" and parts[2] == "data" and parts[3] == "sample_submission.csv"
+    if len(parts) != 4 or parts[0] != "artifacts" or parts[2] != "data":
+        return False
+    sample_path = Path(parts[3])
+    suffix = tabular_suffix(sample_path)
+    if suffix not in _SAMPLE_SUBMISSION_SUFFIXES:
+        return False
+    return sample_path.name[: -len(suffix)] == "sample_submission"
 
 
 def _restore_artifact_data_sample_submission(root: Path, rel: str) -> bool:
     if not _is_artifact_data_sample_submission(rel):
         return False
     parts = rel.split("/")
-    source = root / "artifacts" / parts[1] / "context" / "sample_submission.csv"
+    source = _artifact_context_sample_submission_source(root, parts[1], tabular_suffix(Path(parts[3])))
     if not source.is_file():
         return False
     target = root / rel
@@ -416,7 +428,7 @@ def _matches_artifact_data_sample_submission_context(root: Path, rel: str) -> bo
     if not _is_artifact_data_sample_submission(rel):
         return False
     parts = rel.split("/")
-    source = root / "artifacts" / parts[1] / "context" / "sample_submission.csv"
+    source = _artifact_context_sample_submission_source(root, parts[1], tabular_suffix(Path(parts[3])))
     target = root / rel
     if not source.is_file() or not target.is_file():
         return False
@@ -424,6 +436,13 @@ def _matches_artifact_data_sample_submission_context(root: Path, rel: str) -> bo
         return target.read_bytes() == source.read_bytes()
     except OSError:
         return False
+
+
+def _artifact_context_sample_submission_source(root: Path, slug: str, suffix: str) -> Path:
+    normalized = suffix.lower()
+    if normalized not in _SAMPLE_SUBMISSION_SUFFIXES:
+        normalized = ".csv"
+    return root / "artifacts" / slug / "context" / f"sample_submission{normalized}"
 
 
 def _repair_unauthorized_changes(

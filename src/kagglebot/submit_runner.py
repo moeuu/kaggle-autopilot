@@ -19,6 +19,20 @@ from kagglebot.exceptions import (
     SubmissionRateLimitError,
     SubmissionValidationError,
 )
+from kagglebot.submission_format import load_submission_format_hint
+from kagglebot.submission_output_naming import (
+    all_submission_output_suffixes,
+    output_filename_from_format_text,
+    tabular_submission_output_suffixes,
+)
+from kagglebot.submission_sample_discovery import (
+    TABULAR_INPUT_SUFFIXES,
+    find_usable_sample_submissions,
+    tabular_suffix,
+)
+
+_EXPECTED_NOTEBOOK_OUTPUT_SUFFIXES = all_submission_output_suffixes()
+_EXPECTED_NOTEBOOK_SAMPLE_OUTPUT_SUFFIXES = tabular_submission_output_suffixes()
 
 
 class SubmitRunnerPaths(Protocol):
@@ -68,7 +82,7 @@ class SubmitRunnerDependencies:
     decide_same_submission_path_action: Callable[..., object]
     resolve_notebook_submit_artifact_mode: Callable[..., str]
     decide_notebook_submit_artifact_mode_for_paths: Callable[..., object]
-    count_csv_data_rows: Callable[[Path], int | None]
+    count_tabular_data_rows: Callable[[Path], int | None]
     resolve_kaggle_username: Callable[..., str]
     run_submit_kernel: Callable[..., object]
     run_kaggle_submit_kernel: Callable[..., object]
@@ -167,6 +181,7 @@ def attempt_submit_for_run(
     submit_retry_recorder = submit_run_context.submit_retry_recorder
 
     constraints = deps.load_competition_rule_constraints(config.paths)
+    fallback_sample_submission_path = _resolve_fallback_sample_submission_path(config.paths)
     prepared_preflight_context = _submit_stage.prepare_and_resolve_submit_preflight_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
@@ -188,7 +203,7 @@ def attempt_submit_for_run(
         notebook_submit_artifact_mode=notebook_submit_artifact_mode,
         code_competition=deps.infer_code_competition_from_paths(config.paths),
         sample_submission_path=config.paths.sample_submission_path,
-        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+        fallback_sample_submission_path=fallback_sample_submission_path,
         load_run_state=deps.load_run_state,
         collect_duplicate_submission_sources=deps.collect_duplicate_submission_sources,
         decide_duplicate_submission_action=deps.decide_duplicate_submission_action,
@@ -198,7 +213,7 @@ def attempt_submit_for_run(
         rules_not_accepted_exit_code=RulesNotAcceptedError.exit_code,
         resolve_notebook_submit_artifact_mode=deps.resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=deps.decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=deps.count_csv_data_rows,
+        count_tabular_data_rows=deps.count_tabular_data_rows,
         decide_same_submission_path_action=deps.decide_same_submission_path_action,
         compute_error_fingerprint=deps.compute_error_fingerprint,
         compute_submission_sha256=deps.compute_submission_sha256,
@@ -238,7 +253,7 @@ def attempt_submit_for_run(
         max_attempts=limits.max_transient_retries,
         backoff_base_seconds=limits.backoff_base_sec,
         sample_submission_path=config.paths.sample_submission_path,
-        fallback_sample_submission_path=config.paths.data_dir / "sample_submission.csv",
+        fallback_sample_submission_path=fallback_sample_submission_path,
         submit_code_fingerprint=submit_code_fingerprint,
         run_state=run_state,
         seen_fingerprints=seen_fingerprints,
@@ -264,7 +279,7 @@ def attempt_submit_for_run(
         should_use_notebook_fallback=deps.should_use_notebook_submit_fallback,
         resolve_notebook_submit_artifact_mode=deps.resolve_notebook_submit_artifact_mode,
         decide_notebook_submit_artifact_mode_for_paths=deps.decide_notebook_submit_artifact_mode_for_paths,
-        count_csv_data_rows=deps.count_csv_data_rows,
+        count_tabular_data_rows=deps.count_tabular_data_rows,
         compute_error_fingerprint=deps.compute_error_fingerprint,
         decide_submit_fingerprint_reuse=deps.decide_submit_fingerprint_reuse,
         compute_submit_backoff=deps.compute_submit_backoff,
@@ -303,7 +318,24 @@ def attempt_submit_for_run(
         stdout_tail_chars=limits.stdout_tail_chars,
         stderr_tail_chars=limits.stderr_tail_chars,
         on_message=deps.on_message,
+        wait_for_submission_outcome_func=_submit_stage.wait_for_submission_outcome,
     )
+
+
+def _resolve_fallback_sample_submission_path(paths: SubmitRunnerPaths) -> Path:
+    sample_path = paths.sample_submission_path
+    if sample_path.is_file():
+        return sample_path
+    for root in (getattr(paths, "context_dir", None), paths.data_dir):
+        if root is None:
+            continue
+        candidates = find_usable_sample_submissions(root)
+        if candidates:
+            return candidates[0]
+    suffix = tabular_suffix(sample_path)
+    if suffix in TABULAR_INPUT_SUFFIXES:
+        return paths.data_dir / f"sample_submission{suffix}"
+    return paths.data_dir / "sample_submission.csv"
 
 
 def _build_notebook_submit_runner(*, config: SubmitRunnerConfig, run_id: str, deps: SubmitRunnerDependencies):
@@ -328,4 +360,35 @@ def _build_notebook_submit_runner(*, config: SubmitRunnerConfig, run_id: str, de
         should_retry_ambiguous=deps.should_retry_ambiguous_notebook_submit_error,
         sleep=deps.sleep,
         on_message=deps.on_message,
+        expected_output_file=_expected_notebook_submit_output_file(config.paths),
+    )
+
+
+def _expected_notebook_submit_output_file(paths: SubmitRunnerPaths) -> str | None:
+    format_expected = _expected_notebook_submit_output_file_from_format(paths)
+    if format_expected is not None:
+        return format_expected
+    sample_path = _resolve_fallback_sample_submission_path(paths)
+    suffix = tabular_suffix(sample_path)
+    if suffix in _EXPECTED_NOTEBOOK_SAMPLE_OUTPUT_SUFFIXES:
+        return f"submission{suffix}"
+    return None
+
+
+def _expected_notebook_submit_output_file_from_format(paths: SubmitRunnerPaths) -> str | None:
+    context_dir = getattr(paths, "context_dir", None)
+    if context_dir is None:
+        return None
+    format_path = Path(context_dir) / "submission_format.md"
+    hint = load_submission_format_hint(format_path)
+    if hint is None or not hint.expected_suffixes:
+        return None
+    try:
+        text = format_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        text = ""
+    return output_filename_from_format_text(
+        text,
+        expected_suffixes=hint.expected_suffixes,
+        allowed_suffixes=_EXPECTED_NOTEBOOK_OUTPUT_SUFFIXES,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from kagglebot.submission_service import SubmissionConfig, SubmissionService
 
@@ -131,6 +132,107 @@ def test_submission_service_prefers_real_data_sample_when_placeholders_exist(tmp
 
     prepared = service.validate_and_prepare_submission(submission_path)
     assert prepared == submission_path
+
+
+def test_submission_service_discovers_tsv_sample_submission(tmp_path: Path) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    placeholder_context_sample = context_dir / "sample_submission.csv"
+    placeholder_context_sample.write_text("id,prediction\n", encoding="utf-8")
+
+    real_sample = data_dir / "sample_submission.tsv"
+    pd.DataFrame({"id": [1, 2], "label": ["a", "b"]}).to_csv(real_sample, index=False, sep="\t")
+
+    submission_path = tmp_path / "submission.tsv"
+    pd.DataFrame({"id": [1, 2], "label": ["b", "a"]}).to_csv(submission_path, index=False, sep="\t")
+
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=placeholder_context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+    resolved_sample = service._resolve_sample_submission()
+    assert resolved_sample == real_sample
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared == submission_path
+
+
+def test_submission_service_discovers_jsonl_sample_submission(tmp_path: Path) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    placeholder_context_sample = context_dir / "sample_submission.csv"
+    placeholder_context_sample.write_text("id,prediction\n", encoding="utf-8")
+
+    real_sample = data_dir / "sample_submission.jsonl"
+    real_sample.write_text('{"id": 1, "label": "a"}\n{"id": 2, "label": "b"}\n', encoding="utf-8")
+
+    submission_path = tmp_path / "submission.jsonl"
+    submission_path.write_text('{"id": 1, "label": "b"}\n{"id": 2, "label": "a"}\n', encoding="utf-8")
+
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=placeholder_context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+    resolved_sample = service._resolve_sample_submission()
+    assert resolved_sample == real_sample
+
+    prepared = service.validate_and_prepare_submission(submission_path)
+    assert prepared == submission_path
+
+
+def test_submission_service_falls_back_to_suffixed_synthesized_sample_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    comp_root = tmp_path / "comp"
+    data_dir = comp_root / "data"
+    context_dir = comp_root / "context"
+    cache_dir = data_dir / ".kagglebot_cache"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    placeholder_context_sample = context_dir / "sample_submission.csv"
+    placeholder_context_sample.write_text("id,prediction\n", encoding="utf-8")
+    synthesized = cache_dir / "sample_submission_synth.jsonl"
+    synthesized.write_text('{"id": 1, "prediction": 0.0}\n{"id": 2, "prediction": 0.0}\n', encoding="utf-8")
+
+    import kagglebot.solver.io as solver_io
+
+    monkeypatch.setattr(
+        solver_io,
+        "find_competition_files",
+        lambda data_dir: (_ for _ in ()).throw(FileNotFoundError("no train/test files")),
+    )
+    monkeypatch.setattr(solver_io, "ensure_sample_submission", lambda data_dir: None)
+
+    config = SubmissionConfig(
+        slug="demo",
+        data_dir=data_dir,
+        sample_submission_path=placeholder_context_sample,
+        submission_ledger_path=tmp_path / "ledger.jsonl",
+        dry_run=True,
+        force_submit=True,
+    )
+    service = SubmissionService(config)
+
+    assert service._resolve_sample_submission() == synthesized
 
 
 def test_submission_service_prefers_stage2_sample_over_stage1_by_default(tmp_path: Path) -> None:

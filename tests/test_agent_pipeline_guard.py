@@ -1,11 +1,57 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kagglebot import write_guard
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.orchestrator import agent_pipeline
 from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig
 from kagglebot.paths import CompetitionPaths
+
+
+def test_fallback_strategy_instructions_cover_general_tabular_formats(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text("{}", encoding="utf-8")
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    strategy, instructions, _, research_sources_text, _ = agent_pipeline._build_fallback_strategy(
+        paths=paths,
+        config=config,
+        brief_content="",
+        error_text="strategy unavailable",
+    )
+
+    assert "point-cloud/3D" in strategy
+    assert "annotation" in strategy
+    assert "artifact outputs" in strategy
+    assert "tabular/text/image/sequence" not in strategy
+    assert "Excel" in instructions
+    assert "Feather" in instructions
+    assert "Stata" in instructions
+    assert "XML" in instructions
+    assert "SQLite" in instructions
+    assert "compressed tabular variants" in instructions
+    assert "non-tabular artifacts" in instructions
+    assert "point-cloud/3D" in instructions
+    assert "model files" in instructions
+    assert "forced to CSV" in instructions
+    assert "annotation" in instructions
+    assert "model-artifact specific paths" in instructions
+    assert "CNN/transformer/sequence models where useful" in instructions
+    assert "repo `read_table` helper" in instructions
+    assert "submission format file schema artifact" in research_sources_text
+    assert "submission format csv columns" not in research_sources_text
 
 
 def test_codex_brief_guard_ignores_sibling_competition_artifact_churn(monkeypatch, tmp_path: Path) -> None:
@@ -202,6 +248,40 @@ def test_guard_restores_other_competition_data_sample_submission(tmp_path: Path)
     assert sample_path.read_text(encoding="utf-8") == original
 
 
+def test_guard_restores_other_competition_jsonl_sample_submission(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    other_data = artifacts_dir / "other" / "data"
+    other_data.mkdir(parents=True, exist_ok=True)
+    sample_path = other_data / "sample_submission.jsonl"
+    original = '{"id":1,"target":0.1}\n'
+    sample_path.write_text(original, encoding="utf-8")
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    before = write_guard._snapshot_tree(repo_root)
+
+    sample_path.write_text('{"id":1,"target":0.9}\n', encoding="utf-8")
+    after = write_guard._snapshot_tree(repo_root)
+
+    write_guard._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert sample_path.read_text(encoding="utf-8") == original
+
+
 def test_guard_restores_oversized_data_sample_submission_from_context(tmp_path: Path) -> None:
     repo_root = tmp_path
     artifacts_dir = repo_root / "artifacts"
@@ -245,6 +325,89 @@ def test_guard_restores_oversized_data_sample_submission_from_context(tmp_path: 
     )
 
     assert data_sample.read_text(encoding="utf-8") == context_content
+
+
+def test_guard_restores_oversized_jsonl_data_sample_submission_from_context(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    artifacts_dir = repo_root / "artifacts"
+
+    allowed_kernel = artifacts_dir / "demo" / "kernel"
+    allowed_kernel.mkdir(parents=True, exist_ok=True)
+    (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+
+    slug = "jsonl-demo"
+    context_sample = artifacts_dir / slug / "context" / "sample_submission.jsonl"
+    data_sample = artifacts_dir / slug / "data" / "sample_submission.jsonl"
+    context_sample.parent.mkdir(parents=True, exist_ok=True)
+    data_sample.parent.mkdir(parents=True, exist_ok=True)
+
+    context_content = '{"id":1,"target":0.1}\n'
+    context_sample.write_text(context_content, encoding="utf-8")
+
+    row = '{"id":1,"target":0.1}\n'
+    repeat = (write_guard._MAX_GUARD_FILE_BYTES // len(row)) + 1_000
+    data_sample.write_text(row * repeat, encoding="utf-8")
+    assert data_sample.stat().st_size > write_guard._MAX_GUARD_FILE_BYTES
+
+    allowed_prefixes = [allowed_kernel]
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
+    sample_rel = data_sample.relative_to(repo_root).as_posix()
+    assert sample_rel in guard_snapshot.oversized
+    before = write_guard._snapshot_tree(repo_root)
+
+    data_sample.write_text('{"id":1,"target":0.9}\n', encoding="utf-8")
+    after = write_guard._snapshot_tree(repo_root)
+
+    write_guard._enforce_allowlist_changes(
+        root=repo_root,
+        before=before,
+        after=after,
+        allowed_prefixes=allowed_prefixes,
+        stage="test_guard",
+        guard_snapshot=guard_snapshot,
+        auto_repair=True,
+    )
+
+    assert data_sample.read_text(encoding="utf-8") == context_content
+
+
+def test_guard_recognizes_compressed_data_sample_submission() -> None:
+    assert write_guard._is_artifact_data_sample_submission("artifacts/demo/data/sample_submission.csv.gz")
+    assert write_guard._is_artifact_data_sample_submission("artifacts/demo/data/sample_submission.xlsx")
+    assert write_guard._is_artifact_data_sample_submission("artifacts/demo/data/sample_submission.jsonl.xz")
+    assert not write_guard._is_artifact_data_sample_submission("artifacts/demo/data/sample_submission.zip")
+
+
+def test_guard_matches_compressed_data_sample_submission_context(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    context_sample = repo_root / "artifacts" / "demo" / "context" / "sample_submission.csv.gz"
+    data_sample = repo_root / "artifacts" / "demo" / "data" / "sample_submission.csv.gz"
+    context_sample.parent.mkdir(parents=True, exist_ok=True)
+    data_sample.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"\x1f\x8bcompressed-sample-bytes"
+    context_sample.write_bytes(payload)
+    data_sample.write_bytes(payload)
+
+    assert write_guard._matches_artifact_data_sample_submission_context(
+        repo_root,
+        "artifacts/demo/data/sample_submission.csv.gz",
+    )
+
+
+def test_guard_matches_excel_data_sample_submission_context(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    context_sample = repo_root / "artifacts" / "demo" / "context" / "sample_submission.xlsx"
+    data_sample = repo_root / "artifacts" / "demo" / "data" / "sample_submission.xlsx"
+    context_sample.parent.mkdir(parents=True, exist_ok=True)
+    data_sample.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"excel-sample-bytes"
+    context_sample.write_bytes(payload)
+    data_sample.write_bytes(payload)
+
+    assert write_guard._matches_artifact_data_sample_submission_context(
+        repo_root,
+        "artifacts/demo/data/sample_submission.xlsx",
+    )
 
 
 def test_guard_ignores_kagglebot_cache_churn(tmp_path: Path) -> None:
@@ -406,7 +569,22 @@ def test_guard_ignores_generated_kernel_staging_tree(tmp_path: Path) -> None:
     assert staged_kernel.read_text(encoding="utf-8") == "print('changed')\n"
 
 
-def test_guard_ignores_historical_run_submission_compact_csv_churn(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("filename", "payload", "updated_payload"),
+    [
+        ("submission.compact.csv", b"id,target\n1,0\n", b"id,target\n1,1\n"),
+        ("submission.compact.csv.gz", b"compressed-before", b"compressed-after"),
+        ("submission.compact.tsv", b"id\ttarget\n1\t0\n", b"id\ttarget\n1\t1\n"),
+        ("submission.compact.tsv.zst", b"tsv-zst-before", b"tsv-zst-after"),
+        ("submission.compact.jsonl.zst", b"jsonl-zst-before", b"jsonl-zst-after"),
+    ],
+)
+def test_guard_ignores_historical_run_submission_compact_churn(
+    tmp_path: Path,
+    filename: str,
+    payload: bytes,
+    updated_payload: bytes,
+) -> None:
     repo_root = tmp_path
     artifacts_dir = repo_root / "artifacts"
 
@@ -414,15 +592,15 @@ def test_guard_ignores_historical_run_submission_compact_csv_churn(tmp_path: Pat
     allowed_kernel.mkdir(parents=True, exist_ok=True)
     (allowed_kernel / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
 
-    compact_submission = artifacts_dir / "other" / "runs" / "run123" / "iter-3" / "submission.compact.csv"
+    compact_submission = artifacts_dir / "other" / "runs" / "run123" / "iter-3" / filename
     compact_submission.parent.mkdir(parents=True, exist_ok=True)
-    compact_submission.write_text("id,target\n1,0\n", encoding="utf-8")
+    compact_submission.write_bytes(payload)
 
     allowed_prefixes = [allowed_kernel]
     guard_snapshot = write_guard._backup_guarded_files(repo_root, allowed_prefixes)
     before = write_guard._snapshot_tree(repo_root)
 
-    compact_submission.write_text("id,target\n1,1\n", encoding="utf-8")
+    compact_submission.write_bytes(updated_payload)
     after = write_guard._snapshot_tree(repo_root)
 
     write_guard._enforce_allowlist_changes(
@@ -435,7 +613,7 @@ def test_guard_ignores_historical_run_submission_compact_csv_churn(tmp_path: Pat
         auto_repair=True,
     )
 
-    assert compact_submission.read_text(encoding="utf-8") == "id,target\n1,1\n"
+    assert compact_submission.read_bytes() == updated_payload
 
 
 def test_guard_ignores_venv_churn_and_restores_uv_lock(tmp_path: Path) -> None:

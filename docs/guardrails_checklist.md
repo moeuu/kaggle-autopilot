@@ -5,7 +5,7 @@ Use this checklist when changing autopilot behavior.
 ## 1. Submission Safety
 
 - [ ] Rules acceptance is checked before submission.
-- [ ] Submission CSV is validated against `sample_submission.csv` and context hints (`submission_format.md` / `overview.md`) when sample is placeholder/header-only.
+- [ ] Submission artifact is validated against `sample_submission.*` and context hints (`submission_format.md` / `overview.md`) when sample is placeholder/header-only.
 - [ ] Duplicate hash check is enforced (`submissions/ledger.jsonl`).
 - [ ] Submission rate limiting is enforced.
 - [ ] Repeated submit-error fingerprint abort is enforced.
@@ -13,7 +13,7 @@ Use this checklist when changing autopilot behavior.
 
 ## 2. Planning Pipeline Safety
 
-- [ ] Planning order remains `gpt -> gpt -> gpt`.
+- [ ] Planning order remains `codex -> oracle(gpt-5.5-pro) -> codex` when Oracle is available, with Codex fallback documented.
 - [ ] GPT output sections are validated (`STRATEGY`, `RESEARCH_SOURCES_JSONL`, `RESEARCH_SUMMARY_MD`, `PLAN_JSON`, `CODEX_INSTRUCTIONS`).
 - [ ] Research artifacts are persisted to `context/research_*.{jsonl,md}`.
 - [ ] Plan validation rejects malformed or underspecified pipeline configs.
@@ -44,3 +44,4 @@ Use this checklist when changing autopilot behavior.
 - [ ] Update docs when behavior changes (`README.md`, `docs/*`).
 - [ ] Update/extend tests for new planning-output contracts.
 - [ ] Run `uv run pytest -q` and `uv run ruff check .`.
+- [ ] When runner/orchestration behavior changes, also run `uv run pytest -q -m "slow and not competition_artifact"`.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -9,6 +10,11 @@ from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.exec_utils import run_command
 
 VERIFY_COMPAT_SHIM_MARKER = "# KAGGLEBOT_VERIFY_COMPAT_SHIM"
+PYTEST_XDIST_PLUGIN = "xdist.plugin"
+PYTEST_XDIST_VALUE_OPTIONS = {
+    "-n",
+    "--numprocesses",
+}
 
 DEEP_PAST_VERIFY_COMPAT_SHIM = """
 
@@ -245,6 +251,11 @@ def make_logit_blend_result(*, bundle, artifacts, results_by_name, first_name, s
     )
 """
 
+VERIFY_COMPAT_SHIMS_BY_SLUG_AND_FILE = {
+    ("deep-past-initiative-machine-translation", "kernel.py"): DEEP_PAST_VERIFY_COMPAT_SHIM,
+    ("playground-series-s6e3", "runtime.py"): PLAYGROUND_S6E3_VERIFY_COMPAT_SHIM,
+}
+
 
 def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
     local_artifacts_dir = repo_root / "artifacts"
@@ -313,8 +324,17 @@ def run_verify(
             mirror_verify_artifacts(artifacts_dir, repo_root=repo_root or Path.cwd())
         env = os.environ.copy()
         env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+        if env.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") == "1":
+            args = ensure_pytest_plugin_loaded(args, PYTEST_XDIST_PLUGIN)
 
     result = run_command_fn(args, env=env)
+    if (
+        getattr(result, "returncode", 1) != 0
+        and is_pytest_invocation(args)
+        and is_pytest_xdist_unrecognized_args(getattr(result, "output", ""))
+    ):
+        retry_args = serial_pytest_retry_args(args, repo_root=repo_root or Path.cwd())
+        result = run_command_fn(retry_args, env=env)
     if getattr(result, "returncode", 1) != 0:
         raise RuntimeError(f"Verification failed: {getattr(result, 'output', '')}")
 
@@ -336,10 +356,108 @@ def run_repo_verify(
 
 
 def is_pytest_invocation(cmd_args: list[str]) -> bool:
+    return pytest_arg_insert_index(cmd_args) is not None
+
+
+def pytest_arg_insert_index(cmd_args: list[str]) -> int | None:
     for idx, item in enumerate(cmd_args):
         if item == "pytest" or item.endswith("/pytest"):
-            return True
+            return idx + 1
         if item == "-m" and idx + 1 < len(cmd_args) and cmd_args[idx + 1] == "pytest":
+            return idx + 2
+    return None
+
+
+def ensure_pytest_plugin_loaded(cmd_args: list[str], plugin: str) -> list[str]:
+    if has_pytest_plugin_arg(cmd_args, plugin):
+        return cmd_args
+    insert_at = pytest_arg_insert_index(cmd_args)
+    if insert_at is None:
+        return cmd_args
+    return [*cmd_args[:insert_at], "-p", plugin, *cmd_args[insert_at:]]
+
+
+def serial_pytest_retry_args(cmd_args: list[str], *, repo_root: Path) -> list[str]:
+    stripped_args = strip_pytest_plugin_arg(strip_pytest_xdist_args(cmd_args), PYTEST_XDIST_PLUGIN)
+    addopts = load_pytest_addopts(repo_root)
+    serial_addopts = strip_pytest_xdist_args(addopts)
+    if serial_addopts == addopts:
+        return stripped_args
+    insert_at = pytest_arg_insert_index(stripped_args)
+    if insert_at is None:
+        return stripped_args
+    return [
+        *stripped_args[:insert_at],
+        "-o",
+        f"addopts={shlex.join(serial_addopts)}",
+        *stripped_args[insert_at:],
+    ]
+
+
+def is_pytest_xdist_unrecognized_args(output: object) -> bool:
+    text = str(output or "").lower()
+    return (
+        ("unrecognized arguments" in text and ("-n" in text or "--numprocesses" in text))
+        or ("error importing plugin" in text and "xdist" in text)
+        or "no module named 'xdist'" in text
+    )
+
+
+def strip_pytest_xdist_args(cmd_args: list[str]) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    for item in cmd_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if item in PYTEST_XDIST_VALUE_OPTIONS:
+            skip_next = True
+            continue
+        if item.startswith("-n") and item != "-n":
+            continue
+        if any(item.startswith(f"{option}=") for option in PYTEST_XDIST_VALUE_OPTIONS if option.startswith("--")):
+            continue
+        stripped.append(item)
+    return stripped
+
+
+def strip_pytest_plugin_arg(cmd_args: list[str], plugin: str) -> list[str]:
+    aliases = {plugin, plugin.split(".", 1)[0]}
+    stripped: list[str] = []
+    skip_next = False
+    for idx, item in enumerate(cmd_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "-p" and idx + 1 < len(cmd_args) and cmd_args[idx + 1] in aliases:
+            skip_next = True
+            continue
+        if item.startswith("-p") and item[2:] in aliases:
+            continue
+        stripped.append(item)
+    return stripped
+
+
+def load_pytest_addopts(repo_root: Path) -> list[str]:
+    pyproject_path = repo_root / "pyproject.toml"
+    try:
+        config = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    addopts = config.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("addopts", "")
+    if isinstance(addopts, str):
+        return shlex.split(addopts)
+    if isinstance(addopts, list):
+        return [str(item) for item in addopts]
+    return []
+
+
+def has_pytest_plugin_arg(cmd_args: list[str], plugin: str) -> bool:
+    aliases = {plugin, plugin.split(".", 1)[0]}
+    for idx, item in enumerate(cmd_args):
+        if item == "-p" and idx + 1 < len(cmd_args) and cmd_args[idx + 1] in aliases:
+            return True
+        if item.startswith("-p") and item[2:] in aliases:
             return True
     return False
 
@@ -356,8 +474,8 @@ def append_verify_compat_shim(path: Path, *, slug: str) -> None:
 
 
 def verify_compat_shim(*, slug: str, filename: str) -> str:
-    if slug == "deep-past-initiative-machine-translation" and filename == "kernel.py":
-        return DEEP_PAST_VERIFY_COMPAT_SHIM
-    if slug == "playground-series-s6e3" and filename == "runtime.py":
-        return PLAYGROUND_S6E3_VERIFY_COMPAT_SHIM
-    return ""
+    return VERIFY_COMPAT_SHIMS_BY_SLUG_AND_FILE.get((normalize_verify_slug(slug), Path(filename).name), "")
+
+
+def normalize_verify_slug(slug: str) -> str:
+    return str(slug or "").strip().lower()

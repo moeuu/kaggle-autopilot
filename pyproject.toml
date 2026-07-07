@@ -61,6 +61,28 @@ dependencies = [
     "openpyxl>=3.1.5",
     "nltk>=3.9.4",
     "sentencepiece>=0.2.1",
+    "datasets>=4.3.0",
+    "unsloth>=2026.5.2",
+    "unsloth-zoo>=2026.5.1",
+    "beautifulsoup4>=4.15.0",
+    "spacy>=3.8.14",
+    "sentence-transformers>=5.6.0",
+    "zstandard>=0.25.0",
+    "py7zr>=1.1.3",
+    "pyarrow>=24.0.0",
+    "tables>=3.11.1",
+    "rarfile>=4.2",
+    "pyreadstat>=1.3.5",
+    "odfpy>=1.4.1",
+    "pyxlsb>=1.0.10",
+    "pyyaml>=6.0.3",
+    "fastavro>=1.12.2",
+    "h5py>=3.16.0",
+    "astropy>=7.0.0",
+    "duckdb>=1.5.4",
+    "pyreadr>=0.5.3",
+    "pydicom>=3.0.1",
+    "nibabel>=5.3.2",
 ]
 
 [project.scripts]
@@ -70,6 +92,7 @@ kagglebot = "kagglebot.cli:app"
 dev = [
     "pyright>=1.1.407",
     "pytest>=9.0.2",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.14.10",
 ]
 
@@ -81,6 +104,7 @@ exclude = [
     "artifacts",
     "artifacts_*",
     "outputs",
+    "unsloth_compiled_cache",
 ]
 
 [tool.ruff.lint]
@@ -93,7 +117,7 @@ typeCheckingMode = "basic"
 exclude = ["src/kagglebot/knowledge/__init__.py"]
 
 [tool.pytest.ini_options]
-addopts = "-p no:launch_testing -p no:launch_ros -m 'not competition_artifact and not slow'"
+addopts = "-p no:launch_testing -p no:launch_ros -n auto -m 'not competition_artifact and not slow'"
 markers = [
     "competition_artifact: tests generated competition artifact kernels/runtimes (opt-in)",
     "integration: requires Kaggle CLI + credentials (opt-in)",

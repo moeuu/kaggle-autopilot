@@ -12,9 +12,35 @@ def test_is_local_gpu_compute_normalizes_case_and_whitespace() -> None:
     assert not is_local_gpu_compute("kaggle_gpu")
 
 
-def test_is_heavy_deep_learning_modality_includes_rna_structure() -> None:
-    for modality in ("image", "video", "audio", "text", "rna_structure"):
+def test_is_heavy_deep_learning_modality_includes_asset_and_rna_modalities() -> None:
+    for modality in (
+        "image",
+        "video",
+        "audio",
+        "text",
+        "document",
+        "medical_imaging",
+        "array",
+        "point_cloud",
+        "3d",
+        "point_cloud_3d",
+        "geospatial",
+        "bio",
+        "sequence",
+        "structure",
+        "rna",
+        "rna_structure",
+        "graph",
+        "signal",
+        "annotation",
+        "model_artifact",
+        "artifact",
+    ):
         assert is_heavy_deep_learning_modality(modality)
+    assert is_heavy_deep_learning_modality("medical-imaging")
+    assert is_heavy_deep_learning_modality("point cloud")
+    assert is_heavy_deep_learning_modality("point-cloud-3D")
+    assert is_heavy_deep_learning_modality("model-artifact")
     assert not is_heavy_deep_learning_modality("tabular")
 
 

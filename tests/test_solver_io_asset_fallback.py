@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from kagglebot.solver.io import ensure_sample_submission, find_competition_files
+from kagglebot.solver.io import ensure_sample_submission, find_competition_files, infer_prediction_kind
+
+
+def test_infer_prediction_kind_uses_shared_text_name_tokens() -> None:
+    sample_target = pd.Series([0.0, 0.0], name="predicted_citations")
+
+    assert infer_prediction_kind(sample_target, column_name="predicted_citations") == "text"
 
 
 def test_find_competition_files_synthesizes_from_assets(tmp_path: Path) -> None:
@@ -74,6 +80,50 @@ def test_find_competition_files_synthesizes_sample_submission_from_context(tmp_p
 
     assert train_path.name == "train_synth.csv"
     assert test_path.name == "test_synth.csv"
+
+
+def test_find_competition_files_synthesizes_from_final_asset_split(tmp_path: Path) -> None:
+    base_dir = tmp_path / "comp"
+    data_dir = base_dir / "data"
+    context_dir = base_dir / "context"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    (context_dir / "submission_format.md").write_text(
+        "\n".join(
+            [
+                "## Submission File",
+                "```",
+                "filename,target",
+                "final_images/2.jpg,0",
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    labels = pd.DataFrame({"filename": ["0.jpg", "1.jpg"], "target": [0, 1]})
+    labels.to_csv(data_dir / "train_labels.csv", index=False)
+
+    train_images = data_dir / "train_images"
+    final_images = data_dir / "final_images"
+    train_images.mkdir(parents=True, exist_ok=True)
+    final_images.mkdir(parents=True, exist_ok=True)
+    (train_images / "0.jpg").write_bytes(b"fake")
+    (train_images / "1.jpg").write_bytes(b"fake")
+    (final_images / "2.jpg").write_bytes(b"fake")
+
+    train_path, test_path, sample_path = find_competition_files(data_dir)
+
+    assert sample_path.name == "sample_submission_synth.csv"
+    sample = pd.read_csv(sample_path)
+    assert sample["filename"].tolist() == ["final_images/2.jpg"]
+
+    assert train_path.name == "train_synth.csv"
+    assert test_path.name == "test_synth.csv"
+    test = pd.read_csv(test_path)
+    assert test["filename"].tolist() == ["final_images/2.jpg"]
+    assert test["asset_path"].str.endswith("final_images/2.jpg").tolist() == [True]
 
 
 def test_find_competition_files_uses_ancestor_context_for_nested_data_dir(tmp_path: Path) -> None:

@@ -45,11 +45,11 @@ STRATEGY_AGENT = PRIMARY_AGENT
 IMPLEMENTATION_AGENT = PRIMARY_AGENT
 
 
-def planning_flow_summary() -> str:
+def planning_flow_summary(*, strategy_token: str | None = None) -> str:
     return " -> ".join(
         (
             BRIEF_AGENT.flow_token,
-            STRATEGY_AGENT.flow_token,
+            strategy_token or STRATEGY_AGENT.flow_token,
             IMPLEMENTATION_AGENT.flow_token,
         )
     )

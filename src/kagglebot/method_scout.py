@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kagglebot.asset_modality import AUDIO_SUFFIXES, DOCUMENT_SUFFIXES, IMAGE_SUFFIXES, SIGNAL_SUFFIXES, VIDEO_SUFFIXES
 from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
 from kagglebot.paths import CompetitionPaths
 from kagglebot.scalar_utils import non_nan_float as _to_float
@@ -43,6 +44,74 @@ _UNSAFE_TERMS = (
     "bypass",
 )
 _VALIDATION_TERMS = ("split", "cv", "cross-validation", "groupkfold", "timeseries", "leak", "proxy")
+_IMAGE_MODALITY_HINTS = (
+    "image",
+    "photo",
+    "picture",
+    "vision",
+    *(suffix.lstrip(".") for suffix in sorted(IMAGE_SUFFIXES)),
+    *sorted(IMAGE_SUFFIXES),
+)
+_AUDIO_MODALITY_HINTS = (
+    "audio",
+    "sound",
+    "speech",
+    *(suffix.lstrip(".") for suffix in sorted(AUDIO_SUFFIXES)),
+    *sorted(AUDIO_SUFFIXES),
+)
+_VIDEO_MODALITY_HINTS = (
+    "video",
+    "clip",
+    "frame",
+    *(suffix.lstrip(".") for suffix in sorted(VIDEO_SUFFIXES)),
+    *sorted(VIDEO_SUFFIXES),
+)
+_SIGNAL_MODALITY_HINTS = (
+    "signal",
+    "signals",
+    "waveform",
+    "waveforms",
+    "biosignal",
+    "biosignals",
+    "ecg",
+    "eeg",
+    "ekg",
+    "wfdb",
+    "physionet",
+    *(suffix.lstrip(".") for suffix in sorted(SIGNAL_SUFFIXES)),
+    *sorted(SIGNAL_SUFFIXES),
+)
+_TEXT_MODALITY_HINTS = (
+    "text",
+    "translation",
+    "nlp",
+    "document classification",
+    "document understanding",
+    "document qa",
+    "pdf",
+    "docx",
+    "markdown",
+)
+_TEXT_FILE_REFERENCE_COLUMN_HINTS = (
+    "document_path",
+    "document_file",
+    "doc_path",
+    "doc_file",
+    "pdf_path",
+    "pdf_file",
+    "report_path",
+    "report_file",
+    *(suffix for suffix in sorted(DOCUMENT_SUFFIXES) if suffix not in {".html", ".htm"}),
+)
+_MODALITY_ALIASES = {
+    "3d": "point_cloud",
+    "point_cloud_3d": "point_cloud",
+    "model_artifact": "artifact",
+    "model_output": "artifact",
+    "submission_artifact": "artifact",
+    "sequence": "bio",
+    "structure": "bio",
+}
 
 
 @dataclass(frozen=True)
@@ -185,6 +254,7 @@ def run_method_scout(
     validation_registry = build_validation_registry(
         slug=slug,
         problem_types=problem_types,
+        dataset_profile=dataset_profile,
         campaign_state=campaign_state,
         sources=sources,
     )
@@ -316,11 +386,110 @@ def build_method_scout_queries(
                 f"{' '.join(domain_terms)} image classification detection segmentation 2025 arxiv",
             ]
         )
+    elif modality == "audio":
+        raw_queries.extend(
+            [
+                f"{slug} audio spectrogram MFCC pretrained encoder Kaggle solution",
+                f"{' '.join(domain_terms)} audio classification retrieval {metric_text} 2025 arxiv official repo",
+            ]
+        )
+    elif modality == "video":
+        raw_queries.extend(
+            [
+                f"{slug} video frame sampling temporal pooling TTA Kaggle solution",
+                f"{' '.join(domain_terms)} video action recognition {metric_text} 2025 arxiv official repo",
+            ]
+        )
+    elif modality == "signal":
+        raw_queries.extend(
+            [
+                f"{slug} ECG EEG waveform signal processing Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} biosignal 1D CNN transformer WFDB EDF "
+                    f"{metric_text} 2025 arxiv official repo"
+                ),
+            ]
+        )
+    elif modality == "medical_imaging":
+        raw_queries.extend(
+            [
+                f"{slug} DICOM IMA NIfTI NRRD MHA medical imaging preprocessing windowing Kaggle solution",
+                f"{' '.join(domain_terms)} medical imaging 3D CNN transformer {metric_text} 2025 arxiv official repo",
+            ]
+        )
+    elif modality == "array":
+        raw_queries.extend(
+            [
+                f"{slug} numpy Zarr OME-Zarr N5 AnnData H5AD array feature extraction Kaggle solution",
+                f"{' '.join(domain_terms)} NetCDF GRIB FITS scientific array {metric_text} 2025 official repo",
+            ]
+        )
+    elif modality == "point_cloud":
+        raw_queries.extend(
+            [
+                f"{slug} point cloud lidar voxel projection Kaggle solution",
+                f"{' '.join(domain_terms)} point cloud PointNet transformer {metric_text} 2025 arxiv official repo",
+            ]
+        )
+    elif modality == "geospatial":
+        raw_queries.extend(
+            [
+                f"{slug} geospatial GIS GeoJSON shapefile feature engineering Kaggle solution",
+                f"{' '.join(domain_terms)} geospatial spatial cross validation {metric_text} 2025 official repo",
+            ]
+        )
+    elif modality == "graph":
+        raw_queries.extend(
+            [
+                f"{slug} graph neural network node edge link prediction Kaggle solution",
+                f"{' '.join(domain_terms)} graph features NetworkX GNN {metric_text} 2025 official repo",
+            ]
+        )
+    elif modality == "annotation":
+        raw_queries.extend(
+            [
+                f"{slug} COCO YOLO LabelMe annotation detection segmentation Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} annotation conversion RLE COCO YOLO mask submission "
+                    f"{metric_text} 2025 official repo"
+                ),
+            ]
+        )
+    elif modality == "artifact":
+        raw_queries.extend(
+            [
+                f"{slug} model artifact ONNX safetensors checkpoint submission Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} model artifact packaging ONNX TensorFlow Lite CoreML "
+                    f"safetensors {metric_text} 2025 official repo"
+                ),
+            ]
+        )
     elif modality == "text":
         raw_queries.extend(
             [
                 f"{slug} transformers embedding reranker calibration",
                 f"{' '.join(domain_terms)} NLP {metric_text} 2025 arxiv official repo",
+            ]
+        )
+        if _is_document_file_reference_profile(dataset_profile, problem_types):
+            raw_queries.extend(
+                [
+                    f"{slug} PDF DOCX Markdown document classification feature extraction Kaggle solution",
+                    (
+                        f"{' '.join(domain_terms)} document file metadata text extraction embeddings "
+                        f"{metric_text} 2025 official repo"
+                    ),
+                ]
+            )
+    elif modality == "multimodal":
+        raw_queries.extend(
+            [
+                f"{slug} multimodal image text fusion CLIP embeddings Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} vision language dual encoder late fusion "
+                    f"{metric_text} 2025 arxiv official repo"
+                ),
             ]
         )
     elif modality == "timeseries":
@@ -333,8 +502,129 @@ def build_method_scout_queries(
     elif modality in {"rna", "bio"}:
         raw_queries.extend(
             [
-                f"{slug} official evaluator RNA protein structure baseline GitHub",
-                f"{' '.join(domain_terms)} bioinformatics {metric_text} 2025 arxiv",
+                f"{slug} official evaluator RNA protein molecule structure baseline GitHub",
+                f"{' '.join(domain_terms)} bioinformatics SMILES FASTA PDB {metric_text} 2025 arxiv",
+            ]
+        )
+    if _is_multi_label_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} multi-label classification threshold optimization F1 Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} multi-label one-vs-rest classifier "
+                    f"calibration threshold tuning {metric_text}"
+                ),
+            ]
+        )
+    if _is_multi_output_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} multi-output multi-target modeling Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} multi-output regression multi-target classification "
+                    f"per-target model chaining {metric_text}"
+                ),
+            ]
+        )
+    if _is_quantile_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} quantile regression pinball loss Kaggle solution",
+                f"{' '.join(domain_terms)} prediction intervals conformal quantile regression {metric_text}",
+            ]
+        )
+    if _is_ordinal_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} ordinal classification quadratic weighted kappa Kaggle solution",
+                f"{' '.join(domain_terms)} ordinal regression threshold optimization QWK {metric_text}",
+            ]
+        )
+    if _is_sample_weight_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} sample weights weighted metric Kaggle solution",
+                f"{' '.join(domain_terms)} sample_weight weighted loss validation calibration {metric_text}",
+            ]
+        )
+    if _is_text_generation_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} text generation translation summarization retrieval augmented Kaggle solution",
+                f"{' '.join(domain_terms)} seq2seq transformer BLEU ROUGE semantic similarity {metric_text}",
+            ]
+        )
+    if _is_survival_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} survival analysis concordance index Kaggle solution",
+                (f"{' '.join(domain_terms)} time-to-event Cox Kaplan-Meier event censoring validation {metric_text}"),
+            ]
+        )
+    if _is_pairwise_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} pairwise matchup ranking probability calibration Kaggle solution",
+                (
+                    f"{' '.join(domain_terms)} pairwise preference model Bradley Terry Elo "
+                    f"feature difference calibration {metric_text}"
+                ),
+            ]
+        )
+    if _is_learning_to_rank_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} learning to rank NDCG LambdaMART Kaggle solution",
+                f"{' '.join(domain_terms)} query document relevance ranking group k-fold {metric_text}",
+            ]
+        )
+    if _is_anomaly_detection_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} anomaly detection isolation forest autoencoder Kaggle solution",
+                f"{' '.join(domain_terms)} unsupervised anomaly score calibration validation {metric_text}",
+            ]
+        )
+    elif _is_unsupervised_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} unsupervised prediction baseline clustering density Kaggle solution",
+                f"{' '.join(domain_terms)} no train labels pseudo-label anomaly score validation {metric_text}",
+            ]
+        )
+    if _is_ctr_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} click through rate CTR target encoding calibration Kaggle solution",
+                f"{' '.join(domain_terms)} user item ad click prediction GBDT calibration {metric_text}",
+            ]
+        )
+    if _is_recommender_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} recommender system user item matrix factorization Kaggle solution",
+                f"{' '.join(domain_terms)} user item rating prediction ALS LightFM GBDT features {metric_text}",
+            ]
+        )
+    if _is_forecasting_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} forecasting horizon lag rolling feature validation Kaggle solution",
+                f"{' '.join(domain_terms)} time series forecasting backtesting leakage {metric_text}",
+            ]
+        )
+    if _is_detection_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} object detection prediction_string mAP Kaggle solution",
+                f"{' '.join(domain_terms)} YOLO Faster R-CNN detection TTA NMS {metric_text}",
+            ]
+        )
+    if _is_segmentation_profile(dataset_profile, problem_types):
+        raw_queries.extend(
+            [
+                f"{slug} segmentation RLE mask dice Kaggle solution",
+                f"{' '.join(domain_terms)} U-Net Mask R-CNN segmentation TTA postprocessing {metric_text}",
             ]
         )
     seen: set[str] = set()
@@ -362,6 +652,891 @@ def build_method_scout_queries(
 
 def load_research_sources(path: Path, *, limit: int = 12) -> list[dict[str, object]]:
     return load_jsonl_records(path, limit=max(1, int(limit)))
+
+
+def _is_multi_label_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"multi_label", "multilabel", "multi-label"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"multi_label", "multilabel", "multi-label"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"multi_label", "multilabel", "multi-label"}
+        for problem_type in problem_types
+    )
+
+
+def _is_multi_output_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"multi_output_regression", "multi_target_classification", "multi_task"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() in {"multi_output", "multi_target"} for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() in {"multi_output", "multi_target"} for problem_type in problem_types)
+
+
+def _is_quantile_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"quantile_regression", "prediction_interval", "quantile", "interval_prediction"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"quantile_regression", "prediction_interval", "quantile"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"quantile_regression", "prediction_interval", "quantile"}
+        for problem_type in problem_types
+    )
+
+
+def _is_ordinal_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"ordinal_classification", "ordinal", "ordinal_regression"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"ordinal_classification", "ordinal"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"ordinal_classification", "ordinal", "ordinal_regression"}
+        for problem_type in problem_types
+    )
+
+
+def _is_survival_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"survival", "time_to_event", "time-to-event"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() in {"survival", "time_to_event"} for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() in {"survival", "time_to_event"} for problem_type in problem_types)
+
+
+def _is_pairwise_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"pairwise", "pairwise_preference", "ranking"}:
+        return True
+    structure = str(dataset_profile.get("competition_structure") or "").strip().lower()
+    if "pairwise" in structure:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() in {"pairwise", "ranking"} for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() in {"pairwise", "ranking"} for problem_type in problem_types)
+
+
+def _is_learning_to_rank_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"learning_to_rank", "learning-to-rank", "ltr", "listwise_ranking"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"learning_to_rank", "learning-to-rank", "ltr"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"learning_to_rank", "learning-to-rank", "ltr", "listwise_ranking"}
+        for problem_type in problem_types
+    )
+
+
+def _is_anomaly_detection_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"anomaly_detection", "anomaly-detection", "outlier_detection", "fraud_detection"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"anomaly_detection", "anomaly-detection", "outlier_detection"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"anomaly_detection", "anomaly-detection", "outlier_detection"}
+        for problem_type in problem_types
+    )
+
+
+def _is_unsupervised_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"unsupervised", "unsupervised_prediction", "no_train_labels"}:
+        return True
+    task = str(dataset_profile.get("task") or "").strip().lower()
+    if task == "unsupervised":
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() == "unsupervised" for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() == "unsupervised" for problem_type in problem_types)
+
+
+def _is_ctr_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"ctr", "click_through_rate", "click-through-rate", "click_prediction"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() in {"ctr", "click_prediction"} for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() in {"ctr", "click_prediction"} for problem_type in problem_types)
+
+
+def _is_recommender_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"recommender", "recommendation", "recommender_system", "user_item"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"recommender", "recommendation", "user_item"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"recommender", "recommendation", "user_item"}
+        for problem_type in problem_types
+    )
+
+
+def _is_forecasting_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"forecasting", "forecast", "time_series_forecast", "time-series-forecast"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() in {"forecasting", "forecast"} for tag in tags):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"forecasting", "forecast", "time_series_forecast"}
+        for problem_type in problem_types
+    )
+
+
+def _is_detection_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"object_detection", "detection", "bbox_detection"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() in {"object_detection", "detection"} for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() in {"object_detection", "detection"} for problem_type in problem_types)
+
+
+def _is_segmentation_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"segmentation", "mask_segmentation", "semantic_segmentation", "instance_segmentation"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() == "segmentation" for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() == "segmentation" for problem_type in problem_types)
+
+
+def _is_sample_weight_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    if str(dataset_profile.get("sample_weight_column_hint") or "").strip():
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(str(tag).strip().lower() == "sample_weighted" for tag in tags):
+        return True
+    return any(str(problem_type).strip().lower() == "sample_weighted" for problem_type in problem_types)
+
+
+def _is_text_generation_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"text_generation", "translation", "summarization", "question_answering", "qa"}:
+        return True
+    task = str(dataset_profile.get("task") or "").strip().lower()
+    if task in {"text_generation", "translation", "summarization"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"text_generation", "translation", "summarization", "qa"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"text_generation", "translation", "summarization", "qa"}
+        for problem_type in problem_types
+    )
+
+
+def _is_document_file_reference_profile(dataset_profile: dict[str, object], problem_types: list[str]) -> bool:
+    columns = dataset_profile.get("columns")
+    if isinstance(columns, list):
+        column_text = " ".join(str(item).lower() for item in columns if isinstance(item, str))
+        if any(term in column_text for term in _TEXT_FILE_REFERENCE_COLUMN_HINTS):
+            return True
+    target_semantics = str(dataset_profile.get("target_semantics") or "").strip().lower()
+    if target_semantics in {"document_classification", "document_understanding", "document_qa"}:
+        return True
+    tags = dataset_profile.get("tags")
+    if isinstance(tags, list) and any(
+        str(tag).strip().lower() in {"document", "document_classification", "document_understanding"} for tag in tags
+    ):
+        return True
+    return any(
+        str(problem_type).strip().lower() in {"document", "document_classification", "document_understanding"}
+        for problem_type in problem_types
+    )
+
+
+def _multi_label_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.75 if metric else 0.6
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-multi-label-one-vs-rest-thresholds",
+            name="Multi-label one-vs-rest classifier with per-label threshold optimization",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.72,
+            expected_gain=0.68,
+            implementation_cost=0.42,
+            dependency_risk=0.08,
+            leakage_risk=0.08,
+            runtime_risk=0.25,
+            fallback=(
+                "Use sklearn OneVsRest-style heads, tune thresholds on OOF predictions, and fall back to label priors."
+            ),
+            summary=(
+                "Multi-label heads must optimize per-class thresholds against the competition metric instead of argmax."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_multi_label_thresholds",
+                "contract": (
+                    "fit per-label binary heads, emit OOF/test scores, and tune thresholds using only validation folds"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost"],
+                "fallback": "Use sklearn linear/logistic one-vs-rest heads and prior thresholds.",
+            },
+        )
+    ]
+
+
+def _text_generation_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.76 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-text-generation-retrieval-seq2seq",
+            name="Text-generation retrieval baseline with optional seq2seq reranking",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.84,
+            metric_fit=metric_fit,
+            data_fit=0.72,
+            expected_gain=0.64,
+            implementation_cost=0.46,
+            dependency_risk=0.16,
+            leakage_risk=0.12,
+            runtime_risk=0.34,
+            fallback=(
+                "Use TF-IDF/embedding nearest-neighbor text retrieval and deterministic fallback strings when "
+                "seq2seq inference is unavailable."
+            ),
+            summary=(
+                "Text-generation submissions need retrieval or seq2seq candidates plus text-normalized validation, "
+                "not categorical label encoding."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_text_generation_retrieval_seq2seq",
+                "contract": (
+                    "build prompt/source text features, validate generated strings with text metrics, "
+                    "and preserve exact submission text columns"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["sentence-transformers", "transformers", "torch"],
+                "fallback": "Use sklearn TF-IDF nearest-neighbor retrieval and constant-text fallback.",
+            },
+        )
+    ]
+
+
+def _document_file_reference_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.74 if metric else 0.58
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-document-file-metadata-text-head",
+            name="Document file metadata and text-stat feature head",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="feature_variant",
+            problem_fit=0.82,
+            metric_fit=metric_fit,
+            data_fit=0.78,
+            expected_gain=0.58,
+            implementation_cost=0.28,
+            dependency_risk=0.08,
+            leakage_risk=0.08,
+            runtime_risk=0.16,
+            fallback=(
+                "Use document byte size, suffix, page count, character/word/paragraph counts, "
+                "and optional extracted text embeddings with grouped validation when documents repeat."
+            ),
+            summary=(
+                "Document-reference tables should exploit PDF/DOCX/Markdown metadata and text statistics "
+                "before falling back to generic tabular or transformer-only baselines."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_document_file_metadata_text_head",
+                "contract": (
+                    "resolve document path columns, add document metadata/text-stat features, "
+                    "and optionally cache text embeddings when dependencies permit"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["pypdf", "python-docx", "transformers", "sentence-transformers"],
+                "fallback": "Use built-in PDF/DOCX/Markdown metadata and sklearn heads without optional parsers.",
+            },
+        )
+    ]
+
+
+def _detection_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.78 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-object-detection-router",
+            name="Object detection router with prediction_string formatting and NMS/TTA",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.88,
+            metric_fit=metric_fit,
+            data_fit=0.74,
+            expected_gain=0.7,
+            implementation_cost=0.5,
+            dependency_risk=0.18,
+            leakage_risk=0.1,
+            runtime_risk=0.38,
+            fallback="Use torchvision detector or YOLO when available; otherwise emit validated empty detections.",
+            summary="Detection submissions need box formatting, score thresholds, NMS, and mAP-style validation.",
+            implementation_adapter={
+                "adapter": f"{modality}_object_detection_router",
+                "contract": (
+                    "train or load detector, format prediction_string boxes, and validate mAP-compatible output"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["torch", "torchvision", "ultralytics", "opencv-python"],
+                "fallback": "Use installed torchvision/YOLO paths first, then safe empty detection formatting.",
+            },
+        )
+    ]
+
+
+def _segmentation_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.78 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-segmentation-mask-rle",
+            name="Segmentation mask model with RLE/PNG/TIFF submission formatting",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.74,
+            expected_gain=0.68,
+            implementation_cost=0.5,
+            dependency_risk=0.18,
+            leakage_risk=0.1,
+            runtime_risk=0.38,
+            fallback=(
+                "Use lightweight U-Net/torchvision-style mask head or validated empty masks "
+                "when training is infeasible."
+            ),
+            summary=(
+                "Segmentation submissions need mask decoding/encoding, thresholding, "
+                "connected components, and dice checks."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_segmentation_mask_rle",
+                "contract": (
+                    "produce aligned masks or RLE strings, validate dimensions, and tune mask thresholds on folds"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["torch", "torchvision", "opencv-python", "timm"],
+                "fallback": "Use numpy/OpenCV mask postprocessing and validated empty-mask submission formatting.",
+            },
+        )
+    ]
+
+
+def _pairwise_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.74 if metric else 0.6
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-pairwise-difference-ranking",
+            name="Pairwise feature-difference ranking model with calibrated probabilities",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.84,
+            metric_fit=metric_fit,
+            data_fit=0.72,
+            expected_gain=0.66,
+            implementation_cost=0.38,
+            dependency_risk=0.08,
+            leakage_risk=0.12,
+            runtime_risk=0.22,
+            fallback=(
+                "Build A-vs-B feature differences, include swapped-pair augmentation when valid, "
+                "and calibrate pairwise probabilities."
+            ),
+            summary=("Pairwise tasks should model relative strength instead of treating entity ids as flat labels."),
+            implementation_adapter={
+                "adapter": f"{modality}_pairwise_difference_ranking",
+                "contract": (
+                    "derive pairwise features, respect group/time leakage, and emit calibrated matchup probabilities"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost"],
+                "fallback": "Use sklearn logistic/ridge heads over feature differences plus entity historical rates.",
+            },
+        )
+    ]
+
+
+def _learning_to_rank_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.82 if metric else 0.64
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-learning-to-rank-lambdamart",
+            name="Learning-to-rank LambdaMART with query-group validation",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.88,
+            metric_fit=metric_fit,
+            data_fit=0.76,
+            expected_gain=0.7,
+            implementation_cost=0.42,
+            dependency_risk=0.12,
+            leakage_risk=0.18,
+            runtime_risk=0.28,
+            fallback=(
+                "Use group-aware query splits, per-query normalization, and a GBDT/ridge relevance scorer "
+                "when rank objectives are unavailable."
+            ),
+            summary=(
+                "Learning-to-rank tasks need query-group validation and NDCG-aware ranking losses or calibration."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_learning_to_rank_lambdamart",
+                "contract": (
+                    "preserve query groups, train relevance/rank scores, "
+                    "and validate with NDCG or grouped ranking metrics"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["lightgbm", "xgboost", "catboost"],
+                "fallback": "Use sklearn ranking features plus grouped CV and sort candidates by calibrated relevance.",
+            },
+        )
+    ]
+
+
+def _anomaly_detection_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.76 if metric else 0.58
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-anomaly-score-ensemble",
+            name="Anomaly score ensemble with isolation, robust scaling, and calibration",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.84,
+            metric_fit=metric_fit,
+            data_fit=0.74,
+            expected_gain=0.64,
+            implementation_cost=0.4,
+            dependency_risk=0.08,
+            leakage_risk=0.12,
+            runtime_risk=0.24,
+            fallback=(
+                "Use robust numeric/categorical features, IsolationForest/LOF/PCA scores, "
+                "and calibrate score direction against any public/sample hints."
+            ),
+            summary=(
+                "Anomaly detection tasks without train labels need score ensembles and careful direction validation."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_anomaly_score_ensemble",
+                "contract": "fit unsupervised anomaly scores on train/test features and emit aligned risk scores",
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["pyod", "xgboost", "lightgbm"],
+                "fallback": (
+                    "Use sklearn IsolationForest, robust covariance, PCA reconstruction, and rank-averaged scores."
+                ),
+            },
+        )
+    ]
+
+
+def _unsupervised_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.58 if metric else 0.5
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-unsupervised-score-baseline",
+            name="Unsupervised score baseline with clustering and density features",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="feature_variant",
+            problem_fit=0.76,
+            metric_fit=metric_fit,
+            data_fit=0.68,
+            expected_gain=0.56,
+            implementation_cost=0.34,
+            dependency_risk=0.06,
+            leakage_risk=0.12,
+            runtime_risk=0.2,
+            fallback=(
+                "Generate density, distance-to-centroid, reconstruction, or rank-normalized scores "
+                "when train labels are unavailable."
+            ),
+            summary="No-label prediction tasks need explicit unsupervised scores instead of supervised target fitting.",
+            implementation_adapter={
+                "adapter": f"{modality}_unsupervised_score_baseline",
+                "contract": (
+                    "derive unsupervised scores from train/test features and align them to sample submission rows"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["scipy"],
+                "fallback": "Use sklearn preprocessing, PCA, KMeans distances, and robust rank-normalized scores.",
+            },
+        )
+    ]
+
+
+def _ctr_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.78 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-ctr-gbdt-calibration",
+            name="CTR GBDT model with user-item encodings and probability calibration",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.76,
+            expected_gain=0.68,
+            implementation_cost=0.4,
+            dependency_risk=0.08,
+            leakage_risk=0.16,
+            runtime_risk=0.24,
+            fallback=(
+                "Use leak-safe user/item frequency, target encodings, GBDT or logistic heads, "
+                "and calibrate click probabilities on validation folds."
+            ),
+            summary=(
+                "CTR tasks need user-item/ad interaction features, grouped validation, and calibrated probabilities."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_ctr_gbdt_calibration",
+                "contract": (
+                    "derive leak-safe user/item encodings, fit a click predictor, and emit calibrated probabilities"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost"],
+                "fallback": (
+                    "Use sklearn logistic regression over frequency/count encodings and calibrated validation scores."
+                ),
+            },
+        )
+    ]
+
+
+def _recommender_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.76 if metric else 0.6
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-recommender-user-item-features",
+            name="User-item recommender baseline with aggregate features and matrix factorization fallback",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.84,
+            metric_fit=metric_fit,
+            data_fit=0.74,
+            expected_gain=0.66,
+            implementation_cost=0.42,
+            dependency_risk=0.1,
+            leakage_risk=0.14,
+            runtime_risk=0.28,
+            fallback=(
+                "Blend global/user/item means with leak-safe interaction counts; add ALS/SVD factors when dependencies "
+                "and data density allow."
+            ),
+            summary=(
+                "Recommender tasks should model user-item interactions explicitly instead of treating ids as plain "
+                "categoricals only."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_recommender_user_item_features",
+                "contract": (
+                    "build user/item aggregate features, optional matrix factors, "
+                    "and aligned rating/relevance predictions"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["scipy", "implicit", "lightfm", "xgboost", "lightgbm", "catboost"],
+                "fallback": "Use pandas/sklearn aggregate encodings with ridge/GBDT or global-user-item mean blending.",
+            },
+        )
+    ]
+
+
+def _forecasting_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.78 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-forecasting-backtest-lag-gbdt",
+            name="Forecasting backtest with lag, rolling, and calendar features",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.76,
+            expected_gain=0.68,
+            implementation_cost=0.38,
+            dependency_risk=0.08,
+            leakage_risk=0.18,
+            runtime_risk=0.24,
+            fallback=(
+                "Use past-only lag/rolling/calendar features with chronological backtests and a GBDT or ridge head."
+            ),
+            summary=(
+                "Forecasting tasks need horizon-aware validation and past-only feature engineering, not shuffled CV."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_forecasting_backtest_lag_gbdt",
+                "contract": (
+                    "derive past-only temporal features, run chronological backtests, "
+                    "and emit future-horizon predictions"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost", "statsmodels"],
+                "fallback": "Use pandas lag/rolling features plus sklearn ridge/random forest with time splits.",
+            },
+        )
+    ]
+
+
+def _survival_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.8 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-survival-risk-ranking",
+            name="Survival risk ranking with event-time targets and C-index validation",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.72,
+            expected_gain=0.68,
+            implementation_cost=0.42,
+            dependency_risk=0.12,
+            leakage_risk=0.1,
+            runtime_risk=0.25,
+            fallback=(
+                "Use event/censoring-aware risk targets, Kaplan-Meier/Cox-style transforms, "
+                "and validate with concordance-index-compatible folds."
+            ),
+            summary="Preserve censoring/event-time semantics and optimize a risk ranking for c-index style metrics.",
+            implementation_adapter={
+                "adapter": f"{modality}_survival_risk_ranking",
+                "contract": "fit risk scores from event/time targets and report c-index or rank validation",
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["lifelines", "xgboost", "lightgbm", "catboost"],
+                "fallback": "Use sklearn/GBDT regression or classification risk scores with event-time transforms.",
+            },
+        )
+    ]
+
+
+def _multi_output_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.72 if metric else 0.58
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-multi-output-target-heads",
+            name="Multi-output target heads with shared features and per-target validation",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.82,
+            metric_fit=metric_fit,
+            data_fit=0.72,
+            expected_gain=0.64,
+            implementation_cost=0.38,
+            dependency_risk=0.08,
+            leakage_risk=0.08,
+            runtime_risk=0.24,
+            fallback=(
+                "Use sklearn MultiOutputRegressor/Classifier or one model per target, "
+                "then validate and blend per target."
+            ),
+            summary="Preserve each submission target column with per-target models instead of collapsing to one label.",
+            implementation_adapter={
+                "adapter": f"{modality}_multi_output_heads",
+                "contract": (
+                    "fit one head per target column, emit aligned 2D predictions, and report per-target metrics"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost"],
+                "fallback": "Use sklearn multi-output wrappers or independent linear/tree heads per target.",
+            },
+        )
+    ]
+
+
+def _quantile_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.8 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-quantile-interval-heads",
+            name="Quantile and prediction-interval heads with monotonic postprocessing",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.74,
+            expected_gain=0.66,
+            implementation_cost=0.4,
+            dependency_risk=0.08,
+            leakage_risk=0.1,
+            runtime_risk=0.22,
+            fallback=(
+                "Train separate quantile heads or conformal intervals, enforce lower<=median<=upper, "
+                "and validate with pinball/interval scores."
+            ),
+            summary=(
+                "Quantile submissions need ordered interval outputs and loss functions aligned to requested quantiles."
+            ),
+            implementation_adapter={
+                "adapter": f"{modality}_quantile_interval_heads",
+                "contract": (
+                    "fit quantile or interval heads, enforce non-crossing outputs, "
+                    "and emit all requested sample columns"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["lightgbm", "xgboost", "catboost", "mapie"],
+                "fallback": "Use sklearn GradientBoostingRegressor quantile loss or conformal residual intervals.",
+            },
+        )
+    ]
+
+
+def _ordinal_seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]:
+    metric_fit = 0.82 if metric else 0.62
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-ordinal-threshold-qwk",
+            name="Ordinal classification with threshold tuning for QWK-style metrics",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="strong_single",
+            problem_fit=0.86,
+            metric_fit=metric_fit,
+            data_fit=0.74,
+            expected_gain=0.66,
+            implementation_cost=0.36,
+            dependency_risk=0.08,
+            leakage_risk=0.08,
+            runtime_risk=0.2,
+            fallback=(
+                "Fit regression or ordinal class scores, tune monotonic thresholds on validation folds, "
+                "and clip predictions to valid ordered labels."
+            ),
+            summary="Ordinal tasks should optimize ordered thresholds instead of treating labels as unordered classes.",
+            implementation_adapter={
+                "adapter": f"{modality}_ordinal_threshold_qwk",
+                "contract": (
+                    "fit ordered class/regression scores, tune thresholds for QWK or ordinal metric, "
+                    "and emit valid ordered labels"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost"],
+                "fallback": "Use sklearn regression/classification scores with validation threshold search.",
+            },
+        )
+    ]
+
+
+def _sample_weight_seed_methods(
+    *, modality: str, metric: str | None, weight_column: str | None
+) -> list[MethodCandidate]:
+    metric_fit = 0.76 if metric else 0.6
+    column_text = f"`{weight_column}`" if weight_column else "the detected sample-weight column"
+    return [
+        MethodCandidate(
+            method_id=f"{modality}-sample-weight-aware-training",
+            name="Sample-weight-aware training and validation",
+            source_ids=["method_scout_seed"],
+            source_type="generic",
+            candidate_category="feature_variant",
+            problem_fit=0.78,
+            metric_fit=metric_fit,
+            data_fit=0.72,
+            expected_gain=0.58,
+            implementation_cost=0.24,
+            dependency_risk=0.06,
+            leakage_risk=0.08,
+            runtime_risk=0.12,
+            fallback=(
+                f"Use {column_text} only as sample_weight in fit/evaluation, never as a predictive feature, "
+                "and fall back to unweighted metrics only when the estimator lacks weight support."
+            ),
+            summary="Preserve competition-provided row weights in model fitting, validation metrics, and calibration.",
+            implementation_adapter={
+                "adapter": f"{modality}_sample_weight_aware_training",
+                "contract": (
+                    "remove the weight column from features, pass it to supported estimators/metrics, "
+                    "and report weighted plus unweighted validation diagnostics"
+                ),
+            },
+            dependency_check={
+                "required": ["sklearn"],
+                "optional": ["xgboost", "lightgbm", "catboost"],
+                "fallback": "Use sklearn estimators/metrics that accept sample_weight and log unsupported paths.",
+            },
+        )
+    ]
 
 
 def _active_sources_from_registry(registry: dict[str, object]) -> list[dict[str, object]]:
@@ -396,6 +1571,46 @@ def build_method_candidates(
 ) -> list[MethodCandidate]:
     modality = infer_modality(problem_types, dataset_profile)
     methods = _seed_methods(modality=modality, metric=metric)
+    if _is_multi_label_profile(dataset_profile, problem_types):
+        methods.extend(_multi_label_seed_methods(modality=modality, metric=metric))
+    if _is_multi_output_profile(dataset_profile, problem_types):
+        methods.extend(_multi_output_seed_methods(modality=modality, metric=metric))
+    if _is_quantile_profile(dataset_profile, problem_types):
+        methods.extend(_quantile_seed_methods(modality=modality, metric=metric))
+    if _is_ordinal_profile(dataset_profile, problem_types):
+        methods.extend(_ordinal_seed_methods(modality=modality, metric=metric))
+    if _is_sample_weight_profile(dataset_profile, problem_types):
+        methods.extend(
+            _sample_weight_seed_methods(
+                modality=modality,
+                metric=metric,
+                weight_column=str(dataset_profile.get("sample_weight_column_hint") or "").strip() or None,
+            )
+        )
+    if _is_text_generation_profile(dataset_profile, problem_types):
+        methods.extend(_text_generation_seed_methods(modality=modality, metric=metric))
+    if modality == "text" and _is_document_file_reference_profile(dataset_profile, problem_types):
+        methods.extend(_document_file_reference_seed_methods(modality=modality, metric=metric))
+    if _is_survival_profile(dataset_profile, problem_types):
+        methods.extend(_survival_seed_methods(modality=modality, metric=metric))
+    if _is_pairwise_profile(dataset_profile, problem_types):
+        methods.extend(_pairwise_seed_methods(modality=modality, metric=metric))
+    if _is_learning_to_rank_profile(dataset_profile, problem_types):
+        methods.extend(_learning_to_rank_seed_methods(modality=modality, metric=metric))
+    if _is_anomaly_detection_profile(dataset_profile, problem_types):
+        methods.extend(_anomaly_detection_seed_methods(modality=modality, metric=metric))
+    elif _is_unsupervised_profile(dataset_profile, problem_types):
+        methods.extend(_unsupervised_seed_methods(modality=modality, metric=metric))
+    if _is_ctr_profile(dataset_profile, problem_types):
+        methods.extend(_ctr_seed_methods(modality=modality, metric=metric))
+    if _is_recommender_profile(dataset_profile, problem_types):
+        methods.extend(_recommender_seed_methods(modality=modality, metric=metric))
+    if _is_forecasting_profile(dataset_profile, problem_types):
+        methods.extend(_forecasting_seed_methods(modality=modality, metric=metric))
+    if _is_detection_profile(dataset_profile, problem_types):
+        methods.extend(_detection_seed_methods(modality=modality, metric=metric))
+    if _is_segmentation_profile(dataset_profile, problem_types):
+        methods.extend(_segmentation_seed_methods(modality=modality, metric=metric))
     for index, source in enumerate(sources):
         source_id = _source_id(source, index)
         source_type = classify_source(source, slug=slug)
@@ -464,9 +1679,14 @@ def build_validation_registry(
     problem_types: list[str],
     campaign_state: dict[str, object] | None,
     sources: list[dict[str, object]],
+    dataset_profile: dict[str, object] | None = None,
 ) -> dict[str, object]:
     priority = _campaign_needs_validation_redesign(campaign_state)
-    modality = infer_modality(problem_types, {})
+    dataset_profile = dataset_profile or {}
+    modality = infer_modality(problem_types, dataset_profile)
+    split_hint = str(dataset_profile.get("split_strategy_hint") or "").strip().lower()
+    group_column_hint = str(dataset_profile.get("group_column_hint") or "").strip()
+    has_group_hint = bool(group_column_hint or split_hint in {"group_kfold", "group-kfold", "groupkfold"})
     offline_online_correlation = (campaign_state or {}).get("offline_online_correlation")
     latest = _to_float((campaign_state or {}).get("latest_submission_score"))
     champion = _to_float(
@@ -527,16 +1747,20 @@ def build_validation_registry(
             "adoption_status": "candidate",
         },
     ]
-    if modality in {"image", "text", "rna", "bio"}:
+    if has_group_hint or modality in {"image", "text", "multimodal", "rna", "bio"}:
+        reason = "Group by subject/entity/file/source to avoid near-duplicate leakage."
+        if group_column_hint:
+            reason = f"Group by `{group_column_hint}` to avoid entity leakage between folds."
         profiles.append(
             {
                 "profile_id": "entity_group_cv",
                 "split_family": "group",
-                "reason": "Group by subject/entity/file/source to avoid near-duplicate leakage.",
-                "priority": 0.75 if priority else 0.5,
+                "reason": reason,
+                "priority": 0.88 if has_group_hint else (0.75 if priority else 0.5),
                 "run_status": "planned",
                 "offline_online_correlation": None,
                 "adoption_status": "candidate",
+                "group_column_hint": group_column_hint or None,
             }
         )
     source_hits = [
@@ -607,26 +1831,235 @@ def infer_candidate_category(text: str) -> str:
 
 def infer_modality(problem_types: list[str], dataset_profile: dict[str, object]) -> str:
     text = " ".join(problem_types).lower()
-    if "image" in text or "vision" in text:
+    profile_modality = _normalize_modality_key(dataset_profile.get("modality"))
+    if profile_modality:
+        return profile_modality
+    if "multimodal" in text or "multi modal" in text or "vision language" in text:
+        return "multimodal"
+    if (
+        "medical_imaging" in text
+        or "medical imaging" in text
+        or "medical image" in text
+        or "dicom" in text
+        or "ima" in text
+        or "nifti" in text
+        or "nrrd" in text
+        or "nhdr" in text
+        or "mha" in text
+        or "mhd" in text
+    ):
+        return "medical_imaging"
+    if any(term in text for term in _IMAGE_MODALITY_HINTS):
         return "image"
-    if "text" in text or "translation" in text or "nlp" in text:
+    if any(term in text for term in _SIGNAL_MODALITY_HINTS):
+        return "signal"
+    if any(
+        term in text
+        for term in (
+            "array",
+            "npy",
+            "npz",
+            "netcdf",
+            "grib",
+            "fits",
+            "scientific array",
+            "zarr",
+            "ome-zarr",
+            "ome zarr",
+            "n5",
+            "anndata",
+            "h5ad",
+            "loom",
+            "single-cell",
+            "single cell",
+        )
+    ):
+        return "array"
+    if "point_cloud" in text or "point cloud" in text or "lidar" in text:
+        return "point_cloud"
+    if any(term in text for term in ("geospatial", "geojson", "shapefile", "gis", "geopackage", "kml")):
+        return "geospatial"
+    if any(
+        term in text
+        for term in (
+            "graph",
+            "network",
+            "node classification",
+            "edge prediction",
+            "link prediction",
+            "knowledge graph",
+            "graphml",
+            "gexf",
+            "edgelist",
+            "adjacency",
+        )
+    ):
+        return "graph"
+    if any(
+        term in text
+        for term in (
+            "annotation",
+            "annotations",
+            "coco",
+            "yolo",
+            "labelme",
+            "pascal voc",
+            "rle mask",
+            "run length encoding",
+            "bounding box",
+            "keypoint",
+        )
+    ):
+        return "annotation"
+    if any(term in text for term in _TEXT_MODALITY_HINTS):
         return "text"
     if "timeseries" in text or "time" in text:
         return "timeseries"
-    if "rna" in text or "protein" in text or "bio" in text:
+    if any(
+        term in text
+        for term in (
+            "rna",
+            "protein",
+            "bio",
+            "molecule",
+            "molecular",
+            "smiles",
+            "inchi",
+            "selfies",
+            "smi",
+            "fasta",
+            "fastq",
+            "pdb",
+            "mmcif",
+        )
+    ):
         return "rna" if "rna" in text else "bio"
-    if "audio" in text:
+    if any(term in text for term in _AUDIO_MODALITY_HINTS):
         return "audio"
+    if any(term in text for term in _VIDEO_MODALITY_HINTS):
+        return "video"
     if "tabular" in text:
         return "tabular"
     columns = " ".join(str(item).lower() for item in dataset_profile.get("columns", []) if isinstance(item, str))
-    if any(term in columns for term in ("image", "path", "filename")):
+    has_text_column = any(term in columns for term in ("text", "sentence", "prompt", "question", "caption", "review"))
+    has_asset_column = any(
+        term in columns for term in (*_IMAGE_MODALITY_HINTS, *_AUDIO_MODALITY_HINTS, *_VIDEO_MODALITY_HINTS)
+    )
+    if has_asset_column and has_text_column:
+        return "multimodal"
+    if any(term in columns for term in _IMAGE_MODALITY_HINTS):
         return "image"
-    if any(term in columns for term in ("text", "sentence", "prompt", "translation")):
+    if any(term in columns for term in _AUDIO_MODALITY_HINTS):
+        return "audio"
+    if any(term in columns for term in _VIDEO_MODALITY_HINTS):
+        return "video"
+    if any(term in columns for term in _SIGNAL_MODALITY_HINTS):
+        return "signal"
+    if any(term in columns for term in _TEXT_FILE_REFERENCE_COLUMN_HINTS):
+        return "text"
+    if any(
+        term in columns for term in ("dicom", "nifti", "scan", ".dcm", ".ima", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
+    ):
+        return "medical_imaging"
+    if any(term in columns for term in ("point", "lidar", ".ply", ".pcd", ".las", ".laz")):
+        return "point_cloud"
+    if any(term in columns for term in ("geo", "geometry", "latitude", "longitude", "geojson", ".shp", ".gpkg")):
+        return "geospatial"
+    if any(
+        term in columns
+        for term in (
+            "rna",
+            "protein",
+            "molecule",
+            "molecular",
+            "smiles",
+            "inchi",
+            "selfies",
+            "sequence",
+            "fasta",
+            "fastq",
+            ".pdb",
+            ".cif",
+            ".mmcif",
+            ".sdf",
+            ".mol2",
+            ".smi",
+            ".smiles",
+            ".inchi",
+            ".selfies",
+        )
+    ):
+        return "rna" if "rna" in columns else "bio"
+    if any(
+        term in columns
+        for term in (
+            "graph_id",
+            "node_id",
+            "edge_id",
+            "edge_index",
+            "source_node",
+            "target_node",
+            "adjacency",
+            ".graphml",
+            ".gexf",
+            ".edgelist",
+            ".edges",
+            ".mtx",
+        )
+    ):
+        return "graph"
+    if any(
+        term in columns
+        for term in (
+            "annotation",
+            "annotation_path",
+            "coco",
+            "yolo",
+            "labelme",
+            "bbox",
+            "bounding_box",
+            "rle",
+            "mask",
+            "keypoint",
+        )
+    ):
+        return "annotation"
+    if any(
+        term in columns
+        for term in (
+            "array",
+            ".npy",
+            ".npz",
+            "netcdf",
+            ".nc",
+            "grib",
+            ".grib",
+            "fits",
+            ".fits",
+            "ome.zarr",
+            "zarr",
+            ".zarr",
+            ".ome.zarr",
+            "n5",
+            ".n5",
+            "anndata",
+            "h5ad",
+            ".h5ad",
+            "loom",
+            ".loom",
+        )
+    ):
+        return "array"
+    if any(term in columns for term in ("text", "sentence", "prompt", "question", "caption", "review", "translation")):
         return "text"
     if any(term in columns for term in ("date", "time", "timestamp")):
         return "timeseries"
     return "tabular"
+
+
+def _normalize_modality_key(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return _MODALITY_ALIASES.get(normalized, normalized)
 
 
 def render_method_registry_for_prompt(registry: dict[str, object], *, max_methods: int = 8) -> str:
@@ -694,6 +2127,126 @@ def _seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]
                 "strong_single",
             ),
         ],
+        "audio": [
+            (
+                "audio-spectrogram-transfer",
+                "Waveform or mel-spectrogram pipeline with pretrained audio/CNN encoder when available",
+                "strong_single",
+            ),
+            (
+                "audio-handcrafted-feature-head",
+                "MFCC/log-mel/statistical audio features with leak-safe sklearn head",
+                "feature_variant",
+            ),
+        ],
+        "video": [
+            (
+                "video-frame-backbone-transfer",
+                "Sampled-frame pretrained image/video backbone with temporal pooling and TTA",
+                "strong_single",
+            ),
+            (
+                "video-metadata-motion-feature-head",
+                "Clip metadata, frame statistics, and lightweight motion features with sklearn head",
+                "feature_variant",
+            ),
+        ],
+        "signal": [
+            (
+                "signal-statistical-feature-head",
+                "Waveform summary, frequency-domain, and peak features with robust tabular head baseline",
+                "strong_single",
+            ),
+            (
+                "signal-1d-cnn-optional-branch",
+                "Optional 1D CNN/transformer encoder for ECG/EEG/WFDB-style signal assets",
+                "strong_single",
+            ),
+        ],
+        "medical_imaging": [
+            (
+                "medical-imaging-slice-or-volume-transfer",
+                "Medical slice/volume preprocessing with pretrained image/3D backbone when available",
+                "strong_single",
+            ),
+            (
+                "medical-imaging-windowing-metadata-head",
+                "Modality-aware windowing, spacing metadata, and cached embedding head",
+                "feature_variant",
+            ),
+        ],
+        "array": [
+            (
+                "array-statistical-feature-head",
+                "Numpy array shape/intensity/statistical features with robust sklearn/GBDT head",
+                "strong_single",
+            ),
+            (
+                "array-torch-dataset-encoder",
+                "Torch Dataset over npy/npz assets with cached embeddings and lightweight head",
+                "feature_variant",
+            ),
+        ],
+        "point_cloud": [
+            (
+                "point-cloud-geometric-features",
+                "Point-cloud geometric/statistical features with robust tabular head baseline",
+                "strong_single",
+            ),
+            (
+                "point-cloud-projection-deep-head",
+                "Voxel/projection or point encoder branch with cached features and lightweight head",
+                "feature_variant",
+            ),
+        ],
+        "geospatial": [
+            (
+                "geospatial-geometry-feature-head",
+                "GeoJSON/shapefile geometry features with spatial joins and robust tabular head baseline",
+                "strong_single",
+            ),
+            (
+                "geospatial-spatial-validation",
+                "Spatial grouping, distance features, and leak-aware geographic validation profile",
+                "validation_variant",
+            ),
+        ],
+        "graph": [
+            (
+                "graph-topology-feature-head",
+                "Graph topology, node degree, community, and edge features with robust tabular head baseline",
+                "strong_single",
+            ),
+            (
+                "graph-gnn-optional-branch",
+                "Optional GNN or graph embedding branch for node, edge, link, and graph-level prediction tasks",
+                "strong_single",
+            ),
+        ],
+        "annotation": [
+            (
+                "annotation-format-conversion",
+                "COCO/YOLO/LabelMe/RLE annotation conversion with strict sample-submission contract checks",
+                "feature_variant",
+            ),
+            (
+                "annotation-detection-segmentation-router",
+                "Route boxes, masks, keypoints, or labels to detection/segmentation baselines and packaging",
+                "strong_single",
+            ),
+        ],
+        "artifact": [
+            (
+                "artifact-contract-validation",
+                "Single-file or bundled artifact contract validation with local byte/shape checks",
+                "feature_variant",
+            ),
+            (
+                "artifact-runtime-packaging",
+                "Kernel output packaging path for model weights, arrays, archives, or manifest bundles",
+                "strong_single",
+            ),
+        ],
         "text": [
             (
                 "text-transformer-embedding-rerank",
@@ -703,6 +2256,18 @@ def _seed_methods(*, modality: str, metric: str | None) -> list[MethodCandidate]
             (
                 "text-retrieval-augmented-candidate",
                 "Retrieval or nearest-neighbor candidate generation with leak-safe grouping",
+                "feature_variant",
+            ),
+        ],
+        "multimodal": [
+            (
+                "multimodal-vision-language-fusion",
+                "Image/audio/video asset embeddings plus text embeddings with late-fusion or dual-encoder head",
+                "strong_single",
+            ),
+            (
+                "multimodal-metadata-feature-head",
+                "Asset metadata, text statistics, and cached embeddings with leak-safe tabular head",
                 "feature_variant",
             ),
         ],
@@ -818,8 +2383,65 @@ def _fit_score(*, text: str, modality: str, source_priority: float) -> float:
         bonus += 0.16
     if modality == "image" and any(term in normalized for term in ("timm", "convnext", "vit", "swin", "yolo")):
         bonus += 0.16
+    if modality == "audio" and any(term in normalized for term in ("audio", "spectrogram", "mfcc", "waveform")):
+        bonus += 0.16
+    if modality == "video" and any(term in normalized for term in ("video", "frame", "clip", "temporal", "motion")):
+        bonus += 0.16
+    if modality == "medical_imaging" and any(
+        term in normalized
+        for term in ("dicom", "ima", "nifti", "nrrd", "nhdr", "mha", "mhd", "window", "volume", "slice", "3d")
+    ):
+        bonus += 0.16
+    if modality == "array" and any(
+        term in normalized
+        for term in (
+            "array",
+            "npy",
+            "npz",
+            "netcdf",
+            "grib",
+            "fits",
+            "zarr",
+            "ome-zarr",
+            "ome zarr",
+            "n5",
+            "h5ad",
+            "loom",
+            "torch",
+            "embedding",
+        )
+    ):
+        bonus += 0.16
+    if modality == "point_cloud" and any(term in normalized for term in ("point", "lidar", "voxel", "projection")):
+        bonus += 0.16
+    if modality == "geospatial" and any(
+        term in normalized for term in ("geo", "gis", "spatial", "shapefile", "geometry", "distance")
+    ):
+        bonus += 0.16
+    if modality == "graph" and any(
+        term in normalized for term in ("graph", "node", "edge", "link", "gnn", "networkx", "topology")
+    ):
+        bonus += 0.16
+    if modality == "annotation" and any(
+        term in normalized for term in ("annotation", "coco", "yolo", "labelme", "rle", "mask", "box")
+    ):
+        bonus += 0.16
+    if modality == "rna" and any(term in normalized for term in ("rna", "sequence", "structure", "evaluator")):
+        bonus += 0.16
+    if modality == "bio" and any(
+        term in normalized for term in ("bio", "protein", "molecule", "smiles", "fasta", "pdb", "structure")
+    ):
+        bonus += 0.16
+    if modality == "artifact" and any(
+        term in normalized for term in ("artifact", "bundle", "archive", "onnx", "weights", "model")
+    ):
+        bonus += 0.16
     if modality == "text" and any(term in normalized for term in ("transformer", "embedding", "rerank", "token")):
         bonus += 0.16
+    if modality == "multimodal" and any(
+        term in normalized for term in ("multimodal", "vision language", "clip", "fusion", "dual encoder", "embedding")
+    ):
+        bonus += 0.18
     return min(1.0, 0.45 + bonus + (0.25 * source_priority))
 
 
@@ -905,8 +2527,43 @@ def _fallback_for_category(category: str, *, modality: str) -> str:
         return "Use CatBoost/XGBoost/LightGBM already available in the repo environment."
     if modality == "image":
         return "Use installed torch/timm/torchvision backbone or the repo vision runtime fallback."
+    if modality == "audio":
+        return "Use log-mel/MFCC features with sklearn, or torch audio-style encoder paths when available."
+    if modality == "video":
+        return (
+            "Use sampled-frame features with torchvision/OpenCV-style fallbacks and keep temporal pooling lightweight."
+        )
+    if modality == "medical_imaging":
+        return (
+            "Use image/volume preprocessing plus installed torch fallback; keep DICOM/IMA/NIfTI/NRRD/MHA/MHD "
+            "metadata handling local."
+        )
+    if modality == "array":
+        return "Use numpy statistical features with sklearn/GBDT, or cached torch embeddings when available."
+    if modality == "point_cloud":
+        return "Use geometric features with sklearn/GBDT, or cached voxel/projection features when torch is available."
+    if modality == "geospatial":
+        return "Use geometry-derived features, spatial joins, and leak-aware geographic validation with sklearn/GBDT."
+    if modality == "graph":
+        return "Use topology-derived features, node/edge aggregations, and sklearn/GBDT before optional GNN branches."
+    if modality == "annotation":
+        return (
+            "Use annotation conversion, sample-contract validation, "
+            "and lightweight vision baselines before deep branches."
+        )
+    if modality == "rna":
+        return "Use official evaluator contracts, sequence/structure features, and lightweight postprocessing."
+    if modality == "bio":
+        return (
+            "Use sequence, SMILES, or structure-derived features with official evaluator checks "
+            "and sklearn/GBDT fallback."
+        )
+    if modality == "artifact":
+        return "Use local artifact validation, manifest-aware packaging, and submit only the checked output path."
     if modality == "text":
         return "Use installed transformers/sklearn TF-IDF or cached embeddings fallback."
+    if modality == "multimodal":
+        return "Use cached asset/text embeddings plus a sklearn/GBDT fusion head before optional deep dual encoders."
     return "Use installed repo dependencies and record skipped optional method details."
 
 
@@ -961,8 +2618,25 @@ def _dependency_check(*, text: str, modality: str) -> dict[str, object]:
         optional.extend(["tabpfn", "pytabkit"])
     if "tabm" in normalized:
         optional.extend(["torch", "tabm"])
-    if modality in {"image", "text", "timeseries", "rna", "bio"}:
+    if modality in {
+        "image",
+        "audio",
+        "video",
+        "text",
+        "multimodal",
+        "timeseries",
+        "medical_imaging",
+        "array",
+        "point_cloud",
+        "geospatial",
+        "graph",
+        "annotation",
+        "rna",
+        "bio",
+    }:
         optional.extend(["torch", "transformers"])
+    if modality == "graph":
+        optional.extend(["networkx", "torch-geometric"])
     return {
         "required": sorted(set(required)),
         "optional": sorted(set(optional)),

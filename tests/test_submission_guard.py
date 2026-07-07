@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import gzip
+import io
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pandas as pd
 import pytest
+import zstandard as zstd
 
 from kagglebot.exceptions import SubmissionCliError, SubmissionValidationError
 from kagglebot.submission.guard import (
@@ -32,11 +36,268 @@ def test_validate_submission_columns_mismatch(tmp_path: Path) -> None:
         validate_submission(str(submission), str(sample))
 
 
+def test_validate_submission_rejects_markdown_sample_without_columns(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("# Sample submission\n\nDownload the real sample from Kaggle.\n", encoding="utf-8")
+    submission.write_text("id,target\n1,0.5\n", encoding="utf-8")
+
+    with pytest.raises(SubmissionValidationError, match="sample_submission has no columns"):
+        validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_csv_gz_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv.gz"
+    submission = tmp_path / "submission.csv.gz"
+    with gzip.open(sample, "wt", encoding="utf-8") as handle:
+        handle.write("id,target\n001,0.0\n002,0.0\n")
+    with gzip.open(submission, "wt", encoding="utf-8") as handle:
+        handle.write("id,target\n001,0.1\n002,0.2\n")
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_csv_zst_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv.zst"
+    submission = tmp_path / "submission.csv.zst"
+    compressor = zstd.ZstdCompressor()
+
+    sample.write_bytes(compressor.compress(b"id,target\n001,0.0\n002,0.0\n"))
+    submission.write_bytes(compressor.compress(b"id,target\n001,0.1\n002,0.2\n"))
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_normalizes_blank_csv_header_columns(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("id,,target\n1,-,0\n2,-,0\n", encoding="utf-8")
+    submission.write_text("id,column_2,target\n1,-,0.1\n2,-,0.2\n", encoding="utf-8")
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_html_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.html"
+    submission = tmp_path / "submission.html"
+    pd.DataFrame({"id": ["001", "002"], "target": [0.0, 0.0]}).to_html(sample, index=False)
+    pd.DataFrame({"id": ["001", "002"], "target": [0.1, 0.2]}).to_html(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_html_zst_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.html.zst"
+    submission = tmp_path / "submission.html.zst"
+    compressor = zstd.ZstdCompressor()
+    sample_html = pd.DataFrame({"id": ["001", "002"], "target": [0.0, 0.0]}).to_html(index=False)
+    submission_html = pd.DataFrame({"id": ["001", "002"], "target": [0.1, 0.2]}).to_html(index=False)
+
+    sample.write_bytes(compressor.compress(sample_html.encode("utf-8")))
+    submission.write_bytes(compressor.compress(submission_html.encode("utf-8")))
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_ndjson_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.ndjson"
+    submission = tmp_path / "submission.ndjson"
+    sample.write_text('{"id":"001","target":0.0}\n{"id":"002","target":0.0}\n', encoding="utf-8")
+    submission.write_text('{"id":"001","target":0.1}\n{"id":"002","target":0.2}\n', encoding="utf-8")
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_wrapped_json_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.json"
+    submission = tmp_path / "submission.json"
+    sample.write_text(
+        '{"records":[{"id":"001","target":0.0},{"id":"002","target":0.0}]}',
+        encoding="utf-8",
+    )
+    submission.write_text(
+        '{"rows":[{"id":"001","target":0.1},{"id":"002","target":0.2}]}',
+        encoding="utf-8",
+    )
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_compressed_wrapped_json_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.json.zst"
+    submission = tmp_path / "submission.json.zst"
+    compressor = zstd.ZstdCompressor()
+    sample.write_bytes(
+        compressor.compress(b'{"data":[{"id":"001","target":0.0},{"id":"002","target":0.0}]}'),
+    )
+    submission.write_bytes(
+        compressor.compress(b'{"items":[{"id":"001","target":0.1},{"id":"002","target":0.2}]}'),
+    )
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_rle_empty_mask_marker(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("id,EncodedPixels\ntest_001,\ntest_002,\n", encoding="utf-8")
+    submission.write_text("id,EncodedPixels\ntest_001,-\ntest_002,-\n", encoding="utf-8")
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_pickle_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.pkl"
+    submission = tmp_path / "submission.pkl"
+    pd.DataFrame({"id": ["001", "002"], "target": [0.0, 0.0]}).to_pickle(sample)
+    pd.DataFrame({"id": ["001", "002"], "target": [0.1, 0.2]}).to_pickle(submission)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_zstd_pickle_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.pkl.zst"
+    submission = tmp_path / "submission.pkl.zst"
+    pd.DataFrame({"id": ["001", "002"], "target": [0.0, 0.0]}).to_pickle(sample)
+    pd.DataFrame({"id": ["001", "002"], "target": [0.1, 0.2]}).to_pickle(submission)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_stata_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.dta"
+    submission = tmp_path / "submission.dta"
+    pd.DataFrame({"id": [1, 2], "target": [0.0, 0.0]}).to_stata(sample, write_index=False)
+    pd.DataFrame({"id": [1, 2], "target": [0.1, 0.2]}).to_stata(submission, write_index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_accepts_xml_sample_and_submission(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.xml"
+    submission = tmp_path / "submission.xml"
+    pd.DataFrame({"id": [1, 2], "target": [0.0, 0.0]}).to_xml(sample, index=False, parser="etree")
+    pd.DataFrame({"id": [1, 2], "target": [0.1, 0.2]}).to_xml(submission, index=False, parser="etree")
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_uses_nifti_test_asset_ids_for_header_only_sample(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    test_dir = data_dir / "scans" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "case_001.nii.gz").write_bytes(b"scan-1")
+    (test_dir / "case_002.nii.gz").write_bytes(b"scan-2")
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    pd.DataFrame(
+        {
+            "id": ["case_001.nii.gz", "case_002.nii.gz"],
+            "target": [0.1, 0.2],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_uses_audio_test_asset_ids_for_header_only_sample(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    test_dir = data_dir / "audio" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "clip_001.wav").write_bytes(b"audio-1")
+    (test_dir / "clip_002.wav").write_bytes(b"audio-2")
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    pd.DataFrame(
+        {
+            "id": ["clip_001.wav", "clip_002.wav"],
+            "target": [0.1, 0.2],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_uses_model_artifact_test_asset_ids_for_header_only_sample(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    test_dir = data_dir / "models" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "fold_001.onnx").write_bytes(b"model-1")
+    (test_dir / "fold_002.onnx").write_bytes(b"model-2")
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    pd.DataFrame(
+        {
+            "id": ["fold_001.onnx", "fold_002.onnx"],
+            "target": [0.1, 0.2],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_uses_zarr_test_asset_ids_for_header_only_sample(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    test_dir = data_dir / "arrays" / "test"
+    test_dir.mkdir(parents=True)
+    for name in ("cell_001.zarr", "cell_002.zarr"):
+        store = test_dir / name
+        store.mkdir()
+        (store / ".zarray").write_text("{}", encoding="utf-8")
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    pd.DataFrame(
+        {
+            "id": ["cell_001.zarr", "cell_002.zarr"],
+            "target": [0.1, 0.2],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
 def test_validate_submission_row_count_mismatch(tmp_path: Path) -> None:
     sample, submission = _write_sample_and_submission(tmp_path)
     pd.DataFrame({"id": [1, 2], "target": [0.1, 0.2]}).to_csv(submission, index=False)
     with pytest.raises(SubmissionValidationError, match="row count mismatch"):
         validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_target_only_sample_uses_test_row_count(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "train.svmlight").write_text("0 1:0.0\n1 1:1.0\n", encoding="utf-8")
+    (data_dir / "test.svmlight").write_text(
+        "0 1:0.1\n0 1:0.2\n0 1:0.3\n",
+        encoding="utf-8",
+    )
+    sample = data_dir / "sample_submission.csv"
+    sample.write_text("target\n0.0\n0.0\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    submission.write_text("target\n0.1\n0.2\n0.3\n", encoding="utf-8")
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_target_only_sample_rejects_test_row_count_mismatch(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "train.svmlight").write_text("0 1:0.0\n1 1:1.0\n", encoding="utf-8")
+    (data_dir / "test.svmlight").write_text(
+        "0 1:0.1\n0 1:0.2\n0 1:0.3\n",
+        encoding="utf-8",
+    )
+    sample = data_dir / "sample_submission.csv"
+    sample.write_text("target\n0.0\n0.0\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    submission.write_text("target\n0.1\n", encoding="utf-8")
+
+    with pytest.raises(SubmissionValidationError, match="row count mismatch"):
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
 
 
 def test_validate_submission_id_nan(tmp_path: Path) -> None:
@@ -51,6 +312,76 @@ def test_validate_submission_id_duplicate(tmp_path: Path) -> None:
     pd.DataFrame({"id": [1, 1, 3], "target": [0.1, 0.2, 0.3]}).to_csv(submission, index=False)
     with pytest.raises(SubmissionValidationError, match="duplicate values"):
         validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_rejects_parquet_id_set_mismatch(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.parquet"
+    submission = tmp_path / "submission.parquet"
+    pd.DataFrame({"id": ["001", "002", "003"], "target": [0.0, 0.0, 0.0]}).to_parquet(sample, index=False)
+    pd.DataFrame({"id": ["001", "002", "999"], "target": [0.1, 0.2, 0.3]}).to_parquet(
+        submission,
+        index=False,
+    )
+
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submission(str(submission), str(sample))
+
+    message = str(exc.value)
+    assert "id values mismatch (sample submission ids)" in message
+    assert "003" in message
+    assert "999" in message
+
+
+def test_validate_submission_rejects_file_path_id_set_mismatch(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "file_path": ["test/a.png", "test/b.png", "test/c.png"],
+            "target": [0.0, 0.0, 0.0],
+        }
+    ).to_csv(sample, index=False)
+    pd.DataFrame(
+        {
+            "file_path": ["test/a.png", "test/b.png", "test/z.png"],
+            "target": [0.1, 0.2, 0.3],
+        }
+    ).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submission(str(submission), str(sample), data_dir=tmp_path / "data")
+
+    message = str(exc.value)
+    assert "id values mismatch (sample submission ids)" in message
+    assert "test/c.png" in message
+    assert "test/z.png" in message
+
+
+def test_validate_submission_accepts_zip_wrapped_parquet_sample(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.parquet.zip"
+    payload = io.BytesIO()
+    pd.DataFrame({"id": ["001", "002", "003"], "target": [0.0, 0.0, 0.0]}).to_parquet(payload, index=False)
+    with zipfile.ZipFile(sample, "w") as archive:
+        archive.writestr("nested/sample_submission.parquet", payload.getvalue())
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["001", "002", "003"], "target": [0.1, 0.2, 0.3]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_allows_jsonl_id_reordering_when_ids_match(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.jsonl"
+    submission = tmp_path / "submission.jsonl"
+    sample.write_text(
+        '{"id":"001","target":0.0}\n{"id":"002","target":0.0}\n{"id":"003","target":0.0}\n',
+        encoding="utf-8",
+    )
+    submission.write_text(
+        '{"id":"003","target":0.3}\n{"id":"001","target":0.1}\n{"id":"002","target":0.2}\n',
+        encoding="utf-8",
+    )
+
+    validate_submission(str(submission), str(sample))
 
 
 def test_validate_submission_pred_nan_or_non_numeric(tmp_path: Path) -> None:
@@ -85,6 +416,15 @@ def test_validate_submission_categorical_target_allows_unknown_values(tmp_path: 
     validate_submission(str(submission), str(sample))
 
 
+def test_validate_submission_allows_text_prediction_columns_with_empty_sample_values(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": [1, 2], "translation": ["", ""]}).to_csv(sample, index=False)
+    pd.DataFrame({"id": [1, 2], "translation": ["alpha one", "beta two"]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample))
+
+
 def test_validate_submission_requires_rna_anchor_columns_to_match_sample(tmp_path: Path) -> None:
     sample = tmp_path / "sample_submission.csv"
     submission = tmp_path / "submission.csv"
@@ -111,6 +451,24 @@ def test_validate_submission_requires_rna_anchor_columns_to_match_sample(tmp_pat
 
     with pytest.raises(SubmissionValidationError, match="anchor column 'resname'"):
         validate_submission(str(submission), str(sample))
+
+
+def test_validate_submission_reports_actual_sample_name_for_structured_anchor_mismatch(tmp_path: Path) -> None:
+    sample = tmp_path / "sample_submission.jsonl"
+    submission = tmp_path / "submission.jsonl"
+    sample.write_text(
+        '{"ID":"RNA1_1","resname":"A","resid":1,"x_1":0.0,"y_1":0.0,"z_1":0.0}\n',
+        encoding="utf-8",
+    )
+    submission.write_text(
+        '{"ID":"RNA1_1","resname":"G","resid":1,"x_1":0.1,"y_1":0.2,"z_1":0.3}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submission(str(submission), str(sample))
+
+    assert "anchor column 'resname' must match sample_submission.jsonl exactly" in str(exc.value)
 
 
 def test_validate_submission_reports_multiple_problems(tmp_path: Path) -> None:
@@ -232,6 +590,31 @@ def test_validate_submission_header_only_sample_accepts_icpr_evaluation_id_set(t
     validate_submission(str(submission), str(sample), data_dir=data_dir)
 
 
+def test_validate_submission_header_only_sample_validates_against_jsonl_test_ids(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.jsonl").write_text(
+        '{"id": "a", "feature": 1, "target": 0}\n{"id": "b", "feature": 2, "target": 1}\n',
+        encoding="utf-8",
+    )
+    (data_dir / "test.jsonl").write_text(
+        '{"id": "a", "feature": 10}\n{"id": "b", "feature": 20}\n{"id": "c", "feature": 30}\n',
+        encoding="utf-8",
+    )
+    sample = data_dir / "sample_submission.csv"
+    sample.write_text("id,prediction\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["a", "b"], "prediction": [0.1, 0.2]}).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+    message = str(exc.value)
+    assert "row count mismatch" in message
+    assert "id values mismatch (header-only sample detected; validated against evaluation directory ids)" not in message
+    assert "id values mismatch (header-only sample detected; validated against test data ids)" in message
+
+
 def test_validate_submission_rejects_missing_required_id_suffix_when_inferred(tmp_path: Path) -> None:
     context_dir = tmp_path / "context"
     data_dir = tmp_path / "data"
@@ -281,6 +664,99 @@ def test_validate_submission_accepts_inferred_required_id_suffix_when_present(tm
     validate_submission(str(submission), str(sample), data_dir=data_dir)
 
 
+def test_validate_submission_rejects_missing_compound_required_id_suffix_when_inferred(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "scans" / "test").mkdir(parents=True, exist_ok=True)
+    for stem in ("case_001", "case_002"):
+        (data_dir / "scans" / "test" / f"{stem}.nii.gz").write_bytes(b"scan")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["case_001", "case_002"], "target": [0.1, 0.2]}).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError, match="require '\\.nii\\.gz' suffix"):
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_rejects_partial_compound_required_id_suffix_when_inferred(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "scans" / "test").mkdir(parents=True, exist_ok=True)
+    for stem in ("case_001", "case_002"):
+        (data_dir / "scans" / "test" / f"{stem}.nii.gz").write_bytes(b"scan")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["case_001.nii", "case_002.nii"], "target": [0.1, 0.2]}).to_csv(
+        submission,
+        index=False,
+    )
+
+    with pytest.raises(SubmissionValidationError, match="require '\\.nii\\.gz' suffix"):
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_accepts_inferred_compound_required_id_suffix_when_present(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "scans" / "test").mkdir(parents=True, exist_ok=True)
+    for stem in ("case_001", "case_002"):
+        (data_dir / "scans" / "test" / f"{stem}.nii.gz").write_bytes(b"scan")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "id": ["case_001.nii.gz", "case_002.nii.gz"],
+            "target": [0.1, 0.2],
+        }
+    ).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_prefers_context_compound_id_suffix_when_ambiguous(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    data_dir = tmp_path / "data"
+    (data_dir / "scans" / "test").mkdir(parents=True, exist_ok=True)
+    context_dir.mkdir(parents=True, exist_ok=True)
+    for stem in ("case_001", "case_002"):
+        (data_dir / "scans" / "test" / f"{stem}.nii.gz").write_bytes(b"scan")
+        (data_dir / "scans" / "test" / f"{stem}.nrrd").write_bytes(b"scan")
+
+    sample = context_dir / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    (context_dir / "data.md").write_text(
+        "## Submission Format\n\nThe id column must contain the full scan filename, for example `case_001.nii.gz`.\n",
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["case_001", "case_002"], "target": [0.1, 0.2]}).to_csv(submission, index=False)
+
+    with pytest.raises(SubmissionValidationError, match="require '\\.nii\\.gz' suffix"):
+        validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+@pytest.mark.parametrize("suffix", [".csv", ".csv.gz", ".jsonl.zst", ".parquet", ".xlsx", ".sqlite3", ".py"])
+def test_validate_submission_does_not_infer_required_id_suffix_from_non_asset_files(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    test_dir = data_dir / "test"
+    test_dir.mkdir(parents=True, exist_ok=True)
+    for stem in ("case_001", "case_002"):
+        (test_dir / f"{stem}{suffix}").write_text("not an asset\n", encoding="utf-8")
+
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("id,target\n", encoding="utf-8")
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame({"id": ["case_001", "case_002"], "target": [0.1, 0.2]}).to_csv(submission, index=False)
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
 def test_validate_submission_does_not_infer_suffix_when_real_sample_ids_are_suffixless(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     (data_dir / "test_set").mkdir(parents=True, exist_ok=True)
@@ -295,6 +771,30 @@ def test_validate_submission_does_not_infer_suffix_when_real_sample_ids_are_suff
     submission = tmp_path / "submission.csv"
     submission.write_text(
         "id,image_id,prediction_string\n0,0,0.9 1 2 3 4\n1,1, \n2,2,0.8 5 6 7 8\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(submission), str(sample), data_dir=data_dir)
+
+
+def test_validate_submission_does_not_infer_suffix_when_jsonl_sample_ids_are_suffixless(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "test_set").mkdir(parents=True, exist_ok=True)
+    for stem in ("0", "1", "2"):
+        (data_dir / "test_set" / f"{stem}.png").write_bytes(b"PNG")
+
+    sample = tmp_path / "sample_submission.jsonl"
+    sample.write_text(
+        '{"id":"0","image_id":"0","prediction_string":"0.9 1 2 3 4"}\n'
+        '{"id":"1","image_id":"1","prediction_string":" "}\n'
+        '{"id":"2","image_id":"2","prediction_string":"0.8 5 6 7 8"}\n',
+        encoding="utf-8",
+    )
+    submission = tmp_path / "submission.jsonl"
+    submission.write_text(
+        '{"id":"0","image_id":"0","prediction_string":"0.9 1 2 3 4"}\n'
+        '{"id":"1","image_id":"1","prediction_string":" "}\n'
+        '{"id":"2","image_id":"2","prediction_string":"0.8 5 6 7 8"}\n',
         encoding="utf-8",
     )
 

@@ -8,7 +8,7 @@ from kagglebot.competition_policy import load_competition_policy
 from kagglebot.json_utils import load_json_object, parse_json_object_text, write_json_object
 from kagglebot.kaggle_api import download_competition, download_dataset, kernels_pull
 from kagglebot.paths import CompetitionPaths
-from kagglebot.validators import safe_extract_zip
+from kagglebot.validators import extract_data_archives
 
 _NOTEBOOK_DATASET_REF_RE = re.compile(
     r"(?:kagglehub\.dataset_download|/datasets/)(?:\(|)(?:['\"])?"
@@ -358,11 +358,11 @@ def _stage_reference_sources(
             try:
                 if kind == "dataset":
                     download_dataset_fn(ref, stage_dir, slug=current_slug, dry_run=False, force=True, quiet=quiet)
-                    _unzip_downloads(stage_dir)
+                    _extract_downloads(stage_dir)
                     status = "staged_dataset"
                 elif kind == "competition":
                     download_competition_fn(ref, stage_dir, force=True, quiet=quiet)
-                    _unzip_downloads(stage_dir)
+                    _extract_downloads(stage_dir)
                     status = "staged_competition"
                 elif kind == "kernel":
                     download_kernel_fn(ref, stage_dir, slug=current_slug, dry_run=False, metadata=True)
@@ -395,6 +395,5 @@ def _stage_dir_has_content(stage_dir: Path) -> bool:
         return False
 
 
-def _unzip_downloads(data_dir: Path) -> None:
-    for zip_path in data_dir.glob("*.zip"):
-        safe_extract_zip(zip_path, data_dir)
+def _extract_downloads(data_dir: Path) -> None:
+    extract_data_archives(data_dir, overwrite=False)

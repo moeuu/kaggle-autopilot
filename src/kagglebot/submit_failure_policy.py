@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+from kagglebot.submission_output_naming import all_submission_output_suffixes_ordered
 
 SUBMIT_FAILURE_REPAIR_TARGET_SUBMISSION_ARTIFACT = "submission_artifact"
 SUBMIT_FAILURE_REPAIR_TARGET_SUBMIT_MODE = "submit_mode_or_kernel"
@@ -10,7 +13,6 @@ SUBMIT_FAILURE_REPAIR_TARGET_UNKNOWN = "unknown"
 
 SUBMIT_FILE_ERROR_MARKERS = (
     "submission file",
-    "submission.csv",
     "columns mismatch",
     "row count mismatch",
     "must have ",
@@ -23,6 +25,18 @@ SUBMIT_FILE_ERROR_MARKERS = (
     "prediction column contains nan",
     "file format mismatch",
     "file must be named",
+)
+_SUBMIT_FILE_SUFFIX_PATTERN = (
+    r"(?:" + "|".join(re.escape(suffix) for suffix in all_submission_output_suffixes_ordered()) + r")\b"
+)
+SUBMIT_FILE_NAME_RE = re.compile(
+    rf"\bsubmission[A-Za-z0-9_.-]*{_SUBMIT_FILE_SUFFIX_PATTERN}",
+    re.IGNORECASE,
+)
+GENERIC_SUBMIT_FILE_NAME_RE = re.compile(
+    rf"\b(?:answers?|forecasts?|outputs?|preds?|predictions?|results?|subs?|submit)[A-Za-z0-9_.-]*"
+    rf"{_SUBMIT_FILE_SUFFIX_PATTERN}",
+    re.IGNORECASE,
 )
 
 NOTEBOOK_FALLBACK_HINTS = (
@@ -147,7 +161,11 @@ def submit_error_text_indicates_file_issue(text: str) -> bool:
     lowered = str(text or "").strip().lower()
     if not lowered:
         return False
-    return any(marker in lowered for marker in SUBMIT_FILE_ERROR_MARKERS)
+    return (
+        any(marker in lowered for marker in SUBMIT_FILE_ERROR_MARKERS)
+        or SUBMIT_FILE_NAME_RE.search(lowered) is not None
+        or GENERIC_SUBMIT_FILE_NAME_RE.search(lowered) is not None
+    )
 
 
 def submit_error_requires_file_fix(*, reason: object, error_kind: object, detail: str) -> bool:

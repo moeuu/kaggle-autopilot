@@ -18,7 +18,7 @@ def run_metric_only_competition_metric_fix(
         "- Edit ONLY competition metric selection/reporting logic in kernel outputs.\n"
         "- Do NOT change model architecture, features, training schedule, folds, seeds, or ensembling.\n"
         "- Ensure metrics.json reports the official competition metric exactly.\n"
-        "- Ensure submission.csv format stays unchanged.\n"
+        "- Ensure the submission artifact format stays unchanged.\n"
     )
     metric_fix_error = (
         "Competition metric mismatch detected in strict mode.\n"

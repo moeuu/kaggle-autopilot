@@ -10,7 +10,7 @@ Use this playbook before planning or improving a competition run.
 - online_far_from_top1: Force broader model-family search, ensembling, public-LB validation, and data-source review.
 
 ## Guardrails
-- Keep submissions validated against sample_submission.csv.
+- Keep submissions validated against the required sample/format.
 - Do not automate joining competitions or accepting rules.
 - Do not write secrets, datasets, or large artifacts to git.
 - Prefer structural or architectural improvements over one-off competition hacks.

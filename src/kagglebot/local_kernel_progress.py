@@ -22,6 +22,8 @@ from kagglebot.kernel_progress import (
 )
 from kagglebot.logging_utils import truncate_lines
 
+LOCAL_KERNEL_STARTUP_STALL_GRACE_SEC = 30.0
+
 
 @dataclass
 class LocalKernelProgressTracker:
@@ -236,6 +238,7 @@ def detect_local_kernel_stall(
         newest_activity_age_sec = min(ages)
     else:
         newest_activity_age_sec = max(0.0, time.monotonic() - progress_tracker.started_at_monotonic)
+        stall_timeout_sec = max(stall_timeout_sec, LOCAL_KERNEL_STARTUP_STALL_GRACE_SEC)
     if newest_activity_age_sec < stall_timeout_sec:
         return None
 

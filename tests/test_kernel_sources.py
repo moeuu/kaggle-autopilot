@@ -11,6 +11,7 @@ def test_load_kernel_source_config_defaults_for_missing_invalid_or_non_object_pl
     assert missing.dataset_sources == ()
     assert missing.kernel_sources == ()
     assert missing.model_sources == ()
+    assert missing.required_model_sources == ()
     assert missing.has_text_runtime_features() is False
 
     invalid_path = tmp_path / "invalid.json"
@@ -33,6 +34,7 @@ def test_load_kernel_source_config_parses_text_runtime_fields(tmp_path: Path) ->
             {
                 "kaggle_kernel_sources": {
                     "dataset_sources": ["alice/demo-dataset"],
+                    "required_model_sources": ["carol/required-model/Transformers/default/1"],
                     "required_local_seq2seq_pipelines": ["seq2seq_main"],
                 },
                 "domain_adaptation": {
@@ -54,6 +56,7 @@ def test_load_kernel_source_config_parses_text_runtime_fields(tmp_path: Path) ->
     config = load_kernel_source_config(plan_path)
 
     assert config.dataset_sources == ("alice/demo-dataset",)
+    assert config.required_model_sources == ("carol/required-model/Transformers/default/1",)
     assert config.required_local_seq2seq_pipelines == ("seq2seq_main",)
     assert config.domain_adaptation.adapted_checkpoint_hints == ("alice/adapted-model",)
     assert config.domain_adaptation.allow_kernel_finetune is True

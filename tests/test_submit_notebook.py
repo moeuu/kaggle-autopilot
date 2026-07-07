@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kagglebot.exceptions import KaggleCliError, KernelCapacityError, SubmissionCliError
 from kagglebot.submit_notebook import (
     NotebookSubmitRunner,
@@ -192,6 +194,104 @@ def test_build_notebook_submit_output_reference_handles_missing_submission() -> 
     assert output.submission_artifact_path is None
     assert output.reference.output_file == "submission.csv"
     assert output.reference.version == "1"
+
+
+def test_build_notebook_submit_output_reference_uses_expected_output_file_when_missing_submission() -> None:
+    output = build_notebook_submit_output_reference(
+        kernel_id="user/demo",
+        kernel_submission_path=None,
+        version_label=None,
+        copy_submission_artifact=lambda source: source,
+        expected_output_file="submission.csv.gz",
+    )
+
+    assert output.submission_artifact_path is None
+    assert output.reference.output_file == "submission.csv.gz"
+    assert output.reference.version == "1"
+
+
+@pytest.mark.parametrize(
+    "expected_output_file",
+    [
+        "predictions.vcf.gz",
+        "volume.mrc",
+        "elevation.hgt",
+        "signals.vhdr",
+        "graph.jsonld",
+        "model.engine",
+        "model.rknn",
+        "model.dlc",
+    ],
+)
+def test_build_notebook_submit_output_reference_uses_non_csv_expected_output_file(
+    expected_output_file: str,
+) -> None:
+    output = build_notebook_submit_output_reference(
+        kernel_id="user/demo",
+        kernel_submission_path=None,
+        version_label=None,
+        copy_submission_artifact=lambda source: source,
+        expected_output_file=expected_output_file,
+    )
+
+    assert output.submission_artifact_path is None
+    assert output.reference.output_file == expected_output_file
+    assert output.reference.version == "1"
+
+
+def test_build_notebook_submit_output_reference_normalizes_template_expected_output_file() -> None:
+    output = build_notebook_submit_output_reference(
+        kernel_id="user/demo",
+        kernel_submission_path=None,
+        version_label=None,
+        copy_submission_artifact=lambda source: source,
+        expected_output_file="sample_submission.jsonlines.zst",
+    )
+
+    assert output.submission_artifact_path is None
+    assert output.reference.output_file == "submission.jsonlines.zst"
+    assert output.reference.version == "1"
+
+
+def test_notebook_submit_runner_falls_back_to_source_submission_filename(monkeypatch, tmp_path: Path) -> None:
+    submission_path = tmp_path / "submission.onnx"
+    submission_path.write_bytes(b"model")
+    captured: dict[str, str | None] = {}
+
+    def fake_run_notebook_kernel_submission_for_run(**kwargs):  # noqa: ANN001
+        captured["expected_output_file"] = kwargs["expected_output_file"]
+        return object(), "kernel:user/demo", None
+
+    monkeypatch.setattr(
+        "kagglebot.submit_notebook.run_notebook_kernel_submission_for_run",
+        fake_run_notebook_kernel_submission_for_run,
+    )
+    runner = NotebookSubmitRunner(
+        slug="demo",
+        run_id="run-1",
+        paths=object(),  # type: ignore[arg-type]
+        kaggle_username=None,
+        kernel_name=None,
+        accelerator="cpu",
+        strict_accelerator=False,
+        dry_run=False,
+        timeout_minutes=None,
+        infer_iteration_from_submission_path=lambda _path: 1,
+        resolve_kaggle_username=lambda _username: "user",
+        run_submit_kernel=lambda **_kwargs: None,
+        run_kaggle_submit_kernel=lambda **_kwargs: None,
+        copy_submission_artifact_to_iteration_dir=lambda **_kwargs: submission_path,
+        classify_submit_error=lambda *_args: {},
+        should_retry_ambiguous=lambda **_kwargs: False,
+        sleep=lambda _seconds: None,
+        on_message=lambda _message: None,
+        is_capacity_error=lambda _exc: False,
+        is_push_error=lambda _exc: False,
+    )
+
+    runner.submit(submission_path=submission_path, message="submit", artifact_mode="wrapper")
+
+    assert captured["expected_output_file"] == "submission.onnx"
 
 
 def test_infer_kernel_submit_version_label_from_push_logs(tmp_path: Path) -> None:
@@ -443,7 +543,42 @@ def test_decide_notebook_submit_artifact_mode_for_paths_detects_tiny_contract(tm
         sample_submission_path=sample_path,
         fallback_sample_submission_path=fallback_sample_path,
         submission_path=submission_path,
-        count_csv_data_rows=count_rows,
+        count_tabular_data_rows=count_rows,
+    )
+
+    assert decision.mode == "inference"
+    assert decision.reason == "tiny_public_sample_notebook_contract"
+
+
+def test_decide_notebook_submit_artifact_mode_for_paths_detects_jsonl_tiny_contract(tmp_path: Path) -> None:
+    from kagglebot.context_artifacts import count_tabular_data_rows_capped
+
+    sample_path = tmp_path / "context" / "sample_submission.jsonl"
+    fallback_sample_path = tmp_path / "data" / "sample_submission.jsonl"
+    submission_path = tmp_path / "submission.jsonl"
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_sample_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_path.write_text(
+        '{"id":1,"target":0}\n{"id":2,"target":0}\n{"id":3,"target":0}\n',
+        encoding="utf-8",
+    )
+    fallback_sample_path.write_text(
+        '{"id":1,"target":0}\n{"id":2,"target":0}\n{"id":3,"target":0}\n{"id":4,"target":0}\n',
+        encoding="utf-8",
+    )
+    submission_path.write_text(
+        '{"id":1,"target":0.1}\n{"id":2,"target":0.2}\n{"id":3,"target":0.3}\n',
+        encoding="utf-8",
+    )
+
+    decision = decide_notebook_submit_artifact_mode_for_paths(
+        requested_mode="wrapper",
+        notebook_submit_required=True,
+        code_competition=False,
+        sample_submission_path=sample_path,
+        fallback_sample_submission_path=fallback_sample_path,
+        submission_path=submission_path,
+        count_tabular_data_rows=count_tabular_data_rows_capped,
     )
 
     assert decision.mode == "inference"
@@ -677,6 +812,99 @@ def test_run_notebook_kernel_submission_runs_kernel_and_submits_reference(tmp_pa
         "dry_run": False,
     }
     assert messages == ["[cyan]submit notebook[/cyan]: user/demo-submit"]
+
+
+def test_run_notebook_kernel_submission_keeps_expected_output_file_when_kernel_path_missing(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-2" / "submission.csv.gz"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_bytes(b"compressed")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    captured_submit_kwargs: dict[str, object] = {}
+
+    def run_submit_kernel(**kwargs):  # noqa: ANN003, ARG001
+        return type("KernelResult", (), {"kernel_id": "user/demo-submit", "submission_path": None})()
+
+    def run_kaggle_submit_kernel(**kwargs):  # noqa: ANN003
+        captured_submit_kwargs.update(kwargs)
+        return type("SubmitResult", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    run_notebook_kernel_submission(
+        slug="demo",
+        run_id="run-1",
+        iteration=2,
+        iter_logs_dir=logs_dir,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name="submit-kernel",
+        accelerator="gpu",
+        strict_accelerator=False,
+        submission_path=submission_path,
+        message="submit message",
+        artifact_mode="inference",
+        dry_run=True,
+        timeout_minutes=60,
+        run_submit_kernel=run_submit_kernel,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        copy_submission_artifact=lambda source: source,
+        classify_submit_error=lambda stdout, stderr, exit_code: {"reason": "unclassified_submit_error"},
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: False,
+        sleep=lambda seconds: None,
+        on_message=lambda message: None,
+        is_capacity_error=lambda exc: False,
+        is_push_error=lambda exc: False,
+        expected_output_file="submission.csv.gz",
+    )
+
+    assert captured_submit_kwargs["output_file"] == "submission.csv.gz"
+
+
+def test_run_notebook_kernel_submission_uses_wrapper_zip_name_for_directory_when_kernel_path_missing(
+    tmp_path: Path,
+) -> None:
+    submission_path = tmp_path / "iter-2" / "model"
+    submission_path.mkdir(parents=True)
+    (submission_path / "config.json").write_text('{"architectures": ["Demo"]}\n', encoding="utf-8")
+    (submission_path / "model.safetensors").write_bytes(b"weights")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    captured_submit_kwargs: dict[str, object] = {}
+
+    def run_submit_kernel(**kwargs):  # noqa: ANN003, ARG001
+        return type("KernelResult", (), {"kernel_id": "user/demo-submit", "submission_path": None})()
+
+    def run_kaggle_submit_kernel(**kwargs):  # noqa: ANN003
+        captured_submit_kwargs.update(kwargs)
+        return type("SubmitResult", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    run_notebook_kernel_submission(
+        slug="demo",
+        run_id="run-1",
+        iteration=2,
+        iter_logs_dir=logs_dir,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name="submit-kernel",
+        accelerator="gpu",
+        strict_accelerator=False,
+        submission_path=submission_path,
+        message="submit message",
+        artifact_mode="wrapper",
+        dry_run=True,
+        timeout_minutes=60,
+        run_submit_kernel=run_submit_kernel,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        copy_submission_artifact=lambda source: source,
+        classify_submit_error=lambda stdout, stderr, exit_code: {"reason": "unclassified_submit_error"},
+        should_retry_ambiguous=lambda *, reason, stdout, stderr: False,
+        sleep=lambda seconds: None,
+        on_message=lambda message: None,
+        is_capacity_error=lambda exc: False,
+        is_push_error=lambda exc: False,
+        expected_output_file="submission.hfmodel",
+    )
+
+    assert captured_submit_kwargs["output_file"] == "model.zip"
 
 
 def test_notebook_kernel_submission_error_preserves_kaggle_cli_details() -> None:

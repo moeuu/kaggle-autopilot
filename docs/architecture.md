@@ -7,7 +7,7 @@ This document describes the current autopilot execution architecture.
 `kagglebot autopilot` executes in three major phases:
 
 1. Bootstrap context
-2. Agent pipeline (`gpt -> gpt -> gpt`)
+2. Agent pipeline (`codex -> oracle(gpt-5.5-pro) -> codex` when Oracle is available)
 3. Iterative train/evaluate/improve/submit loop
 
 ## 1) Bootstrap Context
@@ -19,7 +19,7 @@ Bootstrap prepares `artifacts/<slug>/context/`:
 - sample submission snapshot
 - top1 public score snapshot
 
-## 2) Agent Pipeline (`gpt -> gpt -> gpt`)
+## 2) Agent Pipeline (`codex -> oracle(gpt-5.5-pro) -> codex`)
 
 Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 
@@ -180,7 +180,7 @@ artifacts/<slug>/
   runs/<run-id>/iter-<k>/
     metrics.json
     diagnostics.md
-    submission.csv
+    submission.<suffix>
 
 knowledge/
   kb.sqlite
@@ -364,7 +364,7 @@ The next high-value modernization work is:
    resume metrics/support artifact lookup
    now also uses `kernel_outputs.find_newest_existing_path`, so newest-artifact selection is no longer duplicated in
    run-state code.
-   Tiny public `sample_submission.csv` expansion to authoritative test ids now lives in `submission_templates.py`, so
+   Tiny public sample-template expansion to authoritative test ids now lives in `submission_templates.py`, so
    solver and kernel-runtime submission writers share one row-count contract. Direction-aware score gaps, best-score
    selection, and candidate-vs-baseline comparisons now live in `score_utils.py`, leaving campaign modules as
    compatibility call sites and self-improvement run summaries on the shared score policy. Timestamp parsing for ISO

@@ -22,6 +22,8 @@ Problem/error insights are persisted only after a submission result (online scor
 - **Persistent research artifacts**:
   - `knowledge/research/<problem_type>/<slug>/research_sources.jsonl`
   - `knowledge/research/<problem_type>/<slug>/research_summary.md`
+- **Self-improvement playbooks**: `knowledge/playbooks/*.md`
+- **Reusable skills**: `knowledge/skills/*.md`
 - **Size**: Typically <10MB for hundreds of competitions (only metadata)
 
 ## Database Schema
@@ -148,6 +150,19 @@ Stores error-resolution knowledge:
 - whether the error was resolved
 - final submission outcome bucket and online score
 
+### `agent_events` and `run_lessons`
+
+Stores the raw self-improvement event stream and summarized run lessons. `agent_events` is mirrored into an FTS5 table
+when SQLite supports it, so repeated submit failures, top1 gaps, metric issues, and recovery notes are searchable without
+storing raw competition data or predictions.
+
+### `skills`, `skill_versions`, and `skill_evaluations`
+
+Stores reusable procedures extracted from repeated outcomes. Self-improvement writes candidate skills to
+`knowledge/skills/*.md`, versions each update, injects relevant skills into future planning context, and records
+per-run outcomes in `skill_evaluations` so usage count, success count, and fitness can promote or demote procedures over
+time.
+
 Example:
 ```json
 {
@@ -162,9 +177,9 @@ Tags are the primary mechanism for similarity search. They're generated automati
 
 ### Tag Sources
 
-1. **Dataset profiling**: Inferred from `train.csv` statistics
-   - Modality: `tabular`, `text`, `image`, `timeseries`
-   - Task: `regression`, `binary`, `multiclass`
+1. **Dataset profiling**: Inferred from discovered training-table statistics, asset references, and non-tabular file layouts, including common CSV/TSV, JSON/JSONL/NDJSON, Parquet/Feather/Arrow IPC, Excel, Stata, XML, Pickle, compressed tabular, SQLite-derived inputs, and asset-only directories.
+   - Modality: `tabular`, `text`, `image`, `audio`, `video`, `signal`, `medical_imaging`, `array`, `point_cloud`, `geospatial`, `graph`, `bio`, `rna`, `annotation`, `multimodal`, `timeseries`, `artifact`
+   - Task: `regression`, `binary`, `multiclass`, `multi_label`, `multi_output`, `ordinal`, `quantile`, `survival`, `ranking`, `forecasting`, `unsupervised`, or the detected domain modality
    - Size: `n_rows_small`, `n_rows_medium`, `n_rows_large`
    - Characteristics: `missingness_high`, `high_cardinality_cats`
 
@@ -199,7 +214,7 @@ Higher overlap = more similar competition = more relevant learnings.
 ## What the KB Does NOT Store
 
 For privacy and safety:
-- ❌ Raw competition data (train.csv, test.csv)
+- ❌ Raw competition data (for example train/test tables, images, labels, or archives)
 - ❌ Predictions or submission files
 - ❌ Kaggle credentials or API keys
 - ❌ Trained model weights

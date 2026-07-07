@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kagglebot.agents.codex_runner import run_codex
@@ -15,6 +17,8 @@ from kagglebot.agents.identity import (
     render_prompt_identity,
 )
 from kagglebot.agents.strategy_runner import run_strategy
+from kagglebot.artifact_io import copy_artifact_if_needed
+from kagglebot.compression_suffixes import write_compressed_bytes
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.json_utils import load_json_array, load_json_object, parse_json_object_text, write_json_object
@@ -36,6 +40,11 @@ from kagglebot.plan_policy import (
 )
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.solver.metrics import infer_direction
+from kagglebot.submission_sample_discovery import (
+    TABULAR_TEXT_SUFFIXES,
+    default_delimited_text_separator,
+    tabular_suffix,
+)
 from kagglebot.write_guard import (
     WriteGuardPolicy,
     _assert_no_secrets,
@@ -69,6 +78,7 @@ class AgentPipelineConfig:
     method_scout_max_sources: int = 12
     hardware_profile: str | None = "auto"
     time_budget_min: int | None = None
+    strategy_engine: str = field(default_factory=lambda: os.environ.get("KAGGLEBOT_STRATEGY_ENGINE", "auto"))
 
 
 @dataclass(frozen=True)
@@ -285,7 +295,9 @@ def _run_strategy_plan(
         prompt_path.write_text(prompt_text, encoding="utf-8")
         _print_block("gpt strategy prompt (sent)", prompt_text)
 
-        result = run_strategy(prompt_path, output_dir, dry_run=config.dry_run)
+        result = _run_strategy_for_pipeline(
+            prompt_path, output_dir, dry_run=config.dry_run, engine=config.strategy_engine
+        )
         response_text = _select_strategy_response_text(result)
         if result.returncode != 0:
             if "Prompt is too long" in response_text and not compact_mode:
@@ -306,6 +318,12 @@ def _run_strategy_plan(
                 prompt_text = _append_method_registry_with_budget(prompt_text, paths=paths, compact=compact_mode)
                 continue
             if _should_use_fallback_strategy(response_text, result.stderr):
+                if _strategy_engine_is_required(config, "oracle"):
+                    raise KaggleBotError(
+                        f"{STRATEGY_AGENT.display_name} strategy failed and "
+                        "KAGGLEBOT_STRATEGY_ENGINE=oracle requires Oracle to complete successfully: "
+                        f"{result.stderr or response_text}"
+                    )
                 error_text = (result.stderr or response_text).strip()
                 print("[yellow]note[/yellow]: GPT strategy failed; using fallback strategy.")
                 (
@@ -426,6 +444,13 @@ def _select_strategy_response_text(result: object) -> str:
     return primary
 
 
+def _run_strategy_for_pipeline(prompt_path: Path, output_dir: Path, *, dry_run: bool, engine: str) -> object:
+    parameters = inspect.signature(run_strategy).parameters
+    if "engine" in parameters:
+        return run_strategy(prompt_path, output_dir, dry_run=dry_run, engine=engine)
+    return run_strategy(prompt_path, output_dir, dry_run=dry_run)
+
+
 def _contains_required_strategy_sections(text: str) -> bool:
     if not text:
         return False
@@ -481,7 +506,7 @@ def _run_codex_kernel_implementation(
         requirements = summarize_writeup_requirements(paths)
         prompt_text += (
             "\n\nWriteup mode is active for this competition.\n"
-            "Do not treat submission.csv as the primary deliverable. Keep train/eval outputs useful as proxy "
+            "Do not treat a submission artifact as the primary deliverable. Keep train/eval outputs useful as proxy "
             "evidence, and make sure the implementation can support a final judged writeup package.\n"
         )
         if requirements:
@@ -582,13 +607,56 @@ def _ensure_context_materials(paths: CompetitionPaths) -> None:
 
         resolved = ensure_sample_submission(paths.data_dir)
         if resolved is not None and resolved.exists() and _has_data_rows(resolved):
-            paths.sample_submission_path.write_text(resolved.read_text(encoding="utf-8"), encoding="utf-8")
+            destination = paths.context_sample_submission_path_for_suffix(tabular_suffix(resolved))
+            copy_artifact_if_needed(source=resolved, destination=destination)
         else:
-            paths.sample_submission_path.write_text("id,prediction\n", encoding="utf-8")
+            _write_placeholder_sample_submission(paths)
+    head_path = paths.context_sample_submission_head_path_for_suffix(tabular_suffix(paths.sample_submission_path))
     if sample_needs_refresh or (not paths.sample_submission_head_path.exists()):
         head = _read_sample_submission_head(paths, max_lines=5)
         if head:
-            paths.sample_submission_head_path.write_text(head + "\n", encoding="utf-8")
+            head_path.write_text(head + "\n", encoding="utf-8")
+
+
+def _write_placeholder_sample_submission(paths: CompetitionPaths) -> Path:
+    import pandas as pd
+
+    from kagglebot.solver.io import write_table
+    from kagglebot.submission_format import load_submission_format_hint
+
+    hint = load_submission_format_hint(paths.submission_format_md_path)
+    columns = hint.columns if hint and hint.columns and len(hint.columns) >= 2 else ["id", "prediction"]
+    suffix = _placeholder_sample_submission_suffix(hint.expected_suffixes if hint else None)
+    destination = paths.context_sample_submission_path_for_suffix(suffix)
+
+    # Header-only placeholders are intentionally rowless so they cannot be mistaken
+    # for a real competition sample with row-count semantics.
+    frame = pd.DataFrame(columns=columns)
+    try:
+        write_table(frame, destination)
+        return destination
+    except Exception:
+        return _write_placeholder_sample_submission_fallback(paths=paths, suffix=suffix, columns=columns)
+
+
+def _write_placeholder_sample_submission_fallback(
+    *,
+    paths: CompetitionPaths,
+    suffix: str,
+    columns: list[str],
+) -> Path:
+    fallback_suffix = suffix if suffix in TABULAR_TEXT_SUFFIXES and not suffix.endswith(".zip") else ".csv"
+    fallback = paths.context_sample_submission_path_for_suffix(fallback_suffix)
+    separator = default_delimited_text_separator(fallback_suffix)
+    payload = (separator.join(columns) + "\n").encode("utf-8")
+    write_compressed_bytes(fallback, payload, suffix=fallback_suffix)
+    return fallback
+
+
+def _placeholder_sample_submission_suffix(expected_suffixes: list[str] | None) -> str:
+    from kagglebot.submission_sample_discovery import preferred_rowless_tabular_sample_suffix
+
+    return preferred_rowless_tabular_sample_suffix(expected_suffixes)
 
 
 def _load_template(name: str) -> str:
@@ -618,18 +686,12 @@ def _load_dataset_profile_payload(paths: CompetitionPaths) -> dict[str, object]:
 
 
 def _has_data_rows(path: Path) -> bool:
-    non_empty = 0
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                non_empty += 1
-                if non_empty >= 2:
-                    return True
-    except OSError:
+        from kagglebot.submission_sample_discovery import tabular_file_has_data_rows
+
+        return tabular_file_has_data_rows(path)
+    except Exception:
         return False
-    return False
 
 
 def _load_blocked_modules(context_dir: Path) -> list[str]:
@@ -685,7 +747,10 @@ def _extract_marked_section(text: str, marker: str) -> tuple[str, str | None]:
 
 
 def _extract_research_sources_jsonl(text: str) -> tuple[str, str | None]:
-    return _extract_marked_section(text, "===RESEARCH_SOURCES_JSONL===")
+    raw, issue = _extract_marked_section(text, "===RESEARCH_SOURCES_JSONL===")
+    if issue:
+        return raw, issue
+    return _canonicalize_research_sources_jsonl(raw, min_items=_MIN_RESEARCH_ITEMS)
 
 
 def _extract_research_summary(text: str) -> tuple[str, str | None]:
@@ -792,10 +857,10 @@ def _persist_research_to_knowledge(
     }
 
 
-_STRATEGY_PROMPT_MAX_CHARS = 18000
+_STRATEGY_PROMPT_MAX_CHARS = 80000
 _LOG_MAX_CHARS = 500
 _MIN_STRATEGY_CHARS = 1200
-_MIN_INSTRUCTIONS_CHARS = 200
+_MIN_INSTRUCTIONS_CHARS = 8000
 _MIN_SOURCES = 3
 _MIN_RESEARCH_SUMMARY_CHARS = 300
 _MIN_RESEARCH_ITEMS = 3
@@ -811,9 +876,16 @@ _STRATEGY_RATE_LIMIT_MARKERS = (
 )
 _STRATEGY_TIMEOUT_MARKERS = (
     "strategy runner timed out",
+    "strategy runner unavailable",
+    "oracle strategy runner unavailable",
     "timed out",
     "timeout",
     "deadline exceeded",
+)
+_STRATEGY_BROWSER_AUTOMATION_MARKERS = (
+    "browser-automation",
+    "connect econnrefused",
+    "econnrefused 127.0.0.1",
 )
 
 
@@ -826,14 +898,16 @@ def _build_strategy_prompt(
     compact: bool,
 ) -> str:
     profile = _load_dataset_profile_payload(paths)
+    strategy_context_bundle = _build_strategy_context_bundle(paths=paths, config=config, compact=compact)
+    strategy_context_bundle_path = _write_strategy_context_bundle(paths, strategy_context_bundle)
     if compact:
-        dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 2000)
-        submission_format = _truncate(_read_text(paths.submission_format_md_path), 2000)
+        dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 1400)
+        submission_format = _truncate(_read_text(paths.submission_format_md_path), 1200)
         sample_submission_head = _truncate(_read_sample_submission_head(paths), 800)
-        code_snapshot = _truncate(_read_text(paths.code_md_path), 2500)
-        models_snapshot = _truncate(_read_text(paths.models_md_path), 1200)
-        discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 1200)
-        brief_content = _truncate(brief_content, 2000)
+        code_snapshot = _truncate(_read_text(paths.code_md_path), 1200)
+        models_snapshot = _truncate(_read_text(paths.models_md_path), 600)
+        discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 600)
+        brief_content = _truncate(brief_content, 1200)
     else:
         dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 6000)
         submission_format = _truncate(_read_text(paths.submission_format_md_path), 4000)
@@ -853,12 +927,15 @@ def _build_strategy_prompt(
         template,
         {
             "slug": config.slug,
+            "competition_url": config.competition_url or f"https://www.kaggle.com/competitions/{paths.slug}",
             "compute": config.compute,
             "accelerator": config.accelerator,
             "internet": config.internet,
             "hardware_profile": hardware_profile.label,
             "hardware_constraints": hardware_constraints,
             "rules_url": _read_text(paths.rules_url_path).strip() or config.competition_url or "",
+            "strategy_context_bundle_path": str(strategy_context_bundle_path),
+            "strategy_context_bundle": strategy_context_bundle,
             "interpretation": brief_content,
             "dataset_profile": dataset_profile,
             "submission_format": submission_format,
@@ -872,7 +949,7 @@ def _build_strategy_prompt(
         requirements = summarize_writeup_requirements(paths)
         prompt += (
             "\n\n[WRITEUP_MODE]\n"
-            "This competition is judged/writeup-based. Treat offline metrics and any submission.csv artifact as "
+            "This competition is judged/writeup-based. Treat offline metrics and any submission artifact as "
             "proxy evidence only. The strategy must end in a competition-specific writeup/report package.\n"
         )
         if requirements:
@@ -893,6 +970,275 @@ def _build_strategy_prompt(
     if compact:
         prompt += "\n\n[COMPACT]\n"
     return prompt
+
+
+def _build_strategy_context_bundle(
+    *,
+    paths: CompetitionPaths,
+    config: AgentPipelineConfig,
+    compact: bool,
+) -> str:
+    competition_url = config.competition_url or f"https://www.kaggle.com/competitions/{paths.slug}"
+    rules_url = _read_text(paths.rules_url_path).strip() or f"{competition_url}/rules"
+    if compact:
+        overview = _truncate(_read_text(paths.overview_md_path), 800)
+        data_description = _truncate(_read_text(paths.data_md_path), 800)
+        rules = _truncate(_read_text(paths.rules_md_path), 800)
+        data_file_structure = _render_data_file_structure(paths, compact=True)
+    else:
+        overview = _truncate(_read_text(paths.overview_md_path), 3000)
+        data_description = _truncate(_read_text(paths.data_md_path), 3000)
+        rules = _truncate(_read_text(paths.rules_md_path), 2500)
+        data_file_structure = _render_data_file_structure(paths, compact=False)
+    lines = [
+        "# Strategy Context Bundle",
+        "",
+        f"- slug: {paths.slug}",
+        f"- competition_url: {competition_url}",
+        f"- rules_url: {rules_url}",
+        f"- data_dir: {paths.data_dir}",
+        f"- overview_source: {paths.overview_md_path}",
+        f"- data_source: {paths.data_md_path}",
+        f"- rules_source: {paths.rules_md_path}",
+        f"- dataset_profile_source: {paths.dataset_profile_path}",
+        "",
+        "## Competition Overview",
+        overview or "Overview context is unavailable.",
+        "",
+        "## Data Page / Dataset Description",
+        data_description or "Data page context is unavailable.",
+        "",
+        "## Rules",
+        rules or "Rules context is unavailable.",
+        "",
+        "## Data File Structure and Representative Samples",
+        data_file_structure or "Data directory is unavailable or empty.",
+    ]
+    return "\n".join(lines).strip()
+
+
+def _write_strategy_context_bundle(paths: CompetitionPaths, content: str) -> Path:
+    path = paths.context_agent_dir / "strategy_context_bundle.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.strip() + "\n", encoding="utf-8")
+    return path
+
+
+def _render_data_file_structure(paths: CompetitionPaths, *, compact: bool) -> str:
+    data_dir = paths.data_dir
+    if not data_dir.exists():
+        return f"Data directory does not exist: {data_dir}"
+    try:
+        files = sorted(
+            (path for path in data_dir.rglob("*") if path.is_file()),
+            key=lambda path: str(path.relative_to(data_dir)).lower(),
+        )
+    except OSError as exc:
+        return f"Unable to scan data directory {data_dir}: {exc}"
+    if not files:
+        return f"No files found under {data_dir}."
+
+    max_files = 16 if compact else 40
+    max_previews = 3 if compact else 8
+    max_chars = 1800 if compact else 8000
+    lines = [
+        f"Data directory: {data_dir}",
+        f"Total files discovered: {len(files)}",
+        "",
+        "### File inventory",
+    ]
+    for path in files[:max_files]:
+        lines.append(f"- {_format_data_file_inventory_line(path, data_dir)}")
+    if len(files) > max_files:
+        lines.append(f"- ... {len(files) - max_files} more files omitted from prompt inventory.")
+
+    lines.extend(["", "### Representative tabular previews"])
+    preview_count = 0
+    for path in files:
+        if preview_count >= max_previews:
+            break
+        preview = _render_table_preview(path, data_dir=data_dir, compact=compact)
+        if not preview:
+            continue
+        lines.append(preview)
+        preview_count += 1
+    if preview_count == 0:
+        lines.append("No tabular previews could be read; rely on file inventory and dataset_profile.json.")
+    return _truncate("\n".join(lines), max_chars)
+
+
+def _format_data_file_inventory_line(path: Path, data_dir: Path) -> str:
+    try:
+        rel = path.relative_to(data_dir)
+    except ValueError:
+        rel = path
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        size_bytes = -1
+    suffix = "".join(path.suffixes).lower() or "(no suffix)"
+    if size_bytes >= 0:
+        return f"{rel} | suffix={suffix} | size_bytes={size_bytes}"
+    return f"{rel} | suffix={suffix} | size_bytes=unknown"
+
+
+def _render_table_preview(path: Path, *, data_dir: Path, compact: bool) -> str:
+    if not _is_probably_tabular_data_file(path):
+        return ""
+    if path.suffix.lower() == ".json":
+        preview = _render_json_structure_preview(path, data_dir=data_dir, compact=compact)
+        if preview:
+            return preview
+    try:
+        from kagglebot.solver.io import read_table
+
+        frame = read_table(path, nrows=5)
+    except Exception as exc:
+        if compact:
+            return ""
+        return f"#### {_relative_data_path(path, data_dir)}\n- preview_error: {type(exc).__name__}: {exc}"
+    if frame is None or not hasattr(frame, "columns"):
+        return ""
+    columns = [str(column) for column in list(frame.columns)]
+    dtype_items = [(str(column), str(dtype)) for column, dtype in frame.dtypes.items()]
+    sample_rows = frame.head(3).to_csv(index=False)
+    max_columns = 30 if compact else 80
+    max_dtypes = 20 if compact else 50
+    sample_limit = 700 if compact else 1400
+    lines = [
+        f"#### {_relative_data_path(path, data_dir)}",
+        f"- preview_rows_read: {len(frame)}",
+        f"- columns_count: {len(columns)}",
+        f"- columns: {_format_column_list(columns, max_items=max_columns)}",
+        f"- dtypes: {_format_dtype_items(dtype_items, max_items=max_dtypes)}",
+        "- sample_rows_csv:",
+        _truncate(sample_rows, sample_limit),
+    ]
+    return "\n".join(lines).strip()
+
+
+def _render_json_structure_preview(path: Path, *, data_dir: Path, compact: bool) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception as exc:
+        if compact:
+            return ""
+        return f"#### {_relative_data_path(path, data_dir)}\n- json_preview_error: {type(exc).__name__}: {exc}"
+    max_items = 2 if compact else 4
+    lines = [
+        f"#### {_relative_data_path(path, data_dir)}",
+        f"- json_top_level_type: {type(payload).__name__}",
+    ]
+    if isinstance(payload, dict):
+        keys = list(payload.keys())
+        lines.append(f"- top_level_key_count: {len(keys)}")
+        lines.append(f"- first_keys: {_format_column_list(keys, max_items=12 if compact else 24)}")
+        for key in keys[:max_items]:
+            lines.extend(_summarize_json_value(value=payload.get(key), label=f"key {key}", compact=compact))
+    elif isinstance(payload, list):
+        lines.append(f"- item_count: {len(payload)}")
+        for index, item in enumerate(payload[:max_items]):
+            lines.extend(_summarize_json_value(value=item, label=f"item {index}", compact=compact))
+    else:
+        lines.append(f"- scalar_preview: {_truncate(str(payload), 500 if compact else 1000)}")
+    return "\n".join(lines).strip()
+
+
+def _summarize_json_value(*, value: object, label: str, compact: bool) -> list[str]:
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        key_preview = _format_column_list(keys, max_items=12 if compact else 24)
+        lines = [f"- {label}: object with {len(keys)} keys; keys={key_preview}"]
+        if _looks_like_arc_task(value):
+            lines.extend(_summarize_arc_task(value=value, label=label, compact=compact))
+        return lines
+    if isinstance(value, list):
+        lines = [f"- {label}: list length {len(value)}"]
+        if value and isinstance(value[0], dict) and _looks_like_arc_attempt(value[0]):
+            lines.append(f"  - first_attempt_keys: {_format_column_list(list(value[0].keys()), max_items=8)}")
+            lines.append(f"  - first_attempt_1_shape: {_grid_shape(value[0].get('attempt_1'))}")
+            lines.append(f"  - first_attempt_2_shape: {_grid_shape(value[0].get('attempt_2'))}")
+        return lines
+    return [f"- {label}: {type(value).__name__}={_truncate(str(value), 300 if compact else 600)}"]
+
+
+def _looks_like_arc_task(value: dict[object, object]) -> bool:
+    return (
+        "train" in value
+        and "test" in value
+        and isinstance(value.get("train"), list)
+        and isinstance(value.get("test"), list)
+    )
+
+
+def _looks_like_arc_attempt(value: dict[object, object]) -> bool:
+    return "attempt_1" in value or "attempt_2" in value
+
+
+def _summarize_arc_task(*, value: dict[object, object], label: str, compact: bool) -> list[str]:
+    train_pairs = value.get("train")
+    test_pairs = value.get("test")
+    lines = [
+        f"  - {label}.train_pairs: {len(train_pairs) if isinstance(train_pairs, list) else 'unknown'}",
+        f"  - {label}.test_cases: {len(test_pairs) if isinstance(test_pairs, list) else 'unknown'}",
+    ]
+    if isinstance(train_pairs, list) and train_pairs:
+        first_train = train_pairs[0]
+        if isinstance(first_train, dict):
+            lines.append(f"  - {label}.first_train_input_shape: {_grid_shape(first_train.get('input'))}")
+            lines.append(f"  - {label}.first_train_output_shape: {_grid_shape(first_train.get('output'))}")
+            if not compact:
+                lines.append(
+                    f"  - {label}.first_train_input_preview: "
+                    f"{_truncate(json.dumps(first_train.get('input'), ensure_ascii=True), 500)}"
+                )
+                lines.append(
+                    f"  - {label}.first_train_output_preview: "
+                    f"{_truncate(json.dumps(first_train.get('output'), ensure_ascii=True), 500)}"
+                )
+    if isinstance(test_pairs, list) and test_pairs:
+        first_test = test_pairs[0]
+        if isinstance(first_test, dict):
+            lines.append(f"  - {label}.first_test_input_shape: {_grid_shape(first_test.get('input'))}")
+    return lines
+
+
+def _grid_shape(value: object) -> str:
+    if not isinstance(value, list):
+        return "unknown"
+    rows = len(value)
+    if rows == 0:
+        return "0x0"
+    first = value[0]
+    cols = len(first) if isinstance(first, list) else "unknown"
+    return f"{rows}x{cols}"
+
+
+def _is_probably_tabular_data_file(path: Path) -> bool:
+    try:
+        from kagglebot.submission_sample_discovery import is_tabular_data_path
+
+        return bool(is_tabular_data_path(path))
+    except Exception:
+        suffixes = {suffix.lower() for suffix in path.suffixes}
+        return bool(suffixes & {".csv", ".tsv", ".txt", ".json", ".jsonl", ".parquet", ".feather", ".xlsx"})
+
+
+def _relative_data_path(path: Path, data_dir: Path) -> str:
+    try:
+        return str(path.relative_to(data_dir))
+    except ValueError:
+        return str(path)
+
+
+def _format_dtype_items(values: list[tuple[str, str]], *, max_items: int) -> str:
+    if not values:
+        return "{}"
+    selected = values[:max_items]
+    rendered = "{" + ", ".join(f"{name}: {dtype}" for name, dtype in selected) + "}"
+    if len(values) <= max_items:
+        return rendered
+    return f"{rendered} ... +{len(values) - max_items} more"
 
 
 def _apply_quality_gate(
@@ -976,7 +1322,14 @@ def _load_problem_type_knowledge_text(*, paths: CompetitionPaths, repo_root: Pat
 
 def _should_use_fallback_strategy(stdout: str, stderr: str) -> bool:
     haystack = f"{stdout}\n{stderr}".lower()
-    return any(marker in haystack for marker in _STRATEGY_RATE_LIMIT_MARKERS + _STRATEGY_TIMEOUT_MARKERS)
+    return any(
+        marker in haystack
+        for marker in (_STRATEGY_RATE_LIMIT_MARKERS + _STRATEGY_TIMEOUT_MARKERS + _STRATEGY_BROWSER_AUTOMATION_MARKERS)
+    )
+
+
+def _strategy_engine_is_required(config: AgentPipelineConfig, engine: str) -> bool:
+    return config.strategy_engine.strip().lower() == engine
 
 
 def _format_fallback_transcript(error_text: str) -> str:
@@ -1050,8 +1403,11 @@ def _validate_strategy_output(
 
 
 def _validate_research_sources_jsonl(raw: str, *, min_items: int) -> list[str]:
+    canonical, canonical_issue = _canonicalize_research_sources_jsonl(raw, min_items=min_items)
+    if canonical_issue:
+        return [canonical_issue]
     issues: list[str] = []
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    lines = [line.strip() for line in canonical.splitlines() if line.strip()]
     if len(lines) < min_items:
         issues.append(f"RESEARCH_SOURCES_JSONL must contain at least {min_items} items.")
         return issues
@@ -1085,6 +1441,168 @@ def _validate_research_sources_jsonl(raw: str, *, min_items: int) -> list[str]:
         if not isinstance(publish_dates, list) or not publish_dates:
             issues.append(f"RESEARCH_SOURCES_JSONL line {index + 1} publish_dates must be a non-empty list.")
     return issues
+
+
+_RESEARCH_SOURCE_REQUIRED_KEYS = (
+    "url",
+    "title",
+    "date",
+    "why_relevant",
+    "extracted_technique",
+    "query",
+    "top_urls",
+    "publish_dates",
+    "takeaway",
+)
+_RESEARCH_SOURCE_STRING_KEYS = (
+    "url",
+    "title",
+    "date",
+    "why_relevant",
+    "extracted_technique",
+    "query",
+    "takeaway",
+)
+
+
+def _canonicalize_research_sources_jsonl(raw: str, *, min_items: int) -> tuple[str, str | None]:
+    """Normalize common model JSONL slips without throwing away a useful strategy response."""
+    items: list[dict[str, object]] = []
+    for index, line in enumerate(_research_source_candidate_lines(raw)):
+        parsed = _load_research_source_line(line)
+        if parsed is None:
+            return "", f"RESEARCH_SOURCES_JSONL line {index + 1} is not valid JSON after repair."
+        if isinstance(parsed, list):
+            for entry in parsed:
+                normalized = _normalize_research_source_item(entry)
+                if normalized is not None:
+                    items.append(normalized)
+            continue
+        normalized = _normalize_research_source_item(parsed)
+        if normalized is None:
+            return "", f"RESEARCH_SOURCES_JSONL line {index + 1} must be a JSON object."
+        items.append(normalized)
+
+    if len(items) < min_items:
+        return "", f"RESEARCH_SOURCES_JSONL must contain at least {min_items} items."
+    lines = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in items]
+    return "\n".join(lines), None
+
+
+def _research_source_candidate_lines(raw: str) -> list[str]:
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    unfenced_lines: list[str] = []
+    in_fence = False
+    for line in stripped.splitlines():
+        candidate = line.strip()
+        if candidate.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not candidate:
+            continue
+        bullet_match = re.match(r"^(?:[-*]|\d+[.)])\s+(\{.*)$", candidate)
+        if bullet_match:
+            candidate = bullet_match.group(1).strip()
+        unfenced_lines.append(candidate)
+
+    whole = "\n".join(unfenced_lines).strip()
+    if whole.startswith("["):
+        return [whole]
+    if whole.startswith("{") and whole.endswith("}"):
+        if "\n" in whole and all(line.lstrip().startswith("{") for line in unfenced_lines):
+            return [line for line in unfenced_lines if line]
+        try:
+            json.loads(whole)
+            return [whole]
+        except json.JSONDecodeError as exc:
+            if "extra data" not in str(exc).lower():
+                return [whole]
+    return [line for line in unfenced_lines if line]
+
+
+def _load_research_source_line(line: str) -> object | None:
+    candidates = [line, re.sub(r",\s*([}\]])", r"\1", line)]
+    repaired = _repair_research_source_json_line(line)
+    if repaired not in candidates:
+        candidates.append(repaired)
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _repair_research_source_json_line(line: str) -> str:
+    repaired = re.sub(r",\s*([}\]])", r"\1", line.strip())
+    for key in _RESEARCH_SOURCE_STRING_KEYS:
+        repaired = _repair_json_string_value(repaired, key)
+    return repaired
+
+
+def _repair_json_string_value(line: str, key: str) -> str:
+    next_keys = "|".join(re.escape(item) for item in _RESEARCH_SOURCE_REQUIRED_KEYS if item != key)
+    pattern = re.compile(
+        rf'("{re.escape(key)}"\s*:\s*)"(.*?)"(?=\s*(?:,\s*"(?:{next_keys})"\s*:|\}}))',
+        re.DOTALL,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        return match.group(1) + json.dumps(match.group(2), ensure_ascii=False)
+
+    return pattern.sub(replace, line)
+
+
+def _normalize_research_source_item(item: object) -> dict[str, object] | None:
+    if not isinstance(item, dict):
+        return None
+    top_urls_raw = item.get("top_urls")
+    top_urls = _coerce_string_list(top_urls_raw)
+    url = _coerce_research_source_string(item.get("url"))
+    if not top_urls and url:
+        top_urls = [url]
+    publish_dates = _coerce_string_list(item.get("publish_dates"))
+    if not publish_dates:
+        publish_dates = ["unknown"] * max(1, len(top_urls))
+    if top_urls and len(publish_dates) < len(top_urls):
+        publish_dates.extend(["unknown"] * (len(top_urls) - len(publish_dates)))
+    if top_urls and len(publish_dates) > len(top_urls):
+        publish_dates = publish_dates[: len(top_urls)]
+    normalized = {
+        "url": url,
+        "title": _coerce_research_source_string(item.get("title")),
+        "date": _coerce_research_source_string(item.get("date"), default="unknown") or "unknown",
+        "why_relevant": _coerce_research_source_string(item.get("why_relevant")),
+        "extracted_technique": _coerce_research_source_string(item.get("extracted_technique")),
+        "query": _coerce_research_source_string(item.get("query")),
+        "top_urls": top_urls,
+        "publish_dates": publish_dates,
+        "takeaway": _coerce_research_source_string(item.get("takeaway")),
+    }
+    return normalized
+
+
+def _coerce_string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [_coerce_research_source_string(item) for item in value if _coerce_research_source_string(item)]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _coerce_research_source_string(value: object, *, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, int | float | bool):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return default
 
 
 def _extract_section_heading_title(line: str) -> str | None:
@@ -1177,7 +1695,11 @@ def _build_fallback_strategy(
         "",
         "## Candidate Approaches",
         "- Candidate 1: Tree-ensemble family tuned for the dataset type and metric.",
-        "- Candidate 2: Neural family suitable for the modality (tabular/text/image/sequence).",
+        (
+            "- Candidate 2: Modality-specific family suitable for tabular, text/document, image, audio, video, "
+            "signal, medical-imaging, array, point-cloud/3D, geospatial, graph, bio/sequence, annotation, "
+            "or artifact outputs."
+        ),
         "- Candidate 3: Simple/high-bias baseline or linear/kernel family for calibration and fallback.",
         "",
         "## Final",
@@ -1238,7 +1760,7 @@ def _build_fallback_strategy(
             "date": "unknown",
             "why_relevant": "Defines expected output schema for submission validation.",
             "extracted_technique": "Validate columns/rows against sample submission before writing final file.",
-            "query": f"{config.slug} submission format csv columns",
+            "query": f"{config.slug} kaggle submission format file schema artifact",
             "top_urls": [str(paths.sample_submission_path), str(paths.submission_format_md_path)],
             "publish_dates": ["unknown", "unknown"],
             "takeaway": "Submission schema is enforced in fallback implementation instructions.",
@@ -1286,8 +1808,9 @@ def _build_fallback_strategy(
         f"{STRATEGY_AGENT.display_name} was rate-limited. Follow these steps to implement a strong model in kernel.py.",
         "",
         "1) Inspect `/kaggle/input/{slug}/` to locate train/test files and the sample submission.",
-        "2) If train/test CSV files exist (tabular):",
-        "   - Load train/test with pandas; identify target as column present in train but not test.",
+        f"2) If train/test tabular files exist ({_fallback_tabular_format_summary()}):",
+        "   - Load train/test with the repo `read_table` helper or the matching parser; identify target as "
+        "column present in train but not test.",
         "   - Identify ID column from sample_submission (first column) if present.",
         "   - Split train into train/valid with a fixed seed.",
         "   - Preprocess with leak-safe train-fit/apply-to-val-test transforms.",
@@ -1297,10 +1820,13 @@ def _build_fallback_strategy(
         "   - For RNA sequence/structure tasks, treat each molecule/target as the split unit, not each residue row.",
         "   - Use sequence-aware or structure-aware models, preserve sample_submission anchor columns exactly, "
         "and write residue-level coordinates in the provided column order.",
-        "   - Use modality-appropriate models (CNN/transformer/sequence model).",
+        (
+            "   - Use modality-appropriate models or artifact builders: CNN/transformer/sequence models where useful, "
+            "plus signal, array, graph, geospatial, annotation, and model-artifact specific paths."
+        ),
         "   - Only fall back to sample_submission if no valid training path exists.",
         "4) Always write:",
-        "   - `submission.csv` and `metrics.json` under a writable output directory.",
+        "   - the required submission artifact and `metrics.json` under a writable output directory.",
         "   - If `/kaggle/working` is writable, mirror artifacts there; if not, skip silently.",
         "5) Keep changes confined to `kernel.py` and helper files under the kernel directory.",
     ]
@@ -1308,12 +1834,21 @@ def _build_fallback_strategy(
         instructions_lines.extend(
             [
                 "6) This is a writeup/judged competition.",
-                "   - Treat `submission.csv` as optional proxy evidence only, not the primary deliverable.",
+                "   - Treat any submission artifact as optional proxy evidence only, not the primary deliverable.",
                 "   - Preserve experiment outputs that can support a final report/writeup package.",
             ]
         )
     instructions_text = "\n".join(instructions_lines).replace("{slug}", config.slug).strip()
     return strategy_text, instructions_text, plan_payload, research_sources_text, research_summary_text
+
+
+def _fallback_tabular_format_summary() -> str:
+    return (
+        "CSV/TSV/TXT, JSON/JSONL/NDJSON, Parquet/Feather/Arrow, Excel, Stata, XML, "
+        "pickle, SQLite, and compressed tabular variants; non-tabular artifacts such as archives, arrays, "
+        "medical images, media, point-cloud/3D, geospatial, bio/sequence, graph, signal, annotation, and model files "
+        "must follow the requested suffix/manifest instead of being forced to CSV"
+    )
 
 
 def _build_fallback_plan_payload(paths: CompetitionPaths) -> dict[str, object]:
@@ -1582,9 +2117,18 @@ def _read_sample_submission_head(paths: CompetitionPaths, max_lines: int = 5) ->
     sample_path = paths.sample_submission_path
     if not sample_path.exists():
         return ""
+    from kagglebot.submission_sample_discovery import TABULAR_TEXT_SUFFIXES, open_tabular_text, tabular_suffix
+
+    if tabular_suffix(sample_path) not in TABULAR_TEXT_SUFFIXES:
+        try:
+            from kagglebot.solver.io import read_table
+
+            return read_table(sample_path, nrows=max_lines).to_csv(index=False).strip()
+        except Exception:
+            return ""
     lines: list[str] = []
     try:
-        with sample_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with open_tabular_text(sample_path) as handle:
             for _ in range(max_lines):
                 line = handle.readline()
                 if not line:

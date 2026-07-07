@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
 from kagglebot import local_kernel_context as _local_kernel_context
+from kagglebot.asset_modality import (
+    MODEL_ARTIFACT_COMPOUND_SUFFIXES,
+    MODEL_ARTIFACT_JSON_SIDECAR_FILENAMES,
+    MODEL_ARTIFACT_NAME_TOKENS,
+    MODEL_ARTIFACT_SUFFIXES,
+    artifact_suffix,
+)
 from kagglebot.exceptions import KernelFailedError
 from kagglebot.kernel_sources import load_kernel_source_config, pipeline_env_suffix
 
-_LOCAL_MODEL_SCAN_MAX_DEPTH = 4
-_LOADABLE_MODEL_CONFIG_FILENAMES = ("config.json", "tokenizer_config.json")
-_LOADABLE_MODEL_WEIGHT_FILENAMES = ("pytorch_model.bin", "model.safetensors", "tf_model.h5", "flax_model.msgpack")
-_GENERIC_MODEL_ALIAS_TOKENS = {"model", "models", "checkpoint", "checkpoints", "ckpt", "snapshot", "snapshots"}
+_LOCAL_MODEL_SCAN_MAX_DEPTH = 8
+_LOADABLE_MODEL_CONFIG_FILENAMES = MODEL_ARTIFACT_JSON_SIDECAR_FILENAMES
+_LOADABLE_MODEL_WEIGHT_SUFFIXES = (MODEL_ARTIFACT_SUFFIXES | MODEL_ARTIFACT_COMPOUND_SUFFIXES) - {".spm"}
+_GENERIC_MODEL_ALIAS_TOKENS = MODEL_ARTIFACT_NAME_TOKENS | {"snapshot", "snapshots"}
+_NVARC_PIPELINE = "nvarc_qwen3_ttt_turbo_dfs"
+_NVARC_MODEL_SOURCES = (
+    "sorokin/qwen3_2b_grids15_sft141/Transformers/bfloat16/1",
+    "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1",
+)
 
 
 def stage_local_kernel_models(
@@ -21,7 +35,11 @@ def stage_local_kernel_models(
     kernel_stage_dir: Path,
 ) -> tuple[dict[str, str], list[str]]:
     source_config = load_kernel_source_config(base_dir / slug / "plan.json")
-    if not source_config.pipeline_model_hints and not source_config.model_sources:
+    if (
+        not source_config.pipeline_model_hints
+        and not source_config.model_sources
+        and not source_config.required_model_sources
+    ):
         return {}, []
 
     candidate_dirs = discover_local_model_dirs(base_dir=base_dir, slug=slug)
@@ -31,14 +49,37 @@ def stage_local_kernel_models(
     env_updates: dict[str, str] = {}
     notes: list[str] = []
 
+    generic_hints = _dedupe_hints((*source_config.model_sources, *source_config.required_model_sources))
     generic_paths = stage_resolved_model_hints(
-        hints=source_config.model_sources,
+        hints=generic_hints,
         candidate_dirs=candidate_dirs,
         staged_root=staged_root,
     )
     if generic_paths:
         env_updates["KAGGLEBOT_MODEL_PATHS"] = ",".join(str(path) for path in generic_paths)
         notes.append(f"staged {len(generic_paths)} generic local model source(s)")
+
+    unresolved_required_model_sources: list[str] = []
+    if source_config.required_model_sources:
+        _required_paths, unresolved_required_model_sources = stage_resolved_model_hints_checked(
+            hints=source_config.required_model_sources,
+            candidate_dirs=candidate_dirs,
+            staged_root=staged_root,
+        )
+
+    nvarc_hints = _dedupe_hints(tuple(hint for hint in generic_hints if is_required_nvarc_model_source(hint)))
+    if nvarc_hints:
+        nvarc_paths, unresolved_nvarc = stage_resolved_model_hints_checked(
+            hints=nvarc_hints,
+            candidate_dirs=candidate_dirs,
+            staged_root=staged_root,
+        )
+        if nvarc_paths:
+            env_updates[f"KAGGLEBOT_MODEL_PATHS_{pipeline_env_suffix(_NVARC_PIPELINE)}"] = ",".join(
+                str(path) for path in nvarc_paths
+            )
+            notes.append(f"staged {len(nvarc_paths)} local model source(s) for pipeline={_NVARC_PIPELINE}")
+        unresolved_required_model_sources.extend(unresolved_nvarc)
 
     unresolved_required: list[str] = []
     for pipeline_name, hints in source_config.pipeline_model_hints.items():
@@ -63,7 +104,54 @@ def stage_local_kernel_models(
             f"{required_text}. Checked prior kernel model caches, kernel/models, "
             "context/reference_inputs, and Hugging Face snapshot cache."
         )
+    unresolved_required_model_sources = sorted(set(unresolved_required_model_sources))
+    if unresolved_required_model_sources and not _download_passthrough_enabled():
+        missing_text = ", ".join(unresolved_required_model_sources)
+        commands = "; ".join(repair_command_for_model_source(source) for source in unresolved_required_model_sources)
+        raise KernelFailedError(
+            "Required local model sources could not be resolved for local_gpu. "
+            f"Missing: {missing_text}. Populate context/reference_inputs or allow kernel bootstrap. "
+            f"Repair command(s): {commands}"
+        )
+    if unresolved_required_model_sources:
+        notes.append(
+            "missing required local model source(s) will be handled by kernel asset bootstrap because "
+            "KAGGLEBOT_ALLOW_MODEL_DOWNLOAD/LOCAL_INTERNET_FOR_ASSET_CACHE is enabled"
+        )
     return env_updates, notes
+
+
+def _dedupe_hints(hints: Sequence[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for hint in hints:
+        value = str(hint).strip().strip("/")
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    return tuple(values)
+
+
+def is_required_nvarc_model_source(hint: str) -> bool:
+    compact = compact_model_ref_text(hint)
+    return any(compact == compact_model_ref_text(source) for source in _NVARC_MODEL_SOURCES)
+
+
+def _download_passthrough_enabled() -> bool:
+    return os.getenv("KAGGLEBOT_ALLOW_MODEL_DOWNLOAD", "").strip().lower() in {"1", "true", "yes", "on"} or os.getenv(
+        "LOCAL_INTERNET_FOR_ASSET_CACHE", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def repair_command_for_model_source(source: str) -> str:
+    parts = str(source).strip().strip("/").split("/")
+    cache_name = "__".join(parts)
+    cache_dir = Path("context") / "reference_inputs" / f"model__{cache_name}"
+    return shlex.join(
+        ["kaggle", "models", "instances", "versions", "download", str(source), "-p", str(cache_dir), "--untar", "-q"]
+    )
 
 
 def stage_resolved_model_hints(
@@ -72,17 +160,35 @@ def stage_resolved_model_hints(
     candidate_dirs: Sequence[Path],
     staged_root: Path,
 ) -> list[Path]:
+    staged_paths, _unresolved = stage_resolved_model_hints_checked(
+        hints=hints,
+        candidate_dirs=candidate_dirs,
+        staged_root=staged_root,
+    )
+    return staged_paths
+
+
+def stage_resolved_model_hints_checked(
+    *,
+    hints: Sequence[str],
+    candidate_dirs: Sequence[Path],
+    staged_root: Path,
+) -> tuple[list[Path], list[str]]:
     staged_paths: list[Path] = []
     seen_sources: set[Path] = set()
+    unresolved: list[str] = []
     for hint in hints:
         resolved = resolve_local_model_dir_for_hint(hint=hint, candidate_dirs=candidate_dirs)
-        if resolved is None or resolved in seen_sources:
+        if resolved is None:
+            unresolved.append(str(hint))
+            continue
+        if resolved in seen_sources:
             continue
         seen_sources.add(resolved)
         target_dir = staged_root / sanitize_local_model_stage_name(hint)
         _local_kernel_context.stage_local_data_alias(source_dir=resolved, target_dir=target_dir)
         staged_paths.append(target_dir)
-    return staged_paths
+    return staged_paths, unresolved
 
 
 def discover_local_model_dirs(*, base_dir: Path, slug: str) -> list[Path]:
@@ -136,8 +242,12 @@ def iter_dirs_within_depth(root: Path, max_depth: int) -> list[Path]:
 def looks_like_local_model_dir(path: Path) -> bool:
     if not path.exists() or not path.is_dir():
         return False
-    has_config = any((path / filename).exists() for filename in _LOADABLE_MODEL_CONFIG_FILENAMES)
-    has_weights = any((path / filename).exists() for filename in _LOADABLE_MODEL_WEIGHT_FILENAMES)
+    try:
+        filenames = [child.name for child in path.iterdir() if child.is_file()]
+    except OSError:
+        filenames = []
+    has_config = any(filename.lower() in _LOADABLE_MODEL_CONFIG_FILENAMES for filename in filenames)
+    has_weights = any(artifact_suffix(Path(filename)) in _LOADABLE_MODEL_WEIGHT_SUFFIXES for filename in filenames)
     return has_config and has_weights
 
 

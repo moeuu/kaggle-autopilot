@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kagglebot.json_utils import load_json_object_or_empty
+from kagglebot.json_utils import load_json_object_or_empty, write_json_array
 from kagglebot.knowledge import (
     derive_problem_types,
     ensure_taxonomy,
@@ -14,6 +14,7 @@ from kagglebot.knowledge import (
     resolve_research_artifacts,
     resolve_similar_improvements,
 )
+from kagglebot.knowledge.skill_registry import format_skills_for_prompt, search_skills
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 
 
@@ -64,6 +65,26 @@ def refresh_knowledge_hints(*, paths: CompetitionPaths, knowledge_paths: Knowled
         lines.append(context)
     else:
         lines.append("No self-improvement context available yet.")
+    try:
+        problem_types = resolve_problem_types_from_profile(dataset_profile_path=paths.dataset_profile_path)
+        skills = search_skills(knowledge_paths=knowledge_paths, problem_types=problem_types, limit=5)
+        write_json_array(
+            paths.context_dir / "relevant_skills.json",
+            [
+                {
+                    "skill_id": item.get("skill_id"),
+                    "status": item.get("status"),
+                    "fitness_score": item.get("fitness_score"),
+                    "summary": item.get("summary"),
+                }
+                for item in skills
+            ],
+            sort_keys=True,
+        )
+        lines.extend(["", "## Reusable Skills"])
+        lines.append(format_skills_for_prompt(skills, limit=5))
+    except Exception as exc:  # noqa: BLE001
+        lines.extend(["", "## Reusable Skills", f"Reusable skill lookup failed: {exc}"])
 
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     paths.knowledge_hints_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -88,6 +109,16 @@ def load_problem_type_knowledge_text(
             "",
             format_error_fix_insights(
                 resolve_error_fix_insights(knowledge_paths, problem_types, limit=limit),
+                limit=limit,
+            ),
+            "",
+            format_skills_for_prompt(
+                search_skills(
+                    knowledge_paths=knowledge_paths,
+                    problem_types=problem_types,
+                    query=" ".join(problem_types),
+                    limit=limit,
+                ),
                 limit=limit,
             ),
         ]

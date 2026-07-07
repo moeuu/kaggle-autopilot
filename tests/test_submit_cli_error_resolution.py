@@ -337,7 +337,7 @@ def test_resolve_notebook_fallback_after_file_submit_error_updates_state(tmp_pat
         submission_path=submission_path,
         resolve_notebook_submit_artifact_mode=resolve_notebook_mode,
         decide_notebook_submit_artifact_mode_for_paths=decide_artifact_mode,
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         on_message=messages.append,
     )
 
@@ -372,7 +372,7 @@ def test_resolve_notebook_fallback_after_file_submit_error_keeps_state_when_disa
         decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError(f"artifact resolver should not be used: {kwargs}")
         ),
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         on_message=messages.append,
     )
 
@@ -404,7 +404,7 @@ def test_resolve_submit_cli_error_retries_via_notebook_fallback(tmp_path: Path) 
         submission_path=tmp_path / "submission.csv",
         resolve_notebook_submit_artifact_mode=lambda **kwargs: "inference",
         decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: ArtifactModeDecisionStub(mode="inference"),
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         compute_error_fingerprint=lambda stdout, stderr: "unused",
         decide_submit_fingerprint_reuse=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError(f"fingerprint reuse should not be resolved: {kwargs}")
@@ -458,7 +458,7 @@ def test_resolve_submit_cli_error_builds_retry_action(tmp_path: Path) -> None:
         decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError(f"artifact resolver should not be used: {kwargs}")
         ),
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         decide_submit_fingerprint_reuse=lambda **kwargs: (
             fingerprint_calls.append(kwargs)
@@ -522,7 +522,7 @@ def test_resolve_submit_cli_error_for_run_binds_run_state_save(tmp_path: Path) -
         decide_notebook_submit_artifact_mode_for_paths=lambda **kwargs: (_ for _ in ()).throw(
             AssertionError(f"artifact resolver should not be used: {kwargs}")
         ),
-        count_csv_data_rows=lambda path: 3,
+        count_tabular_data_rows=lambda path: 3,
         compute_error_fingerprint=lambda stdout, stderr: f"fp:{stdout}:{stderr}",
         decide_submit_fingerprint_reuse=decide_fingerprint_reuse,
         compute_submit_backoff=lambda **kwargs: 3.25,

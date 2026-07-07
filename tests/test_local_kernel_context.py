@@ -7,6 +7,7 @@ from kagglebot.local_kernel_context import (
     load_dataset_profile_identity,
     stage_local_kernel_context_profile,
     stage_local_kernel_data_dir,
+    stage_local_kernel_reference_inputs,
 )
 
 
@@ -76,3 +77,19 @@ def test_stage_local_kernel_context_profile_noops_when_target_is_source(tmp_path
     stage_local_kernel_context_profile(base_dir=tmp_path, slug="demo", run_dir=tmp_path / "demo")
 
     assert profile_path.read_text(encoding="utf-8") == '{"id_column": "id"}\n'
+
+
+def test_stage_local_kernel_reference_inputs_aliases_persistent_cache(tmp_path: Path) -> None:
+    reference_dir = tmp_path / "demo" / "context" / "reference_inputs"
+    reference_dir.mkdir(parents=True)
+    (reference_dir / "kernel__owner__slug").mkdir()
+    (reference_dir / "kernel__owner__slug" / "kernel-metadata.json").write_text("{}", encoding="utf-8")
+
+    run_dir = tmp_path / "demo" / "kernels" / "run-1"
+
+    stage_local_kernel_reference_inputs(base_dir=tmp_path, slug="demo", run_dir=run_dir)
+
+    target = run_dir / "context" / "reference_inputs"
+    assert target.exists()
+    assert target.is_dir() or target.is_symlink()
+    assert (target / "kernel__owner__slug" / "kernel-metadata.json").exists()

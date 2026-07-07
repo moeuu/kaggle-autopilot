@@ -320,7 +320,8 @@ def append_improvement_policy_context(
     if infer_deliverable_mode_from_paths(config.paths) == "writeup":
         base_prompt_text += (
             "\n\nWriteup mode is active for this competition.\n"
-            "Do not optimize only for submission.csv production. Treat offline metrics and any CSV artifacts as "
+            "Do not optimize only for submission artifact production. Treat offline metrics and any "
+            "submission artifacts as "
             "proxy evidence supporting the final judged writeup package.\n"
         )
     if forced_improvement_reason:

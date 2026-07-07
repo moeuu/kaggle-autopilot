@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
+
+import pandas as pd
 
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
@@ -76,6 +79,71 @@ def test_infer_code_competition_from_plan_notebook_tiny_public_contract(tmp_path
     paths.plan_path.write_text(json.dumps({"submit_mode": "notebook"}), encoding="utf-8")
     paths.data_dir.joinpath("test.csv").write_text("id,text\n1,a\n2,b\n3,c\n", encoding="utf-8")
     paths.data_dir.joinpath("sample_submission.csv").write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+
+    assert infer_code_competition_from_paths(paths) is True
+
+
+def test_infer_code_competition_from_plan_notebook_tiny_public_jsonl_contract(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(json.dumps({"submit_mode": "notebook"}), encoding="utf-8")
+    paths.data_dir.joinpath("test.jsonl").write_text(
+        '{"id": 1, "text": "a"}\n{"id": 2, "text": "b"}\n{"id": 3, "text": "c"}\n',
+        encoding="utf-8",
+    )
+    paths.data_dir.joinpath("sample_submission.jsonl").write_text(
+        '{"id": 1, "target": 0}\n{"id": 2, "target": 0}\n{"id": 3, "target": 0}\n',
+        encoding="utf-8",
+    )
+
+    assert infer_code_competition_from_paths(paths) is True
+
+
+def test_infer_code_competition_from_plan_notebook_tiny_public_alias_contract(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(json.dumps({"submit_mode": "notebook"}), encoding="utf-8")
+    paths.data_dir.joinpath("PublicTest.jsonl").write_text(
+        '{"id": 1, "text": "a"}\n{"id": 2, "text": "b"}\n{"id": 3, "text": "c"}\n',
+        encoding="utf-8",
+    )
+    pd.DataFrame({"id": [1, 2, 3], "target": [0, 0, 0]}).to_excel(
+        paths.data_dir / "SampleSubmission.xlsx",
+        index=False,
+    )
+
+    assert infer_code_competition_from_paths(paths) is True
+
+
+def test_infer_code_competition_from_plan_uses_context_sample_alias_for_tiny_public_contract(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(json.dumps({"submit_mode": "notebook"}), encoding="utf-8")
+    paths.data_dir.joinpath("test.csv").write_text("id,text\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    paths.context_dir.joinpath("AnswerTemplate.csv").write_text("id,target\n1,0\n2,0\n3,0\n", encoding="utf-8")
+
+    assert infer_code_competition_from_paths(paths) is True
+
+
+def test_infer_code_competition_from_plan_notebook_tiny_public_compressed_and_excel_contract(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(json.dumps({"submit_mode": "notebook"}), encoding="utf-8")
+    with gzip.open(paths.data_dir / "test.csv.gz", "wt", encoding="utf-8") as handle:
+        handle.write("id,text\n1,a\n2,b\n3,c\n")
+    pd.DataFrame({"id": [1, 2, 3], "target": [0, 0, 0]}).to_excel(
+        paths.data_dir / "sample_submission.xlsx",
+        index=False,
+    )
 
     assert infer_code_competition_from_paths(paths) is True
 

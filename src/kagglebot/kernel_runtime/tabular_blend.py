@@ -3,11 +3,26 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 try:  # pragma: no cover - local kernel import path
-    from .tabular_ensemble import PipelineResult, clip_predictions, safe_auc
+    from .tabular_ensemble import (
+        PipelineResult,
+        build_prediction_range,
+        clip_predictions,
+        normalize_structured_regression_predictions,
+        prediction_kind_is_probability,
+        safe_auc,
+    )
 except ImportError:  # pragma: no cover - direct sys.path import from artifact kernels
-    from tabular_ensemble import PipelineResult, clip_predictions, safe_auc
+    from tabular_ensemble import (
+        PipelineResult,
+        build_prediction_range,
+        clip_predictions,
+        normalize_structured_regression_predictions,
+        prediction_kind_is_probability,
+        safe_auc,
+    )
 
 
 def seed_prediction_map(result: PipelineResult, key: str) -> dict[int, np.ndarray]:
@@ -32,10 +47,42 @@ def seed_score_rows(result: PipelineResult) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         try:
-            rows.append({"seed": int(item["seed"]), "auc": float(item["auc"])})
+            score = float(item["score"] if "score" in item else item["auc"])
+            row = {
+                "seed": int(item["seed"]),
+                "score": score,
+                "metric": str(item.get("metric") or ("roc_auc" if "auc" in item else "score")),
+            }
+            if "auc" in item:
+                row["auc"] = float(item["auc"])
+            rows.append(row)
         except Exception:
             continue
     return rows
+
+
+def bundle_prediction_kind(bundle: Any) -> str | None:
+    return getattr(bundle, "prediction_kind", None) or getattr(bundle, "target_semantics", None)
+
+
+def bundle_target_name(bundle: Any) -> str | None:
+    return getattr(bundle, "target_col", None) or getattr(bundle, "target_column", None)
+
+
+def score_predictions(bundle: Any, preds: np.ndarray) -> tuple[float, str, dict[str, float]]:
+    prediction_kind = bundle_prediction_kind(bundle)
+    y_true = np.asarray(bundle.target_values, dtype=np.float64)
+    y_pred = np.asarray(preds, dtype=np.float64)
+    if prediction_kind_is_probability(prediction_kind):
+        score = safe_auc(y_true, y_pred)
+        return score, "roc_auc", {"roc_auc": score}
+    if str(prediction_kind or "").lower() in {"count_regression", "positive_skew_regression"}:
+        y_true_clip = np.clip(y_true, 0.0, None)
+        y_pred_clip = np.clip(y_pred, 0.0, None)
+        rmsle = float(np.sqrt(np.mean((np.log1p(y_true_clip) - np.log1p(y_pred_clip)) ** 2)))
+        return -rmsle, "rmsle", {"rmsle": rmsle}
+    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    return -rmse, "rmse", {"rmse": rmse}
 
 
 def should_select_blend_candidate(
@@ -46,8 +93,8 @@ def should_select_blend_candidate(
 ) -> bool:
     if float(blend_result.cv_score) <= float(best_single.cv_score) + min_margin:
         return False
-    blend_seed_scores = {row["seed"]: row["auc"] for row in seed_score_rows(blend_result)}
-    single_seed_scores = {row["seed"]: row["auc"] for row in seed_score_rows(best_single)}
+    blend_seed_scores = {row["seed"]: row["score"] for row in seed_score_rows(blend_result)}
+    single_seed_scores = {row["seed"]: row["score"] for row in seed_score_rows(best_single)}
     common_seeds = sorted(set(blend_seed_scores) & set(single_seed_scores))
     if not common_seeds:
         return True
@@ -96,10 +143,30 @@ def _weighted_rank_average(arrays: list[np.ndarray], weights: list[float]) -> np
     return np.average(ranked, axis=0, weights=np.asarray(weights, dtype=np.float64))
 
 
-def _combine_predictions(arrays: list[np.ndarray], weights: list[float], method: str) -> np.ndarray:
+def _combine_predictions(
+    arrays: list[np.ndarray],
+    weights: list[float],
+    method: str,
+    *,
+    prediction_kind: str | None = None,
+    target_labels: np.ndarray | None = None,
+    target_col: str | None = None,
+) -> np.ndarray:
     normalized_weights = np.asarray(weights, dtype=np.float64)
     normalized_weights = normalized_weights / normalized_weights.sum()
     method_key = str(method).strip().lower()
+    if not prediction_kind_is_probability(prediction_kind):
+        if method_key != "weighted":
+            raise ValueError(f"Blend method '{method}' requires probability predictions.")
+        return normalize_structured_regression_predictions(
+            sum(
+                weight * np.asarray(arr, dtype=np.float64)
+                for weight, arr in zip(normalized_weights, arrays, strict=True)
+            ),
+            prediction_kind=prediction_kind,
+            target_labels=None if target_labels is None else pd.Series(target_labels, name=target_col),
+            target_col=target_col,
+        )
     if method_key == "weighted":
         return clip_predictions(
             sum(
@@ -145,13 +212,30 @@ def make_component_blend_result(
     component_names = list(normalized_weights)
     component_results = [results_by_name[name] for name in component_names]
     weight_values = [normalized_weights[name] for name in component_names]
+    prediction_kind = bundle_prediction_kind(bundle)
+    target_col = bundle_target_name(bundle)
+    target_values = np.asarray(bundle.target_values, dtype=np.float64)
     blend_name = _blend_name(
         name_prefix or f"{kind}_{method}",
         component_names,
         normalized_weights,
     )
-    oof_preds = _combine_predictions([result.oof_preds for result in component_results], weight_values, method)
-    test_preds = _combine_predictions([result.test_preds for result in component_results], weight_values, method)
+    oof_preds = _combine_predictions(
+        [result.oof_preds for result in component_results],
+        weight_values,
+        method,
+        prediction_kind=prediction_kind,
+        target_labels=target_values,
+        target_col=target_col,
+    )
+    test_preds = _combine_predictions(
+        [result.test_preds for result in component_results],
+        weight_values,
+        method,
+        prediction_kind=prediction_kind,
+        target_labels=target_values,
+        target_col=target_col,
+    )
     fold_scores: list[dict[str, Any]] = []
     test_predictions_by_fold: dict[str, np.ndarray] = {}
     oof_predictions_by_fold: dict[str, np.ndarray] = {}
@@ -167,14 +251,23 @@ def make_component_blend_result(
             [mapping[seed] for mapping in seed_oof_maps],
             weight_values,
             method,
+            prediction_kind=prediction_kind,
+            target_labels=target_values,
+            target_col=target_col,
         )
         if all(seed in mapping for mapping in seed_test_maps):
             seed_test_predictions[seed] = _combine_predictions(
                 [mapping[seed] for mapping in seed_test_maps],
                 weight_values,
                 method,
+                prediction_kind=prediction_kind,
+                target_labels=target_values,
+                target_col=target_col,
             )
-        seed_scores.append({"seed": seed, "auc": safe_auc(bundle.target_values, seed_oof_predictions[seed])})
+        seed_score, seed_metric, seed_metric_values = score_predictions(bundle, seed_oof_predictions[seed])
+        seed_scores.append({"seed": seed, "score": seed_score, "metric": seed_metric, **seed_metric_values})
+        if seed_metric == "roc_auc":
+            seed_scores[-1]["auc"] = seed_metric_values["roc_auc"]
     for fold_number in range(1, outer_folds + 1):
         fold_key = f"fold_{fold_number}"
         anchor = component_results[0]
@@ -183,27 +276,48 @@ def make_component_blend_result(
             [result.oof_predictions_by_fold[fold_key] for result in component_results],
             weight_values,
             method,
+            prediction_kind=prediction_kind,
+            target_labels=target_values,
+            target_col=target_col,
         )
         fold_test_preds = _combine_predictions(
             [result.test_predictions_by_fold[fold_key] for result in component_results],
             weight_values,
             method,
+            prediction_kind=prediction_kind,
+            target_labels=target_values,
+            target_col=target_col,
         )
         oof_predictions_by_fold[fold_key] = fold_valid_preds
         test_predictions_by_fold[fold_key] = fold_test_preds
         valid_indices_by_fold[fold_key] = valid_idx
-        fold_scores.append(
-            {
-                "suite": artifacts.suite_name,
-                "pipeline": blend_name,
-                "fold": fold_number,
-                "roc_auc": safe_auc(bundle.target_values[valid_idx], fold_valid_preds),
-                "pseudo_statuses": kind,
-                "pseudo_improved": False,
-                "pseudo_candidates": 0,
-            }
+        fold_score, fold_metric, fold_metric_values = score_predictions(
+            type(
+                "FoldBundle",
+                (),
+                {
+                    "target_values": target_values[valid_idx],
+                    "prediction_kind": prediction_kind,
+                    "target_col": target_col,
+                },
+            )(),
+            fold_valid_preds,
         )
-    cv_score = safe_auc(bundle.target_values, oof_preds)
+        fold_row = {
+            "suite": artifacts.suite_name,
+            "pipeline": blend_name,
+            "fold": fold_number,
+            "score": fold_score,
+            "metric": fold_metric,
+            "pseudo_statuses": kind,
+            "pseudo_improved": False,
+            "pseudo_candidates": 0,
+            **fold_metric_values,
+        }
+        if fold_metric == "roc_auc":
+            fold_row["roc_auc"] = fold_metric_values["roc_auc"]
+        fold_scores.append(fold_row)
+    cv_score, cv_metric, cv_metric_values = score_predictions(bundle, oof_preds)
     max_pair_corr = max(
         (
             _component_correlation(first, second)
@@ -245,8 +359,17 @@ def make_component_blend_result(
             "component_count": len(component_names),
             "max_component_abs_corr": max_pair_corr,
             "pipeline_name": blend_name,
-            "prediction_range": [float(test_preds.min()), float(test_preds.max())],
-            "overall_oof_auc": cv_score,
+            "prediction_kind": prediction_kind,
+            "prediction_range": build_prediction_range(
+                test_preds,
+                prediction_kind=prediction_kind,
+                target_labels=pd.Series(target_values, name=target_col),
+                target_col=target_col,
+            ),
+            "overall_score": cv_score,
+            "metric": cv_metric,
+            **cv_metric_values,
+            "overall_oof_auc": cv_score if cv_metric == "roc_auc" else None,
             "train_mode": getattr(artifacts, "train_mode", None),
             "feature_recipe": getattr(artifacts, "feature_recipe", None),
             "original_row_weight": getattr(artifacts, "original_row_weight", None),
@@ -540,6 +663,9 @@ def build_hill_climb_candidates(
     current_weights = {ordered_candidates[0].name: 1.0}
     used_names = {ordered_candidates[0].name}
     generated: list[PipelineResult] = []
+    blend_methods = (
+        ("weighted", "logit") if prediction_kind_is_probability(bundle_prediction_kind(bundle)) else ("weighted",)
+    )
 
     for _ in range(2, max_components + 1):
         best_candidate: PipelineResult | None = None
@@ -553,7 +679,7 @@ def build_hill_climb_candidates(
                 default=0.0,
             )
             weight_grid = (0.1, 0.15, 0.2) if max_corr > corr_threshold else add_weight_grid
-            for method in ("weighted", "logit"):
+            for method in blend_methods:
                 for add_weight in weight_grid:
                     if max_corr > corr_threshold and add_weight > 0.2:
                         continue
@@ -590,16 +716,17 @@ def build_hill_climb_candidates(
             forced_candidate = remaining[0]
             forced_weights = {name: weight * 0.85 for name, weight in current_weights.items()}
             forced_weights[forced_candidate.name] = 0.15
+            forced_method = "logit" if prediction_kind_is_probability(bundle_prediction_kind(bundle)) else "weighted"
             generated.append(
                 make_component_blend_result(
                     bundle=bundle,
                     artifacts=artifacts,
                     results_by_name=results_by_name,
                     component_weights=forced_weights,
-                    method="logit",
+                    method=forced_method,
                     outer_folds=outer_folds,
                     kind="hill_climb_blend",
-                    name_prefix="hill_climb_logit",
+                    name_prefix=f"hill_climb_{forced_method}",
                 )
             )
     return generated

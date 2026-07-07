@@ -10,7 +10,51 @@ from kagglebot.metric_matching import normalize_metric_name
 from kagglebot.scalar_utils import tolerant_finite_float
 from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
 from kagglebot.solver.evaluate import EvaluationResult
+from kagglebot.solver.io import read_table
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
+
+_METRIC_ASSIGNMENT_NAME_SUFFIXES = (
+    "quadratic_weighted_kappa",
+    "weighted_kappa",
+    "concordance_index",
+    "interval_score",
+    "pinball_loss",
+    "brier_score",
+    "log_loss",
+    "r2_score",
+    "accuracy",
+    "precision",
+    "spearman",
+    "pearson",
+    "recall",
+    "logloss",
+    "mcrmse",
+    "rmsle",
+    "smape",
+    "kappa",
+    "score",
+    "brier",
+    "cindex",
+    "gini",
+    "loss",
+    "ndcg",
+    "mape",
+    "rmse",
+    "mae",
+    "mse",
+    "auc",
+    "qwk",
+    "map",
+    "acc",
+    "r2",
+    "f1",
+)
+_METRIC_ASSIGNMENT_NAME_SUFFIX_RE = "|".join(re.escape(suffix) for suffix in _METRIC_ASSIGNMENT_NAME_SUFFIXES)
+_BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
+    rf"\b(?P<name>[a-z_][a-z0-9_]*?(?:{_METRIC_ASSIGNMENT_NAME_SUFFIX_RE}))\s*=\s*"
+    r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+    flags=re.IGNORECASE,
+)
 
 
 def extract_trusted_cv_value_from_metrics_payload(payload: dict[str, object]) -> float | None:
@@ -107,14 +151,14 @@ def recompute_metric_from_oof_artifact(
     if oof_path is None or not oof_path.exists():
         return None
     try:
-        import pandas as pd
-    except Exception:
-        return None
-    try:
-        oof = pd.read_csv(oof_path)
+        oof = read_table(oof_path)
     except Exception:
         return None
     if oof.empty:
+        return None
+    try:
+        import pandas as pd
+    except Exception:
         return None
 
     y_col = pick_oof_target_column(oof)
@@ -237,7 +281,18 @@ def extract_kernel_metric(payload: dict[str, object], target_metric: str | None)
         return text
 
     def prefers_lower(metric: str) -> bool:
-        return normalize(metric) in {"rmse", "rmsle", "mae", "mape", "logloss", "loss"}
+        return canonical_metric(metric) in {
+            "rmse",
+            "rmsle",
+            "mae",
+            "mape",
+            "mse",
+            "logloss",
+            "mcrmse",
+            "smape",
+            "pinball_loss",
+            "interval_score",
+        } or normalize(metric) in {"logloss", "loss"}
 
     def pick_from_dict(metric_key: str, values: dict[str, object]) -> float | None:
         selection = payload.get("selection")
@@ -360,14 +415,23 @@ def extract_kernel_metric(payload: dict[str, object], target_metric: str | None)
         "accuracy": ("accuracy", "acc"),
         "auc": ("auc", "rocauc", "roc_auc"),
         "brier_score": ("brier", "brier_score", "brierscore"),
+        "concordance_index": ("cindex", "concordance", "concordance_index", "concordanceindex"),
         "fmax": ("fmax", "proxyfmax"),
         "f1": ("f1", "f1score"),
+        "interval_score": ("interval_score", "intervalscore", "prediction_interval_score"),
         "logloss": ("logloss", "log_loss"),
         "mae": ("mae",),
         "mape": ("mape",),
+        "mcrmse": ("mcrmse", "mean_columnwise_rmse", "columnwise_rmse"),
+        "ndcg": ("ndcg", "normalized_discounted_cumulative_gain"),
+        "pearson": ("pearson", "pearsonr"),
+        "pinball_loss": ("pinball", "pinball_loss", "quantile_loss"),
+        "quadratic_weighted_kappa": ("qwk", "weighted_kappa", "quadratic_weighted_kappa", "cohen_kappa"),
         "rmse": ("rmse",),
         "rmsle": ("rmsle",),
         "r2": ("r2", "r2score"),
+        "smape": ("smape",),
+        "spearman": ("spearman", "spearmanr"),
     }
 
     target_key = normalize(target_metric) if target_metric else ""
@@ -587,11 +651,6 @@ def extract_validation_scores_from_log_text(log_text: str, metric_name: str | No
 def extract_baseline_scores_from_log_text(log_text: str) -> list[float]:
     if not log_text:
         return []
-    pattern = re.compile(
-        r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
-        r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
-        flags=re.IGNORECASE,
-    )
     scores: list[float] = []
     for raw_line in log_text.splitlines():
         line = raw_line.strip()
@@ -600,7 +659,7 @@ def extract_baseline_scores_from_log_text(log_text: str) -> list[float]:
             continue
         if "fold=" in lowered:
             continue
-        for match in pattern.finditer(line):
+        for match in _BASELINE_SCORE_ASSIGNMENT_RE.finditer(line):
             parsed = tolerant_finite_float(match.group("value"))
             if parsed is not None:
                 scores.append(float(parsed))

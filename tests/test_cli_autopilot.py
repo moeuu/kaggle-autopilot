@@ -60,6 +60,7 @@ def test_autopilot_submit_aborted_exits_clean(monkeypatch, tmp_path: Path) -> No
             "playground-series-s6e2",
             "--compute",
             "local_gpu",
+            "--no-auto-eval-spec",
         ],
     )
 
@@ -381,6 +382,7 @@ def test_autopilot_resume_run_id_reuses_existing_run(monkeypatch, tmp_path: Path
             "local_gpu",
             "--resume-run-id",
             run_id,
+            "--no-auto-eval-spec",
         ],
     )
 
@@ -430,6 +432,7 @@ def test_autopilot_resume_latest_selects_most_recent_run(monkeypatch, tmp_path: 
             "--compute",
             "local_gpu",
             "--resume-latest",
+            "--no-auto-eval-spec",
         ],
     )
 
@@ -503,6 +506,7 @@ def test_autopilot_resume_run_id_accepts_unique_prefix(monkeypatch, tmp_path: Pa
             "local_gpu",
             "--resume-run-id",
             prefix,
+            "--no-auto-eval-spec",
         ],
     )
 

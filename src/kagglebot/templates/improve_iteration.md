@@ -29,7 +29,7 @@
 **Current Iteration Artifacts**:
 - `{current_metrics_path}` - Latest loop-decision + offline-by-source results (iteration {current_iteration})
 - `{current_diagnostics_path}` - Agent-readable performance analysis
-- `{current_submission_path}` - Current submission.csv
+- `{current_submission_path}` - Current submission artifact
 - `{logs_dir}` - Training logs and error messages (if any)
 
 **Previous Iterations** (learn from history):
@@ -147,8 +147,8 @@ Top1 campaign portfolio override:
 - Persist OOF/test predictions and candidate metadata so `candidate_registry.json`, `portfolio_plan.json`, and `blend_report.json` can rank low-correlation candidates and allocate submissions by information value.
 - For long-running multi-fold candidates, persist a valid intermediate candidate at the end of every fold. Save
   completed-fold OOF/test predictions, metadata, `candidate_<candidate>_fold<N>.json`, and a
-  `submission_<candidate>_fold<N>.csv` that matches `sample_submission.csv`; never leave completed folds only in memory
-  until all folds finish.
+  `submission_<candidate>_fold<N>.<suffix>` that matches the required submission format when tabular; never leave
+  completed folds only in memory until all folds finish.
 
 Candidate selection guard:
 - Do not select the final submission by CV alone when multiple candidates exist.
@@ -160,7 +160,7 @@ Candidate selection guard:
 Implementation scope policy:
 - Always apply changes to `artifacts/<slug>/kernel/kernel.py`.
 - Keep `local_gpu` and `kaggle_gpu` algorithmically identical; only execution location differs.
-- For non-tabular competitions (image/video/audio/text), implement/iterate `custom_main()` in `kernel.py`.
+- For non-tabular competitions (image/video/audio/text/document/medical-imaging/array/point-cloud/3D/geospatial/bio/sequence/graph/signal/annotation/model-artifact), implement/iterate `custom_main()` in `kernel.py`.
 - If pretrained checkpoints are beneficial, add download + cache logic in `kernel.py` with internet-off fallback.
 
 Anti-leakage policy for external data:
@@ -376,7 +376,20 @@ uv run kagglebot train {slug} --compute {compute_mode}
 
 4. Did submission format stay valid?
    ```bash
-   diff <(head -1 {sample_submission_path}) <(head -1 {submission_path})
+   uv run python - <<'PY'
+   from pathlib import Path
+   from kagglebot.solver.io import read_table
+   sample_path = Path("{sample_submission_path}")
+   submission_path = Path("{submission_path}")
+   try:
+       sample = read_table(sample_path)
+       submission = read_table(submission_path)
+   except Exception as exc:
+       print(f"non-tabular or manifest-based submission check required: {exc}")
+   else:
+       assert list(submission.columns) == list(sample.columns)
+       print("tabular submission columns match sample")
+   PY
    ```
 
 **Run Tests**:
@@ -390,7 +403,7 @@ uv run pytest -q
 - ❌ NEVER automate rules acceptance or submission bypass
 - ❌ NEVER commit secrets (kaggle.json, API keys, tokens)
 - ❌ NEVER add interactive prompts (must be non-interactive)
-- ❌ NEVER use test.csv for local validation split generation
+- ❌ NEVER use test files for local validation split generation
 - ❌ NEVER copy hidden/test labels from external labeled overlaps, exact file-hash matches, row-id mappings, or solution-like artifacts
 - ❌ NEVER bypass safety guardrails
 - ✅ DO keep changes incremental (1-2 focused improvements)
@@ -402,7 +415,7 @@ uv run pytest -q
 - [ ] Changes address root cause from diagnostics
 - [ ] Loop-decision score improves, or offline diagnostics provide actionable learning
 - [ ] Train-val gap is reasonable (not overfitting)
-- [ ] submission.csv format still matches sample_submission.csv
+- [ ] Submission artifact format still matches the required sample/format
 - [ ] GPU/TPU utilization >80% (GPU) or >70% (TPU MXU)
 - [ ] Tests pass: `uv run pytest -q`
 - [ ] No secrets leaked into code/logs
@@ -416,7 +429,7 @@ Your improvement will be accepted if:
 
 1. ✅ **Tests pass**: `uv run pytest -q` returns 0 exit code
 2. ✅ **Decision score valid**: metrics.json has loop-decision and supporting offline metrics
-3. ✅ **Submission valid**: submission.csv still matches format
+3. ✅ **Submission valid**: submission artifact still matches format
 4. ✅ **GPU/TPU utilized**: Utilization >80% (GPU) or >70% (TPU) logged
 5. ✅ **No errors**: Training completes without exceptions
 6. ✅ **Progress logged**: Diagnostics updated with change summary

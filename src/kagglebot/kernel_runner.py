@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -35,6 +34,7 @@ from kagglebot import local_kernel_runtime_env as _local_kernel_runtime_env
 from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
 from kagglebot import remote_kernel_state as _remote_kernel_state
+from kagglebot.competition_policy import load_competition_policy
 from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
     KaggleCliError,
@@ -58,6 +58,7 @@ from kagglebot.kernel_outputs import copy_local_kernel_primary_artifacts as _cop
 from kagglebot.kernel_outputs import copy_optional_local_kernel_artifacts as _copy_optional_local_kernel_artifacts
 from kagglebot.kernel_outputs import find_output_file as _find_output_file
 from kagglebot.kernel_outputs import find_submission_file
+from kagglebot.kernel_outputs import resolve_local_kernel_artifact_file as _resolve_local_kernel_artifact_file
 from kagglebot.kernel_outputs import resolve_local_kernel_artifacts as _resolve_local_kernel_artifacts
 from kagglebot.kernel_push_validation import (
     raise_for_invalid_kernel_push_sources as _raise_for_invalid_kernel_push_sources,
@@ -80,15 +81,20 @@ from kagglebot.kernel_submit_wrapper import (
 )
 from kagglebot.kernel_submit_wrapper import render_submission_kernel_script as _render_submission_kernel_script
 from kagglebot.logging_utils import truncate_lines
+from kagglebot.paths import CompetitionPaths
 from kagglebot.solution_guard import ensure_solution_path_allowed
+from kagglebot.submission_format import load_submission_format_hint
+from kagglebot.submission_output_naming import (
+    all_submission_output_suffixes,
+    output_filename_from_format_text,
+    tabular_submission_output_suffixes,
+)
+from kagglebot.submission_sample_discovery import tabular_suffix
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
-_BASELINE_SCORE_ASSIGNMENT_RE = re.compile(
-    r"\b(?P<name>[a-z_][a-z0-9_]*?(?:score|auc|rmse|mae|mse|f1|loss|accuracy|acc|precision|recall|map|ndcg|logloss|brier|gini))\s*=\s*"
-    r"(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
-    re.IGNORECASE,
-)
+_LOCAL_FORMAT_SUBMISSION_OUTPUT_SUFFIXES = all_submission_output_suffixes()
+_LOCAL_SAMPLE_SUBMISSION_OUTPUT_SUFFIXES = tabular_submission_output_suffixes()
 
 
 @dataclass(frozen=True)
@@ -251,7 +257,9 @@ class KernelSubmitPackageBuilder:
         if not config.dry_run and not check_rules_accepted(config.slug, dry_run=False):
             raise RulesNotAcceptedError("Competition rules not accepted.")
 
-        if not config.submission_path.exists() or not config.submission_path.is_file():
+        if not config.submission_path.exists() or not (
+            config.submission_path.is_file() or config.submission_path.is_dir()
+        ):
             raise KernelFailedError(f"Submission artifact not found: {config.submission_path}")
 
         submit_mode = str(config.mode or "wrapper").strip().lower()
@@ -578,12 +586,15 @@ def run_kernel_local(
     context_dir = base_dir / slug / "context"
     output_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "output"
     logs_dir = base_dir / slug / "runs" / run_id / f"iter-{iteration}" / "logs"
+    competition_policy = load_competition_policy(CompetitionPaths(slug=slug, artifacts_dir=base_dir))
+    policy_kernel_contract = competition_policy.execution_hint("kernel_contract")
     output_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
     _local_sample_submission.ensure_local_sample_submission_file(base_dir=base_dir, slug=slug)
     _local_kernel_context.stage_local_kernel_data_dir(base_dir=base_dir, slug=slug, run_dir=run_dir)
     _local_kernel_context.stage_local_kernel_context_profile(base_dir=base_dir, slug=slug, run_dir=run_dir)
+    _local_kernel_context.stage_local_kernel_reference_inputs(base_dir=base_dir, slug=slug, run_dir=run_dir)
 
     ensure_solution_path_allowed(kernel_source_dir, artifacts_dir=base_dir, slug=slug)
     kernel_path = kernel_source_dir / "kernel.py"
@@ -679,6 +690,9 @@ def run_kernel_local(
     env.setdefault("KAGGLEBOT_RUN_ID", run_id)
     env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
     env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
+    local_submission_filename = _local_submission_filename_from_sample(base_dir=base_dir, slug=slug)
+    if local_submission_filename is not None:
+        env.setdefault("KAGGLEBOT_SUBMISSION_FILENAME", local_submission_filename)
     for key, value in hardware_env(resolve_hardware_profile(hardware_profile, compute="local_gpu")).items():
         env.setdefault(key, value)
     for key, value in local_aux_env.items():
@@ -826,11 +840,21 @@ def run_kernel_local(
     )
     print(f"[cyan]kernel local complete[/cyan]: elapsed={result.duration_sec:.0f}s")
 
+    explicit_submission_src = None
+    if local_submission_filename is not None:
+        explicit_submission_src = _resolve_local_kernel_artifact_file(
+            kernel_dir=kernel_stage_dir,
+            output_dir=output_dir,
+            started_at=started_at,
+            filename=local_submission_filename,
+        )
     submission_src, metrics_src = _resolve_local_kernel_artifacts(
         kernel_dir=kernel_stage_dir,
         output_dir=output_dir,
         started_at=started_at,
     )
+    if explicit_submission_src is not None:
+        submission_src = explicit_submission_src
     if submission_src is None:
         raise KernelFailedError("Local kernel completed but submission output was not found.")
 
@@ -850,6 +874,7 @@ def run_kernel_local(
         slug=slug,
         logs_dir=logs_dir,
         metrics_path=metrics_dst,
+        policy_contract=policy_kernel_contract,
     )
     _copy_optional_local_kernel_artifacts(
         kernel_dir=kernel_stage_dir,
@@ -862,6 +887,38 @@ def run_kernel_local(
         output_dir=output_dir,
         submission_path=submission_dst,
         metrics_path=metrics_dst,
+    )
+
+
+def _local_submission_filename_from_sample(*, base_dir: Path, slug: str) -> str | None:
+    format_filename = _local_submission_filename_from_format(base_dir=base_dir, slug=slug)
+    if format_filename is not None:
+        return format_filename
+    source = _local_sample_submission.resolve_sample_submission_source(
+        context_dir=base_dir / slug / "context",
+        data_dir=base_dir / slug / "data",
+    )
+    if source is None:
+        return None
+    suffix = tabular_suffix(source)
+    if suffix not in _LOCAL_SAMPLE_SUBMISSION_OUTPUT_SUFFIXES:
+        return None
+    return f"submission{suffix}"
+
+
+def _local_submission_filename_from_format(*, base_dir: Path, slug: str) -> str | None:
+    format_path = base_dir / slug / "context" / "submission_format.md"
+    hint = load_submission_format_hint(format_path)
+    if hint is None or not hint.expected_suffixes:
+        return None
+    try:
+        text = format_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        text = ""
+    return output_filename_from_format_text(
+        text,
+        expected_suffixes=hint.expected_suffixes,
+        allowed_suffixes=_LOCAL_FORMAT_SUBMISSION_OUTPUT_SUFFIXES,
     )
 
 

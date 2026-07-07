@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import gzip
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
+import pandas as pd
+import pytest
 
 from kagglebot.paths import CompetitionPaths
 from kagglebot.runtime_fixes import (
@@ -47,6 +51,24 @@ def test_error_strategy_skip_reason_detects_deterministic_failures() -> None:
     )
     assert reason_data is not None
     assert "path resolution" in reason_data
+    reason_submission = error_strategy_skip_reason(
+        stage="kernel_fix",
+        error_text=(
+            "ValueError: Kernel source validation failed:\n"
+            "- Kernel sources do not reference a supported submission output artifact."
+        ),
+    )
+    assert reason_submission is not None
+    assert "submission output" in reason_submission
+    reason_submission_generic = error_strategy_skip_reason(
+        stage="kernel_fix",
+        error_text=(
+            "ValueError: Kernel source validation failed:\n"
+            "- Kernel sources do not reference submission output artifact."
+        ),
+    )
+    assert reason_submission_generic is not None
+    assert "submission output" in reason_submission_generic
     reason_metric = error_strategy_skip_reason(
         stage="autofix",
         error_text=(
@@ -135,6 +157,51 @@ def test_maybe_write_column_fill_from_missing_columns_error(tmp_path: Path) -> N
     assert payload["missing_columns"] == []
 
 
+def test_maybe_write_column_fill_from_compressed_file_missing_columns_error(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert maybe_write_column_fill(config, "ValueError: train.csv.gz missing columns: ['a', 'b']") is True
+
+    payload = json.loads((config.paths.context_dir / "column_fill.json").read_text(encoding="utf-8"))
+    assert payload["files"]["train.csv.gz"] == ["a", "b"]
+
+
+def test_maybe_write_column_fill_from_zstd_compressed_file_missing_columns_error(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert maybe_write_column_fill(config, "ValueError: train.csv.zst missing columns: ['a', 'b']") is True
+
+    payload = json.loads((config.paths.context_dir / "column_fill.json").read_text(encoding="utf-8"))
+    assert payload["files"]["train.csv.zst"] == ["a", "b"]
+
+
+def test_maybe_write_column_fill_from_zstd_pickle_missing_columns_error(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert maybe_write_column_fill(config, "ValueError: train.pkl.zst missing columns: ['a', 'b']") is True
+
+    payload = json.loads((config.paths.context_dir / "column_fill.json").read_text(encoding="utf-8"))
+    assert payload["files"]["train.pkl.zst"] == ["a", "b"]
+
+
+def test_maybe_write_column_fill_from_excel_file_missing_columns_error(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert maybe_write_column_fill(config, "ValueError: test.xlsx missing columns: ['session_id']") is True
+
+    payload = json.loads((config.paths.context_dir / "column_fill.json").read_text(encoding="utf-8"))
+    assert payload["files"]["test.xlsx"] == ["session_id"]
+
+
+def test_maybe_write_column_fill_from_sqlite_file_missing_columns_error(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert maybe_write_column_fill(config, "ValueError: competition.sqlite missing columns: ['target']") is True
+
+    payload = json.loads((config.paths.context_dir / "column_fill.json").read_text(encoding="utf-8"))
+    assert payload["files"]["competition.sqlite"] == ["target"]
+
+
 def test_maybe_write_column_fill_merges_keyerror_payload(tmp_path: Path) -> None:
     config = _config(tmp_path)
     fill_path = config.paths.context_dir / "column_fill.json"
@@ -174,6 +241,48 @@ def test_column_map_scans_headers_and_infers_aliases(tmp_path: Path) -> None:
 
     payload = json.loads((config.paths.context_dir / "column_map.json").read_text(encoding="utf-8"))
     assert payload["mapping"]["session_identifier"] == "session_id"
+
+
+def test_scan_tabular_headers_reads_compressed_csv(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    with gzip.open(data_dir / "train.csv.gz", "wt", encoding="utf-8") as handle:
+        handle.write("session_identifier,target\n1,0\n")
+
+    assert scan_tabular_headers(data_dir) == {"train.csv.gz": ["session_identifier", "target"]}
+
+
+def test_scan_tabular_headers_reads_compressed_txt_with_detected_delimiter(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    with gzip.open(data_dir / "train.txt.gz", "wt", encoding="utf-8") as handle:
+        handle.write("session_identifier;target\n1;0\n")
+
+    assert scan_tabular_headers(data_dir) == {"train.txt.gz": ["session_identifier", "target"]}
+
+
+def test_scan_tabular_headers_uses_suffix_default_when_delimiter_sniff_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "train.psv").write_text("session_identifier|target\n1|0\n", encoding="utf-8")
+
+    def fail_sniff(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+        raise OSError("sniff failed")
+
+    monkeypatch.setattr("kagglebot.runtime_fixes.sniff_tabular_text_delimiter", fail_sniff)
+
+    assert scan_tabular_headers(data_dir) == {"train.psv": ["session_identifier", "target"]}
+
+
+def test_scan_tabular_headers_reads_excel(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pd.DataFrame({"session_identifier": [1], "target": [0]}).to_excel(data_dir / "train.xlsx", index=False)
+
+    assert scan_tabular_headers(data_dir) == {"train.xlsx": ["session_identifier", "target"]}
 
 
 def test_column_mapping_handles_non_string_group_tokens() -> None:

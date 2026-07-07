@@ -16,6 +16,7 @@ from kagglebot import autofix_context as _autofix_context
 from kagglebot import autofix_restart as _autofix_restart
 from kagglebot import autopilot_loop_settings as _autopilot_loop_settings
 from kagglebot import autopilot_state as _autopilot_state
+from kagglebot import autopilot_submit as _autopilot_submit
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
 from kagglebot import diagnostics as _diagnostics
@@ -46,6 +47,7 @@ from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
 from kagglebot import submit_failure_context as _submit_failure_context
+from kagglebot import submit_failure_policy as _submit_failure_policy  # noqa: F401
 from kagglebot import submit_gate as _submit_gate
 from kagglebot import submit_knowledge as _submit_knowledge
 from kagglebot import submit_rank as _submit_rank
@@ -93,9 +95,8 @@ from kagglebot.history import new_run_id
 from kagglebot.kaggle_api import (
     leaderboard_rank_for_score,
     leaderboard_top1,
-    list_competition_submissions,
 )
-from kagglebot.kernel_runner import resolve_kaggle_username, run_kernel, run_kernel_local
+from kagglebot.kernel_runner import run_kernel, run_kernel_local
 from kagglebot.knowledge import (
     record_error_fix_insight,
     record_improvement,
@@ -109,6 +110,14 @@ from kagglebot.planning_phase import PlanningPhase
 from kagglebot.runners.base import RunContext
 from kagglebot.runners.local_kernel import LocalKernelRunner
 from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
+from kagglebot.submission_format import load_submission_format_hint
+from kagglebot.submission_output_naming import (
+    all_submission_output_suffixes,
+    first_allowed_expected_output_suffix,
+    output_filename_from_format_text,
+    tabular_submission_output_suffixes,
+)
+from kagglebot.submission_sample_discovery import tabular_suffix
 from kagglebot.top1_campaign import (
     build_blend_report,
     build_candidate_portfolio_plan,
@@ -221,6 +230,97 @@ _DEFAULT_STRICT_COMPETITION_METRIC = True
 _DEFAULT_REQUIRE_SUBMIT_IMPROVEMENT = True
 _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
+_ITERATION_SUBMISSION_SUFFIXES = all_submission_output_suffixes()
+_ITERATION_SAMPLE_SUBMISSION_SUFFIXES = tabular_submission_output_suffixes()
+
+
+def check_rules_accepted(*args, **kwargs):
+    return _autopilot_submit.check_rules_accepted(*args, **kwargs)
+
+
+check_rules_accepted._kagglebot_default_wrapper = True
+
+
+def resolve_kaggle_username(*args, **kwargs):
+    return _autopilot_submit.resolve_kaggle_username(*args, **kwargs)
+
+
+resolve_kaggle_username._kagglebot_default_wrapper = True
+
+
+def run_submit_kernel(**kwargs):
+    return _autopilot_submit.run_submit_kernel(**kwargs)
+
+
+run_submit_kernel._kagglebot_default_wrapper = True
+
+
+def run_kaggle_submit_kernel(**kwargs):
+    return _autopilot_submit.run_kaggle_submit_kernel(**kwargs)
+
+
+run_kaggle_submit_kernel._kagglebot_default_wrapper = True
+
+
+def classify_submit_error(*args, **kwargs):
+    return _autopilot_submit.classify_submit_error(*args, **kwargs)
+
+
+classify_submit_error._kagglebot_default_wrapper = True
+
+
+def list_competition_submissions(*args, **kwargs):
+    return _autopilot_submit.list_competition_submissions(*args, **kwargs)
+
+
+list_competition_submissions._kagglebot_default_wrapper = True
+
+
+def _iteration_submission_path(
+    *,
+    iter_dir: Path,
+    sample_submission_path: Path,
+    submission_format_path: Path | None = None,
+) -> Path:
+    filename = _iteration_submission_filename_from_format(submission_format_path)
+    if filename is not None:
+        return iter_dir / filename
+    suffix = _iteration_submission_suffix_from_format(submission_format_path)
+    if suffix is not None:
+        return iter_dir / f"submission{suffix}"
+    suffix = tabular_suffix(sample_submission_path)
+    if suffix not in _ITERATION_SAMPLE_SUBMISSION_SUFFIXES:
+        suffix = ".csv"
+    return iter_dir / f"submission{suffix}"
+
+
+def _iteration_submission_filename_from_format(submission_format_path: Path | None) -> str | None:
+    if submission_format_path is None or not submission_format_path.exists():
+        return None
+    hint = load_submission_format_hint(submission_format_path)
+    if hint is None or not hint.expected_suffixes:
+        return None
+    try:
+        text = submission_format_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        text = ""
+    return output_filename_from_format_text(
+        text,
+        expected_suffixes=hint.expected_suffixes,
+        allowed_suffixes=_ITERATION_SUBMISSION_SUFFIXES,
+    )
+
+
+def _iteration_submission_suffix_from_format(submission_format_path: Path | None) -> str | None:
+    if submission_format_path is None or not submission_format_path.exists():
+        return None
+    hint = load_submission_format_hint(submission_format_path)
+    if hint is None or not hint.expected_suffixes:
+        return None
+    return first_allowed_expected_output_suffix(
+        hint.expected_suffixes,
+        allowed_suffixes=_ITERATION_SUBMISSION_SUFFIXES,
+    )
 
 
 def run_autopilot(config: AutopilotConfig) -> None:
@@ -652,7 +752,11 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 run_command_fn=run_command,
             )
 
-            submission_path = iter_dir / "submission.csv"
+            submission_path = _iteration_submission_path(
+                iter_dir=iter_dir,
+                sample_submission_path=config.paths.sample_submission_path,
+                submission_format_path=config.paths.submission_format_md_path,
+            )
             metrics_path = iter_dir / "metrics.json"
             evaluation_report_path = iter_dir / "evaluation_report.json"
             evaluation = None

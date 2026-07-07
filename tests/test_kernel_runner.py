@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import base64
 import gzip
+import io
 import json
+import lzma
 import os
 import re
 import runpy
+import sqlite3
 import time
+import zipfile
 from pathlib import Path
 
+import duckdb
+import pandas as pd
+import pyreadr
 import pytest
+import zstandard as zstd
 
 from kagglebot.exceptions import KernelCapacityError, KernelFailedError, KernelStillRunningError, KernelTimeoutError
 from kagglebot.kernel_package_files import (
@@ -40,11 +48,13 @@ from kagglebot.local_kernel_shims import (
     inject_device_coerce_shim,
     inject_local_runtime_shims,
     inject_object_coerce_shim,
+    inject_pandas_tabular_read_shim,
     inject_training_compat_shims,
     inject_training_progress_shim,
     inject_transformers_eval_strategy_shim,
     inject_zero_overlap_drift_shim,
 )
+from kagglebot.submission_sample_discovery import TABULAR_INPUT_SUFFIXES
 
 pytestmark = pytest.mark.slow
 
@@ -206,6 +216,35 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     assert payload["enable_tpu"] is False
 
 
+def test_run_submit_kernel_dry_run_accepts_directory_submission(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    submission_path = tmp_path / "submission.zarr"
+    (submission_path / "arrays").mkdir(parents=True)
+    (submission_path / ".zgroup").write_text("{}", encoding="utf-8")
+    (submission_path / "arrays" / "0").write_bytes(b"chunk")
+
+    run_submit_kernel(
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=False,
+        submission_path=submission_path,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1" / "submit-iter-1"
+    kernel_text = (kernel_dir / "kernel.py").read_text(encoding="utf-8")
+    assert 'SUBMISSION_OUTPUT_NAME = "submission.zarr.zip"' in kernel_text
+    assert 'SUBMISSION_INPUT_SUFFIX = ".zip"' in kernel_text
+
+
 def test_run_submit_kernel_wrapper_rejects_tiny_code_competition_submission(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
@@ -219,6 +258,37 @@ def test_run_submit_kernel_wrapper_rejects_tiny_code_competition_submission(tmp_
     )
     submission_path = tmp_path / "submission.csv"
     submission_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="static wrapper submit kernel"):
+        run_submit_kernel(
+            slug=slug,
+            run_id="run-1",
+            iteration=1,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            enable_internet=False,
+            submission_path=submission_path,
+            mode="wrapper",
+            dry_run=True,
+            timeout_minutes=None,
+        )
+
+
+def test_run_submit_kernel_wrapper_rejects_tiny_tsv_code_competition_submission(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "demo"
+    context_dir = tmp_path / slug / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "overview.md").write_text(
+        "This is a Code Competition. The public test set is dummy data and hidden/full test runs in Kaggle.\n",
+        encoding="utf-8",
+    )
+    submission_path = tmp_path / "submission.tsv"
+    submission_path.write_text("id\ttarget\n1\t0.1\n2\t0.2\n3\t0.3\n", encoding="utf-8")
 
     with pytest.raises(KernelFailedError, match="static wrapper submit kernel"):
         run_submit_kernel(
@@ -273,7 +343,7 @@ def test_run_submit_kernel_wrapper_aligns_to_runtime_sample_submission(
 
     input_dir = tmp_path / "input" / "demo"
     input_dir.mkdir(parents=True)
-    (input_dir / "sample_submission.csv").write_text(
+    (input_dir / "AnswerTemplate.csv").write_text(
         "\n".join(
             [
                 "id,winner_model_a,winner_model_b,winner_tie",
@@ -418,6 +488,49 @@ def test_run_submit_kernel_wrapper_expands_tiny_runtime_sample_to_hidden_test(
     assert out[["winner_model_a", "winner_model_b", "winner_tie"]].sum(axis=1).tolist() == pytest.approx(
         [1.0, 1.0, 1.0, 1.0, 1.0]
     )
+
+
+def test_run_submit_kernel_wrapper_aligns_tsv_runtime_sample_and_test(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    pd = pytest.importorskip("pandas")
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    submission_path = tmp_path / "submission.tsv"
+    submission_path.write_text("id\ttarget\n1\t0.1\n2\t0.9\n", encoding="utf-8")
+
+    run_submit_kernel(
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=False,
+        submission_path=submission_path,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    input_dir = tmp_path / "input" / "demo"
+    input_dir.mkdir(parents=True)
+    (input_dir / "sample_submission.tsv").write_text("id\ttarget\n1\t0.0\n2\t0.0\n", encoding="utf-8")
+    (input_dir / "test.tsv").write_text("id\tfeature\n2\t20\n3\t30\n1\t10\n", encoding="utf-8")
+    working_dir = tmp_path / "working"
+    monkeypatch.setenv("KAGGLEBOT_INPUT_ROOT", str(tmp_path / "input"))
+    monkeypatch.setenv("KAGGLEBOT_WORKING_DIR", str(working_dir))
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1" / "submit-iter-1"
+    runpy.run_path(str(kernel_dir / "kernel.py"), run_name="__main__")
+
+    out_path = working_dir / "submission.tsv"
+    assert out_path.exists()
+    out = pd.read_csv(out_path, sep="\t")
+    assert out["id"].tolist() == [2, 3, 1]
+    assert out["target"].tolist() == pytest.approx([0.9, 0.5, 0.1])
 
 
 def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tmp_path: Path) -> None:
@@ -1126,9 +1239,106 @@ def test_inject_column_fill_shim(tmp_path: Path) -> None:
     assert "column-fill-shim" in text
     assert "column_fill.json" in text
     assert "_pd.DataFrame.__getitem__" in text
+    assert "'read_sas'" in text
+    assert "'read_spss'" in text
+    assert "'read_html'" in text
     assert "float('nan')" in text
     assert "_pd.NA" not in text
     assert (kernel_dir / "column_fill.json").exists()
+
+
+def test_column_fill_shim_wraps_non_csv_pandas_readers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"files": {"table.parquet": ["missing_feature"]}}
+    (context_dir / "column_fill.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, "read_parquet", lambda path, *args, **kwargs: pd.DataFrame({"id": [1, 2]}))
+    inject_column_fill_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_parquet(kernel_dir / "table.parquet")
+
+    assert frame["id"].tolist() == [1, 2]
+    assert "missing_feature" in frame.columns
+    assert frame["missing_feature"].isna().all()
+
+
+@pytest.mark.parametrize(
+    ("reader_name", "suffix"),
+    [
+        ("read_orc", ".orc"),
+        ("read_hdf", ".hdf5"),
+        ("read_sas", ".sas7bdat"),
+        ("read_spss", ".sav"),
+    ],
+)
+def test_column_fill_shim_wraps_binary_pandas_readers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_name: str,
+    suffix: str,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"files": {f"table{suffix}": ["missing_feature"]}}
+    (context_dir / "column_fill.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, reader_name, lambda path, *args, **kwargs: pd.DataFrame({"id": [1, 2]}))
+    inject_column_fill_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = getattr(pd, reader_name)(kernel_dir / f"table{suffix}")
+
+    assert frame["id"].tolist() == [1, 2]
+    assert "missing_feature" in frame.columns
+    assert frame["missing_feature"].isna().all()
+
+
+def test_column_fill_shim_wraps_html_reader_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"files": {"sample_submission.html": ["missing_feature"]}}
+    (context_dir / "column_fill.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, "read_html", lambda path, *args, **kwargs: [pd.DataFrame({"id": [1, 2]})])
+    inject_column_fill_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    tables = pd.read_html(kernel_dir / "sample_submission.html")
+
+    assert len(tables) == 1
+    assert tables[0]["id"].tolist() == [1, 2]
+    assert "missing_feature" in tables[0].columns
+    assert tables[0]["missing_feature"].isna().all()
+
+
+def test_column_fill_shim_matches_same_stem_non_csv_pandas_readers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"files": {"test.csv": ["missing_feature"]}}
+    (context_dir / "column_fill.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, "read_parquet", lambda path, *args, **kwargs: pd.DataFrame({"id": [1, 2]}))
+    inject_column_fill_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_parquet(kernel_dir / "test.parquet")
+
+    assert frame["id"].tolist() == [1, 2]
+    assert "missing_feature" in frame.columns
+    assert frame["missing_feature"].isna().all()
 
 
 def test_inject_column_map_shim(tmp_path: Path) -> None:
@@ -1148,8 +1358,73 @@ def test_inject_column_map_shim(tmp_path: Path) -> None:
     text = site_path.read_text(encoding="utf-8")
     assert text.count("column-map-shim") == 1
     assert "column_map.json" in text
-    assert "df.rename(columns=mapping)" in text
+    assert "_kb_apply_column_map" in text
+    assert "item.rename(columns=mapping)" in text
+    assert "result.rename(columns=mapping)" in text
+    assert "'read_sas'" in text
+    assert "'read_spss'" in text
+    assert "'read_html'" in text
     assert (kernel_dir / "column_map.json").exists()
+
+
+def test_column_map_shim_wraps_non_csv_pandas_readers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"mapping": {"old_name": "new_name"}}
+    (context_dir / "column_map.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, "read_parquet", lambda path, *args, **kwargs: pd.DataFrame({"old_name": [1, 2]}))
+    inject_column_map_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_parquet(kernel_dir / "table.parquet")
+
+    assert frame.columns.tolist() == ["new_name"]
+    assert frame["new_name"].tolist() == [1, 2]
+
+
+@pytest.mark.parametrize("reader_name", ["read_orc", "read_hdf", "read_sas", "read_spss"])
+def test_column_map_shim_wraps_binary_pandas_readers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_name: str,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"mapping": {"old_name": "new_name"}}
+    (context_dir / "column_map.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, reader_name, lambda path, *args, **kwargs: pd.DataFrame({"old_name": [1, 2]}))
+    inject_column_map_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = getattr(pd, reader_name)(kernel_dir / "table")
+
+    assert frame.columns.tolist() == ["new_name"]
+    assert frame["new_name"].tolist() == [1, 2]
+
+
+def test_column_map_shim_wraps_html_reader_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"mapping": {"old_name": "new_name"}}
+    (context_dir / "column_map.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(pd, "read_html", lambda path, *args, **kwargs: [pd.DataFrame({"old_name": [1, 2]})])
+    inject_column_map_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    tables = pd.read_html(kernel_dir / "table.html")
+
+    assert len(tables) == 1
+    assert tables[0].columns.tolist() == ["new_name"]
+    assert tables[0]["new_name"].tolist() == [1, 2]
 
 
 def test_prepare_zero_overlap_drift_guard_detects_high_risk_zero_overlap_feature(tmp_path: Path) -> None:
@@ -1223,7 +1498,673 @@ def test_inject_zero_overlap_drift_shim(tmp_path: Path) -> None:
     assert "zero-overlap-drift-shim" in text
     assert text.count("zero-overlap-drift-shim") == 1
     assert "zero_overlap_drift_guard.json" in text
+    assert "'.sqlite3'" in text
+    assert "'.duckdb'" in text
+    assert "'.rds'" in text
+    assert "'.pkl.zst'" in text
+    assert "'read_sas'" in text
+    assert "'read_spss'" in text
+    assert "'read_html'" in text
+    assert "_KB_ROLE_ALIASES" in text
+    assert "_KB_ROLE_SUFFIXES" in text
+    assert "_kb_tabular_stem(path).lower() in {'train', 'test'}" not in text
+    assert ".sqlite3" in TABULAR_INPUT_SUFFIXES
+    assert ".duckdb" in TABULAR_INPUT_SUFFIXES
+    assert ".rds" in TABULAR_INPUT_SUFFIXES
+    assert ".pkl.zst" in TABULAR_INPUT_SUFFIXES
     assert (kernel_dir / "zero_overlap_drift_guard.json").exists()
+
+
+def test_zero_overlap_drift_shim_wraps_non_csv_pandas_readers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"enabled": True, "drop_columns": ["risk_cat"]}
+    (context_dir / "zero_overlap_drift_guard.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def fake_read_parquet(path, *args, **kwargs):
+        return pd.DataFrame({"id": [1, 2], "risk_cat": ["x", "y"], "safe_cat": ["a", "b"]})
+
+    monkeypatch.setattr(pd, "read_parquet", fake_read_parquet)
+    inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    train = pd.read_parquet(kernel_dir / "train.parquet")
+    leaderboard = pd.read_parquet(kernel_dir / "leaderboard_features.parquet")
+    metadata = pd.read_parquet(kernel_dir / "metadata.parquet")
+
+    assert train.columns.tolist() == ["id", "safe_cat"]
+    assert leaderboard.columns.tolist() == ["id", "safe_cat"]
+    assert metadata.columns.tolist() == ["id", "risk_cat", "safe_cat"]
+
+
+@pytest.mark.parametrize(
+    ("reader_name", "suffix"),
+    [
+        ("read_orc", ".orc"),
+        ("read_hdf", ".hdf5"),
+        ("read_sas", ".sas7bdat"),
+        ("read_spss", ".sav"),
+    ],
+)
+def test_zero_overlap_drift_shim_wraps_binary_pandas_readers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_name: str,
+    suffix: str,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"enabled": True, "drop_columns": ["risk_cat"]}
+    (context_dir / "zero_overlap_drift_guard.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def fake_reader(path, *args, **kwargs):
+        return pd.DataFrame({"id": [1, 2], "risk_cat": ["x", "y"], "safe_cat": ["a", "b"]})
+
+    monkeypatch.setattr(pd, reader_name, fake_reader)
+    inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    train = getattr(pd, reader_name)(kernel_dir / f"train{suffix}")
+    training_set = getattr(pd, reader_name)(kernel_dir / f"TrainingSet{suffix}")
+    metadata = getattr(pd, reader_name)(kernel_dir / f"metadata{suffix}")
+
+    assert train.columns.tolist() == ["id", "safe_cat"]
+    assert training_set.columns.tolist() == ["id", "safe_cat"]
+    assert metadata.columns.tolist() == ["id", "risk_cat", "safe_cat"]
+
+
+def test_zero_overlap_drift_shim_wraps_html_reader_lists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"enabled": True, "drop_columns": ["risk_cat"]}
+    (context_dir / "zero_overlap_drift_guard.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def fake_read_html(path, *args, **kwargs):
+        return [pd.DataFrame({"id": [1, 2], "risk_cat": ["x", "y"], "safe_cat": ["a", "b"]})]
+
+    monkeypatch.setattr(pd, "read_html", fake_read_html)
+    inject_zero_overlap_drift_shim(kernel_dir, context_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    train_tables = pd.read_html(kernel_dir / "train.html")
+    metadata_tables = pd.read_html(kernel_dir / "metadata.html")
+
+    assert train_tables[0].columns.tolist() == ["id", "safe_cat"]
+    assert metadata_tables[0].columns.tolist() == ["id", "risk_cat", "safe_cat"]
+
+
+def test_inject_pandas_tabular_read_shim(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+
+    inject_pandas_tabular_read_shim(kernel_dir)
+    inject_pandas_tabular_read_shim(kernel_dir)
+
+    site_path = kernel_dir / "sitecustomize.py"
+    assert site_path.exists()
+    text = site_path.read_text(encoding="utf-8")
+    assert "pandas-tabular-read-shim" in text
+    assert text.count("pandas-tabular-read-shim") == 1
+    assert "_KB_TABULAR_TEXT_SUFFIXES" in text
+    assert "_KB_TABULAR_STRUCTURED_SUFFIXES" in text
+    assert "_KB_TABULAR_PICKLE_SUFFIXES" in text
+    assert "_KB_TABULAR_ARROW_IPC_SUFFIXES" in text
+    assert "_KB_TABULAR_PARQUET_SUFFIXES" in text
+    assert "_KB_TABULAR_EXCEL_INPUT_ONLY_SUFFIXES" in text
+    assert "_KB_TABULAR_EXCEL_SUFFIXES" in text
+    assert "_KB_TABULAR_GEOPACKAGE_SUFFIXES" in text
+    assert "_KB_TABULAR_HDF_SUFFIXES" in text
+    assert "_KB_TABULAR_JSON_LINES_SUFFIX_PREFIXES" in text
+    assert "_KB_TABULAR_KML_SUFFIXES" in text
+    assert "_KB_TABULAR_STATA_SUFFIXES" in text
+    assert "_KB_TABULAR_SAS_SUFFIXES" in text
+    assert "_KB_TABULAR_SHAPEFILE_SUFFIXES" in text
+    assert "_KB_TABULAR_SPSS_SUFFIXES" in text
+    assert "_KB_TABULAR_MATLAB_SUFFIXES" in text
+    assert "_KB_TABULAR_ARFF_SUFFIXES" in text
+    assert "_KB_TABULAR_HTML_SUFFIX_PREFIXES" in text
+    assert "_KB_TABULAR_SVMLIGHT_SUFFIX_PREFIXES" in text
+    assert "_KB_TABULAR_FIXED_WIDTH_SUFFIX_PREFIXES" in text
+    assert "_pd.read_pickle(_kb_open_binary_sample(resolved_path, suffix))" in text
+    assert "_pd.read_json(StringIO(_kb_read_text(resolved_path, suffix)), lines=True)" in text
+    assert "_pd.read_excel(_kb_open_binary_sample(resolved_path, suffix))" in text
+    assert "_pd.read_orc(_kb_open_binary_sample(resolved_path, suffix))" in text
+    assert "_pd.read_parquet = _patched_read_parquet" in text
+    assert "_pd.read_feather = _patched_read_feather" in text
+    assert "_pd.read_pickle = _patched_read_pickle" in text
+    assert "_pd.read_json = _patched_read_json" in text
+    assert "_pd.read_excel = _patched_read_excel" in text
+    assert "_kb_zip_base_suffix(suffix)" in text
+    assert "_kb_open_binary_sample(resolved_path, suffix)" in text
+    assert "_kb_read_geopackage_table(resolved_path)" in text
+    assert "_kb_read_kml_tabular_frame(resolved_path)" in text
+    assert "_kb_read_shapefile_table(resolved_path)" in text
+    assert "_kb_read_hdf_table(resolved_path)" in text
+    assert "_pd.read_stata(_kb_open_binary_sample(resolved_path, suffix))" in text
+    assert (
+        "_pd.read_sas(_kb_open_binary_sample(resolved_path, suffix), format=_kb_sas_format_for_suffix(suffix))" in text
+    )
+    assert "_pd.read_spss(_kb_open_binary_sample(resolved_path, suffix))" in text
+    assert "_pd.read_stata = _patched_read_stata" in text
+    assert "_pd.read_sas = _patched_read_sas" in text
+    assert "_pd.read_spss = _patched_read_spss" in text
+    assert "_kb_read_mat_tabular_frame(resolved_path)" in text
+    assert "_kb_read_arff_tabular_frame(resolved_path)" in text
+    assert "_kb_read_html_tabular_frame(resolved_path, suffix)" in text
+    assert "_kb_read_svmlight_tabular_frame(resolved_path, suffix)" in text
+    assert "_kb_read_fixed_width_tabular_frame(resolved_path, suffix)" in text
+    assert "table.shape[1] > 0" in text
+    assert "not table.empty and table.shape[1] > 0" not in text
+    assert "return _orig(StringIO(_kb_read_text(resolved_path, suffix)), *args, **kwargs)" in text
+    assert "'.csv.gz'" in text
+    assert "'.csv.zip'" in text
+    assert "'.parquet.zip'" in text
+    assert "'.tab'" in text
+    assert "'.psv'" in text
+    assert "_kb_select_zip_tabular_member" in text
+    assert "'.ndjson'" in text
+    assert "'.sqlite3'" in text
+    assert "'.duckdb'" in text
+    assert "'.rds'" in text
+    assert "'.pkl.zst'" in text
+    assert ".sqlite3" in TABULAR_INPUT_SUFFIXES
+    assert ".duckdb" in TABULAR_INPUT_SUFFIXES
+    assert ".rds" in TABULAR_INPUT_SUFFIXES
+    assert ".pkl.zst" in TABULAR_INPUT_SUFFIXES
+    assert "_KB_ASSET_COMPRESSION_SUFFIXES = (" in text
+    assert "def _kb_compression_suffix_for" in text
+    assert "def _kb_open_compressed_text" in text
+    assert "return _kb_open_compressed_text(path, suffix)" in text
+    assert "gzip.open(path, 'rt'" in text
+    assert "_kb_sniff_sep(resolved_path)" in text
+    assert "_kb_resolve_existing_tabular_path(filepath_or_buffer)" in text
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_same_stem_non_csv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.parquet").write_bytes(b"placeholder")
+    seen: list[Path] = []
+
+    def fake_read_parquet(path, *args, **kwargs):
+        seen.append(Path(path))
+        return pd.DataFrame({"id": [1], "feature": [2], "target": [0]})
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    monkeypatch.setattr(pd, "read_parquet", fake_read_parquet)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert seen == [data_dir / "train.parquet"]
+    assert frame.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_zip_wrapped_csv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(data_dir / "train.csv.zip", "w") as archive:
+        archive.writestr("train.csv", "id,feature,target\n1,2,0\n")
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_zip_wrapped_parquet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = io.BytesIO()
+    pd.DataFrame({"id": [1], "feature": [2], "target": [0]}).to_parquet(payload, index=False)
+    with zipfile.ZipFile(data_dir / "train.parquet.zip", "w") as archive:
+        archive.writestr("nested/train.parquet", payload.getvalue())
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+@pytest.mark.parametrize(
+    ("reader_name", "suffix"),
+    [
+        ("read_parquet", ".parquet"),
+        ("read_feather", ".feather"),
+    ],
+)
+def test_pandas_tabular_read_shim_resolves_native_binary_reader_to_zip_wrapped_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reader_name: str,
+    suffix: str,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame({"id": [1], "feature": [2], "target": [0]})
+    payload = io.BytesIO()
+    if suffix == ".parquet":
+        frame.to_parquet(payload, index=False)
+    else:
+        frame.to_feather(payload)
+    with zipfile.ZipFile(data_dir / f"train{suffix}.zip", "w") as archive:
+        archive.writestr(f"nested/train{suffix}", payload.getvalue())
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, reader_name, getattr(pd, reader_name))
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = getattr(pd, reader_name)(data_dir / f"train{suffix}")
+
+    assert loaded.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+def test_pandas_tabular_read_shim_resolves_native_json_reader_to_zip_wrapped_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(data_dir / "sample_submission.jsonl.zip", "w") as archive:
+        archive.writestr("nested/sample_submission.jsonl", '{"id":1,"target":0.1}\n')
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_json", pd.read_json)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_json(data_dir / "sample_submission.jsonl")
+
+    assert loaded.to_dict("records") == [{"id": 1, "target": 0.1}]
+
+
+def test_pandas_tabular_read_shim_resolves_native_pickle_reader_to_zip_wrapped_pickle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = io.BytesIO()
+    pd.DataFrame({"id": [1], "feature": [2], "target": [0]}).to_pickle(payload)
+    with zipfile.ZipFile(data_dir / "train.pkl.zip", "w") as archive:
+        archive.writestr("nested/train.pkl", payload.getvalue())
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_pickle", pd.read_pickle)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_pickle(data_dir / "train.pkl")
+
+    assert loaded.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+def test_pandas_tabular_read_shim_resolves_native_excel_reader_to_zip_wrapped_workbook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = io.BytesIO()
+    pd.DataFrame({"id": [1], "feature": [2], "target": [0]}).to_excel(payload, index=False)
+    with zipfile.ZipFile(data_dir / "train.xlsx.zip", "w") as archive:
+        archive.writestr("nested/train.xlsx", payload.getvalue())
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_excel", pd.read_excel)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_excel(data_dir / "train.xlsx")
+
+    assert loaded.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+def test_pandas_tabular_read_shim_resolves_native_stata_reader_to_zip_wrapped_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = io.BytesIO()
+    pd.DataFrame({"id": [1], "feature": [2], "target": [0]}).to_stata(payload, write_index=False)
+    with zipfile.ZipFile(data_dir / "train.dta.zip", "w") as archive:
+        archive.writestr("nested/train.dta", payload.getvalue())
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_stata", pd.read_stata)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_stata(data_dir / "train.dta")
+
+    assert loaded.to_dict("records") == [{"id": 1, "feature": 2, "target": 0}]
+
+
+@pytest.mark.parametrize("suffix", [".orc", ".hdf5"])
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_binary_tabular(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    actual = data_dir / f"sample_submission{suffix}"
+    frame = pd.DataFrame({"id": [1, 2], "target": [0, 1]})
+    if suffix == ".orc":
+        frame.to_orc(actual, index=False)
+    else:
+        frame.to_hdf(actual, key="submission", mode="w", format="table", index=False)
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_csv(data_dir / "sample_submission.csv")
+
+    assert loaded.to_dict("list") == {"id": [1, 2], "target": [0, 1]}
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_html_tabular(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame({"id": [1, 2], "target": [0, 1]})
+    frame.to_html(data_dir / "sample_submission.html", index=False)
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_csv(data_dir / "sample_submission.csv")
+
+    assert loaded.to_dict("list") == {"id": [1, 2], "target": [0, 1]}
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_compressed_arff_tabular(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with gzip.open(data_dir / "train.arff.gz", "wt", encoding="utf-8") as handle:
+        handle.write(
+            """
+@RELATION train
+@ATTRIBUTE id NUMERIC
+@ATTRIBUTE feature NUMERIC
+@ATTRIBUTE target {no,yes}
+@DATA
+1,10,no
+2,20,yes
+""".strip()
+        )
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    loaded = pd.read_csv(data_dir / "train.csv")
+
+    assert loaded.to_dict("list") == {"id": [1.0, 2.0], "feature": [10.0, 20.0], "target": ["no", "yes"]}
+
+
+def test_pandas_tabular_read_shim_reads_same_stem_sqlite_from_csv_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    sqlite_path = data_dir / "train.sqlite"
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute("CREATE TABLE train (id INTEGER, feature INTEGER, target INTEGER)")
+        conn.executemany("INSERT INTO train VALUES (?, ?, ?)", [(1, 10, 0), (2, 20, 1)])
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "feature": 10, "target": 0},
+        {"id": 2, "feature": 20, "target": 1},
+    ]
+
+
+def test_pandas_tabular_read_shim_reads_same_stem_duckdb_from_csv_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "train.duckdb"
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE train (id INTEGER, feature INTEGER, target INTEGER)")
+        conn.execute("INSERT INTO train VALUES (1, 10, 0), (2, 20, 1)")
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "feature": 10, "target": 0},
+        {"id": 2, "feature": 20, "target": 1},
+    ]
+
+
+def test_pandas_tabular_read_shim_reads_same_stem_rds_from_csv_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    pyreadr.write_rds(data_dir / "train.rds", pd.DataFrame({"id": [1, 2], "feature": [10, 20], "target": [0, 1]}))
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "feature": 10, "target": 0},
+        {"id": 2, "feature": 20, "target": 1},
+    ]
+
+
+def test_pandas_tabular_read_shim_reads_compressed_tsv_from_csv_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with gzip.open(data_dir / "train.tsv.gz", "wt", encoding="utf-8") as handle:
+        handle.write("id\tfeature\ttarget\n1\t10\t0\n2\t20\t1\n")
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "feature": 10, "target": 0},
+        {"id": 2, "feature": 20, "target": 1},
+    ]
+
+
+def test_pandas_tabular_read_shim_reads_zstd_jsonl_from_csv_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = b'{"id":1,"target":0.1}\n{"id":2,"target":0.2}\n'
+    (data_dir / "sample_submission.jsonl.zst").write_bytes(zstd.ZstdCompressor().compress(payload))
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "sample_submission.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "target": 0.1},
+        {"id": 2, "target": 0.2},
+    ]
+
+
+def test_pandas_tabular_read_shim_reads_compressed_yaml_from_csv_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = yaml.safe_dump(
+        [{"id": 1, "target": 0.1}, {"id": 2, "target": 0.2}],
+        sort_keys=False,
+    )
+    with lzma.open(data_dir / "sample_submission.yaml.xz", "wt", encoding="utf-8") as handle:
+        handle.write(payload)
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "sample_submission.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "target": 0.1},
+        {"id": 2, "target": 0.2},
+    ]
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_fixed_width_tabular(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.fwf").write_text("id feature target\n1  10      0\n2  20      1\n", encoding="utf-8")
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+
+    assert frame.to_dict("records") == [
+        {"id": 1, "feature": 10, "target": 0},
+        {"id": 2, "feature": 20, "target": 1},
+    ]
+
+
+def test_pandas_tabular_read_shim_resolves_missing_csv_to_svmlight_tabular(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.svmlight").write_text("1 1:0.5 2:1.5\n0 1:2.0 2:0.0\n", encoding="utf-8")
+
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL", "1")
+    monkeypatch.setattr(pd, "read_csv", pd.read_csv)
+    inject_pandas_tabular_read_shim(kernel_dir)
+    runpy.run_path(str(kernel_dir / "sitecustomize.py"))
+
+    frame = pd.read_csv(data_dir / "train.csv")
+    dense = frame.copy()
+    for column in dense.columns:
+        if isinstance(dense[column].dtype, pd.SparseDtype):
+            dense[column] = dense[column].sparse.to_dense()
+
+    assert dense.to_dict("records") == [
+        {"target": 1.0, "feature_1": 0.5, "feature_2": 1.5},
+        {"target": 0.0, "feature_1": 2.0, "feature_2": 0.0},
+    ]
 
 
 def test_inject_object_coerce_shim(tmp_path: Path) -> None:
@@ -1933,6 +2874,58 @@ def test_run_kernel_local_enforces_bvs_contract_rejects_regressed_kernel(tmp_pat
         )
 
 
+def test_run_kernel_local_enforces_policy_kernel_contract_for_generic_slug(tmp_path: Path) -> None:
+    slug = "demo-vision-contract"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "from pathlib import Path",
+                "",
+                "print('tri_branch_convnext_spectral cfg: load_size=64 crop_size=64')",
+                "Path('submission.csv').write_text('Id,Category\\nval_1.tif,Health\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text(",
+                "    json.dumps({",
+                "        'model_name': 'resnet50',",
+                "        'chosen_pipeline': 'tri_branch_convnext_spectral',",
+                "        'pipelines': [{'name': 'tri_branch_convnext_spectral', 'score': 0.68}],",
+                "    }),",
+                "    encoding='utf-8',",
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / slug / "context" / "competition_policy.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps({"execution_hints": {"kernel_contract": "bvs"}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KernelFailedError, match="BVS kernel contract failed"):
+        run_kernel_local(
+            slug=slug,
+            run_id="run-policy-contract-reject",
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="cv",
+            metric="accuracy",
+            direction="maximize",
+            holdout_frac=0.2,
+            cv_folds=5,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+
 def test_run_kernel_local_enforces_bvs_contract_allows_ensemble_kernel(tmp_path: Path) -> None:
     slug = "beyond-visible-spectrum-ai-for-agriculture-2026p2"
     source_kernel_dir = tmp_path / slug / "kernel"
@@ -2074,6 +3067,88 @@ def test_run_kernel_local_applies_zero_overlap_drift_drop_shim(tmp_path: Path) -
     assert "zero-overlap-drift-shim" in staged_sitecustomize.read_text(encoding="utf-8")
 
 
+def test_run_kernel_local_reads_non_csv_data_through_csv_references(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import json",
+                "from pathlib import Path",
+                "import pandas as pd",
+                "",
+                "data_root = Path(__file__).resolve().parents[3] / 'data'",
+                "train_df = pd.read_csv(data_root / 'train.csv')",
+                "test_df = pd.read_csv(data_root / 'test.csv')",
+                "ok = float(",
+                "    list(train_df.columns) == ['id', 'feature', 'target']",
+                "    and list(test_df.columns) == ['id', 'feature']",
+                "    and len(train_df) == 2",
+                "    and len(test_df) == 2",
+                ")",
+                "Path('submission.csv').write_text('id,target\\n3,0.1\\n4,0.2\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text(",
+                "    json.dumps({'metric': 'auc', 'offline_value': ok}),",
+                "    encoding='utf-8',",
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+    data_dir = tmp_path / "demo" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.jsonl").write_text(
+        "\n".join(
+            [
+                '{"id":1,"feature":10,"target":0}',
+                '{"id":2,"feature":20,"target":1}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "test.jsonl").write_text(
+        "\n".join(
+            [
+                '{"id":3,"feature":30}',
+                '{"id":4,"feature":40}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data_dir / "sample_submission.csv").write_text("id,target\n3,0.0\n4,0.0\n", encoding="utf-8")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-jsonl-csv-ref",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="cv",
+        metric="auc",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=5,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    assert result.metrics_path is not None
+    metrics_payload = json.loads(result.metrics_path.read_text(encoding="utf-8"))
+    assert metrics_payload.get("offline_value") == 1.0
+    staged_kernel = tmp_path / "demo" / "kernels" / "run-jsonl-csv-ref" / "local-iter-1" / "kernel.py"
+    staged_sitecustomize = tmp_path / "demo" / "kernels" / "run-jsonl-csv-ref" / "local-iter-1" / "sitecustomize.py"
+    assert "_kb_find_file(data_root, 'train.csv')" in staged_kernel.read_text(encoding="utf-8")
+    assert "pandas-tabular-read-shim" in staged_sitecustomize.read_text(encoding="utf-8")
+
+
 def test_run_kernel_local_copies_optional_oof_artifacts(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -2090,8 +3165,8 @@ def test_run_kernel_local_copies_optional_oof_artifacts(tmp_path: Path) -> None:
                 '    \'{"metric":"accuracy","offline_value":0.5}\',',
                 "    encoding='utf-8',",
                 ")",
-                "out.joinpath('oof_predictions.csv').write_text(",
-                "    'row_id,y,oof_pred,oof_proba,fold\\n0,0,0,0.1,1\\n1,1,1,0.9,1\\n',",
+                "out.joinpath('oof_predictions.tsv').write_text(",
+                "    'row_id\\ty\\toof_pred\\toof_proba\\tfold\\n0\\t0\\t0\\t0.1\\t1\\n1\\t1\\t1\\t0.9\\t1\\n',",
                 "    encoding='utf-8',",
                 ")",
                 "out.joinpath('split_diagnostics.json').write_text('{\"ok\": true}', encoding='utf-8')",
@@ -2121,7 +3196,7 @@ def test_run_kernel_local_copies_optional_oof_artifacts(tmp_path: Path) -> None:
         strict_accelerator=False,
     )
 
-    assert (result.output_dir / "oof_predictions.csv").exists()
+    assert (result.output_dir / "oof_predictions.tsv").exists()
     assert (result.output_dir / "split_diagnostics.json").exists()
     assert (result.output_dir / "feature_suspects.csv").exists()
 
@@ -2359,6 +3434,266 @@ def test_run_kernel_local_exports_output_dir_env(tmp_path: Path) -> None:
     assert result.metrics_path == expected_output_dir / "metrics.json"
     assert result.submission_path.exists()
     assert result.metrics_path.exists()
+
+
+@pytest.mark.parametrize("suffix", [".jsonl", ".ndjson", ".tsv.gz", ".pkl", ".dta", ".xml", ".orc", ".hdf5"])
+def test_run_kernel_local_sets_submission_filename_from_sample_suffix(tmp_path: Path, suffix: str) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "name = os.environ['KAGGLEBOT_SUBMISSION_FILENAME']",
+                f"if name != 'submission{suffix}':",
+                "    raise AssertionError(name)",
+                "if name.endswith('.pkl'):",
+                "    import pandas as pd",
+                "    pd.DataFrame({'id': [1], 'target': [0.1]}).to_pickle(name)",
+                "elif name.endswith('.dta'):",
+                "    import pandas as pd",
+                "    pd.DataFrame({'id': [1], 'target': [0.1]}).to_stata(name, write_index=False)",
+                "elif name.endswith('.xml'):",
+                "    import pandas as pd",
+                "    pd.DataFrame({'id': [1], 'target': [0.1]}).to_xml(name, index=False, parser='etree')",
+                "elif name.endswith('.orc'):",
+                "    import pandas as pd",
+                "    pd.DataFrame({'id': [1], 'target': [0.1]}).to_orc(name, index=False)",
+                "elif name.endswith('.hdf5'):",
+                "    import pandas as pd",
+                "    pd.DataFrame({'id': [1], 'target': [0.1]}).to_hdf(",
+                "        name, key='submission', mode='w', format='table', index=False",
+                "    )",
+                "elif name.endswith('.tsv.gz'):",
+                "    import gzip",
+                "    with gzip.open(name, 'wt', encoding='utf-8') as handle:",
+                "        handle.write('id\\ttarget\\n1\\t0.1\\n')",
+                "else:",
+                "    Path(name).write_text('{\"id\":1,\"target\":0.1}\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    context_sample = tmp_path / "demo" / "context" / f"SampleSubmission{suffix}"
+    context_sample.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".pkl":
+        pd.DataFrame({"id": [1], "target": [0.0]}).to_pickle(context_sample)
+    elif suffix == ".dta":
+        pd.DataFrame({"id": [1], "target": [0.0]}).to_stata(context_sample, write_index=False)
+    elif suffix == ".xml":
+        pd.DataFrame({"id": [1], "target": [0.0]}).to_xml(context_sample, index=False, parser="etree")
+    elif suffix == ".orc":
+        pd.DataFrame({"id": [1], "target": [0.0]}).to_orc(context_sample, index=False)
+    elif suffix == ".hdf5":
+        pd.DataFrame({"id": [1], "target": [0.0]}).to_hdf(
+            context_sample,
+            key="submission",
+            mode="w",
+            format="table",
+            index=False,
+        )
+    elif suffix == ".tsv.gz":
+        with gzip.open(context_sample, "wt", encoding="utf-8") as handle:
+            handle.write("id\ttarget\n1\t0.0\n")
+    else:
+        context_sample.write_text('{"id": 1, "target": 0.0}\n', encoding="utf-8")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-env-submission-name",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    expected_output_dir = tmp_path / "demo" / "runs" / "run-env-submission-name" / "iter-1" / "output"
+    assert result.submission_path == expected_output_dir / f"submission{suffix}"
+    if suffix == ".pkl":
+        assert pd.read_pickle(result.submission_path).to_dict("list") == {"id": [1], "target": [0.1]}
+    elif suffix == ".dta":
+        assert pd.read_stata(result.submission_path).to_dict("list") == {"id": [1], "target": [0.1]}
+    elif suffix == ".xml":
+        assert pd.read_xml(result.submission_path, parser="etree").to_dict("list") == {"id": [1], "target": [0.1]}
+    elif suffix == ".orc":
+        assert pd.read_orc(result.submission_path).to_dict("list") == {"id": [1], "target": [0.1]}
+    elif suffix == ".hdf5":
+        assert pd.read_hdf(result.submission_path).to_dict("list") == {"id": [1], "target": [0.1]}
+    elif suffix == ".tsv.gz":
+        with gzip.open(result.submission_path, "rt", encoding="utf-8") as handle:
+            assert handle.read() == "id\ttarget\n1\t0.1\n"
+    else:
+        assert result.submission_path.read_text(encoding="utf-8") == '{"id":1,"target":0.1}\n'
+
+
+@pytest.mark.parametrize(
+    ("suffix", "format_text"),
+    [
+        (".tar.xz", "Submit a submission.tar.xz archive containing model weights and inference code."),
+        (".onnx", "Submit a single ONNX file named `submission.onnx`."),
+    ],
+)
+def test_run_kernel_local_sets_submission_filename_from_submission_format(
+    tmp_path: Path,
+    suffix: str,
+    format_text: str,
+) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "name = os.environ['KAGGLEBOT_SUBMISSION_FILENAME']",
+                f"if name != 'submission{suffix}':",
+                "    raise AssertionError(name)",
+                "Path(name).write_bytes(b'artifact')",
+                "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "submission_format.md").write_text(f"## Submission Format\n{format_text}\n", encoding="utf-8")
+    run_id = f"run-format-submission-name-{suffix.replace('.', '-').strip('-')}"
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id=run_id,
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    expected_output_dir = tmp_path / "demo" / "runs" / run_id / "iter-1" / "output"
+    assert result.submission_path == expected_output_dir / f"submission{suffix}"
+    assert result.submission_path.read_bytes() == b"artifact"
+
+
+def test_run_kernel_local_uses_explicit_submission_filename_from_submission_format(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "name = os.environ['KAGGLEBOT_SUBMISSION_FILENAME']",
+                "if name != 'answers.nii.gz':",
+                "    raise AssertionError(name)",
+                "Path(name).write_bytes(b'artifact')",
+                "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    context_dir = tmp_path / "demo" / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "submission_format.md").write_text(
+        "## Submission Format\nUpload a single file named `answers.nii.gz`.\n",
+        encoding="utf-8",
+    )
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-format-explicit-submission-name",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    expected_output_dir = tmp_path / "demo" / "runs" / "run-format-explicit-submission-name" / "iter-1" / "output"
+    assert result.submission_path == expected_output_dir / "answers.nii.gz"
+    assert result.submission_path.read_bytes() == b"artifact"
+
+
+def test_run_kernel_local_does_not_override_explicit_submission_filename_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    source_kernel_path = source_kernel_dir / "kernel.py"
+    source_kernel_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "name = os.environ['KAGGLEBOT_SUBMISSION_FILENAME']",
+                "if name != 'custom.tsv':",
+                "    raise AssertionError(name)",
+                "Path(name).write_text('id\\ttarget\\n1\\t0.1\\n', encoding='utf-8')",
+                "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    context_sample = tmp_path / "demo" / "context" / "sample_submission.jsonl"
+    context_sample.parent.mkdir(parents=True, exist_ok=True)
+    context_sample.write_text('{"id": 1, "target": 0.0}\n', encoding="utf-8")
+    monkeypatch.setenv("KAGGLEBOT_SUBMISSION_FILENAME", "custom.tsv")
+
+    result = run_kernel_local(
+        slug="demo",
+        run_id="run-explicit-submission-name",
+        iteration=1,
+        base_dir=tmp_path,
+        accelerator="gpu",
+        score_source="holdout",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=False,
+        timeout_minutes=1,
+        strict_accelerator=False,
+    )
+
+    expected_output_dir = tmp_path / "demo" / "runs" / "run-explicit-submission-name" / "iter-1" / "output"
+    assert result.submission_path == expected_output_dir / "custom.tsv"
+    assert result.submission_path.read_text(encoding="utf-8") == "id\ttarget\n1\t0.1\n"
 
 
 def test_run_kernel_local_finds_artifacts_in_legacy_kernel_output(tmp_path: Path) -> None:

@@ -78,7 +78,7 @@ Implement a strong initial model based on overview/data/rules + web research.
 **Where to implement**:
 - For **all compute modes** (`local_gpu`, `kaggle_gpu`, `kaggle_tpu`), implement in `artifacts/{slug}/kernel/kernel.py`.
 - `local_gpu` and `kaggle_gpu` must use the **same algorithm/pipeline**; only execution location differs.
-- If the data is non‑tabular (images/text/video/FASTA/etc.), implement a `custom_main()` entrypoint in `kernel.py`.
+- If the data is non-tabular (image/video/audio/text/document/medical-imaging/point-cloud/3D/geospatial/bio/sequence/graph/signal/annotation/array/model-artifact), implement a `custom_main()` entrypoint in `kernel.py`.
 
 Your implementation should:
 
@@ -86,9 +86,11 @@ Your implementation should:
 
 **Load data**:
 ```python
-import pandas as pd
-train = pd.read_csv("{train_path}")
-test = pd.read_csv("{test_path}")
+from pathlib import Path
+from kagglebot.solver.io import read_table
+
+train = read_table(Path("{train_path}"))
+test = read_table(Path("{test_path}"))
 ```
 
 **Handle missing values**:
@@ -205,12 +207,14 @@ else:
     y_test_pred = model.predict(X_test_processed)
 ```
 
-**Create submission.csv**:
+**Create submission artifact**:
 ```python
+from pathlib import Path
 import pandas as pd
+from kagglebot.solver.io import read_table, write_table
 
-# Load sample submission to get exact format
-sample = pd.read_csv("{sample_submission_path}")
+# Load sample submission to get exact tabular format when the competition provides one.
+sample = read_table(Path("{sample_submission_path}"))
 
 # CRITICAL: Match column names and row count exactly
 submission = pd.DataFrame({{
@@ -222,7 +226,8 @@ submission = pd.DataFrame({{
 assert submission.shape == sample.shape, "Shape mismatch"
 assert list(submission.columns) == list(sample.columns), "Column mismatch"
 
-submission.to_csv("{submission_path}", index=False)
+# Preserve the required suffix/format instead of forcing CSV.
+write_table(submission, Path("{submission_path}"))
 ```
 
 ### Step 3: Safety and Quality Checks
@@ -232,9 +237,9 @@ submission.to_csv("{submission_path}", index=False)
 - ❌ NEVER commit secrets (kaggle.json, API keys, tokens, passwords)
 - ❌ NEVER add interactive prompts (CLI must be non-interactive for automation)
 - ❌ NEVER hardcode competition-specific logic in generic src runtime modules; keep it in `kernel.py`
-- ❌ NEVER use test.csv for validation (offline eval uses train.csv splits only)
+- ❌ NEVER use test files for validation (offline eval uses train data splits only)
 - ❌ NEVER bypass safety guardrails (duplicate checks, rate limits, validation)
-- ✅ DO validate submission format matches sample_submission.csv exactly
+- ✅ DO validate submission format matches the required sample/format exactly
 - ✅ DO handle edge cases (empty files, missing columns, type mismatches)
 - ✅ DO set random seeds for reproducibility (42 everywhere)
 - ✅ DO use web search for documentation (scikit-learn, XGBoost, pandas)
@@ -243,7 +248,7 @@ submission.to_csv("{submission_path}", index=False)
 **Quality Checklist**:
 - [ ] plan.json created with all required fields and realistic target_score
 - [ ] Initial model runs end-to-end without errors
-- [ ] submission.csv format matches sample_submission.csv exactly (columns, rows, types)
+- [ ] Submission artifact format matches the required sample/format exactly (columns, rows, types when tabular)
 - [ ] Offline evaluation produces a numeric score in metrics.json
 - [ ] The primary score comes from a real trained candidate and train-data CV/holdout validation; no placeholder, proxy, public-anchor, packaging-only, identity/noop, or unscored metrics
 - [ ] If multiple candidates exist, final selection is justified by CV + holdout/validation + prediction distribution, not by CV alone
@@ -266,14 +271,30 @@ uv run kagglebot train {slug} --compute {compute_mode}
 # Check metrics
 cat {metrics_path}
 
-# Verify submission format
-head {submission_path}
-diff <(head -1 {sample_submission_path}) <(head -1 {submission_path})
+# Verify submission artifact
+ls -lh {submission_path}
+
+# For tabular submissions, verify columns against the required sample/format.
+# For non-tabular submissions, inspect submission_manifest.json or validate archive/single-file contents.
+uv run python - <<'PY'
+from pathlib import Path
+from kagglebot.solver.io import read_table
+sample_path = Path("{sample_submission_path}")
+submission_path = Path("{submission_path}")
+try:
+    sample = read_table(sample_path)
+    submission = read_table(submission_path)
+except Exception as exc:
+    print(f"non-tabular or manifest-based submission check required: {exc}")
+else:
+    assert list(submission.columns) == list(sample.columns)
+    print("tabular submission columns match sample")
+PY
 ```
 
 **Expected Output**:
 - metrics.json exists with `value` field containing offline score
-- submission.csv exists and matches sample_submission.csv format
+- Submission artifact exists and matches the required sample/format
 - GPU/TPU utilization logged in metrics.json
 
 ---
@@ -284,7 +305,7 @@ Your initial model will be accepted if:
 
 1. ✅ **Tests pass**: `uv run pytest -q` returns 0 exit code
 2. ✅ **Offline score computed**: metrics.json has valid `value` field
-3. ✅ **Submission valid**: submission.csv matches sample_submission.csv format
+3. ✅ **Submission valid**: submission artifact matches the required format
 4. ✅ **GPU/TPU utilized**: Utilization >80% (GPU) or >70% (TPU) logged
 5. ✅ **No errors**: Training completes without exceptions
 6. ✅ **Reproducible**: Same seed produces same results
@@ -310,9 +331,9 @@ If any criterion fails, the autopilot will retry or abort.
 **Common Pitfalls**:
 - Don't overfit: Large models on small datasets fail
 - Don't underfit: Too simple models miss patterns
-- Don't leak: Never use test.csv for validation
+- Don't leak: Never use test files for validation
 - Don't transfer labels: Never copy hidden/test labels from external labeled overlaps, exact file-hash matches, row-id mappings, or solution-like artifacts
-- Don't ignore format: submission.csv must match sample exactly
+- Don't ignore format: the submission artifact must match the required sample/format exactly
 - Don't waste resources: Monitor and maximize GPU/TPU usage
 
 **Debugging**:

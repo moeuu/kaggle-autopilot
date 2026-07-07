@@ -83,6 +83,7 @@ class NotebookSubmitRunner:
     on_message: Callable[[str], None]
     is_capacity_error: Callable[[BaseException], bool]
     is_push_error: Callable[[BaseException], bool]
+    expected_output_file: str | None = None
 
     def submit(
         self,
@@ -115,6 +116,7 @@ class NotebookSubmitRunner:
             on_message=self.on_message,
             is_capacity_error=self.is_capacity_error,
             is_push_error=self.is_push_error,
+            expected_output_file=self.expected_output_file or submission_path.name,
         )
 
 
@@ -138,6 +140,7 @@ def build_notebook_submit_runner_for_run(
     should_retry_ambiguous: Callable[..., bool],
     sleep: Callable[[float], None],
     on_message: Callable[[str], None],
+    expected_output_file: str | None = None,
 ) -> NotebookSubmitRunner:
     return NotebookSubmitRunner(
         slug=slug,
@@ -160,6 +163,7 @@ def build_notebook_submit_runner_for_run(
         on_message=on_message,
         is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
         is_push_error=lambda exc: isinstance(exc, KaggleCliError) and is_submit_kernel_push_error(exc),
+        expected_output_file=expected_output_file,
     )
 
 
@@ -188,6 +192,7 @@ def run_notebook_kernel_submission(
     on_message: Callable[[str], None],
     is_capacity_error: Callable[[BaseException], bool],
     is_push_error: Callable[[BaseException], bool],
+    expected_output_file: str | None = None,
 ) -> tuple[object, str, Path | None]:
     """Run the submit notebook and submit its Kaggle output reference."""
     submit_kernel_kwargs = build_submit_kernel_run_kwargs(
@@ -224,6 +229,11 @@ def run_notebook_kernel_submission(
         kernel_submission_path=getattr(kernel_result, "submission_path", None),
         version_label=infer_kernel_submit_version_label(iter_logs_dir),
         copy_submission_artifact=copy_submission_artifact,
+        expected_output_file=_expected_submit_kernel_output_file(
+            submission_path=submission_path,
+            artifact_mode=artifact_mode,
+            expected_output_file=expected_output_file,
+        ),
     )
     submit_reference = output_reference.reference
     on_message(f"[cyan]submit notebook[/cyan]: {submit_reference.kernel_ref}")
@@ -243,6 +253,17 @@ def run_notebook_kernel_submission(
         on_message=on_message,
     )
     return submit_result, submit_reference.submission_ref, output_reference.submission_artifact_path
+
+
+def _expected_submit_kernel_output_file(
+    *,
+    submission_path: Path,
+    artifact_mode: str | None,
+    expected_output_file: str | None,
+) -> str | None:
+    if submission_path.is_dir() and normalize_notebook_submit_artifact_mode(artifact_mode) == "wrapper":
+        return f"{submission_path.name}.zip"
+    return expected_output_file
 
 
 def run_notebook_kernel_submission_for_run(
@@ -270,6 +291,7 @@ def run_notebook_kernel_submission_for_run(
     on_message: Callable[[str], None],
     is_capacity_error: Callable[[BaseException], bool],
     is_push_error: Callable[[BaseException], bool],
+    expected_output_file: str | None = None,
 ) -> tuple[object, str, Path | None]:
     iteration = infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = paths.iter_dir(run_id, iteration)
@@ -300,6 +322,7 @@ def run_notebook_kernel_submission_for_run(
         is_capacity_error=is_capacity_error,
         is_push_error=is_push_error,
         iter_logs_dir=iter_dir / "logs",
+        expected_output_file=expected_output_file,
     )
 
 

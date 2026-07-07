@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from kagglebot.hashing import sha256_file
+from kagglebot.hashing import sha256_file_or_none
 from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.scalar_utils import finite_float as _to_float
 from kagglebot.scalar_utils import optional_int as _to_int
@@ -206,9 +206,7 @@ def build_campaign_candidate(
     metadata: dict[str, object] | None = None,
 ) -> CampaignCandidate:
     normalized_category = category if category in _CATEGORIES else "strong_single"
-    submission_sha = (
-        sha256_file(str(submission_path)) if submission_path is not None and submission_path.exists() else None
-    )
+    submission_sha = sha256_file_or_none(submission_path)
     return CampaignCandidate(
         candidate_id=f"{run_id}-i{iteration:03d}-{normalized_category}",
         category=normalized_category,  # type: ignore[arg-type]

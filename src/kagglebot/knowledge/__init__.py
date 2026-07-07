@@ -13,6 +13,25 @@ from pathlib import Path
 import pandas as pd
 
 from kagglebot.agents.identity import IMPLEMENTATION_AGENT
+from kagglebot.asset_modality import (
+    ARRAY_SUFFIXES,
+    AUDIO_SUFFIXES,
+    BIO_STRUCTURE_SUFFIXES,
+    DOCUMENT_SUFFIXES,
+    GEOSPATIAL_SUFFIXES,
+    GRAPH_SUFFIXES,
+    IMAGE_SUFFIXES,
+    MEDICAL_IMAGE_SUFFIXES,
+    POINT_CLOUD_SUFFIXES,
+    SCIENTIFIC_ARRAY_SUFFIXES,
+    SIGNAL_SUFFIXES,
+    VIDEO_SUFFIXES,
+    asset_suffix,
+    infer_asset_modality,
+    infer_asset_modality_from_extensions,
+)
+from kagglebot.baseline_tokens import ID_LIKE_COLUMN_NAMES
+from kagglebot.compression_suffixes import open_compressed_text, strip_compression_suffix
 from kagglebot.env_utils import parse_int_value
 from kagglebot.json_utils import parse_json_array_text
 from kagglebot.knowledge.classification import (
@@ -23,6 +42,7 @@ from kagglebot.knowledge.classification import (
 from kagglebot.knowledge.profile_utils import safe_nunique
 from kagglebot.knowledge.repositories import InsightRepository, TaxonomyRepository
 from kagglebot.paths import KnowledgePaths
+from kagglebot.plan_policy import apply_competition_eval_override
 from kagglebot.rna_structure import detect_rna_structure_task, extract_target_id, load_rna_structure_task
 from kagglebot.solver.io import (
     ensure_sample_submission,
@@ -30,21 +50,22 @@ from kagglebot.solver.io import (
     infer_prediction_kind,
     infer_submission_layout,
     infer_task,
+    materialize_sqlite_tables,
+    read_table,
+    task_for_prediction_kind,
 )
+from kagglebot.submission_sample_discovery import (
+    TABULAR_STRUCTURED_SUFFIXES,
+    TABULAR_TEXT_SUFFIXES,
+    is_json_lines_tabular_suffix,
+    is_tabular_data_path,
+    sample_name_score,
+    tabular_suffix,
+)
+from kagglebot.validators import extract_data_archives
 
 _PROFILE_MAX_TABLE_BYTES_DEFAULT = 256 * 1024 * 1024
 _PROFILE_SAMPLE_ROWS = 200_000
-_SLUG_DATASET_PROFILE_OVERRIDES: dict[str, dict[str, object]] = {
-    "deep-past-initiative-machine-translation": {
-        "task": "translation",
-        "task_by_target": {"translation": "translation"},
-        "prediction_kind_by_target": {"translation": "text"},
-        "metric": "Geometric Mean of the BLEU and the chrF++ scores",
-        "split_strategy_hint": "group_kfold",
-        "group_column_hint": "oare_id",
-        "tags": ["text", "translation", "n_rows_small", "high_cardinality_cats"],
-    }
-}
 
 
 def _dataset_slug(data_dir: Path) -> str:
@@ -52,12 +73,7 @@ def _dataset_slug(data_dir: Path) -> str:
 
 
 def _apply_dataset_profile_override(data_dir: Path, profile: dict[str, object]) -> dict[str, object]:
-    override = _SLUG_DATASET_PROFILE_OVERRIDES.get(_dataset_slug(data_dir))
-    if not override:
-        return profile
-    updated = dict(profile)
-    updated.update(override)
-    return updated
+    return apply_competition_eval_override(slug=_dataset_slug(data_dir), payload=profile)
 
 
 @dataclass(frozen=True)
@@ -146,16 +162,40 @@ def derive_problem_types(profile: dict[str, object]) -> list[str]:
         "tabular",
         "text",
         "image",
+        "multimodal",
+        "grouped",
+        "sample_weighted",
         "timeseries",
+        "geospatial",
         "rna_structure",
         "rna",
         "sequence",
         "structure",
+        "survival",
+        "pairwise",
+        "learning_to_rank",
+        "unsupervised",
+        "unsupervised_prediction",
+        "anomaly_detection",
+        "quantile_regression",
+        "prediction_interval",
+        "count_regression",
+        "bounded_regression",
+        "positive_skew_regression",
+        "ordinal_classification",
+        "recommender",
+        "ctr",
+        "forecasting",
+        "object_detection",
+        "segmentation",
         "coordinate_regression",
         "residue_level_output",
         "regression",
         "binary",
         "multiclass",
+        "multi_label",
+        "multi_output",
+        "multi_target",
         "multitask",
         "missingness_high",
         "high_cardinality_cats",
@@ -468,6 +508,8 @@ def _normalize_outcome_bucket(value: str | None) -> str:
 
 
 def build_dataset_profile(data_dir: Path) -> dict[str, object]:
+    extract_data_archives(data_dir, overwrite=False)
+    materialize_sqlite_tables(data_dir)
     profile: dict[str, object] = {"data_dir": str(data_dir)}
     file_count, extension_counts, file_samples = _summarize_files(data_dir)
     profile["file_count"] = file_count
@@ -476,8 +518,13 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
 
     tabular_files = _find_tabular_files(data_dir)
     if not tabular_files:
+        modality = infer_asset_modality(data_dir, include_code_artifact=True)
+        tags = [] if modality == "unknown" else [modality]
         profile["status"] = "non_tabular_data"
-        profile["tags"] = []
+        profile["modality"] = modality
+        profile["task"] = modality
+        profile["metric"] = "unknown"
+        profile["tags"] = tags
         return profile
 
     if detect_rna_structure_task(data_dir):
@@ -502,6 +549,15 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
         if submission_only_profile is not None:
             profile.update(submission_only_profile)
             return profile
+        modality = infer_asset_modality(data_dir, include_code_artifact=True)
+        if modality not in {"unknown", "tabular"}:
+            tags = [] if modality == "unknown" else [modality]
+            profile["status"] = "non_tabular_data"
+            profile["modality"] = modality
+            profile["task"] = modality
+            profile["metric"] = "unknown"
+            profile["tags"] = tags
+            return profile
         profile["status"] = "missing_required_files"
         profile["error"] = str(exc)
         profile["tags"] = []
@@ -520,16 +576,107 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
 
     id_col, target_cols, feature_cols = infer_submission_layout(train=train, test=test, sample=sample)
     if not target_cols:
+        unlabeled_profile = _build_unlabeled_prediction_profile(
+            train=train,
+            test=test,
+            sample=sample,
+            train_path=train_path,
+            test_path=test_path,
+            sample_path=sample_path,
+            train_row_count=train_row_count,
+            test_row_count=test_row_count,
+            train_sampled=train_sampled,
+            test_sampled=test_sampled,
+            sample_sampled=sample_sampled,
+            max_table_bytes=max_table_bytes,
+            id_col=id_col,
+            feature_cols=feature_cols,
+            data_dir=data_dir,
+        )
+        if unlabeled_profile is not None:
+            profile.update(unlabeled_profile)
+            return _apply_dataset_profile_override(data_dir, profile)
         profile["status"] = "missing_target_columns"
         profile["tags"] = []
         return profile
+    sample_weight_column_hint = _infer_sample_weight_column_hint(
+        train=train,
+        test=test,
+        feature_cols=feature_cols,
+        target_cols=target_cols,
+        id_col=id_col,
+    )
+    if sample_weight_column_hint:
+        feature_cols = [col for col in feature_cols if col != sample_weight_column_hint]
     target_col = target_cols[0]
-    task_by_target = {col: infer_task(train[col]) for col in target_cols}
+    task_by_target = {
+        col: "regression"
+        if _looks_like_bounded_regression_target(train[col], column_name=col)
+        or _looks_like_positive_skew_regression_target(train[col], column_name=col)
+        else infer_task(train[col])
+        for col in target_cols
+    }
+    prediction_kind_by_target = {
+        col: _infer_profile_prediction_kind(sample=sample, id_col=id_col, target_col=col, target_cols=target_cols)
+        for col in target_cols
+    }
+    task_by_target = {
+        col: task_for_prediction_kind(task_by_target[col], prediction_kind_by_target[col]) for col in target_cols
+    }
     unique_tasks = sorted(set(task_by_target.values()))
     task = unique_tasks[0] if len(unique_tasks) == 1 else "mixed"
-    prediction_kind_by_target = {
-        col: infer_prediction_kind(sample[col]) if col in sample.columns else "continuous" for col in target_cols
+    target_semantics_by_target = {
+        col: _infer_target_semantics(train[col], column_name=col, task=task_by_target[col]) for col in target_cols
     }
+    target_semantics = _aggregate_target_semantics(
+        target_semantics_by_target=target_semantics_by_target,
+        task=task,
+        target_cols=target_cols,
+    )
+    if _looks_like_coordinate_regression_targets(
+        train=train,
+        target_cols=target_cols,
+        task_by_target=task_by_target,
+    ):
+        target_semantics = "coordinate_regression"
+        target_semantics_by_target = {col: "coordinate_regression" for col in target_cols}
+    if _has_pairwise_feature_signal(feature_cols):
+        target_semantics = "pairwise"
+    elif _looks_like_multi_label_indicator_targets(
+        train=train,
+        sample=sample,
+        target_cols=target_cols,
+        task_by_target=task_by_target,
+    ):
+        target_semantics = "multi_label"
+        target_semantics_by_target = {col: "multi_label" for col in target_cols}
+    if _infer_learning_to_rank_target_semantics(
+        feature_cols=feature_cols,
+        target_col=target_col,
+        target_semantics=target_semantics,
+    ):
+        target_semantics = "learning_to_rank"
+        if len(target_cols) == 1:
+            target_semantics_by_target[target_col] = "learning_to_rank"
+    recommender_semantics = _infer_recommender_target_semantics(
+        feature_cols=feature_cols,
+        target_col=target_col,
+        target_semantics=target_semantics,
+        prediction_kind=prediction_kind_by_target[target_col],
+    )
+    if recommender_semantics is not None:
+        target_semantics = recommender_semantics
+        if len(target_cols) == 1:
+            target_semantics_by_target[target_col] = recommender_semantics
+    if _looks_like_forecasting_layout(train=train, test=test, feature_cols=feature_cols):
+        target_semantics = "forecasting"
+        if len(target_cols) == 1:
+            target_semantics_by_target[target_col] = "forecasting"
+    submission_semantics = _infer_submission_target_semantics(sample=sample, target_cols=target_cols)
+    if submission_semantics is not None:
+        target_semantics = submission_semantics
+        if len(target_cols) == 1:
+            target_semantics_by_target[target_cols[0]] = submission_semantics
     n_rows = train_row_count if train_row_count is not None else len(train)
     n_cols = len(train.columns)
     missingness = float(train.isna().mean().mean())
@@ -538,20 +685,67 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
     cat_cols = [c for c in feature_cols if train[c].dtype == "object"]
     high_cardinality = [c for c in cat_cols if safe_nunique(train[c]) > 50]
 
-    modality = _infer_modality(data_dir, train)
+    modality = _infer_modality(data_dir, train, test, feature_cols=feature_cols)
+    if prediction_kind_by_target[target_col] == "text" and target_semantics not in {"object_detection", "segmentation"}:
+        modality = "text"
+    group_column_hint = _infer_group_column_hint(train, feature_cols=feature_cols)
     task_tag = _task_tag(task, train[target_col])
     size_tag = _size_tag(n_rows)
 
-    tags = [modality, task_tag, size_tag]
+    tags = []
+    for tag in (modality, task_tag, size_tag):
+        if tag not in tags:
+            tags.append(tag)
+    if group_column_hint and "grouped" not in tags:
+        tags.append("grouped")
+    if sample_weight_column_hint and "sample_weighted" not in tags:
+        tags.append("sample_weighted")
     if missingness > 0.2:
         tags.append("missingness_high")
     if high_cardinality:
         tags.append("high_cardinality_cats")
+    semantic_tag = _target_semantics_tag(target_semantics)
+    if semantic_tag and semantic_tag not in tags:
+        tags.append(semantic_tag)
 
-    if task == "regression":
-        metric = "rmse"
-    elif prediction_kind_by_target[target_col] == "probability":
+    if target_semantics == "ctr":
         metric = "logloss"
+    elif target_semantics == "learning_to_rank":
+        metric = "ndcg"
+    elif target_semantics == "recommender":
+        metric = "rmse"
+    elif target_semantics == "forecasting":
+        metric = "rmse"
+    elif target_semantics == "quantile_regression":
+        metric = "pinball_loss"
+    elif target_semantics == "prediction_interval":
+        metric = "interval_score"
+    elif target_semantics == "coordinate_regression":
+        metric = "rmse"
+    elif target_semantics == "count_regression":
+        metric = "rmsle"
+    elif target_semantics == "bounded_regression":
+        metric = "rmse"
+    elif target_semantics == "positive_skew_regression":
+        metric = "rmsle"
+    elif target_semantics == "ordinal_classification":
+        metric = "quadratic_weighted_kappa"
+    elif task == "regression":
+        metric = "rmse"
+    elif target_semantics == "survival":
+        metric = "concordance_index"
+    elif target_semantics == "object_detection":
+        metric = "map"
+    elif target_semantics == "segmentation":
+        metric = "dice"
+    elif target_semantics == "multi_label":
+        metric = "f1"
+    elif target_semantics == "text_generation":
+        metric = "text_similarity"
+    elif prediction_kind_by_target[target_col] in {"probability", "probability_columns"}:
+        metric = "logloss"
+    elif prediction_kind_by_target[target_col] == "text":
+        metric = "text_similarity"
     else:
         metric = "accuracy"
     target_stats = _target_stats(train[target_col], task)
@@ -574,6 +768,8 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             "target_columns": target_cols,
             "task": task,
             "task_by_target": task_by_target,
+            "target_semantics": target_semantics,
+            "target_semantics_by_target": target_semantics_by_target,
             "prediction_kind_by_target": prediction_kind_by_target,
             "metric": metric,
             "missingness": missingness,
@@ -597,7 +793,121 @@ def build_dataset_profile(data_dir: Path) -> dict[str, object]:
             },
         }
     )
+    if modality == "timeseries":
+        profile["split_strategy_hint"] = "timeseries_split"
+    elif group_column_hint:
+        profile["split_strategy_hint"] = "group_kfold"
+    if group_column_hint:
+        profile["group_column_hint"] = group_column_hint
+    if sample_weight_column_hint:
+        profile["sample_weight_column_hint"] = sample_weight_column_hint
+        profile["sample_weight_summary"] = _sample_weight_summary(train[sample_weight_column_hint])
     return _apply_dataset_profile_override(data_dir, profile)
+
+
+def _infer_profile_prediction_kind(
+    *,
+    sample: pd.DataFrame,
+    id_col: str | None,
+    target_col: str,
+    target_cols: list[str],
+) -> str:
+    if target_col in sample.columns:
+        return infer_prediction_kind(sample[target_col], column_name=target_col)
+    prediction_cols = [col for col in sample.columns if col != id_col]
+    if (
+        len(target_cols) == 1
+        and len(prediction_cols) >= 2
+        and all(pd.api.types.is_numeric_dtype(sample[col]) for col in prediction_cols)
+    ):
+        return "probability_columns"
+    return "continuous"
+
+
+def _build_unlabeled_prediction_profile(
+    *,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    sample: pd.DataFrame,
+    train_path: Path,
+    test_path: Path,
+    sample_path: Path,
+    train_row_count: int | None,
+    test_row_count: int | None,
+    train_sampled: bool,
+    test_sampled: bool,
+    sample_sampled: bool,
+    max_table_bytes: int,
+    id_col: str | None,
+    feature_cols: list[str],
+    data_dir: Path,
+) -> dict[str, object] | None:
+    prediction_cols = [str(col) for col in sample.columns if str(col) != str(id_col)]
+    if not prediction_cols:
+        return None
+    if not feature_cols:
+        return None
+
+    target_col = prediction_cols[0]
+    target_semantics = (
+        "anomaly_detection" if _looks_like_anomaly_prediction_column(target_col) else "unsupervised_prediction"
+    )
+    prediction_kind_by_target = {
+        col: _infer_profile_prediction_kind(sample=sample, id_col=id_col, target_col=col, target_cols=prediction_cols)
+        for col in prediction_cols
+    }
+    n_rows = train_row_count if train_row_count is not None else len(train)
+    missingness = float(train.isna().mean().mean())
+    missingness_by_column = {col: float(val) for col, val in train.isna().mean().items()}
+    dtype_by_column = {col: str(dtype) for col, dtype in train.dtypes.items()}
+    cat_cols = [c for c in feature_cols if c in train.columns and train[c].dtype == "object"]
+    high_cardinality = [c for c in cat_cols if safe_nunique(train[c]) > 50]
+    modality = _infer_modality(data_dir, train, test, feature_cols=feature_cols)
+    tags = [modality, "unsupervised", _target_semantics_tag(target_semantics)]
+    if missingness > 0.2:
+        tags.append("missingness_high")
+    if high_cardinality:
+        tags.append("high_cardinality_cats")
+    deduped_tags = [tag for index, tag in enumerate(tags) if tag and tag not in tags[:index]]
+    metric = "auc" if target_semantics == "anomaly_detection" else "unknown"
+    return {
+        "status": "ok",
+        "train_file": train_path.name,
+        "test_file": test_path.name,
+        "sample_submission_file": sample_path.name,
+        "train_rows": n_rows,
+        "train_cols": len(train.columns),
+        "test_rows": test_row_count if test_row_count is not None else len(test),
+        "test_cols": len(test.columns),
+        "id_column": id_col,
+        "target_column": target_col,
+        "target_columns": prediction_cols,
+        "task": "unsupervised",
+        "task_by_target": {col: "unsupervised" for col in prediction_cols},
+        "target_semantics": target_semantics,
+        "target_semantics_by_target": {col: target_semantics for col in prediction_cols},
+        "prediction_kind_by_target": prediction_kind_by_target,
+        "metric": metric,
+        "missingness": missingness,
+        "missingness_by_column": missingness_by_column,
+        "dtype_by_column": dtype_by_column,
+        "categorical_columns": cat_cols,
+        "numeric_columns": [c for c in feature_cols if c in train.columns and c not in cat_cols],
+        "high_cardinality_columns": high_cardinality,
+        "modality": modality,
+        "tags": deduped_tags,
+        "target_stats": {},
+        "train_only_columns": [c for c in train.columns if c not in test.columns],
+        "test_only_columns": [c for c in test.columns if c not in train.columns],
+        "profile_sampling": {
+            "enabled": bool(train_sampled or test_sampled or sample_sampled),
+            "max_table_bytes": max_table_bytes,
+            "max_rows": _PROFILE_SAMPLE_ROWS,
+            "train": train_sampled,
+            "test": test_sampled,
+            "sample_submission": sample_sampled,
+        },
+    }
 
 
 def _build_rna_structure_profile(task) -> dict[str, object]:
@@ -706,6 +1016,8 @@ def _build_submission_only_pairwise_profile(
         return None
 
     id_col = str(sample.columns[0])
+    if not _is_id_like_column(id_col):
+        return None
     target_cols = [str(col) for col in sample.columns[1:] if str(col).strip()]
     if not target_cols:
         return None
@@ -736,6 +1048,8 @@ def _build_submission_only_pairwise_profile(
         "target_columns": target_cols,
         "task": "classification",
         "task_by_target": {col: "classification" for col in target_cols},
+        "target_semantics": "pairwise",
+        "target_semantics_by_target": {col: "pairwise" for col in target_cols},
         "prediction_kind_by_target": {col: prediction_kind for col in target_cols},
         "metric": "brier_score",
         "missingness": 0.0,
@@ -745,7 +1059,7 @@ def _build_submission_only_pairwise_profile(
         "numeric_columns": [],
         "high_cardinality_columns": [],
         "modality": "tabular",
-        "tags": ["tabular", "binary"],
+        "tags": ["tabular", "binary", "pairwise"],
         "competition_structure": "submission_only_pairwise_probability",
         "split_strategy_hint": "group_kfold",
         "group_column_hint": "Season",
@@ -785,10 +1099,15 @@ def _looks_like_march_mania_pairwise_competition(
     first_id = str(sample.iloc[0]["ID"]) if len(sample) else ""
     if not re.fullmatch(r"\d{4}_\d+_\d+", first_id):
         return False
-    lowered = str(sample_path.name).lower()
-    if "samplesubmission" in lowered or "sample_submission" in lowered:
+    if sample_name_score(sample_path) >= 2:
         return True
     return "march-machine-learning-mania" in str(data_dir).lower()
+
+
+def _is_id_like_column(column: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(column).strip().lower()).strip("_")
+    compact = normalized.replace("_", "")
+    return normalized in ID_LIKE_COLUMN_NAMES or compact in ID_LIKE_COLUMN_NAMES
 
 
 def _profile_max_table_bytes() -> int:
@@ -802,19 +1121,22 @@ def _profile_max_table_bytes() -> int:
 
 def _read_table_for_profile(path: Path, *, max_table_bytes: int) -> tuple[pd.DataFrame, int | None, bool]:
     size_bytes = _safe_file_size(path)
-    suffix = path.suffix.lower()
+    suffix = tabular_suffix(path)
     oversized = size_bytes is not None and size_bytes > max_table_bytes
-    if oversized and suffix in {".csv", ".tsv", ".txt", ".jsonl"}:
-        if suffix == ".jsonl":
-            frame = pd.read_json(path, lines=True, nrows=_PROFILE_SAMPLE_ROWS)
+    if oversized and suffix in TABULAR_TEXT_SUFFIXES | TABULAR_STRUCTURED_SUFFIXES:
+        if _is_json_lines_suffix(suffix):
+            frame = _read_table(path, nrows=_PROFILE_SAMPLE_ROWS)
             row_count = _count_text_rows(path, has_header=False)
             return frame, row_count, True
-        sep = "\t" if suffix in {".tsv", ".txt"} else ","
-        frame = pd.read_csv(path, sep=sep, nrows=_PROFILE_SAMPLE_ROWS)
-        row_count = _count_text_rows(path, has_header=True)
+        frame = _read_table(path, nrows=_PROFILE_SAMPLE_ROWS)
+        row_count = _count_text_rows(path, has_header=True) if suffix in TABULAR_TEXT_SUFFIXES else len(frame)
         return frame, row_count, True
     frame = _read_table(path)
     return frame, len(frame), False
+
+
+def _is_json_lines_suffix(suffix: str) -> bool:
+    return is_json_lines_tabular_suffix(suffix)
 
 
 def _safe_file_size(path: Path) -> int | None:
@@ -827,7 +1149,7 @@ def _safe_file_size(path: Path) -> int | None:
 def _count_text_rows(path: Path, *, has_header: bool) -> int | None:
     rows = 0
     try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        with open_compressed_text(path, suffix=tabular_suffix(path), encoding="utf-8", errors="ignore") as handle:
             for line in handle:
                 if line.strip():
                     rows += 1
@@ -839,22 +1161,11 @@ def _count_text_rows(path: Path, *, has_header: bool) -> int | None:
 
 
 def _find_tabular_files(root: Path) -> list[Path]:
-    suffixes = {".csv", ".tsv", ".txt", ".parquet", ".json", ".jsonl"}
-    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in suffixes]
+    return [p for p in root.rglob("*") if p.is_file() and is_tabular_data_path(p)]
 
 
-def _read_table(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".parquet":
-        return pd.read_parquet(path)
-    if suffix in {".json", ".jsonl"}:
-        try:
-            return pd.read_json(path, lines=True)
-        except ValueError:
-            return pd.read_json(path)
-    if suffix in {".tsv", ".txt"}:
-        return pd.read_csv(path, sep="\t")
-    return pd.read_csv(path)
+def _read_table(path: Path, *, nrows: int | None = None) -> pd.DataFrame:
+    return read_table(path, nrows=nrows)
 
 
 def _summarize_files(
@@ -870,7 +1181,7 @@ def _summarize_files(
         if not path.is_file():
             continue
         total += 1
-        ext = path.suffix.lower() or "<none>"
+        ext = tabular_suffix(path) or "<none>"
         counts[ext] = counts.get(ext, 0) + 1
         if len(samples) < max_samples:
             try:
@@ -901,11 +1212,807 @@ def _target_stats(target: pd.Series, task: str) -> dict[str, object]:
     return stats
 
 
-def _infer_modality(data_dir: Path, train: pd.DataFrame) -> str:
-    image_exts = {".jpg", ".jpeg", ".png"}
-    if any(path.suffix.lower() in image_exts for path in data_dir.rglob("*")):
-        return "image"
-    text_cols = [c for c in train.columns if train[c].dtype == "object"]
+def _infer_target_semantics(target: pd.Series, *, column_name: str, task: str) -> str:
+    if task == "text" and _is_text_generation_target_column(column_name):
+        return "text_generation"
+    if task == "regression" and _looks_like_count_regression_target(target, column_name=column_name):
+        return "count_regression"
+    if task == "regression" and _looks_like_bounded_regression_target(target, column_name=column_name):
+        return "bounded_regression"
+    if task == "regression" and _looks_like_positive_skew_regression_target(target, column_name=column_name):
+        return "positive_skew_regression"
+    if task == "classification" and _looks_like_multi_label_target(target, column_name=column_name):
+        return "multi_label"
+    if task == "classification" and _looks_like_ordinal_target(target, column_name=column_name):
+        return "ordinal_classification"
+    return task
+
+
+def _is_text_generation_target_column(name: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", str(name).lower())
+    tokens = set(_column_tokens(name))
+    return compact in {
+        "answer",
+        "answers",
+        "caption",
+        "captions",
+        "completion",
+        "completions",
+        "description",
+        "descriptions",
+        "essay",
+        "essays",
+        "explanation",
+        "explanations",
+        "generatedtext",
+        "response",
+        "responses",
+        "summary",
+        "summaries",
+        "targettext",
+        "textanswer",
+        "transcription",
+        "transcriptions",
+        "translation",
+        "translations",
+    } or bool(
+        tokens
+        & {
+            "answer",
+            "caption",
+            "completion",
+            "description",
+            "essay",
+            "explanation",
+            "response",
+            "summary",
+            "transcription",
+            "translation",
+        }
+    )
+
+
+def _aggregate_target_semantics(
+    *,
+    target_semantics_by_target: dict[str, str],
+    task: str,
+    target_cols: list[str],
+) -> str:
+    if len(target_cols) <= 1:
+        return target_semantics_by_target[target_cols[0]]
+    if _looks_like_survival_target_columns(target_cols):
+        return "survival"
+    semantics = set(target_semantics_by_target.values())
+    if "multi_label" in semantics:
+        return "multi_label"
+    if task == "regression":
+        return "multi_output_regression"
+    if task == "classification":
+        return "multi_target_classification"
+    if task == "mixed":
+        return "multi_task"
+    return f"multi_output_{task}"
+
+
+def _looks_like_coordinate_regression_targets(
+    *,
+    train: pd.DataFrame,
+    target_cols: list[str],
+    task_by_target: dict[str, str],
+) -> bool:
+    if len(target_cols) < 2:
+        return False
+    if not all(col in train.columns for col in target_cols):
+        return False
+    if not all(task_by_target.get(col) == "regression" for col in target_cols):
+        return False
+    if not all(pd.api.types.is_numeric_dtype(train[col]) for col in target_cols):
+        return False
+    axes = {_coordinate_axis_for_column(str(col)) for col in target_cols}
+    axes.discard(None)
+    if {"lat", "lon"}.issubset(axes):
+        return True
+    return {"x", "y"}.issubset(axes)
+
+
+def _looks_like_multi_label_indicator_targets(
+    *,
+    train: pd.DataFrame,
+    sample: pd.DataFrame,
+    target_cols: list[str],
+    task_by_target: dict[str, str],
+) -> bool:
+    if len(target_cols) < 3:
+        return False
+    if _looks_like_survival_target_columns(target_cols):
+        return False
+    if not all(col in train.columns and col in sample.columns for col in target_cols):
+        return False
+    if not all(task_by_target.get(col) == "classification" for col in target_cols):
+        return False
+    if not all(_looks_like_binary_indicator_column(train[col]) for col in target_cols):
+        return False
+    return all(pd.api.types.is_numeric_dtype(sample[col]) for col in target_cols)
+
+
+def _looks_like_binary_indicator_column(series: pd.Series) -> bool:
+    non_null = series.dropna()
+    values = pd.to_numeric(non_null, errors="coerce").dropna()
+    if values.empty or len(values) != len(non_null):
+        return False
+    unique = set(values.unique().tolist())
+    return bool(unique) and unique <= {0, 1, 0.0, 1.0}
+
+
+def _looks_like_count_regression_target(target: pd.Series, *, column_name: str) -> bool:
+    if not pd.api.types.is_numeric_dtype(target):
+        return False
+    tokens = set(_column_tokens(column_name))
+    compact = "".join(_column_tokens(column_name))
+    if not (
+        tokens
+        & {
+            "count",
+            "counts",
+            "demand",
+            "quantity",
+            "qty",
+            "unit",
+            "units",
+            "trip",
+            "trips",
+            "ride",
+            "rides",
+            "rental",
+            "rentals",
+            "order",
+            "orders",
+            "booking",
+            "bookings",
+            "visitor",
+            "visitors",
+            "passenger",
+            "passengers",
+        }
+        or compact in {"itemcount", "unitcount", "numorders", "numberoforders", "tripcount", "ridecount"}
+        or compact.startswith("num")
+    ):
+        return False
+    values = pd.to_numeric(target.dropna(), errors="coerce").dropna()
+    if values.empty or bool((values < 0).any()):
+        return False
+    integer_like = ((values % 1).abs() < 1e-9).mean()
+    return bool(float(integer_like) >= 0.95 and int(values.nunique(dropna=True)) >= 3)
+
+
+def _looks_like_bounded_regression_target(target: pd.Series, *, column_name: str) -> bool:
+    if not pd.api.types.is_numeric_dtype(target):
+        return False
+    tokens = set(_column_tokens(column_name))
+    compact = "".join(_column_tokens(column_name))
+    bounded_names = {
+        "rate",
+        "ratio",
+        "percent",
+        "percentage",
+        "pct",
+        "share",
+        "fraction",
+        "proportion",
+        "probability",
+        "prob",
+    }
+    bounded_compacts = {
+        "conversionrate",
+        "clickthroughrate",
+        "defaultprobability",
+        "winprobability",
+        "targetrate",
+        "targetratio",
+    }
+    if not (tokens & bounded_names or compact in bounded_compacts):
+        return False
+    values = pd.to_numeric(target.dropna(), errors="coerce").dropna()
+    if values.empty or int(values.nunique(dropna=True)) < 3:
+        return False
+    if float(values.min()) < 0.0:
+        return False
+    max_value = float(values.max())
+    if max_value <= 1.0:
+        return True
+    percent_names = {"percent", "percentage", "pct"}
+    return bool((tokens & percent_names or "percent" in compact or "pct" in compact) and max_value <= 100.0)
+
+
+def _looks_like_positive_skew_regression_target(target: pd.Series, *, column_name: str) -> bool:
+    if not pd.api.types.is_numeric_dtype(target):
+        return False
+    tokens = set(_column_tokens(column_name))
+    compact = "".join(_column_tokens(column_name))
+    skew_names = {
+        "amount",
+        "cost",
+        "fare",
+        "income",
+        "price",
+        "profit",
+        "revenue",
+        "sale",
+        "sales",
+        "spend",
+        "value",
+    }
+    skew_compacts = {
+        "saleprice",
+        "salesprice",
+        "transactionamount",
+        "purchaseamount",
+        "targetvalue",
+    }
+    if not (tokens & skew_names or compact in skew_compacts):
+        return False
+    values = pd.to_numeric(target.dropna(), errors="coerce").dropna()
+    if len(values) < 8 or bool((values < 0).any()) or int(values.nunique(dropna=True)) < 5:
+        return False
+    median = float(values.median())
+    if median <= 0.0:
+        return False
+    skew = float(values.skew())
+    if pd.isna(skew):
+        return False
+    return bool(skew >= 1.0 and float(values.max()) / median >= 5.0)
+
+
+def _coordinate_axis_for_column(name: str) -> str | None:
+    tokens = _column_tokens(name)
+    compact = "".join(tokens)
+    if not tokens:
+        return None
+    if tokens[0] in {"x", "y", "z"}:
+        return tokens[0]
+    if tokens[-1] in {"x", "y", "z"} and any(
+        token in {"coord", "coordinate", "coords", "position", "pos"} for token in tokens
+    ):
+        return tokens[-1]
+    if compact in {"x", "xcoord", "xcoordinate", "coordx", "coordinatex", "positionx", "posx"}:
+        return "x"
+    if compact in {"y", "ycoord", "ycoordinate", "coordy", "coordinatey", "positiony", "posy"}:
+        return "y"
+    if compact in {"z", "zcoord", "zcoordinate", "coordz", "coordinatez", "positionz", "posz"}:
+        return "z"
+    if "latitude" in tokens or "lat" in tokens or compact in {"latitude", "lat"}:
+        return "lat"
+    if any(token in {"longitude", "lon", "lng"} for token in tokens) or compact in {"longitude", "lon", "lng"}:
+        return "lon"
+    return None
+
+
+def _target_semantics_tag(target_semantics: str) -> str | None:
+    if target_semantics == "multi_label":
+        return "multi_label"
+    if target_semantics.startswith("multi_output"):
+        return "multi_output"
+    if target_semantics.startswith("multi_target"):
+        return "multi_target"
+    if target_semantics == "multi_task":
+        return "multitask"
+    if target_semantics == "survival":
+        return "survival"
+    if target_semantics == "pairwise":
+        return "pairwise"
+    if target_semantics == "learning_to_rank":
+        return "learning_to_rank"
+    if target_semantics == "anomaly_detection":
+        return "anomaly_detection"
+    if target_semantics == "unsupervised_prediction":
+        return "unsupervised"
+    if target_semantics == "quantile_regression":
+        return "quantile_regression"
+    if target_semantics == "prediction_interval":
+        return "prediction_interval"
+    if target_semantics == "coordinate_regression":
+        return "coordinate_regression"
+    if target_semantics == "count_regression":
+        return "count_regression"
+    if target_semantics == "bounded_regression":
+        return "bounded_regression"
+    if target_semantics == "positive_skew_regression":
+        return "positive_skew_regression"
+    if target_semantics == "ordinal_classification":
+        return "ordinal_classification"
+    if target_semantics == "recommender":
+        return "recommender"
+    if target_semantics == "ctr":
+        return "ctr"
+    if target_semantics == "forecasting":
+        return "forecasting"
+    if target_semantics == "text_generation":
+        return "text_generation"
+    if target_semantics == "object_detection":
+        return "object_detection"
+    if target_semantics == "segmentation":
+        return "segmentation"
+    return None
+
+
+def _infer_submission_target_semantics(*, sample: pd.DataFrame, target_cols: list[str]) -> str | None:
+    prediction_cols = [str(col) for col in sample.columns if str(col) in {str(target) for target in target_cols}]
+    if not prediction_cols:
+        prediction_cols = [str(col) for col in sample.columns[1:]]
+    if _looks_like_prediction_interval_columns(prediction_cols):
+        return "prediction_interval"
+    if _looks_like_quantile_prediction_columns(prediction_cols):
+        return "quantile_regression"
+    compact_cols = {re.sub(r"[^a-z0-9]+", "", col.lower()) for col in prediction_cols}
+    if compact_cols & {
+        "encodedpixels",
+        "rle",
+        "runlengthencoding",
+        "mask",
+        "masks",
+        "segmentation",
+        "segmentationmask",
+        "maskrle",
+    }:
+        return "segmentation"
+    if compact_cols & {"predictionstring", "predstring", "detections", "detectionstring", "bbox", "bboxes", "boxes"}:
+        return "object_detection"
+    return None
+
+
+def _looks_like_prediction_interval_columns(prediction_cols: list[str]) -> bool:
+    compact_cols = {re.sub(r"[^a-z0-9]+", "", col.lower()) for col in prediction_cols}
+    lower_tokens = {"lower", "lo", "low", "lwr", "lowerbound", "lowerci", "lowerlimit"}
+    upper_tokens = {"upper", "hi", "high", "upr", "upperbound", "upperci", "upperlimit"}
+    has_lower = bool(compact_cols & lower_tokens)
+    has_upper = bool(compact_cols & upper_tokens)
+    return has_lower and has_upper
+
+
+def _looks_like_quantile_prediction_columns(prediction_cols: list[str]) -> bool:
+    quantile_count = sum(1 for col in prediction_cols if _is_quantile_prediction_column(col))
+    return quantile_count >= 2
+
+
+def _is_quantile_prediction_column(name: str) -> bool:
+    lower = name.lower().strip()
+    compact = re.sub(r"[^a-z0-9]+", "", lower)
+    if compact in {"median", "p50", "q50", "quantile50"}:
+        return True
+    if re.search(r"(?:^|[_\-.])(?:p|q)(?:0?[1-9]|[1-9][0-9])(?:$|[_\-.])", lower):
+        return True
+    if re.search(r"(?:quantile|percentile)[_\-.]?(?:0?\.\d+|0?[1-9]|[1-9][0-9])", lower):
+        return True
+    return bool(re.search(r"(?:^|[_\-.])0?\.\d+(?:$|[_\-.])", lower))
+
+
+def _has_pairwise_feature_signal(feature_cols: list[str]) -> bool:
+    compact_cols = {re.sub(r"[^a-z0-9]+", "", str(col).lower()) for col in feature_cols}
+    pair_groups = (
+        ("team1", "team2"),
+        ("team_a", "team_b"),
+        ("teama", "teamb"),
+        ("home_team", "away_team"),
+        ("hometeam", "awayteam"),
+        ("player1", "player2"),
+        ("playera", "playerb"),
+        ("item1", "item2"),
+        ("itema", "itemb"),
+        ("modela", "modelb"),
+        ("model_a", "model_b"),
+        ("user1", "user2"),
+        ("usera", "userb"),
+    )
+    for left, right in pair_groups:
+        left_compact = re.sub(r"[^a-z0-9]+", "", left)
+        right_compact = re.sub(r"[^a-z0-9]+", "", right)
+        if left_compact in compact_cols and right_compact in compact_cols:
+            return True
+    prefixes: dict[str, set[str]] = {}
+    for compact in compact_cols:
+        match = re.match(r"(.+?)(?:id)?([12ab])$", compact)
+        if not match:
+            continue
+        prefix, side = match.groups()
+        if prefix in {"team", "player", "item", "model", "user", "entity", "candidate"}:
+            prefixes.setdefault(prefix, set()).add(side)
+    return any({"1", "2"}.issubset(sides) or {"a", "b"}.issubset(sides) for sides in prefixes.values())
+
+
+def _infer_recommender_target_semantics(
+    *,
+    feature_cols: list[str],
+    target_col: str,
+    target_semantics: str,
+    prediction_kind: str,
+) -> str | None:
+    if target_semantics not in {"classification", "regression", "ordinal_classification", "bounded_regression"}:
+        return None
+    if not _has_user_item_feature_signal(feature_cols):
+        return None
+    if _is_ctr_target_column(target_col):
+        return "ctr"
+    if target_semantics == "bounded_regression":
+        return None
+    if _is_recommender_score_target_column(target_col):
+        return "recommender"
+    if target_semantics == "classification" or prediction_kind == "probability":
+        return "ctr"
+    return "recommender"
+
+
+def _infer_learning_to_rank_target_semantics(
+    *,
+    feature_cols: list[str],
+    target_col: str,
+    target_semantics: str,
+) -> bool:
+    if target_semantics not in {"classification", "regression"}:
+        return False
+    if not _has_query_candidate_feature_signal(feature_cols):
+        return False
+    return _is_learning_to_rank_target_column(target_col)
+
+
+def _has_query_candidate_feature_signal(feature_cols: list[str]) -> bool:
+    has_query = any(_is_query_entity_column(str(col)) for col in feature_cols)
+    has_candidate = any(_is_ranking_candidate_column(str(col)) for col in feature_cols)
+    return has_query and has_candidate
+
+
+def _is_query_entity_column(name: str) -> bool:
+    return _column_matches_entity_terms(
+        name,
+        {
+            "query",
+            "search",
+            "request",
+            "question",
+            "prompt",
+            "topic",
+            "keyword",
+            "qid",
+        },
+    )
+
+
+def _is_ranking_candidate_column(name: str) -> bool:
+    return _column_matches_entity_terms(
+        name,
+        {
+            "document",
+            "doc",
+            "passage",
+            "candidate",
+            "result",
+            "page",
+            "url",
+            "answer",
+            "listing",
+            "item",
+        },
+    )
+
+
+def _is_learning_to_rank_target_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(tokens)
+    return bool(tokens & {"relevance", "rank", "ranking", "grade", "gain"}) or compact in {
+        "relevancescore",
+        "relevancegrade",
+        "searchrank",
+        "target",
+        "label",
+    }
+
+
+def _looks_like_anomaly_prediction_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(tokens)
+    return bool(
+        tokens
+        & {
+            "anomaly",
+            "outlier",
+            "fraud",
+            "attack",
+            "intrusion",
+            "defect",
+            "failure",
+            "fault",
+            "risk",
+        }
+    ) or compact in {"anomalyscore", "outlierscore", "fraudscore", "isfraud", "isanomaly"}
+
+
+def _has_user_item_feature_signal(feature_cols: list[str]) -> bool:
+    has_user = any(_is_user_entity_column(str(col)) for col in feature_cols)
+    has_item = any(_is_item_entity_column(str(col)) for col in feature_cols)
+    return has_user and has_item
+
+
+def _is_user_entity_column(name: str) -> bool:
+    return _column_matches_entity_terms(
+        name,
+        {
+            "user",
+            "customer",
+            "client",
+            "member",
+            "account",
+            "person",
+            "profile",
+            "visitor",
+            "session",
+        },
+    )
+
+
+def _is_item_entity_column(name: str) -> bool:
+    return _column_matches_entity_terms(
+        name,
+        {
+            "item",
+            "product",
+            "sku",
+            "listing",
+            "ad",
+            "creative",
+            "campaign",
+            "content",
+            "article",
+            "movie",
+            "book",
+            "game",
+            "song",
+            "track",
+            "merchant",
+            "restaurant",
+            "coupon",
+        },
+    )
+
+
+def _column_matches_entity_terms(name: str, terms: set[str]) -> bool:
+    tokens = _column_tokens(name)
+    compact = "".join(tokens)
+    if any(token in terms for token in tokens):
+        return True
+    id_suffixes = ("id", "idx", "uuid", "code", "key")
+    return any(compact.startswith(term) and compact.endswith(id_suffixes) for term in terms)
+
+
+def _is_ctr_target_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(tokens)
+    return bool(
+        tokens
+        & {
+            "click",
+            "clicked",
+            "clicks",
+            "ctr",
+            "conversion",
+            "converted",
+            "purchase",
+            "purchased",
+            "booked",
+            "install",
+            "installed",
+            "opened",
+        }
+    ) or compact in {"isclick", "isclicked", "hasclicked", "clickthroughrate", "target"}
+
+
+def _is_recommender_score_target_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(tokens)
+    return bool(tokens & {"rating", "ratings", "score", "stars", "relevance", "preference"}) or compact in {
+        "reviewscore",
+        "userscore",
+        "itemscore",
+    }
+
+
+def _looks_like_forecasting_layout(
+    *,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    feature_cols: list[str],
+) -> bool:
+    temporal_cols = [
+        col
+        for col in feature_cols
+        if col in train.columns and col in test.columns and _column_name_has_temporal_token(str(col))
+    ]
+    if not temporal_cols:
+        return False
+    return any(_has_future_temporal_holdout(train[col], test[col]) for col in temporal_cols)
+
+
+def _has_future_temporal_holdout(train_series: pd.Series, test_series: pd.Series) -> bool:
+    if _has_future_ordinal_holdout(train_series, test_series):
+        return True
+    train_dates = _parse_temporal_series(train_series)
+    test_dates = _parse_temporal_series(test_series)
+    if train_dates.empty or test_dates.empty:
+        return False
+    return bool(test_dates.max() > train_dates.max())
+
+
+def _parse_temporal_series(series: pd.Series) -> pd.Series:
+    sample = series.dropna().astype(str).head(500)
+    if sample.empty:
+        return pd.Series(dtype="datetime64[ns, UTC]")
+    parsed = pd.to_datetime(sample, errors="coerce", utc=True, format="mixed")
+    if float(parsed.notna().mean()) < 0.8:
+        return pd.Series(dtype="datetime64[ns, UTC]")
+    return parsed.dropna()
+
+
+def _looks_like_survival_target_columns(target_cols: list[str]) -> bool:
+    has_event = any(_is_survival_event_column(str(col)) for col in target_cols)
+    has_time = any(_is_survival_time_column(str(col)) for col in target_cols)
+    return has_event and has_time
+
+
+def _is_survival_event_column(name: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", name.lower())
+    return compact in {"event", "eventobserved", "observed", "status", "efs", "censor", "censored", "death", "dead"}
+
+
+def _is_survival_time_column(name: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", name.lower())
+    return compact in {
+        "time",
+        "duration",
+        "survivaltime",
+        "timeevent",
+        "timetoevent",
+        "eventtime",
+        "efstime",
+        "os",
+        "ostime",
+        "dfs",
+        "dfstime",
+    }
+
+
+def _looks_like_multi_label_target(target: pd.Series, *, column_name: str) -> bool:
+    if not (pd.api.types.is_object_dtype(target) or pd.api.types.is_string_dtype(target)):
+        return False
+    tokens = set(_column_tokens(column_name))
+    compact = "".join(_column_tokens(column_name))
+    strong_name = bool(tokens & {"labels", "tags", "classes", "categories"}) or "multilabel" in compact
+    generic_name = strong_name or bool(tokens & {"label", "target", "class", "category"})
+    if not generic_name:
+        return False
+    sample = target.dropna().astype(str).str.strip().head(500)
+    sample = sample[sample != ""]
+    if sample.empty:
+        return False
+
+    multi_count = 0
+    atomic_labels: set[str] = set()
+    for value in sample:
+        labels = _split_multi_label_value(value, allow_whitespace=strong_name)
+        if len(labels) < 2:
+            continue
+        multi_count += 1
+        atomic_labels.update(labels)
+    if float(multi_count / len(sample)) < 0.6:
+        return False
+    return len(atomic_labels) >= 2
+
+
+def _looks_like_ordinal_target(target: pd.Series, *, column_name: str) -> bool:
+    tokens = set(_column_tokens(column_name))
+    compact = "".join(_column_tokens(column_name))
+    ordinal_name = bool(
+        tokens
+        & {
+            "severity",
+            "grade",
+            "stage",
+            "level",
+            "rating",
+            "risk",
+            "quality",
+            "ordinal",
+            "class",
+            "label",
+        }
+    ) or compact in {"risklevel", "severitygrade", "qualitygrade", "ordinaltarget"}
+    if not ordinal_name:
+        return False
+    values = target.dropna()
+    if values.empty:
+        return False
+    unique = safe_nunique(values)
+    if unique < 3 or unique > 20:
+        return False
+    if pd.api.types.is_numeric_dtype(values):
+        numeric = pd.to_numeric(values, errors="coerce").dropna()
+        if numeric.empty or len(numeric) != len(values):
+            return False
+        integer_like = bool(((numeric % 1).abs() < 1e-9).all())
+        return integer_like and safe_nunique(numeric) == unique
+    return _looks_like_ordered_category_values(values)
+
+
+def _looks_like_ordered_category_values(values: pd.Series) -> bool:
+    ordered_vocab = {
+        "verylow",
+        "low",
+        "medium",
+        "moderate",
+        "high",
+        "veryhigh",
+        "none",
+        "mild",
+        "severe",
+        "critical",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+    }
+    normalized = {re.sub(r"[^a-z0-9]+", "", str(value).strip().lower()) for value in values}
+    normalized.discard("")
+    if not normalized:
+        return False
+    return normalized.issubset(ordered_vocab)
+
+
+def _split_multi_label_value(value: str, *, allow_whitespace: bool) -> list[str]:
+    raw = value.strip()
+    if not raw:
+        return []
+    if any(sep in raw for sep in ("|", ";", ",")):
+        parts = re.split(r"[|;,]+", raw)
+    elif allow_whitespace:
+        parts = re.split(r"\s+", raw)
+    else:
+        return []
+    labels = [part.strip() for part in parts if part.strip()]
+    if len(labels) < 2:
+        return []
+    if any(len(label) > 48 for label in labels):
+        return []
+    if any(not re.fullmatch(r"[A-Za-z0-9_.:+-]+", label) for label in labels):
+        return []
+    return labels
+
+
+def _infer_modality(
+    data_dir: Path,
+    train: pd.DataFrame,
+    test: pd.DataFrame | None = None,
+    *,
+    feature_cols: list[str] | None = None,
+) -> str:
+    asset_modality = infer_asset_modality(data_dir)
+    if asset_modality not in {"unknown", "tabular"}:
+        return asset_modality
+    asset_reference_modality = _infer_asset_reference_column_modality(train, feature_cols=feature_cols)
+    has_text_signal = _has_text_column_signal(train, feature_cols=feature_cols)
+    if asset_reference_modality is not None:
+        if has_text_signal:
+            return "multimodal"
+        return asset_reference_modality
+    bio_modality = _infer_bio_column_modality(train, feature_cols=feature_cols)
+    if bio_modality is not None:
+        return bio_modality
+    if _has_graph_column_signal(train, feature_cols=feature_cols):
+        return "graph"
+    if _has_geospatial_column_signal(train, feature_cols=feature_cols):
+        return "geospatial"
+    if has_text_signal:
+        return "text"
+    columns = [col for col in (feature_cols or list(train.columns)) if col in train.columns]
+    text_cols = [c for c in columns if pd.api.types.is_object_dtype(train[c]) or pd.api.types.is_string_dtype(train[c])]
     if text_cols:
         avg_len = 0.0
         sample = train[text_cols].astype(str).head(200)
@@ -913,19 +2020,369 @@ def _infer_modality(data_dir: Path, train: pd.DataFrame) -> str:
             avg_len = sample.apply(lambda col: col.map(len)).mean().mean()
         if avg_len >= 30:
             return "text"
-    if _has_temporal_datetime_signal(train):
+    if _has_temporal_signal(train, test):
         return "timeseries"
     return "tabular"
 
 
-def _has_temporal_datetime_signal(train: pd.DataFrame) -> bool:
-    """Return True when the table contains a plausible datetime-like feature column."""
-    temporal_name = re.compile(r"\b(date|datetime|timestamp|time)\b", flags=re.IGNORECASE)
+def _infer_group_column_hint(train: pd.DataFrame, *, feature_cols: list[str] | None = None) -> str | None:
+    columns = [col for col in (feature_cols or list(train.columns)) if col in train.columns]
+    scored: list[tuple[float, int, str]] = []
+    for index, col in enumerate(columns):
+        name = str(col)
+        name_score = _group_column_name_score(name)
+        if name_score <= 0:
+            continue
+        values_score = _group_column_values_score(train[col])
+        if values_score <= 0:
+            continue
+        scored.append((name_score + values_score, -index, name))
+    if not scored:
+        return None
+    return max(scored)[2]
+
+
+def _group_column_name_score(name: str) -> float:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    if compact in {"id", "rowid", "index", "targetid", "predictionid"}:
+        return 0.0
+    entity_tokens = {
+        "account",
+        "author",
+        "case",
+        "center",
+        "customer",
+        "device",
+        "document",
+        "donor",
+        "entity",
+        "group",
+        "household",
+        "installation",
+        "patient",
+        "participant",
+        "session",
+        "site",
+        "source",
+        "study",
+        "subject",
+        "user",
+        "visit",
+    }
+    if tokens & entity_tokens:
+        score = 0.8
+        if "id" in tokens or compact.endswith("id"):
+            score += 0.2
+        return score
+    if compact in {
+        "patientid",
+        "subjectid",
+        "participantid",
+        "sessionid",
+        "visitid",
+        "caseid",
+        "studyid",
+        "siteid",
+        "userid",
+        "customerid",
+        "accountid",
+        "householdid",
+        "donorid",
+        "authorid",
+        "deviceid",
+        "sourceid",
+        "groupid",
+    }:
+        return 1.0
+    return 0.0
+
+
+def _group_column_values_score(series: pd.Series) -> float:
+    sample = series.dropna().head(1000)
+    if len(sample) < 4:
+        return 0.0
+    unique_count = safe_nunique(sample)
+    if unique_count < 2 or unique_count >= len(sample):
+        return 0.0
+    value_counts = sample.astype(str).value_counts(dropna=True)
+    if value_counts.empty or int(value_counts.max()) < 2:
+        return 0.0
+    repeat_ratio = 1.0 - (float(unique_count) / float(len(sample)))
+    if repeat_ratio < 0.05:
+        return 0.0
+    return min(0.5, repeat_ratio)
+
+
+def _infer_sample_weight_column_hint(
+    *,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    feature_cols: list[str],
+    target_cols: list[str],
+    id_col: str | None,
+) -> str | None:
+    excluded = {str(col) for col in target_cols}
+    if id_col is not None:
+        excluded.add(str(id_col))
+    candidates = [str(col) for col in train.columns if str(col) not in excluded]
+    scored: list[tuple[float, int, str]] = []
+    for index, col in enumerate(candidates):
+        if col not in train.columns:
+            continue
+        name_score = _sample_weight_column_name_score(col, train_only=col not in test.columns)
+        if name_score <= 0:
+            continue
+        values_score = _sample_weight_values_score(train[col])
+        if values_score <= 0:
+            continue
+        feature_penalty = 0.15 if col in feature_cols and col in test.columns else 0.0
+        scored.append((name_score + values_score - feature_penalty, -index, col))
+    if not scored:
+        return None
+    return max(scored)[2]
+
+
+def _sample_weight_column_name_score(name: str, *, train_only: bool) -> float:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    explicit_names = {
+        "sampleweight",
+        "rowweight",
+        "observationweight",
+        "instanceweight",
+        "exampleweight",
+        "evalweight",
+        "evaluationweight",
+        "metricweight",
+        "targetweight",
+    }
+    if compact in explicit_names:
+        return 1.0
+    if "weight" in tokens and tokens & {
+        "sample",
+        "row",
+        "observation",
+        "instance",
+        "example",
+        "eval",
+        "evaluation",
+        "metric",
+    }:
+        return 0.95
+    if compact in {"weight", "weights"} and train_only:
+        return 0.72
+    return 0.0
+
+
+def _sample_weight_values_score(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series.dropna(), errors="coerce").dropna()
+    if len(numeric) < 2:
+        return 0.0
+    finite = numeric[numeric.map(lambda value: pd.notna(value))]
+    if finite.empty:
+        return 0.0
+    if float((finite < 0).mean()) > 0.0:
+        return 0.0
+    if float((finite > 0).mean()) < 0.8:
+        return 0.0
+    return 0.35 if safe_nunique(finite) > 1 else 0.2
+
+
+def _sample_weight_summary(series: pd.Series) -> dict[str, float | int]:
+    numeric = pd.to_numeric(series.dropna(), errors="coerce").dropna()
+    if numeric.empty:
+        return {"non_null": 0}
+    return {
+        "non_null": int(len(numeric)),
+        "min": float(numeric.min()),
+        "max": float(numeric.max()),
+        "mean": float(numeric.mean()),
+    }
+
+
+def _has_text_column_signal(train: pd.DataFrame, *, feature_cols: list[str] | None = None) -> bool:
+    columns = [col for col in (feature_cols or list(train.columns)) if col in train.columns]
+    for col in columns:
+        if not _is_text_feature_column(str(col)):
+            continue
+        series = train[col]
+        if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+            continue
+        if _looks_like_text_values(series):
+            return True
+    return False
+
+
+def _is_text_feature_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    if tokens & {"path", "file", "filename", "filepath", "uri", "url"} or compact.endswith(
+        ("path", "file", "filename", "filepath", "uri", "url")
+    ):
+        return False
+    return bool(
+        tokens
+        & {
+            "abstract",
+            "body",
+            "comment",
+            "content",
+            "description",
+            "document",
+            "essay",
+            "message",
+            "post",
+            "prompt",
+            "question",
+            "review",
+            "sentence",
+            "text",
+            "title",
+            "transcript",
+            "tweet",
+        }
+    ) or compact in {"questiontext", "reviewtext", "tweettext", "messagetext", "documenttext"}
+
+
+def _looks_like_text_values(series: pd.Series) -> bool:
+    sample = series.dropna().astype(str).str.strip().head(200)
+    if sample.empty:
+        return False
+    lengths = sample.map(len)
+    if float((lengths >= 8).mean()) < 0.6:
+        return False
+    avg_len = float(lengths.mean())
+    if avg_len < 10:
+        return False
+    word_like_ratio = float(sample.map(lambda value: bool(re.search(r"\s|[.!?,;:]", value))).mean())
+    unique_ratio = float(safe_nunique(sample) / len(sample))
+    return word_like_ratio >= 0.5 and (avg_len >= 12 or unique_ratio >= 0.8)
+
+
+def _infer_asset_reference_column_modality(train: pd.DataFrame, *, feature_cols: list[str] | None = None) -> str | None:
+    columns = [col for col in (feature_cols or list(train.columns)) if col in train.columns]
+    suffixes: set[str] = set()
+    for col in columns:
+        suffixes.update(_asset_suffixes_from_values(train[col]))
+    if suffixes:
+        modality = infer_asset_modality_from_extensions(suffixes)
+        if modality not in {"unknown", "tabular"}:
+            return modality
+
+    for col in columns:
+        modality = _infer_asset_reference_modality_from_column_name(str(col))
+        if modality is not None:
+            return modality
+    return None
+
+
+def _asset_suffixes_from_values(series: pd.Series) -> set[str]:
+    sample = series.dropna().astype(str).str.strip().head(200)
+    if sample.empty:
+        return set()
+    suffixes: set[str] = set()
+    matched = 0
+    for value in sample:
+        suffix = _asset_suffix_from_text(value)
+        if suffix is None:
+            continue
+        matched += 1
+        suffixes.add(suffix)
+    if float(matched / len(sample)) < 0.6:
+        return set()
+    return suffixes
+
+
+def _asset_suffix_from_text(value: str) -> str | None:
+    candidate = value.strip().strip("\"'")
+    if not candidate or any(char.isspace() for char in candidate):
+        return None
+    candidate = candidate.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if not candidate:
+        return None
+    suffix = asset_suffix(Path(candidate))
+    known_suffixes = (
+        IMAGE_SUFFIXES
+        | MEDICAL_IMAGE_SUFFIXES
+        | AUDIO_SUFFIXES
+        | VIDEO_SUFFIXES
+        | SIGNAL_SUFFIXES
+        | DOCUMENT_SUFFIXES
+        | ARRAY_SUFFIXES
+        | SCIENTIFIC_ARRAY_SUFFIXES
+        | POINT_CLOUD_SUFFIXES
+        | GEOSPATIAL_SUFFIXES
+        | BIO_STRUCTURE_SUFFIXES
+        | GRAPH_SUFFIXES
+    )
+    return suffix if suffix in known_suffixes else None
+
+
+def _infer_asset_reference_modality_from_column_name(name: str) -> str | None:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    if tokens & {"dicom", "nifti", "scan", "mri", "ct"} or compact in {"scanpath", "dicompath", "niftipath"}:
+        return "medical_imaging"
+    if tokens & {"signal", "signals", "waveform", "waveforms", "ecg", "eeg"} or compact in {
+        "signalpath",
+        "signalfile",
+        "waveformpath",
+        "waveformfile",
+    }:
+        return "signal"
+    if tokens & {"audio", "sound", "speech"} or compact in {"audiopath", "audiofile", "soundpath"}:
+        return "audio"
+    if tokens & {"video", "frame"} or compact in {"videopath", "videofile", "clipfilename", "clippath"}:
+        return "video"
+    if tokens & {"document", "documents", "doc", "docs", "pdf", "report"} or compact in {
+        "documentpath",
+        "documentfile",
+        "docpath",
+        "docfile",
+        "pdffile",
+        "pdfpath",
+        "reportpath",
+    }:
+        return "text"
+    if tokens & {
+        "annotation",
+        "annotations",
+        "bbox",
+        "bboxes",
+        "mask",
+        "masks",
+        "labelme",
+        "coco",
+        "yolo",
+    } or compact in {
+        "annotationpath",
+        "annotationfile",
+        "annotationspath",
+        "annotationsfile",
+        "bboxpath",
+        "maskpath",
+        "labelmepath",
+        "cocopath",
+        "yolopath",
+    }:
+        return "annotation"
+    if tokens & {"lidar", "pointcloud"} or compact in {"lidarfile", "lidarpath", "pointcloudpath"}:
+        return "point_cloud"
+    if tokens & {"array", "netcdf", "grib", "fits", "zarr", "h5ad", "loom"}:
+        return "array"
+    if tokens & {"image", "photo", "picture"} or compact in {"imagepath", "imagefile", "filepathimage"}:
+        return "image"
+    return None
+
+
+def _has_temporal_signal(train: pd.DataFrame, test: pd.DataFrame | None = None) -> bool:
+    """Return True when the table contains a plausible temporal feature column."""
     for col in train.columns:
         series = train[col]
         if pd.api.types.is_datetime64_any_dtype(series):
             return True
-        if not temporal_name.search(str(col)):
+        if not _column_name_has_temporal_token(str(col)):
             continue
         if not (
             pd.api.types.is_object_dtype(series)
@@ -939,12 +2396,215 @@ def _has_temporal_datetime_signal(train: pd.DataFrame) -> bool:
         parsed = pd.to_datetime(sample, errors="coerce", utc=True, format="mixed")
         if float(parsed.notna().mean()) >= 0.8:
             return True
+        if test is not None and col in test.columns and _has_future_ordinal_holdout(series, test[col]):
+            return True
     return False
+
+
+def _column_name_has_temporal_token(name: str) -> bool:
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", name.lower()) if token]
+    if any(
+        token in {"date", "datetime", "timestamp", "time", "day", "daynum", "week", "month", "year"} for token in tokens
+    ):
+        return True
+    compact = "".join(tokens)
+    return compact in {"dateblocknum", "daynum", "weekofyear"}
+
+
+def _has_future_ordinal_holdout(train_series: pd.Series, test_series: pd.Series) -> bool:
+    if not pd.api.types.is_numeric_dtype(train_series):
+        return False
+    train_values = pd.to_numeric(train_series, errors="coerce").dropna()
+    test_values = pd.to_numeric(test_series, errors="coerce").dropna()
+    if train_values.empty or test_values.empty:
+        return False
+    if safe_nunique(train_values) < 3:
+        return False
+    return float(test_values.min()) > float(train_values.max())
+
+
+def _infer_bio_column_modality(train: pd.DataFrame, *, feature_cols: list[str] | None = None) -> str | None:
+    columns = [col for col in (feature_cols or list(train.columns)) if col in train.columns]
+    rna_columns = [
+        col
+        for col in columns
+        if _is_rna_column(str(col)) or _looks_like_sequence_values(train[col], alphabet=set("ACGUTN"))
+    ]
+    if rna_columns:
+        return "rna"
+    for col in columns:
+        if (
+            _is_bio_column(str(col))
+            or _looks_like_smiles_values(train[col])
+            or _looks_like_sequence_values(train[col], alphabet=set("ACDEFGHIKLMNPQRSTVWYXBZUO"))
+        ):
+            return "bio"
+    return None
+
+
+def _is_rna_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    return bool(tokens & {"rna", "transcript", "nucleotide"}) or compact in {
+        "rnasequence",
+        "nucleotidesequence",
+    }
+
+
+def _is_bio_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    return bool(
+        tokens & {"smiles", "molecule", "molecular", "protein", "peptide", "sequence", "fasta", "fastq"}
+    ) or compact in {
+        "proteinpath",
+        "proteinid",
+        "proteinsequence",
+        "aminoacidsequence",
+        "moleculeid",
+        "molecularformula",
+        "canonicalsmiles",
+        "isosmiles",
+    }
+
+
+def _looks_like_smiles_values(series: pd.Series) -> bool:
+    sample = series.dropna().astype(str).str.strip().head(200)
+    if sample.empty:
+        return False
+    smiles_re = re.compile(r"^[A-Za-z0-9@+\-\[\]\(\)=#$\\/%.]+$")
+
+    def is_smiles(value: str) -> bool:
+        if len(value) < 3 or " " in value:
+            return False
+        if not smiles_re.fullmatch(value):
+            return False
+        return any(marker in value for marker in ("C", "N", "O", "S", "P", "Cl", "Br", "=", "#", "(", "["))
+
+    return float(sample.map(is_smiles).mean()) >= 0.6
+
+
+def _looks_like_sequence_values(series: pd.Series, *, alphabet: set[str]) -> bool:
+    sample = series.dropna().astype(str).str.strip().str.upper().head(200)
+    if sample.empty:
+        return False
+
+    def is_sequence(value: str) -> bool:
+        if len(value) < 8:
+            return False
+        chars = set(value)
+        return chars.issubset(alphabet) and len(chars) >= 2
+
+    return float(sample.map(is_sequence).mean()) >= 0.6
+
+
+def _has_graph_column_signal(train: pd.DataFrame, *, feature_cols: list[str] | None = None) -> bool:
+    columns = [str(col) for col in (feature_cols or list(train.columns)) if col in train.columns]
+    if any(_is_edge_index_column(column) for column in columns):
+        return True
+    return _has_source_destination_columns(columns)
+
+
+def _is_edge_index_column(name: str) -> bool:
+    tokens = _column_tokens(name)
+    compact = "".join(tokens)
+    return any(token in {"edge", "edges", "edgelist", "adjacency"} for token in tokens) or compact in {
+        "edgeindex",
+        "edgeindices",
+        "edgelist",
+        "adjacencylist",
+        "adjacencymatrix",
+    }
+
+
+def _has_source_destination_columns(columns: list[str]) -> bool:
+    return any(_is_source_node_column(column) for column in columns) and any(
+        _is_destination_node_column(column) for column in columns
+    )
+
+
+def _is_source_node_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    return bool(tokens & {"src", "source"}) or compact in {"sourcenode", "sourceid", "fromnode", "fromid", "node1"}
+
+
+def _is_destination_node_column(name: str) -> bool:
+    tokens = set(_column_tokens(name))
+    compact = "".join(_column_tokens(name))
+    return bool(tokens & {"dst", "destination"}) or compact in {
+        "destinationnode",
+        "destinationid",
+        "targetnode",
+        "targetid",
+        "tonode",
+        "toid",
+        "node2",
+    }
+
+
+def _has_geospatial_column_signal(train: pd.DataFrame, *, feature_cols: list[str] | None = None) -> bool:
+    columns = [col for col in (feature_cols or list(train.columns)) if col in train.columns]
+    lat_columns = [
+        col for col in columns if _is_latitude_column(str(col)) and _numeric_values_in_range(train[col], -90.0, 90.0)
+    ]
+    lon_columns = [
+        col for col in columns if _is_longitude_column(str(col)) and _numeric_values_in_range(train[col], -180.0, 180.0)
+    ]
+    if lat_columns and lon_columns:
+        return True
+    return any(_is_geometry_column(str(col)) and _looks_like_geometry_values(train[col]) for col in columns)
+
+
+def _column_tokens(name: str) -> list[str]:
+    return [token for token in re.split(r"[^A-Za-z0-9]+", name.lower()) if token]
+
+
+def _is_latitude_column(name: str) -> bool:
+    tokens = _column_tokens(name)
+    compact = "".join(tokens)
+    return "latitude" in tokens or "lat" in tokens or compact in {"latitude", "lat"}
+
+
+def _is_longitude_column(name: str) -> bool:
+    tokens = _column_tokens(name)
+    compact = "".join(tokens)
+    return any(token in {"longitude", "lon", "lng"} for token in tokens) or compact in {"longitude", "lon", "lng"}
+
+
+def _is_geometry_column(name: str) -> bool:
+    tokens = _column_tokens(name)
+    compact = "".join(tokens)
+    return any(token in {"geometry", "geom", "wkt", "geohash"} for token in tokens) or compact in {
+        "geometry",
+        "geom",
+        "wkt",
+        "geohash",
+    }
+
+
+def _numeric_values_in_range(series: pd.Series, lower: float, upper: float) -> bool:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return False
+    return float(((values >= lower) & (values <= upper)).mean()) >= 0.8
+
+
+def _looks_like_geometry_values(series: pd.Series) -> bool:
+    sample = series.dropna().astype(str).str.strip().head(200)
+    if sample.empty:
+        return False
+    geometry_re = re.compile(
+        r"^(?:POINT|LINESTRING|POLYGON|MULTI(?:POINT|LINESTRING|POLYGON)|GEOMETRYCOLLECTION)\s*\(", re.I
+    )
+    return float(sample.map(lambda value: bool(geometry_re.match(value))).mean()) >= 0.5
 
 
 def _task_tag(task: str, target: pd.Series) -> str:
     if task == "mixed":
         return "multitask"
+    if task in {"text", "translation", "text_generation"}:
+        return "text"
     if task == "regression":
         return "regression"
     unique = safe_nunique(target)
@@ -984,8 +2644,16 @@ def build_plan_and_initial_prompt(
 ) -> str:
     tags = profile.get("tags", [])
     task = profile.get("task", "unknown")
+    target_semantics = str(profile.get("target_semantics") or "").strip()
     metric = profile.get("metric", "rmse")
     dataset_dimensions = _format_dataset_dimensions(profile)
+    raw_sample_submission_file = profile.get("sample_submission_file")
+    sample_submission_file = (
+        str(raw_sample_submission_file).strip()
+        if isinstance(raw_sample_submission_file, str) and str(raw_sample_submission_file).strip()
+        else "sample_submission.* or the detected sample-submission alias"
+    )
+    sample_submission_head_file = _sample_submission_head_file_for_prompt(sample_submission_file)
 
     lines = [
         f"# Kagglebot {IMPLEMENTATION_AGENT.display_name}: Plan + Implement (Iteration 1)",
@@ -996,6 +2664,7 @@ def build_plan_and_initial_prompt(
         "**Competition URL**: {{competition_url}}",
         f"**Rules URL**: {rules_url}",
         f"**Task**: {task}",
+        *([f"**Target semantics**: {target_semantics}"] if target_semantics else []),
         f"**Metric (confirm via rules)**: {metric}",
         f"**Dataset**: {dataset_dimensions}",
         f"**Tags**: {', '.join(tags) if tags else 'None'}",
@@ -1010,8 +2679,8 @@ def build_plan_and_initial_prompt(
         "## Context Files (read these)",
         "",
         f"- artifacts/{slug}/context/dataset_profile.json",
-        f"- artifacts/{slug}/context/sample_submission.csv",
-        f"- artifacts/{slug}/context/sample_submission_head.csv",
+        f"- artifacts/{slug}/context/{sample_submission_file}",
+        f"- artifacts/{slug}/context/{sample_submission_head_file}",
         f"- artifacts/{slug}/context/top1_public.json",
         f"- artifacts/{slug}/context/rules_url.txt",
         f"- artifacts/{slug}/context/rules.md (if present)",
@@ -1071,7 +2740,7 @@ def build_plan_and_initial_prompt(
         "```",
         "",
         "Guidance:",
-        "- Derive target_metric and direction from rules.md/rules.html and sample_submission.csv.",
+        "- Derive target_metric and direction from rules.md/rules.html and the sample submission file.",
         "- Read overview.md/data.md for problem framing and data caveats.",
         "- If sample_submission is ambiguous, use submission_format.md for the required columns.",
         "- Use overview.md/data.md plus dataset_profile.json (file_extension_counts/file_samples)",
@@ -1097,7 +2766,7 @@ def build_plan_and_initial_prompt(
         "- Avoid simplistic starters; aim for competition-appropriate strength from the start.",
         "- Do NOT leave the default starter in place; replace it with a competition-specific model.",
         "- Evaluates with the score_source from plan.json.",
-        "- Writes submission.csv matching sample_submission.csv exactly.",
+        "- Writes the required submission artifact matching the sample/format exactly.",
         "- Cite the key sources you used (short notes).",
         "",
         "Implementation notes:",
@@ -1332,7 +3001,7 @@ Before finalizing:
 **Quality Checklist**:
 - [ ] Changes address root cause from diagnostics
 - [ ] Loop-decision score improves, or offline diagnostics provide actionable learning
-- [ ] submission.csv format still matches sample_submission.csv
+- [ ] Submission artifact format still matches the required sample/format
 - [ ] Tests pass: `uv run pytest -q`
 - [ ] No secrets leaked into code/logs
 
@@ -1679,6 +3348,16 @@ def format_research_artifacts(research_rows: list[dict[str, object]], *, limit: 
         if sources_path:
             lines.append(f"  sources: {sources_path}")
     return "\n".join(lines)
+
+
+def _sample_submission_head_file_for_prompt(sample_submission_file: str) -> str:
+    name = str(sample_submission_file or "").strip()
+    if not name or "*" in name:
+        return "sample_submission_head.* or the detected sample-submission preview"
+    suffix = strip_compression_suffix(tabular_suffix(Path(name)))
+    if suffix in {strip_compression_suffix(candidate) for candidate in TABULAR_TEXT_SUFFIXES}:
+        return f"sample_submission_head{suffix}"
+    return "sample_submission_head.csv"
 
 
 def _ensure_db(paths: KnowledgePaths) -> None:

@@ -33,6 +33,7 @@ Build a Kaggle competition automation CLI:
 1) Before large changes, produce a short plan and list touched files.
 2) Keep changes minimal and well-tested.
 3) Run unit tests (`uv run pytest -q`) and linters (`uv run ruff check .`, `uv run ruff format .`) before concluding.
+   Use `uv run pytest -q -m "slow and not competition_artifact"` when touching slow runner/orchestration paths.
 4) Update docs (README/STRATEGY.md) if behavior changes.
 
 ## Tooling
@@ -40,6 +41,7 @@ Build a Kaggle competition automation CLI:
 - Use `uv add/remove` for dependencies.
 - Keep `uv.lock` committed.
 - Standard test run: `uv sync` then `uv run pytest -q`.
+- Slow mocked runner/orchestration tests are opt-in: `uv run pytest -q -m "slow and not competition_artifact"`.
 
 ## Coding standards
 - Python 3.11+ recommended

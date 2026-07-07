@@ -15,6 +15,11 @@ from urllib.parse import urlparse
 
 from kaggle.api.kaggle_api_extended import KaggleApi
 
+from kagglebot.asset_modality import (
+    DOCUMENT_SUFFIXES,
+    archive_container,
+)
+from kagglebot.compression_suffixes import strip_compression_suffix
 from kagglebot.exec_utils import run_command
 from kagglebot.json_utils import append_jsonl_record, load_jsonl_records, write_json_object, write_jsonl_records
 from kagglebot.submission_artifacts import (
@@ -25,7 +30,21 @@ from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_TABULAR,
     ARTIFACT_CLASS_UNKNOWN,
 )
+from kagglebot.submission_extension_hints import (
+    ARCHIVE_SUBMISSION_SUFFIXES,
+    COMPRESSIBLE_SUBMISSION_KEYWORD_SUFFIXES,
+    COMPRESSION_TOKEN_PATTERNS,
+    JSON_TEXT_NOISE_CONTEXT_MARKERS,
+    MODEL_BUNDLE_MARKERS,
+    NON_TABULAR_SUBMISSION_SUFFIXES,
+    SUBMISSION_ARTIFACT_KEYWORDS,
+    SUBMISSION_TOKEN_PATTERNS,
+    drop_shadowed_submission_suffixes,
+    submission_extension_pattern,
+)
 from kagglebot.submission_format import SubmissionFormatHint, extract_submission_section, parse_submission_format
+from kagglebot.submission_output_naming import all_submission_output_suffixes
+from kagglebot.submission_sample_discovery import TABULAR_SUBMISSION_SUFFIXES
 
 _DEFAULT_SEARCH_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _DEFAULT_PAGE_SIZE = 20
@@ -42,27 +61,20 @@ _KEYWORD_WINDOW_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsubmission format\b", re.I),
     re.compile(r"\bsample submission\b", re.I),
     re.compile(r"\bsubmit predictions\b", re.I),
-    re.compile(r"\bsubmit\b.{0,120}\b(csv|zip|jsonl|json|tsv|parquet|txt|notebook|code)\b", re.I | re.S),
-    re.compile(r"\b(upload|submission)\b.{0,120}\b(csv|zip|jsonl|json|tsv|parquet|txt|notebook|code)\b", re.I | re.S),
+    re.compile(r"\bsubmission[A-Za-z0-9_.-]*\.off\b", re.I),
+    re.compile(
+        rf"\bsubmit\b.{{0,120}}\b({SUBMISSION_ARTIFACT_KEYWORDS})\b",
+        re.I | re.S,
+    ),
+    re.compile(
+        rf"\b(upload|submission)\b.{{0,120}}\b({SUBMISSION_ARTIFACT_KEYWORDS})\b",
+        re.I | re.S,
+    ),
 )
-_KEYWORD_SUFFIX_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bzip(?:ped)?\b", re.I), ".zip"),
-    (re.compile(r"\bjsonl\b|\bndjson\b", re.I), ".jsonl"),
-    (re.compile(r"\bparquet\b", re.I), ".parquet"),
-    (re.compile(r"\btsv\b|\btab[-\s]*separated\b", re.I), ".tsv"),
-    (re.compile(r"\bcsv\b", re.I), ".csv"),
-    (re.compile(r"\bjson\b", re.I), ".json"),
-    (re.compile(r"\btxt\b|\btext\s+file\b", re.I), ".txt"),
-)
-_NOISY_SUFFIX_CONTEXT_MARKERS = (
-    "topology json",
-    "metadata json",
-    "example json",
-    "sample json",
-    "description json",
-    "text description",
-    "txt description",
-)
+_ARCHIVE_SUBMISSION_SUFFIXES = set(ARCHIVE_SUBMISSION_SUFFIXES)
+_TABULAR_SINGLE_FILE_SUFFIXES = set(TABULAR_SUBMISSION_SUFFIXES)
+_NON_TABULAR_SINGLE_FILE_SUFFIXES = set(NON_TABULAR_SUBMISSION_SUFFIXES)
+_DIRECT_SUBMISSION_EXTENSION_PATTERN = submission_extension_pattern(all_submission_output_suffixes())
 
 
 @dataclass(frozen=True)
@@ -466,24 +478,31 @@ def infer_artifact_class(
     if hint.artifact_class and hint.artifact_class != ARTIFACT_CLASS_UNKNOWN:
         return hint.artifact_class
     lowered = text.lower()
-    if ".zip" in suffixes:
-        if any(marker in lowered for marker in ("weights", "inference script", ".pt", ".pth", ".ckpt", ".h5")):
+    archive_suffixes = [suffix for suffix in suffixes if suffix in _ARCHIVE_SUBMISSION_SUFFIXES]
+    if archive_suffixes:
+        if any(marker in lowered for marker in MODEL_BUNDLE_MARKERS):
             return ARTIFACT_CLASS_BUNDLE
-        return ARTIFACT_CLASS_MULTI_FILE_ZIP
+        if ".zip" in archive_suffixes:
+            return ARTIFACT_CLASS_MULTI_FILE_ZIP
+        return ARTIFACT_CLASS_SINGLE_FILE
     if suffixes:
-        if any(suffix in {".csv", ".tsv", ".parquet"} for suffix in suffixes):
+        if any(_is_tabular_file_submission_suffix(suffix) for suffix in suffixes):
             return ARTIFACT_CLASS_TABULAR
         return ARTIFACT_CLASS_SINGLE_FILE
     return ARTIFACT_CLASS_UNKNOWN
 
 
 def infer_artifact_container(*, artifact_class: str, suffixes: list[str]) -> str | None:
+    archive_suffixes = [suffix for suffix in suffixes if suffix in _ARCHIVE_SUBMISSION_SUFFIXES]
     if artifact_class in {ARTIFACT_CLASS_BUNDLE, ARTIFACT_CLASS_MULTI_FILE_ZIP}:
-        return "zip"
+        return archive_container(archive_suffixes)
     if artifact_class in {ARTIFACT_CLASS_TABULAR, ARTIFACT_CLASS_SINGLE_FILE, ARTIFACT_CLASS_NOTEBOOK_OUTPUT}:
+        container = archive_container(archive_suffixes)
+        if container is not None:
+            return container
         return "file"
-    if ".zip" in suffixes:
-        return "zip"
+    if archive_suffixes:
+        return archive_container(archive_suffixes)
     if suffixes:
         return "file"
     return None
@@ -495,13 +514,16 @@ def infer_required_artifact(submission_mode: str, suffixes: list[str], artifact_
     if submission_mode == "notebook_output_submission":
         return "Kaggle notebook submission"
     if artifact_class == ARTIFACT_CLASS_BUNDLE:
-        return "ZIP bundle containing model assets and inference code"
+        container = (archive_container(suffixes) or "zip").upper()
+        return f"{container} bundle containing model assets and inference code"
     if artifact_class == ARTIFACT_CLASS_MULTI_FILE_ZIP:
-        return "ZIP archive containing multiple prediction files"
+        container = (archive_container(suffixes) or "zip").upper()
+        return f"{container} archive containing multiple prediction files"
+    container = archive_container(suffixes)
+    if container is not None:
+        return f"{container.upper()} archive"
     if artifact_class == ARTIFACT_CLASS_SINGLE_FILE and suffixes:
         return f"{suffixes[0]} single file"
-    if ".zip" in suffixes:
-        return "ZIP archive"
     if suffixes:
         return f"{suffixes[0]} file"
     return "unknown"
@@ -509,9 +531,19 @@ def infer_required_artifact(submission_mode: str, suffixes: list[str], artifact_
 
 def filter_noisy_suffixes(text: str, suffixes: list[str]) -> list[str]:
     lowered = text.lower()
-    if not any(marker in lowered for marker in _NOISY_SUFFIX_CONTEXT_MARKERS):
+    if not any(marker in lowered for marker in JSON_TEXT_NOISE_CONTEXT_MARKERS):
         return suffixes
     return [suffix for suffix in suffixes if suffix not in {".json", ".txt"}]
+
+
+def _base_submission_suffix(suffix: str) -> str:
+    return strip_compression_suffix(suffix)
+
+
+def _is_tabular_file_submission_suffix(suffix: str) -> bool:
+    if suffix not in _TABULAR_SINGLE_FILE_SUFFIXES:
+        return False
+    return _base_submission_suffix(suffix) not in {".json", ".txt"}
 
 
 def infer_confidence(text: str, suffixes: list[str], kernels_only: bool) -> str:
@@ -612,16 +644,35 @@ def infer_category_from_landing_text(text: str, slug: str) -> str:
 
 
 def extract_suffixes_from_text(text: str) -> list[str]:
-    matches = re.findall(r"\.(csv|tsv|txt|parquet|jsonl|json|zip)\b", text, flags=re.I)
+    matches = re.findall(
+        rf"\.({_DIRECT_SUBMISSION_EXTENSION_PATTERN})\b",
+        text,
+        flags=re.I,
+    )
     return normalize_suffixes([f".{match.lower()}" for match in matches])
 
 
 def infer_suffixes_from_keywords(text: str) -> list[str]:
     suffixes: list[str] = []
-    for pattern, suffix in _KEYWORD_SUFFIX_PATTERNS:
+    for pattern, suffix in SUBMISSION_TOKEN_PATTERNS:
         if pattern.search(text) and suffix not in suffixes:
             suffixes.append(suffix)
-    return suffixes
+    if ".txt" in suffixes and any(suffix in DOCUMENT_SUFFIXES for suffix in suffixes):
+        suffixes = [suffix for suffix in suffixes if suffix != ".txt"]
+    compression_suffix = compression_suffix_from_keywords(text)
+    if compression_suffix is None:
+        return suffixes
+    compressed = [
+        f"{suffix}{compression_suffix}" for suffix in suffixes if suffix in COMPRESSIBLE_SUBMISSION_KEYWORD_SUFFIXES
+    ]
+    return compressed or suffixes
+
+
+def compression_suffix_from_keywords(text: str) -> str | None:
+    for pattern, suffix in COMPRESSION_TOKEN_PATTERNS:
+        if pattern.search(text):
+            return suffix
+    return None
 
 
 def infer_columns_from_bullets(text: str, *, allow_fallback: bool = False) -> list[str]:
@@ -646,7 +697,7 @@ def normalize_suffixes(suffixes: Iterable[str]) -> list[str]:
             item = f".{item}"
         if item not in ordered:
             ordered.append(item)
-    return ordered
+    return drop_shadowed_submission_suffixes(ordered)
 
 
 def extract_evidence_snippet(html: str, marker_text: str) -> str:

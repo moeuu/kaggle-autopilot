@@ -16,7 +16,7 @@ Context files (for reference):
 - Data description: {{data_md}}
 - Rules: {{rules_md}}
 - Dataset profile: {{dataset_profile}}
-- Sample submission head: {{sample_submission_head}}
+- Sample submission preview (required format): {{sample_submission_head}}
 - Top1 public snapshot: {{top1_public}}
 
 Compute:
@@ -32,7 +32,8 @@ Return output with these exact section markers:
 
 ===STRATEGY_PLAN===
 Provide a deep solution strategy. Include model choices, preprocessing, CV plan, and risk notes.
-For local_gpu, keep each iteration under about 24 hours when possible, but accuracy is the priority. For image/video/audio/text, avoid wasteful full seed x fold x model-family multiplication; keep the strongest feasible pretrained/OCR/VLM path alive and scale it with smaller batches, chunking, quantization, cached embeddings, TTA, OOF blends, or lightweight heads before dropping it.
+Treat the sample submission preview as the required output format, not as proof that the artifact must be CSV.
+For local_gpu, keep each iteration under about 24 hours when possible, but accuracy is the priority. For image/video/audio/text/document/medical-imaging/array/point-cloud/3D/geospatial/bio/sequence/graph/signal/annotation/model-artifact, avoid wasteful full seed x fold x model-family multiplication; keep the strongest feasible pretrained/OCR/VLM/geometric/geospatial/structure-feature path alive and scale it with smaller batches, chunking, quantization, cached embeddings, TTA, OOF blends, or lightweight heads before dropping it.
 Make RTX3060-class execution accuracy-first rather than a hard cap. Expose plan.json/env scale knobs so a stronger GPU profile such as RTX5090 can increase batch size, folds/seeds, candidate count, or image size without rewriting kernel.py.
 
 ===CODEX_IMPLEMENTATION_INSTRUCTIONS===

@@ -166,7 +166,10 @@ def resolve_plan_for_autopilot(
     resolved_target_metric = target_request.target_metric
     resolved_target_score = target_request.target_score
     resolved_target_direction = target_request.target_direction
-    competition_override = plan_policy.competition_eval_override(paths.slug)
+    competition_override = plan_policy.competition_eval_override(
+        paths.slug,
+        fallback_overrides=competition_policy.evaluation.fallback_overrides,
+    )
     metric_direction_decision = plan_policy.resolve_target_metric_direction(
         target_metric=resolved_target_metric,
         target_direction=resolved_target_direction,
@@ -322,6 +325,8 @@ def resolve_plan_for_autopilot(
     evaluation_contract = plan_policy.build_evaluation_contract(
         slug=paths.slug,
         eval_spec=eval_spec,
+        dataset_profile=dataset_profile,
+        competition_override=competition_override,
         target_metric=str(resolved_target_metric) if isinstance(resolved_target_metric, str) else None,
         target_direction=str(resolved_target_direction) if isinstance(resolved_target_direction, str) else None,
         split_strategy=str(split_strategy) if isinstance(split_strategy, str) else None,

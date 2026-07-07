@@ -117,7 +117,7 @@ class WatchConfig:
     kaggle_gpu_quota_web_lookup: bool = False
     self_improvement_interval_hours: float | None = 6.0
     self_improvement_codex: bool = True
-    self_improvement_publish: bool = False
+    self_improvement_publish: bool = True
     top1_exhaustive: bool = True
     top1_submit_policy: str = "value_only"
     hardware_profile: str | None = "auto"

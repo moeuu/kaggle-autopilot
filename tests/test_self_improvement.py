@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kagglebot.knowledge import build_plan_and_initial_prompt
+from kagglebot.knowledge.event_store import search_agent_events
+from kagglebot.knowledge.skill_registry import search_skills, upsert_skill
 from kagglebot.paths import KnowledgePaths
 from kagglebot.self_improvement import (
     SelfImprovementConfig,
@@ -103,11 +105,95 @@ def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: P
     assert report["largest_top1_gaps"][0]["top1_gap"] == 0.15000000000000002
     assert (artifacts / "_self_improvement" / "strategy_context.md").exists()
     assert (artifacts / "_self_improvement" / "experiment_backlog.json").exists()
+    assert (artifacts / "_self_improvement" / "skill_candidates.json").exists()
     assert (artifacts / "_self_improvement" / "outcomes.jsonl").exists()
     assert (tmp_path / "knowledge" / "playbooks" / "global.md").exists()
+    assert (tmp_path / "knowledge" / "skills" / "submit_failure_recovery.md").exists()
     assert "submit_failed" in load_self_improvement_context(artifacts)
     backlog = json.loads((artifacts / "_self_improvement" / "experiment_backlog.json").read_text(encoding="utf-8"))
     assert "Architectural changes are allowed" in backlog[0]["architecture_scope"]
+    candidates = json.loads((artifacts / "_self_improvement" / "skill_candidates.json").read_text(encoding="utf-8"))
+    assert candidates[0]["skill_id"] == "submit_failure_recovery"
+    assert report["consolidated_knowledge"]["lesson_count"] == 1
+    assert search_agent_events(knowledge_paths=KnowledgePaths(workdir=tmp_path), query="submit_failed", limit=5)
+    skills = search_skills(
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+        problem_types=["submission"],
+        query="submit failure",
+        limit=5,
+    )
+    assert skills[0]["skill_id"] == "submit_failure_recovery"
+
+
+def test_self_improvement_records_relevant_skill_outcomes(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    slug = "demo"
+    run_id = "run-1"
+    run_dir = artifacts / slug / "runs" / run_id
+    knowledge_paths = KnowledgePaths(workdir=tmp_path)
+    _write_json(
+        run_dir / "run.json",
+        {
+            "run_id": run_id,
+            "slug": slug,
+            "status": "completed",
+            "config": {"target_direction": "maximize", "target_metric": "auc"},
+        },
+    )
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.8, "score_source": "cv"})
+    _write_json(artifacts / slug / "context" / "top1_public.json", {"score": 0.9})
+    (artifacts / slug / "context" / "relevant_skills.json").write_text(
+        json.dumps(
+            [
+                {"skill_id": "tabular_binary_oof_blend"},
+                {"skill_id": "tabular_binary_oof_blend"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ledger = artifacts / slug / "submissions" / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "event": "outcome",
+                "run_id": run_id,
+                "outcome": {"status": "complete", "score": 0.91},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    upsert_skill(
+        knowledge_paths=knowledge_paths,
+        skill_id="tabular_binary_oof_blend",
+        title="Tabular Binary OOF Blend",
+        summary="Use leak-free OOF blending for tabular binary tasks.",
+        body="Build OOF predictions and blend diverse GBDT families.",
+        tags=["tabular", "binary"],
+        problem_types=["tabular", "binary"],
+        status="active",
+        source="test",
+    )
+
+    run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=knowledge_paths,
+            invoke_codex=False,
+            force=True,
+        )
+    )
+
+    outcomes = [
+        json.loads(line)
+        for line in (artifacts / "_self_improvement" / "outcomes.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    skills = search_skills(knowledge_paths=knowledge_paths, problem_types=["tabular"], query="OOF blend", limit=5)
+    assert outcomes[0]["used_skills"] == ["tabular_binary_oof_blend"]
+    assert skills[0]["skill_id"] == "tabular_binary_oof_blend"
+    assert skills[0]["usage_count"] == 1
+    assert skills[0]["success_count"] == 1
 
 
 def test_self_improvement_includes_campaign_method_outcomes(tmp_path: Path) -> None:
@@ -161,6 +247,22 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
     _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
     calls: dict[str, object] = {}
 
+    def fake_run_strategy(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
+        calls["strategy_prompt"] = prompt_path.read_text(encoding="utf-8")
+        calls["strategy_output_dir"] = output_dir
+        calls["strategy_engine"] = kwargs.get("engine")
+        last_message_path = output_dir / "strategy_last_message.txt"
+        last_message_path.parent.mkdir(parents=True, exist_ok=True)
+        last_message_path.write_text("Prioritize submit diagnostics and retry classification.\n", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Prioritize submit diagnostics and retry classification.",
+            stderr="",
+            transcript_path=output_dir / "strategy_exec.txt",
+            last_message_path=last_message_path,
+            engine="oracle",
+        )
+
     def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
         calls["prompt"] = prompt_path.read_text(encoding="utf-8")
         calls["output_dir"] = output_dir
@@ -171,6 +273,7 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
         )
 
     monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: False)
+    monkeypatch.setattr("kagglebot.self_improvement.run_strategy", fake_run_strategy)
     monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
 
     result = run_self_improvement_cycle(
@@ -184,9 +287,13 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
 
     assert result["status"] == "written"
     assert result["codex_improvement"]["status"] == "completed"
-    assert "Kagglebot Self-Improvement Task" in str(calls["prompt"])
-    assert "Architectural changes are allowed" in str(calls["prompt"])
-    assert "first-place Kaggle leaderboard performance" in str(calls["prompt"])
+    assert result["codex_improvement"]["strategy_engine"] == "oracle"
+    assert calls["strategy_engine"] == "auto"
+    assert "Kagglebot Self-Improvement Strategy" in str(calls["strategy_prompt"])
+    assert "Architectural changes are allowed" in str(calls["strategy_prompt"])
+    assert "Kagglebot Self-Improvement Implementation" in str(calls["prompt"])
+    assert "Prioritize submit diagnostics and retry classification." in str(calls["prompt"])
+    assert "first-place Kaggle leaderboard performance" in " ".join(str(calls["prompt"]).split())
     assert result["codex_improvement"]["publish"]["status"] == "disabled"
 
 
@@ -195,7 +302,29 @@ def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path:
     run_dir = artifacts / "demo" / "runs" / "run-1"
     _write_json(run_dir / "run.json", {"run_id": "run-1", "status": "completed", "config": {}})
     _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
+    calls: dict[str, object] = {}
+
+    def fake_run_strategy(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
+        calls["strategy_prompt"] = prompt_path.read_text(encoding="utf-8")
+        calls["strategy_engine"] = kwargs.get("engine")
+        last_message_path = output_dir / "strategy_last_message.txt"
+        last_message_path.parent.mkdir(parents=True, exist_ok=True)
+        last_message_path.write_text("Use Oracle to plan the next improvement.\n", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Use Oracle to plan the next improvement.",
+            stderr="",
+            transcript_path=output_dir / "strategy_exec.txt",
+            last_message_path=last_message_path,
+            engine="oracle",
+        )
+
+    def fail_run_codex(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("Codex implementation should be skipped for a dirty worktree.")
+
     monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: True)
+    monkeypatch.setattr("kagglebot.self_improvement.run_strategy", fake_run_strategy)
+    monkeypatch.setattr("kagglebot.self_improvement.run_codex", fail_run_codex)
 
     result = run_self_improvement_cycle(
         SelfImprovementConfig(
@@ -207,6 +336,67 @@ def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path:
     )
 
     assert result["codex_improvement"]["status"] == "skipped_dirty_worktree"
+    assert result["codex_improvement"]["strategy_engine"] == "oracle"
+    assert result["codex_improvement"]["publish"]["status"] == "skipped_dirty_worktree"
+    assert calls["strategy_engine"] == "auto"
+    assert "Kagglebot Self-Improvement Strategy" in str(calls["strategy_prompt"])
+
+
+def test_self_improvement_publishes_pending_changes_before_codex(monkeypatch, tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    _write_json(run_dir / "run.json", {"run_id": "run-1", "status": "completed", "config": {}})
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
+    dirty_states = iter([True, False])
+    publish_messages: list[str] = []
+    calls: dict[str, object] = {}
+
+    def fake_run_strategy(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003, ARG001
+        last_message_path = output_dir / "strategy_last_message.txt"
+        last_message_path.parent.mkdir(parents=True, exist_ok=True)
+        last_message_path.write_text("Publish pending work, then implement.\n", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Publish pending work, then implement.",
+            stderr="",
+            transcript_path=output_dir / "strategy_exec.txt",
+            last_message_path=last_message_path,
+            engine="oracle",
+        )
+
+    def fake_publish(*, config, codex_returncode, commit_message):  # noqa: ANN001
+        publish_messages.append(commit_message)
+        return {"status": "pushed", "commit": "abc123", "returncode": codex_returncode}
+
+    def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
+        calls["prompt"] = prompt_path.read_text(encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            transcript_path=output_dir / "codex_exec.jsonl",
+            last_message_path=output_dir / "codex_last_message.txt",
+        )
+
+    monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: next(dirty_states))
+    monkeypatch.setattr("kagglebot.self_improvement.run_strategy", fake_run_strategy)
+    monkeypatch.setattr("kagglebot.self_improvement._publish_codex_changes", fake_publish)
+    monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
+
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=True,
+            publish_codex_changes=True,
+            force=True,
+        )
+    )
+
+    assert result["codex_improvement"]["status"] == "completed"
+    assert publish_messages == [
+        "Publish pending autopilot changes before self-improvement",
+        "Self-improve autopilot from report",
+    ]
+    assert "Kagglebot Self-Improvement Implementation" in str(calls["prompt"])
 
 
 def test_self_improvement_passes_publish_policy_to_controller(monkeypatch, tmp_path: Path) -> None:
@@ -215,6 +405,19 @@ def test_self_improvement_passes_publish_policy_to_controller(monkeypatch, tmp_p
     _write_json(run_dir / "run.json", {"run_id": "run-1", "status": "completed", "config": {}})
     _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.1})
     published: dict[str, object] = {}
+
+    def fake_run_strategy(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003, ARG001
+        last_message_path = output_dir / "strategy_last_message.txt"
+        last_message_path.parent.mkdir(parents=True, exist_ok=True)
+        last_message_path.write_text("Implement the highest-value reusable fix.\n", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Implement the highest-value reusable fix.",
+            stderr="",
+            transcript_path=output_dir / "strategy_exec.txt",
+            last_message_path=last_message_path,
+            engine="oracle",
+        )
 
     def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003
         return SimpleNamespace(
@@ -229,6 +432,7 @@ def test_self_improvement_passes_publish_policy_to_controller(monkeypatch, tmp_p
         return {"status": "pushed", "commit": "abc123"}
 
     monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: False)
+    monkeypatch.setattr("kagglebot.self_improvement.run_strategy", fake_run_strategy)
     monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.self_improvement._maybe_publish_codex_changes", fake_publish)
 
