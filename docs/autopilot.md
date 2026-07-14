@@ -76,6 +76,10 @@ matched route, so transient API failures and missing route configuration are ret
 On first upgrade, the cursor starts at the end of the existing ledger to avoid replaying historical notifications;
 the current watch snapshot is still emitted normally.
 
+For an active run, the watch state's status and phase are authoritative. An inner stage may leave `run.json` at a
+failure status while Oracle/Codex autofix or recovery is already running; notification snapshots report that active
+recovery phase and preserve the inner-stage value separately as `run_record_status` for diagnostics.
+
 ## Planning Flow (codex -> oracle(latest-pro) -> codex(sol-ultra))
 
 Autopilot planning is fixed to:

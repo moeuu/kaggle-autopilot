@@ -348,6 +348,110 @@ def test_build_autopilot_status_payload_prefers_explicit_watch_phase(tmp_path: P
     assert "gpt autofix fixing" in payload["message"]
 
 
+def test_build_autopilot_status_payload_prefers_active_recovery_over_failed_run_record(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    watch_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (watch_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": "run-1",
+                "last_status": "running",
+                "phase": "gpt_submit_autofix_thinking",
+                "phase_detail": "Oracle is analyzing the submit failure",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps({"status": "submit_failed", "config": {"max_iterations": 3}}),
+        encoding="utf-8",
+    )
+    iter_dir = run_dir / "iter-1"
+    iter_dir.mkdir()
+    (iter_dir / "iteration_state.json").write_text(
+        json.dumps({"iteration_complete": True, "submit_phase_state": "submit_failed"}),
+        encoding="utf-8",
+    )
+
+    payload = build_autopilot_status_payload(
+        artifacts_dir=artifacts,
+        now=datetime(2026, 4, 23, tzinfo=UTC),
+    )
+
+    assert payload["status"] == "running"
+    assert payload["run_record_status"] == "submit_failed"
+    assert payload["phase"] == "gpt_submit_autofix_thinking"
+    assert discord_notifications._event_type_for_snapshot(payload) == "autopilot.status"
+    assert discord_notifications._severity_for_snapshot(payload) == "info"
+    assert "gpt submit autofix thinking" in payload["message"]
+
+
+def test_discord_notifier_replaces_transient_failure_with_active_autofix_status(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    watch_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    state_path = watch_dir / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": "run-1",
+                "last_status": "submit_failed",
+                "phase": "submit_failed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps({"status": "submit_failed", "config": {"max_iterations": 3}}),
+        encoding="utf-8",
+    )
+    (watch_dir / "discord_notifier_state.json").write_text(
+        json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0, "last_run_id": "run-1"}),
+        encoding="utf-8",
+    )
+    notifier = RecordingNotifier()
+    first = datetime(2026, 4, 23, 0, 0, tzinfo=UTC)
+
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=first,
+    )
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": "run-1",
+                "last_status": "running",
+                "phase": "gpt_submit_autofix_thinking",
+                "phase_detail": "Oracle is analyzing the submit failure",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=first + timedelta(minutes=1),
+    )
+
+    assert [event["event_type"] for event in notifier.events] == ["autopilot.failed", "autopilot.status"]
+    assert [event["severity"] for event in notifier.events] == ["error", "info"]
+    assert notifier.events[-1]["payload"]["status"] == "running"
+    assert notifier.events[-1]["payload"]["phase"] == "gpt_submit_autofix_thinking"
+    assert notifier.events[-1]["payload"]["discord_update_key"] == ("kaggle-autopilot:lab_rdp:local_gpu:run:run-1")
+
+
 def test_run_discord_notifier_once_suppresses_unchanged_idle_snapshot_even_after_heartbeat(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     (artifacts / "_watch").mkdir(parents=True)

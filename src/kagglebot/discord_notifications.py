@@ -435,7 +435,11 @@ def build_autopilot_status_payload(
         iter_dirs=iter_dirs,
         direction=_clean_str(run_config.get("target_direction")) or _clean_str(latest_metrics.get("direction")),
     )
-    status = _clean_str(run_json.get("status")) or _clean_str(watch_state.get("last_status")) or "running"
+    run_status = _clean_str(run_json.get("status"))
+    watch_status = _clean_str(watch_state.get("last_status"))
+    # The run record can retain a failed inner-stage status while the supervisor is
+    # already recovering it. The active watch state is the orchestration authority.
+    status = watch_status or run_status or "running"
     resolved_phase = _resolve_phase(
         status=status,
         current_iteration=current_iteration,
@@ -528,6 +532,7 @@ def build_autopilot_status_payload(
     )
     _put_if_not_none(payload, "submit_phase_state", _clean_str(marker.get("submit_phase_state")))
     _put_if_not_none(payload, "phase_detail", _clean_str(watch_state.get("phase_detail")))
+    _put_if_not_none(payload, "run_record_status", run_status)
     _put_if_not_none(payload, "readiness_score", _nested_number(latest_metrics, "readiness", "score"))
     return payload
 
@@ -542,7 +547,12 @@ def _event_type_for_snapshot(snapshot: dict[str, object]) -> str:
     if phase == "idle":
         return "autopilot.status"
     current_iteration = snapshot.get("current_iteration")
-    if current_iteration is not None and snapshot.get("latest_completed_iteration") == current_iteration:
+    completed_phase = str(snapshot.get("submit_phase_state") or "iteration_completed").strip().lower()
+    if (
+        current_iteration is not None
+        and snapshot.get("latest_completed_iteration") == current_iteration
+        and phase == completed_phase
+    ):
         return "autopilot.iteration_completed"
     return "autopilot.status"
 
