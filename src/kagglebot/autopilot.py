@@ -2845,7 +2845,7 @@ def _run_improvement(
     allowed_prefixes = build_repair_write_policy(
         repo_root=config.paths.repo_root,
         data_dir=config.paths.data_dir,
-        kernels_dir=config.paths.kernels_dir,
+        kernels_dir=config.paths.kernels_dir / run_id,
         module_file=Path(__file__),
         extra_allowed_prefixes=[agent_dir],
     )
@@ -2862,7 +2862,7 @@ def _run_improvement(
                 else agent_dir / f"improve_capacity_retry{stage_suffix}-{capacity_attempt:02d}"
             )
             guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
-            before = _snapshot_tree(config.paths.repo_root)
+            before = _snapshot_tree(config.paths.repo_root, allowed_prefixes)
             result = run_codex(
                 current_prompt_path,
                 pass_output_dir,
@@ -2873,7 +2873,7 @@ def _run_improvement(
                 cli_profile=ORACLE_IMPLEMENTATION_AGENT.cli_profile,
                 cwd=config.paths.repo_root,
             )
-            after = _snapshot_tree(config.paths.repo_root)
+            after = _snapshot_tree(config.paths.repo_root, allowed_prefixes)
             _enforce_allowlist_changes(
                 root=config.paths.repo_root,
                 before=before,
@@ -3099,7 +3099,7 @@ def _run_kernel_fix(
     allowed_prefixes = build_repair_write_policy(
         repo_root=config.paths.repo_root,
         data_dir=config.paths.data_dir,
-        kernels_dir=config.paths.kernels_dir,
+        kernels_dir=config.paths.kernels_dir / run_id,
         module_file=Path(__file__),
     )
     guard_snapshot = _backup_guarded_files(config.paths.repo_root, allowed_prefixes)
@@ -3127,7 +3127,7 @@ def _run_kernel_fix(
                 f"retrying {IMPLEMENTATION_AGENT.log_alias} pass "
                 f"{codex_pass}/{codex_pass_limit} with previous failure context."
             )
-        before = _snapshot_tree(config.paths.repo_root)
+        before = _snapshot_tree(config.paths.repo_root, allowed_prefixes)
         pass_output_dir = (
             agent_dir if codex_pass == 1 else agent_dir / f"kernel_fix_pass-{attempt:02d}-{codex_pass:02d}"
         )
@@ -3150,7 +3150,7 @@ def _run_kernel_fix(
             cli_profile=ORACLE_IMPLEMENTATION_AGENT.cli_profile,
             cwd=config.paths.repo_root,
         )
-        after = _snapshot_tree(config.paths.repo_root)
+        after = _snapshot_tree(config.paths.repo_root, allowed_prefixes)
         changed = _diff_snapshots(before, after)
         if changed:
             _enforce_allowlist_changes(
@@ -3277,7 +3277,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     allowed_prefixes = build_repair_write_policy(
         repo_root=config.paths.repo_root,
         data_dir=config.paths.data_dir,
-        kernels_dir=config.paths.kernels_dir,
+        kernels_dir=config.paths.kernels_dir / run_id,
         module_file=Path(__file__),
     )
     prompt_plan = _autofix_context.build_autofix_prompt_plan(

@@ -10,6 +10,7 @@ from kagglebot.submission_sample_discovery import TABULAR_SUBMISSION_SUFFIXES, t
 from kagglebot.validators import scan_text_for_secrets
 
 _MAX_GUARD_FILE_BYTES = 2_000_000
+_MAX_GUARD_TOTAL_BACKUP_BYTES = 16 * 1024 * 1024
 _PROTECTED_PATHS = (
     "src/",
     "tests/",
@@ -49,25 +50,60 @@ class WriteGuardPolicy:
     allowed_prefixes: tuple[Path, ...]
     denied_prefixes: tuple[Path, ...] = ()
     external_guard_paths: tuple[Path, ...] = ()
+    snapshot_prefixes: tuple[Path, ...] = ()
+    max_backup_bytes: int | None = None
 
 
-def _snapshot_tree(root: Path) -> dict[str, tuple[int, int]]:
+def _snapshot_tree(root: Path, policy: WriteGuardPolicy | None = None) -> dict[str, tuple[int, int]]:
     snapshot: dict[str, tuple[int, int]] = {}
-    for dirpath, dirnames, filenames in os.walk(root):
-        directory = Path(dirpath)
-        rel_dir = directory.relative_to(root)
-        dirnames[:] = [name for name in dirnames if not _prune_snapshot_directory((rel_dir / name).as_posix())]
-        for filename in filenames:
-            path = directory / filename
-            rel = path.relative_to(root).as_posix()
-            if any(rel.endswith(suffix) for suffix in _NOISE_SUFFIXES):
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            snapshot[rel] = (stat.st_mtime_ns, stat.st_size)
+    for path in _iter_snapshot_files(root, policy.snapshot_prefixes if policy is not None else ()):
+        rel = path.relative_to(root).as_posix()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[rel] = (stat.st_mtime_ns, stat.st_size)
     return snapshot
+
+
+def _iter_snapshot_files(root: Path, prefixes: Sequence[Path]) -> Sequence[Path]:
+    roots = _snapshot_roots(root, prefixes)
+    files: list[Path] = []
+    seen: set[str] = set()
+    for scan_root in roots:
+        if scan_root.is_file():
+            candidates = [scan_root]
+        else:
+            candidates = []
+            for dirpath, dirnames, filenames in os.walk(scan_root):
+                directory = Path(dirpath)
+                rel_dir = directory.relative_to(root)
+                dirnames[:] = [name for name in dirnames if not _prune_snapshot_directory((rel_dir / name).as_posix())]
+                candidates.extend(directory / filename for filename in filenames)
+        for path in candidates:
+            rel = path.relative_to(root).as_posix()
+            if rel in seen or any(rel.endswith(suffix) for suffix in _NOISE_SUFFIXES):
+                continue
+            seen.add(rel)
+            files.append(path)
+    return files
+
+
+def _snapshot_roots(root: Path, prefixes: Sequence[Path]) -> list[Path]:
+    if not prefixes:
+        return [root]
+    roots: list[Path] = []
+    for prefix in prefixes:
+        try:
+            prefix.relative_to(root)
+        except ValueError:
+            continue
+        if prefix.exists() and prefix not in roots:
+            roots.append(prefix)
+    for path in root.glob(".env*"):
+        if path.exists() and path not in roots:
+            roots.append(path)
+    return roots
 
 
 def _prune_snapshot_directory(path: str) -> bool:
@@ -98,6 +134,7 @@ def _repo_root_write_policy(
     denied_prefixes: list[Path],
     extra_allowed_prefixes: list[Path] | None = None,
     extra_external_guard_paths: list[Path] | None = None,
+    snapshot_prefixes: list[Path] | None = None,
 ) -> WriteGuardPolicy:
     allowed_prefixes = [repo_root]
     if extra_allowed_prefixes:
@@ -109,6 +146,8 @@ def _repo_root_write_policy(
         allowed_prefixes=tuple(allowed_prefixes),
         denied_prefixes=tuple(denied_prefixes),
         external_guard_paths=tuple(dict.fromkeys(external_guard_paths)),
+        snapshot_prefixes=tuple(dict.fromkeys(snapshot_prefixes or [])),
+        max_backup_bytes=_MAX_GUARD_TOTAL_BACKUP_BYTES,
     )
 
 
@@ -130,6 +169,7 @@ def build_repair_write_policy(
         repo_root=repo_root,
         denied_prefixes=[data_dir, kernels_dir],
         extra_allowed_prefixes=extra_allowed,
+        snapshot_prefixes=[data_dir.parent / "kernel", data_dir, kernels_dir],
     )
 
 
@@ -165,9 +205,9 @@ def _backup_guarded_files(
     denied = _allowed_prefixes(root, list(policy.denied_prefixes))
     backup: dict[str, bytes] = {}
     oversized: set[str] = set()
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+    backup_bytes = 0
+    backup_limit = None if policy.max_backup_bytes is None else max(0, int(policy.max_backup_bytes))
+    for path in _iter_snapshot_files(root, policy.snapshot_prefixes):
         rel = path.relative_to(root).as_posix()
         if rel.startswith(".git/"):
             continue
@@ -184,10 +224,16 @@ def _backup_guarded_files(
         if size > _MAX_GUARD_FILE_BYTES:
             oversized.add(rel)
             continue
+        if backup_limit is not None and backup_bytes + size > backup_limit:
+            continue
         try:
-            backup[rel] = path.read_bytes()
+            content = path.read_bytes()
         except OSError:
             continue
+        if backup_limit is not None and backup_bytes + len(content) > backup_limit:
+            continue
+        backup[rel] = content
+        backup_bytes += len(content)
     return GuardSnapshot(
         backup=backup,
         oversized=oversized,
@@ -224,7 +270,7 @@ def _enforce_allowlist_changes(
         return
     if auto_repair and guard_snapshot is not None:
         errors = _repair_unauthorized_changes(root, unauthorized, guard_snapshot, before, denied)
-        after_repair = _snapshot_tree(root)
+        after_repair = _snapshot_tree(root, policy)
         changed = _diff_snapshots(before, after_repair)
         unauthorized = [
             path for path in changed if not _is_allowed(path, allowed, denied) and not _is_noise_path(path, denied)

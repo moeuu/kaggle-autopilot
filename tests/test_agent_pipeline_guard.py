@@ -776,6 +776,42 @@ def test_repo_root_write_policy_allows_src_but_restores_data_and_generated_kerne
     assert staged_kernel_path.read_text(encoding="utf-8") == "print('original')\n"
 
 
+def test_write_guard_caps_repo_policy_backup_and_rejects_unbacked_denied_edits(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    denied_dir = repo_root / "artifacts" / "demo" / "kernels"
+    denied_dir.mkdir(parents=True)
+    first = denied_dir / "first.py"
+    second = denied_dir / "second.py"
+    first.write_bytes(b"a" * 6)
+    second.write_bytes(b"b" * 6)
+    policy = write_guard.WriteGuardPolicy(
+        allowed_prefixes=(repo_root,),
+        denied_prefixes=(denied_dir,),
+        max_backup_bytes=6,
+    )
+
+    guard_snapshot = write_guard._backup_guarded_files(repo_root, policy)
+
+    assert sum(len(content) for content in guard_snapshot.backup.values()) <= 6
+    unbacked = next(
+        path for path in (first, second) if path.relative_to(repo_root).as_posix() not in guard_snapshot.backup
+    )
+    before = write_guard._snapshot_tree(repo_root)
+    unbacked.write_text("changed\n", encoding="utf-8")
+    after = write_guard._snapshot_tree(repo_root)
+
+    with pytest.raises(KaggleBotError, match="Cannot auto-repair changed file"):
+        write_guard._enforce_allowlist_changes(
+            root=repo_root,
+            before=before,
+            after=after,
+            allowed_prefixes=policy,
+            stage="test_backup_budget",
+            guard_snapshot=guard_snapshot,
+            auto_repair=True,
+        )
+
+
 def test_build_repair_write_policy_allows_src_and_denies_data_and_kernels(tmp_path: Path) -> None:
     repo_root = tmp_path
     module_file = repo_root / "src" / "kagglebot" / "autopilot.py"
@@ -795,6 +831,12 @@ def test_build_repair_write_policy_allows_src_and_denies_data_and_kernels(tmp_pa
     assert agent_dir in policy.allowed_prefixes
     assert repo_root / "artifacts" / "demo" / "data" in policy.denied_prefixes
     assert repo_root / "artifacts" / "demo" / "kernels" in policy.denied_prefixes
+    assert policy.snapshot_prefixes == (
+        repo_root / "artifacts" / "demo" / "kernel",
+        repo_root / "artifacts" / "demo" / "data",
+        repo_root / "artifacts" / "demo" / "kernels",
+    )
+    assert policy.max_backup_bytes == write_guard._MAX_GUARD_TOTAL_BACKUP_BYTES
 
 
 def test_repo_root_write_policy_rejects_sensitive_repo_files(tmp_path: Path) -> None:
@@ -895,3 +937,28 @@ def test_snapshot_tree_prunes_noise_directories(tmp_path: Path) -> None:
     snapshot = write_guard._snapshot_tree(tmp_path)
 
     assert snapshot == {"src/tracked.py": (tracked.stat().st_mtime_ns, tracked.stat().st_size)}
+
+
+def test_snapshot_tree_scopes_repair_policy_to_current_competition_paths(tmp_path: Path) -> None:
+    kernel = tmp_path / "artifacts" / "demo" / "kernel" / "kernel.py"
+    data = tmp_path / "artifacts" / "demo" / "data" / "train.csv"
+    staged = tmp_path / "artifacts" / "demo" / "kernels" / "run-1" / "kernel.py"
+    historical = tmp_path / "artifacts" / "demo" / "kernels" / "old-run" / "kernel.py"
+    unrelated = tmp_path / "artifacts" / "other" / "kernel" / "kernel.py"
+    for path in (kernel, data, staged, historical, unrelated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(path.name, encoding="utf-8")
+    policy = write_guard.build_repair_write_policy(
+        repo_root=tmp_path,
+        data_dir=data.parent,
+        kernels_dir=staged.parent,
+        module_file=tmp_path / "src" / "kagglebot" / "autopilot.py",
+    )
+
+    snapshot = write_guard._snapshot_tree(tmp_path, policy)
+
+    assert kernel.relative_to(tmp_path).as_posix() in snapshot
+    assert data.relative_to(tmp_path).as_posix() in snapshot
+    assert staged.relative_to(tmp_path).as_posix() in snapshot
+    assert historical.relative_to(tmp_path).as_posix() not in snapshot
+    assert unrelated.relative_to(tmp_path).as_posix() not in snapshot
