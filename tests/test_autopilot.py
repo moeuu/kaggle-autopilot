@@ -50,6 +50,7 @@ from kagglebot.exceptions import (
     KaggleCliError,
     KernelCapacityError,
     KernelFailedError,
+    OracleStrategyError,
     SubmissionCliError,
     SubmissionValidationError,
     SubmitAbortedError,
@@ -400,6 +401,26 @@ def _make_config(tmp_path: Path, **overrides) -> AutopilotConfig:
         dry_run=False,
     )
     return base if not overrides else base.__class__(**{**base.__dict__, **overrides})
+
+
+def test_autopilot_does_not_codex_autofix_required_oracle_failure(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    autofix_called = False
+
+    def fail_oracle(self):  # noqa: ANN001
+        raise OracleStrategyError("required Oracle response unavailable")
+
+    def unexpected_autofix(**kwargs) -> None:  # noqa: ANN003
+        nonlocal autofix_called
+        autofix_called = True
+
+    monkeypatch.setattr("kagglebot.autopilot.AutopilotSession.run", fail_oracle)
+    monkeypatch.setattr("kagglebot.autopilot._run_autofix", unexpected_autofix)
+
+    with pytest.raises(OracleStrategyError, match="required Oracle response unavailable"):
+        run_autopilot(config)
+
+    assert autofix_called is False
 
 
 def test_submission_message_default_is_compact(tmp_path: Path) -> None:
@@ -4127,7 +4148,7 @@ def test_run_autofix_submit_error_blocks_codex_when_oracle_strategy_empty(monkey
         "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
     )
 
-    with pytest.raises(RuntimeError, match="Oracle submit autofix strategy is required"):
+    with pytest.raises(OracleStrategyError, match="Oracle submit autofix strategy is required"):
         _run_autofix(
             config=config,
             run_id=run_id,

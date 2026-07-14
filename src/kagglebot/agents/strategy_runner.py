@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -34,6 +35,7 @@ _DEFAULT_ORACLE_BROWSER_TIMEOUT = "24h"
 _DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
 _DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
 _DEFAULT_ORACLE_FILE_SIZE_LIMIT_BYTES = 1024 * 1024
+_ORACLE_REMOTE_DATA_PART_BYTES = 15 * 1024 * 1024
 _ORACLE_CANONICAL_CONTEXT_FILES = (
     "rules_url.txt",
     "rules.md",
@@ -122,6 +124,13 @@ class OracleAttachmentPlan:
     paths: tuple[Path, ...]
     data_paths: tuple[Path, ...]
     data_decision: str
+
+
+@dataclass(frozen=True)
+class OracleDataDelivery:
+    source_path: Path
+    paths: tuple[Path, ...]
+    sha256: str
 
 
 def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False, engine: str = "auto") -> StrategyResult:
@@ -318,6 +327,8 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         + "Read the attached Kagglebot strategy prompt file and any attached Kagglebot context bundle files. "
         "Treat this as a single-turn consultation with no prior session memory; all required context is attached. "
         "Read oracle_context_manifest.md first and treat full canonical context attachments as authoritative. "
+        "If the manifest lists split competition-data parts, concatenate them in order and verify the listed SHA-256 "
+        "before inspecting the reconstructed archive. "
         "Return exactly the requested delimiter sections, including PLAN_JSON and CODEX_INSTRUCTIONS. "
         "Do not omit source evidence when the prompt requires it."
     )
@@ -328,6 +339,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             _ORACLE_BENIGN_USE_PREAMBLE
             + "Use the Kagglebot strategy prompt below together with every attached canonical context file. "
             "Read oracle_context_manifest.md first; attached full files override trimmed inline excerpts. "
+            "If competition data is split into parts, reconstruct it exactly as directed by the manifest. "
             "Return only the delimiter sections requested inside it, especially STRATEGY, PLAN_JSON, "
             "and CODEX_INSTRUCTIONS.\n\n"
             f"{rendered_prompt}"
@@ -337,6 +349,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         oracle_prompt_path=oracle_prompt_path,
         output_dir=output_dir,
         inline_prompt=inline_prompt,
+        split_large_data=_oracle_browser_engine_requested(extra_args),
     )
     attachment_paths = list(attachment_plan.paths)
     browser_bootstrap = _maybe_start_oracle_browser(extra_args)
@@ -372,6 +385,9 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     try:
         archive_report: dict[str, object] | None = None
         try:
+            transcript_path.unlink(missing_ok=True)
+            last_message_path.unlink(missing_ok=True)
+            (output_dir / "oracle_archive.json").unlink(missing_ok=True)
             result = run_command(args, timeout=timeout)
             if _oracle_browser_engine_requested(extra_args):
                 archive_report = _ensure_oracle_conversation_archived(
@@ -415,16 +431,25 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         browser_bootstrap.close()
 
     total_elapsed = int(time.monotonic() - start_time)
+    transcript_text = transcript_path.read_text(encoding="utf-8", errors="ignore") if transcript_path.exists() else ""
     returncode = result.returncode
     stderr = result.stderr
+    if returncode != 0 and transcript_text.strip():
+        returncode = 0
+        stderr = "\n".join(
+            part
+            for part in (
+                stderr,
+                f"Oracle command exited {result.returncode} after writing a response; validating the response content.",
+            )
+            if part
+        )
     if archive_report is not None and archive_report.get("archived") is not True:
-        returncode = returncode or 70
         archive_error = str(archive_report.get("fallbackReason") or archive_report.get("reason") or "unknown")
         stderr = "\n".join(
-            part for part in (stderr, f"Oracle conversation archive verification failed: {archive_error}") if part
+            part for part in (stderr, f"Oracle conversation archive verification warning: {archive_error}") if part
         )
     print(f"oracle strategy done... ({total_elapsed}s total, exit={returncode})", flush=True)
-    transcript_text = transcript_path.read_text(encoding="utf-8", errors="ignore") if transcript_path.exists() else ""
     stdout_text = transcript_text.strip() or result.stdout.strip()
     if not transcript_text:
         transcript_path.write_text((stdout_text + "\n") if stdout_text else "", encoding="utf-8")
@@ -509,39 +534,111 @@ def _build_oracle_attachment_plan(
     oracle_prompt_path: Path,
     output_dir: Path,
     inline_prompt: bool,
+    split_large_data: bool = False,
 ) -> OracleAttachmentPlan:
-    paths: list[Path] = [] if inline_prompt else [oracle_prompt_path]
+    context_paths: list[Path] = [] if inline_prompt else [oracle_prompt_path]
     for candidate in _oracle_context_bundle_candidates(prompt_path):
-        if candidate.exists() and candidate.is_file() and candidate not in paths:
-            paths.append(candidate)
+        if candidate.exists() and candidate.is_file() and candidate not in context_paths:
+            context_paths.append(candidate)
 
     context_dir = _oracle_context_dir(prompt_path)
     data_paths: list[Path] = []
     data_decision = "not evaluated: no competition context directory was found"
     if context_dir is not None:
         for name in _ORACLE_CANONICAL_CONTEXT_FILES:
-            _append_existing_file(paths, context_dir / name)
+            _append_existing_file(context_paths, context_dir / name)
         for pattern in ("sample_submission_head.*", "sample_submission.*"):
             for candidate in sorted(context_dir.glob(pattern)):
-                _append_existing_file(paths, candidate)
-        _append_existing_file(paths, context_dir / "agent" / "brief_for_strategy.md")
+                _append_existing_file(context_paths, candidate)
+        _append_existing_file(context_paths, context_dir / "agent" / "brief_for_strategy.md")
         data_paths, data_decision = _oracle_competition_data_attachments(context_dir)
-        for candidate in data_paths:
-            _append_existing_file(paths, candidate)
+
+        context_bundle_path = output_dir / "oracle_canonical_context.md"
+        _write_oracle_canonical_context_bundle(context_bundle_path, context_paths)
+        data_deliveries = _prepare_oracle_data_deliveries(
+            data_paths=data_paths,
+            output_dir=output_dir,
+            split_large_data=split_large_data,
+        )
 
         manifest_path = output_dir / "oracle_context_manifest.md"
         manifest_path.write_text(
             _render_oracle_context_manifest(
                 inline_prompt=inline_prompt,
-                context_paths=paths,
+                context_paths=context_paths,
+                context_bundle_path=context_bundle_path,
                 data_paths=data_paths,
+                data_deliveries=data_deliveries,
                 data_decision=data_decision,
             ),
             encoding="utf-8",
         )
-        _append_existing_file(paths, manifest_path)
+        delivery_paths = [context_bundle_path]
+        for delivery in data_deliveries:
+            delivery_paths.extend(delivery.paths)
+        delivery_paths.append(manifest_path)
+        return OracleAttachmentPlan(
+            paths=tuple(delivery_paths),
+            data_paths=tuple(data_paths),
+            data_decision=data_decision,
+        )
 
-    return OracleAttachmentPlan(paths=tuple(paths), data_paths=tuple(data_paths), data_decision=data_decision)
+    return OracleAttachmentPlan(paths=tuple(context_paths), data_paths=tuple(data_paths), data_decision=data_decision)
+
+
+def _write_oracle_canonical_context_bundle(bundle_path: Path, context_paths: list[Path]) -> None:
+    lines = [
+        "# Oracle Canonical Context Bundle",
+        "",
+        "This file contains the complete text of every canonical context source listed below.",
+    ]
+    for path in context_paths:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        lines.extend(
+            [
+                "",
+                f"===== BEGIN FILE: {path} ({path.stat().st_size} bytes) =====",
+                content.rstrip("\n"),
+                f"===== END FILE: {path} =====",
+            ]
+        )
+    bundle_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _prepare_oracle_data_deliveries(
+    *,
+    data_paths: list[Path],
+    output_dir: Path,
+    split_large_data: bool,
+) -> list[OracleDataDelivery]:
+    parts_dir = output_dir / "oracle_data_parts"
+    shutil.rmtree(parts_dir, ignore_errors=True)
+    deliveries: list[OracleDataDelivery] = []
+    for source_path in data_paths:
+        digest = _sha256_file(source_path)
+        if not split_large_data or source_path.stat().st_size <= _ORACLE_REMOTE_DATA_PART_BYTES:
+            deliveries.append(OracleDataDelivery(source_path=source_path, paths=(source_path,), sha256=digest))
+            continue
+
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        source_size = source_path.stat().st_size
+        part_count = (source_size + _ORACLE_REMOTE_DATA_PART_BYTES - 1) // _ORACLE_REMOTE_DATA_PART_BYTES
+        part_paths: list[Path] = []
+        with source_path.open("rb") as source:
+            for index in range(1, part_count + 1):
+                part_path = parts_dir / f"{source_path.name}.part-{index:03d}-of-{part_count:03d}.zip"
+                part_path.write_bytes(source.read(_ORACLE_REMOTE_DATA_PART_BYTES))
+                part_paths.append(part_path)
+        deliveries.append(OracleDataDelivery(source_path=source_path, paths=tuple(part_paths), sha256=digest))
+    return deliveries
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _oracle_context_dir(prompt_path: Path) -> Path | None:
@@ -618,28 +715,40 @@ def _render_oracle_context_manifest(
     *,
     inline_prompt: bool,
     context_paths: list[Path],
+    context_bundle_path: Path,
     data_paths: list[Path],
+    data_deliveries: list[OracleDataDelivery],
     data_decision: str,
 ) -> str:
-    data_set = set(data_paths)
-    canonical_paths = [path for path in context_paths if path not in data_set]
     lines = [
         "# Oracle Context Manifest",
         "",
         f"- rendered_prompt_delivery: {'inline' if inline_prompt else 'file attachment'}",
-        f"- canonical_context_file_count: {len(canonical_paths)}",
+        f"- canonical_context_source_count: {len(context_paths)}",
+        f"- canonical_context_delivery: {context_bundle_path} ({context_bundle_path.stat().st_size} bytes)",
         f"- competition_data: {data_decision}",
         "",
-        "## Canonical Context Files",
+        "## Canonical Context Sources",
     ]
-    lines.extend(f"- {path} ({path.stat().st_size} bytes)" for path in canonical_paths)
+    lines.extend(f"- {path} ({path.stat().st_size} bytes)" for path in context_paths)
     if data_paths:
         lines.extend(["", "## Competition Data Packages"])
-        lines.extend(f"- {path} ({path.stat().st_size} bytes)" for path in data_paths)
+        for delivery in data_deliveries:
+            lines.append(
+                f"- source: {delivery.source_path} ({delivery.source_path.stat().st_size} bytes; "
+                f"sha256={delivery.sha256})"
+            )
+            if delivery.paths == (delivery.source_path,):
+                lines.append(f"  - attachment: {delivery.source_path}")
+                continue
+            lines.append("  - reconstruction: concatenate the following parts in listed order as raw bytes")
+            lines.extend(f"  - part: {path} ({path.stat().st_size} bytes)" for path in delivery.paths)
+            lines.append("  - verify: reconstructed file SHA-256 must match the source SHA-256 above")
     lines.extend(
         [
             "",
-            "Use the full canonical files as authoritative when an inline excerpt is trimmed.",
+            "Read oracle_canonical_context.md as the authoritative full text when an inline excerpt is trimmed.",
+            "When a package is split, concatenate its parts before opening the reconstructed archive.",
             "Do not assume access to any competition data package listed as omitted.",
         ]
     )

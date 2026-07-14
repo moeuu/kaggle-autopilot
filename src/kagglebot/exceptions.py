@@ -7,6 +7,10 @@ class KaggleBotError(Exception):
     exit_code = 1
 
 
+class OracleStrategyError(KaggleBotError):
+    """A required Oracle response was not available for the next Codex stage."""
+
+
 class RulesNotAcceptedError(KaggleBotError):
     """Competition rules were not accepted by the user."""
 

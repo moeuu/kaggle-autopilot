@@ -66,12 +66,12 @@ def run_improvement_strategy_prompt(
             prompt_filename="gpt_improvement_prompt.md",
             start_message="[cyan]improve[/cyan]: gpt drafting improvement prompt",
             failure_message=(
-                "[yellow]improve[/yellow]: gpt improvement strategy failed, "
-                f"falling back to direct {implementation_agent_alias} prompt"
+                "[yellow]improve[/yellow]: Oracle improvement strategy failed; "
+                f"blocking direct {implementation_agent_alias} implementation"
             ),
             empty_message=(
-                "[yellow]improve[/yellow]: gpt improvement strategy empty, "
-                f"falling back to direct {implementation_agent_alias} prompt"
+                "[yellow]improve[/yellow]: Oracle improvement strategy empty; "
+                f"blocking direct {implementation_agent_alias} implementation"
             ),
         ),
         run_strategy_func=run_strategy_func,
@@ -100,12 +100,12 @@ def run_error_strategy_prompt(
                 f"[cyan]{stage_label}[/cyan]: strategy model={strategy_model} reasoning={reasoning_effort}"
             ),
             failure_message=(
-                f"[yellow]{stage_label}[/yellow]: gpt strategy failed, "
-                f"continuing with direct {implementation_agent_alias} fix"
+                f"[yellow]{stage_label}[/yellow]: Oracle strategy failed; "
+                f"blocking direct {implementation_agent_alias} fix"
             ),
             empty_message=(
-                f"[yellow]{stage_label}[/yellow]: gpt strategy empty, "
-                f"continuing with direct {implementation_agent_alias} fix"
+                f"[yellow]{stage_label}[/yellow]: Oracle strategy empty; "
+                f"blocking direct {implementation_agent_alias} fix"
             ),
         ),
         run_strategy_func=run_strategy_func,

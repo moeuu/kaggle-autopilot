@@ -653,11 +653,14 @@ def test_oracle_context_attaches_complete_context_and_permitted_package(monkeypa
     strategy_runner.run_strategy(prompt_path, strategy_dir, dry_run=False, engine="oracle")
 
     attached = captured_args[captured_args.index("--file") + 1 :]
-    assert str(context_dir / "rules.md") in attached
-    assert str(context_dir / "overview.md") in attached
-    assert str(context_dir / "dataset_profile.json") in attached
-    assert str(context_dir / "top1_public.json") in attached
-    assert str(brief_path) in attached
+    context_bundle_path = strategy_dir / "oracle_canonical_context.md"
+    assert str(context_bundle_path) in attached
+    context_bundle = context_bundle_path.read_text(encoding="utf-8")
+    assert str(context_dir / "rules.md") in context_bundle
+    assert "Competition data may be processed" in context_bundle
+    assert "complete overview" in context_bundle
+    assert '"score": 0.9' in context_bundle
+    assert "complete Codex brief" in context_bundle
     assert str(package_path) in attached
     assert captured_args[captured_args.index("--max-file-size-bytes") + 1] == str(package_path.stat().st_size)
     manifest_path = strategy_dir / "oracle_context_manifest.md"
@@ -797,7 +800,7 @@ def test_archive_oracle_conversation_via_cdp_parses_success(monkeypatch, tmp_pat
     assert report["fallbackAttempted"] is True
 
 
-def test_run_strategy_blocks_successful_oracle_output_when_archive_is_unverified(
+def test_run_strategy_preserves_successful_oracle_output_when_archive_is_unverified(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -828,5 +831,90 @@ def test_run_strategy_blocks_successful_oracle_output_when_archive_is_unverified
     result = strategy_runner.run_strategy(prompt_path, tmp_path, engine="oracle")
 
     assert result.stdout == "Oracle response"
-    assert result.returncode == 70
-    assert "archive verification failed" in result.stderr.lower()
+    assert result.returncode == 0
+    assert "archive verification warning" in result.stderr.lower()
+
+
+def test_oracle_context_splits_large_browser_package_without_changing_bytes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    context_dir = tmp_path / "artifacts" / "demo" / "context"
+    strategy_dir = context_dir / "agent" / "strategy"
+    data_dir = context_dir.parent / "data"
+    strategy_dir.mkdir(parents=True)
+    data_dir.mkdir()
+    prompt_path = strategy_dir / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    (context_dir / "rules.md").write_text("Data processing is permitted.\n", encoding="utf-8")
+    package_path = data_dir / "demo.zip"
+    package_bytes = bytes(range(251)) * 41
+    package_path.write_bytes(package_bytes)
+    monkeypatch.setattr(strategy_runner, "_ORACLE_REMOTE_DATA_PART_BYTES", 1024)
+
+    plan = strategy_runner._build_oracle_attachment_plan(
+        prompt_path=prompt_path,
+        oracle_prompt_path=strategy_dir / "oracle_strategy_prompt.md",
+        output_dir=strategy_dir,
+        inline_prompt=True,
+        split_large_data=True,
+    )
+
+    part_paths = [path for path in plan.paths if path.parent.name == "oracle_data_parts"]
+    assert len(part_paths) == 11
+    assert all(path.stat().st_size <= 1024 for path in part_paths)
+    assert b"".join(path.read_bytes() for path in part_paths) == package_bytes
+    manifest = (strategy_dir / "oracle_context_manifest.md").read_text(encoding="utf-8")
+    assert "concatenate the following parts in listed order" in manifest
+    assert strategy_runner._sha256_file(package_path) in manifest
+
+
+def test_run_strategy_does_not_reuse_stale_oracle_transcript(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    (tmp_path / "strategy_exec.txt").write_text("stale Oracle response\n", encoding="utf-8")
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
+    )
+    monkeypatch.setattr(
+        strategy_runner,
+        "run_command",
+        lambda args, **kwargs: CommandResult(
+            args=args,
+            returncode=1,
+            stdout="current Oracle transfer error",
+            stderr="attachment failed",
+            duration_sec=0.01,
+        ),
+    )
+
+    result = strategy_runner.run_strategy(prompt_path, tmp_path, engine="oracle")
+
+    assert result.returncode == 1
+    assert result.stdout == "current Oracle transfer error"
+    assert "stale Oracle response" not in result.stdout
+
+
+def test_run_strategy_accepts_current_oracle_response_despite_cleanup_exit(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
+    )
+
+    def fake_run_command(args: list[str], **kwargs) -> CommandResult:  # noqa: ARG001
+        output_path = Path(args[args.index("--write-output") + 1])
+        output_path.write_text("current complete Oracle response\n", encoding="utf-8")
+        return CommandResult(args=args, returncode=1, stdout="", stderr="cleanup failed", duration_sec=0.01)
+
+    monkeypatch.setattr(strategy_runner, "run_command", fake_run_command)
+
+    result = strategy_runner.run_strategy(prompt_path, tmp_path, engine="oracle")
+
+    assert result.returncode == 0
+    assert result.stdout == "current complete Oracle response"
+    assert "validating the response content" in result.stderr

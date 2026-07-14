@@ -81,6 +81,7 @@ from kagglebot.exceptions import (
     KernelCapacityError,
     KernelFailedError,
     KernelStillRunningError,
+    OracleStrategyError,
     RulesNotAcceptedError,
     SubmitAbortedError,
 )
@@ -383,6 +384,8 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
                 resume_after_failure = True
             except KernelCapacityError:
+                raise
+            except OracleStrategyError:
                 raise
             except KeyboardInterrupt:
                 raise
@@ -2809,7 +2812,7 @@ def _run_improvement(
         run_strategy_func=_run_required_oracle_strategy,
     )
     if not config.dry_run and not strategy_text.strip():
-        raise RuntimeError("Oracle improvement strategy is required before Codex implementation.")
+        raise OracleStrategyError("Oracle improvement strategy is required before Codex implementation.")
 
     prompt_text = _improvement_context.build_improvement_implementation_prompt(
         base_prompt_text=base_prompt_text,
@@ -3076,7 +3079,7 @@ def _run_kernel_fix(
             run_strategy_func=_run_required_oracle_strategy,
         )
         if not config.dry_run and not strategy_text.strip():
-            raise RuntimeError("Oracle kernel-fix strategy is required before Codex implementation.")
+            raise OracleStrategyError("Oracle kernel-fix strategy is required before Codex implementation.")
     prompt_text = _kernel_fix_context.append_kernel_fix_strategy(
         prompt_text=prompt_plan.prompt_text,
         strategy_text=strategy_text,
@@ -3320,7 +3323,7 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         run_strategy_func=_run_required_oracle_strategy,
     )
     if not config.dry_run and not strategy_text.strip():
-        raise RuntimeError(f"Oracle {strategy_label} strategy is required before Codex implementation.")
+        raise OracleStrategyError(f"Oracle {strategy_label} strategy is required before Codex implementation.")
     if strategy_text.strip():
         prompt_text += (
             f"\n\n## {STRATEGY_AGENT.display_name} Extra-High Error-Fix Strategy\n"

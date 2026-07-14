@@ -19,7 +19,7 @@ from kagglebot.agents.identity import (
 from kagglebot.agents.strategy_runner import resolve_strategy_engine, run_strategy
 from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.compression_suffixes import write_compressed_bytes
-from kagglebot.exceptions import KaggleBotError
+from kagglebot.exceptions import KaggleBotError, OracleStrategyError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.json_utils import load_json_array, load_json_object, parse_json_object_text, write_json_object
 from kagglebot.knowledge import (
@@ -338,7 +338,7 @@ def _run_strategy_plan(
                 continue
             if _should_use_fallback_strategy(response_text, result.stderr):
                 if _strategy_engine_is_required(config, "oracle"):
-                    raise KaggleBotError(
+                    raise OracleStrategyError(
                         f"{STRATEGY_AGENT.display_name} strategy failed and "
                         "KAGGLEBOT_STRATEGY_ENGINE=oracle requires Oracle to complete successfully: "
                         f"{result.stderr or response_text}"
@@ -370,7 +370,8 @@ def _run_strategy_plan(
                     research_sources_text=research_sources_text,
                     research_summary_text=research_summary_text,
                 )
-            raise KaggleBotError(f"{STRATEGY_AGENT.display_name} strategy failed: {result.stderr or response_text}")
+            error_type = OracleStrategyError if _strategy_engine_is_required(config, "oracle") else KaggleBotError
+            raise error_type(f"{STRATEGY_AGENT.display_name} strategy failed: {result.stderr or response_text}")
 
         if config.dry_run:
             strategy_text = (
@@ -420,7 +421,8 @@ def _run_strategy_plan(
         if issues:
             if attempt >= _QUALITY_RETRY_LIMIT:
                 issue_text = "\n".join(f"- {issue}" for issue in issues)
-                raise KaggleBotError(f"{STRATEGY_AGENT.display_name} strategy failed quality gate:\n{issue_text}")
+                error_type = OracleStrategyError if _strategy_engine_is_required(config, "oracle") else KaggleBotError
+                raise error_type(f"{STRATEGY_AGENT.display_name} strategy failed quality gate:\n{issue_text}")
             attempt += 1
             for issue in issues:
                 print(f"[yellow]quality gate[/yellow]: {issue}")

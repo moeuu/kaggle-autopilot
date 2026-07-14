@@ -101,6 +101,9 @@ Oracle strategy calls have no outer timeout by default. Large context bundles ma
 waits for the real Oracle response instead of replacing it with a local strategy. Oracle's browser wait defaults to
 24 hours. Set `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC` only when an operator explicitly wants a hard failure; a timeout
 blocks the Codex implementation and never triggers a Codex-to-Codex fallback.
+Required Oracle failures are excluded from the generic Codex autofix loop. When Oracle has already written a current
+response, Kagglebot validates that response even if the CLI later reports a cleanup error. Chat archival is attempted
+and reported separately, so an archival verification warning cannot replace or invalidate a usable Oracle answer.
 
 Every implementation pass that consumes an Oracle response uses the single `[tool.kagglebot.agent]`
 `oracle_implementation_*` profile. This covers initial kernel implementation, improvement iterations, kernel/error
@@ -126,9 +129,10 @@ Useful overrides:
   rolling alias is applied instead of silently keeping the browser's current model. For diagnostics, override either
   explicitly through `KAGGLEBOT_ORACLE_ARGS`, for example `--browser-model-strategy current`.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=1` is the default and pastes the rendered strategy prompt inline. Kagglebot also
-  attaches `oracle_context_manifest.md` and the complete canonical rules, overview, data description, submission
-  format, dataset profile, sample submission, code/models/discussion snapshots, and their indexes when available.
-  Attached full files are authoritative over the prompt's capped inline excerpts.
+  attaches `oracle_context_manifest.md` and `oracle_canonical_context.md`. The latter losslessly consolidates the
+  complete canonical rules, overview, data description, submission format, dataset profile, sample submission,
+  code/models/discussion snapshots, and their indexes when available. Its full contents are authoritative over the
+  prompt's capped inline excerpts.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=0` sends the rendered prompt and context bundle through Oracle `--file` attachments
   instead. In browser mode, Oracle may still inline small text files, so they may not appear as visible ChatGPT file
   chips even though the model receives the content.
@@ -139,7 +143,10 @@ Useful overrides:
   transmission and the package fits `KAGGLEBOT_ORACLE_DATA_ATTACHMENT_MAX_BYTES` (100 MiB by default). Explicit Rules
   restrictions win in `auto` mode. `owner-authorized` records the operator's decision to use their authenticated Oracle
   session as an owner-controlled processing tool rather than a redistribution target. Kagglebot records the exact
-  attachment or omission reason in the context manifest.
+  attachment or omission reason in the context manifest. For remote-Chrome browser runs, archives over 15 MiB are
+  split into ordered `.zip` parts so every upload remains below Oracle's 20 MiB data-transfer ceiling. The manifest
+  records the original SHA-256 and exact byte-concatenation order; Oracle is instructed to reconstruct and verify the
+  original archive before analysis. Up to the configured 100 MiB default is therefore delivered without truncation.
 - `KAGGLEBOT_REFRESH_EVALUATION_SPEC=1` explicitly refreshes the Oracle-generated evaluation specification. The global
   autopilot `--force` flag is reserved for intended side effects and no longer causes this expensive advisor call on
   every watch cycle; valid frozen specifications are reused by default.
