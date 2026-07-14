@@ -37,6 +37,26 @@ Supported compute values:
 - `kaggle_gpu`
 - `kaggle_tpu`
 
+## Discord Status Notifications
+
+Run the notification worker separately from `watch`:
+
+```bash
+uv run kagglebot discord-notifier --interval-sec 300 --heartbeat-sec 1800
+```
+
+Configure `KAGGLEBOT_DISCORD_EVENT_API_URL`, `KAGGLEBOT_DISCORD_EVENT_API_TOKEN`, and optionally
+`KAGGLEBOT_DISCORD_EVENT_ACCOUNT`. The worker monitors the local and sidecar watch scopes under
+`artifacts/_watch/`.
+
+Each run uses a `discord_update_key` containing its `run_id`, so switching to a new competition/run creates a new
+Discord message while heartbeat updates for the same run edit that run's status card. Completion and failure use
+separate event keys. The worker also consumes `started`, `finished`, and `failed` records from each watch
+`ledger.jsonl` with a persisted byte offset. It advances the offset only after the event API reports at least one
+matched route, so transient API failures and missing route configuration are retried instead of silently discarded.
+On first upgrade, the cursor starts at the end of the existing ledger to avoid replaying historical notifications;
+the current watch snapshot is still emitted normally.
+
 ## Planning Flow (codex -> oracle(latest-pro) -> codex(sol-ultra))
 
 Autopilot planning is fixed to:

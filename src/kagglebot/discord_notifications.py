@@ -26,6 +26,13 @@ from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 SOURCE = "kaggle-autopilot"
 DEFAULT_ACCOUNT = "lab_rdp"
 STATE_FILENAME = "discord_notifier_state.json"
+LEDGER_OFFSET_KEY = "watch_ledger_offset"
+LEDGER_CURSOR_INITIALIZED_KEY = "watch_ledger_cursor_initialized"
+_LIFECYCLE_EVENT_TYPES = {
+    "started": "autopilot.started",
+    "finished": "autopilot.finished",
+    "failed": "autopilot.failed",
+}
 
 
 @dataclass(frozen=True)
@@ -85,8 +92,9 @@ class DiscordEventNotifier:
             print(f"[yellow]discord notify failed[/yellow]: {exc}")
             return False
         parsed = parse_json_object_bytes(raw) or {}
-        if int(parsed.get("matched_routes") or 0) <= 0:
+        if (_int_or_none(parsed.get("matched_routes")) or 0) <= 0:
             print("[yellow]discord notify accepted but matched no routes[/yellow]")
+            return False
         return True
 
 
@@ -150,12 +158,34 @@ def _run_discord_notifier_for_watch_state(
     )
     state_path = watch_state_path.parent / STATE_FILENAME
     state = _read_json_object(state_path)
+    snapshot_key = _snapshot_key(snapshot)
+    lifecycle_sent, lifecycle_blocked = _replay_watch_lifecycle_events(
+        artifacts_dir=artifacts_dir,
+        watch_state_path=watch_state_path,
+        state_path=state_path,
+        state=state,
+        snapshot=snapshot,
+        notifier=notifier,
+        current_time=current_time,
+    )
+    if lifecycle_blocked:
+        return lifecycle_sent
+    if lifecycle_sent:
+        state.update(
+            {
+                "last_snapshot_key": snapshot_key,
+                "last_sent_at": current_time.isoformat(),
+                "last_run_id": _clean_str(snapshot.get("run_id")),
+            }
+        )
+        write_json_object(state_path, state, sort_keys=True)
+        return True
+
     event_type = _event_type_for_snapshot(snapshot)
     current_run_id = _clean_str(snapshot.get("run_id"))
     last_run_id = _clean_str(state.get("last_run_id"))
     if current_run_id and current_run_id != last_run_id:
         event_type = "autopilot.started"
-    snapshot_key = _snapshot_key(snapshot)
     last_key = str(state.get("last_snapshot_key") or "")
     last_sent_at = _parse_datetime(state.get("last_sent_at"))
     heartbeat_due = last_sent_at is None or (current_time - last_sent_at).total_seconds() >= max(1, heartbeat_sec)
@@ -170,6 +200,8 @@ def _run_discord_notifier_for_watch_state(
     if not notifier.enabled:
         print("[yellow]discord notifier[/yellow]: disabled; set KAGGLEBOT_DISCORD_EVENT_API_URL and token")
         return False
+    snapshot = dict(snapshot)
+    snapshot["discord_update_key"] = _discord_event_update_key(snapshot=snapshot, event_type=event_type)
     ok = notifier.emit(
         event_type=event_type,
         severity=_severity_for_snapshot(snapshot),
@@ -178,18 +210,157 @@ def _run_discord_notifier_for_watch_state(
         occurred_at=current_time,
     )
     if ok:
-        write_json_object(
-            state_path,
+        state.update(
             {
                 "last_snapshot_key": snapshot_key,
                 "last_sent_at": current_time.isoformat(),
                 "last_event_type": event_type,
                 "last_run_id": current_run_id,
-            },
-            sort_keys=True,
+            }
         )
+        write_json_object(state_path, state, sort_keys=True)
         print(f"[green]discord notifier[/green]: sent {event_type} ({snapshot_key})")
     return ok
+
+
+def _replay_watch_lifecycle_events(
+    *,
+    artifacts_dir: Path,
+    watch_state_path: Path,
+    state_path: Path,
+    state: dict[str, object],
+    snapshot: dict[str, object],
+    notifier: DiscordEventNotifier,
+    current_time: datetime,
+) -> tuple[bool, bool]:
+    if not notifier.enabled:
+        return False, False
+
+    ledger_path = watch_state_path.with_name("ledger.jsonl")
+    if not state.get(LEDGER_CURSOR_INITIALIZED_KEY):
+        state[LEDGER_OFFSET_KEY] = ledger_path.stat().st_size if ledger_path.exists() else 0
+        state[LEDGER_CURSOR_INITIALIZED_KEY] = True
+        write_json_object(state_path, state, sort_keys=True)
+        return False, False
+
+    offset = max(0, _int_or_none(state.get(LEDGER_OFFSET_KEY)) or 0)
+    if ledger_path.exists() and offset > ledger_path.stat().st_size:
+        offset = 0
+    saved_offset = offset
+    sent_any = False
+    for next_offset, record in _watch_ledger_records_after(ledger_path, offset):
+        event_name = _clean_str(record.get("event")) or ""
+        event_type = _LIFECYCLE_EVENT_TYPES.get(event_name)
+        if event_type is not None:
+            payload = _lifecycle_payload(
+                artifacts_dir=artifacts_dir,
+                snapshot=snapshot,
+                record=record,
+                event_name=event_name,
+                event_type=event_type,
+                current_time=current_time,
+            )
+            occurred_at = _parse_datetime(record.get("ts")) or current_time
+            ok = notifier.emit(
+                event_type=event_type,
+                severity="error" if event_name == "failed" else "info",
+                dedupe_key=_lifecycle_dedupe_key(
+                    payload=payload,
+                    event_type=event_type,
+                    ledger_offset=offset,
+                ),
+                payload=payload,
+                occurred_at=occurred_at,
+            )
+            if not ok:
+                state[LEDGER_OFFSET_KEY] = offset
+                write_json_object(state_path, state, sort_keys=True)
+                return sent_any, True
+            sent_any = True
+            offset = next_offset
+            state["last_event_type"] = event_type
+            state["last_run_id"] = _clean_str(payload.get("run_id"))
+            state["last_sent_at"] = current_time.isoformat()
+            state[LEDGER_OFFSET_KEY] = offset
+            write_json_object(state_path, state, sort_keys=True)
+            print(f"[green]discord notifier[/green]: replayed {event_type} at ledger offset {offset}")
+            saved_offset = offset
+            continue
+        offset = next_offset
+    if offset != saved_offset:
+        state[LEDGER_OFFSET_KEY] = offset
+        write_json_object(state_path, state, sort_keys=True)
+    return sent_any, False
+
+
+def _watch_ledger_records_after(path: Path, offset: int) -> list[tuple[int, dict[str, object]]]:
+    if not path.exists():
+        return []
+    size = path.stat().st_size
+    start = offset if offset <= size else 0
+    records: list[tuple[int, dict[str, object]]] = []
+    with path.open("rb") as handle:
+        handle.seek(start)
+        while True:
+            raw = handle.readline()
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):
+                break
+            next_offset = handle.tell()
+            parsed = parse_json_object_bytes(raw)
+            if parsed is not None:
+                records.append((next_offset, parsed))
+            else:
+                records.append((next_offset, {}))
+    return records
+
+
+def _lifecycle_payload(
+    *,
+    artifacts_dir: Path,
+    snapshot: dict[str, object],
+    record: dict[str, object],
+    event_name: str,
+    event_type: str,
+    current_time: datetime,
+) -> dict[str, object]:
+    state_scope = str(snapshot.get("state_scope") or "local_gpu")
+    compute = _compute_for_scope(state_scope)
+    slug = _clean_str(record.get("slug"))
+    run_id = _clean_str(record.get("run_id"))
+    same_run = bool(slug and run_id and slug == snapshot.get("competition") and run_id == snapshot.get("run_id"))
+    payload = (
+        dict(snapshot)
+        if same_run
+        else {
+            "host": socket.gethostname(),
+            "compute": compute,
+            "state_scope": state_scope,
+            "artifact_root": str(artifacts_dir / slug) if slug else str(artifacts_dir),
+            "observed_at": (_parse_datetime(record.get("ts")) or current_time).isoformat(),
+        }
+    )
+    if slug:
+        payload["competition"] = slug
+        payload["slug"] = slug
+    if run_id:
+        payload["run_id"] = run_id
+        if slug:
+            payload["run_dir"] = str(artifacts_dir / slug / "runs" / run_id)
+    payload["status"] = "running" if event_name == "started" else event_name
+    payload["phase"] = event_name
+    payload["message"] = _lifecycle_message(event_name=event_name, slug=slug, compute=compute)
+    for key in ("reason", "error", "resume"):
+        _put_if_not_none(payload, key, record.get(key))
+    payload["discord_update_key"] = _discord_event_update_key(snapshot=payload, event_type=event_type)
+    return payload
+
+
+def _lifecycle_message(*, event_name: str, slug: str | None, compute: str) -> str:
+    competition = slug or "an unknown competition"
+    verb = {"started": "started", "finished": "finished", "failed": "failed"}.get(event_name, event_name)
+    return f"Compute: {compute}\nKaggle autopilot {verb} for {competition}."
 
 
 def _is_idle_snapshot(snapshot: dict[str, object]) -> bool:
@@ -203,10 +374,13 @@ def run_discord_notifier_forever(
     heartbeat_sec: int,
 ) -> None:
     while True:
-        run_discord_notifier_once(
-            artifacts_dir=artifacts_dir,
-            heartbeat_sec=heartbeat_sec,
-        )
+        try:
+            run_discord_notifier_once(
+                artifacts_dir=artifacts_dir,
+                heartbeat_sec=heartbeat_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[yellow]discord notifier cycle failed[/yellow]: {type(exc).__name__}: {exc}")
         time.sleep(max(1, interval_sec))
 
 
@@ -231,7 +405,7 @@ def build_autopilot_status_payload(
             "host": host,
             "compute": compute,
             "state_scope": state_scope,
-            "discord_update_key": _discord_update_key(account=account, state_scope=state_scope),
+            "discord_update_key": f"{_discord_update_key(account=account, state_scope=state_scope)}:idle",
             "status": _clean_str(watch_state.get("last_status")) or "idle",
             "phase": "idle",
             "artifact_root": str(artifacts_dir),
@@ -284,7 +458,7 @@ def build_autopilot_status_payload(
         "competition": slug,
         "slug": slug,
         "run_id": run_id,
-        "discord_update_key": _discord_update_key(account=account, state_scope=state_scope),
+        "discord_update_key": (f"{_discord_update_key(account=account, state_scope=state_scope)}:run:{run_id}"),
         "status": status,
         "phase": phase,
         "artifact_root": str(artifacts_dir / slug),
@@ -417,14 +591,45 @@ def _discord_update_key(*, account: str, state_scope: str) -> str:
     return f"kaggle-autopilot:{account}:{normalized_scope}"
 
 
+def _discord_event_update_key(*, snapshot: dict[str, object], event_type: str) -> str:
+    account = _env_first("KAGGLEBOT_DISCORD_EVENT_ACCOUNT") or DEFAULT_ACCOUNT
+    state_scope = str(snapshot.get("state_scope") or "local_gpu")
+    base = _discord_update_key(account=account, state_scope=state_scope)
+    run_id = _clean_str(snapshot.get("run_id"))
+    if not run_id:
+        return f"{base}:idle"
+    run_key = f"{base}:run:{run_id}"
+    if event_type in {"autopilot.started", "autopilot.status"}:
+        return run_key
+    if event_type == "autopilot.iteration_completed":
+        iteration = _int_or_none(snapshot.get("current_iteration"))
+        return f"{run_key}:iteration:{iteration if iteration is not None else 'unknown'}"
+    return f"{run_key}:{event_type.rsplit('.', 1)[-1]}"
+
+
 def _dedupe_key(*, snapshot: dict[str, object], event_type: str, now: datetime) -> str:
     state_scope = str(snapshot.get("state_scope") or "local_gpu")
     slug = str(snapshot.get("competition") or "idle")
     run_id = str(snapshot.get("run_id") or "none")
     iteration = str(snapshot.get("current_iteration") or "none")
     phase = str(snapshot.get("phase") or "unknown")
-    bucket = now.strftime("%Y%m%dT%H%M%S")
+    if event_type in {"autopilot.started", "autopilot.finished", "autopilot.failed"} and run_id != "none":
+        bucket = "lifecycle"
+    else:
+        bucket = now.strftime("%Y%m%dT%H%M%S")
     return f"kaggle-autopilot:{state_scope}:{event_type}:{slug}:{run_id}:{iteration}:{phase}:{bucket}"
+
+
+def _lifecycle_dedupe_key(
+    *,
+    payload: dict[str, object],
+    event_type: str,
+    ledger_offset: int,
+) -> str:
+    state_scope = str(payload.get("state_scope") or "local_gpu")
+    slug = str(payload.get("competition") or "unknown")
+    run_id = str(payload.get("run_id") or "none")
+    return f"kaggle-autopilot:{state_scope}:{event_type}:{slug}:{run_id}:ledger:{ledger_offset}"
 
 
 def _snapshot_key(snapshot: dict[str, object]) -> str:
