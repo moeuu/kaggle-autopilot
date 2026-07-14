@@ -75,10 +75,9 @@ _ORACLE_DATA_EGRESS_BLOCK_MARKERS = (
 )
 _ORACLE_BENIGN_USE_PREAMBLE = (
     "Authorized benign use: this is offline data-science work for a Kaggle competition the operator has joined. "
-    "Analyze only supplied competition artifacts and public research. Do not provide instructions for unauthorized "
-    "system access, credential theft, malware, exploitation, evasion, or interaction with real-world targets. "
-    "If a competition is security-themed, keep all recommendations defensive and limited to offline dataset "
-    "modeling, validation, and submission generation. "
+    "Analyze only supplied competition artifacts and public research. Limit recommendations to competition "
+    "modeling, validation, and submission generation; do not propose interacting with external systems or "
+    "real-world targets. "
 )
 _ORACLE_CHROME_PROFILE_ROOT_EXCLUDES = (
     "DevToolsActivePort",
@@ -117,6 +116,21 @@ class OracleBrowserBootstrap:
                 self.process.wait(timeout=5)
         if self.temp_profile_dir is not None:
             shutil.rmtree(self.temp_profile_dir, ignore_errors=True)
+
+
+@dataclass
+class OracleBrowserCompatibility:
+    process: subprocess.Popen[bytes] | None = None
+
+    def close(self) -> None:
+        if self.process is None or self.process.poll() is not None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
 
 
 @dataclass(frozen=True)
@@ -382,6 +396,10 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         daemon=True,
     )
     heartbeat.start()
+    browser_compatibility = _start_oracle_browser_attachment_compatibility(
+        args=[*extra_args, *browser_bootstrap.args],
+        attachment_paths=attachment_paths,
+    )
     try:
         archive_report: dict[str, object] | None = None
         try:
@@ -428,6 +446,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     finally:
         stop_event.set()
         heartbeat.join(timeout=1.0)
+        browser_compatibility.close()
         browser_bootstrap.close()
 
     total_elapsed = int(time.monotonic() - start_time)
@@ -962,6 +981,37 @@ def _oracle_remote_chrome_endpoint(args: list[str]) -> tuple[str, int] | None:
     return None
 
 
+def _start_oracle_browser_attachment_compatibility(
+    *,
+    args: list[str],
+    attachment_paths: list[Path],
+) -> OracleBrowserCompatibility:
+    remote = _oracle_remote_chrome_endpoint(args)
+    cdp_module = _oracle_cdp_module_path()
+    node = _oracle_node_command()
+    if remote is None or not attachment_paths or cdp_module is None or node is None:
+        return OracleBrowserCompatibility()
+    host, port = remote
+    names = list(dict.fromkeys(path.name for path in attachment_paths))
+    try:
+        process = subprocess.Popen(  # noqa: S603
+            [
+                node,
+                "-e",
+                _ORACLE_ATTACHMENT_COMPATIBILITY_CDP_SCRIPT,
+                str(cdp_module),
+                host,
+                str(port),
+                json.dumps(names),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return OracleBrowserCompatibility()
+    return OracleBrowserCompatibility(process=process)
+
+
 def _archive_oracle_conversation_via_cdp(
     *,
     conversation_url: str,
@@ -1093,6 +1143,52 @@ const conversationUrl = process.argv[4];
     if (target) await CDP.Close({host, port, id: target.id}).catch(() => {});
   }
 })();
+"""
+
+
+_ORACLE_ATTACHMENT_COMPATIBILITY_CDP_SCRIPT = r"""
+const CDP = require(process.argv[1]);
+const host = process.argv[2];
+const port = Number(process.argv[3]);
+const expectedNames = JSON.parse(process.argv[4]);
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const patchTarget = async (target) => {
+  let client;
+  try {
+    client = await CDP({host, port, target});
+    const names = JSON.stringify(expectedNames);
+    const expression = `(() => {
+      const expectedNames = ${names};
+      let changed = 0;
+      for (const button of document.querySelectorAll('button[aria-label]')) {
+        const label = button.getAttribute('aria-label') || '';
+        if (!label || /^remove\\b/i.test(label)) continue;
+        const name = expectedNames.find((candidate) => label.includes(candidate));
+        if (!name || label.trim() === name) continue;
+        button.setAttribute('aria-label', 'Remove ' + name);
+        changed += 1;
+      }
+      return changed;
+    })()`;
+    await client.Runtime.evaluate({expression, returnByValue: true});
+  } finally {
+    if (client) await client.close().catch(() => {});
+  }
+};
+
+(async () => {
+  while (true) {
+    const targets = await CDP.List({host, port}).catch(() => []);
+    const pages = targets.filter(
+      (target) => target.type === 'page' && /^https:\/\/chatgpt\.com\//.test(target.url || ''),
+    );
+    for (const target of pages) {
+      await patchTarget(target).catch(() => {});
+    }
+    await delay(250);
+  }
+})().catch(() => process.exit(0));
 """
 
 

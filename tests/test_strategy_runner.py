@@ -800,6 +800,60 @@ def test_archive_oracle_conversation_via_cdp_parses_success(monkeypatch, tmp_pat
     assert report["fallbackAttempted"] is True
 
 
+def test_start_oracle_browser_attachment_compatibility_uses_exact_filenames(monkeypatch, tmp_path: Path) -> None:
+    module_path = tmp_path / "chrome-remote-interface"
+    module_path.mkdir()
+    attachment_a = tmp_path / "context.md"
+    attachment_b = tmp_path / "data-part.zip"
+    attachment_a.touch()
+    attachment_b.touch()
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            captured["terminated"] = True
+
+        def wait(self, *, timeout):
+            captured["wait_timeout"] = timeout
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(strategy_runner, "_oracle_cdp_module_path", lambda: module_path)
+    monkeypatch.setattr(strategy_runner, "_oracle_node_command", lambda: "/opt/node")
+    monkeypatch.setattr(strategy_runner.subprocess, "Popen", fake_popen)
+
+    compatibility = strategy_runner._start_oracle_browser_attachment_compatibility(
+        args=["--remote-chrome", "127.0.0.1:9333"],
+        attachment_paths=[attachment_a, attachment_b, attachment_a],
+    )
+    compatibility.close()
+
+    args = captured["args"]
+    assert args[:3] == ["/opt/node", "-e", strategy_runner._ORACLE_ATTACHMENT_COMPATIBILITY_CDP_SCRIPT]
+    assert args[3:6] == [str(module_path), "127.0.0.1", "9333"]
+    assert json.loads(args[6]) == ["context.md", "data-part.zip"]
+    assert captured["kwargs"] == {
+        "stdout": strategy_runner.subprocess.DEVNULL,
+        "stderr": strategy_runner.subprocess.DEVNULL,
+    }
+    assert captured["terminated"] is True
+    assert captured["wait_timeout"] == 5
+
+
+def test_oracle_attachment_compatibility_script_is_locale_independent() -> None:
+    script = strategy_runner._ORACLE_ATTACHMENT_COMPATIBILITY_CDP_SCRIPT
+
+    assert "label.includes(candidate)" in script
+    assert "'Remove ' + name" in script
+    assert "削除" not in script
+
+
 def test_run_strategy_preserves_successful_oracle_output_when_archive_is_unverified(
     monkeypatch,
     tmp_path: Path,

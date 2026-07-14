@@ -2263,15 +2263,21 @@ def test_autopilot_submit_validation_error_autofixes_and_resubmits(monkeypatch, 
         output_submission.parent.mkdir(parents=True, exist_ok=True)
         output_submission.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
 
+    def fake_planning(config: AutopilotConfig, run_id: str) -> None:
+        planning_calls["count"] += 1
+        completion_path = config.paths.run_dir(run_id) / "planning_complete.json"
+        completion_path.parent.mkdir(parents=True, exist_ok=True)
+        completion_path.write_text(
+            json.dumps({"run_id": run_id, "status": "complete", "strategy_engine": "oracle"}),
+            encoding="utf-8",
+        )
+
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": 0.5})
     monkeypatch.setattr("kagglebot.autopilot.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.submission_service.run_kaggle_submit", fake_submit)
-    monkeypatch.setattr(
-        "kagglebot.planning_runner.run_plan_and_initial",
-        lambda *args, **kwargs: planning_calls.update(count=planning_calls["count"] + 1),
-    )
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", fake_planning)
     monkeypatch.setattr("kagglebot.autopilot._run_autofix", fake_submit_autofix)
     monkeypatch.setattr(
         "kagglebot.autopilot.list_competition_submissions",

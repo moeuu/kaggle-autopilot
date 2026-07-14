@@ -152,9 +152,9 @@ class EvaluationAdvisor:
             error_block = f"\nPrevious output issues to fix:\n{joined}\n"
         return (
             "Authorized benign use: this is offline data-science work for a Kaggle competition the operator has "
-            "joined. This request only classifies evaluation metadata and submission requirements. Do not provide "
-            "instructions for unauthorized system access, credential theft, malware, exploitation, evasion, or "
-            "interaction with real-world targets.\n"
+            "joined. This request only classifies evaluation metadata and submission requirements. Limit "
+            "recommendations to competition modeling, validation, and submission generation; do not propose "
+            "interacting with external systems or real-world targets.\n"
             "You are an Evaluation Advisor for Kaggle autopilot.\n"
             "Use LIVE web search aggressively and cite your findings in sources_summary_md.\n"
             "The Oracle runner attaches oracle_context_manifest.md and complete canonical competition context files "

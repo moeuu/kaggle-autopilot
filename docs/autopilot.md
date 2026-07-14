@@ -119,6 +119,11 @@ current shell having `DISPLAY`; Kagglebot first reuses an existing DevTools port
 discoverable X displays such as `:1` with `/run/user/<uid>/gdm/Xauthority`, and finally headless Chrome if no display is
 usable. The default port is `9222`.
 
+While Oracle uploads files, Kagglebot also runs a DevTools compatibility watcher. It recognizes attachment controls by
+the exact attached filename and supplies Oracle CLI's expected `Remove <filename>` accessibility label when ChatGPT is
+rendered in Japanese or another locale. This changes only the temporary page accessibility attribute; Oracle remains
+responsible for uploading the files, inserting the prompt, and submitting the consultation.
+
 Useful overrides:
 
 - `KAGGLEBOT_ORACLE_BROWSER_BOOTSTRAP=0` disables automatic Chrome bootstrap.
