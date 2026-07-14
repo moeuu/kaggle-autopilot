@@ -10,8 +10,8 @@ from pathlib import Path
 _DEFAULT_MODEL = "gpt-5.6-sol"
 _DEFAULT_REASONING_EFFORT = "xhigh"
 _DEFAULT_ORACLE_MODEL = "gpt-5-pro"
-_DEFAULT_REPOSITORY_IMPLEMENTATION_PROFILE = "sol-ultra"
-_DEFAULT_REPOSITORY_REASONING_PROFILE = "ultra"
+_DEFAULT_ORACLE_IMPLEMENTATION_PROFILE = "sol-ultra"
+_DEFAULT_ORACLE_REASONING_PROFILE = "ultra"
 
 
 @dataclass(frozen=True)
@@ -74,33 +74,56 @@ def resolve_oracle_model(
     return env.get("KAGGLEBOT_ORACLE_MODEL", configured).strip() or configured
 
 
-def resolve_repository_implementation_agent(
+def resolve_oracle_implementation_agent(
     *,
     config_path: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> AgentIdentity:
     env = os.environ if environ is None else environ
     settings = _load_project_agent_settings(config_path or _find_project_config())
+    model = settings.get("oracle_implementation_model", settings.get("repository_implementation_model", _DEFAULT_MODEL))
+    reasoning_effort = settings.get(
+        "oracle_implementation_reasoning_effort",
+        settings.get("repository_implementation_reasoning_effort", _DEFAULT_REASONING_EFFORT),
+    )
+    cli_profile = settings.get(
+        "oracle_implementation_profile",
+        settings.get("repository_implementation_profile", _DEFAULT_ORACLE_IMPLEMENTATION_PROFILE),
+    )
+    reasoning_profile = settings.get(
+        "oracle_implementation_reasoning_profile",
+        settings.get("repository_implementation_reasoning_profile", _DEFAULT_ORACLE_REASONING_PROFILE),
+    )
     return AgentIdentity(
         model=env.get(
-            "KAGGLEBOT_REPO_IMPLEMENTATION_MODEL", settings.get("repository_implementation_model", _DEFAULT_MODEL)
+            "KAGGLEBOT_ORACLE_IMPLEMENTATION_MODEL",
+            env.get("KAGGLEBOT_REPO_IMPLEMENTATION_MODEL", model),
         ),
         reasoning_effort=env.get(
-            "KAGGLEBOT_REPO_IMPLEMENTATION_REASONING_EFFORT",
-            settings.get("repository_implementation_reasoning_effort", _DEFAULT_REASONING_EFFORT),
+            "KAGGLEBOT_ORACLE_IMPLEMENTATION_REASONING_EFFORT",
+            env.get("KAGGLEBOT_REPO_IMPLEMENTATION_REASONING_EFFORT", reasoning_effort),
         ),
         cli_command=env.get("KAGGLEBOT_AGENT_CLI_COMMAND", "codex"),
         log_alias=env.get("KAGGLEBOT_AGENT_LOG_ALIAS", "gpt"),
         display_family=env.get("KAGGLEBOT_AGENT_DISPLAY_FAMILY", "GPT"),
         cli_profile=env.get(
-            "KAGGLEBOT_REPO_IMPLEMENTATION_PROFILE",
-            settings.get("repository_implementation_profile", _DEFAULT_REPOSITORY_IMPLEMENTATION_PROFILE),
+            "KAGGLEBOT_ORACLE_IMPLEMENTATION_PROFILE",
+            env.get("KAGGLEBOT_REPO_IMPLEMENTATION_PROFILE", cli_profile),
         ),
         reasoning_profile=env.get(
-            "KAGGLEBOT_REPO_IMPLEMENTATION_REASONING_PROFILE",
-            settings.get("repository_implementation_reasoning_profile", _DEFAULT_REPOSITORY_REASONING_PROFILE),
+            "KAGGLEBOT_ORACLE_IMPLEMENTATION_REASONING_PROFILE",
+            env.get("KAGGLEBOT_REPO_IMPLEMENTATION_REASONING_PROFILE", reasoning_profile),
         ),
     )
+
+
+def resolve_repository_implementation_agent(
+    *,
+    config_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> AgentIdentity:
+    """Backward-compatible alias for the shared Oracle-mediated implementer."""
+    return resolve_oracle_implementation_agent(config_path=config_path, environ=environ)
 
 
 def oracle_flow_token() -> str:
@@ -139,6 +162,10 @@ def _load_project_agent_settings(config_path: Path | None) -> dict[str, str]:
         "model",
         "reasoning_effort",
         "oracle_model",
+        "oracle_implementation_model",
+        "oracle_implementation_reasoning_effort",
+        "oracle_implementation_profile",
+        "oracle_implementation_reasoning_profile",
         "repository_implementation_model",
         "repository_implementation_reasoning_effort",
         "repository_implementation_profile",
@@ -157,7 +184,8 @@ PRIMARY_AGENT = resolve_primary_agent()
 BRIEF_AGENT = PRIMARY_AGENT
 STRATEGY_AGENT = PRIMARY_AGENT
 IMPLEMENTATION_AGENT = PRIMARY_AGENT
-REPOSITORY_IMPLEMENTATION_AGENT = resolve_repository_implementation_agent()
+ORACLE_IMPLEMENTATION_AGENT = resolve_oracle_implementation_agent()
+REPOSITORY_IMPLEMENTATION_AGENT = ORACLE_IMPLEMENTATION_AGENT
 
 
 def planning_flow_summary(*, strategy_token: str | None = None) -> str:

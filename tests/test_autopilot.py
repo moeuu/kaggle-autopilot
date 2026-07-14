@@ -19,7 +19,7 @@ from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import plan_resolution as _plan_resolution_test
 from kagglebot import submit_notebook as _submit_notebook_test
 from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
-from kagglebot.agents.identity import IMPLEMENTATION_AGENT
+from kagglebot.agents.identity import ORACLE_IMPLEMENTATION_AGENT
 from kagglebot.autopilot import (
     _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
     _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
@@ -6008,8 +6008,12 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     run_autopilot(config)
     iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
     assert (iter_dir / "agent" / "prompt.md").exists()
-    assert any(kwargs.get("model") == IMPLEMENTATION_AGENT.model for kwargs in codex_kwargs_seen)
-    assert any(kwargs.get("reasoning_effort") == IMPLEMENTATION_AGENT.reasoning_effort for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("model") == ORACLE_IMPLEMENTATION_AGENT.model for kwargs in codex_kwargs_seen)
+    assert any(
+        kwargs.get("reasoning_effort") == ORACLE_IMPLEMENTATION_AGENT.reasoning_effort for kwargs in codex_kwargs_seen
+    )
+    assert any(kwargs.get("cli_profile") == "sol-ultra" for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("reasoning_profile") == "ultra" for kwargs in codex_kwargs_seen)
 
 
 def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path: Path) -> None:

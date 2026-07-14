@@ -11,6 +11,7 @@ from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     BRIEF_AGENT,
     IMPLEMENTATION_AGENT,
+    ORACLE_IMPLEMENTATION_AGENT,
     STRATEGY_AGENT,
     prompt_identity_mapping,
     render_prompt_identity,
@@ -479,12 +480,19 @@ def _contains_required_strategy_sections(text: str) -> bool:
     return all(marker in text for marker in required_markers)
 
 
+def _implementation_agent_for_strategy_engine(engine: str):
+    if resolve_strategy_engine(engine) == "oracle":
+        return ORACLE_IMPLEMENTATION_AGENT
+    return IMPLEMENTATION_AGENT
+
+
 def _run_codex_kernel_implementation(
     paths: CompetitionPaths,
     config: AgentPipelineConfig,
     output_dir: Path,
     instructions_path: Path,
 ) -> None:
+    implementation_agent = _implementation_agent_for_strategy_engine(config.strategy_engine)
     kernel_dir = paths.kernel_source_dir
     ensure_solution_path_allowed(kernel_dir, artifacts_dir=paths.artifacts_dir, slug=paths.slug)
     kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -546,8 +554,11 @@ def _run_codex_kernel_implementation(
         prompt_path,
         output_dir,
         dry_run=config.dry_run,
-        model=_PLANNING_CODEX_MODEL,
-        reasoning_effort=_PLANNING_REASONING_EFFORT,
+        model=implementation_agent.model,
+        reasoning_effort=implementation_agent.reasoning_effort,
+        reasoning_profile=implementation_agent.reasoning_profile,
+        cli_profile=implementation_agent.cli_profile,
+        cwd=config.repo_root,
     )
     after = _snapshot_tree(config.repo_root)
     _enforce_allowlist_changes(

@@ -29,7 +29,7 @@ Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
-2. **Plan**: Codex summarizes context, Oracle/latest Pro runs research + frozen plan, then Codex implements it; Oracle failure blocks implementation
+2. **Plan**: Codex summarizes context, Oracle/latest Pro runs research + frozen plan, then the shared `sol-ultra` Codex implementer applies it; Oracle failure blocks implementation
 3. **Initial model**: Agent implements an initial solution in `artifacts/<slug>/kernel/kernel.py` (all compute modes)
 4. **Iterate**: Train → evaluate → diagnose → improve (default 5 iterations; long heavy local GPU runs are capped to 3)
 5. **Submit + Decide**: Submit each iteration, wait for Kaggle score, then decide continue/stop
@@ -416,15 +416,18 @@ Optional environment knobs:
   - Default preference is earlier stage samples (`Stage1` before `Stage2`) when multiple staged files exist.
   - `KAGGLEBOT_SUBMISSION_STAGE=<int>` or `KAGGLEBOT_SAMPLE_SUBMISSION_STAGE=<int>` forces preferred stage.
 - Large competition download strategy (auto-enabled):
-  - Kagglebot now probes competition file sizes first.
-  - If total size is large (default threshold: `8 GiB`), downloads switch to per-file mode with retry/backoff.
-  - When per-file mode hits `429 Too Many Requests`, Kagglebot retries per-file mode (no single-shot fallback).
-  - `KAGGLEBOT_DOWNLOAD_SPLIT_THRESHOLD_BYTES=<int>` override split threshold bytes.
-  - `KAGGLEBOT_DOWNLOAD_RETRY_ATTEMPTS=<int>` retry attempts per command (`0` = unlimited; default `8`).
-  - `KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS=<int>` retry attempts for `429` in per-file mode (`0` = unlimited; default `8`).
+  - Kagglebot pins the current Kaggle CLI, lists files first, and streams every file independently by default. This avoids a giant all-data ZIP and preserves nested paths.
+  - Downloads use atomic `.part` files, HTTP Range resume, exact size checks, free-space preflight, and a per-destination process lock.
+  - Network disconnects, timeouts, HTTP 429, and HTTP 5xx retry indefinitely by default. Authentication, rules, missing resources, unsafe paths, and insufficient disk fail immediately because waiting cannot repair them.
+  - Kaggle `Retry-After` is honored, requests are paced, and authentication is refreshed when a streaming retry opens a new session.
+  - `KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST=1` opts back into the legacy all-data ZIP first path.
+  - `KAGGLEBOT_DOWNLOAD_SPLIT_THRESHOLD_BYTES=<int>` controls the split threshold only when streaming is disabled.
+  - `KAGGLEBOT_DOWNLOAD_RETRY_ATTEMPTS=<int>` retry attempts for transient failures (`0` = unlimited; default `0`).
+  - `KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS=<int>` retry attempts for HTTP 429 (`0` = unlimited; default `0`).
   - `KAGGLEBOT_DOWNLOAD_RETRY_BACKOFF_SEC=<float>` base retry backoff seconds (default `2.0`).
   - `KAGGLEBOT_DOWNLOAD_RETRY_MAX_BACKOFF_SEC=<float>` max retry backoff seconds (default `120.0`).
-  - `KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC=<float>` minimum delay between split-download API requests (default `0.0`).
+  - `KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC=<float>` minimum delay between per-file API requests (default `0.25`).
+  - `KAGGLEBOT_DOWNLOAD_DISK_RESERVE_BYTES=<int>` free-space reserve retained during downloads (default `1 GiB`).
 - Training progress logging (applies even when kernel code is quiet):
   - `KAGGLEBOT_TRAIN_PROGRESS=1|0` (default `1`) enable/disable forced periodic training logs
   - `KAGGLEBOT_PROGRESS_INTERVAL_SEC=<float>` watchdog silence threshold before emitting "no new logs" status (default `45`)
@@ -473,7 +476,8 @@ Optional environment knobs:
   - Policy files can also declare generic `required_capabilities` and `execution_hints`, including local-kernel `kernel_contract` guards, so competition-specific win conditions stay in artifacts while `src/` only gains reusable orchestration/runtime features
 - ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration prioritizes validation redesign with group/time/leak/proxy split candidates before spending submissions on model-only changes
 - ✅ **Candidate-selection guardrails**: when kernels report multiple candidates, autopilot blocks submissions where the selected pipeline wins only on CV while another candidate has materially better holdout/validation, especially when prediction distribution collapses to sparse or constant-like outputs
-- ✅ **Transactional Oracle/Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, submit outcomes, and verified reusable-skill usage, then requires a clean, committed, pushed repository baseline with its GitHub URL and exact SHA before Oracle. Codex starts only after a structured Oracle plan, baseline revalidation, and verified chat archival, and repository implementation uses the `sol-ultra` profile. Completed browser consultations are archived through authenticated CDP when Oracle's menu selector cannot find the archive action.
+- ✅ **Oracle-gated `sol-ultra` implementation**: every Codex edit that follows an Oracle response uses the shared `oracle_implementation_*` settings (`gpt-5.6-sol`, `xhigh`, `sol-ultra`, semantic `ultra`). Pre-Oracle brief extraction and explicitly selected non-Oracle legacy flows remain on the normal Codex profile.
+- ✅ **Transactional Oracle/Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, submit outcomes, and verified reusable-skill usage, then requires a clean, committed, pushed repository baseline with its GitHub URL and exact SHA before Oracle. Codex starts only after a structured Oracle plan, baseline revalidation, and verified chat archival. Completed browser consultations are archived through authenticated CDP when Oracle's menu selector cannot find the archive action.
 - ✅ **Automated judged Writeups**: writeup competitions produce placeholder-free, secret-scanned, content-hashed reports; submission-enabled `--force` runs check participation and rules, submit through the authenticated Kaggle UI, and never retry duplicate or ambiguous attempts.
 
 ## Top1 Public Leaderboard (Reference)

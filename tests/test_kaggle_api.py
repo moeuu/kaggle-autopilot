@@ -461,10 +461,10 @@ def test_download_rate_limit_attempts_reads_env(monkeypatch) -> None:
 
 def test_download_env_readers_fallback_for_invalid_and_non_finite(monkeypatch) -> None:
     monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_RATE_LIMIT_RETRY_ATTEMPTS", "3.5")
-    assert kaggle_api._download_rate_limit_attempts() == 8
+    assert kaggle_api._download_rate_limit_attempts() is None
 
     monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_MIN_INTERVAL_SEC", "nan")
-    assert kaggle_api._download_min_interval_sec() == 0.0
+    assert kaggle_api._download_min_interval_sec() == 0.25
 
 
 def test_kaggle_cli_memory_limit_env_uses_shared_number_parsing(monkeypatch) -> None:
@@ -483,7 +483,7 @@ def test_download_single_shot_first_reads_env(monkeypatch) -> None:
     assert kaggle_api._download_single_shot_first_enabled() is False
 
     monkeypatch.setenv("KAGGLEBOT_DOWNLOAD_SINGLE_SHOT_FIRST", "maybe")
-    assert kaggle_api._download_single_shot_first_enabled() is True
+    assert kaggle_api._download_single_shot_first_enabled() is False
 
 
 def test_download_streaming_and_preserve_path_flags_use_shared_env_parser(monkeypatch) -> None:
@@ -508,6 +508,25 @@ def test_rate_limit_retry_sleep_uses_longer_backoff(monkeypatch) -> None:
     assert kaggle_api._compute_retry_sleep_sec(attempt=3, base_backoff=2.0, error=error) == 120.0
 
 
+def test_rate_limit_retry_sleep_respects_retry_after(monkeypatch) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_backoff_sec", lambda: 2.0)
+    monkeypatch.setattr(kaggle_api, "_download_rate_limit_max_backoff_sec", lambda: 120.0)
+    error = KaggleCliError(
+        "transient",
+        ["GET"],
+        exit_code=429,
+        output="HTTP 429 retry-after=45: Too Many Requests",
+    )
+
+    assert kaggle_api._compute_retry_sleep_sec(attempt=1, base_backoff=2.0, error=error) == 45.0
+
+
+def test_unbounded_retry_backoff_calculation_remains_capped(monkeypatch) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_retry_max_backoff_sec", lambda: 120.0)
+
+    assert kaggle_api._compute_retry_sleep_sec(attempt=100_000, base_backoff=2.0) == 120.0
+
+
 def test_apply_download_pacing_sleeps_until_interval(monkeypatch) -> None:
     ticks = iter([10.2, 10.5])
     sleeps: list[float] = []
@@ -527,6 +546,7 @@ def test_apply_download_pacing_sleeps_until_interval(monkeypatch) -> None:
 
 def test_download_competition_uses_single_shot_for_small_data(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: False)
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: True)
     monkeypatch.setattr(
         kaggle_api,
         "_list_competition_files_with_sizes",
@@ -814,6 +834,140 @@ def test_download_competition_streams_large_data_without_kaggle_cli(monkeypatch,
 
     assert output == "streamed train_audio/123/a.ogg"
     assert streamed == ["train_audio/123/a.ogg"]
+
+
+def test_download_competition_streams_small_data_by_file_by_default(monkeypatch, tmp_path) -> None:
+    files = [kaggle_api._CompetitionFile(name="train.csv", size_bytes=3)]
+    monkeypatch.setattr(kaggle_api, "_download_streaming_enabled", lambda: True)
+    monkeypatch.setattr(kaggle_api, "_download_single_shot_first_enabled", lambda: False)
+    monkeypatch.setattr(kaggle_api, "_list_competition_files_with_sizes", lambda slug, dry_run: files)  # noqa: ARG005
+    monkeypatch.setattr(kaggle_api, "_split_download_threshold_bytes", lambda: 10**12)
+
+    class FakeSession:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(kaggle_api, "_build_kaggle_download_session", lambda: FakeSession())
+
+    def fake_stream(**kwargs) -> str:  # noqa: ANN003
+        (kwargs["dest_dir"] / kwargs["file"].name).write_bytes(b"abc")
+        return "streamed"
+
+    monkeypatch.setattr(kaggle_api, "_download_competition_file_streaming", fake_stream)
+    monkeypatch.setattr(
+        kaggle_api,
+        "_run_kaggle",
+        lambda *args, **kwargs: pytest.fail("streaming mode must not invoke the CLI bundle download"),
+    )
+
+    output = kaggle_api.download_competition("demo", tmp_path, force=True, quiet=True)
+
+    assert output == "streamed"
+    assert (tmp_path / "train.csv").read_bytes() == b"abc"
+
+
+def test_streaming_download_promotes_complete_partial_without_network(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_disk_reserve_bytes", lambda: 0)
+    output_path = tmp_path / "nested" / "train.bin"
+    output_path.parent.mkdir(parents=True)
+    part_path = output_path.with_name("train.bin.part")
+    part_path.write_bytes(b"abc")
+
+    class NoNetworkSession:
+        def get(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("a complete partial file should be finalized without a request")
+
+    output = kaggle_api._download_competition_file_streaming(
+        slug="demo",
+        dest_dir=tmp_path,
+        file=kaggle_api._CompetitionFile(name="nested/train.bin", size_bytes=3),
+        force=True,
+        quiet=True,
+        session=NoNetworkSession(),
+    )
+
+    assert output.startswith("resumed nested/train.bin")
+    assert output_path.read_bytes() == b"abc"
+    assert not part_path.exists()
+
+
+def test_streaming_download_resumes_partial_file_with_valid_range(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_disk_reserve_bytes", lambda: 0)
+    output_path = tmp_path / "nested" / "train.bin"
+    output_path.parent.mkdir(parents=True)
+    output_path.with_name("train.bin.part").write_bytes(b"ab")
+
+    class FakeResponse:
+        status_code = 206
+        text = ""
+        headers = {"Content-Range": "bytes 2-2/3", "Content-Length": "1"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def iter_content(self, chunk_size):  # noqa: ANN001, ARG002
+            yield b"c"
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] | None = None
+
+        def get(self, url, *, headers, stream, timeout):  # noqa: ANN001, ARG002
+            assert stream is True
+            self.headers = headers
+            return FakeResponse()
+
+    session = FakeSession()
+    kaggle_api._download_competition_file_streaming(
+        slug="demo",
+        dest_dir=tmp_path,
+        file=kaggle_api._CompetitionFile(name="nested/train.bin", size_bytes=3),
+        force=True,
+        quiet=True,
+        session=session,
+    )
+
+    assert output_path.read_bytes() == b"abc"
+    assert session.headers == {"Accept-Encoding": "identity", "Range": "bytes=2-"}
+
+
+def test_streaming_session_supports_access_token_auth(monkeypatch) -> None:
+    from kaggle.api import kaggle_api_extended
+
+    class FakeApi:
+        CONFIG_NAME_TOKEN = "token"
+        CONFIG_NAME_USER = "username"
+        CONFIG_NAME_KEY = "key"
+
+        def __init__(self) -> None:
+            self.config_values = {"token": "test-access-token"}
+
+        def authenticate(self) -> None:
+            pass
+
+    monkeypatch.setattr(kaggle_api_extended, "KaggleApi", FakeApi)
+
+    session = kaggle_api._build_kaggle_download_session()
+    try:
+        assert session.headers["Authorization"] == "Bearer test-access-token"
+    finally:
+        session.close()
+
+
+def test_download_capacity_fails_before_partial_write(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(kaggle_api, "_download_disk_reserve_bytes", lambda: 100)
+    monkeypatch.setattr(kaggle_api.shutil, "disk_usage", lambda path: SimpleNamespace(free=105))
+
+    with pytest.raises(KaggleCliResourceError, match="Insufficient disk space"):
+        kaggle_api._ensure_download_capacity(
+            tmp_path,
+            expected_size=20,
+            partial_size=10,
+            file_name="huge.bin",
+        )
 
 
 def test_streaming_count_requires_preserved_path(monkeypatch, tmp_path) -> None:

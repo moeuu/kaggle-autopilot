@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from kagglebot.agents.identity import (
+    resolve_oracle_implementation_agent,
     resolve_oracle_model,
     resolve_primary_agent,
     resolve_repository_implementation_agent,
@@ -104,3 +105,26 @@ repository_implementation_reasoning_profile = "ultra"
     assert agent.reasoning_effort == "xhigh"
     assert agent.cli_profile == "sol-ultra"
     assert agent.reasoning_profile == "ultra"
+
+
+def test_resolve_oracle_implementation_agent_centralizes_all_oracle_followup_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "pyproject.toml"
+    config_path.write_text(
+        """
+[tool.kagglebot.agent]
+oracle_implementation_model = "gpt-5.6-sol"
+oracle_implementation_reasoning_effort = "xhigh"
+oracle_implementation_profile = "sol-ultra"
+oracle_implementation_reasoning_profile = "ultra"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    agent = resolve_oracle_implementation_agent(config_path=config_path, environ={})
+    repository_agent = resolve_repository_implementation_agent(config_path=config_path, environ={})
+
+    assert agent.model == "gpt-5.6-sol"
+    assert agent.reasoning_effort == "xhigh"
+    assert agent.cli_profile == "sol-ultra"
+    assert agent.reasoning_profile == "ultra"
+    assert repository_agent == agent

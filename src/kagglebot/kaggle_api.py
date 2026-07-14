@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import logging
 import math
 import os
 import re
+import shutil
 import time
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -47,19 +51,20 @@ _KERNEL_ID_RE = re.compile(r"^(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)
 _NEXT_PAGE_TOKEN_PREFIX = "next page token ="
 _FILES_PAGE_SIZE = 200
 _DEFAULT_SPLIT_THRESHOLD_BYTES = 8 * 1024**3
-_DEFAULT_DOWNLOAD_ATTEMPTS = 8
+_DEFAULT_DOWNLOAD_ATTEMPTS = 0
 _DEFAULT_RATE_LIMIT_DOWNLOAD_ATTEMPTS = _DEFAULT_DOWNLOAD_ATTEMPTS
 _DEFAULT_RETRY_BACKOFF_SEC = 2.0
 _DEFAULT_RETRY_MAX_BACKOFF_SEC = 120.0
 _DEFAULT_RATE_LIMIT_BACKOFF_SEC = 60.0
 _DEFAULT_RATE_LIMIT_MAX_BACKOFF_SEC = 900.0
-_DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC = 0.0
-_DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST = True
+_DEFAULT_DOWNLOAD_MIN_INTERVAL_SEC = 0.25
+_DEFAULT_DOWNLOAD_SINGLE_SHOT_FIRST = False
 _DEFAULT_DOWNLOAD_STREAMING = True
 _DEFAULT_DOWNLOAD_PRESERVE_PATHS = True
 _DEFAULT_DOWNLOAD_CHUNK_BYTES = 8 * 1024**2
 _DEFAULT_DOWNLOAD_HTTP_CONNECT_TIMEOUT_SEC = 20.0
 _DEFAULT_DOWNLOAD_HTTP_READ_TIMEOUT_SEC = 120.0
+_DEFAULT_DOWNLOAD_DISK_RESERVE_BYTES = 1024**3
 _DEFAULT_KAGGLE_CLI_MEMORY_LIMIT_MB = 8192
 
 logger = logging.getLogger(__name__)
@@ -119,6 +124,35 @@ def download_competition(
     progress_callback: DownloadProgressCallback | None = None,
 ) -> str:
     dest_dir.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        return _download_competition_locked(
+            slug,
+            dest_dir,
+            force=force,
+            quiet=quiet,
+            dry_run=True,
+            progress_callback=progress_callback,
+        )
+    with _competition_download_lock(dest_dir):
+        return _download_competition_locked(
+            slug,
+            dest_dir,
+            force=force,
+            quiet=quiet,
+            dry_run=False,
+            progress_callback=progress_callback,
+        )
+
+
+def _download_competition_locked(
+    slug: str,
+    dest_dir: Path,
+    *,
+    force: bool,
+    quiet: bool,
+    dry_run: bool,
+    progress_callback: DownloadProgressCallback | None,
+) -> str:
     files: list[_CompetitionFile] | None = None
     total_size: int | None = None
     threshold = _split_download_threshold_bytes()
@@ -177,7 +211,7 @@ def download_competition(
         )
         return ""
 
-    if _download_streaming_enabled() and not dry_run and files and total_size >= threshold:
+    if _download_streaming_enabled() and not dry_run and files:
         return _download_competition_by_file(
             slug,
             dest_dir,
@@ -234,6 +268,22 @@ def download_competition(
                 completed_files=completed_after,
             )
         raise
+
+
+@contextmanager
+def _competition_download_lock(dest_dir: Path):
+    lock_path = dest_dir.parent / f".{dest_dir.name}.kagglebot-download.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"pid={os.getpid()}\n")
+            handle.flush()
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _list_competition_files_with_sizes(slug: str, *, dry_run: bool) -> list[_CompetitionFile]:
@@ -399,13 +449,52 @@ def _download_http_read_timeout_sec() -> float:
     )
 
 
+def _download_disk_reserve_bytes() -> int:
+    return max(
+        0,
+        _read_int_env("KAGGLEBOT_DOWNLOAD_DISK_RESERVE_BYTES", _DEFAULT_DOWNLOAD_DISK_RESERVE_BYTES),
+    )
+
+
 def _compute_retry_sleep_sec(*, attempt: int, base_backoff: float, error: KaggleCliError | None = None) -> float:
     max_backoff = _download_retry_max_backoff_sec()
     if error is not None and _is_rate_limited_download_error(error):
         base_backoff = _download_rate_limit_backoff_sec()
         max_backoff = _download_rate_limit_max_backoff_sec()
-    sleep_sec = base_backoff * (2 ** (attempt - 1))
+    sleep_sec = base_backoff * (2 ** min(max(0, attempt - 1), 30))
+    retry_after = _retry_after_seconds(error)
+    if retry_after is not None:
+        sleep_sec = max(sleep_sec, retry_after)
     return min(sleep_sec, max_backoff)
+
+
+def _retry_after_seconds(error: KaggleCliError | None) -> float | None:
+    if error is None:
+        return None
+    match = re.search(r"retry-after=(?P<seconds>\d+(?:\.\d+)?)", error.output or "", re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return max(0.0, float(match.group("seconds")))
+    except ValueError:
+        return None
+
+
+def _normalize_retry_after_seconds(value: str) -> float | None:
+    stripped = value.strip()
+    if not stripped:
+        return None
+    try:
+        return max(0.0, float(stripped))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 def _apply_download_pacing(*, min_interval_sec: float, last_request_started_at: float | None) -> float:
@@ -595,6 +684,9 @@ def _download_competition_by_file(
                     )
                     if sleep_sec > 0:
                         time.sleep(sleep_sec)
+                    if streaming_session is not None:
+                        streaming_session.close()
+                        streaming_session = _build_kaggle_download_session()
                     attempt += 1
     finally:
         if streaming_session is not None:
@@ -620,7 +712,9 @@ def _download_competition_all_streaming(
         output_path.unlink()
 
     resume_from = _partial_download_size(part_path, expected_size=0)
-    headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else {}
+    headers = {"Accept-Encoding": "identity"}
+    if resume_from > 0:
+        headers["Range"] = f"bytes={resume_from}-"
     url = _competition_all_download_url(slug=slug)
     timeout = (_download_http_connect_timeout_sec(), _download_http_read_timeout_sec())
 
@@ -646,24 +740,38 @@ def _download_competition_all_streaming(
                     output="416 Range Not Satisfiable",
                 )
             if status_code >= 400:
-                text = str(getattr(response, "text", "") or "")
                 raise KaggleCliError(
                     f"Kaggle download failed for {slug} with HTTP {status_code}.",
                     ["GET", _redact_download_url(url)],
                     exit_code=status_code,
-                    output=f"HTTP {status_code}: {text[:500]}",
+                    output=_http_download_error_output(response),
                 )
 
             append = resume_from > 0 and status_code == 206
             expected_size = _response_total_size(response, resume_from=resume_from, append=append)
+            _ensure_download_capacity(
+                dest_dir,
+                expected_size=expected_size,
+                partial_size=resume_from if append else 0,
+                file_name=output_path.name,
+            )
             mode = "ab" if append else "wb"
             with part_path.open(mode) as out:
                 for chunk in response.iter_content(chunk_size=_download_chunk_bytes()):
                     if not chunk:
                         continue
                     out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
     except KaggleCliError:
         raise
+    except OSError as exc:
+        raise KaggleCliResourceError(
+            f"Local storage failed while downloading {slug}: {exc}",
+            ["GET", _redact_download_url(url)],
+            exit_code=17,
+            output=str(exc),
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise KaggleNetworkError(
             f"Kaggle streaming download failed for {slug}: {exc}",
@@ -702,8 +810,19 @@ def _download_competition_file_streaming(
     if output_path.exists() and force:
         output_path.unlink()
 
+    if _promote_complete_partial(part_path, output_path, expected_size=file.size_bytes):
+        return f"resumed {file.name} ({file.size_bytes} bytes)"
+
     resume_from = _partial_download_size(part_path, expected_size=file.size_bytes)
-    headers = {"Range": f"bytes={resume_from}-"} if resume_from > 0 else {}
+    _ensure_download_capacity(
+        dest_dir,
+        expected_size=file.size_bytes,
+        partial_size=resume_from,
+        file_name=file.name,
+    )
+    headers = {"Accept-Encoding": "identity"}
+    if resume_from > 0:
+        headers["Range"] = f"bytes={resume_from}-"
     url = _competition_file_download_url(slug=slug, file_name=file.name)
     timeout = (_download_http_connect_timeout_sec(), _download_http_read_timeout_sec())
 
@@ -729,23 +848,39 @@ def _download_competition_file_streaming(
                     output="416 Range Not Satisfiable",
                 )
             if status_code >= 400:
-                text = str(getattr(response, "text", "") or "")
                 raise KaggleCliError(
                     f"Kaggle download failed for {file.name} with HTTP {status_code}.",
                     ["GET", _redact_download_url(url)],
                     exit_code=status_code,
-                    output=f"HTTP {status_code}: {text[:500]}",
+                    output=_http_download_error_output(response),
                 )
 
             append = resume_from > 0 and status_code == 206
+            if append and not _response_range_starts_at(response, resume_from):
+                part_path.unlink(missing_ok=True)
+                raise KaggleNetworkError(
+                    f"Kaggle returned an invalid resume range for {file.name}; retry will restart it.",
+                    ["GET", _redact_download_url(url)],
+                    exit_code=16,
+                    output=f"invalid Content-Range for offset {resume_from}",
+                )
             mode = "ab" if append else "wb"
             with part_path.open(mode) as out:
                 for chunk in response.iter_content(chunk_size=_download_chunk_bytes()):
                     if not chunk:
                         continue
                     out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
     except KaggleCliError:
         raise
+    except OSError as exc:
+        raise KaggleCliResourceError(
+            f"Local storage failed while downloading {file.name}: {exc}",
+            ["GET", _redact_download_url(url)],
+            exit_code=17,
+            output=str(exc),
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise KaggleNetworkError(
             f"Kaggle streaming download failed for {file.name}: {exc}",
@@ -811,6 +946,38 @@ def _partial_download_size(path: Path, *, expected_size: int) -> int:
     return size
 
 
+def _promote_complete_partial(part_path: Path, output_path: Path, *, expected_size: int) -> bool:
+    if expected_size <= 0 or _path_size(part_path) != expected_size:
+        return False
+    part_path.replace(output_path)
+    return True
+
+
+def _ensure_download_capacity(
+    dest_dir: Path,
+    *,
+    expected_size: int,
+    partial_size: int,
+    file_name: str,
+) -> None:
+    if expected_size <= 0:
+        return
+    remaining = max(0, expected_size - max(0, partial_size))
+    required = remaining + _download_disk_reserve_bytes()
+    try:
+        free = shutil.disk_usage(dest_dir).free
+    except OSError:
+        return
+    if free >= required:
+        return
+    raise KaggleCliResourceError(
+        f"Insufficient disk space to download {file_name} safely.",
+        ["kaggle", "competitions", "download"],
+        exit_code=17,
+        output=f"required={required} free={free} remaining={remaining}",
+    )
+
+
 def _path_size(path: Path) -> int:
     try:
         if not path.is_file():
@@ -832,16 +999,59 @@ def _response_total_size(response: object, *, resume_from: int, append: bool) ->
     return resume_from + content_length if append else content_length
 
 
+def _response_range_starts_at(response: object, expected_start: int) -> bool:
+    headers = getattr(response, "headers", {}) or {}
+    content_range = str(headers.get("Content-Range") or "")
+    match = re.match(r"bytes\s+(?P<start>\d+)-\d+/", content_range, re.IGNORECASE)
+    return bool(match and _parse_int(match.group("start")) == expected_start)
+
+
+def _http_download_error_output(response: object) -> str:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    text = str(getattr(response, "text", "") or "").strip().replace("\n", " ")
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = str(headers.get("Retry-After") or "").strip()
+    retry_after_seconds = _normalize_retry_after_seconds(retry_after)
+    retry_detail = f" retry-after={retry_after_seconds:.3f}" if retry_after_seconds is not None else ""
+    return f"HTTP {status_code}{retry_detail}: {text[:500]}"
+
+
 def _build_kaggle_download_session() -> object:
     try:
         import requests
     except ImportError as exc:
         raise KaggleCliError("The requests package is required for streaming Kaggle downloads.") from exc
 
-    username, api_key = _kaggle_api_credentials()
     session = requests.Session()
-    session.auth = (username, api_key)
     session.headers.update({"User-Agent": "kagglebot-stream-download/1.0"})
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+
+        api = KaggleApi()
+        api.authenticate()
+        token = str(api.config_values.get(api.CONFIG_NAME_TOKEN) or "").strip()
+        username = str(api.config_values.get(api.CONFIG_NAME_USER) or "").strip()
+        api_key = str(api.config_values.get(api.CONFIG_NAME_KEY) or "").strip()
+    except SystemExit as exc:
+        raise KaggleCliError(
+            f"{KAGGLE_CREDENTIALS_ERROR} Required for streaming download.",
+            ["kaggle", "competitions", "download"],
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise KaggleCliError(
+            f"Unable to initialize Kaggle authentication for streaming download: {exc}",
+            ["kaggle", "competitions", "download"],
+        ) from exc
+
+    if token:
+        session.headers.update({"Authorization": f"Bearer {token}"})
+    elif username and api_key:
+        session.auth = (username, api_key)
+    else:
+        raise KaggleCliError(
+            f"{KAGGLE_CREDENTIALS_ERROR} Required for streaming download.",
+            ["kaggle", "competitions", "download"],
+        )
     return session
 
 
@@ -887,7 +1097,9 @@ def _is_retryable_download_error(exc: KaggleCliError) -> bool:
         return False
     if isinstance(exc, KaggleNetworkError):
         return True
-    if exc.exit_code in {130, 137, 143}:
+    if exc.exit_code in {137, 143, 408, 425, 429, 500, 502, 503, 504} or (
+        exc.exit_code is not None and 500 <= exc.exit_code <= 599
+    ):
         return True
     text = (exc.output or "").lower()
     retry_tokens = (
@@ -895,6 +1107,17 @@ def _is_retryable_download_error(exc: KaggleCliError) -> bool:
         "timeout",
         "connection reset",
         "connection aborted",
+        "connection broken",
+        "remote end closed connection",
+        "remote disconnected",
+        "incomplete read",
+        "chunkedencodingerror",
+        "read timed out",
+        "name resolution",
+        "temporary failure in name resolution",
+        "service unavailable",
+        "gateway timeout",
+        "bad gateway",
         "temporarily unavailable",
         "too many requests",
         "429",

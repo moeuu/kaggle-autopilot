@@ -47,7 +47,7 @@ def test_cli_implement_uses_shared_verify_helper(monkeypatch, tmp_path: Path) ->
         "run_strategy",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="oracle brief"),
     )
-    monkeypatch.setattr(cli, "run_codex", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "run_codex", lambda *args, **kwargs: captured.update(codex_kwargs=kwargs))
 
     result = CliRunner().invoke(
         cli.app,
@@ -67,6 +67,9 @@ def test_cli_implement_uses_shared_verify_helper(monkeypatch, tmp_path: Path) ->
     assert captured["cmd"] == "uv run pytest -q"
     assert captured["dry_run"] is False
     assert captured["artifacts_dir"] == tmp_path / "artifacts"
+    codex_kwargs = captured["codex_kwargs"]
+    assert codex_kwargs["cli_profile"] == "sol-ultra"
+    assert codex_kwargs["reasoning_profile"] == "ultra"
 
 
 def test_cli_resolve_accelerator_converts_policy_error(monkeypatch) -> None:

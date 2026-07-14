@@ -61,6 +61,7 @@ from kagglebot import watch_state as _watch_state
 from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import (
     IMPLEMENTATION_AGENT,
+    ORACLE_IMPLEMENTATION_AGENT,
     STRATEGY_AGENT,
     prompt_identity_format_args,
 )
@@ -215,12 +216,12 @@ MAX_AUTOFIX_CODEX_PASSES = 3
 MAX_KERNEL_FIX_CODEX_PASSES = 3
 MAX_AGENT_CAPACITY_ATTEMPTS = 3
 AGENT_CAPACITY_RETRY_SLEEP = 5.0
-_ERROR_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
-_ERROR_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
+_ERROR_FIX_CODEX_MODEL = ORACLE_IMPLEMENTATION_AGENT.model
+_ERROR_FIX_REASONING_EFFORT = ORACLE_IMPLEMENTATION_AGENT.reasoning_effort
 _ERROR_STRATEGY_MODEL = STRATEGY_AGENT.model
 _ERROR_STRATEGY_REASONING_EFFORT = STRATEGY_AGENT.reasoning_effort
-_METRIC_FIX_CODEX_MODEL = IMPLEMENTATION_AGENT.model
-_METRIC_FIX_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
+_METRIC_FIX_CODEX_MODEL = ORACLE_IMPLEMENTATION_AGENT.model
+_METRIC_FIX_REASONING_EFFORT = ORACLE_IMPLEMENTATION_AGENT.reasoning_effort
 _MAX_METRIC_FIX_ATTEMPTS = 3
 _MAX_METRIC_FIX_CODEX_PASSES = 4
 _FORCED_INITIAL_SUBMIT_REASON = "initial_submit_contract_probe"
@@ -2863,8 +2864,11 @@ def _run_improvement(
                 current_prompt_path,
                 pass_output_dir,
                 dry_run=config.dry_run,
-                model=_ERROR_FIX_CODEX_MODEL,
-                reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+                model=ORACLE_IMPLEMENTATION_AGENT.model,
+                reasoning_effort=ORACLE_IMPLEMENTATION_AGENT.reasoning_effort,
+                reasoning_profile=ORACLE_IMPLEMENTATION_AGENT.reasoning_profile,
+                cli_profile=ORACLE_IMPLEMENTATION_AGENT.cli_profile,
+                cwd=config.paths.repo_root,
             )
             after = _snapshot_tree(config.paths.repo_root)
             _enforce_allowlist_changes(
@@ -3017,6 +3021,17 @@ def _run_kernel_fix(
             )
         return
 
+    if codex_model not in {None, ORACLE_IMPLEMENTATION_AGENT.model}:
+        raise ValueError(
+            "Oracle-mediated kernel fixes must use the configured oracle_implementation_model "
+            f"({ORACLE_IMPLEMENTATION_AGENT.model}), not {codex_model}."
+        )
+    if codex_reasoning_effort not in {None, ORACLE_IMPLEMENTATION_AGENT.reasoning_effort}:
+        raise ValueError(
+            "Oracle-mediated kernel fixes must use the configured oracle_implementation_reasoning_effort "
+            f"({ORACLE_IMPLEMENTATION_AGENT.reasoning_effort}), not {codex_reasoning_effort}."
+        )
+
     prompt_plan = _kernel_fix_context.build_kernel_fix_prompt_plan(
         config=config,
         run_id=run_id,
@@ -3126,8 +3141,11 @@ def _run_kernel_fix(
             pass_output_dir,
             dry_run=config.dry_run,
             heartbeat_label="fixing error",
-            model=codex_model or _ERROR_FIX_CODEX_MODEL,
-            reasoning_effort=codex_reasoning_effort or _ERROR_FIX_REASONING_EFFORT,
+            model=ORACLE_IMPLEMENTATION_AGENT.model,
+            reasoning_effort=ORACLE_IMPLEMENTATION_AGENT.reasoning_effort,
+            reasoning_profile=ORACLE_IMPLEMENTATION_AGENT.reasoning_profile,
+            cli_profile=ORACLE_IMPLEMENTATION_AGENT.cli_profile,
+            cwd=config.paths.repo_root,
         )
         after = _snapshot_tree(config.paths.repo_root)
         changed = _diff_snapshots(before, after)
@@ -3351,8 +3369,11 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
             pass_output_dir,
             dry_run=config.dry_run,
             heartbeat_label="fixing error",
-            model=_ERROR_FIX_CODEX_MODEL,
-            reasoning_effort=_ERROR_FIX_REASONING_EFFORT,
+            model=ORACLE_IMPLEMENTATION_AGENT.model,
+            reasoning_effort=ORACLE_IMPLEMENTATION_AGENT.reasoning_effort,
+            reasoning_profile=ORACLE_IMPLEMENTATION_AGENT.reasoning_profile,
+            cli_profile=ORACLE_IMPLEMENTATION_AGENT.cli_profile,
+            cwd=config.paths.repo_root,
         )
         after = _snapshot_tree(config.paths.repo_root)
         changed = _diff_snapshots(before, after)

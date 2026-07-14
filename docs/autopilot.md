@@ -4,7 +4,7 @@ Autopilot is a non-interactive Kaggle loop with readiness-score iteration contro
 It always follows this high-level path:
 
 1. Bootstrap competition context
-2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex`; implementation stops if Oracle fails
+2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex(sol-ultra)`; implementation stops if Oracle fails
 3. Train/evaluate per iteration
 4. Improve if needed
 5. Submit and use submission outcomes as secondary guardrails
@@ -37,7 +37,7 @@ Supported compute values:
 - `kaggle_gpu`
 - `kaggle_tpu`
 
-## Planning Flow (codex -> oracle(latest-pro) -> codex)
+## Planning Flow (codex -> oracle(latest-pro) -> codex(sol-ultra))
 
 Autopilot planning is fixed to:
 
@@ -49,7 +49,7 @@ when the rolling alias does not map to the desired release.
 
 1. Codex: reads local context and writes a brief.
 2. Oracle with the latest Pro model: performs strategy planning with the brief, local context bundle, and live web search when available.
-3. Codex: implements kernel code from frozen instructions.
+3. Codex with the `sol-ultra` profile: implements kernel code from frozen instructions.
 
 Autopilot implementation stages require Oracle and do not fall back to a Codex strategy. If Oracle is not installed as `oracle`, set
 `KAGGLEBOT_ORACLE_COMMAND`, for example `KAGGLEBOT_ORACLE_COMMAND="npx -y @steipete/oracle"`. Extra Oracle flags can
@@ -62,6 +62,11 @@ Oracle strategy calls have no outer timeout by default. Large context bundles ma
 waits for the real Oracle response instead of replacing it with a local strategy. Oracle's browser wait defaults to
 24 hours. Set `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC` only when an operator explicitly wants a hard failure; a timeout
 blocks the Codex implementation and never triggers a Codex-to-Codex fallback.
+
+Every implementation pass that consumes an Oracle response uses the single `[tool.kagglebot.agent]`
+`oracle_implementation_*` profile. This covers initial kernel implementation, improvement iterations, kernel/error
+autofix, the `implement` CLI command, and repository self-improvement. Pre-Oracle brief extraction and an explicitly
+selected legacy `codex` strategy do not use `sol-ultra`.
 
 When browser Oracle is selected and no explicit browser route is configured, Kagglebot bootstraps Chrome automatically
 and appends `--remote-chrome 127.0.0.1:<port>` to the Oracle call. This lets SSH/TTY autopilot loops run without the

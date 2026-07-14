@@ -4,10 +4,17 @@ from types import SimpleNamespace
 import pytest
 
 from kagglebot import write_guard
+from kagglebot.agents.identity import IMPLEMENTATION_AGENT, ORACLE_IMPLEMENTATION_AGENT
 from kagglebot.exceptions import KaggleBotError
 from kagglebot.orchestrator import agent_pipeline
 from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig
 from kagglebot.paths import CompetitionPaths
+
+
+def test_oracle_strategy_uses_sol_ultra_only_for_followup_implementation() -> None:
+    assert agent_pipeline._implementation_agent_for_strategy_engine("oracle") is ORACLE_IMPLEMENTATION_AGENT
+    assert agent_pipeline._implementation_agent_for_strategy_engine("auto") is ORACLE_IMPLEMENTATION_AGENT
+    assert agent_pipeline._implementation_agent_for_strategy_engine("codex") is IMPLEMENTATION_AGENT
 
 
 def test_fallback_strategy_instructions_cover_general_tabular_formats(tmp_path: Path) -> None:

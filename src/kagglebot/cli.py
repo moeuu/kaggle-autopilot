@@ -9,6 +9,7 @@ import typer
 from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
+from kagglebot.agents.identity import ORACLE_IMPLEMENTATION_AGENT
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.autopilot_state import ResumeRunResolutionError, resolve_resume_run_id
@@ -200,7 +201,16 @@ def implement(
         encoding="utf-8",
     )
 
-    run_codex(mediated_prompt_path, agent_dir, dry_run=cfg.dry_run)
+    run_codex(
+        mediated_prompt_path,
+        agent_dir,
+        dry_run=cfg.dry_run,
+        model=ORACLE_IMPLEMENTATION_AGENT.model,
+        reasoning_effort=ORACLE_IMPLEMENTATION_AGENT.reasoning_effort,
+        reasoning_profile=ORACLE_IMPLEMENTATION_AGENT.reasoning_profile,
+        cli_profile=ORACLE_IMPLEMENTATION_AGENT.cli_profile,
+        cwd=cfg.workdir,
+    )
 
     run_repo_verify(verify_cmd, dry_run=cfg.dry_run, artifacts_dir=cfg.artifacts_dir)
     print(f"[green]agent logs[/green]: {agent_dir}")
