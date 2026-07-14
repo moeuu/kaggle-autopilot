@@ -6,7 +6,11 @@ from kagglebot import planning_runner
 
 
 def _planning_config(tmp_path):
-    paths = SimpleNamespace(repo_root=tmp_path, artifacts_dir=tmp_path / "artifacts")
+    paths = SimpleNamespace(
+        repo_root=tmp_path,
+        artifacts_dir=tmp_path / "artifacts",
+        run_dir=lambda run_id: tmp_path / "artifacts" / "demo" / "runs" / run_id,
+    )
     paths.artifacts_dir.mkdir()
     return SimpleNamespace(
         slug="demo",
@@ -55,6 +59,7 @@ def test_run_plan_and_initial_requires_oracle_even_when_environment_requests_aut
     assert pipeline_engines == ["oracle"]
     assert phases[0][0] == "gpt_planning"
     assert "oracle(latest-pro)" in phases[0][1]
+    assert (config.paths.run_dir("run-1") / "planning_complete.json").exists()
 
 
 def test_run_plan_and_initial_auto_reports_oracle_when_available(monkeypatch, tmp_path) -> None:

@@ -104,6 +104,9 @@ blocks the Codex implementation and never triggers a Codex-to-Codex fallback.
 Required Oracle failures are excluded from the generic Codex autofix loop. When Oracle has already written a current
 response, Kagglebot validates that response even if the CLI later reports a cleanup error. Chat archival is attempted
 and reported separately, so an archival verification warning cannot replace or invalidate a usable Oracle answer.
+Resume skips planning only when the current run contains `planning_complete.json`, written after Oracle planning,
+sol-ultra implementation, and repository verification all succeed. A plan or kernel left by an older or incomplete
+run cannot bypass the required Oracle stage.
 
 Every implementation pass that consumes an Oracle response uses the single `[tool.kagglebot.agent]`
 `oracle_implementation_*` profile. This covers initial kernel implementation, improvement iterations, kernel/error

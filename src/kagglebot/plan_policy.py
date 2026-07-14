@@ -1310,12 +1310,25 @@ def resolve_target_request(
     )
 
 
-def should_skip_planning_on_resume(*, resume_run: bool, plan_path: Path, kernel_path: Path) -> bool:
+def should_skip_planning_on_resume(
+    *,
+    resume_run: bool,
+    plan_path: Path,
+    kernel_path: Path,
+    completion_path: Path,
+    run_id: str,
+    required_strategy_engine: str,
+) -> bool:
     if not resume_run:
         return False
-    if not plan_path.exists():
+    if not plan_path.exists() or not kernel_path.exists():
         return False
-    return kernel_path.exists()
+    completion = load_json_object_or_empty(completion_path)
+    return (
+        completion.get("status") == "complete"
+        and completion.get("run_id") == run_id
+        and completion.get("strategy_engine") == required_strategy_engine
+    )
 
 
 def _str_or_none(value: object) -> str | None:

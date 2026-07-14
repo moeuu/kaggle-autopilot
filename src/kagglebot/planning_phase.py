@@ -30,6 +30,9 @@ class PlanningPhase:
             resume_run=self.resume_run,
             plan_path=self.config.paths.plan_path,
             kernel_path=self.config.paths.kernel_source_dir / "kernel.py",
+            completion_path=self.config.paths.run_dir(self.run_id) / "planning_complete.json",
+            run_id=self.run_id,
+            required_strategy_engine="oracle",
         ):
             print("[yellow]resume[/yellow]: skipping planning after restart; reusing existing plan")
             return plan

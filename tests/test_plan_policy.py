@@ -331,14 +331,31 @@ def test_resolved_plan_payload_keeps_full_orchestration_schema() -> None:
 def test_should_skip_planning_on_resume_requires_plan_and_kernel(tmp_path: Path) -> None:
     plan_path = tmp_path / "plan.json"
     kernel_path = tmp_path / "kernel" / "kernel.py"
+    completion_path = tmp_path / "runs" / "run-1" / "planning_complete.json"
 
-    assert should_skip_planning_on_resume(resume_run=True, plan_path=plan_path, kernel_path=kernel_path) is False
+    def should_skip(*, resume_run: bool) -> bool:
+        return should_skip_planning_on_resume(
+            resume_run=resume_run,
+            plan_path=plan_path,
+            kernel_path=kernel_path,
+            completion_path=completion_path,
+            run_id="run-1",
+            required_strategy_engine="oracle",
+        )
+
+    assert should_skip(resume_run=True) is False
     plan_path.write_text("{}", encoding="utf-8")
-    assert should_skip_planning_on_resume(resume_run=True, plan_path=plan_path, kernel_path=kernel_path) is False
+    assert should_skip(resume_run=True) is False
     kernel_path.parent.mkdir(parents=True, exist_ok=True)
     kernel_path.write_text("# generated kernel\n", encoding="utf-8")
-    assert should_skip_planning_on_resume(resume_run=False, plan_path=plan_path, kernel_path=kernel_path) is False
-    assert should_skip_planning_on_resume(resume_run=True, plan_path=plan_path, kernel_path=kernel_path) is True
+    assert should_skip(resume_run=False) is False
+    assert should_skip(resume_run=True) is False
+    completion_path.parent.mkdir(parents=True)
+    completion_path.write_text(
+        '{"run_id":"run-1","status":"complete","strategy_engine":"oracle"}\n',
+        encoding="utf-8",
+    )
+    assert should_skip(resume_run=True) is True
 
 
 def test_resolve_target_metric_direction_applies_competition_override() -> None:

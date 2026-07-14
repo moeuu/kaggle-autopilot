@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Protocol
 
 from kagglebot import verify_artifacts as _verify_artifacts
@@ -7,6 +8,7 @@ from kagglebot.agents.identity import oracle_flow_token, planning_flow_summary
 from kagglebot.agents.strategy_runner import resolve_strategy_engine
 from kagglebot.campaign import normalize_campaign_mode
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import write_json_object
 from kagglebot.method_scout import effective_method_scout_mode
 from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig, run_agent_pipeline
 from kagglebot.watch_state import update_watch_phase
@@ -72,6 +74,18 @@ def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
         artifacts_dir=config.paths.artifacts_dir,
         run_command_fn=run_command,
     )
+    if not config.dry_run:
+        completion_path = config.paths.run_dir(run_id) / "planning_complete.json"
+        write_json_object(
+            completion_path,
+            {
+                "completed_at": datetime.now(UTC).isoformat(),
+                "run_id": run_id,
+                "status": "complete",
+                "strategy_engine": resolved_strategy_engine,
+            },
+            sort_keys=True,
+        )
 
 
 def _pipeline_strategy_engine_request() -> str:
