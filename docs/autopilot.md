@@ -489,11 +489,16 @@ Key files:
 - Manifest path fields accept common aliases and object values such as `{ "path": "predictions.zarr" }`, `{ "sourcePath": "answers.nii.gz" }`, and `folderPath`, so hand-written or agent-generated manifests do not have to use one exact schema.
 - Submit failures now persist a structured `submit_failure_context.json` snapshot so `submit_autofix` can distinguish between submission-file repairs, submit-mode/kernel fixes, platform issues, and manual blockers such as missing rules acceptance or credentials.
 - For local kernel training (`local_gpu`), terminal logs show elapsed/ETA and stage progress (`seed i/N`, `fold j/K`, `step s/T`) when patterns are detectable from kernel output.
-- A local timeout, exhausted CUDA-OOM retry, host-memory guard, stall, SIGKILL-style exit, or missing local GPU
-  automatically commits the current run and iteration to `kaggle_gpu`. The handoff reuses the same kernel sources,
-  plan, data/context package, run ID, iteration number, output paths, and Oracle-to-Codex repair loop. State is stored
-  in `runs/<run-id>/compute_handoff.json` and `iter-<n>/compute_handoff.json`, so service restarts resume on Kaggle GPU
-  instead of repeating the failed local training. Set `KAGGLEBOT_LOCAL_TO_KAGGLE_GPU=0` to disable this behavior or
+- Local-to-Kaggle GPU handoff is a last resort. A timeout, exhausted CUDA-OOM retry, host-memory guard, stall, or
+  SIGKILL-style exit must repeat three times with the same resource-failure class after the Oracle-to-Codex repair
+  loop before handoff is considered. A missing local GPU is immediately eligible, but every handoff still requires
+  fresh quota data with at least 900 available minutes (and at least the configured run time budget). Stale, missing,
+  or insufficient quota data keeps the run on `local_gpu`. The handoff is committed only after Kaggle accepts a kernel;
+  package preparation is reported separately as `kaggle_kernel_preparing`. State is stored in
+  `runs/<run-id>/compute_handoff.json` and `iter-<n>/compute_handoff.json`. Set
+  `KAGGLEBOT_LOCAL_TO_KAGGLE_GPU=0` to disable handoff,
+  `KAGGLEBOT_LOCAL_TO_KAGGLE_GPU_MIN_RESOURCE_FAILURES=<n>` to change the repeat threshold,
+  `KAGGLEBOT_KAGGLE_GPU_HANDOFF_MIN_AVAILABLE_MINUTES=<n>` to change the quota floor, or
   `KAGGLEBOT_KAGGLE_GPU_HANDOFF_PROFILE=kaggle_t4` to override the default `kaggle_p100` profile.
 - For Kaggle kernel training, execution and logs are tracked through kernel run artifacts.
 - If autopilot crashes, restart with `--resume-run-id <run-id>` or `--resume-latest`.

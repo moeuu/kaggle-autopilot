@@ -132,6 +132,9 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     }
     plan_path = tmp_path / "demo" / "plan.json"
     plan_path.write_text(json.dumps(plan_payload, indent=2), encoding="utf-8")
+    stale_local_output = tmp_path / "demo" / "kernels" / "run-1" / "local-iter-1" / "outputs" / "package.py"
+    stale_local_output.parent.mkdir(parents=True)
+    stale_local_output.write_text("password = 'third-party-example'\n", encoding="utf-8")
     run_kernel(
         slug="demo",
         run_id="run-1",
@@ -159,6 +162,7 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     assert payload["dataset_sources"] == ["alice/demo-dataset"]
     assert payload["kernel_sources"] == ["bob/demo-kernel"]
     assert payload["model_sources"] == ["carol/demo-model/PyTorch/default/1"]
+    assert not stale_local_output.exists()
     kernel_text = (tmp_path / "demo" / "kernels" / "run-1" / "kernel.py").read_text(encoding="utf-8")
     assert "# kagglebot:competition_slug" in kernel_text
     assert "_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = \"demo\"" in kernel_text
@@ -735,12 +739,15 @@ def test_kernel_push_injects_competition_slug_before_push(tmp_path: Path, monkey
         kernel_slug="kernel-slug",
         kernel_id="user/kernel-slug",
     )
+    started: list[str] = []
     kernel_id = kernel_runner.KernelJobMonitor().push_and_wait(
         preparation=preparation,
         slug="demo",
         timeout_minutes=1,
+        on_remote_started=started.append,
     )
     assert kernel_id == "user/kernel-slug"
+    assert started == ["user/kernel-slug"]
 
 
 def test_kernel_push_clears_stale_output_before_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

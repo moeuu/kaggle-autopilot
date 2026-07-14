@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -159,6 +160,8 @@ class KernelPackageBuilder:
         output_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "output"
         logs_dir = config.base_dir / config.slug / "runs" / config.run_id / f"iter-{config.iteration}" / "logs"
         context_dir = config.base_dir / config.slug / "context"
+        if kernel_dir.exists():
+            shutil.rmtree(kernel_dir)
         kernel_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +363,7 @@ class KernelJobMonitor:
         preparation: KernelPreparation,
         slug: str,
         timeout_minutes: int | None,
+        on_remote_started: Callable[[str], None] | None = None,
     ) -> str:
         _kernel_bootstrap.ensure_kernel_competition_slug_env(preparation.kernel_dir, slug)
         if preparation.runtime_bootstrap_mode == "force_train":
@@ -381,6 +385,7 @@ class KernelJobMonitor:
                 kernel_id=pending_kernel_id,
                 slug=slug,
                 timeout_minutes=timeout_minutes,
+                on_remote_started=on_remote_started,
             )
             if resumed_kernel_id:
                 return resumed_kernel_id
@@ -422,6 +427,8 @@ class KernelJobMonitor:
             kernel_id = resolved_id
 
         print(f"[cyan]kernel status[/cyan]: {kernel_id}")
+        if on_remote_started is not None:
+            on_remote_started(kernel_id)
         _wait_for_kernel_and_record_pending(
             preparation=preparation,
             kernel_id=kernel_id,
@@ -464,6 +471,7 @@ def run_kernel(
     dry_run: bool,
     timeout_minutes: int | None,
     hardware_profile: str | None = "auto",
+    on_remote_started: Callable[[str], None] | None = None,
 ) -> KernelRunResult:
     build_config = KernelBuildConfig(
         slug=slug,
@@ -497,6 +505,7 @@ def run_kernel(
         preparation=preparation,
         slug=slug,
         timeout_minutes=timeout_minutes,
+        on_remote_started=on_remote_started,
     )
     submission_path = find_submission_file(preparation.output_dir)
     metrics_path = _find_output_file(preparation.output_dir, "metrics.json")
@@ -953,6 +962,7 @@ def _resume_prior_kernel_if_active(
     kernel_id: str,
     slug: str,
     timeout_minutes: int | None,
+    on_remote_started: Callable[[str], None] | None = None,
 ) -> str | None:
     try:
         output = kernels_status(kernel_id, slug=slug, dry_run=False)
@@ -992,6 +1002,8 @@ def _resume_prior_kernel_if_active(
 
     _kernel_remote_ops.clear_stale_kernel_output(preparation.output_dir)
     print(f"[yellow]kernel resume[/yellow]: waiting for existing remote kernel {kernel_id} ({status})")
+    if on_remote_started is not None:
+        on_remote_started(kernel_id)
     if is_kernel_status_running(status):
         _wait_for_kernel_and_record_pending(
             preparation=preparation,

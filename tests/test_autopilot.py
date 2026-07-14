@@ -6876,7 +6876,10 @@ def test_autopilot_preflight_fixes_kernel_sources_before_local_run(monkeypatch, 
     assert calls["run_kernel_local"] == 1
 
 
-def test_autopilot_hands_resource_limited_local_iteration_to_kaggle_gpu(monkeypatch, tmp_path: Path) -> None:
+def test_autopilot_hands_repeated_resource_limited_local_iteration_to_kaggle_gpu(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_plan(
         paths,
@@ -6931,13 +6934,15 @@ def test_autopilot_hands_resource_limited_local_iteration_to_kaggle_gpu(monkeypa
     monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fail_local_kernel)
     monkeypatch.setattr("kagglebot.autopilot.run_kernel", run_remote_kernel)
     monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", unexpected_kernel_fix)
+    monkeypatch.setenv("KAGGLEBOT_KAGGLE_GPU_AVAILABLE_MINUTES", "1800")
 
     config = _make_config(tmp_path, submit=False, max_iterations=1, compute="local_gpu", accelerator="gpu")
     run_autopilot(config)
 
-    assert calls["local"] == 1
+    # The existing repeated-error guard regenerates once before the third counted resource retry.
+    assert calls["local"] == 4
     assert calls["remote"] == 1
-    assert calls["kernel_fix"] == 0
+    assert calls["kernel_fix"] == 2
     remote_kwargs = calls["remote_kwargs"]
     assert isinstance(remote_kwargs, dict)
     assert remote_kwargs["run_id"] == "run-1"

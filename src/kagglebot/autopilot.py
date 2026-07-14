@@ -386,9 +386,33 @@ def _run_local_to_kaggle_gpu_handoff(
     kaggle_user = resolve_kaggle_username(remote_config.kaggle_username)
     kernel_attempts = 0
     error_fingerprints: dict[str, int] = {}
+
+    def mark_remote_started(kernel_id: str) -> None:
+        nonlocal handoff_payload
+        handoff_payload = _compute_handoff.finish_handoff(
+            run_dir=run_dir,
+            iter_dir=iter_dir,
+            payload=handoff_payload,
+            status="kaggle_gpu_running",
+            kernel_id=kernel_id,
+        )
+        _watch_state.update_watch_phase(
+            remote_config,
+            run_id,
+            "kaggle_kernel_running",
+            detail=f"Kaggle kernel {kernel_id} was accepted and is running or queued.",
+            iteration=iteration,
+        )
+
     try:
         while True:
-            _watch_state.update_watch_phase(remote_config, run_id, "kaggle_kernel_running", iteration=iteration)
+            _watch_state.update_watch_phase(
+                remote_config,
+                run_id,
+                "kaggle_kernel_preparing",
+                detail="Building and validating the Kaggle kernel package before push.",
+                iteration=iteration,
+            )
             try:
                 result = run_kernel(
                     slug=remote_config.slug,
@@ -408,8 +432,9 @@ def _run_local_to_kaggle_gpu_handoff(
                     dry_run=remote_config.dry_run,
                     timeout_minutes=time_budget_min,
                     hardware_profile=hardware_profile,
+                    on_remote_started=mark_remote_started,
                 )
-                _compute_handoff.finish_handoff(
+                handoff_payload = _compute_handoff.finish_handoff(
                     run_dir=run_dir,
                     iter_dir=iter_dir,
                     payload=handoff_payload,
@@ -422,6 +447,12 @@ def _run_local_to_kaggle_gpu_handoff(
             except KaggleNetworkError:
                 raise
             except KernelStillRunningError as exc:
+                handoff_payload = _compute_handoff.finish_handoff(
+                    run_dir=run_dir,
+                    iter_dir=iter_dir,
+                    payload=handoff_payload,
+                    status="kaggle_gpu_running",
+                )
                 error_text = _kernel_errors.format_kernel_error(exc)
                 (logs_dir / "kernel_remote_still_running.txt").write_text(error_text + "\n", encoding="utf-8")
                 _watch_state.update_watch_phase(
@@ -1051,10 +1082,26 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
 
             if evaluation is None and config.compute.startswith("kaggle_"):
                 kaggle_user = resolve_kaggle_username(config.kaggle_username)
-                _watch_state.update_watch_phase(config, run_id, "kaggle_kernel_running", iteration=iteration)
+                _watch_state.update_watch_phase(
+                    config,
+                    run_id,
+                    "kaggle_kernel_preparing",
+                    detail="Building and validating the Kaggle kernel package before push.",
+                    iteration=iteration,
+                )
                 print(f"[cyan]kernel run[/cyan]: {config.compute}")
                 kernel_attempts = 0
                 error_fingerprints: dict[str, int] = {}
+
+                def mark_kaggle_kernel_started(kernel_id: str) -> None:
+                    _watch_state.update_watch_phase(
+                        config,
+                        run_id,
+                        "kaggle_kernel_running",
+                        detail=f"Kaggle kernel {kernel_id} was accepted and is running or queued.",
+                        iteration=iteration,
+                    )
+
                 while True:
                     try:
                         kernel_result = run_kernel(
@@ -1075,6 +1122,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             dry_run=config.dry_run,
                             timeout_minutes=time_budget_min,
                             hardware_profile=config.hardware_profile,
+                            on_remote_started=mark_kaggle_kernel_started,
                         )
                         if kernel_result.submission_path:
                             submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
@@ -1234,6 +1282,8 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 print(f"[cyan]kernel local run[/cyan]: {config.compute}")
                 kernel_attempts = 0
                 error_fingerprints = {}
+                consecutive_resource_failures = 0
+                previous_resource_failure_kind: str | None = None
                 while True:
                     try:
                         kernel_result = run_kernel_local(
@@ -1300,60 +1350,87 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 error_fingerprints.clear()
                                 continue
                             raise
-                        if _compute_handoff.should_handoff_local_failure(exc):
-                            config, kernel_result = _run_local_to_kaggle_gpu_handoff(
-                                config=config,
-                                run_id=run_id,
-                                iteration=iteration,
-                                iter_dir=iter_dir,
-                                logs_dir=logs_dir,
-                                output_dir=output_dir,
-                                kernel_name=kernel_name,
-                                enable_internet=enable_internet,
-                                score_source=score_source,
-                                target_metric=target_metric,
-                                metric_direction=metric_direction,
-                                holdout_frac=holdout_frac,
-                                cv_folds=cv_folds,
-                                seed=seed,
-                                time_budget_min=time_budget_min,
-                                local_error_text=error_text,
-                                pending_error_fixes=pending_error_fixes,
+                        resource_failure_kind = _compute_handoff.local_resource_failure_kind(exc)
+                        if resource_failure_kind is None:
+                            consecutive_resource_failures = 0
+                            previous_resource_failure_kind = None
+                        elif resource_failure_kind == previous_resource_failure_kind:
+                            consecutive_resource_failures += 1
+                        else:
+                            consecutive_resource_failures = 1
+                            previous_resource_failure_kind = resource_failure_kind
+                        if _compute_handoff.should_handoff_local_failure(
+                            exc,
+                            consecutive_failures=consecutive_resource_failures,
+                        ):
+                            quota = _compute_handoff.evaluate_kaggle_gpu_handoff_quota(
+                                artifact_root=config.paths.base_dir.parent,
+                                time_budget_minutes=time_budget_min,
                             )
-                            accelerator_used = config.accelerator
-                            run_config_payload = run_payload.get("config")
-                            if isinstance(run_config_payload, dict):
-                                run_config_payload.update(
-                                    {
-                                        "compute": config.compute,
-                                        "accelerator": config.accelerator,
-                                        "hardware_profile": config.hardware_profile,
-                                    }
+                            if quota.allowed:
+                                config, kernel_result = _run_local_to_kaggle_gpu_handoff(
+                                    config=config,
+                                    run_id=run_id,
+                                    iteration=iteration,
+                                    iter_dir=iter_dir,
+                                    logs_dir=logs_dir,
+                                    output_dir=output_dir,
+                                    kernel_name=kernel_name,
+                                    enable_internet=enable_internet,
+                                    score_source=score_source,
+                                    target_metric=target_metric,
+                                    metric_direction=metric_direction,
+                                    holdout_frac=holdout_frac,
+                                    cv_folds=cv_folds,
+                                    seed=seed,
+                                    time_budget_min=time_budget_min,
+                                    local_error_text=error_text,
+                                    pending_error_fixes=pending_error_fixes,
                                 )
-                                _autopilot_state.write_run_payload(run_dir, run_payload)
-                            if kernel_result.submission_path:
-                                submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
-                                    source=kernel_result.submission_path,
+                                accelerator_used = config.accelerator
+                                run_config_payload = run_payload.get("config")
+                                if isinstance(run_config_payload, dict):
+                                    run_config_payload.update(
+                                        {
+                                            "compute": config.compute,
+                                            "accelerator": config.accelerator,
+                                            "hardware_profile": config.hardware_profile,
+                                        }
+                                    )
+                                    _autopilot_state.write_run_payload(run_dir, run_payload)
+                                if kernel_result.submission_path:
+                                    submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
+                                        source=kernel_result.submission_path,
+                                        iter_dir=iter_dir,
+                                    )
+                                _autopilot_state.copy_kernel_support_artifacts_to_iteration_dir(
+                                    kernel_output_dir=kernel_result.output_dir,
                                     iter_dir=iter_dir,
                                 )
-                            _autopilot_state.copy_kernel_support_artifacts_to_iteration_dir(
-                                kernel_output_dir=kernel_result.output_dir,
-                                iter_dir=iter_dir,
+                                if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+                                    kernel_metrics_artifact_path = kernel_result.metrics_path
+                                    kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
+                                    evaluation = _kernel_metrics.load_kernel_metrics(
+                                        kernel_result.metrics_path,
+                                        metric_direction,
+                                        target_metric,
+                                    )
+                                if evaluation is None:
+                                    raise KernelFailedError(
+                                        "Handed-off Kaggle kernel metrics missing expected score; "
+                                        "ensure metrics.json includes a numeric metric value."
+                                    )
+                                break
+                            available = (
+                                f"{quota.available_minutes}m available"
+                                if quota.available_minutes is not None
+                                else "quota unavailable"
                             )
-                            if kernel_result.metrics_path and kernel_result.metrics_path.exists():
-                                kernel_metrics_artifact_path = kernel_result.metrics_path
-                                kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
-                                evaluation = _kernel_metrics.load_kernel_metrics(
-                                    kernel_result.metrics_path,
-                                    metric_direction,
-                                    target_metric,
-                                )
-                            if evaluation is None:
-                                raise KernelFailedError(
-                                    "Handed-off Kaggle kernel metrics missing expected score; "
-                                    "ensure metrics.json includes a numeric metric value."
-                                )
-                            break
+                            print(
+                                "[yellow]compute handoff deferred[/yellow]: "
+                                f"{available}; {quota.required_minutes}m required. "
+                                "Repairing and retrying on local_gpu."
+                            )
                         if config.dry_run:
                             raise
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
