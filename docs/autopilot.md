@@ -122,7 +122,8 @@ usable. The default port is `9222`.
 While Oracle uploads files, Kagglebot also runs a DevTools compatibility watcher. It recognizes attachment controls by
 the exact attached filename and supplies Oracle CLI's expected `Remove <filename>` accessibility label when ChatGPT is
 rendered in Japanese or another locale. This changes only the temporary page accessibility attribute; Oracle remains
-responsible for uploading the files, inserting the prompt, and submitting the consultation.
+responsible for uploading the files, inserting the prompt, and submitting the consultation. Filename matching also
+accepts ChatGPT's duplicate-upload suffixes such as `(1)`, which can occur on an Oracle quality-gate retry.
 
 Useful overrides:
 

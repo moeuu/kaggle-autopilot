@@ -850,6 +850,7 @@ def test_oracle_attachment_compatibility_script_is_locale_independent() -> None:
     script = strategy_runner._ORACLE_ATTACHMENT_COMPATIBILITY_CDP_SCRIPT
 
     assert "label.includes(candidate)" in script
+    assert "label.includes(stem)" in script
     assert "'Remove ' + name" in script
     assert "削除" not in script
 

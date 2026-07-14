@@ -1164,7 +1164,10 @@ const patchTarget = async (target) => {
       for (const button of document.querySelectorAll('button[aria-label]')) {
         const label = button.getAttribute('aria-label') || '';
         if (!label || /^remove\\b/i.test(label)) continue;
-        const name = expectedNames.find((candidate) => label.includes(candidate));
+        const name = expectedNames.find((candidate) => {
+          const stem = candidate.replace(/\\.[a-z0-9]{1,10}$/i, '');
+          return label.includes(candidate) || (stem.length >= 6 && label.includes(stem));
+        });
         if (!name || label.trim() === name) continue;
         button.setAttribute('aria-label', 'Remove ' + name);
         changed += 1;
