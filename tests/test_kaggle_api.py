@@ -204,6 +204,14 @@ def test_list_entered_competitions_dry_run_still_reads_entered_group(monkeypatch
     ]
 
 
+def test_normalize_competitions_list_response_supports_kaggle_sdk_2_wrapper() -> None:
+    competitions = [SimpleNamespace(slug="first"), SimpleNamespace(slug="second")]
+    response = SimpleNamespace(competitions=competitions)
+
+    assert kaggle_api.normalize_competitions_list_response(response) == competitions
+    assert kaggle_api.normalize_competitions_list_response(competitions) == competitions
+
+
 def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
     captured = {}
 

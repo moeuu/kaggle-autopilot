@@ -1914,6 +1914,32 @@ def test_discover_entered_competitions_pages_and_deduplicates() -> None:
     assert [listing.slug for listing in listings] == ["titanic"]
 
 
+def test_discover_entered_competitions_accepts_kaggle_sdk_2_response_wrapper() -> None:
+    item = SimpleNamespace(
+        url="https://www.kaggle.com/competitions/wrapped",
+        ref="https://www.kaggle.com/competitions/wrapped",
+        title="Wrapped",
+        description="desc",
+        category="Research",
+        reward="$1,000",
+        evaluation_metric="AUC",
+        team_count=20,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+    )
+
+    class WrappedFakeApi(_FakeApi):
+        def competitions_list(self, **kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(competitions=super().competitions_list(**kwargs))
+
+    fake_api = WrappedFakeApi({("entered", None, 1, None): [item]})
+
+    listings = discover_entered_competitions(api=fake_api, page_limit=3)
+
+    assert [listing.slug for listing in listings] == ["wrapped"]
+
+
 def test_enrich_records_prefers_accepted_submission_filename() -> None:
     record = CrawlRecord(
         slug="currency-noise",

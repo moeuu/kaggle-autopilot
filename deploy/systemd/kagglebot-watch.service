@@ -1,0 +1,24 @@
+[Unit]
+Description=Kagglebot continuous competition autopilot
+Documentation=file:%h/.local/share/kagglebot-autopilot/current/docs/autopilot.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/kagglebot-autopilot/current
+Environment=PYTHONUNBUFFERED=1
+Environment=KAGGLEBOT_WATCH_COMPUTE=local_gpu
+Environment=KAGGLEBOT_WATCH_HARDWARE_PROFILE=auto
+Environment=KAGGLEBOT_WATCH_MAX_ITERATIONS=5
+Environment=PATH=%h/.local/npm-global/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-%h/.config/kagglebot-autopilot/watch.env
+ExecStart=%h/.local/share/kagglebot-autopilot/uv run kagglebot --force watch --compute ${KAGGLEBOT_WATCH_COMPUTE} --hardware-profile ${KAGGLEBOT_WATCH_HARDWARE_PROFILE} --max-iterations ${KAGGLEBOT_WATCH_MAX_ITERATIONS}
+Restart=always
+RestartSec=60
+TimeoutStopSec=30
+KillMode=control-group
+SuccessExitStatus=143 SIGTERM
+
+[Install]
+WantedBy=default.target

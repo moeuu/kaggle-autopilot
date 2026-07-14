@@ -37,6 +37,25 @@ Supported compute values:
 - `kaggle_gpu`
 - `kaggle_tpu`
 
+## Persistent systemd Service
+
+Install and immediately start the repository-managed user services from any clone location:
+
+```bash
+./scripts/kagglebot-systemd install
+```
+
+The installer creates a stable symlink to the current clone and registers the unit files in `deploy/systemd/`.
+`kagglebot-watch.service` directly runs `uv run kagglebot --force watch`; there is no separate service-specific
+autopilot implementation. Pulling repository code therefore updates the implementation used on the next service
+restart. The primary, Oracle, and Oracle-follow-up model identities remain centralized in `[tool.kagglebot.agent]` in
+`pyproject.toml`, not duplicated in the systemd unit.
+
+Use `./scripts/kagglebot-systemd start|stop|restart|status|uninstall` for lifecycle management. Optional per-machine
+settings belong in `~/.config/kagglebot-autopilot/watch.env`; start from `deploy/systemd/watch.env.example`. Keep API
+tokens out of the repository. Enabling user lingering with `loginctl enable-linger "$USER"` makes enabled user services
+start at boot without waiting for an interactive login.
+
 ## Discord Status Notifications
 
 Run the notification worker separately from `watch`:

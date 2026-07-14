@@ -1,0 +1,22 @@
+[Unit]
+Description=Kagglebot Discord autopilot notifier
+Documentation=file:%h/.local/share/kagglebot-autopilot/current/docs/autopilot.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/kagglebot-autopilot/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/npm-global/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-%h/.config/kagglebot-autopilot/discord-notifier.env
+EnvironmentFile=-%h/.config/kagglebot-discord-notifier.env
+ExecStart=%h/.local/share/kagglebot-autopilot/uv run kagglebot discord-notifier --interval-sec 300 --heartbeat-sec 1800
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+KillMode=control-group
+SuccessExitStatus=143 SIGTERM
+
+[Install]
+WantedBy=default.target

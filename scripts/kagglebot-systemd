@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly service_names=(
+  kagglebot-watch.service
+  kagglebot-discord-notifier.service
+)
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+runtime_root="${HOME}/.local/share/kagglebot-autopilot"
+current_link="${runtime_root}/current"
+uv_link="${runtime_root}/uv"
+user_unit_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+command_name="${1:-install}"
+
+require_systemd_user() {
+  command -v systemctl >/dev/null 2>&1 || {
+    printf 'systemctl is required.\n' >&2
+    exit 1
+  }
+  systemctl --user show-environment >/dev/null
+}
+
+install_services() {
+  require_systemd_user
+  local uv_bin
+  uv_bin="$(command -v uv || true)"
+  if [[ -z "${uv_bin}" ]]; then
+    printf 'uv is required: https://docs.astral.sh/uv/getting-started/installation/\n' >&2
+    exit 1
+  fi
+
+  if [[ -e "${current_link}" && ! -L "${current_link}" ]]; then
+    printf '%s exists and is not a symlink; move it before installing.\n' "${current_link}" >&2
+    exit 1
+  fi
+
+  (cd "${repo_root}" && uv sync --frozen)
+  mkdir -p "${runtime_root}" "${user_unit_dir}" "${HOME}/.config/kagglebot-autopilot"
+  ln -sfn "${repo_root}" "${current_link}"
+  ln -sfn "${uv_bin}" "${uv_link}"
+
+  local service_name
+  for service_name in "${service_names[@]}"; do
+    ln -sfn "${current_link}/deploy/systemd/${service_name}" "${user_unit_dir}/${service_name}"
+  done
+
+  systemctl --user daemon-reload
+  systemctl --user enable "${service_names[@]}"
+  systemctl --user restart "${service_names[@]}"
+  printf 'Installed from %s\n' "${repo_root}"
+  status_services
+}
+
+start_services() {
+  require_systemd_user
+  systemctl --user daemon-reload
+  systemctl --user start "${service_names[@]}"
+  status_services
+}
+
+stop_services() {
+  require_systemd_user
+  systemctl --user stop "${service_names[@]}"
+}
+
+restart_services() {
+  require_systemd_user
+  systemctl --user daemon-reload
+  systemctl --user restart "${service_names[@]}"
+  status_services
+}
+
+status_services() {
+  require_systemd_user
+  systemctl --user status "${service_names[@]}" --no-pager
+}
+
+uninstall_services() {
+  require_systemd_user
+  systemctl --user disable --now "${service_names[@]}" 2>/dev/null || true
+  local service_name
+  for service_name in "${service_names[@]}"; do
+    rm -f "${user_unit_dir}/${service_name}"
+  done
+  rm -f "${current_link}" "${uv_link}"
+  systemctl --user daemon-reload
+  printf 'Removed Kagglebot user services. Configuration files were preserved.\n'
+}
+
+case "${command_name}" in
+  install) install_services ;;
+  start) start_services ;;
+  stop) stop_services ;;
+  restart) restart_services ;;
+  status) status_services ;;
+  uninstall) uninstall_services ;;
+  *)
+    printf 'Usage: %s {install|start|stop|restart|status|uninstall}\n' "$0" >&2
+    exit 2
+    ;;
+esac

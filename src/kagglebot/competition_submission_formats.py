@@ -24,6 +24,7 @@ from kagglebot.asset_modality import (
 from kagglebot.compression_suffixes import strip_compression_suffix
 from kagglebot.exec_utils import run_command
 from kagglebot.json_utils import append_jsonl_record, load_jsonl_records, write_json_object, write_jsonl_records
+from kagglebot.kaggle_api import normalize_competitions_list_response
 from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_BUNDLE,
     ARTIFACT_CLASS_MULTI_FILE_ZIP,
@@ -382,7 +383,9 @@ def _entered_competitions_page_with_retry(
 ) -> list[Any]:
     for attempt in range(max(1, retry_attempts)):
         try:
-            return list(api.competitions_list(group="entered", page=page, sort_by="latestDeadline"))
+            return normalize_competitions_list_response(
+                api.competitions_list(group="entered", page=page, sort_by="latestDeadline")
+            )
         except Exception as exc:  # noqa: BLE001
             if "429" not in str(exc) or attempt + 1 >= max(1, retry_attempts):
                 raise
@@ -412,7 +415,9 @@ def discover_competitions(
 
     for group in ("general", "community", "entered"):
         for page in range(1, max_pages_per_search + 1):
-            competitions = api.competitions_list(group=group, page=page, sort_by="recentlyCreated")
+            competitions = normalize_competitions_list_response(
+                api.competitions_list(group=group, page=page, sort_by="recentlyCreated")
+            )
             if not competitions:
                 break
             for competition in competitions:
@@ -423,7 +428,9 @@ def discover_competitions(
 
     for category in ("all", "featured", "research", "gettingStarted", "playground"):
         for page in range(1, max_pages_per_search + 1):
-            competitions = api.competitions_list(category=category, page=page, sort_by="recentlyCreated")
+            competitions = normalize_competitions_list_response(
+                api.competitions_list(category=category, page=page, sort_by="recentlyCreated")
+            )
             if not competitions:
                 break
             for competition in competitions:
@@ -441,11 +448,13 @@ def discover_competitions(
         seen_queries.add(prefix)
         saturated = False
         for page in range(1, max_pages_per_search + 1):
-            competitions = api.competitions_list(
-                search=prefix,
-                page=page,
-                category="all",
-                sort_by="recentlyCreated",
+            competitions = normalize_competitions_list_response(
+                api.competitions_list(
+                    search=prefix,
+                    page=page,
+                    category="all",
+                    sort_by="recentlyCreated",
+                )
             )
             if not competitions:
                 break

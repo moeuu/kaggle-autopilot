@@ -1303,7 +1303,9 @@ def list_entered_competitions(*, page_limit: int = 5, dry_run: bool = False) -> 
         competitions: list[EnteredCompetition] = []
         seen: set[str] = set()
         for page in range(1, max(1, page_limit) + 1):
-            page_items = api.competitions_list(group="entered", page=page, sort_by="latestDeadline")
+            page_items = normalize_competitions_list_response(
+                api.competitions_list(group="entered", page=page, sort_by="latestDeadline")
+            )
             if not page_items:
                 break
             for item in page_items:
@@ -1319,6 +1321,20 @@ def list_entered_competitions(*, page_limit: int = 5, dry_run: bool = False) -> 
         raise
     except Exception as exc:  # noqa: BLE001
         raise KaggleCliError(f"Unable to list entered Kaggle competitions: {exc}") from exc
+
+
+def normalize_competitions_list_response(response: object) -> list[object]:
+    """Return competition items from both legacy and Kaggle SDK 2.x responses."""
+    wrapped = getattr(response, "competitions", None)
+    items = wrapped if wrapped is not None else response
+    if items is None:
+        return []
+    if isinstance(items, (str, bytes, dict)):
+        raise TypeError(f"Unsupported Kaggle competitions response: {type(response).__name__}")
+    try:
+        return list(items)  # type: ignore[arg-type]
+    except TypeError as exc:
+        raise TypeError(f"Unsupported Kaggle competitions response: {type(response).__name__}") from exc
 
 
 def _entered_competition_from_api(competition: object) -> EnteredCompetition:

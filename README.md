@@ -17,6 +17,23 @@ Safe, non-interactive automation for Kaggle competitions with readiness-score-dr
 uv sync
 ```
 
+For a persistent user-level autopilot directly backed by this clone:
+
+```bash
+./scripts/kagglebot-systemd install
+```
+
+The installer runs `uv sync --frozen`, registers the versioned units from `deploy/systemd/`, and enables both the
+continuous `watch` loop and Discord notifier. It does not copy or fork the autopilot implementation: systemd runs
+`uv run kagglebot --force watch` from this checkout. Agent model settings continue to come only from
+`[tool.kagglebot.agent]` in `pyproject.toml`.
+
+Optional machine-specific watch settings can be copied from `deploy/systemd/watch.env.example` to
+`~/.config/kagglebot-autopilot/watch.env`. Discord credentials belong in
+`~/.config/kagglebot-autopilot/discord-notifier.env`; never commit either file. Manage the services with
+`./scripts/kagglebot-systemd start|stop|restart|status|uninstall`. Use `loginctl enable-linger "$USER"` when the user
+services must start at boot before the first login.
+
 ## Quick Start (Minimal Args)
 
 Run autopilot with a single command:
