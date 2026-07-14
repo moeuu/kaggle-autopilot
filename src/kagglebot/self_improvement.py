@@ -39,6 +39,8 @@ from kagglebot.score_utils import best_score as _best_score
 from kagglebot.score_utils import score_gap as _score_delta
 from kagglebot.submit_attempts import load_submit_attempt_rows
 
+_INTERRUPTED_TRANSACTION_STATES = frozenset({"oracle_running", "oracle_succeeded", "codex_running"})
+
 
 @dataclass(frozen=True)
 class SelfImprovementConfig:
@@ -166,6 +168,42 @@ def load_self_improvement_context(artifacts_dir: Path, *, max_chars: int = 6000)
     return ""
 
 
+def has_interrupted_self_improvement(config: SelfImprovementConfig) -> bool:
+    return _interrupted_transaction(config) is not None
+
+
+def recover_interrupted_self_improvement(config: SelfImprovementConfig) -> dict[str, object]:
+    """Finish an interrupted Oracle-to-Codex repository transaction before watch resumes."""
+    if config.dry_run:
+        return {"status": "dry_run"}
+    with repository_transaction_lock(config.output_dir / "transaction.lock"):
+        interrupted = _interrupted_transaction(config)
+        if interrupted is None:
+            return {"status": "no_interrupted_transaction"}
+        output_dir, transaction_state = interrupted
+        previous_state = str(transaction_state.get("state") or "")
+        transaction_state["recovery_count"] = int(transaction_state.get("recovery_count") or 0) + 1
+        transaction_state["recovery_started_at"] = datetime.now(UTC).isoformat()
+        write_transaction_state(output_dir / "transaction.json", transaction_state)
+        append_transaction_event(output_dir / "events.jsonl", state="recovery_started", from_state=previous_state)
+        if previous_state == "codex_running":
+            return _resume_repository_codex(
+                config=config,
+                output_dir=output_dir,
+                transaction_state=transaction_state,
+            )
+        report = _read_json_object(config.latest_json_path)
+        if not report:
+            raise RepositoryTransactionError(
+                f"cannot recover self-improvement transaction without {config.latest_json_path}"
+            )
+        return _run_codex_improvement_transaction(
+            config=config,
+            report=report,
+            output_dir=output_dir,
+        )
+
+
 def _maybe_run_codex_improvement(
     *,
     config: SelfImprovementConfig,
@@ -175,6 +213,29 @@ def _maybe_run_codex_improvement(
         return {"status": "disabled"}
     try:
         with repository_transaction_lock(config.output_dir / "transaction.lock"):
+            interrupted = _interrupted_transaction(config)
+            if interrupted is not None:
+                output_dir, transaction_state = interrupted
+                previous_state = str(transaction_state.get("state") or "")
+                transaction_state["recovery_count"] = int(transaction_state.get("recovery_count") or 0) + 1
+                transaction_state["recovery_started_at"] = datetime.now(UTC).isoformat()
+                write_transaction_state(output_dir / "transaction.json", transaction_state)
+                append_transaction_event(
+                    output_dir / "events.jsonl",
+                    state="recovery_started",
+                    from_state=previous_state,
+                )
+                if previous_state == "codex_running":
+                    return _resume_repository_codex(
+                        config=config,
+                        output_dir=output_dir,
+                        transaction_state=transaction_state,
+                    )
+                return _run_codex_improvement_transaction(
+                    config=config,
+                    report=report,
+                    output_dir=output_dir,
+                )
             return _run_codex_improvement_transaction(config=config, report=report)
     except RepositoryTransactionLockedError as exc:
         return {"status": "skipped_transaction_locked", "reason": str(exc)}
@@ -184,12 +245,14 @@ def _run_codex_improvement_transaction(
     *,
     config: SelfImprovementConfig,
     report: dict[str, object],
+    output_dir: Path | None = None,
 ) -> dict[str, object]:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    output_dir = config.output_dir / "transactions" / timestamp
+    timestamp = output_dir.name if output_dir is not None else datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    output_dir = output_dir or config.output_dir / "transactions" / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / "transaction.json"
     events_path = output_dir / "events.jsonl"
+    previous_state = _read_json_object(state_path)
     append_transaction_event(events_path, state="lock_acquired")
 
     publish_pending: dict[str, object] | None = None
@@ -221,6 +284,7 @@ def _run_codex_improvement_transaction(
         "state": "baseline_verified",
         "baseline": baseline_payload(baseline),
         "created_at": datetime.now(UTC).isoformat(),
+        "recovery_count": int(previous_state.get("recovery_count") or 0),
     }
     write_transaction_state(state_path, transaction_state)
     append_transaction_event(events_path, state="baseline_verified", baseline_sha=baseline.head_sha)
@@ -292,7 +356,78 @@ def _run_codex_improvement_transaction(
         ),
         encoding="utf-8",
     )
+    return _execute_repository_codex(
+        config=config,
+        output_dir=output_dir,
+        transaction_state=transaction_state,
+        baseline=baseline,
+        strategy_engine=strategy_result.engine,
+        strategy_prompt_path=strategy_prompt_path,
+        strategy_transcript_path=strategy_result.transcript_path,
+        strategy_last_message_path=strategy_result.last_message_path,
+        oracle_response_path=oracle_response_path,
+        oracle_plan_path=oracle_plan_path,
+        prompt_path=prompt_path,
+    )
+
+
+def _resume_repository_codex(
+    *,
+    config: SelfImprovementConfig,
+    output_dir: Path,
+    transaction_state: dict[str, object],
+) -> dict[str, object]:
+    baseline = _baseline_from_transaction_state(transaction_state)
+    prompt_path = output_dir / "prompt.md"
+    oracle_response_path = output_dir / "oracle_response.md"
+    oracle_plan_path = output_dir / "oracle_plan.json"
+    for required_path in (prompt_path, oracle_response_path, oracle_plan_path):
+        if not required_path.is_file():
+            raise RepositoryTransactionError(
+                f"cannot resume Codex for interrupted self-improvement; missing {required_path}"
+            )
+    if _git_dirty(baseline.workdir):
+        head_result = run_command(["git", "rev-parse", "HEAD"], cwd=baseline.workdir)
+        if head_result.returncode != 0 or head_result.stdout.strip() != baseline.head_sha:
+            raise RepositoryTransactionError(
+                "repository HEAD changed during interrupted Codex implementation; "
+                "a fresh clean Oracle baseline is required"
+            )
+    else:
+        revalidate_repository_baseline(baseline)
+    append_transaction_event(output_dir / "events.jsonl", state="codex_restarting")
+    return _execute_repository_codex(
+        config=config,
+        output_dir=output_dir,
+        transaction_state=transaction_state,
+        baseline=baseline,
+        strategy_engine="oracle",
+        strategy_prompt_path=output_dir / "strategy_prompt.md",
+        strategy_transcript_path=output_dir / "strategy" / "strategy_exec.txt",
+        strategy_last_message_path=output_dir / "strategy" / "strategy_last_message.txt",
+        oracle_response_path=oracle_response_path,
+        oracle_plan_path=oracle_plan_path,
+        prompt_path=prompt_path,
+    )
+
+
+def _execute_repository_codex(
+    *,
+    config: SelfImprovementConfig,
+    output_dir: Path,
+    transaction_state: dict[str, object],
+    baseline: RepositoryBaseline,
+    strategy_engine: str,
+    strategy_prompt_path: Path,
+    strategy_transcript_path: Path,
+    strategy_last_message_path: Path,
+    oracle_response_path: Path,
+    oracle_plan_path: Path,
+    prompt_path: Path,
+) -> dict[str, object]:
     transaction_state["state"] = "codex_running"
+    state_path = output_dir / "transaction.json"
+    events_path = output_dir / "events.jsonl"
     write_transaction_state(state_path, transaction_state)
     append_transaction_event(
         events_path,
@@ -331,10 +466,10 @@ def _run_codex_improvement_transaction(
     return {
         "status": final_status,
         "returncode": result.returncode,
-        "strategy_engine": strategy_result.engine,
+        "strategy_engine": strategy_engine,
         "strategy_prompt_path": str(strategy_prompt_path),
-        "strategy_transcript_path": str(strategy_result.transcript_path),
-        "strategy_last_message_path": str(strategy_result.last_message_path),
+        "strategy_transcript_path": str(strategy_transcript_path),
+        "strategy_last_message_path": str(strategy_last_message_path),
         "oracle_response_path": str(oracle_response_path),
         "oracle_plan_path": str(oracle_plan_path),
         "prompt_path": str(prompt_path),
@@ -345,6 +480,49 @@ def _run_codex_improvement_transaction(
         "transaction_state_path": str(state_path),
         "publish": publish_result,
     }
+
+
+def _interrupted_transaction(
+    config: SelfImprovementConfig,
+) -> tuple[Path, dict[str, object]] | None:
+    transactions_dir = config.output_dir / "transactions"
+    if not transactions_dir.is_dir():
+        return None
+    for output_dir in sorted((path for path in transactions_dir.iterdir() if path.is_dir()), reverse=True):
+        state_path = output_dir / "transaction.json"
+        if not state_path.is_file():
+            continue
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RepositoryTransactionError(
+                f"cannot read self-improvement transaction state {state_path}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RepositoryTransactionError(f"self-improvement transaction state must be an object: {state_path}")
+        if str(payload.get("state") or "") in _INTERRUPTED_TRANSACTION_STATES:
+            return output_dir, payload
+    return None
+
+
+def _baseline_from_transaction_state(transaction_state: dict[str, object]) -> RepositoryBaseline:
+    raw = transaction_state.get("baseline")
+    if not isinstance(raw, dict):
+        raise RepositoryTransactionError("interrupted self-improvement transaction has no repository baseline")
+    required = ("workdir", "branch", "upstream", "remote", "remote_branch", "repository_url", "head_sha", "remote_sha")
+    missing = [key for key in required if not str(raw.get(key) or "").strip()]
+    if missing:
+        raise RepositoryTransactionError(f"interrupted self-improvement baseline is missing: {', '.join(missing)}")
+    return RepositoryBaseline(
+        workdir=Path(str(raw["workdir"])),
+        branch=str(raw["branch"]),
+        upstream=str(raw["upstream"]),
+        remote=str(raw["remote"]),
+        remote_branch=str(raw["remote_branch"]),
+        repository_url=str(raw["repository_url"]),
+        head_sha=str(raw["head_sha"]),
+        remote_sha=str(raw["remote_sha"]),
+    )
 
 
 def _self_improvement_strategy_engine() -> str:

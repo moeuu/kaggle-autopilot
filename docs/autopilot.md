@@ -107,6 +107,15 @@ and reported separately, so an archival verification warning cannot replace or i
 Resume skips planning only when the current run contains `planning_complete.json`, written after Oracle planning,
 sol-ultra implementation, and repository verification all succeed. A plan or kernel left by an older or incomplete
 run cannot bypass the required Oracle stage.
+Iteration improvement, kernel-fix, and autofix flows also persist `oracle_workflow_state.json` in the run directory.
+If systemd, SIGTERM, or an intentional source-reload restart interrupts Oracle or the following Codex pass, resume
+re-runs that complete Oracle-to-Codex workflow before starting planning or another kernel. A corrupt or unsupported
+pending workflow blocks resume instead of being silently skipped. Ordinary handled failures are recorded as failed
+and continue to use the existing error policy rather than being retried forever.
+The periodic repository self-improvement transaction uses the same ordering guarantee at the watch boundary:
+`oracle_running` is re-executed in its existing transaction, while `codex_running` resumes from the saved Oracle
+response, validated plan, implementation prompt, and repository baseline. This recovery runs before competition
+selection or an active-run kernel resume.
 
 Every implementation pass that consumes an Oracle response uses the single `[tool.kagglebot.agent]`
 `oracle_implementation_*` profile. This covers initial kernel implementation, improvement iterations, kernel/error

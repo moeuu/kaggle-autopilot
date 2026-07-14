@@ -706,6 +706,29 @@ def test_run_watch_once_marks_kaggle_gpu_capacity_as_no_capacity(monkeypatch, tm
     assert result.slug == "demo"
 
 
+def test_run_watch_once_recovers_self_improvement_before_competition_work(monkeypatch, tmp_path: Path) -> None:
+    events: list[str] = []
+    lock_handle = object()
+
+    monkeypatch.setattr("kagglebot.supervisor.has_interrupted_self_improvement", lambda config: True)
+    monkeypatch.setattr(
+        "kagglebot.supervisor.recover_interrupted_self_improvement",
+        lambda config: events.append("recover") or {"status": "completed"},
+    )
+    monkeypatch.setattr("kagglebot.supervisor._try_acquire_watch_resource_lock", lambda config, ledger: lock_handle)
+    monkeypatch.setattr(
+        "kagglebot.supervisor._run_watch_once_unlocked",
+        lambda config, ledger: events.append("watch")
+        or supervisor.WatchCycleResult(status="no_candidates", slug=None, run_id=None),
+    )
+    monkeypatch.setattr("kagglebot.supervisor._release_watch_resource_lock", lambda handle: None)
+
+    result = run_watch_once(_config(tmp_path))
+
+    assert result.status == "no_candidates"
+    assert events == ["recover", "watch"]
+
+
 def test_run_watch_once_skips_when_watch_resource_is_locked(monkeypatch, tmp_path: Path) -> None:
     def fake_flock(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
         raise BlockingIOError()

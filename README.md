@@ -632,5 +632,5 @@ uv run kagglebot knowledge search --tag tabular --tag binary --limit 5
 ## Notes
 
 - **Non-interactive**: No prompts for input. All decisions via CLI flags or `plan.json`.
-- **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run.
+- **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run. Interrupted Oracle-to-Codex improvement, kernel-fix, autofix, and repository self-improvement workflows are checkpointed and completed before watch can launch another kernel.
 - **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; duplicate submission SHA is skipped unless forced, initial leaderboard checkpoints are submitted when submit is enabled, and daily/rolling 24h submission limits are honored when rules expose them.

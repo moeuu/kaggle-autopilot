@@ -8,14 +8,16 @@ from kagglebot.knowledge import build_plan_and_initial_prompt
 from kagglebot.knowledge.event_store import search_agent_events
 from kagglebot.knowledge.skill_registry import search_skills, upsert_skill
 from kagglebot.paths import KnowledgePaths
-from kagglebot.repository_transaction import RepositoryBaseline
+from kagglebot.repository_transaction import RepositoryBaseline, baseline_payload
 from kagglebot.self_improvement import (
     SelfImprovementConfig,
     _best_iteration_value,
     _best_online_score,
     _read_json_object,
     _score_gap,
+    has_interrupted_self_improvement,
     load_self_improvement_context,
+    recover_interrupted_self_improvement,
     run_self_improvement_cycle,
 )
 
@@ -356,6 +358,111 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
     assert "first-place Kaggle leaderboard performance" in " ".join(str(calls["prompt"]).split())
     assert result["codex_improvement"]["publish"]["status"] == "disabled"
     assert result["codex_improvement"]["implementation_profile"]["cli_profile"] == "sol-ultra"
+
+
+def test_self_improvement_reexecutes_interrupted_oracle_before_codex(monkeypatch, tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    config = SelfImprovementConfig(
+        artifacts_dir=artifacts,
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+        invoke_codex=True,
+    )
+    baseline = _mock_repository_baseline(monkeypatch, tmp_path)
+    transaction_dir = config.output_dir / "transactions" / "20260101T000000Z"
+    _write_json(config.latest_json_path, {"recommended_actions": ["repair recovery"]})
+    _write_json(
+        transaction_dir / "transaction.json",
+        {
+            "schema_version": 1,
+            "transaction_id": transaction_dir.name,
+            "state": "oracle_running",
+            "baseline": baseline_payload(baseline),
+        },
+    )
+    calls: list[str] = []
+
+    def fake_run_strategy(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003, ARG001
+        calls.append("oracle")
+        last_message_path = output_dir / "strategy_last_message.txt"
+        last_message_path.parent.mkdir(parents=True, exist_ok=True)
+        last_message_path.write_text("Recovered Oracle strategy.\n", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Recovered Oracle strategy.",
+            stderr="",
+            transcript_path=output_dir / "strategy_exec.txt",
+            last_message_path=last_message_path,
+            engine="oracle",
+        )
+
+    def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003, ARG001
+        calls.append("codex")
+        return SimpleNamespace(
+            returncode=0,
+            transcript_path=output_dir / "codex_exec.jsonl",
+            last_message_path=output_dir / "codex_last_message.txt",
+        )
+
+    monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: False)
+    monkeypatch.setattr("kagglebot.self_improvement.run_strategy", fake_run_strategy)
+    monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
+
+    assert has_interrupted_self_improvement(config) is True
+    result = recover_interrupted_self_improvement(config)
+
+    assert result["status"] == "completed"
+    assert calls == ["oracle", "codex"]
+    state = json.loads((transaction_dir / "transaction.json").read_text(encoding="utf-8"))
+    assert state["state"] == "completed"
+    assert state["recovery_count"] == 1
+    assert has_interrupted_self_improvement(config) is False
+
+
+def test_self_improvement_resumes_codex_from_completed_oracle(monkeypatch, tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    config = SelfImprovementConfig(
+        artifacts_dir=artifacts,
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+        invoke_codex=True,
+    )
+    baseline = _mock_repository_baseline(monkeypatch, tmp_path)
+    transaction_dir = config.output_dir / "transactions" / "20260101T000000Z"
+    _write_json(
+        transaction_dir / "transaction.json",
+        {
+            "schema_version": 1,
+            "transaction_id": transaction_dir.name,
+            "state": "codex_running",
+            "baseline": baseline_payload(baseline),
+        },
+    )
+    (transaction_dir / "prompt.md").write_text("Saved Oracle implementation prompt.\n", encoding="utf-8")
+    (transaction_dir / "oracle_response.md").write_text("Saved Oracle response.\n", encoding="utf-8")
+    _write_json(transaction_dir / "oracle_plan.json", {"proposed_files": ["src/example.py"]})
+    calls: list[str] = []
+
+    def fake_run_codex(prompt_path, output_dir, **kwargs):  # noqa: ANN001, ANN003, ARG001
+        calls.append(prompt_path.read_text(encoding="utf-8"))
+        return SimpleNamespace(
+            returncode=0,
+            transcript_path=output_dir / "codex_exec.jsonl",
+            last_message_path=output_dir / "codex_last_message.txt",
+        )
+
+    monkeypatch.setattr("kagglebot.self_improvement._git_dirty", lambda workdir: False)
+    monkeypatch.setattr(
+        "kagglebot.self_improvement.run_strategy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Oracle must not be repeated after completion")),
+    )
+    monkeypatch.setattr("kagglebot.self_improvement.run_codex", fake_run_codex)
+
+    result = recover_interrupted_self_improvement(config)
+
+    assert result["status"] == "completed"
+    assert calls == ["Saved Oracle implementation prompt.\n"]
+    state = json.loads((transaction_dir / "transaction.json").read_text(encoding="utf-8"))
+    assert state["state"] == "completed"
+    assert state["recovery_count"] == 1
 
 
 def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path: Path) -> None:

@@ -45,7 +45,12 @@ from kagglebot.kaggle_gpu_quota import (
     read_kaggle_gpu_quota_file,
 )
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
-from kagglebot.self_improvement import SelfImprovementConfig, run_self_improvement_cycle
+from kagglebot.self_improvement import (
+    SelfImprovementConfig,
+    has_interrupted_self_improvement,
+    recover_interrupted_self_improvement,
+    run_self_improvement_cycle,
+)
 from kagglebot.solver.metrics import infer_direction
 from kagglebot.watch_state import (
     active_state_is_stale,
@@ -265,6 +270,7 @@ def run_watch_forever(
 
 
 def run_watch_once(config: WatchConfig) -> WatchCycleResult:
+    _recover_self_improvement_before_watch(config)
     ledger = WatchLedger(config.ledger_path)
     lock_handle = _try_acquire_watch_resource_lock(config, ledger)
     if lock_handle is None:
@@ -275,6 +281,22 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
         return _run_watch_once_unlocked(config, ledger)
     finally:
         _release_watch_resource_lock(lock_handle)
+
+
+def _recover_self_improvement_before_watch(config: WatchConfig) -> None:
+    recovery_config = SelfImprovementConfig(
+        artifacts_dir=config.artifacts_dir,
+        knowledge_paths=KnowledgePaths(workdir=config.workdir),
+        min_interval_hours=config.self_improvement_interval_hours,
+        invoke_codex=True,
+        publish_codex_changes=config.self_improvement_publish,
+        dry_run=config.dry_run,
+    )
+    if not has_interrupted_self_improvement(recovery_config):
+        return
+    print("[yellow]self-improvement[/yellow]: recovering interrupted Oracle-to-Codex transaction before watch")
+    result = recover_interrupted_self_improvement(recovery_config)
+    print(f"[cyan]self-improvement recovery[/cyan]: {result.get('status')}")
 
 
 def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchCycleResult:

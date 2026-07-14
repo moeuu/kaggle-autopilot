@@ -39,6 +39,7 @@ from kagglebot import method_scout as _method_scout
 from kagglebot import metric_fix as _metric_fix
 from kagglebot import metric_matching as _metric_matching
 from kagglebot import metric_recheck as _metric_recheck
+from kagglebot import oracle_workflow_state as _oracle_workflow_state
 from kagglebot import plan_policy as _plan_policy
 from kagglebot import plan_resolution as _plan_resolution
 from kagglebot import planning_runner as _planning_runner
@@ -568,6 +569,148 @@ def _config_for_committed_compute_handoff(config: AutopilotConfig, run_id: str) 
     )
 
 
+def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) -> None:
+    pending = _oracle_workflow_state.load_pending_oracle_workflow(config.paths.run_dir(run_id))
+    if pending is None:
+        return
+    workflow_id = str(pending.get("workflow_id") or "unknown")
+    workflow_kind = str(pending.get("workflow_kind") or "")
+    raw_payload = pending.get("recovery_payload")
+    if not isinstance(raw_payload, dict):
+        raise OracleStrategyError(f"Interrupted Oracle workflow {workflow_id} has no valid recovery payload.")
+    payload: dict[str, object] = raw_payload
+    _watch_state.update_watch_phase(
+        config,
+        run_id,
+        "oracle_workflow_recovering",
+        detail=f"Recovering interrupted {workflow_kind} Oracle-to-Codex workflow before resuming kernels.",
+        iteration=_workflow_optional_int(payload.get("iteration")),
+    )
+    print(
+        "[yellow]resume[/yellow]: recovering interrupted Oracle workflow "
+        f"{workflow_id} ({pending.get('status')}) before planning or kernel execution"
+    )
+    if workflow_kind == "kernel_fix":
+        iteration = _workflow_required_int(payload, "iteration", workflow_id=workflow_id)
+        attempt = _workflow_required_int(payload, "attempt", workflow_id=workflow_id)
+        _run_kernel_fix(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=config.paths.iter_dir(run_id, iteration),
+            error_message=str(payload.get("error_message") or "Interrupted kernel failure"),
+            attempt=attempt,
+            pending_error_fixes=[],
+            use_gpt_strategy=bool(payload.get("use_gpt_strategy", True)),
+            codex_model=_workflow_optional_str(payload.get("codex_model")),
+            codex_reasoning_effort=_workflow_optional_str(payload.get("codex_reasoning_effort")),
+            prompt_prefix=str(payload.get("prompt_prefix") or ""),
+            max_codex_passes=_workflow_optional_int(payload.get("max_codex_passes")),
+        )
+    elif workflow_kind == "improvement":
+        from kagglebot.solver.evaluate import EvaluationResult
+
+        iteration = _workflow_required_int(payload, "iteration", workflow_id=workflow_id)
+        raw_evaluation = payload.get("evaluation")
+        if not isinstance(raw_evaluation, dict):
+            raise OracleStrategyError(f"Interrupted Oracle workflow {workflow_id} has no evaluation payload.")
+        fold_scores_raw = raw_evaluation.get("fold_scores")
+        fold_scores = (
+            [float(value) for value in fold_scores_raw if isinstance(value, (int, float))]
+            if isinstance(fold_scores_raw, list)
+            else None
+        )
+        evaluation = EvaluationResult(
+            score_source=str(raw_evaluation.get("score_source") or "offline"),
+            metric=str(raw_evaluation.get("metric") or "unknown"),
+            direction=str(raw_evaluation.get("direction") or "maximize"),  # type: ignore[arg-type]
+            value=_workflow_required_float(raw_evaluation, "value", workflow_id=workflow_id),
+            std=_workflow_optional_float(raw_evaluation.get("std")),
+            train_score=_workflow_optional_float(raw_evaluation.get("train_score")),
+            val_score=_workflow_optional_float(raw_evaluation.get("val_score")),
+            fold_scores=fold_scores,
+        )
+        top1_info = payload.get("top1_info") if isinstance(payload.get("top1_info"), dict) else {}
+        pending_insights_raw = payload.get("pending_problem_insights")
+        pending_insights = (
+            [item for item in pending_insights_raw if isinstance(item, dict)]
+            if isinstance(pending_insights_raw, list)
+            else []
+        )
+        extra_notes_raw = payload.get("extra_policy_notes")
+        extra_notes = [str(item) for item in extra_notes_raw] if isinstance(extra_notes_raw, list) else None
+        previous_history = (
+            payload.get("previous_submission_history")
+            if isinstance(payload.get("previous_submission_history"), dict)
+            else None
+        )
+        _run_improvement(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=config.paths.iter_dir(run_id, iteration),
+            evaluation=evaluation,
+            top1_info=top1_info,
+            target_score=_workflow_required_float(payload, "target_score", workflow_id=workflow_id),
+            delta_offline=_workflow_optional_float(payload.get("delta_offline")),
+            pending_problem_insights=pending_insights,
+            current_score=_workflow_optional_float(payload.get("current_score")),
+            current_score_source=str(payload.get("current_score_source") or "offline"),
+            minimum_improvement_mode=_workflow_optional_str(payload.get("minimum_improvement_mode")),
+            minimum_improvement_reason=_workflow_optional_str(payload.get("minimum_improvement_reason")),
+            target_medal=_workflow_optional_str(payload.get("target_medal")),
+            target_rank_percentile=_workflow_optional_float(payload.get("target_rank_percentile")),
+            forced_improvement_mode=_workflow_optional_str(payload.get("forced_improvement_mode")),
+            forced_improvement_reason=_workflow_optional_str(payload.get("forced_improvement_reason")),
+            extra_policy_notes=extra_notes,
+            enforce_code_reference_implementation=bool(payload.get("enforce_code_reference_implementation")),
+            code_reference_enforcement_reason=_workflow_optional_str(payload.get("code_reference_enforcement_reason")),
+            best_score_so_far=_workflow_optional_float(payload.get("best_score_so_far")),
+            previous_submission_history=previous_history,
+        )
+    elif workflow_kind == "autofix":
+        attempt = _workflow_required_int(payload, "attempt", workflow_id=workflow_id)
+        error_text = str(payload.get("error_text") or "Interrupted autofix failure")
+        error: Exception
+        if bool(payload.get("submit_autofix")):
+            error = SubmitAbortedError(error_text)
+        else:
+            error = RuntimeError(error_text)
+        _run_autofix(config=config, run_id=run_id, attempt=attempt, error=error)
+    else:
+        raise OracleStrategyError(
+            f"Interrupted Oracle workflow {workflow_id} has unsupported kind {workflow_kind!r}; refusing to skip it."
+        )
+    print(f"[green]resume[/green]: recovered Oracle workflow {workflow_id}; normal autopilot resume may continue")
+
+
+def _workflow_optional_str(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _workflow_optional_int(value: object) -> int | None:
+    return tolerant_int(value)
+
+
+def _workflow_required_int(payload: dict[str, object], key: str, *, workflow_id: str) -> int:
+    value = _workflow_optional_int(payload.get(key))
+    if value is None:
+        raise OracleStrategyError(f"Interrupted Oracle workflow {workflow_id} has invalid {key}.")
+    return value
+
+
+def _workflow_optional_float(value: object) -> float | None:
+    return tolerant_finite_float(value)
+
+
+def _workflow_required_float(payload: dict[str, object], key: str, *, workflow_id: str) -> float:
+    value = _workflow_optional_float(payload.get(key))
+    if value is None:
+        raise OracleStrategyError(f"Interrupted Oracle workflow {workflow_id} has invalid {key}.")
+    return value
+
+
 def run_autopilot(config: AutopilotConfig) -> None:
     resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
     resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
@@ -585,6 +728,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
     try:
         while True:
             effective_config = _config_for_committed_compute_handoff(config, run_id)
+            _recover_pending_oracle_workflow(config=effective_config, run_id=run_id)
             session = AutopilotSession(config=effective_config, run_id=run_id, resume_run=resume_after_failure)
             try:
                 return session.run()
@@ -3102,6 +3246,121 @@ def _run_improvement(
     best_score_so_far: float | None = None,
     previous_submission_history: dict[str, object] | None = None,
 ) -> None:
+    if config.dry_run:
+        _run_improvement_body(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=iter_dir,
+            evaluation=evaluation,
+            top1_info=top1_info,
+            target_score=target_score,
+            delta_offline=delta_offline,
+            pending_problem_insights=pending_problem_insights,
+            current_score=current_score,
+            current_score_source=current_score_source,
+            minimum_improvement_mode=minimum_improvement_mode,
+            minimum_improvement_reason=minimum_improvement_reason,
+            target_medal=target_medal,
+            target_rank_percentile=target_rank_percentile,
+            forced_improvement_mode=forced_improvement_mode,
+            forced_improvement_reason=forced_improvement_reason,
+            extra_policy_notes=extra_policy_notes,
+            enforce_code_reference_implementation=enforce_code_reference_implementation,
+            code_reference_enforcement_reason=code_reference_enforcement_reason,
+            best_score_so_far=best_score_so_far,
+            previous_submission_history=previous_submission_history,
+            workflow_checkpoint=None,
+        )
+        return
+    recovery_payload: dict[str, object] = {
+        "iteration": int(iteration),
+        "evaluation": {
+            "score_source": evaluation.score_source,
+            "metric": evaluation.metric,
+            "direction": evaluation.direction,
+            "value": evaluation.value,
+            "std": evaluation.std,
+            "train_score": evaluation.train_score,
+            "val_score": evaluation.val_score,
+            "fold_scores": evaluation.fold_scores,
+        },
+        "top1_info": top1_info,
+        "target_score": target_score,
+        "delta_offline": delta_offline,
+        "pending_problem_insights": pending_problem_insights,
+        "current_score": current_score,
+        "current_score_source": current_score_source,
+        "minimum_improvement_mode": minimum_improvement_mode,
+        "minimum_improvement_reason": minimum_improvement_reason,
+        "target_medal": target_medal,
+        "target_rank_percentile": target_rank_percentile,
+        "forced_improvement_mode": forced_improvement_mode,
+        "forced_improvement_reason": forced_improvement_reason,
+        "extra_policy_notes": extra_policy_notes,
+        "enforce_code_reference_implementation": enforce_code_reference_implementation,
+        "code_reference_enforcement_reason": code_reference_enforcement_reason,
+        "best_score_so_far": best_score_so_far,
+        "previous_submission_history": previous_submission_history,
+    }
+    with _oracle_workflow_state.oracle_workflow_checkpoint(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id=f"improvement-iter-{iteration}",
+        workflow_kind="improvement",
+        recovery_payload=recovery_payload,
+    ) as checkpoint:
+        _run_improvement_body(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=iter_dir,
+            evaluation=evaluation,
+            top1_info=top1_info,
+            target_score=target_score,
+            delta_offline=delta_offline,
+            pending_problem_insights=pending_problem_insights,
+            current_score=current_score,
+            current_score_source=current_score_source,
+            minimum_improvement_mode=minimum_improvement_mode,
+            minimum_improvement_reason=minimum_improvement_reason,
+            target_medal=target_medal,
+            target_rank_percentile=target_rank_percentile,
+            forced_improvement_mode=forced_improvement_mode,
+            forced_improvement_reason=forced_improvement_reason,
+            extra_policy_notes=extra_policy_notes,
+            enforce_code_reference_implementation=enforce_code_reference_implementation,
+            code_reference_enforcement_reason=code_reference_enforcement_reason,
+            best_score_so_far=best_score_so_far,
+            previous_submission_history=previous_submission_history,
+            workflow_checkpoint=checkpoint,
+        )
+
+
+def _run_improvement_body(
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    iter_dir: Path,
+    evaluation: EvaluationResult,
+    top1_info: dict[str, object],
+    target_score: float,
+    delta_offline: float | None,
+    pending_problem_insights: list[dict[str, object]],
+    current_score: float | None,
+    current_score_source: str,
+    minimum_improvement_mode: str | None,
+    minimum_improvement_reason: str | None,
+    target_medal: str | None,
+    target_rank_percentile: float | None,
+    forced_improvement_mode: str | None,
+    forced_improvement_reason: str | None,
+    extra_policy_notes: list[str] | None,
+    enforce_code_reference_implementation: bool,
+    code_reference_enforcement_reason: str | None,
+    best_score_so_far: float | None,
+    previous_submission_history: dict[str, object] | None,
+    workflow_checkpoint: _oracle_workflow_state.OracleWorkflowCheckpoint | None,
+) -> None:
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3155,6 +3414,8 @@ def _run_improvement(
     )
     if not config.dry_run and not strategy_text.strip():
         raise OracleStrategyError("Oracle improvement strategy is required before Codex implementation.")
+    if workflow_checkpoint is not None:
+        workflow_checkpoint.mark_oracle_complete(response_path=strategy_dir / "strategy_last_message.txt")
 
     prompt_text = _improvement_context.build_improvement_implementation_prompt(
         base_prompt_text=base_prompt_text,
@@ -3342,6 +3603,72 @@ def _run_kernel_fix(
     prompt_prefix: str = "",
     max_codex_passes: int | None = None,
 ) -> None:
+    if config.dry_run:
+        _run_kernel_fix_body(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=iter_dir,
+            error_message=error_message,
+            attempt=attempt,
+            pending_error_fixes=pending_error_fixes,
+            use_gpt_strategy=use_gpt_strategy,
+            codex_model=codex_model,
+            codex_reasoning_effort=codex_reasoning_effort,
+            prompt_prefix=prompt_prefix,
+            max_codex_passes=max_codex_passes,
+            workflow_checkpoint=None,
+        )
+        return
+    recovery_payload: dict[str, object] = {
+        "iteration": int(iteration),
+        "attempt": int(attempt),
+        "error_message": error_message,
+        "use_gpt_strategy": bool(use_gpt_strategy),
+        "codex_model": codex_model,
+        "codex_reasoning_effort": codex_reasoning_effort,
+        "prompt_prefix": prompt_prefix,
+        "max_codex_passes": max_codex_passes,
+    }
+    with _oracle_workflow_state.oracle_workflow_checkpoint(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id=f"kernel-fix-iter-{iteration}-attempt-{attempt}",
+        workflow_kind="kernel_fix",
+        recovery_payload=recovery_payload,
+    ) as checkpoint:
+        _run_kernel_fix_body(
+            config=config,
+            run_id=run_id,
+            iteration=iteration,
+            iter_dir=iter_dir,
+            error_message=error_message,
+            attempt=attempt,
+            pending_error_fixes=pending_error_fixes,
+            use_gpt_strategy=use_gpt_strategy,
+            codex_model=codex_model,
+            codex_reasoning_effort=codex_reasoning_effort,
+            prompt_prefix=prompt_prefix,
+            max_codex_passes=max_codex_passes,
+            workflow_checkpoint=checkpoint,
+        )
+
+
+def _run_kernel_fix_body(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    iter_dir: Path,
+    error_message: str,
+    attempt: int,
+    pending_error_fixes: list[dict[str, object]] | None,
+    use_gpt_strategy: bool,
+    codex_model: str | None,
+    codex_reasoning_effort: str | None,
+    prompt_prefix: str,
+    max_codex_passes: int | None,
+    workflow_checkpoint: _oracle_workflow_state.OracleWorkflowCheckpoint | None,
+) -> None:
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     lightweight_fix = _kernel_fix_context.prepare_lightweight_kernel_fix(
@@ -3422,6 +3749,9 @@ def _run_kernel_fix(
         )
         if not config.dry_run and not strategy_text.strip():
             raise OracleStrategyError("Oracle kernel-fix strategy is required before Codex implementation.")
+    if workflow_checkpoint is not None:
+        response_path = prompt_plan.strategy_dir / "strategy_last_message.txt" if strategy_text.strip() else None
+        workflow_checkpoint.mark_oracle_complete(response_path=response_path)
     prompt_text = _kernel_fix_context.append_kernel_fix_strategy(
         prompt_text=prompt_plan.prompt_text,
         strategy_text=strategy_text,
@@ -3601,6 +3931,44 @@ def _run_kernel_fix(
 
 
 def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: Exception) -> None:
+    if config.dry_run:
+        _run_autofix_body(
+            config=config,
+            run_id=run_id,
+            attempt=attempt,
+            error=error,
+            workflow_checkpoint=None,
+        )
+        return
+    error_text = "".join(traceback.format_exception(type(error), error, error.__traceback__)).strip()
+    recovery_payload: dict[str, object] = {
+        "attempt": int(attempt),
+        "error_text": error_text[: 1024 * 1024],
+        "submit_autofix": isinstance(error, SubmitAbortedError),
+    }
+    with _oracle_workflow_state.oracle_workflow_checkpoint(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id=f"autofix-attempt-{attempt}",
+        workflow_kind="autofix",
+        recovery_payload=recovery_payload,
+    ) as checkpoint:
+        _run_autofix_body(
+            config=config,
+            run_id=run_id,
+            attempt=attempt,
+            error=error,
+            workflow_checkpoint=checkpoint,
+        )
+
+
+def _run_autofix_body(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    attempt: int,
+    error: Exception,
+    workflow_checkpoint: _oracle_workflow_state.OracleWorkflowCheckpoint | None,
+) -> None:
     prepared_context = _autofix_context.prepare_autofix_context(
         config=config,
         run_id=run_id,
@@ -3666,6 +4034,10 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
     )
     if not config.dry_run and not strategy_text.strip():
         raise OracleStrategyError(f"Oracle {strategy_label} strategy is required before Codex implementation.")
+    if workflow_checkpoint is not None:
+        workflow_checkpoint.mark_oracle_complete(
+            response_path=autofix_dir / "gpt_strategy" / "strategy_last_message.txt"
+        )
     if strategy_text.strip():
         prompt_text += (
             f"\n\n## {STRATEGY_AGENT.display_name} Extra-High Error-Fix Strategy\n"

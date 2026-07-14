@@ -423,6 +423,148 @@ def test_autopilot_does_not_codex_autofix_required_oracle_failure(monkeypatch, t
     assert autofix_called is False
 
 
+def test_autopilot_recovers_pending_oracle_workflow_before_session(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path, run_id=None)
+    events: list[str] = []
+
+    monkeypatch.setenv("KAGGLEBOT_RESUME_RUN_ID", "run-1")
+    monkeypatch.setenv("KAGGLEBOT_RESUME_SLUG", config.slug)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._recover_pending_oracle_workflow",
+        lambda **kwargs: events.append("recover"),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.AutopilotSession.run",
+        lambda self: events.append("session"),
+    )
+
+    run_autopilot(config)
+
+    assert events == ["recover", "session"]
+
+
+def test_kernel_fix_interruption_is_recovered_before_kernel_resume(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    iter_dir = config.paths.iter_dir(run_id, 1)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("kagglebot.kernel_fix_context.prepare_lightweight_kernel_fix", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.agent_strategy.run_error_strategy_prompt",
+        lambda **kwargs: "oracle repair strategy",
+    )
+    monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
+    monkeypatch.setattr("kagglebot.autopilot._snapshot_tree", lambda *args, **kwargs: {})
+
+    def interrupted_codex(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("kagglebot.autopilot.run_codex", interrupted_codex)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_kernel_fix(
+            config=config,
+            run_id=run_id,
+            iteration=1,
+            iter_dir=iter_dir,
+            error_message="RuntimeError: kernel failed",
+            attempt=1,
+            pending_error_fixes=[],
+        )
+
+    pending = autopilot_mod._oracle_workflow_state.load_pending_oracle_workflow(config.paths.run_dir(run_id))
+    assert pending is not None
+    assert pending["status"] == "pending_codex"
+    assert pending["workflow_kind"] == "kernel_fix"
+
+    recovered: dict[str, object] = {}
+
+    def fake_kernel_fix(**kwargs) -> None:  # noqa: ANN003
+        recovered.update(kwargs)
+        checkpoint = autopilot_mod._oracle_workflow_state.OracleWorkflowCheckpoint(
+            path=autopilot_mod._oracle_workflow_state.oracle_workflow_state_path(config.paths.run_dir(run_id)),
+            workflow_id=str(pending["workflow_id"]),
+        )
+        checkpoint.mark_completed()
+
+    monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", fake_kernel_fix)
+
+    autopilot_mod._recover_pending_oracle_workflow(config=config, run_id=run_id)
+
+    assert recovered["iteration"] == 1
+    assert recovered["attempt"] == 1
+    assert recovered["error_message"] == "RuntimeError: kernel failed"
+
+
+def test_recovery_dispatches_interrupted_improvement(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    checkpoint = autopilot_mod._oracle_workflow_state.begin_oracle_workflow(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id="improvement-iter-1",
+        workflow_kind="improvement",
+        recovery_payload={
+            "iteration": 1,
+            "evaluation": {
+                "score_source": "holdout",
+                "metric": "rmse",
+                "direction": "minimize",
+                "value": 0.45,
+                "std": None,
+                "train_score": None,
+                "val_score": None,
+                "fold_scores": [0.44, 0.46],
+            },
+            "top1_info": {"score": 0.12},
+            "target_score": 0.4,
+            "delta_offline": 0.05,
+        },
+    )
+    recovered: dict[str, object] = {}
+
+    def fake_improvement(**kwargs) -> None:  # noqa: ANN003
+        recovered.update(kwargs)
+        checkpoint.mark_completed()
+
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", fake_improvement)
+
+    autopilot_mod._recover_pending_oracle_workflow(config=config, run_id=run_id)
+
+    evaluation = recovered["evaluation"]
+    assert isinstance(evaluation, EvaluationResult)
+    assert evaluation.value == pytest.approx(0.45)
+    assert recovered["iteration"] == 1
+
+
+def test_recovery_dispatches_interrupted_submit_autofix(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    checkpoint = autopilot_mod._oracle_workflow_state.begin_oracle_workflow(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id="autofix-attempt-2",
+        workflow_kind="autofix",
+        recovery_payload={
+            "attempt": 2,
+            "error_text": "Kaggle rejected submission format",
+            "submit_autofix": True,
+        },
+    )
+    recovered: dict[str, object] = {}
+
+    def fake_autofix(**kwargs) -> None:  # noqa: ANN003
+        recovered.update(kwargs)
+        checkpoint.mark_completed()
+
+    monkeypatch.setattr("kagglebot.autopilot._run_autofix", fake_autofix)
+
+    autopilot_mod._recover_pending_oracle_workflow(config=config, run_id=run_id)
+
+    assert recovered["attempt"] == 2
+    assert isinstance(recovered["error"], SubmitAbortedError)
+    assert "submission format" in str(recovered["error"])
+
+
 def test_submission_message_default_is_compact(tmp_path: Path) -> None:
     config = _make_config(tmp_path, slug="deep-past-initiative-machine-translation", message=None)
     message = resolve_submission_message(
