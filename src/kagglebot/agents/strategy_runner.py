@@ -32,6 +32,52 @@ _ORACLE_BROWSER_READY_TIMEOUT_SEC = 15.0
 _DEFAULT_ORACLE_BROWSER_INPUT_TIMEOUT = "600s"
 _DEFAULT_ORACLE_BROWSER_TIMEOUT = "24h"
 _DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
+_DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
+_DEFAULT_ORACLE_FILE_SIZE_LIMIT_BYTES = 1024 * 1024
+_ORACLE_CANONICAL_CONTEXT_FILES = (
+    "rules_url.txt",
+    "rules.md",
+    "overview.md",
+    "data.md",
+    "submission_format.md",
+    "dataset_profile.json",
+    "competition_policy.json",
+    "evaluation_spec.json",
+    "top1_public.json",
+    "reference_inputs_manifest.json",
+    "knowledge_hints.txt",
+    "code.md",
+    "models.md",
+    "discussion.md",
+    "code_notebooks_index.json",
+    "discussion_threads_index.json",
+    "research_sources.jsonl",
+    "research_summary.md",
+    "method_registry.json",
+    "source_registry.json",
+    "validation_registry.json",
+    "validation_lab_report.json",
+    "win_contract.json",
+    "private_robustness_report.json",
+    "top1_exhaustion_report.json",
+    "top1_exhaustion_report.md",
+)
+_ORACLE_DATA_EGRESS_BLOCK_MARKERS = (
+    "not to transmit",
+    "do not transmit",
+    "not transmit",
+    "party not participating",
+    "persons who have not formally agreed",
+    "private sharing outside of teams",
+    "privately sharing code or data outside of teams",
+)
+_ORACLE_BENIGN_USE_PREAMBLE = (
+    "Authorized benign use: this is offline data-science work for a Kaggle competition the operator has joined. "
+    "Analyze only supplied competition artifacts and public research. Do not provide instructions for unauthorized "
+    "system access, credential theft, malware, exploitation, evasion, or interaction with real-world targets. "
+    "If a competition is security-themed, keep all recommendations defensive and limited to offline dataset "
+    "modeling, validation, and submission generation. "
+)
 _ORACLE_CHROME_PROFILE_ROOT_EXCLUDES = (
     "DevToolsActivePort",
     "SingletonCookie",
@@ -69,6 +115,13 @@ class OracleBrowserBootstrap:
                 self.process.wait(timeout=5)
         if self.temp_profile_dir is not None:
             shutil.rmtree(self.temp_profile_dir, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class OracleAttachmentPlan:
+    paths: tuple[Path, ...]
+    data_paths: tuple[Path, ...]
+    data_decision: str
 
 
 def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False, engine: str = "auto") -> StrategyResult:
@@ -261,22 +314,32 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
 
     model = resolve_oracle_model()
     consult_prompt = (
-        "Read the attached Kagglebot strategy prompt file and any attached Kagglebot context bundle files. "
+        _ORACLE_BENIGN_USE_PREAMBLE
+        + "Read the attached Kagglebot strategy prompt file and any attached Kagglebot context bundle files. "
         "Treat this as a single-turn consultation with no prior session memory; all required context is attached. "
+        "Read oracle_context_manifest.md first and treat full canonical context attachments as authoritative. "
         "Return exactly the requested delimiter sections, including PLAN_JSON and CODEX_INSTRUCTIONS. "
         "Do not omit source evidence when the prompt requires it."
     )
     extra_args = _oracle_extra_args()
-    browser_bootstrap = _maybe_start_oracle_browser(extra_args)
     inline_prompt = _oracle_inline_prompt_enabled(extra_args)
     if inline_prompt:
         consult_prompt = (
-            "Use the Kagglebot strategy prompt below as the complete context. "
+            _ORACLE_BENIGN_USE_PREAMBLE
+            + "Use the Kagglebot strategy prompt below together with every attached canonical context file. "
+            "Read oracle_context_manifest.md first; attached full files override trimmed inline excerpts. "
             "Return only the delimiter sections requested inside it, especially STRATEGY, PLAN_JSON, "
             "and CODEX_INSTRUCTIONS.\n\n"
             f"{rendered_prompt}"
         )
-    attachment_paths = _oracle_attachment_paths(prompt_path=prompt_path, oracle_prompt_path=oracle_prompt_path)
+    attachment_plan = _build_oracle_attachment_plan(
+        prompt_path=prompt_path,
+        oracle_prompt_path=oracle_prompt_path,
+        output_dir=output_dir,
+        inline_prompt=inline_prompt,
+    )
+    attachment_paths = list(attachment_plan.paths)
+    browser_bootstrap = _maybe_start_oracle_browser(extra_args)
     args = [
         *command,
         *_oracle_engine_args(extra_args),
@@ -284,6 +347,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         *browser_bootstrap.args,
         *_oracle_wait_args(extra_args),
         *_oracle_force_args(extra_args),
+        *_oracle_max_file_size_args(extra_args, attachment_paths),
         "--model",
         model,
         "--write-output",
@@ -291,7 +355,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         "-p",
         consult_prompt,
     ]
-    if not inline_prompt:
+    if attachment_paths:
         args += ["--file", *[str(path) for path in attachment_paths]]
     timeout = _oracle_strategy_timeout()
 
@@ -439,12 +503,156 @@ def _oracle_inline_prompt_enabled(extra_args: list[str]) -> bool:
     return _env_flag("KAGGLEBOT_ORACLE_INLINE_PROMPT", default=True)
 
 
-def _oracle_attachment_paths(*, prompt_path: Path, oracle_prompt_path: Path) -> list[Path]:
-    paths: list[Path] = [oracle_prompt_path]
+def _build_oracle_attachment_plan(
+    *,
+    prompt_path: Path,
+    oracle_prompt_path: Path,
+    output_dir: Path,
+    inline_prompt: bool,
+) -> OracleAttachmentPlan:
+    paths: list[Path] = [] if inline_prompt else [oracle_prompt_path]
     for candidate in _oracle_context_bundle_candidates(prompt_path):
         if candidate.exists() and candidate.is_file() and candidate not in paths:
             paths.append(candidate)
-    return paths
+
+    context_dir = _oracle_context_dir(prompt_path)
+    data_paths: list[Path] = []
+    data_decision = "not evaluated: no competition context directory was found"
+    if context_dir is not None:
+        for name in _ORACLE_CANONICAL_CONTEXT_FILES:
+            _append_existing_file(paths, context_dir / name)
+        for pattern in ("sample_submission_head.*", "sample_submission.*"):
+            for candidate in sorted(context_dir.glob(pattern)):
+                _append_existing_file(paths, candidate)
+        _append_existing_file(paths, context_dir / "agent" / "brief_for_strategy.md")
+        data_paths, data_decision = _oracle_competition_data_attachments(context_dir)
+        for candidate in data_paths:
+            _append_existing_file(paths, candidate)
+
+        manifest_path = output_dir / "oracle_context_manifest.md"
+        manifest_path.write_text(
+            _render_oracle_context_manifest(
+                inline_prompt=inline_prompt,
+                context_paths=paths,
+                data_paths=data_paths,
+                data_decision=data_decision,
+            ),
+            encoding="utf-8",
+        )
+        _append_existing_file(paths, manifest_path)
+
+    return OracleAttachmentPlan(paths=tuple(paths), data_paths=tuple(data_paths), data_decision=data_decision)
+
+
+def _oracle_context_dir(prompt_path: Path) -> Path | None:
+    for candidate in prompt_path.parents:
+        if candidate.name != "context":
+            continue
+        if any((candidate / name).exists() for name in ("rules.md", "overview.md", "dataset_profile.json")):
+            return candidate
+    return None
+
+
+def _append_existing_file(paths: list[Path], candidate: Path) -> None:
+    if candidate.exists() and candidate.is_file() and candidate not in paths:
+        paths.append(candidate)
+
+
+def _oracle_competition_data_attachments(context_dir: Path) -> tuple[list[Path], str]:
+    mode = os.environ.get("KAGGLEBOT_ORACLE_COMPETITION_DATA", "auto").strip().lower()
+    if mode not in {"auto", "never", "owner-authorized"}:
+        mode = "auto"
+    if mode == "never":
+        return [], "omitted: KAGGLEBOT_ORACLE_COMPETITION_DATA=never"
+
+    if mode == "auto":
+        rules_path = context_dir / "rules.md"
+        rules_text = rules_path.read_text(encoding="utf-8", errors="ignore").lower() if rules_path.exists() else ""
+        if not rules_text.strip():
+            return [], "omitted: competition rules are unavailable, so data egress cannot be verified"
+        marker = next((item for item in _ORACLE_DATA_EGRESS_BLOCK_MARKERS if item in rules_text), None)
+        if marker is not None:
+            return [], f'omitted: competition rules restrict third-party data transmission (matched "{marker}")'
+
+    data_dir = context_dir.parent / "data"
+    candidates = _oracle_competition_package_candidates(data_dir=data_dir, slug=context_dir.parent.name)
+    if not candidates:
+        return [], "omitted: no canonical downloaded competition package was found"
+
+    max_bytes = _oracle_data_attachment_max_bytes()
+    total_bytes = sum(path.stat().st_size for path in candidates)
+    if total_bytes > max_bytes:
+        return [], f"omitted: canonical package size {total_bytes} bytes exceeds limit {max_bytes} bytes"
+    authorization = "; owner-authorized processing" if mode == "owner-authorized" else ""
+    return candidates, (
+        f"attached: {len(candidates)} canonical package file(s), {total_bytes} bytes total{authorization}"
+    )
+
+
+def _oracle_competition_package_candidates(*, data_dir: Path, slug: str) -> list[Path]:
+    if not data_dir.exists():
+        return []
+    exact_zip = data_dir / f"{slug}.zip"
+    if exact_zip.exists() and exact_zip.is_file():
+        return [exact_zip]
+    archive_suffixes = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".7z")
+    return sorted(
+        path
+        for path in data_dir.iterdir()
+        if path.is_file() and any(path.name.lower().endswith(suffix) for suffix in archive_suffixes)
+    )
+
+
+def _oracle_data_attachment_max_bytes() -> int:
+    raw = os.environ.get(
+        "KAGGLEBOT_ORACLE_DATA_ATTACHMENT_MAX_BYTES",
+        str(_DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES),
+    ).strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES
+
+
+def _render_oracle_context_manifest(
+    *,
+    inline_prompt: bool,
+    context_paths: list[Path],
+    data_paths: list[Path],
+    data_decision: str,
+) -> str:
+    data_set = set(data_paths)
+    canonical_paths = [path for path in context_paths if path not in data_set]
+    lines = [
+        "# Oracle Context Manifest",
+        "",
+        f"- rendered_prompt_delivery: {'inline' if inline_prompt else 'file attachment'}",
+        f"- canonical_context_file_count: {len(canonical_paths)}",
+        f"- competition_data: {data_decision}",
+        "",
+        "## Canonical Context Files",
+    ]
+    lines.extend(f"- {path} ({path.stat().st_size} bytes)" for path in canonical_paths)
+    if data_paths:
+        lines.extend(["", "## Competition Data Packages"])
+        lines.extend(f"- {path} ({path.stat().st_size} bytes)" for path in data_paths)
+    lines.extend(
+        [
+            "",
+            "Use the full canonical files as authoritative when an inline excerpt is trimmed.",
+            "Do not assume access to any competition data package listed as omitted.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _oracle_max_file_size_args(extra_args: list[str], attachment_paths: list[Path]) -> list[str]:
+    if not attachment_paths or _oracle_args_include_option(extra_args, "--max-file-size-bytes"):
+        return []
+    largest = max(path.stat().st_size for path in attachment_paths)
+    if largest <= _DEFAULT_ORACLE_FILE_SIZE_LIMIT_BYTES:
+        return []
+    return ["--max-file-size-bytes", str(largest)]
 
 
 def _oracle_context_bundle_candidates(prompt_path: Path) -> list[Path]:

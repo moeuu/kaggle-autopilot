@@ -553,11 +553,12 @@ def test_autopilot_resume_run_id_rejects_ambiguous_prefix(monkeypatch, tmp_path:
 
 def test_autopilot_auto_eval_spec_enabled_by_default(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
-    calls = {"ensure_spec": 0, "run_autopilot": 0}
+    calls = {"ensure_spec": 0, "run_autopilot": 0, "advisor_force": None}
 
     class _FakeAdvisor:
-        def __init__(self, **kwargs):  # noqa: ARG002
+        def __init__(self, **kwargs):
             self.spec_path = Path("/tmp/evaluation_spec.json")
+            calls["advisor_force"] = kwargs["force"]
 
         def ensure_spec(self):
             calls["ensure_spec"] += 1
@@ -574,6 +575,7 @@ def test_autopilot_auto_eval_spec_enabled_by_default(monkeypatch, tmp_path: Path
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -584,6 +586,7 @@ def test_autopilot_auto_eval_spec_enabled_by_default(monkeypatch, tmp_path: Path
     assert result.exit_code == 0
     assert calls["ensure_spec"] == 1
     assert calls["run_autopilot"] == 1
+    assert calls["advisor_force"] is False
     assert "evaluation advisor" in result.stdout.lower()
 
 

@@ -107,6 +107,47 @@ def test_watch_optional_float_rejects_bool_and_non_finite_values() -> None:
     assert supervisor._optional_float("0.25") == 0.25  # noqa: SLF001
 
 
+def test_prepare_competition_reuses_eval_spec_despite_global_force(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path, auto_eval_spec=True, force=True)
+    candidate = _competition("demo")
+    paths = supervisor.CompetitionPaths(slug="demo", artifacts_dir=config.artifacts_dir)
+    knowledge_paths = supervisor.KnowledgePaths(workdir=tmp_path)
+    advisor_kwargs: dict[str, object] = {}
+    phases: list[str] = []
+    phase_contexts: list[tuple[str, str]] = []
+
+    class FakeAdvisor:
+        def __init__(self, **kwargs) -> None:
+            advisor_kwargs.update(kwargs)
+
+        def ensure_spec(self):
+            return {"metric_name": "auc"}, "frozen"
+
+    monkeypatch.delenv("KAGGLEBOT_REFRESH_EVALUATION_SPEC", raising=False)
+    monkeypatch.setattr(supervisor, "bootstrap_competition", lambda **kwargs: None)
+    monkeypatch.setattr(supervisor, "EvaluationAdvisor", FakeAdvisor)
+    monkeypatch.setattr(
+        supervisor,
+        "update_watch_phase",
+        lambda config, run_id, phase, **kwargs: (
+            phase_contexts.append((config.slug, config.compute)),
+            phases.append(phase),
+        ),
+    )
+
+    supervisor._prepare_competition(
+        config=config,
+        candidate=candidate,
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        run_id="run-1",
+    )
+
+    assert advisor_kwargs["force"] is False
+    assert phases == ["preparing_data", "oracle_evaluation_advisor"]
+    assert phase_contexts == [("demo", "local_gpu"), ("demo", "local_gpu")]
+
+
 def test_select_next_competition_filters_disabled_and_blocked(monkeypatch, tmp_path: Path) -> None:
     candidates = [
         _competition("disabled", submissions_disabled=True),
@@ -892,6 +933,44 @@ def test_run_watch_once_resumes_active_run(monkeypatch, tmp_path: Path) -> None:
     assert result.status == "finished"
     assert result.slug == "demo"
     assert captured["run_id"] is None
+
+
+def test_run_watch_once_restarts_interrupted_preflight_with_same_run_id(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    run_id = "20260423T010203Z-preflight"
+    config.state_path.parent.mkdir(parents=True)
+    config.state_path.write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": run_id,
+                "last_status": "running",
+                "phase": "oracle_evaluation_advisor",
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_list_entered_competitions(**kwargs):  # noqa: ANN003, ARG001
+        raise AssertionError("an interrupted preflight must restart the same competition")
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", fail_list_entered_competitions)
+    monkeypatch.setattr(
+        "kagglebot.supervisor._prepare_competition",
+        lambda **kwargs: captured.update(prepared_run_id=kwargs["run_id"]),
+    )
+    monkeypatch.setattr(
+        "kagglebot.supervisor.run_autopilot",
+        lambda config: captured.update(config_run_id=config.run_id),
+    )
+
+    result = run_watch_once(config)
+
+    assert result.status == "finished"
+    assert result.run_id == run_id
+    assert captured == {"prepared_run_id": run_id, "config_run_id": run_id}
 
 
 def test_run_watch_once_clears_stale_active_run(

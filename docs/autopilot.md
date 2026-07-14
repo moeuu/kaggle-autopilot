@@ -125,13 +125,24 @@ Useful overrides:
 - Auto-bootstrapped remote Chrome always uses model picker `select` and thinking time `extended`, so the `gpt-5-pro`
   rolling alias is applied instead of silently keeping the browser's current model. For diagnostics, override either
   explicitly through `KAGGLEBOT_ORACLE_ARGS`, for example `--browser-model-strategy current`.
-- `KAGGLEBOT_ORACLE_INLINE_PROMPT=1` is the default and pastes the full rendered strategy prompt inline. The rendered
-  prompt already includes the local context bundle and is capped at roughly 80k characters before compact fallback.
+- `KAGGLEBOT_ORACLE_INLINE_PROMPT=1` is the default and pastes the rendered strategy prompt inline. Kagglebot also
+  attaches `oracle_context_manifest.md` and the complete canonical rules, overview, data description, submission
+  format, dataset profile, sample submission, code/models/discussion snapshots, and their indexes when available.
+  Attached full files are authoritative over the prompt's capped inline excerpts.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=0` sends the rendered prompt and context bundle through Oracle `--file` attachments
   instead. In browser mode, Oracle may still inline small text files, so they may not appear as visible ChatGPT file
   chips even though the model receives the content.
 - `KAGGLEBOT_ORACLE_BROWSER_ATTACHMENTS=never|auto|always` controls browser file delivery for auto-bootstrapped remote
   Chrome when `--file` attachments are enabled.
+- `KAGGLEBOT_ORACLE_COMPETITION_DATA=auto|never|owner-authorized` controls raw competition package delivery. `auto` is the default and
+  attaches the canonical downloaded archive only when the competition Rules do not restrict third-party data
+  transmission and the package fits `KAGGLEBOT_ORACLE_DATA_ATTACHMENT_MAX_BYTES` (100 MiB by default). Explicit Rules
+  restrictions win in `auto` mode. `owner-authorized` records the operator's decision to use their authenticated Oracle
+  session as an owner-controlled processing tool rather than a redistribution target. Kagglebot records the exact
+  attachment or omission reason in the context manifest.
+- `KAGGLEBOT_REFRESH_EVALUATION_SPEC=1` explicitly refreshes the Oracle-generated evaluation specification. The global
+  autopilot `--force` flag is reserved for intended side effects and no longer causes this expensive advisor call on
+  every watch cycle; valid frozen specifications are reused by default.
 - `KAGGLEBOT_ORACLE_BROWSER_INPUT_TIMEOUT=600s` and `KAGGLEBOT_ORACLE_BROWSER_TIMEOUT=24h` tune Oracle's browser input
   and overall browser waits for slower remote Chrome sessions and long GPT Pro answers.
 - `KAGGLEBOT_ORACLE_BROWSER_HEADLESS=0` refuses the headless fallback when ChatGPT/Cloudflare requires a real display.

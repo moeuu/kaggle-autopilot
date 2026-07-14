@@ -170,7 +170,7 @@ def _run_discord_notifier_for_watch_state(
     )
     if lifecycle_blocked:
         return lifecycle_sent
-    if lifecycle_sent:
+    if lifecycle_sent and _is_idle_snapshot(snapshot):
         state.update(
             {
                 "last_snapshot_key": snapshot_key,
@@ -190,7 +190,7 @@ def _run_discord_notifier_for_watch_state(
     last_sent_at = _parse_datetime(state.get("last_sent_at"))
     heartbeat_due = last_sent_at is None or (current_time - last_sent_at).total_seconds() >= max(1, heartbeat_sec)
     heartbeat_send_allowed = heartbeat_due and not _is_idle_snapshot(snapshot)
-    should_send = force or snapshot_key != last_key or heartbeat_send_allowed
+    should_send = force or lifecycle_sent or snapshot_key != last_key or heartbeat_send_allowed
     if not should_send:
         if current_run_id and current_run_id != last_run_id:
             state["last_run_id"] = current_run_id

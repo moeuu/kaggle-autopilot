@@ -269,9 +269,10 @@ def test_run_strategy_defaults_to_auto_and_uses_oracle_when_available(monkeypatc
     assert "--force" in captured_args
     assert "-p" in captured_args
     assert (
-        "Use the Kagglebot strategy prompt below as the complete context."
-        in captured_args[captured_args.index("-p") + 1]
+        "Use the Kagglebot strategy prompt below together with every attached canonical context file."
+        in (captured_args[captured_args.index("-p") + 1])
     )
+    assert "Authorized benign use" in captured_args[captured_args.index("-p") + 1]
     assert "strategy prompt" in captured_args[captured_args.index("-p") + 1]
     assert "--file" not in captured_args
     assert (tmp_path / "oracle_strategy_prompt.md").exists()
@@ -613,6 +614,105 @@ def test_run_strategy_oracle_attaches_context_bundle_when_inline_disabled(monkey
     attached = captured_args[file_index + 1 :]
     assert str(strategy_dir / "oracle_strategy_prompt.md") in attached
     assert str(bundle_path) in attached
+
+
+def test_oracle_context_attaches_complete_context_and_permitted_package(monkeypatch, tmp_path: Path) -> None:
+    context_dir = tmp_path / "artifacts" / "demo" / "context"
+    strategy_dir = context_dir / "agent" / "strategy"
+    data_dir = context_dir.parent / "data"
+    strategy_dir.mkdir(parents=True)
+    data_dir.mkdir()
+    prompt_path = strategy_dir / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    (context_dir / "rules.md").write_text(
+        "Competition data may be processed by external tools for this competition.\n",
+        encoding="utf-8",
+    )
+    (context_dir / "overview.md").write_text("complete overview\n", encoding="utf-8")
+    (context_dir / "dataset_profile.json").write_text("{}\n", encoding="utf-8")
+    (context_dir / "top1_public.json").write_text('{"score": 0.9}\n', encoding="utf-8")
+    brief_path = context_dir / "agent" / "brief_for_strategy.md"
+    brief_path.parent.mkdir(exist_ok=True)
+    brief_path.write_text("complete Codex brief\n", encoding="utf-8")
+    package_path = data_dir / "demo.zip"
+    package_path.write_bytes(b"x" * (1024 * 1024 + 1))
+    captured_args: list[str] = []
+
+    def fake_run_command(args: list[str], **kwargs) -> CommandResult:  # noqa: ARG001
+        nonlocal captured_args
+        captured_args = args
+        return CommandResult(args=args, returncode=0, stdout="oracle output\n", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
+    )
+    monkeypatch.setattr(strategy_runner, "run_command", fake_run_command)
+
+    strategy_runner.run_strategy(prompt_path, strategy_dir, dry_run=False, engine="oracle")
+
+    attached = captured_args[captured_args.index("--file") + 1 :]
+    assert str(context_dir / "rules.md") in attached
+    assert str(context_dir / "overview.md") in attached
+    assert str(context_dir / "dataset_profile.json") in attached
+    assert str(context_dir / "top1_public.json") in attached
+    assert str(brief_path) in attached
+    assert str(package_path) in attached
+    assert captured_args[captured_args.index("--max-file-size-bytes") + 1] == str(package_path.stat().st_size)
+    manifest_path = strategy_dir / "oracle_context_manifest.md"
+    assert str(manifest_path) in attached
+    assert "attached: 1 canonical package file(s)" in manifest_path.read_text(encoding="utf-8")
+
+
+def test_oracle_context_never_attaches_data_for_rules_with_third_party_restriction(tmp_path: Path) -> None:
+    context_dir = tmp_path / "artifacts" / "demo" / "context"
+    strategy_dir = context_dir / "agent" / "strategy"
+    data_dir = context_dir.parent / "data"
+    strategy_dir.mkdir(parents=True)
+    data_dir.mkdir()
+    prompt_path = strategy_dir / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    (context_dir / "rules.md").write_text(
+        "You agree not to transmit Competition Data to any party not participating in the Competition.\n",
+        encoding="utf-8",
+    )
+    package_path = data_dir / "demo.zip"
+    package_path.write_bytes(b"competition data")
+
+    plan = strategy_runner._build_oracle_attachment_plan(
+        prompt_path=prompt_path,
+        oracle_prompt_path=strategy_dir / "oracle_strategy_prompt.md",
+        output_dir=strategy_dir,
+        inline_prompt=True,
+    )
+
+    assert package_path not in plan.paths
+    assert plan.data_paths == ()
+    assert "restrict third-party data transmission" in plan.data_decision
+    manifest = (strategy_dir / "oracle_context_manifest.md").read_text(encoding="utf-8")
+    assert 'matched "not to transmit"' in manifest
+
+
+def test_oracle_context_owner_authorized_mode_attaches_package_despite_transmission_wording(
+    monkeypatch, tmp_path: Path
+) -> None:
+    context_dir = tmp_path / "artifacts" / "demo" / "context"
+    data_dir = context_dir.parent / "data"
+    context_dir.mkdir(parents=True)
+    data_dir.mkdir()
+    (context_dir / "rules.md").write_text(
+        "You agree not to transmit Competition Data to any party not participating in the Competition.\n",
+        encoding="utf-8",
+    )
+    package_path = data_dir / "demo.zip"
+    package_path.write_bytes(b"competition data")
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_COMPETITION_DATA", "owner-authorized")
+
+    paths, decision = strategy_runner._oracle_competition_data_attachments(context_dir)
+
+    assert paths == [package_path]
+    assert "owner-authorized processing" in decision
 
 
 def test_run_strategy_oracle_keeps_explicit_extra_engine_and_wait(monkeypatch, tmp_path: Path) -> None:

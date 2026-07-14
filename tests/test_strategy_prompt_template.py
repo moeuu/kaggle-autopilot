@@ -60,7 +60,8 @@ def test_strategy_plan_prompt_includes_quality_gate_checklist() -> None:
     assert "{{competition_url}}" in template
     assert "{{strategy_context_bundle}}" in template
     assert "{{strategy_context_bundle_path}}" in template
-    assert "You cannot read local files unless their contents are included below." in template
+    assert "oracle_context_manifest.md" in template
+    assert "Authorized benign use" in template
     assert ">=8000 characters" in template
     assert "12000-25000 characters" in template
     assert "There is no 1200-character cap" in template

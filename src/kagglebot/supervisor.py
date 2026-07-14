@@ -17,7 +17,7 @@ from rich import print
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
 from kagglebot.datetime_utils import parse_iso_datetime_utc
-from kagglebot.env_utils import env_optional_int, parse_float_value, parse_int_value, read_env_or_file
+from kagglebot.env_utils import env_flag, env_optional_int, parse_float_value, parse_int_value, read_env_or_file
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import (
     KaggleCliResourceError,
@@ -52,6 +52,7 @@ from kagglebot.watch_state import (
     load_watch_state,
     safe_state_scope,
     set_resume_env,
+    update_watch_phase,
     write_watch_state,
 )
 
@@ -68,6 +69,18 @@ _REWARD_AMOUNT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _DEFAULT_RESOURCE_BLOCK_TTL_HOURS = 168.0
+_RESTARTABLE_PREFLIGHT_PHASES = {
+    "bootstrapping",
+    "preparing_data",
+    "oracle_evaluation_advisor",
+    "autopilot_starting",
+}
+
+
+@dataclass(frozen=True)
+class _WatchPhaseContext:
+    slug: str
+    compute: str
 
 
 @dataclass(frozen=True)
@@ -274,6 +287,11 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         run_id = active_run_id
         resume = True
         ledger.append("selected", slug=active_slug, run_id=run_id, reason="resume_active")
+    elif active_slug and active_run_id and _preflight_can_restart(config, active_slug, active_run_id, state=state):
+        candidate = _candidate_from_slug(active_slug)
+        run_id = active_run_id
+        resume = False
+        ledger.append("selected", slug=active_slug, run_id=run_id, reason="restart_preflight")
     else:
         if active_slug and active_run_id and active_state_is_stale(state):
             ledger.append("stale_active_cleared", slug=active_slug, run_id=active_run_id, reason="stale_watch_state")
@@ -339,7 +357,13 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
     previous_state_path = os.environ.get("KAGGLEBOT_WATCH_STATE_PATH")
     os.environ["KAGGLEBOT_WATCH_STATE_PATH"] = str(config.state_path)
     try:
-        _prepare_competition(config=config, candidate=candidate, paths=paths, knowledge_paths=knowledge_paths)
+        _prepare_competition(
+            config=config,
+            candidate=candidate,
+            paths=paths,
+            knowledge_paths=knowledge_paths,
+            run_id=run_id,
+        )
         write_watch_state(
             config.state_path,
             {
@@ -671,8 +695,11 @@ def _prepare_competition(
     candidate: EnteredCompetition,
     paths: CompetitionPaths,
     knowledge_paths: KnowledgePaths,
+    run_id: str,
 ) -> None:
     print(f"[cyan]watch[/cyan]: bootstrapping {candidate.slug}")
+    phase_context = _WatchPhaseContext(slug=candidate.slug, compute=config.compute)
+    update_watch_phase(phase_context, run_id, "preparing_data", detail="downloading and profiling competition data")
     bootstrap_competition(
         slug=candidate.slug,
         competition_url=candidate.url,
@@ -684,7 +711,18 @@ def _prepare_competition(
         dry_run=config.dry_run,
     )
     if config.auto_eval_spec:
-        advisor = EvaluationAdvisor(paths=paths, slug=candidate.slug, dry_run=config.dry_run, force=config.force)
+        update_watch_phase(
+            phase_context,
+            run_id,
+            "oracle_evaluation_advisor",
+            detail="resolving evaluation specification",
+        )
+        advisor = EvaluationAdvisor(
+            paths=paths,
+            slug=candidate.slug,
+            dry_run=config.dry_run,
+            force=env_flag("KAGGLEBOT_REFRESH_EVALUATION_SPEC", default=False),
+        )
         advisor.ensure_spec()
 
 
@@ -1192,6 +1230,22 @@ def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[
         return True
     status = str(payload.get("status") or "").strip().lower()
     return status not in _TERMINAL_RUN_STATUSES
+
+
+def _preflight_can_restart(
+    config: WatchConfig,
+    slug: str,
+    run_id: str,
+    *,
+    state: dict[str, object],
+) -> bool:
+    if active_state_is_stale(state):
+        return False
+    if str(state.get("last_status") or "").strip().lower() != "running":
+        return False
+    if str(state.get("phase") or "").strip().lower() not in _RESTARTABLE_PREFLIGHT_PHASES:
+        return False
+    return not CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).run_dir(run_id).exists()
 
 
 def _candidate_from_slug(slug: str) -> EnteredCompetition:

@@ -649,6 +649,59 @@ def test_run_discord_notifier_once_replays_lifecycle_events_from_watch_ledger(tm
     assert notifier_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
 
 
+def test_started_lifecycle_is_immediately_updated_to_current_oracle_phase(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    run_dir = artifacts / "demo" / "runs" / "run-1"
+    watch_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (watch_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "active_slug": "demo",
+                "active_run_id": "run-1",
+                "last_status": "running",
+                "phase": "oracle_strategy",
+                "phase_detail": "Oracle Pro is producing the implementation strategy",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "run.json").write_text(
+        json.dumps({"status": "running", "config": {"max_iterations": 3}}),
+        encoding="utf-8",
+    )
+    (watch_dir / "discord_notifier_state.json").write_text(
+        json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
+        encoding="utf-8",
+    )
+    ledger_path = watch_dir / "ledger.jsonl"
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-04-23T00:00:00+00:00",
+                "event": "started",
+                "slug": "demo",
+                "run_id": "run-1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    notifier = RecordingNotifier()
+
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
+    )
+
+    assert [event["event_type"] for event in notifier.events] == ["autopilot.started", "autopilot.status"]
+    assert notifier.events[-1]["payload"]["phase"] == "oracle_strategy"
+    assert notifier.events[0]["payload"]["discord_update_key"] == notifier.events[-1]["payload"]["discord_update_key"]
+
+
 def test_run_discord_notifier_once_retries_lifecycle_without_advancing_cursor(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     watch_dir = artifacts / "_watch"
@@ -697,8 +750,14 @@ def test_run_discord_notifier_once_retries_lifecycle_without_advancing_cursor(tm
         now=now + timedelta(minutes=5),
     )
 
-    assert len(notifier.events) == 2
+    assert len(notifier.events) == 3
+    assert [event["event_type"] for event in notifier.events] == [
+        "autopilot.started",
+        "autopilot.started",
+        "autopilot.status",
+    ]
     assert notifier.events[0]["dedupe_key"] == notifier.events[1]["dedupe_key"]
+    assert notifier.events[-1]["payload"]["discord_update_key"] == ("kaggle-autopilot:lab_rdp:local_gpu:run:run-2")
     assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == (
         ledger_path.stat().st_size
     )

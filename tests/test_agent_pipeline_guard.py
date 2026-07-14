@@ -17,6 +17,47 @@ def test_oracle_strategy_uses_sol_ultra_only_for_followup_implementation() -> No
     assert agent_pipeline._implementation_agent_for_strategy_engine("codex") is IMPLEMENTATION_AGENT
 
 
+def test_agent_pipeline_publishes_codex_oracle_codex_phases(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="on",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+    brief_path = tmp_path / "brief.md"
+    instructions_path = tmp_path / "instructions.md"
+    phases: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(agent_pipeline, "_ensure_context_materials", lambda paths: None)
+    monkeypatch.setattr(agent_pipeline.CodexBriefStage, "run", lambda self: brief_path)
+    monkeypatch.setattr(
+        agent_pipeline.StrategyStage,
+        "run",
+        lambda self, *, brief_path: instructions_path,
+    )
+    monkeypatch.setattr(
+        agent_pipeline.CodexImplementationStage,
+        "run",
+        lambda self, *, instructions_path: None,
+    )
+    monkeypatch.setattr(
+        agent_pipeline,
+        "update_watch_phase",
+        lambda config, run_id, phase, *, detail=None, iteration=None: phases.append((phase, detail)),
+    )
+
+    agent_pipeline.AgentPipeline(paths=paths, config=config).run()
+
+    assert [phase for phase, _ in phases] == ["codex_brief", "oracle_strategy", "codex_implementation"]
+    assert "Oracle Pro" in str(phases[1][1])
+    assert "sol-ultra" in str(phases[2][1])
+
+
 def test_fallback_strategy_instructions_cover_general_tabular_formats(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

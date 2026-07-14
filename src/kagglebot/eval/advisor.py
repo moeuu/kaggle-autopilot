@@ -151,8 +151,15 @@ class EvaluationAdvisor:
             joined = "\n".join(f"- {item}" for item in previous_errors[-5:])
             error_block = f"\nPrevious output issues to fix:\n{joined}\n"
         return (
+            "Authorized benign use: this is offline data-science work for a Kaggle competition the operator has "
+            "joined. This request only classifies evaluation metadata and submission requirements. Do not provide "
+            "instructions for unauthorized system access, credential theft, malware, exploitation, evasion, or "
+            "interaction with real-world targets.\n"
             "You are an Evaluation Advisor for Kaggle autopilot.\n"
             "Use LIVE web search aggressively and cite your findings in sources_summary_md.\n"
+            "The Oracle runner attaches oracle_context_manifest.md and complete canonical competition context files "
+            "when available. Read the manifest first and use full attachments as authoritative over trimmed inline "
+            "excerpts. Never assume access to a data package that the manifest marks omitted.\n"
             "You MUST choose only from the supported metric/split options listed below.\n"
             "Return JSON only. No markdown fences. No extra keys.\n"
             f"{error_block}\n"

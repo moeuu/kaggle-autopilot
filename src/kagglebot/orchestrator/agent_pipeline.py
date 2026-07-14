@@ -45,6 +45,7 @@ from kagglebot.submission_sample_discovery import (
     default_delimited_text_separator,
     tabular_suffix,
 )
+from kagglebot.watch_state import update_watch_phase
 from kagglebot.write_guard import (
     WriteGuardPolicy,
     _assert_no_secrets,
@@ -131,8 +132,26 @@ class AgentPipeline:
         strategy_stage = StrategyStage(paths=self.paths, config=self.config, output_dir=strategy_dir)
         implement_stage = CodexImplementationStage(paths=self.paths, config=self.config, output_dir=implement_dir)
 
+        update_watch_phase(
+            self.config,
+            self.config.run_id,
+            "codex_brief",
+            detail="Codex is analyzing the complete local competition context",
+        )
         brief_path = brief_stage.run()
+        update_watch_phase(
+            self.config,
+            self.config.run_id,
+            "oracle_strategy",
+            detail="Oracle Pro is producing the implementation strategy",
+        )
         instructions_path = strategy_stage.run(brief_path=brief_path)
+        update_watch_phase(
+            self.config,
+            self.config.run_id,
+            "codex_implementation",
+            detail="Codex sol-ultra is implementing the Oracle strategy",
+        )
         implement_stage.run(instructions_path=instructions_path)
 
 

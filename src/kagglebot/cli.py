@@ -19,6 +19,7 @@ from kagglebot.competition import parse_competition_slug
 from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute, resolve_accelerator
 from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
+from kagglebot.env_utils import env_flag
 from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.experiment_graph import normalize_portfolio_execution
@@ -553,7 +554,7 @@ def autopilot(
             paths=paths,
             slug=slug,
             dry_run=cfg.dry_run,
-            force=cfg.force,
+            force=env_flag("KAGGLEBOT_REFRESH_EVALUATION_SPEC", default=False),
         )
         spec, source = advisor.ensure_spec()
         metric_name = spec.get("metric_name")
