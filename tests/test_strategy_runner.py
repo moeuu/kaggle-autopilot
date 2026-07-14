@@ -668,6 +668,104 @@ def test_oracle_context_attaches_complete_context_and_permitted_package(monkeypa
     assert "attached: 1 canonical package file(s)" in manifest_path.read_text(encoding="utf-8")
 
 
+def test_oracle_improvement_context_resolves_competition_root_and_attaches_runtime_files(tmp_path: Path) -> None:
+    competition_dir = tmp_path / "artifacts" / "demo"
+    context_dir = competition_dir / "context"
+    iter_dir = competition_dir / "runs" / "run-1" / "iter-2"
+    strategy_dir = iter_dir / "agent" / "improve_strategy-01"
+    logs_dir = iter_dir / "logs"
+    strategy_dir.mkdir(parents=True)
+    logs_dir.mkdir(parents=True)
+    (context_dir).mkdir(parents=True)
+    (context_dir / "overview.md").write_text("competition overview\n", encoding="utf-8")
+    (competition_dir / "plan.json").write_text('{"target_metric":"rmse"}\n', encoding="utf-8")
+    kernel_path = competition_dir / "kernel" / "kernel.py"
+    kernel_path.parent.mkdir()
+    kernel_path.write_text("print('current kernel')\n", encoding="utf-8")
+    run_path = iter_dir.parent / "run.json"
+    run_path.write_text('{"status":"running"}\n', encoding="utf-8")
+    (iter_dir / "metrics.json").write_text('{"offline_value":0.42}\n', encoding="utf-8")
+    (iter_dir / "diagnostics.md").write_text("validation drift detected\n", encoding="utf-8")
+    (logs_dir / "kernel_stderr.txt").write_text("CUDA out of memory\n", encoding="utf-8")
+    prompt_path = strategy_dir / "gpt_improvement_prompt.md"
+    prompt_path.write_text("improve this run", encoding="utf-8")
+
+    plan = strategy_runner._build_oracle_attachment_plan(
+        prompt_path=prompt_path,
+        oracle_prompt_path=strategy_dir / "oracle_strategy_prompt.md",
+        output_dir=strategy_dir,
+        inline_prompt=True,
+    )
+
+    assert strategy_runner._oracle_context_dir(prompt_path) == context_dir
+    assert strategy_dir / "oracle_context_manifest.md" in plan.paths
+    bundle = (strategy_dir / "oracle_canonical_context.md").read_text(encoding="utf-8")
+    for expected in (kernel_path, run_path, iter_dir / "metrics.json", iter_dir / "diagnostics.md"):
+        assert str(expected) in bundle
+    assert "CUDA out of memory" in bundle
+
+
+def test_oracle_autofix_context_attaches_saved_error_and_current_kernel(tmp_path: Path) -> None:
+    competition_dir = tmp_path / "artifacts" / "demo"
+    context_dir = competition_dir / "context"
+    attempt_dir = competition_dir / "runs" / "run-1" / "autofix" / "attempt-1"
+    strategy_dir = attempt_dir / "gpt_strategy"
+    strategy_dir.mkdir(parents=True)
+    context_dir.mkdir(parents=True)
+    (context_dir / "dataset_profile.json").write_text("{}\n", encoding="utf-8")
+    kernel_path = competition_dir / "kernel" / "kernel.py"
+    kernel_path.parent.mkdir()
+    kernel_path.write_text("raise RuntimeError('bad shape')\n", encoding="utf-8")
+    error_path = attempt_dir / "error-1.txt"
+    error_path.write_text("ValueError: submission row mismatch\n", encoding="utf-8")
+    prompt_path = strategy_dir / "gpt_strategy_prompt.md"
+    prompt_path.write_text("repair the failure", encoding="utf-8")
+
+    strategy_runner._build_oracle_attachment_plan(
+        prompt_path=prompt_path,
+        oracle_prompt_path=strategy_dir / "oracle_strategy_prompt.md",
+        output_dir=strategy_dir,
+        inline_prompt=True,
+    )
+
+    bundle = (strategy_dir / "oracle_canonical_context.md").read_text(encoding="utf-8")
+    assert str(error_path) in bundle
+    assert "ValueError: submission row mismatch" in bundle
+    assert str(kernel_path) in bundle
+
+
+def test_oracle_repository_improvement_attaches_report_backlog_and_knowledge_context(tmp_path: Path) -> None:
+    improvement_dir = tmp_path / "artifacts" / "_self_improvement"
+    transaction_dir = improvement_dir / "transactions" / "20260714T000000Z"
+    strategy_dir = transaction_dir / "strategy"
+    strategy_dir.mkdir(parents=True)
+    expected_files = {
+        "latest.json": '{"recommended_actions":["repair validation"]}\n',
+        "latest.md": "# Improvement report\n",
+        "strategy_context.md": "Prioritize failed submissions\n",
+        "experiment_backlog.json": '[{"title":"validation redesign"}]\n',
+        "skill_candidates.json": '[{"name":"submission repair"}]\n',
+        "outcomes.jsonl": '{"status":"failed"}\n',
+    }
+    for name, content in expected_files.items():
+        (improvement_dir / name).write_text(content, encoding="utf-8")
+    prompt_path = transaction_dir / "strategy_prompt.md"
+    prompt_path.write_text("review repository", encoding="utf-8")
+
+    plan = strategy_runner._build_oracle_attachment_plan(
+        prompt_path=prompt_path,
+        oracle_prompt_path=strategy_dir / "oracle_strategy_prompt.md",
+        output_dir=strategy_dir,
+        inline_prompt=True,
+    )
+
+    assert strategy_dir / "oracle_context_manifest.md" in plan.paths
+    bundle = (strategy_dir / "oracle_canonical_context.md").read_text(encoding="utf-8")
+    for name, content in expected_files.items():
+        assert str(improvement_dir / name) in bundle
+        assert content.strip() in bundle
+
+
 def test_oracle_context_never_attaches_data_for_rules_with_third_party_restriction(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("KAGGLEBOT_ORACLE_COMPETITION_DATA", raising=False)
     context_dir = tmp_path / "artifacts" / "demo" / "context"

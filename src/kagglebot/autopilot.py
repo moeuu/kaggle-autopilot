@@ -20,6 +20,7 @@ from kagglebot import autopilot_state as _autopilot_state
 from kagglebot import autopilot_submit as _autopilot_submit
 from kagglebot import campaign_metrics as _campaign_metrics
 from kagglebot import code_reference as _code_reference
+from kagglebot import compute_handoff as _compute_handoff
 from kagglebot import diagnostics as _diagnostics
 from kagglebot import env_utils as _env_utils
 from kagglebot import improvement_context as _improvement_context
@@ -99,7 +100,7 @@ from kagglebot.kaggle_api import (
     leaderboard_rank_for_score,
     leaderboard_top1,
 )
-from kagglebot.kernel_runner import run_kernel, run_kernel_local
+from kagglebot.kernel_runner import KernelRunResult, run_kernel, run_kernel_local
 from kagglebot.knowledge import (
     record_error_fix_insight,
     record_improvement,
@@ -334,6 +335,208 @@ def _iteration_submission_suffix_from_format(submission_format_path: Path | None
     )
 
 
+def _run_local_to_kaggle_gpu_handoff(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    iteration: int,
+    iter_dir: Path,
+    logs_dir: Path,
+    output_dir: Path,
+    kernel_name: str | None,
+    enable_internet: bool,
+    score_source: str,
+    target_metric: str,
+    metric_direction: str,
+    holdout_frac: float,
+    cv_folds: int,
+    seed: int,
+    time_budget_min: int | None,
+    local_error_text: str,
+    pending_error_fixes: list[dict[str, object]],
+) -> tuple[AutopilotConfig, KernelRunResult]:
+    run_dir = config.paths.run_dir(run_id)
+    hardware_profile = _compute_handoff.kaggle_gpu_handoff_profile()
+    remote_config = replace(
+        config,
+        compute="kaggle_gpu",
+        accelerator="gpu",
+        strict_accelerator=False,
+        hardware_profile=hardware_profile,
+    )
+    handoff_payload = _compute_handoff.begin_handoff(
+        run_dir=run_dir,
+        iter_dir=iter_dir,
+        run_id=run_id,
+        iteration=iteration,
+        error_text=local_error_text,
+        to_hardware_profile=hardware_profile,
+    )
+    _watch_state.update_watch_phase(
+        remote_config,
+        run_id,
+        "local_to_kaggle_gpu_handoff",
+        detail="Local training exceeded available resources; continuing the same iteration on Kaggle GPU.",
+        iteration=iteration,
+    )
+    print(
+        "[yellow]compute handoff[/yellow]: local_gpu resource limit detected; "
+        f"continuing run={run_id} iter={iteration} on kaggle_gpu ({hardware_profile})"
+    )
+    kaggle_user = resolve_kaggle_username(remote_config.kaggle_username)
+    kernel_attempts = 0
+    error_fingerprints: dict[str, int] = {}
+    try:
+        while True:
+            _watch_state.update_watch_phase(remote_config, run_id, "kaggle_kernel_running", iteration=iteration)
+            try:
+                result = run_kernel(
+                    slug=remote_config.slug,
+                    run_id=run_id,
+                    iteration=iteration,
+                    base_dir=remote_config.paths.base_dir.parent,
+                    kaggle_username=kaggle_user,
+                    kernel_name=kernel_name,
+                    accelerator="gpu",
+                    enable_internet=enable_internet,
+                    score_source=score_source,
+                    metric=target_metric,
+                    direction=metric_direction,
+                    holdout_frac=holdout_frac,
+                    cv_folds=cv_folds,
+                    seed=seed,
+                    dry_run=remote_config.dry_run,
+                    timeout_minutes=time_budget_min,
+                    hardware_profile=hardware_profile,
+                )
+                _compute_handoff.finish_handoff(
+                    run_dir=run_dir,
+                    iter_dir=iter_dir,
+                    payload=handoff_payload,
+                    status="completed",
+                    kernel_id=result.kernel_id,
+                )
+                return remote_config, result
+            except RulesNotAcceptedError:
+                raise
+            except KaggleNetworkError:
+                raise
+            except KernelStillRunningError as exc:
+                error_text = _kernel_errors.format_kernel_error(exc)
+                (logs_dir / "kernel_remote_still_running.txt").write_text(error_text + "\n", encoding="utf-8")
+                _watch_state.update_watch_phase(
+                    remote_config,
+                    run_id,
+                    "kaggle_kernel_still_running",
+                    detail="The handed-off Kaggle notebook is still running; waiting without pushing a duplicate.",
+                    iteration=iteration,
+                )
+                time.sleep(KERNEL_STILL_RUNNING_RETRY_SLEEP)
+            except KernelCapacityError as exc:
+                kernel_attempts += 1
+                error_text = _kernel_errors.format_kernel_error(exc)
+                _kernel_errors.record_kernel_error(
+                    logs_dir=logs_dir,
+                    attempt=kernel_attempts,
+                    error_text=error_text,
+                    error_fingerprints=error_fingerprints,
+                    max_repeats=MAX_KERNEL_CAPACITY_REPEAT,
+                    output_dir=output_dir,
+                )
+                capacity_retries = _env_utils.env_int(
+                    "KAGGLEBOT_KERNEL_CAPACITY_RETRIES",
+                    default=MAX_KERNEL_CAPACITY_RETRIES,
+                )
+                _watch_state.update_watch_phase(
+                    remote_config,
+                    run_id,
+                    "kaggle_gpu_no_capacity",
+                    detail="Kaggle GPU capacity is unavailable for the local-training handoff.",
+                    iteration=iteration,
+                )
+                if kernel_attempts > capacity_retries:
+                    raise
+                time.sleep(KERNEL_CAPACITY_RETRY_SLEEP * kernel_attempts)
+            except Exception as exc:  # noqa: BLE001
+                kernel_attempts += 1
+                error_text = _kernel_errors.format_kernel_error(exc)
+                if _kernel_errors.is_kernel_registration_error(exc):
+                    _kernel_errors.record_kernel_error(
+                        logs_dir=logs_dir,
+                        attempt=kernel_attempts,
+                        error_text=error_text,
+                        error_fingerprints=error_fingerprints,
+                        output_dir=output_dir,
+                    )
+                    if kernel_attempts > MAX_KERNEL_REGISTRATION_RETRIES:
+                        raise
+                    time.sleep(KERNEL_REGISTRATION_RETRY_SLEEP * kernel_attempts)
+                    continue
+                try:
+                    _kernel_errors.record_kernel_error(
+                        logs_dir=logs_dir,
+                        attempt=kernel_attempts,
+                        error_text=error_text,
+                        error_fingerprints=error_fingerprints,
+                        output_dir=output_dir,
+                    )
+                except KernelFailedError:
+                    if _autofix_restart.maybe_regenerate_kernel_sources_once(
+                        dry_run=remote_config.dry_run,
+                        agent_dir=iter_dir / "agent",
+                        run_id=run_id,
+                        iteration=iteration,
+                        attempt=kernel_attempts,
+                        trigger_reason="handoff_repeated_error_fingerprint",
+                        regenerate_kernel_sources=lambda: _planning_runner.run_plan_and_initial(remote_config, run_id),
+                    ):
+                        error_fingerprints.clear()
+                        continue
+                    raise
+                if remote_config.dry_run:
+                    raise
+                if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:
+                    raise
+                print(
+                    "[yellow]handoff kernel failed[/yellow]: invoking "
+                    f"{IMPLEMENTATION_AGENT.log_alias} to repair the Kaggle GPU run (attempt {kernel_attempts})"
+                )
+                _run_kernel_fix(
+                    config=remote_config,
+                    run_id=run_id,
+                    iteration=iteration,
+                    iter_dir=iter_dir,
+                    error_message=error_text,
+                    attempt=kernel_attempts,
+                    pending_error_fixes=pending_error_fixes,
+                )
+    except BaseException as exc:
+        _compute_handoff.finish_handoff(
+            run_dir=run_dir,
+            iter_dir=iter_dir,
+            payload=handoff_payload,
+            status="failed",
+            error_text=_kernel_errors.format_kernel_error(exc),
+        )
+        raise
+
+
+def _config_for_committed_compute_handoff(config: AutopilotConfig, run_id: str) -> AutopilotConfig:
+    if config.compute != "local_gpu":
+        return config
+    committed_handoff = _compute_handoff.load_committed_handoff(config.paths.run_dir(run_id))
+    if committed_handoff is None:
+        return config
+    resumed_profile = str(committed_handoff.get("to_hardware_profile") or _compute_handoff.kaggle_gpu_handoff_profile())
+    return replace(
+        config,
+        compute="kaggle_gpu",
+        accelerator="gpu",
+        strict_accelerator=False,
+        hardware_profile=resumed_profile,
+    )
+
+
 def run_autopilot(config: AutopilotConfig) -> None:
     resume_id = os.environ.get("KAGGLEBOT_RESUME_RUN_ID")
     resume_slug = os.environ.get("KAGGLEBOT_RESUME_SLUG")
@@ -350,7 +553,8 @@ def run_autopilot(config: AutopilotConfig) -> None:
     submit_force_override = False
     try:
         while True:
-            session = AutopilotSession(config=config, run_id=run_id, resume_run=resume_after_failure)
+            effective_config = _config_for_committed_compute_handoff(config, run_id)
+            session = AutopilotSession(config=effective_config, run_id=run_id, resume_run=resume_after_failure)
             try:
                 return session.run()
             except RulesNotAcceptedError:
@@ -381,7 +585,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 ):
                     os.environ["KAGGLEBOT_FORCE_RESUBMIT"] = "1"
                     submit_force_override = True
-                _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+                _run_autofix(config=effective_config, run_id=run_id, attempt=attempt, error=exc)
                 resume_after_failure = True
             except KernelCapacityError:
                 raise
@@ -398,7 +602,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 if attempt > MAX_AUTOFIX_ATTEMPTS:
                     raise
                 print(f"[yellow]autofix[/yellow]: invoking {IMPLEMENTATION_AGENT.log_alias} to repair error")
-                _run_autofix(config=config, run_id=run_id, attempt=attempt, error=exc)
+                _run_autofix(config=effective_config, run_id=run_id, attempt=attempt, error=exc)
                 resume_after_failure = True
     finally:
         if submit_force_override:
@@ -408,6 +612,13 @@ def run_autopilot(config: AutopilotConfig) -> None:
 def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool = False) -> None:
     run_dir = config.paths.run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
+    resumed_config = _config_for_committed_compute_handoff(config, run_id)
+    if resumed_config != config:
+        config = resumed_config
+        print(
+            "[yellow]compute handoff resume[/yellow]: "
+            f"continuing run={run_id} on kaggle_gpu ({config.hardware_profile})"
+        )
     _watch_state.update_watch_phase(config, run_id, "autopilot_starting")
     print(f"[green]run started[/green]: {run_id}")
     planning_phase = PlanningPhase(config=config, run_id=run_id, resume_run=resume_run)
@@ -1089,6 +1300,60 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 error_fingerprints.clear()
                                 continue
                             raise
+                        if _compute_handoff.should_handoff_local_failure(exc):
+                            config, kernel_result = _run_local_to_kaggle_gpu_handoff(
+                                config=config,
+                                run_id=run_id,
+                                iteration=iteration,
+                                iter_dir=iter_dir,
+                                logs_dir=logs_dir,
+                                output_dir=output_dir,
+                                kernel_name=kernel_name,
+                                enable_internet=enable_internet,
+                                score_source=score_source,
+                                target_metric=target_metric,
+                                metric_direction=metric_direction,
+                                holdout_frac=holdout_frac,
+                                cv_folds=cv_folds,
+                                seed=seed,
+                                time_budget_min=time_budget_min,
+                                local_error_text=error_text,
+                                pending_error_fixes=pending_error_fixes,
+                            )
+                            accelerator_used = config.accelerator
+                            run_config_payload = run_payload.get("config")
+                            if isinstance(run_config_payload, dict):
+                                run_config_payload.update(
+                                    {
+                                        "compute": config.compute,
+                                        "accelerator": config.accelerator,
+                                        "hardware_profile": config.hardware_profile,
+                                    }
+                                )
+                                _autopilot_state.write_run_payload(run_dir, run_payload)
+                            if kernel_result.submission_path:
+                                submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
+                                    source=kernel_result.submission_path,
+                                    iter_dir=iter_dir,
+                                )
+                            _autopilot_state.copy_kernel_support_artifacts_to_iteration_dir(
+                                kernel_output_dir=kernel_result.output_dir,
+                                iter_dir=iter_dir,
+                            )
+                            if kernel_result.metrics_path and kernel_result.metrics_path.exists():
+                                kernel_metrics_artifact_path = kernel_result.metrics_path
+                                kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
+                                evaluation = _kernel_metrics.load_kernel_metrics(
+                                    kernel_result.metrics_path,
+                                    metric_direction,
+                                    target_metric,
+                                )
+                            if evaluation is None:
+                                raise KernelFailedError(
+                                    "Handed-off Kaggle kernel metrics missing expected score; "
+                                    "ensure metrics.json includes a numeric metric value."
+                                )
+                            break
                         if config.dry_run:
                             raise
                         if MAX_KERNEL_FIX_ATTEMPTS is not None and kernel_attempts > MAX_KERNEL_FIX_ATTEMPTS:

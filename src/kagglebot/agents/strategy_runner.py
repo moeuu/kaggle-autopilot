@@ -35,6 +35,8 @@ _DEFAULT_ORACLE_BROWSER_TIMEOUT = "24h"
 _DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
 _DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
 _DEFAULT_ORACLE_FILE_SIZE_LIMIT_BYTES = 1024 * 1024
+_ORACLE_RUNTIME_CONTEXT_FILE_MAX_BYTES = 4 * 1024 * 1024
+_ORACLE_RUNTIME_CONTEXT_TOTAL_MAX_BYTES = 16 * 1024 * 1024
 _ORACLE_REMOTE_DATA_PART_BYTES = 15 * 1024 * 1024
 _ORACLE_CANONICAL_CONTEXT_FILES = (
     "rules_url.txt",
@@ -343,7 +345,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         "Read oracle_context_manifest.md first and treat full canonical context attachments as authoritative. "
         "If the manifest lists split competition-data parts, concatenate them in order and verify the listed SHA-256 "
         "before inspecting the reconstructed archive. "
-        "Return exactly the requested delimiter sections, including PLAN_JSON and CODEX_INSTRUCTIONS. "
+        "Return exactly the delimiter sections requested by the attached strategy prompt; do not invent sections. "
         "Do not omit source evidence when the prompt requires it."
     )
     extra_args = _oracle_extra_args()
@@ -354,8 +356,8 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             + "Use the Kagglebot strategy prompt below together with every attached canonical context file. "
             "Read oracle_context_manifest.md first; attached full files override trimmed inline excerpts. "
             "If competition data is split into parts, reconstruct it exactly as directed by the manifest. "
-            "Return only the delimiter sections requested inside it, especially STRATEGY, PLAN_JSON, "
-            "and CODEX_INSTRUCTIONS.\n\n"
+            "Return only the delimiter sections requested inside it; do not invent sections that its contract "
+            "does not request.\n\n"
             f"{rendered_prompt}"
         )
     attachment_plan = _build_oracle_attachment_plan(
@@ -572,37 +574,43 @@ def _build_oracle_attachment_plan(
         _append_existing_file(context_paths, context_dir / "agent" / "brief_for_strategy.md")
         data_paths, data_decision = _oracle_competition_data_attachments(context_dir)
 
-        context_bundle_path = output_dir / "oracle_canonical_context.md"
-        _write_oracle_canonical_context_bundle(context_bundle_path, context_paths)
-        data_deliveries = _prepare_oracle_data_deliveries(
-            data_paths=data_paths,
-            output_dir=output_dir,
-            split_large_data=split_large_data,
-        )
-
-        manifest_path = output_dir / "oracle_context_manifest.md"
-        manifest_path.write_text(
-            _render_oracle_context_manifest(
-                inline_prompt=inline_prompt,
-                context_paths=context_paths,
-                context_bundle_path=context_bundle_path,
-                data_paths=data_paths,
-                data_deliveries=data_deliveries,
-                data_decision=data_decision,
-            ),
-            encoding="utf-8",
-        )
-        delivery_paths = [context_bundle_path]
-        for delivery in data_deliveries:
-            delivery_paths.extend(delivery.paths)
-        delivery_paths.append(manifest_path)
+    if not context_paths and context_dir is None:
         return OracleAttachmentPlan(
-            paths=tuple(delivery_paths),
+            paths=tuple(context_paths),
             data_paths=tuple(data_paths),
             data_decision=data_decision,
         )
 
-    return OracleAttachmentPlan(paths=tuple(context_paths), data_paths=tuple(data_paths), data_decision=data_decision)
+    context_bundle_path = output_dir / "oracle_canonical_context.md"
+    _write_oracle_canonical_context_bundle(context_bundle_path, context_paths)
+    data_deliveries = _prepare_oracle_data_deliveries(
+        data_paths=data_paths,
+        output_dir=output_dir,
+        split_large_data=split_large_data,
+    )
+
+    manifest_path = output_dir / "oracle_context_manifest.md"
+    manifest_path.write_text(
+        _render_oracle_context_manifest(
+            inline_prompt=inline_prompt,
+            context_paths=context_paths,
+            context_bundle_path=context_bundle_path,
+            data_paths=data_paths,
+            data_deliveries=data_deliveries,
+            data_decision=data_decision,
+        ),
+        encoding="utf-8",
+    )
+    delivery_paths = list(context_paths) if context_dir is None else []
+    delivery_paths.append(context_bundle_path)
+    for delivery in data_deliveries:
+        delivery_paths.extend(delivery.paths)
+    delivery_paths.append(manifest_path)
+    return OracleAttachmentPlan(
+        paths=tuple(delivery_paths),
+        data_paths=tuple(data_paths),
+        data_decision=data_decision,
+    )
 
 
 def _write_oracle_canonical_context_bundle(bundle_path: Path, context_paths: list[Path]) -> None:
@@ -662,10 +670,9 @@ def _sha256_file(path: Path) -> str:
 
 def _oracle_context_dir(prompt_path: Path) -> Path | None:
     for candidate in prompt_path.parents:
-        if candidate.name != "context":
-            continue
-        if any((candidate / name).exists() for name in ("rules.md", "overview.md", "dataset_profile.json")):
-            return candidate
+        context_candidate = candidate if candidate.name == "context" else candidate / "context"
+        if any((context_candidate / name).exists() for name in ("rules.md", "overview.md", "dataset_profile.json")):
+            return context_candidate
     return None
 
 
@@ -784,10 +791,120 @@ def _oracle_max_file_size_args(extra_args: list[str], attachment_paths: list[Pat
 
 
 def _oracle_context_bundle_candidates(prompt_path: Path) -> list[Path]:
-    return [
+    candidates = [
         prompt_path.parent / "strategy_context_bundle.md",
         prompt_path.parent.parent / "strategy_context_bundle.md",
     ]
+    context_dir = _oracle_context_dir(prompt_path)
+    if context_dir is not None:
+        competition_dir = context_dir.parent
+        candidates.extend(
+            [
+                competition_dir / "plan.json",
+                competition_dir / "kernel" / "kernel.py",
+            ]
+        )
+        run_dir = _oracle_run_dir(prompt_path)
+        if run_dir is not None:
+            candidates.extend(
+                [
+                    run_dir / "run.json",
+                    run_dir / "run_state.json",
+                    run_dir / "compute_handoff.json",
+                    run_dir / "submit_failure_context.json",
+                ]
+            )
+        iter_dir = _oracle_iteration_dir(prompt_path)
+        if iter_dir is not None:
+            candidates.extend(_oracle_iteration_context_candidates(iter_dir))
+            logs_dir = iter_dir / "logs"
+            if logs_dir.exists():
+                candidates.extend(
+                    path
+                    for path in sorted(logs_dir.rglob("*"))
+                    if path.is_file() and path.suffix.lower() in {".json", ".jsonl", ".log", ".md", ".txt"}
+                )
+        for parent in prompt_path.parents:
+            if parent == run_dir:
+                break
+            candidates.extend(sorted(parent.glob("error*.txt")))
+            candidates.extend(sorted(parent.glob("kernel_error*.txt")))
+            candidates.extend(sorted(parent.glob("submit_failure*.json")))
+
+    self_improvement_dir = _oracle_self_improvement_dir(prompt_path)
+    if self_improvement_dir is not None:
+        candidates.extend(
+            self_improvement_dir / name
+            for name in (
+                "latest.json",
+                "latest.md",
+                "strategy_context.md",
+                "experiment_backlog.json",
+                "skill_candidates.json",
+                "outcomes.jsonl",
+            )
+        )
+    return _bounded_unique_context_paths(candidates)
+
+
+def _oracle_run_dir(prompt_path: Path) -> Path | None:
+    for candidate in prompt_path.parents:
+        if candidate.parent.name == "runs":
+            return candidate
+    return None
+
+
+def _oracle_iteration_dir(prompt_path: Path) -> Path | None:
+    run_dir = _oracle_run_dir(prompt_path)
+    if run_dir is None:
+        return None
+    for candidate in prompt_path.parents:
+        if candidate.parent == run_dir and candidate.name.startswith("iter-"):
+            return candidate
+    return None
+
+
+def _oracle_iteration_context_candidates(iter_dir: Path) -> list[Path]:
+    return [
+        iter_dir / "metrics.json",
+        iter_dir / "diagnostics.md",
+        iter_dir / "evaluation_report.json",
+        iter_dir / "iteration_state.json",
+        iter_dir / "compute_handoff.json",
+        iter_dir / "experiment_graph.json",
+        iter_dir / "allocator_decision.json",
+        iter_dir / "graph_execution_report.json",
+        iter_dir / "validation_lab_report.json",
+        iter_dir / "private_robustness_report.json",
+        iter_dir / "portfolio_optimizer_report.json",
+        iter_dir / "top1_exhaustion_report.json",
+        iter_dir / "blend_report.json",
+        iter_dir / "portfolio_plan.json",
+        iter_dir / "output" / "metrics.json",
+    ]
+
+
+def _oracle_self_improvement_dir(prompt_path: Path) -> Path | None:
+    return next((candidate for candidate in prompt_path.parents if candidate.name == "_self_improvement"), None)
+
+
+def _bounded_unique_context_paths(candidates: list[Path]) -> list[Path]:
+    selected: list[Path] = []
+    selected_bytes = 0
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_file() or candidate in selected:
+            continue
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            continue
+        if size > _ORACLE_RUNTIME_CONTEXT_FILE_MAX_BYTES:
+            continue
+        if selected_bytes + size > _ORACLE_RUNTIME_CONTEXT_TOTAL_MAX_BYTES:
+            continue
+        selected.append(candidate)
+        selected_bytes += size
+    return selected
 
 
 def _maybe_start_oracle_browser(extra_args: list[str]) -> OracleBrowserBootstrap:

@@ -119,6 +119,7 @@ def build_run_payload(
             "agent": getattr(config, "agent"),
             "compute": getattr(config, "compute"),
             "accelerator": getattr(config, "accelerator"),
+            "hardware_profile": getattr(config, "hardware_profile", None),
             "deliverable_mode": resolved.get("deliverable_mode"),
             "submit_mode": resolved.get("submit_mode"),
             "code_competition": resolved.get("code_competition"),

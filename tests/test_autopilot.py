@@ -6876,6 +6876,82 @@ def test_autopilot_preflight_fixes_kernel_sources_before_local_run(monkeypatch, 
     assert calls["run_kernel_local"] == 1
 
 
+def test_autopilot_hands_resource_limited_local_iteration_to_kaggle_gpu(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_plan(
+        paths,
+        target_metric="rmse",
+        target_score=0.5,
+        target_direction="minimize",
+        score_source="cv",
+        cv_folds=3,
+        seed=42,
+    )
+    calls: dict[str, object] = {"local": 0, "remote": 0, "kernel_fix": 0}
+
+    def fail_local_kernel(**kwargs):  # noqa: ANN003
+        calls["local"] = int(calls["local"]) + 1
+        raise KernelFailedError("Local kernel exceeded host memory guard at 24576 MiB RSS")
+
+    def run_remote_kernel(**kwargs):  # noqa: ANN003
+        calls["remote"] = int(calls["remote"]) + 1
+        calls["remote_kwargs"] = kwargs
+        output_dir = (
+            kwargs["base_dir"] / kwargs["slug"] / "runs" / kwargs["run_id"] / f"iter-{kwargs['iteration']}" / "output"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        submission_path = output_dir / "submission.csv"
+        metrics_path = output_dir / "metrics.json"
+        submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "score_source": "cv",
+                    "metric": "rmse",
+                    "direction": "minimize",
+                    "offline_value": 0.4,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return KernelRunResult(
+            kernel_id="user/demo-run-1-i1",
+            output_dir=output_dir,
+            submission_path=submission_path,
+            metrics_path=metrics_path,
+        )
+
+    def unexpected_kernel_fix(**kwargs):  # noqa: ANN003
+        calls["kernel_fix"] = int(calls["kernel_fix"]) + 1
+
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.resolve_kaggle_username", lambda *args, **kwargs: "user")
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", fail_local_kernel)
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel", run_remote_kernel)
+    monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", unexpected_kernel_fix)
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_autopilot(config)
+
+    assert calls["local"] == 1
+    assert calls["remote"] == 1
+    assert calls["kernel_fix"] == 0
+    remote_kwargs = calls["remote_kwargs"]
+    assert isinstance(remote_kwargs, dict)
+    assert remote_kwargs["run_id"] == "run-1"
+    assert remote_kwargs["iteration"] == 1
+    assert remote_kwargs["accelerator"] == "gpu"
+    assert remote_kwargs["hardware_profile"] == "kaggle_p100"
+    handoff = json.loads((config.paths.run_dir("run-1") / "compute_handoff.json").read_text(encoding="utf-8"))
+    assert handoff["status"] == "completed"
+    assert handoff["destination_committed"] is True
+    assert handoff["kernel_id"] == "user/demo-run-1-i1"
+    run_payload = json.loads((config.paths.run_dir("run-1") / "run.json").read_text(encoding="utf-8"))
+    assert run_payload["config"]["compute"] == "kaggle_gpu"
+
+
 def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
     calls = {"train": 0}
 

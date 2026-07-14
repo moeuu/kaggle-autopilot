@@ -140,8 +140,12 @@ Useful overrides:
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=1` is the default and pastes the rendered strategy prompt inline. Kagglebot also
   attaches `oracle_context_manifest.md` and `oracle_canonical_context.md`. The latter losslessly consolidates the
   complete canonical rules, overview, data description, submission format, dataset profile, sample submission,
-  code/models/discussion snapshots, and their indexes when available. Its full contents are authoritative over the
-  prompt's capped inline excerpts.
+  code/models/discussion snapshots, and their indexes when available. Improvement and autofix calls additionally
+  include the current `plan.json`, `kernel.py`, run state, iteration metrics, diagnostics, evaluation reports, text
+  logs, and saved error transcripts. Repository self-improvement calls include `latest.json`, `latest.md`, strategy
+  context, experiment backlog, skill candidates, and outcome history. Runtime context files are capped at 4 MiB each
+  and 16 MiB total so a runaway log cannot break Oracle delivery. Full bundle contents are authoritative over capped
+  inline excerpts.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=0` sends the rendered prompt and context bundle through Oracle `--file` attachments
   instead. In browser mode, Oracle may still inline small text files, so they may not appear as visible ChatGPT file
   chips even though the model receives the content.
@@ -485,5 +489,11 @@ Key files:
 - Manifest path fields accept common aliases and object values such as `{ "path": "predictions.zarr" }`, `{ "sourcePath": "answers.nii.gz" }`, and `folderPath`, so hand-written or agent-generated manifests do not have to use one exact schema.
 - Submit failures now persist a structured `submit_failure_context.json` snapshot so `submit_autofix` can distinguish between submission-file repairs, submit-mode/kernel fixes, platform issues, and manual blockers such as missing rules acceptance or credentials.
 - For local kernel training (`local_gpu`), terminal logs show elapsed/ETA and stage progress (`seed i/N`, `fold j/K`, `step s/T`) when patterns are detectable from kernel output.
+- A local timeout, exhausted CUDA-OOM retry, host-memory guard, stall, SIGKILL-style exit, or missing local GPU
+  automatically commits the current run and iteration to `kaggle_gpu`. The handoff reuses the same kernel sources,
+  plan, data/context package, run ID, iteration number, output paths, and Oracle-to-Codex repair loop. State is stored
+  in `runs/<run-id>/compute_handoff.json` and `iter-<n>/compute_handoff.json`, so service restarts resume on Kaggle GPU
+  instead of repeating the failed local training. Set `KAGGLEBOT_LOCAL_TO_KAGGLE_GPU=0` to disable this behavior or
+  `KAGGLEBOT_KAGGLE_GPU_HANDOFF_PROFILE=kaggle_t4` to override the default `kaggle_p100` profile.
 - For Kaggle kernel training, execution and logs are tracked through kernel run artifacts.
 - If autopilot crashes, restart with `--resume-run-id <run-id>` or `--resume-latest`.
