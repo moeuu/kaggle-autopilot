@@ -631,6 +631,10 @@ def test_oracle_context_attaches_complete_context_and_permitted_package(monkeypa
     (context_dir / "overview.md").write_text("complete overview\n", encoding="utf-8")
     (context_dir / "dataset_profile.json").write_text("{}\n", encoding="utf-8")
     (context_dir / "top1_public.json").write_text('{"score": 0.9}\n', encoding="utf-8")
+    (context_dir / "kaggle_discovery.md").write_text(
+        "# Kaggle Discovery Snapshot\n\n- ARC model candidate\n",
+        encoding="utf-8",
+    )
     brief_path = context_dir / "agent" / "brief_for_strategy.md"
     brief_path.parent.mkdir(exist_ok=True)
     brief_path.write_text("complete Codex brief\n", encoding="utf-8")
@@ -660,6 +664,7 @@ def test_oracle_context_attaches_complete_context_and_permitted_package(monkeypa
     assert "Competition data may be processed" in context_bundle
     assert "complete overview" in context_bundle
     assert '"score": 0.9' in context_bundle
+    assert "ARC model candidate" in context_bundle
     assert "complete Codex brief" in context_bundle
     assert str(package_path) in attached
     assert captured_args[captured_args.index("--max-file-size-bytes") + 1] == str(package_path.stat().st_size)

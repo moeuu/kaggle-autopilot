@@ -25,6 +25,7 @@ Read and summarize these local files (paths). Do not paste raw content:
 - Discussion tab snapshot: {{discussion_path}}
 - Discussion thread dir: {{discussion_threads_dir}}
 - Downloaded discussion index (JSON): {{discussion_index_path}}
+- Ranked Kaggle ecosystem discovery (Datasets/Models/Code/Discussions/Game Arena/Benchmarks): {{kaggle_discovery_path}}
 
 If a file is missing or empty, note it explicitly.
 
@@ -36,4 +37,5 @@ Brief requirements (use short headings):
 - Constraints or rules that impact modeling (no external data, etc.)
 - High-scoring code notebook patterns (with notebook score evidence)
 - High-signal discussion thread insights and caveats
+- Relevant reusable datasets, pretrained models, notebooks, hot discussions, Game Arena signals, and benchmark ideas from the ranked Kaggle discovery file; ignore low-relevance trends
 - Any uncertainties or missing info

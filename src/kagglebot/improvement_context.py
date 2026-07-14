@@ -37,6 +37,7 @@ class ImprovementContextPaths(Protocol):
     sample_submission_path: Path
     code_md_path: Path
     code_notebooks_index_path: Path
+    kaggle_discovery_md_path: Path
     kernel_source_dir: Path
     method_registry_path: Path
 
@@ -229,6 +230,12 @@ def build_improvement_prompt_plan(
         extra_policy_notes=extra_policy_notes,
         submit_failure_notes=submit_failure_notes,
         submit_failure_force_reason=submit_failure_force_reason,
+    )
+    base_prompt_text += (
+        "\n\n## Ranked Kaggle Ecosystem Discovery\n"
+        f"- Snapshot: {config.paths.kaggle_discovery_md_path}\n"
+        "Inspect high-relevance Datasets, Models, Code, Discussions, Game Arena, and Benchmarks records before "
+        "choosing the next experiment. Ignore low-relevance trends and verify competition rules/licenses before use.\n"
     )
 
     code_reference_mandatory = bool(code_reference_underperforming or enforce_code_reference_implementation)

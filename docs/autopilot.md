@@ -140,7 +140,7 @@ Useful overrides:
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=1` is the default and pastes the rendered strategy prompt inline. Kagglebot also
   attaches `oracle_context_manifest.md` and `oracle_canonical_context.md`. The latter losslessly consolidates the
   complete canonical rules, overview, data description, submission format, dataset profile, sample submission,
-  code/models/discussion snapshots, and their indexes when available. Improvement and autofix calls additionally
+  code/models/discussion snapshots, ranked Kaggle ecosystem discovery, and their indexes when available. Improvement and autofix calls additionally
   include the current `plan.json`, `kernel.py`, run state, iteration metrics, diagnostics, evaluation reports, text
   logs, and saved error transcripts. Repository self-improvement calls include `latest.json`, `latest.md`, strategy
   context, experiment backlog, skill candidates, and outcome history. Runtime context files are capped at 4 MiB each
@@ -171,9 +171,15 @@ Useful overrides:
 
 The GPT stage now produces and the pipeline persists:
 - `artifacts/<slug>/context/research_sources.jsonl`
+- `artifacts/<slug>/context/kaggle_discovery.json` and `kaggle_discovery.md` (ranked public Kaggle Datasets, Models,
+  Code, hot Discussions, Game Arena, and Benchmarks context; cached for 24 hours)
 - `artifacts/<slug>/context/research_summary.md`
 - `artifacts/<slug>/context/method_scout_queries.json`
 - `artifacts/<slug>/context/source_registry.json`
+
+Kaggle ecosystem discovery is enabled unless `KAGGLEBOT_KAGGLE_DISCOVERY=0`. Adjust its cache with
+`KAGGLEBOT_KAGGLE_DISCOVERY_REFRESH_HOURS` and the per-surface shortlist size with
+`KAGGLEBOT_KAGGLE_DISCOVERY_MAX_ITEMS_PER_SURFACE`.
 - `artifacts/<slug>/context/method_registry.json`
 - `artifacts/<slug>/context/validation_registry.json`
 - `artifacts/<slug>/context/validation_lab_report.json`

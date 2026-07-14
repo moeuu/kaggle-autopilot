@@ -22,6 +22,7 @@ from kagglebot.compression_suffixes import write_compressed_bytes
 from kagglebot.exceptions import KaggleBotError, OracleStrategyError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.json_utils import load_json_array, load_json_object, parse_json_object_text, write_json_object
+from kagglebot.kaggle_discovery import refresh_kaggle_discovery
 from kagglebot.knowledge import (
     derive_problem_types,
     record_research_artifacts,
@@ -120,6 +121,17 @@ class AgentPipeline:
     def run(self) -> None:
         self.paths.context_agent_dir.mkdir(parents=True, exist_ok=True)
         _ensure_context_materials(self.paths)
+        if self.config.internet != "off" and not self.config.dry_run:
+            update_watch_phase(
+                self.config,
+                self.config.run_id,
+                "kaggle_discovery",
+                detail="Ranking relevant Kaggle datasets, models, code, discussions, arena, and benchmarks.",
+            )
+            try:
+                refresh_kaggle_discovery(paths=self.paths)
+            except Exception as exc:  # noqa: BLE001
+                print(f"Kaggle discovery unavailable; continuing with cached competition context: {exc}")
 
         brief_dir = self.paths.context_agent_dir / "brief"
         strategy_dir = self.paths.context_agent_dir / "strategy"
@@ -180,6 +192,7 @@ def _run_codex_brief(paths: CompetitionPaths, config: AgentPipelineConfig, outpu
             "discussion_path": str(paths.discussion_md_path),
             "discussion_threads_dir": str(paths.discussion_threads_dir),
             "discussion_index_path": str(paths.discussion_threads_index_path),
+            "kaggle_discovery_path": str(paths.kaggle_discovery_md_path),
         },
     )
     prompt_text = _append_problem_type_knowledge(
@@ -960,6 +973,7 @@ def _build_strategy_prompt(
         code_snapshot = _truncate(_read_text(paths.code_md_path), 1200)
         models_snapshot = _truncate(_read_text(paths.models_md_path), 600)
         discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 600)
+        kaggle_discovery_snapshot = _truncate(_read_text(paths.kaggle_discovery_md_path), 1200)
         brief_content = _truncate(brief_content, 1200)
     else:
         dataset_profile = _truncate(_read_text(paths.dataset_profile_path), 6000)
@@ -968,6 +982,7 @@ def _build_strategy_prompt(
         code_snapshot = _truncate(_read_text(paths.code_md_path), 9000)
         models_snapshot = _truncate(_read_text(paths.models_md_path), 3500)
         discussion_snapshot = _truncate(_read_text(paths.discussion_md_path), 3500)
+        kaggle_discovery_snapshot = _truncate(_read_text(paths.kaggle_discovery_md_path), 7000)
         brief_content = _truncate(brief_content, 5000)
 
     hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
@@ -996,6 +1011,7 @@ def _build_strategy_prompt(
             "code_snapshot": code_snapshot,
             "models_snapshot": models_snapshot,
             "discussion_snapshot": discussion_snapshot,
+            "kaggle_discovery_snapshot": kaggle_discovery_snapshot,
         },
     )
     if infer_deliverable_mode_from_paths(paths) == "writeup":
@@ -1066,6 +1082,10 @@ def _build_strategy_context_bundle(
         "",
         "## Data File Structure and Representative Samples",
         data_file_structure or "Data directory is unavailable or empty.",
+        "",
+        "## Ranked Kaggle Ecosystem Discovery",
+        _truncate(_read_text(paths.kaggle_discovery_md_path), 1500 if compact else 8000)
+        or "Kaggle ecosystem discovery is unavailable.",
     ]
     return "\n".join(lines).strip()
 
@@ -2252,6 +2272,7 @@ def _build_fallback_brief(paths: CompetitionPaths, config: AgentPipelineConfig, 
         f"- discussion: {paths.discussion_md_path}",
         f"- discussion_threads_dir: {paths.discussion_threads_dir}",
         f"- discussion_index: {paths.discussion_threads_index_path}",
+        f"- kaggle_discovery: {paths.kaggle_discovery_md_path}",
         "",
         "## Rules headings",
         _format_heading_list(rules_headings),

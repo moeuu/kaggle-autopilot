@@ -55,6 +55,8 @@ _ORACLE_CANONICAL_CONTEXT_FILES = (
     "discussion.md",
     "code_notebooks_index.json",
     "discussion_threads_index.json",
+    "kaggle_discovery.json",
+    "kaggle_discovery.md",
     "research_sources.jsonl",
     "research_summary.md",
     "method_registry.json",

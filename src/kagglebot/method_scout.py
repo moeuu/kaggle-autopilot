@@ -235,6 +235,17 @@ def run_method_scout(
         if source_mode == "off"
         else load_research_sources(paths.context_dir / "research_sources.jsonl", limit=max_sources)
     )
+    if source_mode != "off":
+        discovery_sources = load_kaggle_discovery_sources(
+            paths.context_dir / "kaggle_discovery.json",
+            limit=max(1, min(6, max_sources // 2)),
+        )
+        if discovery_sources:
+            discovery_slots = min(len(discovery_sources), max(1, max_sources // 2))
+            raw_sources = [
+                *raw_sources[: max(0, max_sources - discovery_slots)],
+                *discovery_sources[:discovery_slots],
+            ]
     source_registry = build_source_registry(
         slug=slug,
         queries=queries,
@@ -1555,6 +1566,64 @@ def _active_sources_from_registry(registry: dict[str, object]) -> list[dict[str,
                 "takeaway": item.get("takeaway"),
                 "extracted_technique": item.get("extracted_technique"),
                 "source_id": item.get("source_id"),
+            }
+        )
+    return sources
+
+
+def load_kaggle_discovery_sources(path: Path, *, limit: int = 6) -> list[dict[str, object]]:
+    payload = load_json_object(path)
+    if payload is None:
+        return []
+    raw_records = payload.get("records")
+    if not isinstance(raw_records, list):
+        return []
+    candidates = [
+        record
+        for record in raw_records
+        if isinstance(record, dict)
+        and (_to_float(record.get("relevance_score")) or 0.0) > 0.0
+        and str(record.get("url") or "").startswith("https://www.kaggle.com/")
+    ]
+    candidates.sort(
+        key=lambda record: (
+            _to_float(record.get("relevance_score")) or 0.0,
+            _to_float(record.get("rank_score")) or 0.0,
+        ),
+        reverse=True,
+    )
+    selected: list[dict[str, object]] = []
+    used_surfaces: set[str] = set()
+    for record in candidates:
+        surface = str(record.get("surface") or "unknown")
+        if surface in used_surfaces:
+            continue
+        selected.append(record)
+        used_surfaces.add(surface)
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        selected_ids = {id(record) for record in selected}
+        selected.extend(record for record in candidates if id(record) not in selected_ids)
+    sources: list[dict[str, object]] = []
+    for record in selected[:limit]:
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        date = next(
+            (str(metadata.get(key)) for key in ("lastUpdated", "lastRunTime", "postDate") if metadata.get(key)),
+            "unknown",
+        )
+        surface = str(record.get("surface") or "unknown")
+        summary = str(record.get("summary") or "").strip()
+        sources.append(
+            {
+                "url": record.get("url"),
+                "title": record.get("title"),
+                "date": date,
+                "query": record.get("query"),
+                "takeaway": summary or f"Relevant Kaggle {surface} discovery candidate.",
+                "extracted_technique": f"Inspect and validate the ranked Kaggle {surface} candidate.",
+                "kaggle_surface": surface,
+                "relevance_score": record.get("relevance_score"),
             }
         )
     return sources

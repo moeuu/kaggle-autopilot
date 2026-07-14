@@ -78,10 +78,18 @@ Competition discussion tab snapshot (trimmed):
 {{discussion_snapshot}}
 >>>
 
+Ranked Kaggle ecosystem discovery (Datasets, Models, Code, hot Discussions, Game Arena, Benchmarks; trimmed):
+<<<
+{{kaggle_discovery_snapshot}}
+>>>
+
 Use the code snapshot's notebook scores as ranking evidence when selecting candidate pipelines.
 Treat the notebook listed under `Required Reference Notebook (Execution baseline)` in the code snapshot as a mandatory reference baseline (or kernel base).
 If the raw top-ranked notebook is marked as leak-like/placeholder, use it only as a warning signal and do not copy leak logic.
 Use discussion thread insights for failure modes, leakage warnings, and strong baselines.
+Use high-relevance Kaggle discovery records to find reusable public assets, pretrained models, executable notebooks,
+evaluation ideas, and current community warnings. Treat low-relevance hot items as trend signals only. Verify each
+asset's license, competition rules, input compatibility, and reproducibility before recommending or attaching it.
 Use the method scout context when present: prefer competition-specific and modality-specific papers, official repositories,
 Kaggle notebooks/discussions, and similar-competition writeups over generic method lists. Treat blocked method candidates
 as unsafe or infeasible and do not implement them.

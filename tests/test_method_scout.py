@@ -10,6 +10,7 @@ from kagglebot.method_scout import (
     classify_source,
     effective_method_scout_mode,
     infer_modality,
+    load_kaggle_discovery_sources,
     load_method_registry,
     load_source_registry,
     load_validation_registry,
@@ -928,6 +929,97 @@ def test_method_registry_ranks_competition_specific_above_generic(tmp_path: Path
     source_registry = json.loads(source_registry_path(paths.context_dir).read_text(encoding="utf-8"))
     assert source_registry["active_source_ids"]
     assert source_registry["planned_query_ids"]
+
+
+def test_load_kaggle_discovery_sources_prefers_relevant_surface_diversity(tmp_path: Path) -> None:
+    path = tmp_path / "kaggle_discovery.json"
+    path.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "surface": "datasets",
+                        "url": "https://www.kaggle.com/datasets/example/arc-data",
+                        "title": "ARC data",
+                        "summary": "ARC task corpus",
+                        "query": "arc agi",
+                        "relevance_score": 4.0,
+                        "rank_score": 4.5,
+                    },
+                    {
+                        "surface": "datasets",
+                        "url": "https://www.kaggle.com/datasets/example/arc-more-data",
+                        "title": "More ARC data",
+                        "relevance_score": 3.5,
+                        "rank_score": 4.0,
+                    },
+                    {
+                        "surface": "models",
+                        "url": "https://www.kaggle.com/models/example/arc-model",
+                        "title": "ARC model",
+                        "relevance_score": 2.0,
+                        "rank_score": 3.0,
+                    },
+                    {
+                        "surface": "code",
+                        "url": "https://www.kaggle.com/code/example/arc-solver",
+                        "title": "ARC solver",
+                        "relevance_score": "broken",
+                        "rank_score": 5.0,
+                    },
+                    {
+                        "surface": "discussions",
+                        "url": "https://example.com/not-kaggle",
+                        "title": "External candidate",
+                        "relevance_score": 5.0,
+                        "rank_score": 5.0,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sources = load_kaggle_discovery_sources(path, limit=3)
+
+    assert [source["kaggle_surface"] for source in sources] == ["datasets", "models", "datasets"]
+    assert sources[0]["takeaway"] == "ARC task corpus"
+
+
+def test_method_scout_merges_kaggle_discovery_into_source_registry(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="arc-prize", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.kaggle_discovery_path.write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "surface": "code",
+                        "url": "https://www.kaggle.com/code/example/arc-solver",
+                        "title": "ARC solver notebook",
+                        "summary": "A competition-specific solver to reproduce and validate.",
+                        "query": "arc prize",
+                        "relevance_score": 4.0,
+                        "rank_score": 5.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_method_scout(
+        paths=paths,
+        slug=paths.slug,
+        problem_types=["grid-reasoning"],
+        dataset_profile={"modality": "array"},
+        metric="accuracy",
+        mode="refresh",
+        max_sources=4,
+    )
+
+    source_registry = json.loads(source_registry_path(paths.context_dir).read_text(encoding="utf-8"))
+    assert any(source["title"] == "ARC solver notebook" for source in source_registry["sources"])
 
 
 def test_method_registry_prompt_lists_active_and_blocked_methods(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ def test_agent_pipeline_publishes_codex_oracle_codex_phases(monkeypatch, tmp_pat
     phases: list[tuple[str, str | None]] = []
 
     monkeypatch.setattr(agent_pipeline, "_ensure_context_materials", lambda paths: None)
+    monkeypatch.setattr(agent_pipeline, "refresh_kaggle_discovery", lambda **kwargs: {})
     monkeypatch.setattr(agent_pipeline.CodexBriefStage, "run", lambda self: brief_path)
     monkeypatch.setattr(
         agent_pipeline.StrategyStage,
@@ -53,9 +54,14 @@ def test_agent_pipeline_publishes_codex_oracle_codex_phases(monkeypatch, tmp_pat
 
     agent_pipeline.AgentPipeline(paths=paths, config=config).run()
 
-    assert [phase for phase, _ in phases] == ["codex_brief", "oracle_strategy", "codex_implementation"]
-    assert "Oracle Pro" in str(phases[1][1])
-    assert "sol-ultra" in str(phases[2][1])
+    assert [phase for phase, _ in phases] == [
+        "kaggle_discovery",
+        "codex_brief",
+        "oracle_strategy",
+        "codex_implementation",
+    ]
+    assert "Oracle Pro" in str(phases[2][1])
+    assert "sol-ultra" in str(phases[3][1])
 
 
 def test_fallback_strategy_instructions_cover_general_tabular_formats(tmp_path: Path) -> None:
@@ -100,6 +106,39 @@ def test_fallback_strategy_instructions_cover_general_tabular_formats(tmp_path: 
     assert "repo `read_table` helper" in instructions
     assert "submission format file schema artifact" in research_sources_text
     assert "submission format csv columns" not in research_sources_text
+
+
+def test_strategy_prompt_includes_ranked_kaggle_discovery(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True)
+    paths.kaggle_discovery_md_path.write_text(
+        "# Kaggle Discovery Snapshot\n\n## Models\n- Relevant pretrained model\n",
+        encoding="utf-8",
+    )
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="on",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+    )
+
+    prompt = agent_pipeline._build_strategy_prompt(  # noqa: SLF001
+        template=agent_pipeline._load_template("strategy_plan.md"),  # noqa: SLF001
+        config=config,
+        paths=paths,
+        brief_content="competition brief",
+        compact=False,
+    )
+
+    assert "Ranked Kaggle ecosystem discovery" in prompt
+    assert "Relevant pretrained model" in prompt
+    assert "{{kaggle_discovery_snapshot}}" not in prompt
+    bundle = (paths.context_agent_dir / "strategy_context_bundle.md").read_text(encoding="utf-8")
+    assert "## Ranked Kaggle Ecosystem Discovery" in bundle
 
 
 def test_codex_brief_guard_ignores_sibling_competition_artifact_churn(monkeypatch, tmp_path: Path) -> None:

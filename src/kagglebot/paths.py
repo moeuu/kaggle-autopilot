@@ -129,6 +129,14 @@ class CompetitionPaths:
         return self.context_dir / "discussion_threads_index.json"
 
     @property
+    def kaggle_discovery_path(self) -> Path:
+        return self.context_dir / "kaggle_discovery.json"
+
+    @property
+    def kaggle_discovery_md_path(self) -> Path:
+        return self.context_dir / "kaggle_discovery.md"
+
+    @property
     def reference_inputs_dir(self) -> Path:
         return self.context_dir / "reference_inputs"
 

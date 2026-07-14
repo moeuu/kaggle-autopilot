@@ -515,6 +515,8 @@ artifacts/<slug>/
     dataset_profile.json         # Dataset statistics
     research_sources.jsonl       # Strategy web-research log (working copy)
     research_summary.md          # Ranked research shortlist (working copy)
+    kaggle_discovery.json        # Ranked Datasets/Models/Code/Discussions/Arena/Benchmarks metadata
+    kaggle_discovery.md          # Oracle/Codex-readable Kaggle ecosystem shortlist
     research_storage.json        # Mapping to persisted knowledge paths
     method_scout_queries.json    # Competition-specific method discovery queries
     source_registry.json         # Attributed research/notebook/repo/discussion sources and planned retrieval queries
