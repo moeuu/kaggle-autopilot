@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,15 +53,31 @@ class WriteGuardPolicy:
 
 def _snapshot_tree(root: Path) -> dict[str, tuple[int, int]]:
     snapshot: dict[str, tuple[int, int]] = {}
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        if rel.startswith(".git/"):
-            continue
-        stat = path.stat()
-        snapshot[rel] = (stat.st_mtime_ns, stat.st_size)
+    for dirpath, dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        rel_dir = directory.relative_to(root)
+        dirnames[:] = [name for name in dirnames if not _prune_snapshot_directory((rel_dir / name).as_posix())]
+        for filename in filenames:
+            path = directory / filename
+            rel = path.relative_to(root).as_posix()
+            if any(rel.endswith(suffix) for suffix in _NOISE_SUFFIXES):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[rel] = (stat.st_mtime_ns, stat.st_size)
     return snapshot
+
+
+def _prune_snapshot_directory(path: str) -> bool:
+    normalized = path.strip("/")
+    if normalized == ".git" or normalized.startswith(".git/"):
+        return True
+    parts = normalized.split("/")
+    if "__pycache__" in parts:
+        return True
+    return any(prefix.strip("/") in parts for prefix in _NOISE_PREFIXES)
 
 
 def _default_external_guard_paths(repo_root: Path) -> tuple[Path, ...]:

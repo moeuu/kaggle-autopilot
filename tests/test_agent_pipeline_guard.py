@@ -875,3 +875,23 @@ def test_auto_strategy_engine_requires_oracle() -> None:
     )
 
     assert agent_pipeline._strategy_engine_is_required(config, "oracle") is True  # noqa: SLF001
+
+
+def test_snapshot_tree_prunes_noise_directories(tmp_path: Path) -> None:
+    tracked = tmp_path / "src" / "tracked.py"
+    noise_files = [
+        tmp_path / ".git" / "index",
+        tmp_path / ".venv" / "lib" / "package.py",
+        tmp_path / "nested" / ".venv" / "package.py",
+        tmp_path / "tests" / "__pycache__" / "cached.pyc",
+        tmp_path / ".pytest_cache" / "state",
+    ]
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("tracked\n", encoding="utf-8")
+    for path in noise_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("noise\n", encoding="utf-8")
+
+    snapshot = write_guard._snapshot_tree(tmp_path)
+
+    assert snapshot == {"src/tracked.py": (tracked.stat().st_mtime_ns, tracked.stat().st_size)}
