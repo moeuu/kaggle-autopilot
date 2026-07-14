@@ -211,6 +211,40 @@ def test_run_codex_uses_permissive_mode_by_default(monkeypatch, tmp_path: Path) 
     assert "--sandbox" not in captured_args[0]
 
 
+def test_run_codex_removes_stale_outputs_before_start(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    prompt_path.write_text("implement it", encoding="utf-8")
+    transcript_path = output_dir / "codex_exec.jsonl"
+    last_message_path = output_dir / "codex_last_message.txt"
+    transcript_path.write_text('{"type":"turn.completed","stale":true}\n', encoding="utf-8")
+    last_message_path.write_text("stale completion\n", encoding="utf-8")
+
+    class DummyProcess:
+        def __init__(self, args: list[str]) -> None:
+            assert not transcript_path.exists()
+            assert not last_message_path.exists()
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO('{"type":"turn.started"}\n')
+            self.stderr = io.StringIO("")
+            self._returncode = 0
+            result_path = Path(args[args.index("--output-last-message") + 1])
+            result_path.write_text("current completion\n", encoding="utf-8")
+
+        def wait(self) -> int:
+            return self._returncode
+
+    monkeypatch.setattr(codex_runner, "_supported_flags", lambda: set())
+    monkeypatch.setattr(codex_runner.subprocess, "Popen", lambda args, **kwargs: DummyProcess(args))
+
+    result = codex_runner.run_codex(prompt_path, output_dir)
+
+    assert result.stdout == '{"type":"turn.started"}\n'
+    assert transcript_path.read_text(encoding="utf-8") == result.stdout
+    assert last_message_path.read_text(encoding="utf-8") == "current completion\n"
+
+
 def test_run_codex_workspace_write_mode_skips_permissive_retry(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("KAGGLEBOT_AGENT_SANDBOX_MODE", "workspace-write")
     prompt_path = tmp_path / "prompt.md"

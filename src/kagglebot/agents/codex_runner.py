@@ -59,6 +59,8 @@ def run_codex(
     prompt_text = render_prompt_identity(prompt_path.read_text(encoding="utf-8"))
     transcript_path = output_dir / "codex_exec.jsonl"
     last_message_path = output_dir / "codex_last_message.txt"
+    transcript_path.unlink(missing_ok=True)
+    last_message_path.unlink(missing_ok=True)
 
     if dry_run:
         transcript_path.write_text("", encoding="utf-8")
