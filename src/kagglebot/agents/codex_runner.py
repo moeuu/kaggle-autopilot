@@ -36,6 +36,11 @@ class CodexResult:
     sandbox_policy_mode: str = "permissive"
     used_sandbox_fallback: bool = False
     sandbox_failure_excerpt: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    reasoning_profile: str | None = None
+    cli_profile: str | None = None
+    working_directory: str | None = None
 
 
 def run_codex(
@@ -46,6 +51,9 @@ def run_codex(
     heartbeat_label: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    reasoning_profile: str | None = None,
+    cli_profile: str | None = None,
+    cwd: Path | None = None,
 ) -> CodexResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_text = render_prompt_identity(prompt_path.read_text(encoding="utf-8"))
@@ -62,11 +70,20 @@ def run_codex(
             stdout="",
             stderr="",
             sandbox_policy_mode=resolve_agent_sandbox_mode(),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            reasoning_profile=reasoning_profile,
+            cli_profile=cli_profile,
+            working_directory=str(cwd.resolve()) if cwd is not None else None,
         )
 
     args = [IMPLEMENTATION_AGENT.cli_command, "exec"]
+    if cli_profile:
+        args += ["--profile", cli_profile]
     if model:
         args += ["-m", model]
+    if cwd is not None:
+        args += ["-C", str(cwd.resolve())]
     normalized_effort = _normalize_reasoning_effort(reasoning_effort)
     if normalized_effort:
         args += ["-c", f'model_reasoning_effort="{normalized_effort}"']
@@ -103,6 +120,7 @@ def run_codex(
             args=args,
             prompt_text=prompt_text,
             timeout=timeout,
+            cwd=cwd,
         )
         stdout_attempts.append(stdout_text)
         if stderr_text:
@@ -116,8 +134,12 @@ def run_codex(
             used_sandbox_fallback = True
             print(f"{_RUNNER_LABEL}: sandbox startup failed; retrying without sandbox", flush=True)
             retry_args = [IMPLEMENTATION_AGENT.cli_command, "exec"]
+            if cli_profile:
+                retry_args += ["--profile", cli_profile]
             if model:
                 retry_args += ["-m", model]
+            if cwd is not None:
+                retry_args += ["-C", str(cwd.resolve())]
             if normalized_effort:
                 retry_args += ["-c", f'model_reasoning_effort="{normalized_effort}"']
             retry_args += _build_shared_args(
@@ -130,6 +152,7 @@ def run_codex(
                 args=retry_args,
                 prompt_text=prompt_text,
                 timeout=timeout,
+                cwd=cwd,
             )
             stdout_attempts.append(stdout_text)
             if stderr_text:
@@ -158,6 +181,11 @@ def run_codex(
         sandbox_policy_mode=sandbox_policy_mode,
         used_sandbox_fallback=used_sandbox_fallback,
         sandbox_failure_excerpt=sandbox_failure_excerpt,
+        model=model,
+        reasoning_effort=normalized_effort,
+        reasoning_profile=reasoning_profile,
+        cli_profile=cli_profile,
+        working_directory=str(cwd.resolve()) if cwd is not None else None,
     )
 
 
@@ -197,7 +225,13 @@ def _codex_timeout_seconds() -> float:
     return max(60.0, parsed)
 
 
-def _run_codex_process(*, args: list[str], prompt_text: str, timeout: float | None = None) -> tuple[str, str, int]:
+def _run_codex_process(
+    *,
+    args: list[str],
+    prompt_text: str,
+    timeout: float | None = None,
+    cwd: Path | None = None,
+) -> tuple[str, str, int]:
     stdout_chunks: list[str] = []
     stderr_text = ""
     timed_out = False
@@ -209,6 +243,7 @@ def _run_codex_process(*, args: list[str], prompt_text: str, timeout: float | No
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=os.name != "nt",
+        cwd=cwd,
     )
     timeout_thread: threading.Thread | None = None
     if timeout is not None and timeout > 0:

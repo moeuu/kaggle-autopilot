@@ -723,7 +723,7 @@ def _build_autopilot_config(
         patience=config.patience,
         min_improvement=config.min_improvement,
         submit=config.submit_policy != "none",
-        force_submit=False,
+        force_submit=config.force,
         message=None,
         verify_cmd=config.verify_cmd,
         dry_run=config.dry_run,

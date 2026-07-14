@@ -203,7 +203,7 @@ def test_apply_final_run_status_marks_submitted_when_submission_result_exists() 
     assert payload["status"] == "submitted"
 
 
-def test_apply_final_run_status_marks_manual_finalization_for_writeup_bundle() -> None:
+def test_apply_final_run_status_marks_validated_writeup_ready() -> None:
     payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
     bundle = {"path": "writeup.md"}
 
@@ -215,7 +215,7 @@ def test_apply_final_run_status_marks_manual_finalization_for_writeup_bundle() -
         writeup_bundle_meta=bundle,
     )
 
-    assert payload["status"] == "manual_finalization_required"
+    assert payload["status"] == "writeup_ready"
     assert payload["writeup_bundle"] == bundle
 
 

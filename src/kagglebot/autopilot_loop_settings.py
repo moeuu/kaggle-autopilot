@@ -39,6 +39,7 @@ class AutopilotLoopSettings:
     submit_mode: str
     writeup_mode: bool
     submit_enabled: bool
+    writeup_submit_enabled: bool
     strict_competition_metric: bool
     require_submit_improvement: bool
     submit_improved_only: bool
@@ -116,6 +117,7 @@ def resolve_autopilot_loop_settings(
     resolved["submit_mode"] = submit_mode
     writeup_mode = deliverable_mode == "writeup"
     submit_enabled = bool(config.submit and not writeup_mode)
+    writeup_submit_enabled = bool(config.submit and writeup_mode)
     strict_competition_metric = _env_utils.env_flag(
         "KAGGLEBOT_STRICT_COMPETITION_METRIC",
         default=defaults.strict_competition_metric,
@@ -196,6 +198,7 @@ def resolve_autopilot_loop_settings(
         submit_mode=submit_mode,
         writeup_mode=writeup_mode,
         submit_enabled=submit_enabled,
+        writeup_submit_enabled=writeup_submit_enabled,
         strict_competition_metric=strict_competition_metric,
         require_submit_improvement=require_submit_improvement,
         submit_improved_only=submit_improved_only,

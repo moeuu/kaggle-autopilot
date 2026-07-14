@@ -228,7 +228,12 @@ def apply_final_run_status(
         return apply_run_status(payload, status="submitted")
     if writeup_mode and writeup_bundle_meta:
         payload["writeup_bundle"] = writeup_bundle_meta
-        return apply_run_status(payload, status="manual_finalization_required")
+        writeup_status = str(writeup_bundle_meta.get("status") or "")
+        if writeup_status == "submitted":
+            return apply_run_status(payload, status="submitted")
+        if writeup_status == "submit_blocked":
+            return apply_run_status(payload, status="writeup_submit_blocked")
+        return apply_run_status(payload, status="writeup_ready")
     if payload.get("status") not in {"interrupted", "submit_failed"}:
         return apply_run_status(payload, status="completed")
     return payload

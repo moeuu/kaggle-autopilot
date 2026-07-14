@@ -13,7 +13,7 @@ Use this checklist when changing autopilot behavior.
 
 ## 2. Planning Pipeline Safety
 
-- [ ] Planning order remains `codex -> oracle(latest-pro) -> codex` when Oracle is available, with Codex fallback documented.
+- [ ] Planning order remains `codex -> oracle(latest-pro) -> codex`; Oracle failure, invalid output, or unverified archival blocks implementation without a Codex fallback.
 - [ ] GPT output sections are validated (`STRATEGY`, `RESEARCH_SOURCES_JSONL`, `RESEARCH_SUMMARY_MD`, `PLAN_JSON`, `CODEX_INSTRUCTIONS`).
 - [ ] Research artifacts are persisted to `context/research_*.{jsonl,md}`.
 - [ ] Plan validation rejects malformed or underspecified pipeline configs.

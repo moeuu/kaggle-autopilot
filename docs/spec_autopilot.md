@@ -34,8 +34,9 @@ Autopilot planning is fixed to:
 2. Oracle/latest Pro strategy: produce the frozen strategy plan from the brief and attached context bundle.
 3. Codex kernel implementation: implement from frozen instructions.
 
-`KAGGLEBOT_STRATEGY_ENGINE=auto` is the default and uses Oracle when the configured command is available; otherwise
-the strategy stage falls back to the Codex runner. Use `oracle` to require Oracle or `codex` to force the legacy path.
+`KAGGLEBOT_STRATEGY_ENGINE=auto` resolves to Oracle and blocks implementation if Oracle is unavailable, invalid, times
+out under an explicit operator timeout, or cannot be archived and verified. It never falls back to the Codex runner.
+Use `codex` only to explicitly force the legacy strategy path outside an Oracle-to-Codex workflow.
 Oracle strategy runs default to `--engine browser --wait`; set `KAGGLEBOT_ORACLE_ENGINE=api` or
 `KAGGLEBOT_ORACLE_ENGINE=auto` when API routing is intentional.
 

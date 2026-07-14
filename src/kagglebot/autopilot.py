@@ -143,6 +143,7 @@ from kagglebot.write_guard import (
     build_repair_write_policy,
 )
 from kagglebot.writeup import build_writeup_bundle
+from kagglebot.writeup_submission import WriteupSubmissionRequest, submit_validated_writeup
 
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
@@ -478,6 +479,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     submit_mode = loop_settings.submit_mode
     writeup_mode = loop_settings.writeup_mode
     submit_enabled = loop_settings.submit_enabled
+    writeup_submit_enabled = loop_settings.writeup_submit_enabled
     strict_competition_metric = loop_settings.strict_competition_metric
     require_submit_improvement = loop_settings.require_submit_improvement
     submit_improved_only = loop_settings.submit_improved_only
@@ -2665,6 +2667,25 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         print(
             "[yellow]submit skipped[/yellow]: no competition-faithful fallback artifact "
             "(all candidates were blocked by quality guard)."
+        )
+
+    if writeup_submit_enabled and writeup_bundle_meta is not None:
+        writeup_submission = submit_validated_writeup(
+            WriteupSubmissionRequest(
+                slug=config.slug,
+                metadata=writeup_bundle_meta,
+                attempts_path=run_dir / "writeup_submit_attempts.jsonl",
+                force=config.force_submit,
+                dry_run=config.dry_run,
+            )
+        )
+        writeup_bundle_meta["submission"] = writeup_submission
+        writeup_bundle_meta["status"] = (
+            "submitted" if writeup_submission.get("status") == "submitted" else "submit_blocked"
+        )
+        _json_utils.write_json_object(
+            run_dir / "writeup" / "writeup_metadata.json",
+            writeup_bundle_meta,
         )
 
     if submitted and last_submission_result:

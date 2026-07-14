@@ -159,9 +159,10 @@ storing raw competition data or predictions.
 ### `skills`, `skill_versions`, and `skill_evaluations`
 
 Stores reusable procedures extracted from repeated outcomes. Self-improvement writes candidate skills to
-`knowledge/skills/*.md`, versions each update, injects relevant skills into future planning context, and records
-per-run outcomes in `skill_evaluations` so usage count, success count, and fitness can promote or demote procedures over
-time.
+`knowledge/skills/*.md`, versions each update, and injects suggestions into future planning context and
+`suggested_skills.json`. Per-run outcomes are attributed only when an agent records the skill as `implemented` or
+`verified` in run-scoped `applied_knowledge.json`; mere suggestions in `relevant_skills.json` never affect fitness.
+Verified usage updates `skill_evaluations` so usage count, success count, and fitness can promote or demote procedures.
 
 Example:
 ```json

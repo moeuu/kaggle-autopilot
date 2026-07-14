@@ -123,6 +123,7 @@ def test_resolve_autopilot_loop_settings_disables_submit_for_writeup() -> None:
 
     assert settings.writeup_mode is True
     assert settings.submit_enabled is False
+    assert settings.writeup_submit_enabled is True
     assert settings.max_iterations == 1
     assert settings.submission_limit_per_day is None
     assert resolved["deliverable_mode"] == "writeup"

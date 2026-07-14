@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from kagglebot.agents.identity import resolve_oracle_model, resolve_primary_agent
+from kagglebot.agents.identity import (
+    resolve_oracle_model,
+    resolve_primary_agent,
+    resolve_repository_implementation_agent,
+)
 
 
 def test_resolve_primary_agent_reads_project_configuration(tmp_path: Path) -> None:
@@ -79,3 +83,24 @@ oracle_model = "configured-pro"
     )
 
     assert model == "fixed-pro"
+
+
+def test_resolve_repository_implementation_agent_uses_sol_ultra_profile(tmp_path: Path) -> None:
+    config_path = tmp_path / "pyproject.toml"
+    config_path.write_text(
+        """
+[tool.kagglebot.agent]
+repository_implementation_model = "gpt-5.6-sol"
+repository_implementation_reasoning_effort = "xhigh"
+repository_implementation_profile = "sol-ultra"
+repository_implementation_reasoning_profile = "ultra"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    agent = resolve_repository_implementation_agent(config_path=config_path, environ={})
+
+    assert agent.model == "gpt-5.6-sol"
+    assert agent.reasoning_effort == "xhigh"
+    assert agent.cli_profile == "sol-ultra"
+    assert agent.reasoning_profile == "ultra"

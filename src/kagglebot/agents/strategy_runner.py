@@ -25,13 +25,12 @@ from kagglebot.exec_utils import CommandResult, run_command
 _DEFAULT_MODEL = STRATEGY_AGENT.model
 _DEFAULT_REASONING_EFFORT = STRATEGY_AGENT.reasoning_effort
 _DEFAULT_TIMEOUT_SEC = 600.0
-_DEFAULT_ORACLE_TIMEOUT_SEC = 3900.0
 _PYTEST_TIMEOUT_SEC = 2.0
 _RUNNER_LABEL = STRATEGY_AGENT.log_alias
 _DEFAULT_ORACLE_BROWSER_PORT = 9222
 _ORACLE_BROWSER_READY_TIMEOUT_SEC = 15.0
 _DEFAULT_ORACLE_BROWSER_INPUT_TIMEOUT = "600s"
-_DEFAULT_ORACLE_BROWSER_TIMEOUT = "60m"
+_DEFAULT_ORACLE_BROWSER_TIMEOUT = "24h"
 _DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
 _ORACLE_CHROME_PROFILE_ROOT_EXCLUDES = (
     "DevToolsActivePort",
@@ -307,10 +306,11 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     )
     heartbeat.start()
     try:
+        archive_report: dict[str, object] | None = None
         try:
             result = run_command(args, timeout=timeout)
             if _oracle_browser_engine_requested(extra_args):
-                _ensure_oracle_conversation_archived(
+                archive_report = _ensure_oracle_conversation_archived(
                     transcript_path=transcript_path,
                     output_dir=output_dir,
                     browser_bootstrap=browser_bootstrap,
@@ -351,7 +351,15 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         browser_bootstrap.close()
 
     total_elapsed = int(time.monotonic() - start_time)
-    print(f"oracle strategy done... ({total_elapsed}s total, exit={result.returncode})", flush=True)
+    returncode = result.returncode
+    stderr = result.stderr
+    if archive_report is not None and archive_report.get("archived") is not True:
+        returncode = returncode or 70
+        archive_error = str(archive_report.get("fallbackReason") or archive_report.get("reason") or "unknown")
+        stderr = "\n".join(
+            part for part in (stderr, f"Oracle conversation archive verification failed: {archive_error}") if part
+        )
+    print(f"oracle strategy done... ({total_elapsed}s total, exit={returncode})", flush=True)
     transcript_text = transcript_path.read_text(encoding="utf-8", errors="ignore") if transcript_path.exists() else ""
     stdout_text = transcript_text.strip() or result.stdout.strip()
     if not transcript_text:
@@ -360,9 +368,9 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     return StrategyResult(
         transcript_path=transcript_path,
         last_message_path=last_message_path,
-        returncode=result.returncode,
+        returncode=returncode,
         stdout=stdout_text,
-        stderr=result.stderr,
+        stderr=stderr,
         sandbox_policy_mode="external",
         engine="oracle",
     )
@@ -375,10 +383,10 @@ def _resolve_strategy_engine(engine: str | None) -> str:
 def resolve_strategy_engine(engine: str | None = None) -> str:
     requested = (engine or os.environ.get("KAGGLEBOT_STRATEGY_ENGINE") or "auto").strip().lower()
     if requested == "auto":
-        return "oracle" if _oracle_available() else "codex"
+        return "oracle"
     if requested in {"oracle", "codex"}:
         return requested
-    return "codex"
+    raise ValueError(f"Unsupported strategy engine: {requested}")
 
 
 def _oracle_command() -> list[str]:
@@ -408,13 +416,13 @@ def _oracle_wait_args(extra_args: list[str]) -> list[str]:
     return ["--wait"]
 
 
-def _oracle_strategy_timeout() -> float:
+def _oracle_strategy_timeout() -> float | None:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return float(os.environ.get("KAGGLEBOT_PYTEST_STRATEGY_TIMEOUT_SEC", str(_PYTEST_TIMEOUT_SEC)))
     raw = os.environ.get("KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC")
     if raw is None:
-        raw = os.environ.get("KAGGLEBOT_STRATEGY_TIMEOUT_SEC", str(_DEFAULT_ORACLE_TIMEOUT_SEC))
-    return float(raw)
+        raw = os.environ.get("KAGGLEBOT_STRATEGY_TIMEOUT_SEC")
+    return None if raw is None or not raw.strip() else float(raw)
 
 
 def _oracle_force_args(extra_args: list[str]) -> list[str]:
@@ -539,14 +547,14 @@ def _ensure_oracle_conversation_archived(
     output_dir: Path,
     browser_bootstrap: OracleBrowserBootstrap,
     extra_args: list[str],
-) -> None:
+) -> dict[str, object]:
     if _oracle_archive_mode(extra_args) == "never":
-        return
+        return {"archived": True, "mode": "never", "verification": "explicitly_disabled"}
     report_path = output_dir / "oracle_archive.json"
     status = _find_oracle_session_archive_status(transcript_path)
     if status.get("archived") is True:
         report_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return
+        return status
     conversation_url = str(status.get("conversationUrl") or "").strip()
     remote = _oracle_remote_chrome_endpoint(browser_bootstrap.args or extra_args)
     if not conversation_url or remote is None:
@@ -558,14 +566,20 @@ def _ensure_oracle_conversation_archived(
         }
     else:
         host, port = remote
-        report = {
-            **status,
-            **_archive_oracle_conversation_via_cdp(
-                conversation_url=conversation_url,
-                host=host,
-                port=port,
-            ),
-        }
+        report = dict(status)
+        for attempt in range(1, 4):
+            report = {
+                **report,
+                **_archive_oracle_conversation_via_cdp(
+                    conversation_url=conversation_url,
+                    host=host,
+                    port=port,
+                ),
+                "fallbackAttempt": attempt,
+            }
+            if report.get("archived") is True:
+                break
+            time.sleep(float(attempt))
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if report.get("archived") is True:
         print("oracle strategy: archived ChatGPT conversation", flush=True)
@@ -575,6 +589,7 @@ def _ensure_oracle_conversation_archived(
             f"({report.get('fallbackReason') or report.get('reason') or 'unknown'})",
             flush=True,
         )
+    return report
 
 
 def _oracle_archive_mode(extra_args: list[str]) -> str:
@@ -735,7 +750,20 @@ const conversationUrl = process.argv[4];
         body: JSON.stringify({is_archived: true}),
       });
       const body = await response.text();
-      return {archived: response.ok, status: response.status, response: body.slice(0, 500)};
+      if (!response.ok) {
+        return {archived: false, status: response.status, response: body.slice(0, 500)};
+      }
+      const verifyResponse = await fetch('/backend-api/conversation/${conversationId}', {
+        credentials: 'include',
+        headers: {'authorization': 'Bearer ' + accessToken},
+      });
+      const verified = await verifyResponse.json().catch(() => ({}));
+      return {
+        archived: verifyResponse.ok && verified && verified.is_archived === true,
+        status: response.status,
+        verificationStatus: verifyResponse.status,
+        response: body.slice(0, 500),
+      };
     })()`;
     const evaluated = await client.Runtime.evaluate({expression, awaitPromise: true, returnByValue: true});
     const value = evaluated.result && evaluated.result.value;

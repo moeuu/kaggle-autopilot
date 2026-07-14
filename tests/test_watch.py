@@ -834,7 +834,7 @@ def test_run_watch_once_passes_improved_submit_policy(monkeypatch, tmp_path: Pat
     result = run_watch_once(_config(tmp_path))
 
     assert result.status == "finished"
-    assert captured == {"submit_policy": "improved", "submit": True, "force_submit": False}
+    assert captured == {"submit_policy": "improved", "submit": True, "force_submit": True}
 
 
 def test_run_watch_once_caps_iterations_to_plan_max(monkeypatch, tmp_path: Path) -> None:

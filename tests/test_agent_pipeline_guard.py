@@ -811,3 +811,19 @@ def test_guard_rejects_external_sensitive_path_edits(tmp_path: Path) -> None:
         assert str(external_path) in str(exc)
     else:
         raise AssertionError("expected forbidden external path edit to be rejected")
+
+
+def test_auto_strategy_engine_requires_oracle() -> None:
+    config = agent_pipeline.AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=Path("."),
+        strategy_engine="auto",
+    )
+
+    assert agent_pipeline._strategy_engine_is_required(config, "oracle") is True  # noqa: SLF001

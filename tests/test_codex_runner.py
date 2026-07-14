@@ -252,3 +252,47 @@ def test_run_codex_workspace_write_mode_skips_permissive_retry(monkeypatch, tmp_
     assert result.sandbox_policy_mode == "workspace-write"
     assert result.used_sandbox_fallback is False
     assert calls["count"] == 1
+
+
+def test_run_codex_passes_profile_model_effort_and_workdir(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("implement the Oracle brief", encoding="utf-8")
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    captured: dict[str, object] = {}
+
+    class DummyProcess:
+        def __init__(self, args: list[str], **kwargs) -> None:
+            captured["args"] = args
+            captured["cwd"] = kwargs.get("cwd")
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+            self._returncode = 0
+            last_message_path = Path(args[args.index("--output-last-message") + 1])
+            last_message_path.write_text("done\n", encoding="utf-8")
+
+        def wait(self) -> int:
+            return self._returncode
+
+    monkeypatch.setattr(codex_runner, "_supported_flags", lambda: {"--full-auto"})
+    monkeypatch.setattr(codex_runner.subprocess, "Popen", DummyProcess)
+
+    result = codex_runner.run_codex(
+        prompt_path,
+        tmp_path / "out",
+        model="gpt-5.6-sol",
+        reasoning_effort="xhigh",
+        reasoning_profile="ultra",
+        cli_profile="sol-ultra",
+        cwd=workdir,
+    )
+
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--profile") + 1] == "sol-ultra"
+    assert args[args.index("-m") + 1] == "gpt-5.6-sol"
+    assert args[args.index("-C") + 1] == str(workdir.resolve())
+    assert 'model_reasoning_effort="xhigh"' in args
+    assert captured["cwd"] == workdir
+    assert result.reasoning_profile == "ultra"

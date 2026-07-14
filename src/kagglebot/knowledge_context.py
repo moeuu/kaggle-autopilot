@@ -68,19 +68,19 @@ def refresh_knowledge_hints(*, paths: CompetitionPaths, knowledge_paths: Knowled
     try:
         problem_types = resolve_problem_types_from_profile(dataset_profile_path=paths.dataset_profile_path)
         skills = search_skills(knowledge_paths=knowledge_paths, problem_types=problem_types, limit=5)
-        write_json_array(
-            paths.context_dir / "relevant_skills.json",
-            [
-                {
-                    "skill_id": item.get("skill_id"),
-                    "status": item.get("status"),
-                    "fitness_score": item.get("fitness_score"),
-                    "summary": item.get("summary"),
-                }
-                for item in skills
-            ],
-            sort_keys=True,
-        )
+        suggestions = [
+            {
+                "skill_id": item.get("skill_id"),
+                "lifecycle": "suggested",
+                "status": item.get("status"),
+                "fitness_score": item.get("fitness_score"),
+                "summary": item.get("summary"),
+            }
+            for item in skills
+        ]
+        write_json_array(paths.context_dir / "suggested_skills.json", suggestions, sort_keys=True)
+        # Compatibility artifact for older readers. Outcome attribution never reads this file.
+        write_json_array(paths.context_dir / "relevant_skills.json", suggestions, sort_keys=True)
         lines.extend(["", "## Reusable Skills"])
         lines.append(format_skills_for_prompt(skills, limit=5))
     except Exception as exc:  # noqa: BLE001

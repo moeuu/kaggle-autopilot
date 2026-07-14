@@ -11,6 +11,7 @@ from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.writeup import (
     build_writeup_bundle,
+    extract_writeup_constraints,
     infer_code_competition_from_paths,
     infer_deliverable_mode,
     infer_deliverable_mode_from_paths,
@@ -199,8 +200,23 @@ def test_build_writeup_bundle_creates_report_and_metadata(tmp_path: Path) -> Non
     assert report_path.exists()
     assert metadata_path.exists()
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert payload["status"] == "manual_finalization_required"
+    assert payload["status"] == "ready_for_submit"
+    assert payload["validation"]["valid"] is True
+    assert payload["content_sha256"]
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence["proxy_metric"] == "accuracy"
     assert evidence["proxy_value"] == 0.91
-    assert "Clinical Relevance" in report_path.read_text(encoding="utf-8")
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Clinical Relevance" in report_text
+    assert "Use this section to" not in report_text
+
+
+def test_extract_writeup_constraints_and_block_short_report(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.overview_md_path.write_text(
+        "The formal Kaggle Writeup should be between 1,500 and 4,000 words.",
+        encoding="utf-8",
+    )
+
+    assert extract_writeup_constraints(paths) == {"min_words": 1500, "max_words": 4000}

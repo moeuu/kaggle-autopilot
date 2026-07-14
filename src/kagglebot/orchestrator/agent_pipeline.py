@@ -15,7 +15,7 @@ from kagglebot.agents.identity import (
     prompt_identity_mapping,
     render_prompt_identity,
 )
-from kagglebot.agents.strategy_runner import run_strategy
+from kagglebot.agents.strategy_runner import resolve_strategy_engine, run_strategy
 from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.compression_suffixes import write_compressed_bytes
 from kagglebot.exceptions import KaggleBotError
@@ -1350,7 +1350,7 @@ def _should_use_fallback_strategy(stdout: str, stderr: str) -> bool:
 
 
 def _strategy_engine_is_required(config: AgentPipelineConfig, engine: str) -> bool:
-    return config.strategy_engine.strip().lower() == engine
+    return resolve_strategy_engine(config.strategy_engine) == engine
 
 
 def _format_fallback_transcript(error_text: str) -> str:

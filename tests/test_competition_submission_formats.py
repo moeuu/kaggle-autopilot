@@ -297,6 +297,139 @@ def test_crawl_competition_submission_format_prefers_code_runtime_over_writeup_w
     assert record.artifact_class == "notebook_output"
 
 
+def test_crawl_competition_submission_format_prefers_explicit_csv_over_rubric_writeup_wording() -> None:
+    listing = CompetitionListing(
+        slug="csv-with-writeup",
+        title="CSV With Writeup",
+        url="https://www.kaggle.com/competitions/csv-with-writeup",
+        description="",
+        category="Community",
+        reward="$1,000",
+        evaluation_metric="dice",
+        team_count=10,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Evaluation</h2><p>Technical quality is reviewed under the judging rubric.</p>
+      <h2>Submission File</h2>
+      <p>Upload one submission.csv with columns id,prediction.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/csv-with-writeup/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.artifact_class == "tabular"
+    assert record.detected_extensions == [".csv"]
+
+
+def test_crawl_competition_submission_format_prefers_file_over_supplemental_required_writeup() -> None:
+    listing = CompetitionListing(
+        slug="file-plus-winner-writeup",
+        title="File Plus Winner Writeup",
+        url="https://www.kaggle.com/competitions/file-plus-winner-writeup",
+        description="",
+        category="Featured",
+        reward="$1,000",
+        evaluation_metric="score",
+        team_count=10,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission File</h2><p>Upload predictions.csv with columns id,prediction.</p>
+      <h2>Prizes</h2><p>Prize winners must submit a solution writeup after the competition.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/file-plus-winner-writeup/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.detected_extensions == [".csv"]
+
+
+def test_crawl_competition_submission_format_keeps_required_writeup_with_attachment() -> None:
+    listing = CompetitionListing(
+        slug="writeup-with-zip",
+        title="Writeup With Zip",
+        url="https://www.kaggle.com/competitions/writeup-with-zip",
+        description="",
+        category="Community",
+        reward="$1,000",
+        evaluation_metric="",
+        team_count=10,
+        max_daily_submissions=1,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Requirements</h2>
+      <p>A Kaggle Writeup is required to be eligible. Attach submission.zip to the Writeup.</p>
+      <p>To create a new Writeup, click New Writeup. After you save your Writeup, click Submit.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/writeup-with-zip/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "writeup_submission"
+    assert record.artifact_class == "writeup"
+
+
+def test_crawl_competition_submission_format_prefers_executable_notebook_over_output_suffix() -> None:
+    listing = CompetitionListing(
+        slug="executable-reconstruction",
+        title="Executable Reconstruction",
+        url="https://www.kaggle.com/competitions/executable-reconstruction",
+        description="",
+        category="Community",
+        reward="$1,000",
+        evaluation_metric="",
+        team_count=10,
+        max_daily_submissions=1,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Submission Requirements</h2>
+      <p>Participants must submit an executable reconstruction algorithm, not a dataset.</p>
+      <p>Each submission must be a Kaggle Notebook or script that runs end-to-end.</p>
+      <p>The notebook writes reconstruction.npy during evaluation.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/executable-reconstruction/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "notebook_output_submission"
+    assert record.required_artifact == "Kaggle notebook submission"
+
+
 def test_crawl_competition_submission_format_parses_zstd_csv_submission() -> None:
     listing = CompetitionListing(
         slug="demo-zstd",

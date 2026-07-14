@@ -278,27 +278,16 @@ def test_run_strategy_defaults_to_auto_and_uses_oracle_when_available(monkeypatc
     assert (tmp_path / "strategy_last_message.txt").read_text(encoding="utf-8") == "oracle strategy output\n"
 
 
-def test_run_strategy_auto_falls_back_to_codex_when_oracle_unavailable(monkeypatch, tmp_path: Path) -> None:
+def test_run_strategy_auto_requires_oracle_when_oracle_unavailable(monkeypatch, tmp_path: Path) -> None:
     prompt_path = tmp_path / "prompt.md"
     prompt_path.write_text("strategy prompt", encoding="utf-8")
-    captured_args: list[str] = []
-
-    def fake_run_command(args: list[str], **kwargs) -> CommandResult:  # noqa: ARG001
-        nonlocal captured_args
-        captured_args = args
-        last_message_path = Path(args[args.index("--output-last-message") + 1])
-        last_message_path.write_text("codex strategy output\n", encoding="utf-8")
-        return CommandResult(args=args, returncode=0, stdout="full transcript\n", stderr="", duration_sec=0.01)
-
-    monkeypatch.setattr(strategy_runner, "_oracle_available", lambda: False)
-    monkeypatch.setattr(strategy_runner, "_supported_flags", lambda: {"--full-auto"})
-    monkeypatch.setattr(strategy_runner, "run_command", fake_run_command)
+    monkeypatch.setattr(strategy_runner, "_oracle_command", lambda: [])
 
     result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="auto")
 
-    assert result.engine == "codex"
-    assert captured_args[0] == "codex"
-    assert result.stdout == "codex strategy output"
+    assert result.engine == "oracle"
+    assert result.returncode == 127
+    assert "unavailable" in result.stderr.lower()
 
 
 def test_run_strategy_oracle_uses_configured_command_and_args(monkeypatch, tmp_path: Path) -> None:
@@ -355,7 +344,7 @@ def test_run_strategy_oracle_uses_long_default_timeout_outside_pytest(monkeypatc
     result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="oracle")
 
     assert result.engine == "oracle"
-    assert captured_timeout == 3900.0
+    assert captured_timeout is None
 
 
 def test_run_strategy_oracle_timeout_override_wins_over_global_timeout(monkeypatch, tmp_path: Path) -> None:
@@ -448,7 +437,7 @@ def test_oracle_browser_bootstrap_reuses_ready_remote_chrome(monkeypatch) -> Non
         "--browser-input-timeout",
         "600s",
         "--browser-timeout",
-        "60m",
+        "24h",
         "--browser-archive",
         "always",
     ]
@@ -471,7 +460,7 @@ def test_oracle_browser_bootstrap_keeps_explicit_model_strategy(monkeypatch) -> 
         "--browser-input-timeout",
         "600s",
         "--browser-timeout",
-        "60m",
+        "24h",
         "--browser-archive",
         "always",
     ]
@@ -706,3 +695,38 @@ def test_archive_oracle_conversation_via_cdp_parses_success(monkeypatch, tmp_pat
 
     assert report["archived"] is True
     assert report["fallbackAttempted"] is True
+
+
+def test_run_strategy_blocks_successful_oracle_output_when_archive_is_unverified(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=["--remote-chrome", "127.0.0.1:9222"]),
+    )
+    monkeypatch.setattr(
+        strategy_runner,
+        "run_command",
+        lambda args, **kwargs: CommandResult(
+            args=args,
+            returncode=0,
+            stdout="Oracle response",
+            stderr="",
+            duration_sec=0.01,
+        ),
+    )
+    monkeypatch.setattr(
+        strategy_runner,
+        "_ensure_oracle_conversation_archived",
+        lambda **kwargs: {"archived": False, "fallbackReason": "verification-failed"},
+    )
+
+    result = strategy_runner.run_strategy(prompt_path, tmp_path, engine="oracle")
+
+    assert result.stdout == "Oracle response"
+    assert result.returncode == 70
+    assert "archive verification failed" in result.stderr.lower()

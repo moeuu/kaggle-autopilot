@@ -58,10 +58,10 @@ be supplied with `KAGGLEBOT_ORACLE_ARGS`, such as `--browser-manual-login`. Kagg
 set `KAGGLEBOT_ORACLE_ENGINE=api` or `KAGGLEBOT_ORACLE_ENGINE=auto` to override that default.
 Global `--dry-run` skips both model calls, writes a deterministic preview plan, resolves the run configuration and
 guardrails, then stops before kernel preflight, training, evaluation, and submission.
-Oracle strategy calls have a longer default outer timeout than Codex strategy calls (`3900` seconds) because GPT Pro
-browser runs with large context bundles can take many minutes. Oracle's browser wait defaults to 60 minutes, and the
-outer timeout has a small buffer so Oracle can finish writing its result before Kagglebot falls back. Use
-`KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC` to tune this without shortening or lengthening the Codex strategy runner.
+Oracle strategy calls have no outer timeout by default. Large context bundles may take many minutes, and Kagglebot
+waits for the real Oracle response instead of replacing it with a local strategy. Oracle's browser wait defaults to
+24 hours. Set `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC` only when an operator explicitly wants a hard failure; a timeout
+blocks the Codex implementation and never triggers a Codex-to-Codex fallback.
 
 When browser Oracle is selected and no explicit browser route is configured, Kagglebot bootstraps Chrome automatically
 and appends `--remote-chrome 127.0.0.1:<port>` to the Oracle call. This lets SSH/TTY autopilot loops run without the
@@ -88,7 +88,7 @@ Useful overrides:
   chips even though the model receives the content.
 - `KAGGLEBOT_ORACLE_BROWSER_ATTACHMENTS=never|auto|always` controls browser file delivery for auto-bootstrapped remote
   Chrome when `--file` attachments are enabled.
-- `KAGGLEBOT_ORACLE_BROWSER_INPUT_TIMEOUT=600s` and `KAGGLEBOT_ORACLE_BROWSER_TIMEOUT=60m` tune Oracle's browser input
+- `KAGGLEBOT_ORACLE_BROWSER_INPUT_TIMEOUT=600s` and `KAGGLEBOT_ORACLE_BROWSER_TIMEOUT=24h` tune Oracle's browser input
   and overall browser waits for slower remote Chrome sessions and long GPT Pro answers.
 - `KAGGLEBOT_ORACLE_BROWSER_HEADLESS=0` refuses the headless fallback when ChatGPT/Cloudflare requires a real display.
 - `KAGGLEBOT_ORACLE_FORCE=0` disables Kagglebot's default Oracle `--force`. The default is on so a stale timed-out
@@ -147,6 +147,9 @@ Submission behavior:
   operator or rule limits. Bug-like stagnation is controlled separately through repeated-error fingerprints,
   no-improvement patience, and same-config loop guards.
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
+- writeup runs produce a validated, content-hashed report without placeholder instructions; when submission is enabled,
+  global `--force` is present, and participation/rules checks pass, the final writeup is saved and submitted through an
+  authenticated Kaggle browser session. Started, submitted, and ambiguous content hashes are never retried automatically.
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test`/`sample_submission` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test artifact in a wrapper kernel
 - static wrapper submit kernels fail fast for detected code competitions when the embedded artifact has only tiny public-test rows, preventing accidental 3-row notebook submissions; the row-count guard recognizes compressed and zip-wrapped single-table binary artifacts such as Parquet
@@ -334,20 +337,23 @@ instead of being filtered out at selection time; complex simulation/reasoning/op
 training-time estimates so lightweight sidecars can still make capacity-aware choices.
 
 `watch` also runs a periodic self-improvement loop. The loop scans recent runs, submission outcomes, top1 gaps,
-diagnostics, submit failures, and the reusable skills injected into each run under `artifacts/`. It writes
+diagnostics, submit failures, and explicitly applied reusable skills under `artifacts/`. It writes
 `_self_improvement/latest.json`, `latest.md`, `strategy_context.md`, `experiment_backlog.json`,
 `skill_candidates.json`, and normalized `outcomes.jsonl`, then asks the Oracle/GPT strategy adviser for the highest
-value improvement brief and calls Codex to implement it when the git worktree is clean. That improvement may include
+value improvement brief and calls Codex to implement it only after the repository is clean, committed, pushed to its
+configured upstream, and bound to an exact repository URL and commit SHA. Oracle must echo that baseline in a validated
+JSON plan; the baseline is revalidated before the `sol-ultra` Codex profile runs. That improvement may include
 architectural changes to planner, runner, evaluation, strategy, knowledge, model-search, or self-improvement boundaries
 when the report shows the current architecture is blocking leaderboard progress.
 
 The loop also consolidates reusable knowledge: raw report and lesson events go into `knowledge/kb.sqlite`, failure
 lessons are searchable through the FTS-backed event store, skill candidates are written to `knowledge/skills/*.md`,
-and observed skill outcomes update skill fitness in `skill_evaluations`. The generated strategy context is injected
+and only skills recorded as `implemented` or `verified` in `applied_knowledge.json` update fitness in
+`skill_evaluations`. Suggested skills remain separate and cannot receive outcome credit. The generated strategy context is injected
 into future bootstrap/planning prompts and live `knowledge_hints.txt`; generated playbooks are written under
 `knowledge/playbooks/`. Use `--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to
 write reports without invoking the Oracle/Codex implementation step. `--self-improvement-publish` additionally
-verifies, commits, and pushes repo changes after success; it is off by default and still requires global `--force`.
+verifies, commits, and pushes repo changes after success; it is enabled by default in `watch` and still requires global `--force`.
 Manual runs are available through `kagglebot self-improve [--publish]`.
 
 ## Artifacts

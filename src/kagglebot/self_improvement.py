@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kagglebot.agents.codex_runner import run_codex
-from kagglebot.agents.identity import IMPLEMENTATION_AGENT
+from kagglebot.agents.identity import REPOSITORY_IMPLEMENTATION_AGENT
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exec_utils import run_command
 from kagglebot.json_utils import (
@@ -22,6 +22,18 @@ from kagglebot.json_utils import (
 from kagglebot.knowledge.event_store import record_agent_event, record_run_lesson
 from kagglebot.knowledge.skill_registry import record_skill_evaluation, upsert_skill
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.repository_transaction import (
+    RepositoryBaseline,
+    RepositoryTransactionError,
+    RepositoryTransactionLockedError,
+    append_transaction_event,
+    baseline_payload,
+    repository_transaction_lock,
+    revalidate_repository_baseline,
+    validate_repository_oracle_response,
+    verify_clean_pushed_repository,
+    write_transaction_state,
+)
 from kagglebot.scalar_utils import parse_finite_float as _to_float
 from kagglebot.score_utils import best_score as _best_score
 from kagglebot.score_utils import score_gap as _score_delta
@@ -78,6 +90,10 @@ class SelfImprovementConfig:
         return self.output_dir / "skill_candidates.json"
 
     @property
+    def scheduler_state_path(self) -> Path:
+        return self.output_dir / "scheduler.json"
+
+    @property
     def codex_dir(self) -> Path:
         return self.output_dir / "codex"
 
@@ -120,6 +136,7 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
         write_json_object(config.latest_json_path, report, sort_keys=True)
         config.latest_markdown_path.write_text(_render_markdown(report), encoding="utf-8")
     append_jsonl_record(config.reports_jsonl_path, report, sort_keys=True)
+    _record_self_improvement_schedule(config=config, codex_result=codex_result)
     return {
         "status": "written",
         "report_path": str(config.latest_json_path),
@@ -156,12 +173,67 @@ def _maybe_run_codex_improvement(
 ) -> dict[str, object] | None:
     if not config.invoke_codex:
         return {"status": "disabled"}
+    try:
+        with repository_transaction_lock(config.output_dir / "transaction.lock"):
+            return _run_codex_improvement_transaction(config=config, report=report)
+    except RepositoryTransactionLockedError as exc:
+        return {"status": "skipped_transaction_locked", "reason": str(exc)}
+
+
+def _run_codex_improvement_transaction(
+    *,
+    config: SelfImprovementConfig,
+    report: dict[str, object],
+) -> dict[str, object]:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    output_dir = config.codex_dir / timestamp
+    output_dir = config.output_dir / "transactions" / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
+    state_path = output_dir / "transaction.json"
+    events_path = output_dir / "events.jsonl"
+    append_transaction_event(events_path, state="lock_acquired")
+
+    publish_pending: dict[str, object] | None = None
+    if _git_dirty(config.knowledge_paths.workdir):
+        if not config.publish_codex_changes:
+            return {
+                "status": "blocked_dirty",
+                "reason": "repository changes must be verified, committed, and pushed before Oracle",
+                "publish": {"status": "disabled"},
+            }
+        publish_pending = _publish_codex_changes(
+            config=config,
+            codex_returncode=0,
+            commit_message="Publish pending autopilot changes before self-improvement",
+        )
+        if publish_pending.get("status") not in {"pushed", "skipped_no_changes"}:
+            return {"status": "baseline_publish_failed", "publish": publish_pending}
+    try:
+        baseline = verify_clean_pushed_repository(config.knowledge_paths.workdir)
+    except RepositoryTransactionError as exc:
+        return {
+            "status": "baseline_verification_failed",
+            "reason": str(exc),
+            "publish": publish_pending or {"status": "skipped_clean"},
+        }
+    transaction_state: dict[str, object] = {
+        "schema_version": 1,
+        "transaction_id": timestamp,
+        "state": "baseline_verified",
+        "baseline": baseline_payload(baseline),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    write_transaction_state(state_path, transaction_state)
+    append_transaction_event(events_path, state="baseline_verified", baseline_sha=baseline.head_sha)
+
     strategy_dir = output_dir / "strategy"
     strategy_prompt_path = output_dir / "strategy_prompt.md"
-    strategy_prompt_path.write_text(_build_strategy_prompt(config=config, report=report), encoding="utf-8")
+    strategy_prompt_path.write_text(
+        _build_strategy_prompt(config=config, report=report, baseline=baseline),
+        encoding="utf-8",
+    )
+    transaction_state["state"] = "oracle_running"
+    write_transaction_state(state_path, transaction_state)
+    append_transaction_event(events_path, state="oracle_running")
     strategy_result = run_strategy(
         strategy_prompt_path,
         strategy_dir,
@@ -170,8 +242,11 @@ def _maybe_run_codex_improvement(
     )
     strategy_text = strategy_result.stdout.strip()
     if strategy_result.returncode != 0 or not strategy_text:
+        transaction_state["state"] = "oracle_failed"
+        write_transaction_state(state_path, transaction_state)
+        append_transaction_event(events_path, state="oracle_failed", returncode=strategy_result.returncode)
         return {
-            "status": "strategy_failed",
+            "status": "oracle_failed",
             "returncode": strategy_result.returncode,
             "strategy_engine": strategy_result.engine,
             "strategy_prompt_path": str(strategy_prompt_path),
@@ -179,53 +254,95 @@ def _maybe_run_codex_improvement(
             "strategy_last_message_path": str(strategy_result.last_message_path),
             "publish": {"status": "skipped_strategy_failed"},
         }
-    dirty = _git_dirty(config.knowledge_paths.workdir)
-    if dirty:
-        publish_pending: dict[str, object] | None = None
-        if config.publish_codex_changes:
-            publish_pending = _publish_codex_changes(
-                config=config,
-                codex_returncode=0,
-                commit_message="Publish pending autopilot changes before self-improvement",
-            )
-            dirty = _git_dirty(config.knowledge_paths.workdir)
-        if not dirty:
-            publish_pending = publish_pending or {"status": "skipped_no_changes"}
-        else:
-            return {
-                "status": "skipped_dirty_worktree",
-                "reason": "Oracle strategy completed; Codex implementation only runs from a clean git worktree.",
-                "strategy_engine": strategy_result.engine,
-                "strategy_prompt_path": str(strategy_prompt_path),
-                "strategy_transcript_path": str(strategy_result.transcript_path),
-                "strategy_last_message_path": str(strategy_result.last_message_path),
-                "publish": publish_pending or {"status": "skipped_dirty_worktree"},
-            }
+    oracle_response_path = output_dir / "oracle_response.md"
+    oracle_response_path.write_text(strategy_text + "\n", encoding="utf-8")
+    try:
+        oracle_plan = validate_repository_oracle_response(strategy_text, baseline)
+        revalidate_repository_baseline(baseline)
+    except RepositoryTransactionError as exc:
+        transaction_state["state"] = "oracle_invalid"
+        transaction_state["reason"] = str(exc)
+        write_transaction_state(state_path, transaction_state)
+        append_transaction_event(events_path, state="oracle_invalid", reason=str(exc))
+        return {
+            "status": "oracle_invalid",
+            "reason": str(exc),
+            "strategy_engine": strategy_result.engine,
+            "strategy_prompt_path": str(strategy_prompt_path),
+            "strategy_transcript_path": str(strategy_result.transcript_path),
+            "strategy_last_message_path": str(strategy_result.last_message_path),
+            "oracle_response_path": str(oracle_response_path),
+            "publish": {"status": "skipped_oracle_invalid"},
+        }
+    oracle_plan_path = output_dir / "oracle_plan.json"
+    write_json_object(oracle_plan_path, oracle_plan, sort_keys=True)
+    transaction_state["state"] = "oracle_succeeded"
+    transaction_state["oracle_plan_path"] = str(oracle_plan_path)
+    write_transaction_state(state_path, transaction_state)
+    append_transaction_event(events_path, state="oracle_succeeded")
 
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(
-        _build_codex_prompt(config=config, report=report, strategy_text=strategy_text),
+        _build_codex_prompt(
+            config=config,
+            report=report,
+            strategy_text=strategy_text,
+            oracle_plan=oracle_plan,
+            baseline=baseline,
+        ),
         encoding="utf-8",
+    )
+    transaction_state["state"] = "codex_running"
+    write_transaction_state(state_path, transaction_state)
+    append_transaction_event(
+        events_path,
+        state="codex_running",
+        profile=REPOSITORY_IMPLEMENTATION_AGENT.cli_profile,
+        reasoning_profile=REPOSITORY_IMPLEMENTATION_AGENT.reasoning_profile,
     )
     result = run_codex(
         prompt_path,
         output_dir,
         dry_run=config.dry_run,
         heartbeat_label="self-improvement",
-        model=IMPLEMENTATION_AGENT.model,
-        reasoning_effort=IMPLEMENTATION_AGENT.reasoning_effort,
+        model=REPOSITORY_IMPLEMENTATION_AGENT.model,
+        reasoning_effort=REPOSITORY_IMPLEMENTATION_AGENT.reasoning_effort,
+        reasoning_profile=REPOSITORY_IMPLEMENTATION_AGENT.reasoning_profile,
+        cli_profile=REPOSITORY_IMPLEMENTATION_AGENT.cli_profile,
+        cwd=baseline.workdir,
     )
     publish_result = _maybe_publish_codex_changes(config=config, codex_returncode=result.returncode)
+    if result.returncode != 0:
+        final_status = "codex_failed"
+    elif config.publish_codex_changes and publish_result.get("status") not in {"pushed", "skipped_no_changes"}:
+        final_status = "publish_failed"
+    else:
+        final_status = "completed"
+    transaction_state["state"] = final_status
+    transaction_state["implementation_profile"] = {
+        "model": REPOSITORY_IMPLEMENTATION_AGENT.model,
+        "reasoning_effort": REPOSITORY_IMPLEMENTATION_AGENT.reasoning_effort,
+        "reasoning_profile": REPOSITORY_IMPLEMENTATION_AGENT.reasoning_profile,
+        "cli_profile": REPOSITORY_IMPLEMENTATION_AGENT.cli_profile,
+    }
+    transaction_state["publish"] = publish_result
+    write_transaction_state(state_path, transaction_state)
+    append_transaction_event(events_path, state=str(transaction_state["state"]), returncode=result.returncode)
     return {
-        "status": "completed" if result.returncode == 0 else "failed",
+        "status": final_status,
         "returncode": result.returncode,
         "strategy_engine": strategy_result.engine,
         "strategy_prompt_path": str(strategy_prompt_path),
         "strategy_transcript_path": str(strategy_result.transcript_path),
         "strategy_last_message_path": str(strategy_result.last_message_path),
+        "oracle_response_path": str(oracle_response_path),
+        "oracle_plan_path": str(oracle_plan_path),
         "prompt_path": str(prompt_path),
         "transcript_path": str(result.transcript_path),
         "last_message_path": str(result.last_message_path),
+        "implementation_profile": transaction_state["implementation_profile"],
+        "baseline": baseline_payload(baseline),
+        "transaction_state_path": str(state_path),
         "publish": publish_result,
     }
 
@@ -234,7 +351,12 @@ def _self_improvement_strategy_engine() -> str:
     return "oracle"
 
 
-def _build_strategy_prompt(*, config: SelfImprovementConfig, report: dict[str, object]) -> str:
+def _build_strategy_prompt(
+    *,
+    config: SelfImprovementConfig,
+    report: dict[str, object],
+    baseline: RepositoryBaseline,
+) -> str:
     actions = report.get("recommended_actions")
     actions_text = json.dumps(actions if isinstance(actions, list) else [], indent=2, sort_keys=True)
     architecture_policy = (
@@ -250,6 +372,9 @@ def _build_strategy_prompt(*, config: SelfImprovementConfig, report: dict[str, o
 
 You are the strategy adviser for this repository. Do not edit files. Produce the implementation brief that Codex will
 execute next.
+
+Immutable repository baseline:
+{baseline.prompt_header()}
 
 Goal: improve Kagglebot's ability to reach first-place Kaggle leaderboard performance by addressing the
 highest-signal root cause from the latest self-improvement report.
@@ -278,28 +403,50 @@ Recommended actions:
 {actions_text}
 ```
 
-Return exactly this structure:
+Return exactly these delimiter sections. Echo the exact repository URL and baseline SHA in the JSON plan.
 
-## Decision
+===DECISION===
 The single highest-value improvement to implement.
 
-## Evidence
+===EVIDENCE===
 Why this is the right fix, tied to the report/backlog.
 
-## Codex Implementation Brief
-Concrete files, behavior changes, and tests Codex should implement.
+===REPO_IMPROVEMENT_PLAN_JSON===
+```json
+{{
+  "schema_version": 1,
+  "repository_url": "{baseline.repository_url}",
+  "baseline_sha": "{baseline.head_sha}",
+  "proposed_files": ["concrete/path.py"],
+  "acceptance_tests": ["uv run pytest -q tests/test_relevant.py"],
+  "prohibited_side_effects": ["Kaggle submission", "rule acceptance", "joining competitions"],
+  "rollback_strategy": "Revert the controller-owned implementation commit."
+}}
+```
 
-## Guardrails
-Risks and constraints Codex must preserve.
+===GUARDRAILS===
+Risks, compatibility notes, and constraints Codex must preserve.
 """
 
 
-def _build_codex_prompt(*, config: SelfImprovementConfig, report: dict[str, object], strategy_text: str) -> str:
+def _build_codex_prompt(
+    *,
+    config: SelfImprovementConfig,
+    report: dict[str, object],
+    strategy_text: str,
+    oracle_plan: dict[str, object],
+    baseline: RepositoryBaseline,
+) -> str:
     actions = report.get("recommended_actions")
     actions_text = json.dumps(actions if isinstance(actions, list) else [], indent=2, sort_keys=True)
     return f"""# Kagglebot Self-Improvement Implementation
 
 You are the implementation agent for this repository.
+
+Implementation profile: `{REPOSITORY_IMPLEMENTATION_AGENT.cli_profile}`
+Semantic reasoning profile: `{REPOSITORY_IMPLEMENTATION_AGENT.reasoning_profile}`
+Repository URL: {baseline.repository_url}
+Oracle-reviewed baseline SHA: {baseline.head_sha}
 
 Goal: implement the Oracle/strategy-adviser brief below to improve Kagglebot's ability to reach first-place Kaggle
 leaderboard performance.
@@ -325,6 +472,12 @@ Recommended actions:
 ## Oracle Strategy Brief
 
 {strategy_text.strip()}
+
+## Validated Oracle Plan
+
+```json
+{json.dumps(oracle_plan, indent=2, sort_keys=True)}
+```
 
 Implement the brief at the right architectural level. Keep the diff reviewable, update focused tests/docs when behavior
 changes, and leave a concise summary in your final message.
@@ -354,6 +507,10 @@ def _publish_codex_changes(
     workdir = config.knowledge_paths.workdir
     if not _git_dirty(workdir):
         return {"status": "skipped_no_changes"}
+    upstream = _git_upstream(workdir)
+    if upstream is None:
+        return {"status": "missing_upstream"}
+    remote, branch = upstream
 
     verification: list[dict[str, object]] = []
     for command in config.publish_verify_commands:
@@ -404,7 +561,7 @@ def _publish_codex_changes(
             "stdout": commit_result.stdout,
             "verification": verification,
         }
-    push_result = run_command(["git", "push", "origin", "HEAD"], cwd=workdir, stream_output=True)
+    push_result = run_command(["git", "push", remote, f"HEAD:{branch}"], cwd=workdir, stream_output=True)
     if push_result.returncode != 0:
         return {
             "status": "git_push_failed",
@@ -436,19 +593,61 @@ def _git_staged_changes(workdir: Path) -> bool:
     return result.returncode == 1
 
 
+def _git_upstream(workdir: Path) -> tuple[str, str] | None:
+    try:
+        result = run_command(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd=workdir,
+        )
+    except (OSError, RuntimeError):
+        return None
+    upstream = result.stdout.strip()
+    remote, separator, branch = upstream.partition("/")
+    if result.returncode != 0 or not separator or not remote or not branch:
+        return None
+    return remote, branch
+
+
 def _self_improvement_due(config: SelfImprovementConfig) -> bool:
     if config.force:
         return True
     if config.min_interval_hours is None or config.min_interval_hours <= 0:
         return False
-    path = config.latest_json_path
-    if not path.exists():
+    state = _read_json_object(config.scheduler_state_path)
+    if not state:
         return True
     try:
-        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-    except OSError:
+        now = datetime.now(UTC)
+        retry_at_raw = str(state.get("retry_at") or "").strip()
+        if retry_at_raw:
+            retry_at = datetime.fromisoformat(retry_at_raw.replace("Z", "+00:00"))
+            return retry_at <= now
+        completed_at_raw = str(state.get("last_completed_at") or "").strip()
+        if not completed_at_raw:
+            return True
+        completed_at = datetime.fromisoformat(completed_at_raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return True
-    return mtime + timedelta(hours=config.min_interval_hours) <= datetime.now(UTC)
+    return completed_at + timedelta(hours=config.min_interval_hours) <= now
+
+
+def _record_self_improvement_schedule(
+    *,
+    config: SelfImprovementConfig,
+    codex_result: dict[str, object] | None,
+) -> None:
+    now = datetime.now(UTC)
+    status = str((codex_result or {}).get("status") or "report_only")
+    completed = status in {"completed", "disabled"}
+    previous = _read_json_object(config.scheduler_state_path)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "last_attempt_at": now.isoformat(),
+        "last_status": status,
+        "last_completed_at": now.isoformat() if completed else previous.get("last_completed_at"),
+        "retry_at": None if completed else (now + timedelta(minutes=30)).isoformat(),
+    }
+    write_transaction_state(config.scheduler_state_path, payload)
 
 
 def _collect_recent_runs(artifacts_dir: Path, *, limit: int) -> list[dict[str, object]]:
@@ -491,7 +690,8 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
     submit_failures = _load_submit_failures(run_dir / "submit_attempts.jsonl")
     latest_diagnostics = _latest_text(run_dir, "diagnostics.md", max_chars=1800)
     failure_contexts = [_read_json_object(path) for path in sorted(run_dir.glob("iter-*/submit_failure_context.json"))]
-    used_skills = _load_relevant_skill_ids(paths.context_dir / "relevant_skills.json")
+    applied_skills = _load_applied_skills(run_dir)
+    used_skills = [str(item["skill_id"]) for item in applied_skills]
     cause_tags = _infer_cause_tags(
         status=status,
         iterations=iterations,
@@ -521,6 +721,7 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
         "submit_failure_count": len(submit_failures),
         "cause_tags": cause_tags,
         "used_skills": used_skills,
+        "applied_skills": applied_skills,
         "diagnostics_excerpt": latest_diagnostics,
     }
 
@@ -641,6 +842,7 @@ def _normalized_outcomes(runs: list[dict[str, object]]) -> list[dict[str, object
                 "campaign_outcome_count": run.get("campaign_outcome_count"),
                 "campaign_outcomes": run.get("campaign_outcomes"),
                 "used_skills": run.get("used_skills"),
+                "applied_skills": run.get("applied_skills"),
             }
         )
     return outcomes
@@ -1282,24 +1484,35 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
     return load_jsonl_records(path)
 
 
-def _load_relevant_skill_ids(path: Path) -> list[str]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, list):
-        return []
-    skill_ids: list[str] = []
+def _load_applied_skills(run_dir: Path) -> list[dict[str, object]]:
+    paths = [run_dir / "applied_knowledge.json", *sorted(run_dir.glob("iter-*/applied_knowledge.json"))]
+    applied: list[dict[str, object]] = []
     seen: set[str] = set()
-    for item in payload:
-        if not isinstance(item, dict):
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
-        skill_id = str(item.get("skill_id") or "").strip()
-        if not skill_id or skill_id in seen:
+        rows = payload if isinstance(payload, list) else payload.get("skills", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
             continue
-        seen.add(skill_id)
-        skill_ids.append(skill_id)
-    return skill_ids
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            skill_id = str(row.get("skill_id") or "").strip()
+            lifecycle = str(row.get("lifecycle") or row.get("status") or "").strip().lower()
+            if not skill_id or skill_id in seen or lifecycle not in {"implemented", "verified"}:
+                continue
+            seen.add(skill_id)
+            applied.append(
+                {
+                    "skill_id": skill_id,
+                    "lifecycle": lifecycle,
+                    "source_path": str(path),
+                    "evidence": row.get("evidence"),
+                }
+            )
+    return applied
 
 
 def _string_list(value: object) -> list[str]:

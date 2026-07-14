@@ -53,6 +53,14 @@ from kagglebot.writeup import infer_deliverable_mode
 _DEFAULT_SEARCH_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _DEFAULT_PAGE_SIZE = 20
 _SUBMISSION_NOTEBOOK_RE = re.compile(r"\b(submit|submission|upload)\b.{0,80}\b(notebook|code)\b", re.I | re.S)
+_EXECUTABLE_NOTEBOOK_SUBMISSION_RE = re.compile(
+    r"(?:"
+    r"(?:must|shall|required to)\s+submit.{0,160}\b(?:executable|notebook|script|algorithm)\b|"
+    r"(?:submission|entry)\s+must.{0,160}\b(?:kaggle\s+)?(?:notebook|script|executable)\b|"
+    r"\b(?:kaggle\s+)?notebook\s+or\s+script\b"
+    r")",
+    re.I | re.S,
+)
 _CODE_COMPETITION_RE = re.compile(r"\b(code competition|kernel submissions only|notebook submission)\b", re.I)
 _BULLET_COLUMN_RE = re.compile(r"^\s*[-*]\s*`?(?P<name>[A-Za-z0-9_. -]+?)`?\s*$")
 _SECTION_BLOCK_RE = re.compile(
@@ -87,6 +95,28 @@ _SUPPORTED_SUBMISSION_MODES = {
     "writeup_submission",
 }
 _WRITEUP_EVIDENCE_MARKERS = ("writeup", "judged", "rubric", "panel", "manual grading", "manual review")
+_REQUIRED_WRITEUP_RE = re.compile(
+    r"(?:"
+    r"(?:must|required|requires?|mandatory|need to|to be eligible).{0,100}\bwrite[ -]?ups?\b|"
+    r"\bwrite[ -]?ups?\b.{0,100}(?:must|required|mandatory|to be eligible)|"
+    r"final submission.{0,120}(?:through|as).{0,40}\bwrite[ -]?ups?\b|"
+    r"create (?:a |your )?(?:new )?write[ -]?up.{0,120}\bsubmit\b"
+    r")",
+    re.I | re.S,
+)
+_PRIMARY_WRITEUP_SUBMISSION_RE = re.compile(
+    r"(?:"
+    r"final submission.{0,120}(?:through|as).{0,40}\bwrite[ -]?ups?\b|"
+    r"(?:create|new) (?:a |your )?(?:new )?write[ -]?up.{0,160}\bsubmit\b|"
+    r"after (?:you )?save (?:your )?write[ -]?up.{0,100}\bsubmit\b|"
+    r"complete submission consists of.{0,160}\bwrite[ -]?ups?\b"
+    r")",
+    re.I | re.S,
+)
+_PRIMARY_FILE_SUBMISSION_RE = re.compile(
+    r"(?:\bsubmission file\b|\bpredictions? must be submitted as\b|\bfile should contain a header\b)",
+    re.I,
+)
 _GENERIC_BUNDLE_MARKERS = ("agent config", "agent.yaml", "system prompts", "custom tools", "skills/")
 _EXTERNAL_REPOSITORY_SUBMISSION_RE = re.compile(
     r"\bsubmit\b.{0,100}\bsource code\b.{0,180}\b(?:pull request|\bpr\b)",
@@ -478,12 +508,33 @@ def crawl_competition_submission_format(
         rules_text = html_to_text(rules_html)
         rules_section = find_submission_text_block(rules_text)
 
-    is_writeup = (
-        not listing.is_kernels_submissions_only
-        and infer_deliverable_mode(overview_text, rules_text, default="") == "writeup"
+    combined_text = "\n".join((overview_text, rules_text))
+    is_external_repository_submission = bool(_EXTERNAL_REPOSITORY_SUBMISSION_RE.search(combined_text))
+    preliminary_text = overview_section or rules_section
+    preliminary_suffixes = filter_noisy_suffixes(
+        preliminary_text,
+        normalize_suffixes(
+            extract_suffixes_from_text(preliminary_text) or infer_suffixes_from_keywords(preliminary_text)
+        ),
     )
-    is_external_repository_submission = bool(
-        _EXTERNAL_REPOSITORY_SUBMISSION_RE.search("\n".join((overview_text, rules_text)))
+    has_primary_file_or_notebook_contract = bool(
+        preliminary_suffixes
+        or _PRIMARY_FILE_SUBMISSION_RE.search(preliminary_text)
+        or _SUBMISSION_NOTEBOOK_RE.search(preliminary_text)
+        or _CODE_COMPETITION_RE.search(preliminary_text)
+    )
+    writeup_required = bool(_REQUIRED_WRITEUP_RE.search(combined_text))
+    writeup_is_primary = bool(_PRIMARY_WRITEUP_SUBMISSION_RE.search(combined_text))
+    is_writeup = bool(
+        not listing.is_kernels_submissions_only
+        and not is_external_repository_submission
+        and (
+            writeup_is_primary
+            or (
+                not has_primary_file_or_notebook_contract
+                and (writeup_required or infer_deliverable_mode(overview_text, rules_text, default="") == "writeup")
+            )
+        )
     )
     writeup_text = extract_writeup_evidence(overview_text, rules_text) if is_writeup else ""
     chosen_text = overview_section or rules_section or writeup_text
@@ -845,6 +896,8 @@ def extract_writeup_evidence(*texts: str, max_lines: int = 12) -> str:
 def infer_submission_mode(listing: CompetitionListing, text: str, suffixes: list[str]) -> str:
     if listing.is_kernels_submissions_only:
         return "code_competition_runtime_submission"
+    if _EXECUTABLE_NOTEBOOK_SUBMISSION_RE.search(text):
+        return "notebook_output_submission"
     if suffixes:
         return "direct_file_upload"
     if _SUBMISSION_NOTEBOOK_RE.search(text) or _CODE_COMPETITION_RE.search(text):
