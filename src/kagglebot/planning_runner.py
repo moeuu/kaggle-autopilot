@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from kagglebot import verify_artifacts as _verify_artifacts
-from kagglebot.agents.identity import planning_flow_summary
+from kagglebot.agents.identity import oracle_flow_token, planning_flow_summary
 from kagglebot.agents.strategy_runner import resolve_strategy_engine
 from kagglebot.campaign import normalize_campaign_mode
 from kagglebot.exec_utils import run_command
@@ -31,7 +31,7 @@ class PlanningRunConfig(Protocol):
 def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
     strategy_engine = _pipeline_strategy_engine_request()
     resolved_strategy_engine = resolve_strategy_engine(strategy_engine)
-    strategy_token = "oracle(gpt-5.5-pro)" if resolved_strategy_engine == "oracle" else None
+    strategy_token = oracle_flow_token() if resolved_strategy_engine == "oracle" else None
     flow_summary = planning_flow_summary(strategy_token=strategy_token)
     print(f"[cyan]plan[/cyan]: {flow_summary}")
     update_watch_phase(
@@ -75,7 +75,4 @@ def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
 
 
 def _pipeline_strategy_engine_request() -> str:
-    import os
-
-    requested = os.environ.get("KAGGLEBOT_STRATEGY_ENGINE", "auto").strip().lower()
-    return requested if requested in {"auto", "oracle", "codex"} else "auto"
+    return "oracle"

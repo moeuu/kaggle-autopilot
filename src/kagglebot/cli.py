@@ -9,6 +9,7 @@ import typer
 from rich import print
 
 from kagglebot.agents.codex_runner import run_codex
+from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.autopilot_state import ResumeRunResolutionError, resolve_resume_run_id
 from kagglebot.bootstrap import bootstrap_competition
@@ -18,7 +19,7 @@ from kagglebot.competition_submission_formats import crawl_submission_formats
 from kagglebot.compute import Compute, resolve_accelerator
 from kagglebot.discord_notifications import run_discord_notifier_forever, run_discord_notifier_once
 from kagglebot.eval import EvaluationAdvisor
-from kagglebot.exceptions import RulesNotAcceptedError, SubmitAbortedError
+from kagglebot.exceptions import KaggleBotError, RulesNotAcceptedError, SubmitAbortedError
 from kagglebot.experiment_graph import normalize_portfolio_execution
 from kagglebot.hardware import resolve_hardware_profile
 from kagglebot.history import new_run_id
@@ -178,8 +179,28 @@ def implement(
     run_dir.mkdir(parents=True, exist_ok=True)
     agent_dir = run_dir / "codex"
     prompt_path = paths.codex_plan_and_implement_prompt
+    strategy_dir = run_dir / "oracle"
+    strategy_prompt_path = run_dir / "oracle_implementation_prompt.md"
+    implementation_prompt = prompt_path.read_text(encoding="utf-8")
+    strategy_prompt_path.write_text(
+        "Review the implementation request below without editing files. Return a concrete implementation brief "
+        "for Codex, including risks, exact files, and tests.\n\n" + implementation_prompt,
+        encoding="utf-8",
+    )
+    strategy_result = run_strategy(strategy_prompt_path, strategy_dir, dry_run=cfg.dry_run, engine="oracle")
+    strategy_text = strategy_result.stdout.strip()
+    if not cfg.dry_run and (strategy_result.returncode != 0 or not strategy_text):
+        raise KaggleBotError("Oracle implementation strategy is required before Codex implementation.")
+    mediated_prompt_path = run_dir / "codex_implementation_prompt.md"
+    mediated_prompt_path.write_text(
+        implementation_prompt
+        + "\n\n## Oracle implementation brief\n"
+        + (strategy_text or "DRY RUN: Oracle strategy not executed.")
+        + "\n",
+        encoding="utf-8",
+    )
 
-    run_codex(prompt_path, agent_dir, dry_run=cfg.dry_run)
+    run_codex(mediated_prompt_path, agent_dir, dry_run=cfg.dry_run)
 
     run_repo_verify(verify_cmd, dry_run=cfg.dry_run, artifacts_dir=cfg.artifacts_dir)
     print(f"[green]agent logs[/green]: {agent_dir}")
@@ -1030,6 +1051,11 @@ def crawl_submission_formats_cmd(
         "--resume/--no-resume",
         help="Reuse existing raw JSONL output and skip already crawled competition slugs.",
     ),
+    entered_only: bool = typer.Option(
+        False,
+        "--entered-only/--all-competitions",
+        help="Audit only competitions joined by the authenticated Kaggle account.",
+    ),
 ) -> None:
     cfg = ctx.obj
     summary = crawl_submission_formats(
@@ -1039,8 +1065,13 @@ def crawl_submission_formats_cmd(
         max_competitions=max_competitions,
         fetch_rules_pages=fetch_rules_pages,
         resume=resume,
+        entered_only=entered_only,
     )
-    print(f"[green]crawl complete[/green]: {summary['competition_count']} competitions")
+    print(
+        "[green]crawl complete[/green]: "
+        f"{summary['competition_count']} competitions, "
+        f"{summary['review_required_count']} require review"
+    )
 
 
 @knowledge_app.command("show")

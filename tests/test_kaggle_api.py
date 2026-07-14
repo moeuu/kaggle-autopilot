@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,22 @@ from kagglebot.exceptions import KaggleCliError, KaggleCliResourceError, KernelC
 from kagglebot.exec_utils import CommandResult
 
 pytestmark = pytest.mark.slow
+
+
+def test_submission_row_from_api_preserves_format_error_description() -> None:
+    row = kaggle_api._submission_row_from_api(
+        SimpleNamespace(
+            _file_name="submission.csv",
+            _status="SubmissionStatus.COMPLETE",
+            _public_score="",
+            _private_score="",
+            _error_description="Your notebook generated a submission file with incorrect format.",
+        )
+    )
+
+    assert row["fileName"] == "submission.csv"
+    assert row["errorDescription"] == "Your notebook generated a submission file with incorrect format."
+    assert row["publicScore"] == ""
 
 
 def test_optional_datetime_normalizes_iso_values_to_utc() -> None:
@@ -116,6 +133,75 @@ def test_entered_competition_optional_int_fields_accept_integral_float_values() 
 
     assert entered.team_count == 12
     assert entered.max_daily_submissions == 5
+
+
+def test_entered_competition_normalizes_mixed_case_underscore_slug() -> None:
+    class Competition:
+        slug = "WiDSWorldWide_GlobalDathon26"
+        title = "WiDS Worldwide Global Datathon 2026"
+        url = "https://www.kaggle.com/competitions/WiDSWorldWide_GlobalDathon26"
+        category = "Community"
+        reward = "25,000 Usd"
+        evaluation_metric = ""
+        deadline = None
+        enabled_date = None
+        new_entrant_deadline = None
+        merger_deadline = None
+        team_count = 1754
+        max_daily_submissions = 5
+        is_kernels_submissions_only = False
+        submissions_disabled = False
+
+    entered = kaggle_api._entered_competition_from_api(Competition())
+
+    assert entered.slug == "widsworldwide_globaldathon26"
+
+
+def test_list_entered_competitions_dry_run_still_reads_entered_group(monkeypatch) -> None:
+    from kaggle.api import kaggle_api_extended
+
+    calls: list[dict[str, object]] = []
+
+    class FakeApi:
+        def authenticate(self) -> None:
+            calls.append({"authenticate": True})
+
+        def competitions_list(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs["page"] > 1:
+                return []
+            return [
+                type(
+                    "Competition",
+                    (),
+                    {
+                        "slug": "demo",
+                        "title": "Demo",
+                        "url": "https://www.kaggle.com/competitions/demo",
+                        "category": "Playground",
+                        "reward": "",
+                        "evaluation_metric": "auc",
+                        "deadline": None,
+                        "enabled_date": None,
+                        "new_entrant_deadline": None,
+                        "merger_deadline": None,
+                        "team_count": 10,
+                        "max_daily_submissions": 5,
+                        "is_kernels_submissions_only": False,
+                        "submissions_disabled": False,
+                    },
+                )()
+            ]
+
+    monkeypatch.setattr(kaggle_api_extended, "KaggleApi", FakeApi)
+
+    entered = kaggle_api.list_entered_competitions(page_limit=5, dry_run=True)
+
+    assert [item.slug for item in entered] == ["demo"]
+    assert calls == [
+        {"authenticate": True},
+        {"group": "entered", "page": 1, "sort_by": "latestDeadline"},
+    ]
 
 
 def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:

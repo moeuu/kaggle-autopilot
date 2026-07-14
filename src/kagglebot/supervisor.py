@@ -580,7 +580,7 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
     resource_blocked = _resource_blocked_slugs(records)
     active = _active_slugs(config)
     candidates = list_entered_competitions(page_limit=config.page_limit, dry_run=config.dry_run)
-    filtered: list[tuple[bool, bool, float, int, EnteredCompetition]] = []
+    filtered: list[tuple[tuple[int, int, int], float, bool, int, EnteredCompetition]] = []
     for index, candidate in enumerate(candidates):
         slug = candidate.slug.lower()
         if slug in active:
@@ -614,6 +614,12 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
             continue
         history = _load_submission_history(config=config, slug=candidate.slug)
         history = _enrich_submission_history_from_leaderboard(config=config, slug=candidate.slug, history=history)
+        score = (
+            _lightweight_candidate_score(candidate, history=history)
+            if config.lightweight_only
+            else _candidate_score(candidate, history=history)
+        )
+        priority_tier, priority_reason = _competition_priority_tier(candidate, history=history)
         ledger.append(
             "candidate_seen",
             slug=candidate.slug,
@@ -629,15 +635,34 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
             total_teams=history.total_teams,
             estimated_training_min=_estimate_training_minutes(candidate),
             data_size_bytes=data_size_bytes,
+            priority_tier=list(priority_tier),
+            priority_reason=priority_reason,
+            priority_score=score,
         )
-        score = (
-            _lightweight_candidate_score(candidate, history=history)
-            if config.lightweight_only
-            else _candidate_score(candidate, history=history)
+        filtered.append((priority_tier, score, history.autopilot_started, index, candidate))
+    filtered.sort(key=lambda item: (item[0], -item[1], item[2], item[3], item[4].slug))
+    return [candidate for _group, _score, _started, _index, candidate in filtered]
+
+
+def _competition_priority_tier(
+    candidate: EnteredCompetition,
+    *,
+    history: SubmissionHistory,
+) -> tuple[tuple[int, int, int], str]:
+    unsubmitted = not history.submitted
+    monetary_prize = (_reward_amount_usd(candidate.reward) or 0.0) > 0.0
+    medal_candidate = _is_medal_candidate(candidate)
+    reasons = [
+        label
+        for enabled, label in (
+            (unsubmitted, "unsubmitted"),
+            (monetary_prize, "monetary_prize"),
+            (medal_candidate, "medal_candidate"),
         )
-        filtered.append((history.autopilot_started, history.submitted, score, index, candidate))
-    filtered.sort(key=lambda item: (item[0], item[1], -item[2], item[3], item[4].slug))
-    return [candidate for _started, _submitted, _score, _index, candidate in filtered]
+        if enabled
+    ]
+    tier = (int(not unsubmitted), int(not monetary_prize), int(not medal_candidate))
+    return tier, "+".join(reasons) if reasons else "standard"
 
 
 def _prepare_competition(
@@ -919,10 +944,7 @@ def _deadline_priority_score(candidate: EnteredCompetition) -> float:
 
 
 def _is_medal_candidate(candidate: EnteredCompetition) -> bool:
-    category = candidate.category.strip().lower()
-    if category not in {"featured", "research", "community"}:
-        return False
-    if _reward_amount_usd(candidate.reward) is None:
+    if not candidate.awards_points:
         return False
     if candidate.team_count is not None and candidate.team_count < 50:
         return False
@@ -1002,7 +1024,7 @@ def _enrich_submission_history_from_leaderboard(
     slug: str,
     history: SubmissionHistory,
 ) -> SubmissionHistory:
-    if not history.submitted or history.rank_percentile is not None or history.outcome_score is None or config.dry_run:
+    if not history.submitted or history.rank_percentile is not None or history.outcome_score is None:
         return history
     paths = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir)
     direction = _load_metric_direction(paths)
@@ -1014,7 +1036,7 @@ def _enrich_submission_history_from_leaderboard(
             paths.context_dir,
             score=history.outcome_score,
             direction=direction,
-            dry_run=config.dry_run,
+            dry_run=False,
         )
     except Exception:
         return history
@@ -1188,6 +1210,7 @@ def _candidate_from_slug(slug: str) -> EnteredCompetition:
         max_daily_submissions=None,
         is_kernels_submissions_only=False,
         submissions_disabled=False,
+        awards_points=False,
         source="state",
     )
 

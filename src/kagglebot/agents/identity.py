@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
+
+_DEFAULT_MODEL = "gpt-5.6-sol"
+_DEFAULT_REASONING_EFFORT = "xhigh"
+_DEFAULT_ORACLE_MODEL = "gpt-5-pro"
 
 
 @dataclass(frozen=True)
@@ -33,13 +40,79 @@ class AgentIdentity:
         return f"{self.log_alias}({self.model})"
 
 
-PRIMARY_AGENT = AgentIdentity(
-    model=os.environ.get("KAGGLEBOT_PRIMARY_MODEL", "gpt-5.5"),
-    reasoning_effort=os.environ.get("KAGGLEBOT_PRIMARY_REASONING_EFFORT", "xhigh"),
-    cli_command=os.environ.get("KAGGLEBOT_AGENT_CLI_COMMAND", "codex"),
-    log_alias=os.environ.get("KAGGLEBOT_AGENT_LOG_ALIAS", "gpt"),
-    display_family=os.environ.get("KAGGLEBOT_AGENT_DISPLAY_FAMILY", "GPT"),
-)
+def resolve_primary_agent(
+    *,
+    config_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> AgentIdentity:
+    env = os.environ if environ is None else environ
+    settings = _load_project_agent_settings(config_path or _find_project_config())
+    return AgentIdentity(
+        model=env.get("KAGGLEBOT_PRIMARY_MODEL", settings.get("model", _DEFAULT_MODEL)),
+        reasoning_effort=env.get(
+            "KAGGLEBOT_PRIMARY_REASONING_EFFORT",
+            settings.get("reasoning_effort", _DEFAULT_REASONING_EFFORT),
+        ),
+        cli_command=env.get("KAGGLEBOT_AGENT_CLI_COMMAND", "codex"),
+        log_alias=env.get("KAGGLEBOT_AGENT_LOG_ALIAS", "gpt"),
+        display_family=env.get("KAGGLEBOT_AGENT_DISPLAY_FAMILY", "GPT"),
+    )
+
+
+def resolve_oracle_model(
+    *,
+    config_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    env = os.environ if environ is None else environ
+    settings = _load_project_agent_settings(config_path or _find_project_config())
+    configured = settings.get("oracle_model", _DEFAULT_ORACLE_MODEL)
+    return env.get("KAGGLEBOT_ORACLE_MODEL", configured).strip() or configured
+
+
+def oracle_flow_token() -> str:
+    model = resolve_oracle_model()
+    label = "latest-pro" if model == _DEFAULT_ORACLE_MODEL else model
+    return f"oracle({label})"
+
+
+def _find_project_config(start_dir: Path | None = None) -> Path | None:
+    current = (start_dir or Path.cwd()).resolve()
+    for directory in (current, *current.parents):
+        candidate = directory / "pyproject.toml"
+        if candidate.is_file():
+            return candidate
+
+    source_checkout = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    return source_checkout if source_checkout.is_file() else None
+
+
+def _load_project_agent_settings(config_path: Path | None) -> dict[str, str]:
+    if config_path is None:
+        return {}
+    try:
+        payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError(f"Unable to read agent configuration from {config_path}: {exc}") from exc
+
+    section: object = payload.get("tool", {})
+    for key in ("kagglebot", "agent"):
+        section = section.get(key, {}) if isinstance(section, dict) else {}
+    if not isinstance(section, dict):
+        return {}
+
+    settings: dict[str, str] = {}
+    for key in ("model", "reasoning_effort", "oracle_model"):
+        value = section.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"tool.kagglebot.agent.{key} must be a non-empty string in {config_path}")
+        settings[key] = value.strip()
+    return settings
+
+
+PRIMARY_AGENT = resolve_primary_agent()
 BRIEF_AGENT = PRIMARY_AGENT
 STRATEGY_AGENT = PRIMARY_AGENT
 IMPLEMENTATION_AGENT = PRIMARY_AGENT

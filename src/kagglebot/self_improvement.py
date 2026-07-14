@@ -231,7 +231,7 @@ def _maybe_run_codex_improvement(
 
 
 def _self_improvement_strategy_engine() -> str:
-    return "auto"
+    return "oracle"
 
 
 def _build_strategy_prompt(*, config: SelfImprovementConfig, report: dict[str, object]) -> str:

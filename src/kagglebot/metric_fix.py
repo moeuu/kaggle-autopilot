@@ -12,7 +12,7 @@ def run_metric_only_competition_metric_fix(
     codex_reasoning_effort: str,
     max_codex_passes: int,
 ) -> None:
-    """Apply a metric-only kernel fix using the implementation agent without strategy mediation."""
+    """Apply a metric-only kernel fix after Oracle strategy mediation."""
     policy_prefix = (
         "Metric-only repair policy:\n"
         "- Edit ONLY competition metric selection/reporting logic in kernel outputs.\n"
@@ -28,7 +28,7 @@ def run_metric_only_competition_metric_fix(
     run_kernel_fix(
         error_message=metric_fix_error,
         attempt=attempt,
-        use_gpt_strategy=False,
+        use_gpt_strategy=True,
         codex_model=codex_model,
         codex_reasoning_effort=codex_reasoning_effort,
         prompt_prefix=policy_prefix,

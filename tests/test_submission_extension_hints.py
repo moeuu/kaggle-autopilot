@@ -1465,7 +1465,7 @@ def test_signal_submission_artifact_keywords_are_registry_backed() -> None:
         SIGNAL_SUBMISSION_ARTIFACT_KEYWORDS
     )
     assert "brainvision\\s+header|vhdr(?:\\s+(?:header|file|format))?" in SIGNAL_SUBMISSION_ARTIFACT_KEYWORDS
-    assert "eeglab(?:\\s+(?:set|dataset|file|format))?|set(?:\\s+(?:eeg|file|format))?" in (
+    assert "eeglab(?:\\s+(?:set|dataset|file|format))?|set\\s+(?:eeg|file|format)" in (
         SIGNAL_SUBMISSION_ARTIFACT_KEYWORDS
     )
     assert "fif\\.gz" in SIGNAL_SUBMISSION_ARTIFACT_KEYWORDS
@@ -1634,7 +1634,7 @@ def test_model_submission_artifact_keywords_are_registry_backed() -> None:
     assert "tensorrt\\s+engine|engine(?:\\s+(?:model|file|format))?" in MODEL_SUBMISSION_ARTIFACT_KEYWORDS
     assert "rockchip\\s+rknn|rknn(?:\\s+(?:model|file|format))?" in MODEL_SUBMISSION_ARTIFACT_KEYWORDS
     assert "hailo\\s+hef|hef(?:\\s+(?:model|file|format))?" in MODEL_SUBMISSION_ARTIFACT_KEYWORDS
-    assert "torchscript|pytorch\\s+(?:model|weights?)|pt(?:\\s+(?:file|format))?" in (
+    assert "torchscript|pytorch\\s+(?:model|weights?)|pt\\s+(?:file|format)" in (
         MODEL_SUBMISSION_ARTIFACT_KEYWORDS
     )
     assert "core\\s*ml(?!\\s+(?:model\\s+)?(?:package|directory|folder|bundle))(?:\\s+model)?" in (

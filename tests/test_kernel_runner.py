@@ -212,7 +212,7 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert payload["competition_sources"] == ["demo"]
     assert payload["code_file"] == "kernel.py"
-    assert payload["enable_gpu"] is False
+    assert payload["enable_gpu"] is True
     assert payload["enable_tpu"] is False
 
 
@@ -601,7 +601,7 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
     assert "Path('/kaggle/working')" in kernel_text
     assert not (kernel_dir / "output").exists()
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
-    assert payload["enable_gpu"] is False
+    assert payload["enable_gpu"] is True
     assert payload["enable_tpu"] is False
 
 

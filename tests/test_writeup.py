@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
@@ -14,6 +15,7 @@ from kagglebot.writeup import (
     infer_deliverable_mode,
     infer_deliverable_mode_from_paths,
     infer_submit_mode_from_paths,
+    normalize_deliverable_mode,
 )
 
 
@@ -23,6 +25,24 @@ def test_infer_deliverable_mode_from_paths_detects_writeup(tmp_path: Path) -> No
     paths.rules_md_path.write_text("This hackathon is judged by a panel.\n", encoding="utf-8")
     paths.overview_md_path.write_text("Documentation and writeup quality are part of the rubric.\n", encoding="utf-8")
     assert infer_deliverable_mode_from_paths(paths) == "writeup"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Submissions to this competition must be made through Writeups.",
+        "Submit a Writeup describing your approach and supporting evidence.",
+        "Writeups will be judged according to the published criteria.",
+        "All submissions are judged based on the following rubric.",
+        "Your submission should include a Kaggle writeup documenting the agent and a link to its code.",
+    ],
+)
+def test_infer_deliverable_mode_detects_kaggle_writeups_wording(text: str) -> None:
+    assert infer_deliverable_mode(text) == "writeup"
+
+
+def test_normalize_deliverable_mode_accepts_plural_writeups() -> None:
+    assert normalize_deliverable_mode("Writeups") == "writeup"
 
 
 def test_infer_deliverable_mode_ignores_negative_writeup_mentions() -> None:

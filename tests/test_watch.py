@@ -35,6 +35,7 @@ def _competition(
     deadline: datetime | None = None,
     new_entrant_deadline: datetime | None = None,
     evaluation_metric: str = "auc",
+    awards_points: bool | None = None,
 ) -> EnteredCompetition:
     return EnteredCompetition(
         slug=slug,
@@ -51,6 +52,11 @@ def _competition(
         max_daily_submissions=5,
         is_kernels_submissions_only=False,
         submissions_disabled=submissions_disabled,
+        awards_points=(
+            awards_points
+            if awards_points is not None
+            else category.strip().lower() in {"featured", "research", "community"} and bool(reward)
+        ),
         source="test",
     )
 
@@ -187,7 +193,7 @@ def test_select_next_competition_prioritizes_never_submitted(monkeypatch, tmp_pa
     assert [item.slug for item in selected][:2] == ["never-submitted", "submitted"]
 
 
-def test_select_next_competition_prioritizes_never_submitted_before_money_prizes(
+def test_select_next_competition_uses_submission_history_before_prize_score(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -209,7 +215,61 @@ def test_select_next_competition_prioritizes_never_submitted_before_money_prizes
     assert [item.slug for item in selected][:2] == ["no-prize-never-submitted", "prize-submitted"]
 
 
-def test_select_next_competition_prioritizes_never_autopiloted_before_previous_runs(
+def test_select_next_competition_orders_prize_then_medal_then_standard_within_submission_tier(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    candidates = [
+        _competition("standard", reward="", awards_points=False),
+        _competition("medal", reward="", awards_points=True),
+        _competition("prize", reward="$5,000", awards_points=False),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+    config = _config(tmp_path)
+    for candidate in candidates:
+        ledger_path = config.artifacts_dir / candidate.slug / "submissions" / "ledger.jsonl"
+        ledger_path.parent.mkdir(parents=True)
+        ledger_path.write_text(
+            json.dumps({"event": "submit", "slug": candidate.slug, "ts": "2026-04-22T00:00:00+00:00"}) + "\n",
+            encoding="utf-8",
+        )
+
+    selected = select_next_competition(config)
+
+    assert [item.slug for item in selected][:3] == ["prize", "medal", "standard"]
+
+
+def test_select_next_competition_prioritizes_prize_and_medal_combinations_within_unsubmitted(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    candidates = [
+        _competition(
+            "standard-high-score",
+            reward="",
+            awards_points=False,
+            category="Featured",
+            deadline=now + timedelta(hours=1),
+            team_count=5000,
+        ),
+        _competition("medal-only", reward="", awards_points=True),
+        _competition("prize-only", reward="$1,000", awards_points=False),
+        _competition("prize-and-medal", reward="$1,000", awards_points=True),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+
+    selected = select_next_competition(_config(tmp_path))
+
+    assert [item.slug for item in selected] == [
+        "prize-and-medal",
+        "prize-only",
+        "medal-only",
+        "standard-high-score",
+    ]
+
+
+def test_select_next_competition_uses_score_before_autopilot_history(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -228,7 +288,35 @@ def test_select_next_competition_prioritizes_never_autopiloted_before_previous_r
 
     selected = select_next_competition(config)
 
-    assert [item.slug for item in selected][:2] == ["never-started", "prize-started"]
+    assert [item.slug for item in selected][:2] == ["prize-started", "never-started"]
+
+
+def test_select_next_competition_prioritizes_urgent_started_candidate_over_far_unstarted(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(UTC)
+    candidates = [
+        _competition(
+            "urgent-started",
+            reward="$50,000",
+            category="Research",
+            deadline=now + timedelta(days=1),
+        ),
+        _competition("far-unstarted", deadline=now + timedelta(days=90)),
+    ]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+    config = _config(tmp_path)
+    run_dir = config.artifacts_dir / "urgent-started" / "runs" / "20260422T000000Z-started"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "20260422T000000Z-started", "status": "completed"}),
+        encoding="utf-8",
+    )
+
+    selected = select_next_competition(config)
+
+    assert [item.slug for item in selected][:2] == ["urgent-started", "far-unstarted"]
 
 
 def test_select_next_competition_parses_kaggle_usd_reward_text(monkeypatch, tmp_path: Path) -> None:
@@ -436,7 +524,7 @@ def test_select_next_competition_prioritizes_submitted_competition_with_more_ran
     assert [item.slug for item in selected][:2] == ["poor-rank", "good-rank"]
 
 
-def test_select_next_competition_enriches_submitted_rank_from_leaderboard_score(
+def test_select_next_competition_dry_run_enriches_submitted_rank_from_leaderboard_score(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -455,7 +543,7 @@ def test_select_next_competition_enriches_submitted_rank_from_leaderboard_score(
         return {"rank": 80, "total_teams": 100, "rank_percentile": 0.8}
 
     monkeypatch.setattr("kagglebot.supervisor.leaderboard_rank_for_score", fake_rank_for_score)
-    config = _config(tmp_path)
+    config = _config(tmp_path, dry_run=True)
     for slug, score in (("good-rank", 0.95), ("poor-rank", 0.8)):
         context_dir = config.artifacts_dir / slug / "context"
         context_dir.mkdir(parents=True)

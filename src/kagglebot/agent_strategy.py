@@ -19,13 +19,17 @@ class StrategyPromptRunConfig:
     detail_message: str = ""
 
 
+def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool) -> StrategyResult:
+    return run_strategy(prompt_path, output_dir, dry_run=dry_run, engine="oracle")
+
+
 def run_strategy_prompt(
     *,
     prompt_text: str,
     output_dir: Path,
     dry_run: bool,
     config: StrategyPromptRunConfig,
-    run_strategy_func: Callable[[Path, Path, bool], StrategyResult] = run_strategy,
+    run_strategy_func: Callable[[Path, Path, bool], StrategyResult] = _run_oracle_strategy,
     read_response_func: Callable[[Path], str] = read_agent_response,
 ) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -52,7 +56,7 @@ def run_improvement_strategy_prompt(
     output_dir: Path,
     dry_run: bool,
     implementation_agent_alias: str,
-    run_strategy_func: Callable[[Path, Path, bool], StrategyResult] = run_strategy,
+    run_strategy_func: Callable[[Path, Path, bool], StrategyResult] = _run_oracle_strategy,
 ) -> str:
     return run_strategy_prompt(
         prompt_text=prompt_text,
@@ -83,7 +87,7 @@ def run_error_strategy_prompt(
     implementation_agent_alias: str,
     strategy_model: str,
     reasoning_effort: str,
-    run_strategy_func: Callable[[Path, Path, bool], StrategyResult] = run_strategy,
+    run_strategy_func: Callable[[Path, Path, bool], StrategyResult] = _run_oracle_strategy,
 ) -> str:
     return run_strategy_prompt(
         prompt_text=prompt_text,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import time
 import traceback
@@ -146,6 +147,13 @@ from kagglebot.writeup import build_writeup_bundle
 if TYPE_CHECKING:
     from kagglebot.paths import CompetitionPaths, KnowledgePaths
     from kagglebot.solver.evaluate import EvaluationResult
+
+
+def _run_required_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool) -> object:
+    parameters = inspect.signature(run_strategy).parameters
+    if "engine" in parameters:
+        return run_strategy(prompt_path, output_dir, dry_run=dry_run, engine="oracle")
+    return run_strategy(prompt_path, output_dir, dry_run=dry_run)
 
 
 @dataclass(frozen=True)
@@ -751,6 +759,19 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 artifacts_dir=config.paths.artifacts_dir,
                 run_command_fn=run_command,
             )
+
+            if config.dry_run:
+                _watch_state.update_watch_phase(config, run_id, "dry_run_complete", iteration=iteration)
+                _autopilot_state.apply_run_status(
+                    run_payload,
+                    status="completed",
+                    stop_reason="dry_run_preview",
+                )
+                print(
+                    "[yellow]DRY RUN[/yellow]: would validate and run the generated kernel, "
+                    "evaluate its metrics, validate the submission artifact, and submit only if all guardrails pass."
+                )
+                break
 
             submission_path = _iteration_submission_path(
                 iter_dir=iter_dir,
@@ -2763,8 +2784,10 @@ def _run_improvement(
         output_dir=strategy_dir,
         dry_run=config.dry_run,
         implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
-        run_strategy_func=run_strategy,
+        run_strategy_func=_run_required_oracle_strategy,
     )
+    if not config.dry_run and not strategy_text.strip():
+        raise RuntimeError("Oracle improvement strategy is required before Codex implementation.")
 
     prompt_text = _improvement_context.build_improvement_implementation_prompt(
         base_prompt_text=base_prompt_text,
@@ -3014,8 +3037,10 @@ def _run_kernel_fix(
             implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
             strategy_model=_ERROR_STRATEGY_MODEL,
             reasoning_effort=_ERROR_STRATEGY_REASONING_EFFORT,
-            run_strategy_func=run_strategy,
+            run_strategy_func=_run_required_oracle_strategy,
         )
+        if not config.dry_run and not strategy_text.strip():
+            raise RuntimeError("Oracle kernel-fix strategy is required before Codex implementation.")
     prompt_text = _kernel_fix_context.append_kernel_fix_strategy(
         prompt_text=prompt_plan.prompt_text,
         strategy_text=strategy_text,
@@ -3253,14 +3278,11 @@ def _run_autofix(*, config: AutopilotConfig, run_id: str, attempt: int, error: E
         implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
         strategy_model=_ERROR_STRATEGY_MODEL,
         reasoning_effort=_ERROR_STRATEGY_REASONING_EFFORT,
-        run_strategy_func=run_strategy,
+        run_strategy_func=_run_required_oracle_strategy,
     )
-    if not strategy_text.strip():
-        print(
-            f"[yellow]{strategy_label}[/yellow]: gpt strategy unavailable, "
-            f"continuing with direct {IMPLEMENTATION_AGENT.log_alias} fix"
-        )
-    else:
+    if not config.dry_run and not strategy_text.strip():
+        raise RuntimeError(f"Oracle {strategy_label} strategy is required before Codex implementation.")
+    if strategy_text.strip():
         prompt_text += (
             f"\n\n## {STRATEGY_AGENT.display_name} Extra-High Error-Fix Strategy\n"
             "Use the strategy below as guidance, then apply minimal targeted edits.\n\n"

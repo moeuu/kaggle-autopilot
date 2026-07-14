@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from kagglebot.agents import strategy_runner
+from kagglebot.agents.identity import resolve_oracle_model
 from kagglebot.exec_utils import CommandResult
 
 
@@ -263,7 +265,7 @@ def test_run_strategy_defaults_to_auto_and_uses_oracle_when_available(monkeypatc
     assert "browser" in captured_args
     assert "--wait" in captured_args
     assert "--model" in captured_args
-    assert "gpt-5.5-pro" in captured_args
+    assert resolve_oracle_model() in captured_args
     assert "--force" in captured_args
     assert "-p" in captured_args
     assert (
@@ -311,7 +313,7 @@ def test_run_strategy_oracle_uses_configured_command_and_args(monkeypatch, tmp_p
 
     monkeypatch.setenv("KAGGLEBOT_ORACLE_COMMAND", "npx -y @steipete/oracle")
     monkeypatch.setenv("KAGGLEBOT_ORACLE_ARGS", "--engine browser --browser-manual-login")
-    monkeypatch.setenv("KAGGLEBOT_ORACLE_MODEL", "gpt-5.5-pro")
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_MODEL", "pinned-pro")
     monkeypatch.setattr(
         strategy_runner,
         "_maybe_start_oracle_browser",
@@ -327,6 +329,7 @@ def test_run_strategy_oracle_uses_configured_command_and_args(monkeypatch, tmp_p
     assert "browser" in captured_args
     assert "--browser-manual-login" in captured_args
     assert "--wait" in captured_args
+    assert captured_args[captured_args.index("--model") + 1] == "pinned-pro"
 
 
 def test_run_strategy_oracle_uses_long_default_timeout_outside_pytest(monkeypatch, tmp_path: Path) -> None:
@@ -426,6 +429,8 @@ def test_oracle_browser_bootstrap_skips_when_route_is_explicit(monkeypatch) -> N
 
 def test_oracle_browser_bootstrap_reuses_ready_remote_chrome(monkeypatch) -> None:
     monkeypatch.delenv("KAGGLEBOT_ORACLE_ENGINE", raising=False)
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_BROWSER_MODEL_STRATEGY", "ignore")
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_BROWSER_THINKING_TIME", "light")
     monkeypatch.setenv("KAGGLEBOT_ORACLE_BROWSER_PORT", "9333")
     monkeypatch.setattr(strategy_runner, "_oracle_remote_chrome_ready", lambda port: port == 9333)
 
@@ -435,13 +440,17 @@ def test_oracle_browser_bootstrap_reuses_ready_remote_chrome(monkeypatch) -> Non
         "--remote-chrome",
         "127.0.0.1:9333",
         "--browser-model-strategy",
-        "ignore",
+        "select",
+        "--browser-thinking-time",
+        "extended",
         "--browser-attachments",
         "auto",
         "--browser-input-timeout",
         "600s",
         "--browser-timeout",
         "60m",
+        "--browser-archive",
+        "always",
     ]
     assert result.process is None
     assert result.temp_profile_dir is None
@@ -455,13 +464,76 @@ def test_oracle_browser_bootstrap_keeps_explicit_model_strategy(monkeypatch) -> 
     assert result.args == [
         "--remote-chrome",
         "127.0.0.1:9222",
+        "--browser-thinking-time",
+        "extended",
         "--browser-attachments",
         "auto",
         "--browser-input-timeout",
         "600s",
         "--browser-timeout",
         "60m",
+        "--browser-archive",
+        "always",
     ]
+
+
+def test_oracle_browser_bootstrap_keeps_explicit_archive_mode(monkeypatch) -> None:
+    monkeypatch.setattr(strategy_runner, "_oracle_remote_chrome_ready", lambda port: True)  # noqa: ARG005
+
+    result = strategy_runner._maybe_start_oracle_browser(["--browser-archive", "never"])
+
+    assert "--browser-archive" not in result.args
+
+
+def test_oracle_browser_bootstrap_does_not_duplicate_explicit_thinking_time(monkeypatch) -> None:
+    monkeypatch.setattr(strategy_runner, "_oracle_remote_chrome_ready", lambda port: True)  # noqa: ARG005
+
+    result = strategy_runner._maybe_start_oracle_browser(["--browser-thinking-time", "light"])
+
+    assert "--browser-thinking-time" not in result.args
+
+
+def test_prepare_oracle_chrome_profile_excludes_live_browser_locks(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "Local State").write_text("state", encoding="utf-8")
+    for name in strategy_runner._ORACLE_CHROME_PROFILE_ROOT_EXCLUDES:
+        (source / name).write_text("live", encoding="utf-8")
+    destination = tmp_path / "copy"
+    destination.mkdir()
+
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_CHROME_COPY_PROFILE", str(source))
+    monkeypatch.setattr(strategy_runner, "mkdtemp", lambda prefix: str(destination))
+    monkeypatch.setattr(strategy_runner.shutil, "which", lambda command: None)
+
+    profile_dir, temp_profile_dir = strategy_runner._prepare_oracle_chrome_profile()
+
+    assert profile_dir == destination
+    assert temp_profile_dir == destination
+    assert (destination / "Local State").read_text(encoding="utf-8") == "state"
+    for name in strategy_runner._ORACLE_CHROME_PROFILE_ROOT_EXCLUDES:
+        assert not (destination / name).exists()
+
+
+def test_prepare_oracle_chrome_profile_passes_root_excludes_to_rsync(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "copy"
+    destination.mkdir()
+    captured_args: list[str] = []
+
+    def fake_run(args: list[str], **kwargs) -> None:  # noqa: ARG001
+        captured_args.extend(args)
+
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_CHROME_COPY_PROFILE", str(source))
+    monkeypatch.setattr(strategy_runner, "mkdtemp", lambda prefix: str(destination))
+    monkeypatch.setattr(strategy_runner.shutil, "which", lambda command: "/usr/bin/rsync")
+    monkeypatch.setattr(strategy_runner.subprocess, "run", fake_run)
+
+    strategy_runner._prepare_oracle_chrome_profile()
+
+    for name in strategy_runner._ORACLE_CHROME_PROFILE_ROOT_EXCLUDES:
+        assert f"--exclude=/{name}" in captured_args
 
 
 def test_oracle_browser_bootstrap_skips_api_engine(monkeypatch) -> None:
@@ -578,3 +650,59 @@ def test_run_strategy_oracle_keeps_explicit_extra_engine_and_wait(monkeypatch, t
     assert captured_args.count("--engine") == 1
     assert captured_args[captured_args.index("--engine") + 1] == "api"
     assert captured_args.count("--wait") == 1
+
+
+def test_find_oracle_session_archive_status_matches_write_output_path(monkeypatch, tmp_path: Path) -> None:
+    oracle_home = tmp_path / "oracle"
+    session_dir = oracle_home / "sessions" / "run-1"
+    session_dir.mkdir(parents=True)
+    transcript_path = tmp_path / "output" / "strategy_exec.txt"
+    transcript_path.parent.mkdir()
+    (session_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "options": {"writeOutputPath": str(transcript_path.resolve())},
+                "browser": {
+                    "archive": {
+                        "archived": False,
+                        "reason": "conversation-menu-not-found",
+                        "conversationUrl": "https://chatgpt.com/c/example",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ORACLE_HOME", str(oracle_home))
+
+    report = strategy_runner._find_oracle_session_archive_status(transcript_path)
+
+    assert report["conversationUrl"] == "https://chatgpt.com/c/example"
+    assert report["oracleSession"] == str(session_dir)
+
+
+def test_archive_oracle_conversation_via_cdp_parses_success(monkeypatch, tmp_path: Path) -> None:
+    module_path = tmp_path / "chrome-remote-interface"
+    module_path.mkdir()
+    monkeypatch.setattr(strategy_runner, "_oracle_cdp_module_path", lambda: module_path)
+    monkeypatch.setattr(strategy_runner, "_oracle_node_command", lambda: "/usr/bin/node")
+    monkeypatch.setattr(
+        strategy_runner,
+        "run_command",
+        lambda args, **kwargs: CommandResult(
+            args=args,
+            returncode=0,
+            stdout='{"archived":true,"status":200,"response":"{\\"success\\":true}"}\n',
+            stderr="",
+            duration_sec=0.01,
+        ),
+    )
+
+    report = strategy_runner._archive_oracle_conversation_via_cdp(
+        conversation_url="https://chatgpt.com/c/example",
+        host="127.0.0.1",
+        port=9222,
+    )
+
+    assert report["archived"] is True
+    assert report["fallbackAttempted"] is True

@@ -8,13 +8,17 @@ import pytest
 from kagglebot.competition_submission_formats import (
     CompetitionListing,
     CrawlRecord,
+    assess_submission_format_support,
     crawl_competition_submission_format,
     crawl_submission_formats,
     discover_competitions,
+    discover_entered_competitions,
+    enrich_records_with_kaggle_evidence,
     extract_competition_slugs_from_html,
     find_submission_text_block,
     html_to_text,
     infer_submission_mode,
+    infer_suffixes_from_keywords,
 )
 
 
@@ -77,6 +81,12 @@ def test_html_to_text_keeps_submission_section_structure() -> None:
     assert "Survived" in text
 
 
+def test_submission_suffix_keywords_ignore_common_prose_tokens() -> None:
+    text = "The test set closes at 11:59 PM PT. Winners receive $1,000 USD. See the debugging doc."
+
+    assert infer_suffixes_from_keywords(text) == []
+
+
 def test_crawl_competition_submission_format_parses_csv_submission() -> None:
     listing = CompetitionListing(
         slug="titanic",
@@ -119,6 +129,172 @@ def test_crawl_competition_submission_format_parses_csv_submission() -> None:
     assert record.artifact_class == "tabular"
     assert record.detected_extensions == [".csv"]
     assert record.detected_columns == ["PassengerId", "Survived"]
+
+
+def test_crawl_competition_submission_format_infers_csv_from_header_and_rows() -> None:
+    listing = CompetitionListing(
+        slug="csv-example",
+        title="CSV Example",
+        url="https://www.kaggle.com/competitions/csv-example",
+        description="",
+        category="Playground",
+        reward="",
+        evaluation_metric="AUC",
+        team_count=10,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <h2>Submission File</h2>
+    <p>All computations used to generate the submission file must be offline.</p>
+    <h2>Submission Format</h2>
+    <p>link</p>
+    <p>keyboard_arrow_up</p>
+    <p>The file should contain a header and have the following format:</p>
+    <pre>id,Heart Disease
+    630000,0.2
+    630001,0.3</pre>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/csv-example/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.detected_extensions == [".csv"]
+    assert record.detected_columns == ["id", "Heart Disease"]
+
+
+def test_crawl_competition_submission_format_prefers_named_outer_submission_file() -> None:
+    listing = CompetitionListing(
+        slug="named-output",
+        title="Named Output",
+        url="https://www.kaggle.com/competitions/named-output",
+        description="",
+        category="Research",
+        reward="",
+        evaluation_metric="Score",
+        team_count=10,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <h2>Submission Format</h2>
+    <p>Your notebook must output a submission.csv file.</p>
+    <p>Run predict.py and save predictions to submission.csv.</p>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/named-output/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.detected_extensions == [".csv"]
+    assert record.artifact_class == "tabular"
+
+
+def test_crawl_competition_submission_format_classifies_external_pull_request() -> None:
+    listing = CompetitionListing(
+        slug="external-pr",
+        title="External PR",
+        url="https://www.kaggle.com/competitions/external-pr",
+        description="",
+        category="Community",
+        reward="$1,000",
+        evaluation_metric="",
+        team_count=1,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <h2>Submission Results</h2>
+    <p>Participants must submit their source code by initiating a Pull Request (PR) to the repository.</p>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/external-pr/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "external_repository_submission"
+    assert assess_submission_format_support(record) == (False, "external_submission_requires_manual_workflow")
+
+
+def test_crawl_competition_submission_format_classifies_writeup_rubric() -> None:
+    listing = CompetitionListing(
+        slug="judged-challenge",
+        title="Judged Challenge",
+        url="https://www.kaggle.com/competitions/judged-challenge",
+        description="",
+        category="Community",
+        reward="$10,000",
+        evaluation_metric="",
+        team_count=10,
+        max_daily_submissions=1,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <h2>Evaluation</h2>
+      <p>All submissions are judged based on the following rubric:</p>
+      <ul><li>Technical quality (40)</li><li>Impact (60)</li></ul>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/judged-challenge/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "writeup_submission"
+    assert record.required_artifact == "Kaggle Writeup"
+    assert record.artifact_class == "writeup"
+    assert record.extraction_confidence == "high"
+    assert "following rubric" in record.raw_format_text
+
+
+def test_crawl_competition_submission_format_prefers_code_runtime_over_writeup_wording() -> None:
+    listing = CompetitionListing(
+        slug="code-challenge",
+        title="Code Challenge",
+        url="https://www.kaggle.com/competitions/code-challenge",
+        description="",
+        category="Featured",
+        reward="$10,000",
+        evaluation_metric="Score",
+        team_count=10,
+        max_daily_submissions=1,
+        is_kernels_submissions_only=True,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <p>Submissions must be made through Notebooks and are judged with the following rubric.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({"https://www.kaggle.com/competitions/code-challenge/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "code_competition_runtime_submission"
+    assert record.artifact_class == "notebook_output"
 
 
 def test_crawl_competition_submission_format_parses_zstd_csv_submission() -> None:
@@ -1364,6 +1540,56 @@ def test_find_submission_text_block_prefers_submission_file_format_over_generic_
     assert "csv file" in section
 
 
+def test_find_submission_text_block_prefers_explicit_archive_over_earlier_sample_mention() -> None:
+    text = """
+    The agent receives a sample submission while running in the sandbox.
+
+    Evaluation
+    You must provide a zip archive named submission.zip containing agent.yaml and prompts/system.md.
+    """
+
+    section = find_submission_text_block(text)
+
+    assert "submission.zip" in section
+
+
+def test_crawl_competition_submission_format_classifies_agent_config_zip_bundle() -> None:
+    slug = "agent-config-demo"
+    listing = CompetitionListing(
+        slug=slug,
+        title="Agent Config Demo",
+        url=f"https://www.kaggle.com/competitions/{slug}",
+        description="",
+        category="Playground",
+        reward="Swag",
+        evaluation_metric="AUC",
+        team_count=100,
+        max_daily_submissions=5,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+        source="test",
+    )
+    overview_html = """
+    <html><body>
+      <p>The agent receives a sample submission in the sandbox.</p>
+      <h2>Evaluation</h2>
+      <p>You must provide a zip archive named submission.zip containing your Agent Config.</p>
+      <p>An agent.yaml file must be located at the root of the archive.</p>
+    </body></html>
+    """
+
+    record = crawl_competition_submission_format(
+        listing=listing,
+        fetcher=_FakeFetcher({f"https://www.kaggle.com/competitions/{slug}/overview": overview_html}),  # type: ignore[arg-type]
+        fetch_rules_page=False,
+    )
+
+    assert record.submission_mode == "direct_file_upload"
+    assert record.artifact_class == "bundle"
+    assert record.required_artifact == "ZIP submission bundle"
+    assert ".zip" in record.detected_extensions
+
+
 def test_infer_submission_mode_prefers_code_competition_flag() -> None:
     listing = CompetitionListing(
         slug="code-comp",
@@ -1444,6 +1670,37 @@ def test_crawl_submission_formats_writes_summary_json(monkeypatch, tmp_path) -> 
     assert saved["submission_modes"] == {"direct_file_upload": 1}
     assert saved["artifact_classes"] == {"tabular": 1}
     assert saved["extensions"] == {".csv": 1}
+    assert saved["supported_competition_count"] == 1
+    assert saved["review_required_count"] == 0
+    assert saved["review_required"] == []
+
+
+def test_assess_submission_format_support_flags_unknown_direct_upload() -> None:
+    record = CrawlRecord(
+        slug="unknown",
+        title="Unknown",
+        competition_type="Community",
+        submission_mode="direct_file_upload",
+        required_artifact="unknown",
+        artifact_class="unknown",
+        artifact_container=None,
+        raw_format_text="",
+        detected_extensions=[],
+        detected_columns=[],
+        delimiter=None,
+        is_code_competition=False,
+        evidence_url="https://www.kaggle.com/competitions/unknown/overview",
+        evidence_html_snippet="",
+        extraction_confidence="low",
+        reward="",
+        evaluation_metric="",
+        team_count=None,
+        max_daily_submissions=None,
+        discovery_source="test",
+        crawled_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert assess_submission_format_support(record) == (False, "unknown_artifact_class")
 
 
 def test_discover_competitions_merges_landing_and_api_results(monkeypatch) -> None:
@@ -1495,3 +1752,122 @@ def test_discover_competitions_merges_landing_and_api_results(monkeypatch) -> No
     assert listings[0].slug == "titanic"
     assert listings[0].team_count == 123
     assert listings[0].category == "Getting Started"
+
+
+def test_discover_entered_competitions_pages_and_deduplicates() -> None:
+    item = SimpleNamespace(
+        url="https://www.kaggle.com/competitions/titanic",
+        ref="https://www.kaggle.com/competitions/titanic",
+        title="Titanic",
+        description="desc",
+        category="Getting Started",
+        reward="Knowledge",
+        evaluation_metric="Accuracy",
+        team_count=123,
+        max_daily_submissions=10,
+        is_kernels_submissions_only=False,
+        submissions_disabled=False,
+    )
+    first_page = [item, *[item for _ in range(19)]]
+    fake_api = _FakeApi(
+        {
+            ("entered", None, 1, None): first_page,
+            ("entered", None, 2, None): [],
+        }
+    )
+
+    listings = discover_entered_competitions(api=fake_api, page_limit=3)
+
+    assert [listing.slug for listing in listings] == ["titanic"]
+
+
+def test_enrich_records_prefers_accepted_submission_filename() -> None:
+    record = CrawlRecord(
+        slug="currency-noise",
+        title="Currency Noise",
+        competition_type="Community",
+        submission_mode="direct_file_upload",
+        required_artifact=".usd file",
+        artifact_class="tabular",
+        artifact_container="file",
+        raw_format_text="Cash prizes are USD 10,000.",
+        detected_extensions=[".usd"],
+        detected_columns=[],
+        delimiter=None,
+        is_code_competition=False,
+        evidence_url="https://www.kaggle.com/competitions/currency-noise/overview",
+        evidence_html_snippet="",
+        extraction_confidence="low",
+        reward="$10,000",
+        evaluation_metric="RMSE",
+        team_count=10,
+        max_daily_submissions=5,
+        discovery_source="test",
+        crawled_at="2026-01-01T00:00:00+00:00",
+    )
+
+    class EvidenceApi:
+        def authenticate(self) -> None:
+            return None
+
+        def competition_submissions(self, slug: str, *, page_size: int):  # noqa: ANN202
+            assert slug == "currency-noise"
+            assert page_size == 100
+            return [SimpleNamespace(file_name="submission.csv", status="SubmissionStatus.COMPLETE")]
+
+        def competition_list_files(self, slug: str, *, page_size: int):  # noqa: ANN202, ARG002
+            raise AssertionError("accepted submission evidence should avoid a file-list call")
+
+    [enriched] = enrich_records_with_kaggle_evidence([record], api=EvidenceApi())  # type: ignore[arg-type]
+
+    assert enriched.detected_extensions == [".csv"]
+    assert enriched.artifact_class == "tabular"
+    assert enriched.required_artifact == ".csv file"
+    assert "accepted submission filename" in enriched.raw_format_text
+
+
+def test_enrich_records_uses_only_top_level_official_sample_submission() -> None:
+    record = CrawlRecord(
+        slug="sample-evidence",
+        title="Sample Evidence",
+        competition_type="Community",
+        submission_mode="other_or_unknown",
+        required_artifact="unknown",
+        artifact_class="unknown",
+        artifact_container=None,
+        raw_format_text="Submission details are in the data files.",
+        detected_extensions=[],
+        detected_columns=[],
+        delimiter=None,
+        is_code_competition=False,
+        evidence_url="https://www.kaggle.com/competitions/sample-evidence/overview",
+        evidence_html_snippet="",
+        extraction_confidence="low",
+        reward="",
+        evaluation_metric="",
+        team_count=10,
+        max_daily_submissions=5,
+        discovery_source="test",
+        crawled_at="2026-01-01T00:00:00+00:00",
+    )
+
+    class EvidenceApi:
+        def authenticate(self) -> None:
+            return None
+
+        def competition_submissions(self, slug: str, *, page_size: int):  # noqa: ANN202, ARG002
+            return []
+
+        def competition_list_files(self, slug: str, *, page_size: int):  # noqa: ANN202, ARG002
+            return SimpleNamespace(
+                files=[
+                    SimpleNamespace(name="training/example/sample_submission.csv"),
+                    SimpleNamespace(name="SampleSubmissionStage1.tsv"),
+                ]
+            )
+
+    [enriched] = enrich_records_with_kaggle_evidence([record], api=EvidenceApi())  # type: ignore[arg-type]
+
+    assert enriched.submission_mode == "direct_file_upload"
+    assert enriched.detected_extensions == [".tsv"]
+    assert enriched.artifact_class == "tabular"

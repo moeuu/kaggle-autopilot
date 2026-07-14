@@ -16,6 +16,11 @@ from kagglebot.competition import parse_competition_slug
         ("https://www.kaggle.com/c/titanic", "titanic"),
         ("https://www.kaggle.com/c/titanic/", "titanic"),
         ("www.kaggle.com/competitions/titanic", "titanic"),
+        ("WiDSWorldWide_GlobalDathon26", "widsworldwide_globaldathon26"),
+        (
+            "https://www.kaggle.com/competitions/WiDSWorldWide_GlobalDathon26",
+            "widsworldwide_globaldathon26",
+        ),
     ],
 )
 def test_parse_competition_slug(value: str, expected: str) -> None:

@@ -25,13 +25,18 @@ def _planning_config(tmp_path):
     )
 
 
-def test_run_plan_and_initial_auto_reports_codex_when_oracle_unavailable(monkeypatch, tmp_path) -> None:
+def test_run_plan_and_initial_requires_oracle_even_when_environment_requests_auto(monkeypatch, tmp_path) -> None:
     config = _planning_config(tmp_path)
     phases: list[tuple[str, str]] = []
     pipeline_engines: list[str] = []
 
     monkeypatch.setenv("KAGGLEBOT_STRATEGY_ENGINE", "auto")
-    monkeypatch.setattr(planning_runner, "resolve_strategy_engine", lambda requested: "codex")
+    requested_engines: list[str] = []
+    monkeypatch.setattr(
+        planning_runner,
+        "resolve_strategy_engine",
+        lambda requested: requested_engines.append(requested) or "oracle",
+    )
     monkeypatch.setattr(
         planning_runner,
         "update_watch_phase",
@@ -46,9 +51,10 @@ def test_run_plan_and_initial_auto_reports_codex_when_oracle_unavailable(monkeyp
 
     planning_runner.run_plan_and_initial(config, "run-1")
 
-    assert pipeline_engines == ["auto"]
+    assert requested_engines == ["oracle"]
+    assert pipeline_engines == ["oracle"]
     assert phases[0][0] == "gpt_planning"
-    assert "oracle" not in phases[0][1]
+    assert "oracle(latest-pro)" in phases[0][1]
 
 
 def test_run_plan_and_initial_auto_reports_oracle_when_available(monkeypatch, tmp_path) -> None:
@@ -72,6 +78,6 @@ def test_run_plan_and_initial_auto_reports_oracle_when_available(monkeypatch, tm
 
     planning_runner.run_plan_and_initial(config, "run-1")
 
-    assert pipeline_engines == ["auto"]
+    assert pipeline_engines == ["oracle"]
     assert phases[0][0] == "gpt_planning"
-    assert "oracle(gpt-5.5-pro)" in phases[0][1]
+    assert "oracle(latest-pro)" in phases[0][1]

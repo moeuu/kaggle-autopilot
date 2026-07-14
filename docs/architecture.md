@@ -7,7 +7,7 @@ This document describes the current autopilot execution architecture.
 `kagglebot autopilot` executes in three major phases:
 
 1. Bootstrap context
-2. Agent pipeline (`codex -> oracle(gpt-5.5-pro) -> codex` when Oracle is available)
+2. Required agent pipeline (`codex -> oracle(latest-pro) -> codex`)
 3. Iterative train/evaluate/improve/submit loop
 
 ## 1) Bootstrap Context
@@ -19,7 +19,7 @@ Bootstrap prepares `artifacts/<slug>/context/`:
 - sample submission snapshot
 - top1 public score snapshot
 
-## 2) Agent Pipeline (`codex -> oracle(gpt-5.5-pro) -> codex`)
+## 2) Agent Pipeline (`codex -> oracle(latest-pro) -> codex`)
 
 Implemented in `src/kagglebot/orchestrator/agent_pipeline.py`.
 

@@ -4,7 +4,7 @@ Autopilot is a non-interactive Kaggle loop with readiness-score iteration contro
 It always follows this high-level path:
 
 1. Bootstrap competition context
-2. Plan and implement initial kernel via `codex -> oracle(gpt-5.5-pro) -> codex` when Oracle is available, otherwise the strategy step falls back to Codex
+2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex`; implementation stops if Oracle fails
 3. Train/evaluate per iteration
 4. Improve if needed
 5. Submit and use submission outcomes as secondary guardrails
@@ -24,28 +24,40 @@ uv run kagglebot --force watch --compute local_gpu
 
 `watch` selects from `group=entered`, runs one competition at a time, records its loop state under
 `artifacts/_watch/`, and then selects again. It does not accept rules, join competitions, or consider
-unentered competitions.
+unentered competitions. Entered-list slugs are normalized to lowercase while preserving Kaggle's supported hyphens
+and underscores. Selection uses the lexicographic priority tier `unsubmitted -> monetary prize -> awards points/medal`
+before the recorded score (deadline urgency, rank headroom, category, and competition size). This prevents a large
+score bonus from moving a submitted or non-prize competition ahead of a higher priority tier.
+`--dry-run watch --once` still performs the read-only entered-list lookup and prints the competition it would select.
+It also performs read-only leaderboard lookup when a recorded submission score needs rank-percentile enrichment, so
+the preview uses the same priority inputs as a real watch cycle.
 
 Supported compute values:
 - `local_gpu`
 - `kaggle_gpu`
 - `kaggle_tpu`
 
-## Planning Flow (codex -> oracle(gpt-5.5-pro) -> codex)
+## Planning Flow (codex -> oracle(latest-pro) -> codex)
 
 Autopilot planning is fixed to:
 
+Codex model and reasoning defaults are configured in `[tool.kagglebot.agent]` in `pyproject.toml`. Override them for
+one run with `KAGGLEBOT_PRIMARY_MODEL` and `KAGGLEBOT_PRIMARY_REASONING_EFFORT` when needed.
+Oracle uses the `gpt-5-pro` rolling alias, which selects the current ChatGPT Pro model with the default browser engine.
+Set `KAGGLEBOT_ORACLE_MODEL` to pin a specific model. API engine users must select an API-supported model explicitly
+when the rolling alias does not map to the desired release.
+
 1. Codex: reads local context and writes a brief.
-2. Oracle with GPT-5.5 Pro: performs strategy planning with the brief, local context bundle, and live web search when available.
+2. Oracle with the latest Pro model: performs strategy planning with the brief, local context bundle, and live web search when available.
 3. Codex: implements kernel code from frozen instructions.
 
-The strategy engine defaults to `auto`: Kagglebot uses Oracle when the configured `oracle` command is present and
-falls back to Codex when it is not. Set `KAGGLEBOT_STRATEGY_ENGINE=oracle` to require Oracle, or
-`KAGGLEBOT_STRATEGY_ENGINE=codex` to force the legacy strategy runner. If Oracle is not installed as `oracle`, set
+Autopilot implementation stages require Oracle and do not fall back to a Codex strategy. If Oracle is not installed as `oracle`, set
 `KAGGLEBOT_ORACLE_COMMAND`, for example `KAGGLEBOT_ORACLE_COMMAND="npx -y @steipete/oracle"`. Extra Oracle flags can
 be supplied with `KAGGLEBOT_ORACLE_ARGS`, such as `--browser-manual-login`. Kagglebot defaults Oracle to
 `--engine browser --wait` so planning uses ChatGPT Pro browser access instead of unexpectedly spending API credits;
 set `KAGGLEBOT_ORACLE_ENGINE=api` or `KAGGLEBOT_ORACLE_ENGINE=auto` to override that default.
+Global `--dry-run` skips both model calls, writes a deterministic preview plan, resolves the run configuration and
+guardrails, then stops before kernel preflight, training, evaluation, and submission.
 Oracle strategy calls have a longer default outer timeout than Codex strategy calls (`3900` seconds) because GPT Pro
 browser runs with large context bundles can take many minutes. Oracle's browser wait defaults to 60 minutes, and the
 outer timeout has a small buffer so Oracle can finish writing its result before Kagglebot falls back. Use
@@ -66,9 +78,9 @@ Useful overrides:
   temporary Oracle Chrome profile.
 - `KAGGLEBOT_ORACLE_CHROME_USER_DATA_DIR=/path/to/profile` uses a persistent dedicated Chrome profile instead of a
   temporary copied profile.
-- `KAGGLEBOT_ORACLE_BROWSER_MODEL_STRATEGY=ignore|current|select` controls the ChatGPT model picker for auto-bootstrapped
-  remote Chrome. The default is `ignore`, which avoids model-picker failures in SSH loops; use `select` when the browser
-  session can reliably select GPT Pro.
+- Auto-bootstrapped remote Chrome always uses model picker `select` and thinking time `extended`, so the `gpt-5-pro`
+  rolling alias is applied instead of silently keeping the browser's current model. For diagnostics, override either
+  explicitly through `KAGGLEBOT_ORACLE_ARGS`, for example `--browser-model-strategy current`.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=1` is the default and pastes the full rendered strategy prompt inline. The rendered
   prompt already includes the local context bundle and is capped at roughly 80k characters before compact fallback.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=0` sends the rendered prompt and context bundle through Oracle `--file` attachments
@@ -314,9 +326,8 @@ watch --self-improvement-publish/--no-self-improvement-publish
 `--submit-policy improved` disables the initial contract-probe submit and only submits when an artifact improves over
 a previously submitted checkpoint. Use `--submit-policy none` for artifact generation without live submissions.
 
-Selection priority first favors entered competitions with no local autopilot run history, then competitions with no local
-submission history, monetary prizes, and submitted competitions with poor current rank percentile where there is more
-leaderboard headroom.
+Selection priority is `unsubmitted`, then `monetary prize`, then Kaggle `awardsPoints`/medal eligibility, then all other
+eligible entered competitions. Score and rank headroom order candidates only after those tier keys.
 Because `watch` only reads Kaggle's entered-competition group, a passed new-entrant deadline does not exclude a
 competition; only a passed submission deadline does. Unfamiliar competition types are passed through to autopilot
 instead of being filtered out at selection time; complex simulation/reasoning/optimization tasks receive larger

@@ -29,7 +29,7 @@ Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
-2. **Plan**: Codex summarizes context, Oracle/GPT-5.5 Pro runs research + frozen plan when available, then Codex implements it
+2. **Plan**: Codex summarizes context, Oracle/latest Pro runs research + frozen plan, then Codex implements it; Oracle failure blocks implementation
 3. **Initial model**: Agent implements an initial solution in `artifacts/<slug>/kernel/kernel.py` (all compute modes)
 4. **Iterate**: Train → evaluate → diagnose → improve (default 5 iterations; long heavy local GPU runs are capped to 3)
 5. **Submit + Decide**: Submit each iteration, wait for Kaggle score, then decide continue/stop
@@ -359,6 +359,9 @@ uv run kagglebot --force watch --compute local_gpu
 
 # Crawl Kaggle competition submission formats
 uv run kagglebot crawl-submission-formats --output-dir artifacts/competition-submission-formats
+
+# Audit only competitions already joined by this Kaggle account
+uv run kagglebot crawl-submission-formats --entered-only --output-dir artifacts/entered-submission-formats
 ```
 
 `crawl-submission-formats` discovers competition slugs from Kaggle list pages plus Kaggle API search sweeps,
@@ -367,6 +370,9 @@ then scrapes each competition's Kaggle overview/rules pages with headless Chrome
 - `raw_submission_formats.jsonl`
 - `normalized_submission_formats.csv`
 - `summary.json`
+
+`summary.json` includes `supported_competition_count` and a fail-closed `review_required` list for formats that could
+not be mapped to a supported direct-upload extension, notebook runtime/output, or Writeup workflow.
 
 Use `--max-prefix-depth` and `--max-pages-per-search` to broaden historical discovery coverage.
 
@@ -444,15 +450,16 @@ Optional environment knobs:
 
 - ✅ **Readiness-score-driven loop**: stop/continue uses SRS (offline metric + uncertainty), with optional submission/rank guardrails
 - ✅ **24h watch mode stays scoped to entered competitions**: `watch` never accepts rules or joins competitions automatically
+- ✅ **Deterministic watch priority**: unsubmitted competitions always come first; within each submission tier the order is prize+medal, prize-only, medal-only, then neither, with the candidate score used only as a tie-breaker
 - ✅ **Strict local validation before submit**: Column order, row count, ID integrity, numeric prediction checks
 - ✅ **Duplicate prevention**: SHA256 hash check against `submissions/ledger.jsonl`
 - ✅ **Rate limiting**: 5-min cooldown between submissions plus a bounded Kaggle submit CLI timeout
-- ✅ **Notebook-submit queue guard**: submit-only Kaggle kernels default to CPU metadata to avoid scarce GPU queues; set `KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR=gpu|tpu` to override. `KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC` bounds how long a remote kernel may remain `QUEUED` (default 1800s, `0` disables).
+- ✅ **Notebook-submit accelerator integrity**: submit notebooks inherit the requested accelerator, so GPU code competitions are not silently staged as CPU. Set `KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR=cpu|gpu|tpu` only for an explicit override. `KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC` bounds how long a remote kernel may remain `QUEUED` (default 1800s, `0` disables).
 - ✅ **No infinite submit loop**: Same submit-error fingerprint aborts the run immediately
 - ✅ **Controlled retries**: Transient submit errors retry up to 3 times with backoff; permanent errors abort immediately
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
-- ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, legacy `csv` aliases remain accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission
+- ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, Kaggle `Writeups` wording and legacy `csv` aliases are accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission
 - ✅ **Explicit submit mode**: `submit_mode` is tracked separately as `file|notebook`, so notebook-only leaderboard competitions no longer get conflated with writeup competitions
 - ✅ **Winner-mode iteration policy**: leaderboard runs default to a near-first-place target (`target_medal=winner`, `target_rank_percentile=0.001`) so `minor_tuning` is suppressed until the run reaches the target rank band
 - ✅ **Top1 campaign state**: autopilot CLI defaults to `--campaign-mode top1`, writes `context/campaign_state.json`, `context/candidate_registry.json`, `context/reference_reproduction_report.json`, `context/experiment_graph.json`, and iteration portfolio/blend/allocator reports; submissions that regress against the historical/champion public baseline are blocked unless they are calibration probes or explicitly forced
@@ -466,7 +473,7 @@ Optional environment knobs:
   - Policy files can also declare generic `required_capabilities` and `execution_hints`, including local-kernel `kernel_contract` guards, so competition-specific win conditions stay in artifacts while `src/` only gains reusable orchestration/runtime features
 - ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration prioritizes validation redesign with group/time/leak/proxy split candidates before spending submissions on model-only changes
 - ✅ **Candidate-selection guardrails**: when kernels report multiple candidates, autopilot blocks submissions where the selected pipeline wins only on CV while another candidate has materially better holdout/validation, especially when prediction distribution collapses to sparse or constant-like outputs
-- ✅ **Oracle/Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, submit outcomes, and reusable skill usage, writes `_self_improvement/latest.*`, `strategy_context.md`, experiment backlog, `skill_candidates.json`, playbooks, and skill markdown, injects that context into future planning, and can ask Oracle/GPT for the improvement brief before Codex makes structural or architectural improvements when the git worktree is clean. Browser Oracle can bootstrap a remote-debugging Chrome session automatically for SSH/TTY loops without `DISPLAY`.
+- ✅ **Oracle/Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, submit outcomes, and reusable skill usage, writes `_self_improvement/latest.*`, `strategy_context.md`, experiment backlog, `skill_candidates.json`, playbooks, and skill markdown, injects that context into future planning, and requires an Oracle/GPT improvement brief before Codex makes structural or architectural improvements when the git worktree is clean. Completed browser consultations are archived; Kagglebot uses an authenticated CDP fallback when Oracle's menu selector cannot find the archive action.
 
 ## Top1 Public Leaderboard (Reference)
 

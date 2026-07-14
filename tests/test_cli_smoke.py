@@ -1,6 +1,7 @@
 """Smoke test for CLI import."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -35,10 +36,17 @@ def test_cli_implement_uses_shared_verify_helper(monkeypatch, tmp_path: Path) ->
         meta_path = paths.context_dir / "metadata.json"
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         meta_path.write_text("{}", encoding="utf-8")
+        paths.codex_plan_and_implement_prompt.parent.mkdir(parents=True, exist_ok=True)
+        paths.codex_plan_and_implement_prompt.write_text("implementation request", encoding="utf-8")
         return meta_path
 
     monkeypatch.setattr(cli, "run_repo_verify", fake_run_repo_verify)
     monkeypatch.setattr(cli, "bootstrap_competition", fake_bootstrap_competition)
+    monkeypatch.setattr(
+        cli,
+        "run_strategy",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="oracle brief"),
+    )
     monkeypatch.setattr(cli, "run_codex", lambda *args, **kwargs: None)
 
     result = CliRunner().invoke(

@@ -116,6 +116,11 @@ pythonVersion = "3.11"
 typeCheckingMode = "basic"
 exclude = ["src/kagglebot/knowledge/__init__.py"]
 
+[tool.kagglebot.agent]
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+oracle_model = "gpt-5-pro" # Rolling alias for the current ChatGPT Pro model in browser mode.
+
 [tool.pytest.ini_options]
 addopts = "-p no:launch_testing -p no:launch_ros -n auto -m 'not competition_artifact and not slow'"
 markers = [

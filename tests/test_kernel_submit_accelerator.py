@@ -8,8 +8,8 @@ from kagglebot.kernel_submit_accelerator import (
 )
 
 
-def test_resolve_submit_kernel_accelerator_defaults_to_cpu_without_override() -> None:
-    assert resolve_submit_kernel_accelerator("gpu", env_get=lambda _name: None) == "cpu"
+def test_resolve_submit_kernel_accelerator_honors_requested_gpu_without_override() -> None:
+    assert resolve_submit_kernel_accelerator("gpu", env_get=lambda _name: None) == "gpu"
 
 
 def test_resolve_submit_kernel_accelerator_honors_valid_override() -> None:

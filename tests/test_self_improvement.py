@@ -288,7 +288,7 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
     assert result["status"] == "written"
     assert result["codex_improvement"]["status"] == "completed"
     assert result["codex_improvement"]["strategy_engine"] == "oracle"
-    assert calls["strategy_engine"] == "auto"
+    assert calls["strategy_engine"] == "oracle"
     assert "Kagglebot Self-Improvement Strategy" in str(calls["strategy_prompt"])
     assert "Architectural changes are allowed" in str(calls["strategy_prompt"])
     assert "Kagglebot Self-Improvement Implementation" in str(calls["prompt"])
@@ -338,7 +338,7 @@ def test_self_improvement_skips_codex_when_worktree_dirty(monkeypatch, tmp_path:
     assert result["codex_improvement"]["status"] == "skipped_dirty_worktree"
     assert result["codex_improvement"]["strategy_engine"] == "oracle"
     assert result["codex_improvement"]["publish"]["status"] == "skipped_dirty_worktree"
-    assert calls["strategy_engine"] == "auto"
+    assert calls["strategy_engine"] == "oracle"
     assert "Kagglebot Self-Improvement Strategy" in str(calls["strategy_prompt"])
 
 

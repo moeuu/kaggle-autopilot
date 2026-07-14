@@ -87,6 +87,7 @@ class EnteredCompetition:
     max_daily_submissions: int | None
     is_kernels_submissions_only: bool
     submissions_disabled: bool
+    awards_points: bool
     source: str
 
 
@@ -1017,13 +1018,21 @@ def submit_competition(slug: str, submission_file: Path, message: str, *, dry_ru
 
 
 def list_competition_submissions(slug: str, *, dry_run: bool = False) -> list[dict[str, str]]:
+    if dry_run:
+        return []
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+
+        api = KaggleApi()
+        api.authenticate()
+        return [_submission_row_from_api(row) for row in api.competition_submissions(slug)]
+    except Exception:  # noqa: BLE001
+        pass
     output = _run_kaggle(
         ["kaggle", "competitions", "submissions", "-c", slug, "--csv"],
         slug=slug,
-        dry_run=dry_run,
+        dry_run=False,
     )
-    if dry_run:
-        return []
     rows: list[dict[str, str]] = []
     for row in csv.DictReader(output.splitlines()):
         if not row:
@@ -1034,9 +1043,34 @@ def list_competition_submissions(slug: str, *, dry_run: bool = False) -> list[di
     return rows
 
 
+def _submission_row_from_api(submission: object) -> dict[str, str]:
+    attributes = {
+        "ref": "ref",
+        "fileName": "file_name",
+        "date": "date",
+        "description": "description",
+        "errorDescription": "error_description",
+        "publicScore": "public_score",
+        "privateScore": "private_score",
+        "status": "status",
+        "submittedBy": "submitted_by",
+        "teamName": "team_name",
+        "url": "url",
+    }
+    row: dict[str, str] = {}
+    for output_key, attribute in attributes.items():
+        value = getattr(submission, attribute, None)
+        if value is None:
+            value = getattr(submission, f"_{attribute}", None)
+        if value is None:
+            continue
+        row[output_key] = value.isoformat() if isinstance(value, datetime) else str(value)
+    return row
+
+
 def list_entered_competitions(*, page_limit: int = 5, dry_run: bool = False) -> list[EnteredCompetition]:
-    if dry_run:
-        return []
+    # Listing entered competitions is read-only and is required for a useful watch dry-run preview.
+    del dry_run
 
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
@@ -1090,6 +1124,7 @@ def _entered_competition_from_api(competition: object) -> EnteredCompetition:
         max_daily_submissions=_optional_int(getattr(competition, "max_daily_submissions", None)),
         is_kernels_submissions_only=bool(getattr(competition, "is_kernels_submissions_only", False)),
         submissions_disabled=bool(getattr(competition, "submissions_disabled", False)),
+        awards_points=bool(getattr(competition, "awards_points", False)),
         source="api-group:entered",
     )
 

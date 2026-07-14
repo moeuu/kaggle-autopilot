@@ -152,6 +152,38 @@ def test_validate_and_prepare_submission_accepts_zip_without_sample_csv(tmp_path
     assert prepared == submission_path
 
 
+def test_validate_and_prepare_submission_requires_context_root_archive_member(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "overview.md").write_text(
+        "An agent.yaml file must be located at the root of the archive.\n",
+        encoding="utf-8",
+    )
+    submission_path = tmp_path / "submission.zip"
+    with zipfile.ZipFile(submission_path, "w") as archive:
+        archive.writestr("config/agent.yaml", b"agent: demo")
+
+    with pytest.raises(SubmissionValidationError, match="required top-level files: agent.yaml"):
+        service.validate_and_prepare_submission(submission_path)
+
+
+def test_validate_and_prepare_submission_accepts_context_root_archive_member(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "overview.md").write_text(
+        "An agent.yaml file must be located at the root of the archive.\n",
+        encoding="utf-8",
+    )
+    submission_path = tmp_path / "submission.zip"
+    with zipfile.ZipFile(submission_path, "w") as archive:
+        archive.writestr("agent.yaml", b"agent: demo")
+        archive.writestr("prompts/system.md", b"prompt")
+
+    assert service.validate_and_prepare_submission(submission_path) == submission_path
+
+
 def test_validate_and_prepare_submission_rejects_invalid_zip(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     submission_path = tmp_path / "submission.zip"

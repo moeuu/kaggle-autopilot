@@ -26,12 +26,12 @@ Common options:
 - `--max-iterations`, `--patience`, `--min-improvement`, `--max-total-min`
 - `--internet auto|off|on`
 
-## 2. Planning Contract (`codex -> oracle(gpt-5.5-pro) -> codex`)
+## 2. Planning Contract (`codex -> oracle(latest-pro) -> codex`)
 
 Autopilot planning is fixed to:
 
 1. Codex brief: collect and summarize competition context.
-2. Oracle/GPT-5.5 Pro strategy: produce the frozen strategy plan from the brief and attached context bundle.
+2. Oracle/latest Pro strategy: produce the frozen strategy plan from the brief and attached context bundle.
 3. Codex kernel implementation: implement from frozen instructions.
 
 `KAGGLEBOT_STRATEGY_ENGINE=auto` is the default and uses Oracle when the configured command is available; otherwise

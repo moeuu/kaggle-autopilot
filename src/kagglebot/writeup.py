@@ -45,10 +45,15 @@ _WRITEUP_NEGATIVE_PATTERNS = (
     re.compile(r"\bdeliverable[_ ]mode\s*[:=]\s*leaderboard\b"),
 )
 _WRITEUP_STRONG_PATTERNS = (
-    re.compile(r"\brequires? (?:an? )?writeup\b"),
-    re.compile(r"\bdeliverable[_ ]mode\s*[:=]\s*writeup\b"),
-    re.compile(r"\bdeliverable mode\s*[:=]\s*writeup\b"),
-    re.compile(r"\bwriteup[- ]based\b"),
+    re.compile(r"\brequires? (?:an? )?writeups?\b"),
+    re.compile(r"\bdeliverable[_ ]mode\s*[:=]\s*writeups?\b"),
+    re.compile(r"\bdeliverable mode\s*[:=]\s*writeups?\b"),
+    re.compile(r"\bwriteups?[- ]based\b"),
+    re.compile(r"\bsubmissions?\b.*\b(?:made|submitted)\s+through\s+(?:a\s+)?writeups?\b"),
+    re.compile(r"\bsubmit (?:an? )?writeups?\b"),
+    re.compile(r"\bsubmissions? should include\b.*\bwriteups?\b"),
+    re.compile(r"\bwriteups? (?:are|will be) judged\b"),
+    re.compile(r"\bsubmissions? (?:are|will be) judged\b.*\brubric\b"),
     re.compile(r"\bmanual (?:grading|review)\b"),
 )
 _LEADERBOARD_STRONG_PATTERNS = (
@@ -88,7 +93,7 @@ _CODE_COMPETITION_PATTERNS = (
 
 def normalize_deliverable_mode(value: object, *, default: str = "leaderboard") -> str:
     normalized = str(value or "").strip().lower()
-    if normalized in {"writeup", "judged", "hackathon", "report"}:
+    if normalized in {"writeup", "writeups", "judged", "hackathon", "report"}:
         return "writeup"
     if normalized in {"csv", "submission", "leaderboard"}:
         return "leaderboard"

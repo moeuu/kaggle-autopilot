@@ -674,7 +674,7 @@ _SIGNAL_SUBMISSION_ALIAS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"mne\s+fif|fif(?:\s+(?:eeg|meg|file|format))?", ".fif"),
     (r"brainvision\s+eeg|eeg(?:\s+(?:signal|file|format))?", ".eeg"),
     (r"eeglab\s+fdt|fdt(?:\s+(?:eeg|file|format))?", ".fdt"),
-    (r"eeglab(?:\s+(?:set|dataset|file|format))?|set(?:\s+(?:eeg|file|format))?", ".set"),
+    (r"eeglab(?:\s+(?:set|dataset|file|format))?|set\s+(?:eeg|file|format)", ".set"),
     (r"neuroscan\s+cnt|cnt(?:\s+(?:eeg|file|format))?", ".cnt"),
     (r"micromed\s+trc|trc(?:\s+(?:eeg|file|format))?", ".trc"),
 )
@@ -711,7 +711,7 @@ _MODEL_SUBMISSION_ALIAS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"catboost(?:\s+(?:model))?", ".cbm"),
     (r"light\s*gbm(?:\s+(?:booster|model))?", ".bst"),
     (r"pytorch\s+checkpoint|(?:pytorch\s+)?state[-_\s]*dict|pth(?:\s+(?:file|format))?", ".pth"),
-    (r"torchscript|pytorch\s+(?:model|weights?)|pt(?:\s+(?:file|format))?", ".pt"),
+    (r"torchscript|pytorch\s+(?:model|weights?)|pt\s+(?:file|format)", ".pt"),
     (r"keras\s+h5|hdf5\s+model|h5\s+model", ".h5"),
     (
         r"core\s*ml(?!\s+(?:model\s+)?(?:package|directory|folder|bundle))(?:\s+model)?"
@@ -857,7 +857,15 @@ def _registry_submission_token_patterns(
     alias_suffixes: set[str],
 ) -> tuple[tuple[re.Pattern[str], str], ...]:
     generated = (
-        (_compile_submission_token_pattern(_suffix_keyword_pattern(suffix)), suffix)
+        (
+            _compile_submission_token_pattern(
+                rf"(?:\.{_suffix_keyword_pattern(suffix)}|"
+                rf"{_suffix_keyword_pattern(suffix)}(?:\s+[a-z][a-z0-9_-]*){{0,3}}\s+"
+                rf"(?:file|format|archive|bundle|store|directory|folder|image|mesh|scene|model|document|report|"
+                rf"notebook|script|checkpoint|signal|raster|header|database|ontology|annotations?))"
+            ),
+            suffix,
+        )
         for suffix in sorted(suffixes - alias_suffixes, key=len, reverse=True)
     )
     aliases = ((_compile_submission_token_pattern(pattern), suffix) for pattern, suffix in alias_patterns)

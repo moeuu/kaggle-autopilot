@@ -69,8 +69,8 @@ def test_kernel_fix_prompt_plan_handles_missing_module_and_blocked_modules(tmp_p
 
     assert plan.prompt_path == agent_dir / "kernel_fix_prompt.md"
     assert plan.attempt_path == agent_dir / "kernel_fix_prompt-02.md"
-    assert plan.strategy_skip_reason == "deterministic missing module error"
-    assert plan.strategy_prompt is None
+    assert plan.strategy_skip_reason is None
+    assert plan.strategy_prompt is not None
     assert plan.prompt_text.startswith("Repair prefix")
     assert "Missing dependency detected: foo" in plan.prompt_text
     assert "blocked=- bar" in plan.prompt_text

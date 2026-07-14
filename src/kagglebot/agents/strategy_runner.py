@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -13,7 +14,7 @@ from tempfile import mkdtemp
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from kagglebot.agents.identity import STRATEGY_AGENT, render_prompt_identity
+from kagglebot.agents.identity import STRATEGY_AGENT, render_prompt_identity, resolve_oracle_model
 from kagglebot.agents.sandbox_fallback import (
     append_sandbox_args,
     detect_sandbox_startup_failure,
@@ -27,11 +28,17 @@ _DEFAULT_TIMEOUT_SEC = 600.0
 _DEFAULT_ORACLE_TIMEOUT_SEC = 3900.0
 _PYTEST_TIMEOUT_SEC = 2.0
 _RUNNER_LABEL = STRATEGY_AGENT.log_alias
-_DEFAULT_ORACLE_MODEL = "gpt-5.5-pro"
 _DEFAULT_ORACLE_BROWSER_PORT = 9222
 _ORACLE_BROWSER_READY_TIMEOUT_SEC = 15.0
 _DEFAULT_ORACLE_BROWSER_INPUT_TIMEOUT = "600s"
 _DEFAULT_ORACLE_BROWSER_TIMEOUT = "60m"
+_DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
+_ORACLE_CHROME_PROFILE_ROOT_EXCLUDES = (
+    "DevToolsActivePort",
+    "SingletonCookie",
+    "SingletonLock",
+    "SingletonSocket",
+)
 
 
 @dataclass(frozen=True)
@@ -253,7 +260,7 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             engine="oracle",
         )
 
-    model = os.environ.get("KAGGLEBOT_ORACLE_MODEL", _DEFAULT_ORACLE_MODEL).strip() or _DEFAULT_ORACLE_MODEL
+    model = resolve_oracle_model()
     consult_prompt = (
         "Read the attached Kagglebot strategy prompt file and any attached Kagglebot context bundle files. "
         "Treat this as a single-turn consultation with no prior session memory; all required context is attached. "
@@ -302,6 +309,13 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     try:
         try:
             result = run_command(args, timeout=timeout)
+            if _oracle_browser_engine_requested(extra_args):
+                _ensure_oracle_conversation_archived(
+                    transcript_path=transcript_path,
+                    output_dir=output_dir,
+                    browser_bootstrap=browser_bootstrap,
+                    extra_args=extra_args,
+                )
         except FileNotFoundError:
             message = f"Oracle strategy runner unavailable: executable not found: {command[0]}"
             transcript_path.write_text(message + "\n", encoding="utf-8")
@@ -454,8 +468,10 @@ def _maybe_start_oracle_browser(extra_args: list[str]) -> OracleBrowserBootstrap
         "--remote-chrome",
         remote_arg,
         *_oracle_browser_model_strategy_args(extra_args),
+        *_oracle_browser_thinking_time_args(extra_args),
         *_oracle_browser_attachments_args(extra_args),
         *_oracle_browser_timeout_args(extra_args),
+        *_oracle_browser_archive_args(extra_args),
     ]
     if _oracle_remote_chrome_ready(port):
         return OracleBrowserBootstrap(args=oracle_args)
@@ -474,6 +490,7 @@ def _maybe_start_oracle_browser(extra_args: list[str]) -> OracleBrowserBootstrap
         f"--user-data-dir={profile_dir}",
         f"--profile-directory={os.environ.get('KAGGLEBOT_ORACLE_CHROME_PROFILE', 'Default').strip() or 'Default'}",
         "--disable-gpu",
+        "--lang=en-US",
         "--no-first-run",
         "--no-default-browser-check",
     ]
@@ -501,10 +518,237 @@ def _oracle_browser_bootstrap_enabled() -> bool:
 def _oracle_browser_model_strategy_args(extra_args: list[str]) -> list[str]:
     if _oracle_args_include_option(extra_args, "--browser-model-strategy"):
         return []
-    strategy = os.environ.get("KAGGLEBOT_ORACLE_BROWSER_MODEL_STRATEGY", "ignore").strip().lower()
-    if strategy not in {"select", "current", "ignore"}:
-        strategy = "ignore"
-    return ["--browser-model-strategy", strategy]
+    return ["--browser-model-strategy", "select"]
+
+
+def _oracle_browser_thinking_time_args(extra_args: list[str]) -> list[str]:
+    if _oracle_args_include_option(extra_args, "--browser-thinking-time"):
+        return []
+    return ["--browser-thinking-time", _DEFAULT_ORACLE_BROWSER_THINKING_TIME]
+
+
+def _oracle_browser_archive_args(extra_args: list[str]) -> list[str]:
+    if _oracle_args_include_option(extra_args, "--browser-archive"):
+        return []
+    return ["--browser-archive", "always"]
+
+
+def _ensure_oracle_conversation_archived(
+    *,
+    transcript_path: Path,
+    output_dir: Path,
+    browser_bootstrap: OracleBrowserBootstrap,
+    extra_args: list[str],
+) -> None:
+    if _oracle_archive_mode(extra_args) == "never":
+        return
+    report_path = output_dir / "oracle_archive.json"
+    status = _find_oracle_session_archive_status(transcript_path)
+    if status.get("archived") is True:
+        report_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return
+    conversation_url = str(status.get("conversationUrl") or "").strip()
+    remote = _oracle_remote_chrome_endpoint(browser_bootstrap.args or extra_args)
+    if not conversation_url or remote is None:
+        report = {
+            **status,
+            "archived": False,
+            "fallbackAttempted": False,
+            "fallbackReason": "missing-conversation-url-or-remote-chrome",
+        }
+    else:
+        host, port = remote
+        report = {
+            **status,
+            **_archive_oracle_conversation_via_cdp(
+                conversation_url=conversation_url,
+                host=host,
+                port=port,
+            ),
+        }
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if report.get("archived") is True:
+        print("oracle strategy: archived ChatGPT conversation", flush=True)
+    else:
+        print(
+            "oracle strategy: warning: ChatGPT conversation archive could not be verified "
+            f"({report.get('fallbackReason') or report.get('reason') or 'unknown'})",
+            flush=True,
+        )
+
+
+def _oracle_archive_mode(extra_args: list[str]) -> str:
+    for index, value in enumerate(extra_args):
+        if value == "--browser-archive" and index + 1 < len(extra_args):
+            return extra_args[index + 1].strip().lower()
+        if value.startswith("--browser-archive="):
+            return value.partition("=")[2].strip().lower()
+    return "always"
+
+
+def _find_oracle_session_archive_status(transcript_path: Path) -> dict[str, object]:
+    sessions_root = Path(os.environ.get("ORACLE_HOME", str(Path.home() / ".oracle"))).expanduser() / "sessions"
+    if not sessions_root.is_dir():
+        return {}
+    expected = str(transcript_path.resolve())
+    meta_paths = sorted(
+        sessions_root.glob("*/meta.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for meta_path in meta_paths[:100]:
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        options = payload.get("options") if isinstance(payload, dict) else None
+        if not isinstance(options, dict) or str(options.get("writeOutputPath") or "") != expected:
+            continue
+        browser = payload.get("browser")
+        archive = browser.get("archive") if isinstance(browser, dict) else None
+        report = dict(archive) if isinstance(archive, dict) else {}
+        report["oracleSession"] = str(meta_path.parent)
+        return report
+    return {}
+
+
+def _oracle_remote_chrome_endpoint(args: list[str]) -> tuple[str, int] | None:
+    for index, value in enumerate(args):
+        if value == "--remote-chrome" and index + 1 < len(args):
+            raw = args[index + 1]
+        elif value.startswith("--remote-chrome="):
+            raw = value.partition("=")[2]
+        else:
+            continue
+        host, separator, port_text = raw.rpartition(":")
+        if not separator:
+            return None
+        try:
+            return host or "127.0.0.1", int(port_text)
+        except ValueError:
+            return None
+    return None
+
+
+def _archive_oracle_conversation_via_cdp(
+    *,
+    conversation_url: str,
+    host: str,
+    port: int,
+) -> dict[str, object]:
+    cdp_module = _oracle_cdp_module_path()
+    node = _oracle_node_command()
+    if cdp_module is None or node is None:
+        return {
+            "archived": False,
+            "fallbackAttempted": False,
+            "fallbackReason": "chrome-remote-interface-unavailable",
+        }
+    try:
+        result = run_command(
+            [
+                node,
+                "-e",
+                _ORACLE_ARCHIVE_CDP_SCRIPT,
+                str(cdp_module),
+                host,
+                str(port),
+                conversation_url,
+            ],
+            timeout=30.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return {
+            "archived": False,
+            "fallbackAttempted": True,
+            "fallbackReason": type(exc).__name__,
+        }
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        payload = {}
+    if result.returncode != 0 or not isinstance(payload, dict):
+        return {
+            "archived": False,
+            "fallbackAttempted": True,
+            "fallbackReason": (result.stderr or result.stdout or "cdp-archive-failed")[-500:],
+        }
+    payload["fallbackAttempted"] = True
+    return payload
+
+
+def _oracle_node_command() -> str | None:
+    configured = os.environ.get("KAGGLEBOT_ORACLE_NODE_COMMAND", "").strip()
+    if configured:
+        return configured
+    return shutil.which("node")
+
+
+def _oracle_cdp_module_path() -> Path | None:
+    configured = os.environ.get("KAGGLEBOT_ORACLE_CDP_MODULE", "").strip()
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path.home() / ".local/oracle-node24/lib/node_modules/@steipete/oracle/node_modules/chrome-remote-interface",
+        Path("/usr/local/lib/node_modules/@steipete/oracle/node_modules/chrome-remote-interface"),
+    ]
+    for candidate in candidates:
+        if candidate is not None and candidate.exists():
+            return candidate
+    npx_root = Path.home() / ".npm/_npx"
+    if npx_root.is_dir():
+        matches = sorted(
+            npx_root.glob("*/node_modules/@steipete/oracle/node_modules/chrome-remote-interface"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if matches:
+            return matches[0]
+    return None
+
+
+_ORACLE_ARCHIVE_CDP_SCRIPT = r"""
+const CDP = require(process.argv[1]);
+const host = process.argv[2];
+const port = Number(process.argv[3]);
+const conversationUrl = process.argv[4];
+(async () => {
+  let client;
+  let target;
+  try {
+    const conversationId = new URL(conversationUrl).pathname.split('/').filter(Boolean).pop();
+    target = await CDP.New({host, port, url: conversationUrl});
+    client = await CDP({host, port, target});
+    await client.Page.enable();
+    await client.Page.navigate({url: conversationUrl});
+    await client.Page.loadEventFired();
+    const expression = `(async () => {
+      const sessionResponse = await fetch('/api/auth/session', {credentials: 'include'});
+      const session = await sessionResponse.json();
+      const accessToken = session && session.accessToken;
+      if (!accessToken) {
+        return {archived: false, status: sessionResponse.status, fallbackReason: 'access-token-unavailable'};
+      }
+      const response = await fetch('/backend-api/conversation/${conversationId}', {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: {'authorization': 'Bearer ' + accessToken, 'content-type': 'application/json'},
+        body: JSON.stringify({is_archived: true}),
+      });
+      const body = await response.text();
+      return {archived: response.ok, status: response.status, response: body.slice(0, 500)};
+    })()`;
+    const evaluated = await client.Runtime.evaluate({expression, awaitPromise: true, returnByValue: true});
+    const value = evaluated.result && evaluated.result.value;
+    console.log(JSON.stringify(value || {archived: false, fallbackReason: 'empty-cdp-result'}));
+  } catch (error) {
+    console.log(JSON.stringify({archived: false, fallbackReason: String(error)}));
+    process.exitCode = 1;
+  } finally {
+    if (client) await client.close().catch(() => {});
+    if (target) await CDP.Close({host, port, id: target.id}).catch(() => {});
+  }
+})();
+"""
 
 
 def _oracle_browser_attachments_args(extra_args: list[str]) -> list[str]:
@@ -574,10 +818,12 @@ def _prepare_oracle_chrome_profile() -> tuple[Path, Path | None]:
     if source.exists():
         rsync = shutil.which("rsync")
         if rsync:
+            root_excludes = [f"--exclude=/{name}" for name in _ORACLE_CHROME_PROFILE_ROOT_EXCLUDES]
             subprocess.run(  # noqa: S603
                 [
                     rsync,
                     "-a",
+                    *root_excludes,
                     "--exclude=*/Cache/*",
                     "--exclude=*/Code Cache/*",
                     "--exclude=*/GPUCache/*",
@@ -603,6 +849,7 @@ def _prepare_oracle_chrome_profile() -> tuple[Path, Path | None]:
                     "CacheStorage",
                     "GrShaderCache",
                     "ShaderCache",
+                    *_ORACLE_CHROME_PROFILE_ROOT_EXCLUDES,
                 ),
             )
     return temp_profile_dir, temp_profile_dir

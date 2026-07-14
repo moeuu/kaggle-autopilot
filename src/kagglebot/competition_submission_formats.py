@@ -4,9 +4,10 @@ import base64
 import csv
 import json
 import re
+import time
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -18,6 +19,7 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 from kagglebot.asset_modality import (
     DOCUMENT_SUFFIXES,
     archive_container,
+    artifact_suffix,
 )
 from kagglebot.compression_suffixes import strip_compression_suffix
 from kagglebot.exec_utils import run_command
@@ -29,6 +31,7 @@ from kagglebot.submission_artifacts import (
     ARTIFACT_CLASS_SINGLE_FILE,
     ARTIFACT_CLASS_TABULAR,
     ARTIFACT_CLASS_UNKNOWN,
+    ARTIFACT_CLASS_WRITEUP,
 )
 from kagglebot.submission_extension_hints import (
     ARCHIVE_SUBMISSION_SUFFIXES,
@@ -45,6 +48,7 @@ from kagglebot.submission_extension_hints import (
 from kagglebot.submission_format import SubmissionFormatHint, extract_submission_section, parse_submission_format
 from kagglebot.submission_output_naming import all_submission_output_suffixes
 from kagglebot.submission_sample_discovery import TABULAR_SUBMISSION_SUFFIXES
+from kagglebot.writeup import infer_deliverable_mode
 
 _DEFAULT_SEARCH_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _DEFAULT_PAGE_SIZE = 20
@@ -53,11 +57,12 @@ _CODE_COMPETITION_RE = re.compile(r"\b(code competition|kernel submissions only|
 _BULLET_COLUMN_RE = re.compile(r"^\s*[-*]\s*`?(?P<name>[A-Za-z0-9_. -]+?)`?\s*$")
 _SECTION_BLOCK_RE = re.compile(
     r"(?is)"
-    r"(submission file format|submission format|make a submission|how to submit|submit predictions)"
+    r"(submission file(?: format)?|submission format|make a submission|how to submit|submit predictions)"
     r"(.*?)(?=\n[A-Z][^\n]{0,80}\n|\Z)"
 )
 _KEYWORD_WINDOW_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsubmission file format\b", re.I),
+    re.compile(r"\bsubmission file\b", re.I),
     re.compile(r"\bsubmission format\b", re.I),
     re.compile(r"\bsample submission\b", re.I),
     re.compile(r"\bsubmit predictions\b", re.I),
@@ -75,6 +80,26 @@ _ARCHIVE_SUBMISSION_SUFFIXES = set(ARCHIVE_SUBMISSION_SUFFIXES)
 _TABULAR_SINGLE_FILE_SUFFIXES = set(TABULAR_SUBMISSION_SUFFIXES)
 _NON_TABULAR_SINGLE_FILE_SUFFIXES = set(NON_TABULAR_SUBMISSION_SUFFIXES)
 _DIRECT_SUBMISSION_EXTENSION_PATTERN = submission_extension_pattern(all_submission_output_suffixes())
+_SUPPORTED_SUBMISSION_MODES = {
+    "code_competition_runtime_submission",
+    "direct_file_upload",
+    "notebook_output_submission",
+    "writeup_submission",
+}
+_WRITEUP_EVIDENCE_MARKERS = ("writeup", "judged", "rubric", "panel", "manual grading", "manual review")
+_GENERIC_BUNDLE_MARKERS = ("agent config", "agent.yaml", "system prompts", "custom tools", "skills/")
+_EXTERNAL_REPOSITORY_SUBMISSION_RE = re.compile(
+    r"\bsubmit\b.{0,100}\bsource code\b.{0,180}\b(?:pull request|\bpr\b)",
+    re.I | re.S,
+)
+_SAMPLE_NOTEBOOK_LINK_RE = re.compile(
+    r"sample\s+submission.{0,700}?href=[\"'](?:https?://www\.kaggle\.com)?/code/[^\"']+[\"']",
+    re.I | re.S,
+)
+_SAMPLE_SUBMISSION_NAME_RE = re.compile(
+    r"^(?:sample[_ -]?submission|samplesubmission|submission[_ -]?template|answer[_ -]?template)",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -212,24 +237,30 @@ def crawl_submission_formats(
     max_competitions: int | None = None,
     fetch_rules_pages: bool = True,
     resume: bool = True,
+    entered_only: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     fetcher = fetcher or ChromeDomFetcher()
 
-    listings = discover_competitions(
-        fetcher=fetcher,
-        max_prefix_depth=max_prefix_depth,
-        max_pages_per_search=max_pages_per_search,
-        search_alphabet=search_alphabet,
-    )
+    if entered_only:
+        listings = discover_entered_competitions()
+    else:
+        listings = discover_competitions(
+            fetcher=fetcher,
+            max_prefix_depth=max_prefix_depth,
+            max_pages_per_search=max_pages_per_search,
+            search_alphabet=search_alphabet,
+        )
     if max_competitions is not None:
         listings = listings[:max_competitions]
 
     raw_path = output_dir / "raw_submission_formats.jsonl"
-    processed_slugs = load_processed_slugs(raw_path) if resume else set()
+    listing_slugs = {listing.slug for listing in listings}
     records: list[CrawlRecord] = []
     if resume and raw_path.exists():
-        records.extend(load_raw_records(raw_path))
+        existing_records = [record for record in load_raw_records(raw_path) if record.slug in listing_slugs]
+        records.extend(record for record in existing_records if not should_retry_crawl_record(record))
+    processed_slugs = {record.slug for record in records}
 
     for index, listing in enumerate(listings, start=1):
         if listing.slug in processed_slugs:
@@ -269,11 +300,66 @@ def crawl_submission_formats(
         processed_slugs.add(listing.slug)
         print(f"[{index}/{len(listings)}] crawled {listing.slug} -> {record.submission_mode}")
 
+    records = [refine_crawl_record(record) for record in records]
+    if entered_only:
+        records = enrich_records_with_kaggle_evidence(records)
+
+    write_jsonl(raw_path, [asdict(record) for record in records])
     write_jsonl(output_dir / "discovered_competitions.jsonl", [asdict(item) for item in listings])
     write_csv(output_dir / "normalized_submission_formats.csv", records)
     summary = build_summary(records)
     write_json_object(output_dir / "summary.json", summary)
     return summary
+
+
+def should_retry_crawl_record(record: CrawlRecord) -> bool:
+    return record.submission_mode == "other_or_unknown" or (
+        record.submission_mode == "direct_file_upload"
+        and (record.artifact_class == ARTIFACT_CLASS_UNKNOWN or not record.detected_extensions)
+    )
+
+
+def discover_entered_competitions(
+    *,
+    api: KaggleApi | None = None,
+    page_limit: int = 100,
+    retry_attempts: int = 5,
+) -> list[CompetitionListing]:
+    api = api or KaggleApi()
+    api.authenticate()
+    listings: dict[str, CompetitionListing] = {}
+    for page in range(1, max(1, page_limit) + 1):
+        competitions = _entered_competitions_page_with_retry(
+            api,
+            page=page,
+            retry_attempts=retry_attempts,
+        )
+        if not competitions:
+            break
+        for competition in competitions:
+            listing = listing_from_api_competition(competition, source="api-group:entered")
+            listings[listing.slug] = merge_listing(listings.get(listing.slug), listing)
+        if len(competitions) < _DEFAULT_PAGE_SIZE:
+            break
+    return sorted(listings.values(), key=lambda item: item.slug)
+
+
+def _entered_competitions_page_with_retry(
+    api: KaggleApi,
+    *,
+    page: int,
+    retry_attempts: int,
+) -> list[Any]:
+    for attempt in range(max(1, retry_attempts)):
+        try:
+            return list(api.competitions_list(group="entered", page=page, sort_by="latestDeadline"))
+        except Exception as exc:  # noqa: BLE001
+            if "429" not in str(exc) or attempt + 1 >= max(1, retry_attempts):
+                raise
+            delay_sec = min(60, 5 * (2**attempt))
+            print(f"Kaggle API rate limited; retrying entered page {page} in {delay_sec}s")
+            time.sleep(delay_sec)
+    return []
 
 
 def discover_competitions(
@@ -392,52 +478,336 @@ def crawl_competition_submission_format(
         rules_text = html_to_text(rules_html)
         rules_section = find_submission_text_block(rules_text)
 
-    chosen_text = overview_section or rules_section
-    chosen_url = overview_url if overview_section or not rules_section else rules_url
-    hint = (
-        parse_submission_format(chosen_text)
-        if chosen_text
-        else SubmissionFormatHint(None, None, None, artifact_class=ARTIFACT_CLASS_UNKNOWN, artifact_container=None)
+    is_writeup = (
+        not listing.is_kernels_submissions_only
+        and infer_deliverable_mode(overview_text, rules_text, default="") == "writeup"
     )
-    expected_suffixes = normalize_suffixes(
-        hint.expected_suffixes or extract_suffixes_from_text(chosen_text) or infer_suffixes_from_keywords(chosen_text)
+    is_external_repository_submission = bool(
+        _EXTERNAL_REPOSITORY_SUBMISSION_RE.search("\n".join((overview_text, rules_text)))
     )
-    expected_suffixes = filter_noisy_suffixes(chosen_text, expected_suffixes)
-    submission_mode = infer_submission_mode(listing, chosen_text, expected_suffixes)
-    artifact_class = infer_artifact_class(listing=listing, hint=hint, text=chosen_text, suffixes=expected_suffixes)
-    artifact_container = infer_artifact_container(artifact_class=artifact_class, suffixes=expected_suffixes)
-    required_artifact = infer_required_artifact(
-        submission_mode=submission_mode,
-        suffixes=expected_suffixes,
-        artifact_class=artifact_class,
-    )
-    confidence = infer_confidence(chosen_text, expected_suffixes, listing.is_kernels_submissions_only)
+    writeup_text = extract_writeup_evidence(overview_text, rules_text) if is_writeup else ""
+    chosen_text = overview_section or rules_section or writeup_text
+    chosen_url = overview_url if overview_section or writeup_text or not rules_section else rules_url
+    if is_writeup:
+        hint = SubmissionFormatHint(
+            None,
+            None,
+            None,
+            artifact_class=ARTIFACT_CLASS_WRITEUP,
+            artifact_container=None,
+        )
+        expected_suffixes: list[str] = []
+        submission_mode = "writeup_submission"
+        artifact_class = ARTIFACT_CLASS_WRITEUP
+        artifact_container = None
+        required_artifact = "Kaggle Writeup"
+        confidence = "high"
+    elif is_external_repository_submission:
+        hint = SubmissionFormatHint(
+            None,
+            None,
+            None,
+            artifact_class=ARTIFACT_CLASS_UNKNOWN,
+            artifact_container=None,
+        )
+        expected_suffixes = []
+        submission_mode = "external_repository_submission"
+        artifact_class = ARTIFACT_CLASS_UNKNOWN
+        artifact_container = None
+        required_artifact = "external source-code pull request"
+        confidence = "high"
+    else:
+        hint = (
+            parse_submission_format(chosen_text)
+            if chosen_text
+            else SubmissionFormatHint(None, None, None, artifact_class=ARTIFACT_CLASS_UNKNOWN, artifact_container=None)
+        )
+        expected_suffixes = normalize_suffixes(
+            hint.expected_suffixes
+            or extract_suffixes_from_text(chosen_text)
+            or infer_suffixes_from_keywords(chosen_text)
+        )
+        expected_suffixes = filter_noisy_suffixes(chosen_text, expected_suffixes)
+        named_submission_suffixes = extract_named_submission_suffixes(chosen_text)
+        if named_submission_suffixes:
+            expected_suffixes = named_submission_suffixes
+        csv_columns = infer_csv_example_columns(chosen_text)
+        if csv_columns:
+            expected_suffixes = [".csv"]
+            hint = replace(hint, expected_suffixes=[".csv"], columns=csv_columns, delimiter=",")
+        if any(suffix in _ARCHIVE_SUBMISSION_SUFFIXES for suffix in expected_suffixes) and any(
+            marker in chosen_text.lower() for marker in MODEL_BUNDLE_MARKERS + _GENERIC_BUNDLE_MARKERS
+        ):
+            expected_suffixes = [suffix for suffix in expected_suffixes if suffix in _ARCHIVE_SUBMISSION_SUFFIXES]
+        if not expected_suffixes and _SAMPLE_NOTEBOOK_LINK_RE.search(overview_html):
+            submission_mode = "notebook_output_submission"
+        else:
+            submission_mode = infer_submission_mode(listing, chosen_text, expected_suffixes)
+        artifact_class = infer_artifact_class(listing=listing, hint=hint, text=chosen_text, suffixes=expected_suffixes)
+        artifact_container = infer_artifact_container(artifact_class=artifact_class, suffixes=expected_suffixes)
+        required_artifact = infer_required_artifact(
+            submission_mode=submission_mode,
+            suffixes=expected_suffixes,
+            artifact_class=artifact_class,
+            text=chosen_text,
+        )
+        confidence = infer_confidence(chosen_text, expected_suffixes, listing.is_kernels_submissions_only)
     evidence_html = overview_html if chosen_url == overview_url else rules_html
     evidence_marker = overview_section or rules_section or chosen_text
 
-    return CrawlRecord(
-        slug=listing.slug,
-        title=listing.title,
-        competition_type=listing.category or "Unspecified",
-        submission_mode=submission_mode,
-        required_artifact=required_artifact,
+    return refine_crawl_record(
+        CrawlRecord(
+            slug=listing.slug,
+            title=listing.title,
+            competition_type=listing.category or "Unspecified",
+            submission_mode=submission_mode,
+            required_artifact=required_artifact,
+            artifact_class=artifact_class,
+            artifact_container=artifact_container,
+            raw_format_text=truncate_text(chosen_text, 4_000),
+            detected_extensions=expected_suffixes,
+            detected_columns=hint.columns
+            or infer_columns_from_bullets(chosen_text, allow_fallback=bool(expected_suffixes)),
+            delimiter=hint.delimiter,
+            is_code_competition=submission_mode == "code_competition_runtime_submission",
+            evidence_url=chosen_url,
+            evidence_html_snippet=truncate_text(extract_evidence_snippet(evidence_html, evidence_marker), 1_500),
+            extraction_confidence=confidence,
+            reward=listing.reward,
+            evaluation_metric=listing.evaluation_metric,
+            team_count=listing.team_count,
+            max_daily_submissions=listing.max_daily_submissions,
+            discovery_source=listing.source,
+            crawled_at=datetime.now(UTC).isoformat(),
+        )
+    )
+
+
+def infer_csv_example_columns(text: str) -> list[str]:
+    """Infer CSV from an adjacent header/data example, without treating prose dates as rows."""
+
+    lowered = text.lower()
+    if "submission" not in lowered or not any(marker in lowered for marker in ("format", "header", "schema")):
+        return []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, header_line in enumerate(lines[:-1]):
+        if "," not in header_line:
+            continue
+        try:
+            header = next(csv.reader([header_line]))
+        except csv.Error:
+            continue
+        header = [cell.strip() for cell in header]
+        if len(header) < 2 or not all(header) or not any(re.search(r"[A-Za-z_]", cell) for cell in header):
+            continue
+        for data_line in lines[index + 1 : index + 3]:
+            if "," not in data_line:
+                continue
+            try:
+                data = next(csv.reader([data_line]))
+            except csv.Error:
+                continue
+            if len(data) == len(header):
+                return header
+    return []
+
+
+def refine_crawl_record(record: CrawlRecord) -> CrawlRecord:
+    text = record.raw_format_text
+    if _EXTERNAL_REPOSITORY_SUBMISSION_RE.search(text):
+        return replace(
+            record,
+            submission_mode="external_repository_submission",
+            required_artifact="external source-code pull request",
+            artifact_class=ARTIFACT_CLASS_UNKNOWN,
+            artifact_container=None,
+            detected_extensions=[],
+            extraction_confidence="high",
+        )
+    if record.submission_mode in {
+        "code_competition_runtime_submission",
+        "notebook_output_submission",
+        "writeup_submission",
+        "external_repository_submission",
+    }:
+        return record
+
+    named_submission_suffixes = extract_named_submission_suffixes(text)
+    if named_submission_suffixes:
+        return _record_with_authoritative_suffixes(record, named_submission_suffixes)
+
+    csv_columns = infer_csv_example_columns(text)
+    if csv_columns:
+        return _record_with_authoritative_suffixes(record, [".csv"], columns=csv_columns)
+
+    archive_suffixes = [suffix for suffix in record.detected_extensions if suffix in _ARCHIVE_SUBMISSION_SUFFIXES]
+    if archive_suffixes and record.artifact_class in {ARTIFACT_CLASS_BUNDLE, ARTIFACT_CLASS_MULTI_FILE_ZIP}:
+        return _record_with_authoritative_suffixes(record, archive_suffixes)
+    return record
+
+
+def enrich_records_with_kaggle_evidence(
+    records: list[CrawlRecord],
+    *,
+    api: KaggleApi | None = None,
+    retry_attempts: int = 4,
+) -> list[CrawlRecord]:
+    """Prefer accepted uploads and official top-level sample files over page-text guesses."""
+
+    candidates = [record for record in records if record.submission_mode in {"direct_file_upload", "other_or_unknown"}]
+    if not candidates:
+        return records
+    api = api or KaggleApi()
+    api.authenticate()
+    enriched: dict[str, CrawlRecord] = {}
+    for record in candidates:
+        successful_names = _successful_submission_names(
+            api,
+            slug=record.slug,
+            retry_attempts=retry_attempts,
+        )
+        successful_suffixes = _suffixes_from_names(successful_names)
+        if successful_suffixes:
+            enriched[record.slug] = _record_with_authoritative_suffixes(
+                record,
+                successful_suffixes,
+                evidence=f"accepted submission filename(s): {', '.join(successful_names)}",
+            )
+            continue
+
+        sample_names = _top_level_sample_submission_names(
+            api,
+            slug=record.slug,
+            retry_attempts=retry_attempts,
+        )
+        sample_suffixes = _suffixes_from_names(sample_names)
+        if sample_suffixes:
+            enriched[record.slug] = _record_with_authoritative_suffixes(
+                record,
+                sample_suffixes,
+                evidence=f"official sample submission file(s): {', '.join(sample_names)}",
+            )
+    return [enriched.get(record.slug, record) for record in records]
+
+
+def _successful_submission_names(api: KaggleApi, *, slug: str, retry_attempts: int) -> list[str]:
+    try:
+        submissions = _kaggle_call_with_retry(
+            lambda: list(api.competition_submissions(slug, page_size=100)),
+            label=f"submission history for {slug}",
+            retry_attempts=retry_attempts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Kaggle submission-history evidence unavailable for {slug}: {exc}")
+        return []
+    names: list[str] = []
+    for submission in submissions:
+        status = str(_api_attribute(submission, "status") or "").lower()
+        if not status.endswith("complete"):
+            continue
+        name = _api_attribute(submission, "file_name", "fileName", "ref")
+        if name and str(name) not in names:
+            names.append(str(name))
+    return names
+
+
+def _top_level_sample_submission_names(api: KaggleApi, *, slug: str, retry_attempts: int) -> list[str]:
+    try:
+        response = _kaggle_call_with_retry(
+            lambda: api.competition_list_files(slug, page_size=1000),
+            label=f"sample files for {slug}",
+            retry_attempts=retry_attempts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Kaggle sample-file evidence unavailable for {slug}: {exc}")
+        return []
+    names: list[str] = []
+    for item in list(getattr(response, "files", response) or []):
+        name = str(_api_attribute(item, "name", "ref") or "").replace("\\", "/")
+        if "/" in name or not _SAMPLE_SUBMISSION_NAME_RE.match(name):
+            continue
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _kaggle_call_with_retry(call: Any, *, label: str, retry_attempts: int) -> Any:
+    for attempt in range(max(1, retry_attempts)):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001
+            if "429" not in str(exc) or attempt + 1 >= max(1, retry_attempts):
+                raise
+            delay_sec = min(60, 5 * (2**attempt))
+            print(f"Kaggle API rate limited; retrying {label} in {delay_sec}s")
+            time.sleep(delay_sec)
+    raise RuntimeError(f"Kaggle API call failed: {label}")
+
+
+def _api_attribute(item: Any, *names: str) -> Any:
+    for name in names:
+        value = getattr(item, name, None)
+        if value is None:
+            value = getattr(item, f"_{name}", None)
+        if value is not None:
+            return value
+    return None
+
+
+def _suffixes_from_names(names: Iterable[str]) -> list[str]:
+    suffixes: list[str] = []
+    for name in names:
+        suffix = artifact_suffix(Path(name))
+        if suffix and suffix not in suffixes:
+            suffixes.append(suffix)
+    return normalize_suffixes(suffixes)
+
+
+def _record_with_authoritative_suffixes(
+    record: CrawlRecord,
+    suffixes: list[str],
+    *,
+    columns: list[str] | None = None,
+    evidence: str = "",
+) -> CrawlRecord:
+    normalized = normalize_suffixes(suffixes)
+    archive_suffixes = [suffix for suffix in normalized if suffix in _ARCHIVE_SUBMISSION_SUFFIXES]
+    if archive_suffixes:
+        normalized = archive_suffixes
+        if record.artifact_class == ARTIFACT_CLASS_BUNDLE:
+            artifact_class = ARTIFACT_CLASS_BUNDLE
+        elif record.artifact_class == ARTIFACT_CLASS_MULTI_FILE_ZIP:
+            artifact_class = ARTIFACT_CLASS_MULTI_FILE_ZIP
+        else:
+            artifact_class = ARTIFACT_CLASS_SINGLE_FILE
+    elif any(_is_tabular_file_submission_suffix(suffix) for suffix in normalized):
+        artifact_class = ARTIFACT_CLASS_TABULAR
+    else:
+        artifact_class = ARTIFACT_CLASS_SINGLE_FILE
+    raw_text = record.raw_format_text
+    if evidence and evidence not in raw_text:
+        raw_text = truncate_text(f"{raw_text}\n\nAudit evidence: {evidence}".strip(), 4_000)
+    return replace(
+        record,
+        submission_mode="direct_file_upload",
+        required_artifact=infer_required_artifact(
+            "direct_file_upload",
+            normalized,
+            artifact_class,
+            text=raw_text,
+        ),
         artifact_class=artifact_class,
-        artifact_container=artifact_container,
-        raw_format_text=truncate_text(chosen_text, 4_000),
-        detected_extensions=expected_suffixes,
-        detected_columns=hint.columns
-        or infer_columns_from_bullets(chosen_text, allow_fallback=bool(expected_suffixes)),
-        delimiter=hint.delimiter,
-        is_code_competition=submission_mode == "code_competition_runtime_submission",
-        evidence_url=chosen_url,
-        evidence_html_snippet=truncate_text(extract_evidence_snippet(evidence_html, evidence_marker), 1_500),
-        extraction_confidence=confidence,
-        reward=listing.reward,
-        evaluation_metric=listing.evaluation_metric,
-        team_count=listing.team_count,
-        max_daily_submissions=listing.max_daily_submissions,
-        discovery_source=listing.source,
-        crawled_at=datetime.now(UTC).isoformat(),
+        artifact_container=infer_artifact_container(artifact_class=artifact_class, suffixes=normalized),
+        raw_format_text=raw_text,
+        detected_extensions=normalized,
+        detected_columns=columns or record.detected_columns,
+        delimiter="," if ".csv" in normalized else record.delimiter,
+        extraction_confidence="high" if evidence or columns else record.extraction_confidence,
+        discovery_source=(
+            f"{record.discovery_source},kaggle-submission-evidence"
+            if evidence and "kaggle-submission-evidence" not in record.discovery_source.split(",")
+            else record.discovery_source
+        ),
     )
 
 
@@ -450,10 +820,26 @@ def find_submission_text_block(text: str) -> str:
         candidate = match.group(0).strip()
         if len(candidate.splitlines()) > 1:
             candidates.append(candidate)
+    keyword_window = extract_keyword_window(text, window=1_200)
+    if keyword_window:
+        candidates.append(keyword_window)
     preferred = select_best_submission_block(candidates)
     if preferred:
         return preferred
     return extract_keyword_window(text)
+
+
+def extract_writeup_evidence(*texts: str, max_lines: int = 12) -> str:
+    lines: list[str] = []
+    for text in texts:
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            lowered = line.lower()
+            if line and any(marker in lowered for marker in _WRITEUP_EVIDENCE_MARKERS) and line not in lines:
+                lines.append(line)
+            if len(lines) >= max_lines:
+                return "\n".join(lines)
+    return "\n".join(lines)
 
 
 def infer_submission_mode(listing: CompetitionListing, text: str, suffixes: list[str]) -> str:
@@ -475,13 +861,13 @@ def infer_artifact_class(
 ) -> str:
     if listing.is_kernels_submissions_only:
         return ARTIFACT_CLASS_NOTEBOOK_OUTPUT
-    if hint.artifact_class and hint.artifact_class != ARTIFACT_CLASS_UNKNOWN:
-        return hint.artifact_class
     lowered = text.lower()
     archive_suffixes = [suffix for suffix in suffixes if suffix in _ARCHIVE_SUBMISSION_SUFFIXES]
+    if archive_suffixes and any(marker in lowered for marker in MODEL_BUNDLE_MARKERS + _GENERIC_BUNDLE_MARKERS):
+        return ARTIFACT_CLASS_BUNDLE
+    if hint.artifact_class and hint.artifact_class != ARTIFACT_CLASS_UNKNOWN:
+        return hint.artifact_class
     if archive_suffixes:
-        if any(marker in lowered for marker in MODEL_BUNDLE_MARKERS):
-            return ARTIFACT_CLASS_BUNDLE
         if ".zip" in archive_suffixes:
             return ARTIFACT_CLASS_MULTI_FILE_ZIP
         return ARTIFACT_CLASS_SINGLE_FILE
@@ -508,13 +894,21 @@ def infer_artifact_container(*, artifact_class: str, suffixes: list[str]) -> str
     return None
 
 
-def infer_required_artifact(submission_mode: str, suffixes: list[str], artifact_class: str) -> str:
+def infer_required_artifact(
+    submission_mode: str,
+    suffixes: list[str],
+    artifact_class: str,
+    *,
+    text: str = "",
+) -> str:
     if submission_mode == "code_competition_runtime_submission":
         return "Kaggle notebook output"
     if submission_mode == "notebook_output_submission":
         return "Kaggle notebook submission"
     if artifact_class == ARTIFACT_CLASS_BUNDLE:
         container = (archive_container(suffixes) or "zip").upper()
+        if any(marker in text.lower() for marker in _GENERIC_BUNDLE_MARKERS):
+            return f"{container} submission bundle"
         return f"{container} bundle containing model assets and inference code"
     if artifact_class == ARTIFACT_CLASS_MULTI_FILE_ZIP:
         container = (archive_container(suffixes) or "zip").upper()
@@ -652,6 +1046,15 @@ def extract_suffixes_from_text(text: str) -> list[str]:
     return normalize_suffixes([f".{match.lower()}" for match in matches])
 
 
+def extract_named_submission_suffixes(text: str) -> list[str]:
+    matches = re.findall(
+        rf"(?<![A-Za-z0-9_])submission\.({_DIRECT_SUBMISSION_EXTENSION_PATTERN})\b",
+        text,
+        flags=re.I,
+    )
+    return normalize_suffixes([f".{match.lower()}" for match in matches])
+
+
 def infer_suffixes_from_keywords(text: str) -> list[str]:
     suffixes: list[str] = []
     for pattern, suffix in SUBMISSION_TOKEN_PATTERNS:
@@ -717,14 +1120,15 @@ def extract_keyword_window(text: str, *, window: int = 700) -> str:
     plain = text.strip()
     if not plain:
         return ""
+    candidates: list[str] = []
     for pattern in _KEYWORD_WINDOW_PATTERNS:
-        match = pattern.search(plain)
-        if not match:
-            continue
-        start = max(0, match.start() - 160)
-        end = min(len(plain), match.end() + window)
-        return plain[start:end].strip()
-    return ""
+        for match in pattern.finditer(plain):
+            start = max(0, match.start() - 160)
+            end = min(len(plain), match.end() + window)
+            candidate = plain[start:end].strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+    return select_best_submission_block(candidates)
 
 
 def select_best_submission_block(candidates: Iterable[str]) -> str:
@@ -744,6 +1148,10 @@ def select_best_submission_block(candidates: Iterable[str]) -> str:
             score += 3
         score += len(extract_suffixes_from_text(normalized)) * 3
         score += len(infer_suffixes_from_keywords(normalized)) * 2
+        if infer_csv_example_columns(normalized):
+            score += 5
+        if "too many requests" in lowered:
+            score -= 10
         if len(normalized.splitlines()) >= 3:
             score += 1
         if score > best_score:
@@ -765,10 +1173,6 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     write_jsonl_records(path, rows, ensure_ascii=True)
-
-
-def load_processed_slugs(path: Path) -> set[str]:
-    return {row["slug"] for row in load_jsonl(path) if isinstance(row.get("slug"), str)}
 
 
 def load_raw_records(path: Path) -> list[CrawlRecord]:
@@ -816,18 +1220,47 @@ def build_summary(records: list[CrawlRecord]) -> dict[str, Any]:
     by_mode: dict[str, int] = {}
     by_artifact_class: dict[str, int] = {}
     by_extension: dict[str, int] = {}
+    review_required: list[dict[str, str]] = []
     for record in records:
         by_mode[record.submission_mode] = by_mode.get(record.submission_mode, 0) + 1
         by_artifact_class[record.artifact_class] = by_artifact_class.get(record.artifact_class, 0) + 1
         for suffix in record.detected_extensions:
             by_extension[suffix] = by_extension.get(suffix, 0) + 1
+        supported, reason = assess_submission_format_support(record)
+        if not supported:
+            review_required.append({"slug": record.slug, "reason": reason})
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "competition_count": len(records),
         "submission_modes": dict(sorted(by_mode.items())),
         "artifact_classes": dict(sorted(by_artifact_class.items())),
         "extensions": dict(sorted(by_extension.items())),
+        "supported_competition_count": len(records) - len(review_required),
+        "review_required_count": len(review_required),
+        "review_required": review_required,
     }
+
+
+def assess_submission_format_support(record: CrawlRecord) -> tuple[bool, str]:
+    if record.submission_mode == "external_repository_submission":
+        return False, "external_submission_requires_manual_workflow"
+    if record.submission_mode not in _SUPPORTED_SUBMISSION_MODES:
+        return False, f"unsupported_or_unknown_submission_mode:{record.submission_mode}"
+    if record.submission_mode in {
+        "code_competition_runtime_submission",
+        "notebook_output_submission",
+        "writeup_submission",
+    }:
+        return True, "supported"
+    if record.artifact_class == ARTIFACT_CLASS_UNKNOWN:
+        return False, "unknown_artifact_class"
+    if not record.detected_extensions:
+        return False, "direct_upload_extension_unknown"
+    supported_suffixes = set(all_submission_output_suffixes())
+    unsupported = [suffix for suffix in record.detected_extensions if suffix not in supported_suffixes]
+    if unsupported:
+        return False, f"unsupported_extensions:{'|'.join(unsupported)}"
+    return True, "supported"
 
 
 def extract_build_version_from_client_token(token: str) -> str:

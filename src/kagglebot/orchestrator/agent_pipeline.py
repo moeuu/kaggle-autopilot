@@ -3,9 +3,8 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
-import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from kagglebot.agents.codex_runner import run_codex
@@ -78,7 +77,7 @@ class AgentPipelineConfig:
     method_scout_max_sources: int = 12
     hardware_profile: str | None = "auto"
     time_budget_min: int | None = None
-    strategy_engine: str = field(default_factory=lambda: os.environ.get("KAGGLEBOT_STRATEGY_ENGINE", "auto"))
+    strategy_engine: str = "oracle"
 
 
 @dataclass(frozen=True)
@@ -352,6 +351,28 @@ def _run_strategy_plan(
                     research_summary_text=research_summary_text,
                 )
             raise KaggleBotError(f"{STRATEGY_AGENT.display_name} strategy failed: {result.stderr or response_text}")
+
+        if config.dry_run:
+            strategy_text = (
+                "# Dry-run Strategy Preview\n\n"
+                f"{STRATEGY_AGENT.display_name} was not executed. A real run will generate and validate the full "
+                "strategy before implementation."
+            )
+            instructions_text = (
+                f"# Dry-run {IMPLEMENTATION_AGENT.display_name} Preview\n\n"
+                f"No implementation was executed. The planned entrypoint is artifacts/{config.slug}/kernel/kernel.py."
+            )
+            return _write_strategy_outputs(
+                paths=paths,
+                knowledge_paths=KnowledgePaths(workdir=config.repo_root),
+                method_scout_mode="off",
+                strategy_text=strategy_text,
+                instructions_text=instructions_text,
+                transcript_text=response_text or "DRY RUN: strategy not executed.\n",
+                plan_payload=_build_fallback_plan_payload(paths),
+                research_sources_text="",
+                research_summary_text="",
+            )
 
         strategy_text, instructions_text = _split_strategy_output(response_text)
         instructions_text = _ensure_kernel_instruction_reference(

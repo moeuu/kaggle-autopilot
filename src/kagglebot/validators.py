@@ -30,7 +30,7 @@ from kagglebot.submission_extension_hints import (
 )
 from kagglebot.submission_sample_discovery import TABULAR_SUBMISSION_SUFFIXES, tabular_suffix
 
-_SLUG_RE = re.compile(r"^[a-z0-9-]+$")
+_SLUG_RE = re.compile(r"^[a-z0-9_-]+$")
 
 SECRET_PATTERNS = [
     r"kaggle\.json",

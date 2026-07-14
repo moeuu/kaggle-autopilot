@@ -393,6 +393,46 @@ def test_agent_pipeline_does_not_raise_on_successful_strategy_result(monkeypatch
     assert (paths.context_agent_dir / "codex_instructions.md").exists()
 
 
+def test_agent_pipeline_dry_run_uses_preview_without_quality_gate(monkeypatch, tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_context(paths)
+
+    def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
+        assert dry_run is True
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return DummyCodexResult(output_dir, message="DRY RUN: codex not executed.")
+
+    def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
+        assert dry_run is True
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return DummyStrategyResult("")
+
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_codex", fake_run_codex)
+    monkeypatch.setattr("kagglebot.orchestrator.agent_pipeline.run_strategy", fake_run_strategy)
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=True,
+        repo_root=tmp_path,
+    )
+
+    run_agent_pipeline(paths=paths, config=config)
+
+    assert (
+        (paths.context_agent_dir / "strategy_plan.md")
+        .read_text(encoding="utf-8")
+        .startswith("# Dry-run Strategy Preview")
+    )
+    assert (paths.context_agent_dir / "codex_instructions.md").exists()
+    assert paths.plan_path.exists()
+    assert not (paths.context_dir / "research_sources.jsonl").exists()
+
+
 def test_agent_pipeline_repairs_research_sources_without_retry(monkeypatch, tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
@@ -456,7 +496,7 @@ def test_agent_pipeline_repairs_research_sources_without_retry(monkeypatch, tmp_
     assert rows[0]["query"] == '"Tufa Labs duck harness" "ARC-AGI-3" "June 30 milestone"'
 
 
-def test_agent_pipeline_falls_back_when_strategy_times_out(monkeypatch, tmp_path: Path) -> None:
+def test_agent_pipeline_blocks_implementation_when_oracle_times_out(monkeypatch, tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     _write_context(paths)
 
@@ -490,15 +530,11 @@ def test_agent_pipeline_falls_back_when_strategy_times_out(monkeypatch, tmp_path
         repo_root=tmp_path,
     )
 
-    run_agent_pipeline(paths=paths, config=config)
+    with pytest.raises(KaggleBotError, match="requires Oracle"):
+        run_agent_pipeline(paths=paths, config=config)
 
-    agent_dir = paths.context_agent_dir
-    assert len(codex_calls) == 2
-    assert (agent_dir / "strategy_plan.md").exists()
-    assert (agent_dir / "codex_instructions.md").exists()
-    assert (agent_dir / "strategy_transcript.txt").read_text(encoding="utf-8").find("timed out") != -1
-    assert (paths.context_dir / "research_sources.jsonl").exists()
-    assert (paths.context_dir / "research_summary.md").exists()
+    assert len(codex_calls) == 1
+    assert not (paths.context_agent_dir / "codex_instructions.md").exists()
 
 
 def test_agent_pipeline_does_not_fallback_when_oracle_is_required(monkeypatch, tmp_path: Path) -> None:

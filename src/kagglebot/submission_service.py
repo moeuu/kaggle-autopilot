@@ -1637,9 +1637,11 @@ class SubmissionService:
         """Coerce submission artifact into the expected file format when inferable."""
         expected_suffixes = self._expected_submission_suffixes(format_hint)
         if not expected_suffixes:
+            self._validate_context_archive_contract(submission_path)
             return submission_path
         current_suffix = self._submission_format_suffix(submission_path)
         if current_suffix in expected_suffixes:
+            self._validate_context_archive_contract(submission_path)
             return submission_path
         preferred_suffix = expected_suffixes[0]
         converted = self._convert_submission_to_suffix(
@@ -1648,6 +1650,7 @@ class SubmissionService:
             format_hint=format_hint,
         )
         if converted is not None:
+            self._validate_context_archive_contract(converted)
             return converted
         expected_display = ", ".join(expected_suffixes)
         actual_display = current_suffix or "<no extension>"
@@ -1657,6 +1660,45 @@ class SubmissionService:
             f"  actual:          {actual_display}\n"
             f"  file:            {submission_path}"
         )
+
+    def _validate_context_archive_contract(self, submission_path: Path) -> None:
+        if not self._is_zip_submission(submission_path):
+            return
+        required_members = self._required_top_level_archive_members()
+        if not required_members:
+            return
+        try:
+            with zipfile.ZipFile(submission_path) as archive:
+                top_level_files = {
+                    normalized
+                    for info in archive.infolist()
+                    if not info.is_dir() and "/" not in (normalized := self._safe_archive_member_name(info.filename))
+                }
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise SubmissionValidationError(f"submission zip is invalid: {submission_path}") from exc
+        missing = sorted(required_members - top_level_files)
+        if missing:
+            raise SubmissionValidationError(
+                "submission zip archive missing required top-level files: " + ", ".join(missing)
+            )
+
+    def _required_top_level_archive_members(self) -> set[str]:
+        pattern = re.compile(
+            r"(?i)(?:an?\s+)?[`'\"]?([a-z0-9][a-z0-9._-]*\.[a-z0-9][a-z0-9._-]*)[`'\"]?\s+"
+            r"file\s+must\s+be\s+(?:located|placed)\s+at\s+(?:the\s+)?(?:root|top[- ]level)"
+        )
+        required: set[str] = set()
+        for context_dir in self._candidate_context_dirs():
+            for name in ("submission_format.md", "overview.md", "data.md", "rules.md"):
+                path = context_dir / name
+                if not path.is_file():
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                required.update(match.group(1) for match in pattern.finditer(text))
+        return required
 
     def _resolve_submission_artifact_class(
         self,

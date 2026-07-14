@@ -19,6 +19,7 @@ from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import plan_resolution as _plan_resolution_test
 from kagglebot import submit_notebook as _submit_notebook_test
 from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
+from kagglebot.agents.identity import IMPLEMENTATION_AGENT
 from kagglebot.autopilot import (
     _DEFAULT_FORCE_MAJOR_RANK_MAX_PERCENTILE,
     _DEFAULT_FORCE_MAJOR_RANK_MIN_TEAMS,
@@ -666,6 +667,37 @@ def test_autopilot_local_requires_kernel_when_legacy_disabled(monkeypatch, tmp_p
     (config.paths.kernel_source_dir / "kernel.py").unlink(missing_ok=True)
     with pytest.raises(RuntimeError, match="requires kernel.py"):
         run_autopilot(config)
+
+
+def test_autopilot_dry_run_stops_before_kernel_preflight_and_execution(monkeypatch, tmp_path: Path) -> None:
+    def fake_plan(config: AutopilotConfig, run_id: str) -> None:  # noqa: ARG001
+        _write_plan(
+            config.paths,
+            target_metric="rmse",
+            target_score=0.5,
+            target_direction="minimize",
+            max_iterations=1,
+        )
+
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", fake_plan)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.kernel_preflight.run_kernel_source_preflight_fixes",
+        lambda *args, **kwargs: pytest.fail("dry-run must stop before kernel preflight"),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot.run_kernel_local",
+        lambda *args, **kwargs: pytest.fail("dry-run must stop before kernel execution"),
+    )
+
+    config = _make_config(tmp_path, dry_run=True, submit=True, max_iterations=1)
+
+    run_autopilot(config)
+
+    run_payload = json.loads((config.paths.run_dir("run-1") / "run.json").read_text(encoding="utf-8"))
+    assert run_payload["status"] == "completed"
+    assert run_payload["stop_reason"] == "dry_run_preview"
 
 
 def test_autopilot_uses_plan_from_agent(monkeypatch, tmp_path: Path) -> None:
@@ -4067,7 +4099,7 @@ def test_run_autofix_submit_error_still_runs_strategy_for_internet_policy(monkey
     assert calls["codex"] == 1
 
 
-def test_run_autofix_submit_error_falls_back_to_direct_codex_when_strategy_empty(monkeypatch, tmp_path: Path) -> None:
+def test_run_autofix_submit_error_blocks_codex_when_oracle_strategy_empty(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     run_id = config.run_id or "run-1"
     run_dir = config.paths.run_dir(run_id)
@@ -4095,16 +4127,15 @@ def test_run_autofix_submit_error_falls_back_to_direct_codex_when_strategy_empty
         "kagglebot.autopilot._autofix_restart.maybe_restart_for_src_changes", lambda *args, **kwargs: None
     )
 
-    _run_autofix(
-        config=config,
-        run_id=run_id,
-        attempt=1,
-        error=SubmitAbortedError("status 'error' during polling; aborting submit stage for this run."),
-    )
+    with pytest.raises(RuntimeError, match="Oracle submit autofix strategy is required"):
+        _run_autofix(
+            config=config,
+            run_id=run_id,
+            attempt=1,
+            error=SubmitAbortedError("status 'error' during polling; aborting submit stage for this run."),
+        )
 
-    assert calls["codex"] == 1
-    prompt_text = (run_dir / "autofix" / "attempt-1" / "prompt.md").read_text(encoding="utf-8")
-    assert "## GPT 5.4 Extra-High Error-Fix Strategy" not in prompt_text
+    assert calls["codex"] == 0
 
 
 def test_run_autofix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_path: Path) -> None:
@@ -4178,7 +4209,7 @@ def test_run_kernel_fix_retries_same_attempt_when_verify_fails(monkeypatch, tmp_
         if calls["verify"] == 1:
             raise RuntimeError("Verification failed: first kernel-fix pass")
 
-    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", flaky_verify)
     monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
@@ -4243,7 +4274,7 @@ def test_run_kernel_fix_includes_subgroup_prompt_context(monkeypatch, tmp_path: 
         last_msg.write_text("kernel fix applied\n", encoding="utf-8")
         return DummyResult(last_msg)
 
-    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot._backup_guarded_files", lambda *args, **kwargs: {})
@@ -5977,8 +6008,8 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     run_autopilot(config)
     iter_dir = config.paths.iter_dir(config.run_id or "run-1", 1)
     assert (iter_dir / "agent" / "prompt.md").exists()
-    assert any(kwargs.get("model") == "gpt-5.5" for kwargs in codex_kwargs_seen)
-    assert any(kwargs.get("reasoning_effort") == "xhigh" for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("model") == IMPLEMENTATION_AGENT.model for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("reasoning_effort") == IMPLEMENTATION_AGENT.reasoning_effort for kwargs in codex_kwargs_seen)
 
 
 def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path: Path) -> None:
@@ -6010,7 +6041,7 @@ def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path:
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6083,7 +6114,7 @@ def test_run_improvement_retries_transient_agent_capacity(monkeypatch, tmp_path:
         return DummyResult(last_msg, returncode=0)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6272,7 +6303,7 @@ def test_run_improvement_appends_code_reference_gate_when_underperforming(monkey
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6331,7 +6362,7 @@ def test_run_improvement_appends_additional_policy_notes(monkeypatch, tmp_path: 
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6434,7 +6465,7 @@ def test_run_improvement_appends_competition_policy_override(monkeypatch, tmp_pa
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6534,7 +6565,7 @@ def test_run_improvement_retries_when_code_reference_impl_is_missing(monkeypatch
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -6620,7 +6651,7 @@ def test_run_improvement_code_reference_repair_allows_src_edits(monkeypatch, tmp
         return DummyResult(last_msg)
 
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
-    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_improvement_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.knowledge_context.load_problem_type_knowledge_text", lambda *args, **kwargs: "")
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
     monkeypatch.setattr("kagglebot.autopilot.record_improvement", lambda *args, **kwargs: None)
@@ -8528,7 +8559,7 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
     def fail_if_called(*args, **kwargs):  # noqa: ARG001
         raise AssertionError("allowlist enforcement must not run when no file changes are detected")
 
-    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "")
+    monkeypatch.setattr("kagglebot.agent_strategy.run_error_strategy_prompt", lambda **kwargs: "oracle strategy")
     monkeypatch.setattr("kagglebot.autopilot.run_codex", fake_run_codex)
     monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", fake_replan)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)

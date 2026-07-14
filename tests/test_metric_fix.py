@@ -18,7 +18,7 @@ def test_run_metric_only_competition_metric_fix_builds_restricted_kernel_fix_req
     assert len(calls) == 1
     request = calls[0]
     assert request["attempt"] == 2
-    assert request["use_gpt_strategy"] is False
+    assert request["use_gpt_strategy"] is True
     assert request["codex_model"] == "gpt-test"
     assert request["codex_reasoning_effort"] == "high"
     assert request["max_codex_passes"] == 4

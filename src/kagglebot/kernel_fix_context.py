@@ -111,10 +111,7 @@ def build_kernel_fix_prompt_plan(
     if prompt_prefix.strip():
         prompt_text = f"{prompt_prefix.strip()}\n\n{prompt_text}"
 
-    if not use_gpt_strategy:
-        strategy_skip_reason = "metric_fix_policy"
-    else:
-        strategy_skip_reason = _runtime_fixes.error_strategy_skip_reason(stage="kernel_fix", error_text=error_message)
+    strategy_skip_reason = None
     strategy_prompt = None
     strategy_dir = agent_dir / f"kernel_fix_strategy-{attempt:02d}"
     if not strategy_skip_reason:

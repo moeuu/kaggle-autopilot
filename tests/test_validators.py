@@ -28,6 +28,7 @@ from kagglebot.validators import (
 
 def test_validate_slug() -> None:
     assert validate_slug("titanic") == "titanic"
+    assert validate_slug("widsworldwide_globaldathon26") == "widsworldwide_globaldathon26"
     with pytest.raises(ValueError, match="Invalid competition slug"):
         validate_slug("../etc/passwd")
 
