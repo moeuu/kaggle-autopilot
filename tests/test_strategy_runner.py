@@ -668,7 +668,8 @@ def test_oracle_context_attaches_complete_context_and_permitted_package(monkeypa
     assert "attached: 1 canonical package file(s)" in manifest_path.read_text(encoding="utf-8")
 
 
-def test_oracle_context_never_attaches_data_for_rules_with_third_party_restriction(tmp_path: Path) -> None:
+def test_oracle_context_never_attaches_data_for_rules_with_third_party_restriction(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KAGGLEBOT_ORACLE_COMPETITION_DATA", raising=False)
     context_dir = tmp_path / "artifacts" / "demo" / "context"
     strategy_dir = context_dir / "agent" / "strategy"
     data_dir = context_dir.parent / "data"
