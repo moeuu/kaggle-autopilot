@@ -3,6 +3,8 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- cohort-x-task-2 20260715T211756Z-824e1427: reason=OracleStrategyError fingerprint=56655e6b2c92738ada85
+- arc-prize-2026-arc-agi-2 20260715T191406Z-29a80a2b: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 - ai-agent-security-multi-step-tool-attacks 20260715T160516Z-7045e102: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 - biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: reason=submit_aborted fingerprint=3be5105ab5a5014fa8f4
 - arc-prize-2026-arc-agi-2 20260629T151254Z-4a6d2fa8: reason=RuntimeError fingerprint=80636502f0494ff1b437

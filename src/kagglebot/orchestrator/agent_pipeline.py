@@ -985,6 +985,10 @@ def _run_kernel_contract_smoke(
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
         )
+        if paths.slug == "arc-prize-2026-arc-agi-2":
+            env.pop("ARC_DATA_DIR", None)
+            env["FAST_DEV"] = "0"
+            env["ARC_SELF_TEST"] = "1"
         compile_result = _run_bounded_smoke_command(
             [sys.executable, "-m", "py_compile", str(staged_kernel_path)],
             cwd=staged_kernel_dir,

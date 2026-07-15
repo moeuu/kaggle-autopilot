@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,56 @@ def test_missing_frozen_plan_pipeline_lookup_is_diagnosed(tmp_path: Path) -> Non
     assert "obsolete_pipeline" in issues[0]
     assert "commented_out_pipeline" not in issues[0]
     assert "actual_pipeline" in issues[0]
+
+
+def test_kernel_contract_smoke_injects_data_free_self_test_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(
+        slug="arc-prize-2026-arc-agi-2",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    paths.kernel_source_dir.mkdir(parents=True)
+    paths.data_dir.mkdir(parents=True)
+    (paths.data_dir / "dataset.json").write_text("not for contract smoke", encoding="utf-8")
+    kernel_path = paths.kernel_source_dir / "kernel.py"
+    kernel_path.write_text(
+        """\
+import json
+import os
+from pathlib import Path
+
+if os.environ.get("ARC_SELF_TEST") != "1":
+    raise FileNotFoundError("normal entrypoint requires competition data")
+assert os.environ.get("FAST_DEV") == "0"
+assert "ARC_DATA_DIR" not in os.environ
+assert not (Path.cwd().parent / "plan.json").exists()
+assert not any((Path.cwd().parent / "data").iterdir())
+output_dir = Path("outputs")
+output_dir.mkdir()
+(output_dir / "self_test_results.json").write_text(
+    json.dumps({"status": "passed"}), encoding="utf-8"
+)
+print("isolated contract self-test passed")
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_pipeline, "_diagnose_missing_pipeline_lookups", lambda *args: ())
+    monkeypatch.setenv("ARC_SELF_TEST", "parent-value")
+    monkeypatch.setenv("FAST_DEV", "parent-value")
+    monkeypatch.setenv("ARC_DATA_DIR", str(paths.data_dir))
+
+    results = [
+        agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path) for _ in ("initial", "repaired")
+    ]
+
+    assert all(result.passed for result in results)
+    assert all("isolated contract self-test passed" in result.smoke_stdout for result in results)
+    assert (paths.data_dir / "dataset.json").read_text(encoding="utf-8") == "not for contract smoke"
+    assert os.environ["ARC_SELF_TEST"] == "parent-value"
+    assert os.environ["FAST_DEV"] == "parent-value"
+    assert os.environ["ARC_DATA_DIR"] == str(paths.data_dir)
 
 
 @pytest.mark.parametrize(

@@ -4,8 +4,7 @@ Recommended action: Force broader model-family search, ensembling, public-LB val
 
 ## Signals
 - cohort-x-task-1 20260629T021700Z-c2183268: gap=0.29333
-- arc-prize-2026-arc-agi-2 20260627T040552Z-1c7b2617: gap=50.56
-- pokemon-tcg-ai-battle 20260626T193050Z-5c402644: gap=791.7
+- arc-prize-2026-arc-agi-2 20260627T040552Z-1c7b2617: gap=55.83
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

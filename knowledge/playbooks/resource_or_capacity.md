@@ -8,9 +8,8 @@ Recommended action: Add cheaper smoke tests and resource-aware model schedules b
 - the-post-backprop-challenge-zero-gradient-learning-for-efficiency 20260628T234426Z-d00e2a18: gap=None
 - soccer-feature-engineering-hackathon 20260628T163341Z-f76f9a6c: gap=None
 - arc-prize-2026-arc-agi-3 20260628T134729Z-d572cf68: gap=None
-- arc-prize-2026-arc-agi-2 20260627T040552Z-1c7b2617: gap=50.56
+- arc-prize-2026-arc-agi-2 20260627T040552Z-1c7b2617: gap=55.83
 - arc-prize-2026-arc-agi-3 20260627T010924Z-72d6b99d: gap=None
-- pokemon-tcg-ai-battle 20260626T193050Z-5c402644: gap=791.7
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
