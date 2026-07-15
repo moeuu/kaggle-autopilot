@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from kagglebot import submission_fidelity as _submission_fidelity
 from kagglebot import submit_attempt_loop as _submit_attempt_loop
 from kagglebot import submit_context as _submit_context
 from kagglebot import submit_outcome as _submit_outcome
@@ -163,6 +164,13 @@ def attempt_submit_for_run(
     submit_code_fingerprint = submit_run_context.submit_code_fingerprint
     allow_force = submit_run_context.allow_force
     input_submission_path = submit_run_context.input_submission_path
+    active_quarantine = _load_current_quarantine_state(
+        run_state=run_state,
+        submission_ledger_path=config.paths.submission_ledger_path,
+        slug=config.slug,
+    )
+    if active_quarantine is not None and run_state.get(_submission_fidelity.QUARANTINE_STATE_KEY) != active_quarantine:
+        deps.save_run_state(run_dir, {_submission_fidelity.QUARANTINE_STATE_KEY: active_quarantine})
 
     submit_runtime_context = _submit_context.build_submit_runtime_context(
         slug=config.slug,
@@ -204,7 +212,7 @@ def attempt_submit_for_run(
             submission_path=path,
             source_submission_path=input_submission_path,
             run_dir=run_dir,
-            sample_submission_path=config.paths.sample_submission_path,
+            sample_submission_path=fallback_sample_submission_path,
             data_dir=config.paths.data_dir,
         ),
         validation_error_types=(SubmissionValidationError,),
@@ -267,7 +275,44 @@ def attempt_submit_for_run(
         run_id=run_id,
         deps=deps,
         submission_path=prepared_submission_path,
+        quarantine_state=_load_current_quarantine_state(
+            run_state=deps.load_run_state(run_dir),
+            submission_ledger_path=config.paths.submission_ledger_path,
+            slug=config.slug,
+        ),
+        save_run_state=lambda updates: deps.save_run_state(run_dir, updates),
     )
+
+    def validate_local_submission_fidelity(current_state: object) -> dict[str, object] | None:
+        notebook_required = bool(getattr(current_state, "notebook_submit_required", False))
+        artifact_mode = str(getattr(current_state, "submission_artifact_mode", "") or "").strip().lower()
+        if notebook_required and artifact_mode in {"gateway", "inference"}:
+            return None
+        iteration = _submit_stage_duplicate.infer_iteration_from_submission_path(input_submission_path) or 1
+        logs_dir = run_dir / f"iter-{iteration}" / "logs"
+        return _submission_fidelity.validate_file_submission_fidelity(
+            slug=config.slug,
+            run_id=run_id,
+            iteration=iteration,
+            source_candidate_path=input_submission_path,
+            prepared_submission_path=prepared_submission_path,
+            code_fingerprint=submit_code_fingerprint,
+            metrics_path=discover_submission_metrics_path(
+                submission_path=input_submission_path,
+                run_dir=run_dir,
+            ),
+            semantic_report_path=run_dir / "submission_semantic_preflight.json",
+            sample_submission_path=fallback_sample_submission_path,
+            report_path=logs_dir / "submission_fidelity_report-file.json",
+            expected_contract_path=logs_dir / "submission_fidelity_expected-file.json",
+            quarantine_state=_load_current_quarantine_state(
+                run_state=deps.load_run_state(run_dir),
+                submission_ledger_path=config.paths.submission_ledger_path,
+                slug=config.slug,
+            ),
+            score_value=best_score,
+            score_direction=config.target_direction,
+        )
 
     submit_attempt_loop_result = _submit_attempt_loop.run_submit_stage_attempts_until_success_or_abort(
         run_dir=run_dir,
@@ -283,17 +328,43 @@ def attempt_submit_for_run(
         submit_code_fingerprint=submit_code_fingerprint,
         run_state=run_state,
         seen_fingerprints=seen_fingerprints,
-        run_notebook_submit=lambda current_state: notebook_submitter.submit(
-            submission_path=prepared_submission_path,
-            message=message,
-            artifact_mode=current_state.submission_artifact_mode,
-        ),
-        run_file_submit=lambda: submission_service.submit_prepared(
-            prepared_path=prepared_submission_path,
-            message=message,
+        run_notebook_submit=lambda current_state: _run_notebook_submit_with_local_fidelity(
+            current_state=current_state,
+            validate_local_submission_fidelity=validate_local_submission_fidelity,
+            quarantine_state=lambda: _load_current_quarantine_state(
+                run_state=deps.load_run_state(run_dir),
+                submission_ledger_path=config.paths.submission_ledger_path,
+                slug=config.slug,
+            ),
+            save_run_state=lambda updates: deps.save_run_state(run_dir, updates),
+            submission_ledger_path=config.paths.submission_ledger_path,
+            slug=config.slug,
             run_id=run_id,
-            offline_score=best_score,
-            score_source="offline",
+            submit=lambda: notebook_submitter.submit(
+                submission_path=prepared_submission_path,
+                message=message,
+                artifact_mode=current_state.submission_artifact_mode,
+            ),
+        ),
+        run_file_submit=lambda: _run_file_submit_with_fidelity(
+            state=submit_stage_state,
+            validate_local_submission_fidelity=validate_local_submission_fidelity,
+            quarantine_state=lambda: _load_current_quarantine_state(
+                run_state=deps.load_run_state(run_dir),
+                submission_ledger_path=config.paths.submission_ledger_path,
+                slug=config.slug,
+            ),
+            save_run_state=lambda updates: deps.save_run_state(run_dir, updates),
+            submission_ledger_path=config.paths.submission_ledger_path,
+            slug=config.slug,
+            run_id=run_id,
+            submit=lambda: submission_service.submit_prepared(
+                prepared_path=prepared_submission_path,
+                message=message,
+                run_id=run_id,
+                offline_score=best_score,
+                score_source="offline",
+            ),
         ),
         submit_aborter=submit_aborter,
         submit_attempt_recorder=submit_attempt_recorder,
@@ -403,6 +474,8 @@ def _build_notebook_submit_runner(
     run_id: str,
     deps: SubmitRunnerDependencies,
     submission_path: Path | None = None,
+    quarantine_state: dict[str, object] | None = None,
+    save_run_state: Callable[[dict[str, object]], object] | None = None,
 ):
     from kagglebot import submit_notebook as _submit_notebook
 
@@ -446,7 +519,71 @@ def _build_notebook_submit_runner(
             code_competition=deps.infer_code_competition_from_paths(config.paths),
             submission_path=submission_path,
         ),
+        quarantine_state=quarantine_state,
+        save_run_state=save_run_state,
+        submission_ledger_path=config.paths.submission_ledger_path,
     )
+
+
+def _load_current_quarantine_state(
+    *,
+    run_state: dict[str, object],
+    submission_ledger_path: Path,
+    slug: str,
+) -> dict[str, object] | None:
+    return _submission_fidelity.load_active_submission_fidelity_quarantine(
+        run_state=run_state,
+        submission_ledger_path=submission_ledger_path,
+        slug=slug,
+    )
+
+
+def _run_notebook_submit_with_local_fidelity(
+    *,
+    current_state: object,
+    validate_local_submission_fidelity: Callable[[object], dict[str, object] | None],
+    quarantine_state: Callable[[], dict[str, object] | None],
+    save_run_state: Callable[[dict[str, object]], object],
+    submission_ledger_path: Path,
+    slug: str,
+    run_id: str,
+    submit: Callable[[], tuple[object, str, Path | None]],
+) -> tuple[object, str, Path | None]:
+    report = validate_local_submission_fidelity(current_state)
+    if report is not None:
+        _submission_fidelity.reserve_quarantine_repair_attempt(
+            report=report,
+            quarantine_state=quarantine_state(),
+            save_run_state=save_run_state,
+            submission_ledger_path=submission_ledger_path,
+            slug=slug,
+            run_id=run_id,
+        )
+    return submit()
+
+
+def _run_file_submit_with_fidelity(
+    *,
+    state: object,
+    validate_local_submission_fidelity: Callable[[object], dict[str, object] | None],
+    quarantine_state: Callable[[], dict[str, object] | None],
+    save_run_state: Callable[[dict[str, object]], object],
+    submission_ledger_path: Path,
+    slug: str,
+    run_id: str,
+    submit: Callable[[], object],
+) -> object:
+    report = validate_local_submission_fidelity(state)
+    if report is not None:
+        _submission_fidelity.reserve_quarantine_repair_attempt(
+            report=report,
+            quarantine_state=quarantine_state(),
+            save_run_state=save_run_state,
+            submission_ledger_path=submission_ledger_path,
+            slug=slug,
+            run_id=run_id,
+        )
+    return submit()
 
 
 def _expected_notebook_submit_output_file(

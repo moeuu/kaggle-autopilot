@@ -48,6 +48,7 @@ from kagglebot import planning_runner as _planning_runner
 from kagglebot import runtime_fixes as _runtime_fixes
 from kagglebot import score_progress as _score_progress
 from kagglebot import score_utils as _score_utils
+from kagglebot import submission_fidelity as _submission_fidelity
 from kagglebot import submission_history as _submission_history
 from kagglebot import submission_policy as _submission_policy
 from kagglebot import submit_attempts as _submit_attempts
@@ -2648,6 +2649,18 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                     "[red]leaderboard implementation anomaly[/red]: "
                                     f"{leaderboard_anomaly_payload['note']}"
                                 )
+                            if online_score is not None:
+                                quarantine_action = _submission_fidelity.persist_leaderboard_outcome_quarantine(
+                                    slug=config.slug,
+                                    run_id=run_id,
+                                    run_state=_autopilot_state.load_run_state(run_dir),
+                                    latest_submit_attempt=_submit_attempts.load_latest_submit_attempt(run_dir),
+                                    anomaly=leaderboard_anomaly_payload,
+                                    submission_ledger_path=config.paths.submission_ledger_path,
+                                    save_run_state=lambda updates: _autopilot_state.save_run_state(run_dir, updates),
+                                )
+                                if quarantine_action is not None:
+                                    print(f"[yellow]submission fidelity quarantine[/yellow]: {quarantine_action}")
                         submitted_tracking_score, submitted_tracking_source = (
                             _submit_tracking.submission_score_for_tracking(
                                 offline_score=decision_score,

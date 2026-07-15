@@ -87,6 +87,21 @@ def resolve_local_submission_guardrail_abort_spec(
     compute_error_fingerprint: Callable[[str, str], str],
     default_exit_code: int = 1,
 ) -> SubmitAbortSpec:
+    if getattr(error, "fidelity_repair_required", False):
+        stderr_tail = str(error)
+        fingerprint = str(getattr(error, "attempt_fingerprint", "") or "").strip()
+        return SubmitAbortSpec(
+            fingerprint=fingerprint or compute_error_fingerprint("", stderr_tail),
+            error_kind="fidelity_repair_required",
+            reason="fidelity_repair_required",
+            message=(
+                "Submission fidelity validation failed; this attempt is non-retryable until the implementation "
+                "audit changes the package/output fingerprint."
+            ),
+            stdout_tail="",
+            stderr_tail=stderr_tail,
+            exit_code=getattr(error, "exit_code", default_exit_code),
+        )
     return build_local_submission_guardrail_abort_spec(
         error=error,
         exit_code=getattr(error, "exit_code", default_exit_code),

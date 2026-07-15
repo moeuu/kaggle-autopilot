@@ -282,3 +282,60 @@ def test_iteration_evidence_detects_snapshot_tampering_during_implementation(tmp
     iter1.joinpath("kernel_before_improvement.py").write_text("MODEL = 'tampered'\n", encoding="utf-8")
     with pytest.raises(IterationEvidenceIntegrityError, match="kernel_snapshot was modified"):
         verify_iteration_evidence_bundle(bundle)
+
+
+def test_iteration_evidence_carries_actionable_submission_fidelity_codes(tmp_path: Path) -> None:
+    paths = _make_paths(tmp_path)
+    run_id = "run-fidelity"
+    iter1 = paths.iter_dir(run_id, 1)
+    _write_iteration_metrics(iter1, value=0.60, source="cv", trusted=True)
+    attempts_path = paths.run_dir(run_id) / "submit_attempts.jsonl"
+    attempts_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path = iter1 / "logs" / "submission_fidelity_report-file.json"
+    attempts_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-16T00:00:00+00:00",
+                "ok": False,
+                "error_kind": "fidelity_repair_required",
+                "action_taken": "abort",
+                "reason": "fidelity_repair_required",
+                "sub_path": str(iter1 / "submission.csv"),
+                "sub_sha256": "output-v1",
+                "submission_fidelity": {
+                    "verdict": "fail",
+                    "reason_codes": ["required_model_source_not_loaded", "prediction_fallback_used"],
+                    "report_path": str(report_path),
+                    "report_fingerprint": "report-v1",
+                    "attempt_fingerprint": "attempt-v1",
+                    "expected_hashes": {"package_fingerprint": "package-v1"},
+                    "actual_hashes": {"output_sha256": "output-v1"},
+                    "supporting_artifact_paths": [str(report_path)],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    bundle = prepare_iteration_evidence(
+        paths=paths,
+        slug="demo",
+        run_id=run_id,
+        iteration=1,
+        evaluation=_evaluation(value=0.60),
+        target_score=0.80,
+        current_score=0.60,
+        current_score_source="cv",
+        delta_offline=None,
+        pending_problem_insights=[],
+        previous_submission_history=None,
+    )
+
+    attempt = bundle.payload["iterations"][0]["submission_attempts"][0]
+    assert attempt["submission_fidelity"]["reason_codes"] == [
+        "required_model_source_not_loaded",
+        "prediction_fallback_used",
+    ]
+    gaps = bundle.payload["decision_requirements"]["evidence_gaps"]
+    assert any("required_model_source_not_loaded" in gap and str(report_path) in gap for gap in gaps)

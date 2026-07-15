@@ -17,6 +17,7 @@ from kagglebot import autopilot_state as _autopilot_state_test
 from kagglebot import autopilot_submit as autopilot_submit_mod
 from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import plan_resolution as _plan_resolution_test
+from kagglebot import submission_fidelity as _submission_fidelity_test
 from kagglebot import submit_notebook as _submit_notebook_test
 from kagglebot.agent_io import agent_failure_detail, is_agent_capacity_failure
 from kagglebot.agents.identity import ORACLE_IMPLEMENTATION_AGENT
@@ -108,6 +109,42 @@ class TrainingOutcome:
     model_name: str
     model_summary: dict[str, object]
     accelerator: str
+
+
+def test_leaderboard_anomaly_submission_fidelity_quarantine_persists_controller_state(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "run-1"
+    ledger_path = tmp_path / "submission_ledger.jsonl"
+    run_dir.mkdir(parents=True)
+    fidelity = {
+        "verdict": "pass",
+        "attempt_fingerprint": "attempt-v1",
+        "report_fingerprint": "report-v1",
+        "package_fingerprint": "package-v1",
+        "actual_hashes": {"output_sha256": "output-v1"},
+        "metric_provenance": {"trusted": True},
+        "reason_codes": [],
+    }
+
+    action = _submission_fidelity_test.persist_leaderboard_outcome_quarantine(
+        slug="demo",
+        run_id="run-1",
+        run_state=load_run_state(run_dir),
+        latest_submit_attempt={"ok": True, "submission_fidelity": fidelity},
+        anomaly={"signals": ["online_score_collapse_vs_top1"]},
+        submission_ledger_path=ledger_path,
+        save_run_state=lambda updates: _autopilot_state_test.save_run_state(run_dir, updates),
+    )
+
+    assert action == "activated"
+    quarantine = load_run_state(run_dir)[_submission_fidelity_test.QUARANTINE_STATE_KEY]
+    assert quarantine["status"] == "active"
+    assert quarantine["anomaly"]["output_sha256"] == "output-v1"
+    ledger_event = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert ledger_event["event"] == "submission_fidelity_quarantine"
+    assert ledger_event["reason_codes"] == [
+        "leaderboard_implementation_anomaly",
+        "online_score_collapse_vs_top1",
+    ]
 
 
 def _write_sample_submission(path: Path) -> None:

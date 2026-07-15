@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kagglebot import kernel_outputs as _kernel_outputs
+from kagglebot import submission_fidelity as _submission_fidelity
 from kagglebot import submit_kernel_fidelity as _submit_kernel_fidelity
 from kagglebot.exceptions import KaggleCliError, KernelCapacityError, SubmissionCliError
 from kagglebot.submit_notebook_decisions import (
@@ -89,6 +90,9 @@ class NotebookSubmitRunner:
     review_code_submission: Callable[..., object] | None = None
     recheck_code_submission_guard: Callable[..., object] | None = None
     record_code_submission_execution: Callable[..., object] | None = None
+    quarantine_state: Mapping[str, object] | None = None
+    save_run_state: Callable[[dict[str, object]], object] | None = None
+    submission_ledger_path: Path | None = None
 
     def submit(
         self,
@@ -125,6 +129,9 @@ class NotebookSubmitRunner:
             review_code_submission=self.review_code_submission,
             recheck_code_submission_guard=self.recheck_code_submission_guard,
             record_code_submission_execution=self.record_code_submission_execution,
+            quarantine_state=self.quarantine_state,
+            save_run_state=self.save_run_state,
+            submission_ledger_path=self.submission_ledger_path,
         )
 
 
@@ -152,6 +159,9 @@ def build_notebook_submit_runner_for_run(
     review_code_submission: Callable[..., object] | None = None,
     recheck_code_submission_guard: Callable[..., object] | None = None,
     record_code_submission_execution: Callable[..., object] | None = None,
+    quarantine_state: Mapping[str, object] | None = None,
+    save_run_state: Callable[[dict[str, object]], object] | None = None,
+    submission_ledger_path: Path | None = None,
 ) -> NotebookSubmitRunner:
     return NotebookSubmitRunner(
         slug=slug,
@@ -178,6 +188,9 @@ def build_notebook_submit_runner_for_run(
         review_code_submission=review_code_submission,
         recheck_code_submission_guard=recheck_code_submission_guard,
         record_code_submission_execution=record_code_submission_execution,
+        quarantine_state=quarantine_state,
+        save_run_state=save_run_state,
+        submission_ledger_path=submission_ledger_path,
     )
 
 
@@ -211,6 +224,9 @@ def run_notebook_kernel_submission(
     review_code_submission: Callable[..., object] | None = None,
     recheck_code_submission_guard: Callable[..., object] | None = None,
     record_code_submission_execution: Callable[..., object] | None = None,
+    quarantine_state: Mapping[str, object] | None = None,
+    save_run_state: Callable[[dict[str, object]], object] | None = None,
+    submission_ledger_path: Path | None = None,
 ) -> tuple[object, str, Path | None]:
     """Run the submit notebook and submit its Kaggle output reference."""
     submit_kernel_kwargs = build_submit_kernel_run_kwargs(
@@ -255,6 +271,7 @@ def run_notebook_kernel_submission(
     )
     local_artifact_path: Path | None = None
     fidelity_report_path: Path | None = None
+    fidelity_report: dict[str, object] | None = None
     try:
         local_artifact_path = _resolve_submit_kernel_local_artifact_path(
             kernel_result=kernel_result,
@@ -292,7 +309,7 @@ def run_notebook_kernel_submission(
             )
             if expected_contract_path is not None:
                 fidelity_report_path = iter_logs_dir / f"submission_fidelity_report-v{version_label}.json"
-                _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
+                fidelity_report = _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
                     artifact_mode=artifact_mode,
                     expected_metrics=expected_metrics_payload,
                     actual_metrics_path=metrics_path if isinstance(metrics_path, Path) else None,
@@ -306,6 +323,23 @@ def run_notebook_kernel_submission(
                     run_id=run_id,
                     iteration=iteration,
                     previous_report_paths=iter_logs_dir.glob("submission_fidelity_report-v*.json"),
+                    quarantine_state=quarantine_state,
+                )
+            elif quarantine_state and str(quarantine_state.get("status") or "").strip().lower() == "active":
+                fidelity_report_path = iter_logs_dir / f"submission_fidelity_report-v{version_label}.json"
+                fidelity_report = _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
+                    artifact_mode=artifact_mode,
+                    expected_metrics=expected_metrics_payload,
+                    actual_metrics_path=metrics_path if isinstance(metrics_path, Path) else None,
+                    runtime_fidelity_path=runtime_fidelity_path,
+                    submission_path=local_artifact_path,
+                    package_dir=package_dir,
+                    report_path=fidelity_report_path,
+                    kernel_id=kernel_id,
+                    kernel_version=version_label,
+                    run_id=run_id,
+                    iteration=iteration,
+                    quarantine_state=quarantine_state,
                 )
             else:
                 _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
@@ -375,6 +409,15 @@ def run_notebook_kernel_submission(
             expected_output_file=code_output_file_name,
             submission_path=reviewed_artifact,
             message=message,
+        )
+    if fidelity_report is not None and save_run_state is not None:
+        _submission_fidelity.reserve_quarantine_repair_attempt(
+            report=fidelity_report,
+            quarantine_state=quarantine_state,
+            save_run_state=save_run_state,
+            submission_ledger_path=submission_ledger_path,
+            slug=slug,
+            run_id=run_id,
         )
     on_message(f"[cyan]submit notebook[/cyan]: {submit_reference.kernel_ref}")
     submit_kwargs = build_kaggle_submit_kernel_kwargs(
@@ -538,6 +581,9 @@ def run_notebook_kernel_submission_for_run(
     review_code_submission: Callable[..., object] | None = None,
     recheck_code_submission_guard: Callable[..., object] | None = None,
     record_code_submission_execution: Callable[..., object] | None = None,
+    quarantine_state: Mapping[str, object] | None = None,
+    save_run_state: Callable[[dict[str, object]], object] | None = None,
+    submission_ledger_path: Path | None = None,
 ) -> tuple[object, str, Path | None]:
     iteration = infer_iteration_from_submission_path(submission_path) or 1
     iter_dir = paths.iter_dir(run_id, iteration)
@@ -580,6 +626,9 @@ def run_notebook_kernel_submission_for_run(
         review_code_submission=review_code_submission,
         recheck_code_submission_guard=recheck_code_submission_guard,
         record_code_submission_execution=record_code_submission_execution,
+        quarantine_state=quarantine_state,
+        save_run_state=save_run_state,
+        submission_ledger_path=submission_ledger_path,
     )
 
 

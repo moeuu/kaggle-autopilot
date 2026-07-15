@@ -160,15 +160,47 @@ Before any submit call:
 - duplicate hash check
 - rate-limit and retry policy
 - repeated error fingerprint abort
+- `submission_fidelity.py` freezes run/iteration identity, source and prepared/output hashes, code/package fingerprint,
+  selected pipeline/assets, metric provenance, output contract, bounded prediction statistics, and declared fallback
+  state in one versioned `SubmissionFidelityReport`
 - freshly packaged `gateway`/`inference` kernels bind selection, metric provenance, assets, accelerator, output name,
   local candidate evidence, and the bounded source package in `submit_fidelity_expected.json`
 - the pure-standard-library bootstrap recorder emits version-scoped input/asset, output/hash, metrics, fallback,
   tabular ID/order/dispersion, accelerator-fallback, and exception/error-transcript evidence
-- `submit_kernel_fidelity.py` writes one normalized, immutable `submission_fidelity_report.json`; a non-passing
-  verdict raises `SubmissionValidationError` before Codex or Kaggle submission, and Codex cannot override it
+- a non-passing fidelity verdict raises `SubmissionValidationError` as `fidelity_repair_required` before Kaggle
+  submission; it is non-retryable in the current submit loop and Codex cannot override it
 
-Wrapper and file submissions retain their existing validation path. The mandatory attestation applies only to newly
-built `gateway`/`inference` code-submit packages; direct legacy metrics-only callers remain compatible.
+Attestation scope is explicit and mode-dependent:
+
+| Submission path | Fidelity scope | What it proves |
+|---|---|---|
+| File or wrapper | `local_prepared_artifact` | Exact prepared bytes are bound to local selection/evaluation and existing structural/semantic validation. It does not claim remote execution evidence. |
+| Gateway or inference notebook | `remote_notebook_runtime` | Staged package, runtime identity/assets/logs/metrics, selected kernel output, and exact downloaded bytes are bound together. |
+
+`submit_kernel_fidelity.py` remains an import-compatible notebook adapter; the shared report and state policy live in
+`submission_fidelity.py`. Historical file/attempt records without new provenance fields are surfaced as
+`legacy_unknown` warnings. Fresh strong contracts and every active anomaly quarantine are fail-closed.
+
+### Leaderboard anomaly quarantine
+
+A detected `leaderboard_implementation_anomaly` creates a durable quarantine in `run_state.json` and a matching
+`submission_fidelity_quarantine` ledger event. The record stores only hashes, bounded summaries, reason codes, and
+supporting paths: anomalous output hash, code/package fingerprint, report fingerprint, and attempt fingerprint.
+
+While active, normal submissions are blocked. One repaired-candidate permit is persisted only when:
+
+1. both the code/package fingerprint and output bytes changed;
+2. the fidelity report passes with trusted metric provenance; and
+3. the ordinary rules, validation, duplicate, rate-limit, message, and code-review guards still apply.
+
+The permit remains pending until a leaderboard outcome is observed. Another anomalous outcome retains quarantine and
+adds that attempt fingerprint to the failed set; repeating it is rejected. A passing pre-submit report never resolves
+the state. Resolution occurs only when the repaired attempt receives a non-anomalous leaderboard outcome.
+
+Fidelity summaries are copied into `submit_attempts.jsonl` and `iteration_evidence.json`, including report path,
+verdict, exact reason codes, expected/actual hashes, fingerprints, and supporting artifact paths. This gives the next
+Oracle/Codex iteration concrete repair targets such as input discovery, asset loading, fallback activation, output
+selection, ID alignment, or metric provenance.
 
 ## Artifact Map
 
@@ -190,6 +222,10 @@ artifacts/<slug>/
     metrics.json
     diagnostics.md
     submission.<suffix>
+    logs/
+      submission_fidelity_expected-file.json
+      submission_fidelity_report-file.json
+      submission_fidelity_report-v<kernel-version>.json
 
 knowledge/
   kb.sqlite

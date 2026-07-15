@@ -648,6 +648,7 @@ def _summarize_attempts(attempts: list[dict[str, object]]) -> list[dict[str, obj
             "reason": record.get("reason"),
             "submission_sha256": record.get("sub_sha256"),
             "code_fingerprint": record.get("code_fingerprint"),
+            "submission_fidelity": _bounded_json_value(record.get("submission_fidelity"), max_items=32),
             "error_excerpt": _redact(str(record.get("stderr_tail") or ""))[:1_200],
         }
         for record in attempts
@@ -777,6 +778,22 @@ def _evidence_gaps(*, current_record: dict[str, object], transitions: list[dict[
     attempts = current_record.get("submission_attempts")
     if isinstance(attempts, list) and any(item.get("ok") is not True for item in attempts if isinstance(item, dict)):
         gaps.append("Submission attempts failed; separate output/runtime contract repair from model-quality changes.")
+    if isinstance(attempts, list):
+        fidelity_failures = []
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            fidelity = item.get("submission_fidelity")
+            if not isinstance(fidelity, dict) or fidelity.get("verdict") != "fail":
+                continue
+            fidelity_failures.append(fidelity)
+        if fidelity_failures:
+            latest = fidelity_failures[-1]
+            codes = ", ".join(str(code) for code in list(latest.get("reason_codes") or [])[:12])
+            gaps.append(
+                "Submission fidelity repair required: "
+                f"reason_codes={codes or 'legacy_unknown'}; report={latest.get('report_path')}"
+            )
     return gaps
 
 

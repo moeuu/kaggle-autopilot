@@ -42,11 +42,18 @@ class SubmitAttemptRecorder:
     save_run_state: Callable[[dict[str, object]], None]
 
     def append(self, payload: dict[str, object]) -> None:
-        append_submit_attempt(run_dir=self.run_dir, payload=payload)
+        append_submit_attempt(run_dir=self.run_dir, payload=_attach_submission_fidelity(self.run_dir, payload))
 
     def record_state(self, *, attempt_payload: dict[str, object], run_state_update: dict[str, object]) -> None:
-        self.append(attempt_payload)
-        self.save_run_state(run_state_update)
+        enriched_attempt = _attach_submission_fidelity(self.run_dir, attempt_payload)
+        append_submit_attempt(run_dir=self.run_dir, payload=enriched_attempt)
+        enriched_state = dict(run_state_update)
+        fidelity = enriched_attempt.get("submission_fidelity")
+        if isinstance(fidelity, dict):
+            enriched_state["last_submission_fidelity"] = fidelity
+            if enriched_attempt.get("reason") == "fidelity_repair_required":
+                enriched_state["fidelity_repair_required"] = True
+        self.save_run_state(enriched_state)
 
     def record_payloads(self, payloads: SubmitAttemptStatePayloads) -> None:
         self.record_state(
@@ -73,6 +80,26 @@ def append_submit_attempt(*, run_dir: Path, payload: dict[str, object], now_iso:
     }
     attempts_path = run_dir / "submit_attempts.jsonl"
     append_jsonl_record(attempts_path, record, ensure_ascii=True)
+
+
+def _attach_submission_fidelity(run_dir: Path, payload: dict[str, object]) -> dict[str, object]:
+    if isinstance(payload.get("submission_fidelity"), dict):
+        return dict(payload)
+    from kagglebot.submission_fidelity import (
+        fidelity_report_summary,
+        find_latest_submission_fidelity_report,
+    )
+
+    submission_sha = str(payload.get("sub_sha256") or "").strip()
+    match = find_latest_submission_fidelity_report(run_dir, output_sha256=submission_sha or None)
+    if match is None and payload.get("reason") == "fidelity_repair_required":
+        match = find_latest_submission_fidelity_report(run_dir)
+    if match is None:
+        return dict(payload)
+    report_path, report = match
+    enriched = dict(payload)
+    enriched["submission_fidelity"] = fidelity_report_summary(report, report_path=report_path)
+    return enriched
 
 
 def load_submit_attempt_rows(run_dir: Path) -> list[dict[str, object]]:

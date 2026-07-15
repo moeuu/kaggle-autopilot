@@ -135,6 +135,57 @@ def test_submit_attempt_recorder_appends_attempt_and_saves_state(tmp_path) -> No
     assert saved_updates == [{"submit_attempted": True, "submit_ok": True}]
 
 
+def test_submit_attempt_recorder_attaches_fidelity_failure_evidence(tmp_path: Path) -> None:
+    report_path = tmp_path / "iter-1" / "logs" / "submission_fidelity_report-file.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "report_type": "SubmissionFidelityReport",
+                "verdict": "fail",
+                "reason_codes": ["file_identifier_order_mismatch"],
+                "reasons": [
+                    {
+                        "code": "file_identifier_order_mismatch",
+                        "message": "identifier order differs",
+                    }
+                ],
+                "artifact_mode": "file",
+                "attestation_scope": "local_prepared_artifact",
+                "remote_runtime_attested": False,
+                "package_fingerprint": "code-v1",
+                "attempt_fingerprint": "attempt-v1",
+                "selected_output": {"sha256": "output-v1"},
+                "metric_provenance": {"trusted": True},
+                "supporting_artifact_paths": [str(report_path)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    saved_updates: list[dict[str, object]] = []
+    recorder = SubmitAttemptRecorder(run_dir=tmp_path, save_run_state=saved_updates.append)
+
+    recorder.record_state(
+        attempt_payload={
+            "run_id": "run-1",
+            "sub_path": "submission.csv",
+            "sub_sha256": "output-v1",
+            "ok": False,
+            "reason": "fidelity_repair_required",
+        },
+        run_state_update={"submit_attempted": True, "submit_ok": False},
+    )
+
+    attempt = load_latest_submit_attempt(tmp_path)
+    fidelity = attempt["submission_fidelity"]
+    assert fidelity["report_path"] == str(report_path.resolve())
+    assert fidelity["reason_codes"] == ["file_identifier_order_mismatch"]
+    assert fidelity["actual_hashes"]["output_sha256"] == "output-v1"
+    assert saved_updates[-1]["last_submission_fidelity"] == fidelity
+    assert saved_updates[-1]["fidelity_repair_required"] is True
+
+
 def test_build_submit_attempt_recorder_for_run_binds_run_dir(tmp_path: Path) -> None:
     saved_updates: list[tuple[Path, dict[str, object]]] = []
 
