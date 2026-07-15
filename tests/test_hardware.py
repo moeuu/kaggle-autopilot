@@ -15,7 +15,7 @@ def test_resolve_explicit_rtx3060_profile() -> None:
     assert hardware_env(profile)["KAGGLEBOT_GPU_VRAM_GB"] == "12"
     assert hardware_env(profile)["KAGGLEBOT_ACCURACY_FIRST"] == "1"
     rendered = render_hardware_constraints(profile, compute="local_gpu")
-    assert "Planning time budget: unlimited per kernel iteration" in rendered
+    assert "Planning time budget: <= 1440 minutes per kernel iteration" in rendered
     assert "RTX3060-class accuracy-first rule" in rendered
 
 

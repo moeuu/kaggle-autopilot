@@ -23,7 +23,7 @@ from kagglebot.kernel_status import (
 )
 from kagglebot.logging_utils import truncate_lines
 
-LOG_POLL_INTERVAL = 2.0
+LOG_POLL_INTERVAL = 30.0
 HEARTBEAT_INTERVAL = 30.0
 STATUS_ERROR_SLEEP = 10.0
 MAX_STATUS_ERRORS = 6

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from kagglebot.agents.codex_runner import run_codex
 from kagglebot.agents.identity import REPOSITORY_IMPLEMENTATION_AGENT
 from kagglebot.agents.strategy_runner import run_strategy
 from kagglebot.exec_utils import run_command
+from kagglebot.hashing import sha256_text
 from kagglebot.json_utils import (
     append_jsonl_record,
     load_json_object_or_empty,
@@ -19,8 +21,10 @@ from kagglebot.json_utils import (
     write_json_object,
     write_jsonl_records,
 )
+from kagglebot.kaggle_api import leaderboard_rank_for_score
 from kagglebot.knowledge.event_store import record_agent_event, record_run_lesson
 from kagglebot.knowledge.skill_registry import record_skill_evaluation, upsert_skill
+from kagglebot.leaderboard_anomaly import assess_leaderboard_anomaly
 from kagglebot.paths import CompetitionPaths, KnowledgePaths
 from kagglebot.repository_transaction import (
     RepositoryBaseline,
@@ -46,7 +50,7 @@ _INTERRUPTED_TRANSACTION_STATES = frozenset({"oracle_running", "oracle_succeeded
 class SelfImprovementConfig:
     artifacts_dir: Path
     knowledge_paths: KnowledgePaths
-    max_runs: int = 80
+    max_runs: int = 500
     min_interval_hours: float | None = 6.0
     invoke_codex: bool = True
     allow_architectural_changes: bool = True
@@ -108,7 +112,23 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
         return {"status": "skipped_not_due", "report_path": str(config.latest_json_path)}
 
     runs = _collect_recent_runs(config.artifacts_dir, limit=max(1, config.max_runs))
-    report = _build_report(artifacts_dir=config.artifacts_dir, runs=runs)
+    scheduler_before = _read_json_object(config.scheduler_state_path)
+    handled_anomalies_before = set(_string_list(scheduler_before.get("handled_leaderboard_anomaly_fingerprints")))
+    actionable_leaderboard_anomaly = next(
+        (
+            anomaly
+            for run in runs
+            for anomaly in _dict_list(run.get("leaderboard_anomalies"))
+            if str(anomaly.get("fingerprint") or "") not in handled_anomalies_before
+        ),
+        None,
+    )
+    watch_incidents = _collect_watch_incidents(config.artifacts_dir, limit=max(20, config.max_runs * 2))
+    report = _build_report(
+        artifacts_dir=config.artifacts_dir,
+        runs=runs,
+        watch_incidents=watch_incidents,
+    )
     backlog = _build_experiment_backlog(report)
     skill_candidates = _build_skill_candidates(report=report, backlog=backlog)
     outcomes = _normalized_outcomes(runs)
@@ -138,7 +158,14 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
         write_json_object(config.latest_json_path, report, sort_keys=True)
         config.latest_markdown_path.write_text(_render_markdown(report), encoding="utf-8")
     append_jsonl_record(config.reports_jsonl_path, report, sort_keys=True)
-    _record_self_improvement_schedule(config=config, codex_result=codex_result)
+    _record_self_improvement_schedule(
+        config=config,
+        codex_result=codex_result,
+        incident_fingerprints=[
+            str(item.get("fingerprint") or "") for item in watch_incidents if str(item.get("fingerprint") or "")
+        ],
+        anomaly_fingerprints=_leaderboard_anomaly_fingerprints(runs),
+    )
     return {
         "status": "written",
         "report_path": str(config.latest_json_path),
@@ -150,6 +177,12 @@ def run_self_improvement_cycle(config: SelfImprovementConfig) -> dict[str, objec
         "codex_improvement": codex_result,
         "consolidated_knowledge": report.get("consolidated_knowledge"),
         "top_actions": report.get("recommended_actions", [])[:3],
+        "latest_watch_incident": (
+            report.get("recent_watch_incidents", [None])[0]
+            if isinstance(report.get("recent_watch_incidents"), list) and report.get("recent_watch_incidents")
+            else None
+        ),
+        "latest_leaderboard_anomaly": actionable_leaderboard_anomaly,
     }
 
 
@@ -704,24 +737,10 @@ def _publish_codex_changes(
         if result.returncode != 0:
             return {"status": "verification_failed", "verification": verification}
 
-    add_result = run_command(
-        [
-            "git",
-            "add",
-            "-A",
-            "--",
-            "src",
-            "tests",
-            "docs",
-            "README.md",
-            "STRATEGY.md",
-            "AGENTS.md",
-            "knowledge",
-            "pyproject.toml",
-            "uv.lock",
-        ],
-        cwd=workdir,
-    )
+    publish_paths = _existing_publish_paths(workdir)
+    if not publish_paths:
+        return {"status": "skipped_no_stageable_changes", "verification": verification}
+    add_result = run_command(["git", "add", "-A", "--", *publish_paths], cwd=workdir)
     if add_result.returncode != 0:
         return {"status": "git_add_failed", "stderr": add_result.stderr, "verification": verification}
     if not _git_staged_changes(workdir):
@@ -753,6 +772,22 @@ def _publish_codex_changes(
         "commit": head_result.stdout.strip(),
         "verification": verification,
     }
+
+
+def _existing_publish_paths(workdir: Path) -> list[str]:
+    """Return safe publish roots without failing on optional absent files."""
+    candidates = (
+        "src",
+        "tests",
+        "docs",
+        "README.md",
+        "STRATEGY.md",
+        "AGENTS.md",
+        "knowledge",
+        "pyproject.toml",
+        "uv.lock",
+    )
+    return [relative for relative in candidates if (workdir / relative).exists()]
 
 
 def _git_dirty(workdir: Path) -> bool:
@@ -794,6 +829,20 @@ def _self_improvement_due(config: SelfImprovementConfig) -> bool:
     state = _read_json_object(config.scheduler_state_path)
     if not state:
         return True
+    handled_fingerprints = set(_string_list(state.get("handled_watch_incident_fingerprints")))
+    current_fingerprints = {
+        str(item.get("fingerprint") or "")
+        for item in _collect_watch_incidents(config.artifacts_dir, limit=max(20, config.max_runs * 2))
+        if str(item.get("fingerprint") or "")
+    }
+    if current_fingerprints - handled_fingerprints:
+        return True
+    handled_anomaly_fingerprints = set(_string_list(state.get("handled_leaderboard_anomaly_fingerprints")))
+    current_anomaly_fingerprints = set(
+        _leaderboard_anomaly_fingerprints(_collect_recent_runs(config.artifacts_dir, limit=max(1, config.max_runs)))
+    )
+    if current_anomaly_fingerprints - handled_anomaly_fingerprints:
+        return True
     try:
         now = datetime.now(UTC)
         retry_at_raw = str(state.get("retry_at") or "").strip()
@@ -813,17 +862,37 @@ def _record_self_improvement_schedule(
     *,
     config: SelfImprovementConfig,
     codex_result: dict[str, object] | None,
+    incident_fingerprints: list[str],
+    anomaly_fingerprints: list[str],
 ) -> None:
     now = datetime.now(UTC)
     status = str((codex_result or {}).get("status") or "report_only")
     completed = status in {"completed", "disabled"}
     previous = _read_json_object(config.scheduler_state_path)
+    handled_fingerprints = list(
+        dict.fromkeys(
+            [
+                *_string_list(previous.get("handled_watch_incident_fingerprints")),
+                *incident_fingerprints,
+            ]
+        )
+    )[-500:]
+    handled_anomaly_fingerprints = list(
+        dict.fromkeys(
+            [
+                *_string_list(previous.get("handled_leaderboard_anomaly_fingerprints")),
+                *(anomaly_fingerprints if completed or codex_result is None else []),
+            ]
+        )
+    )[-500:]
     payload: dict[str, object] = {
         "schema_version": 1,
         "last_attempt_at": now.isoformat(),
         "last_status": status,
         "last_completed_at": now.isoformat() if completed else previous.get("last_completed_at"),
         "retry_at": None if completed else (now + timedelta(minutes=30)).isoformat(),
+        "handled_watch_incident_fingerprints": handled_fingerprints,
+        "handled_leaderboard_anomaly_fingerprints": handled_anomaly_fingerprints,
     }
     write_transaction_state(config.scheduler_state_path, payload)
 
@@ -850,13 +919,118 @@ def _collect_recent_runs(artifacts_dir: Path, *, limit: int) -> list[dict[str, o
     return [_load_run_summary(run_dir=run_dir, slug=slug) for _mtime, run_dir, slug in candidates[:limit]]
 
 
+def _collect_watch_incidents(artifacts_dir: Path, *, limit: int) -> list[dict[str, object]]:
+    """Collect failures that may occur before a run directory exists.
+
+    Run-only analysis misses discovery, dataset-profile, and other supervisor
+    preflight failures. The watch ledgers are the durable source for those
+    failures, so promote them into the same cross-competition improvement
+    report with a normalized fingerprint.
+    """
+    watch_dir = artifacts_dir / "_watch"
+    if not watch_dir.is_dir():
+        return []
+    incidents: list[dict[str, object]] = []
+    seen_records: set[tuple[str, str, str, str]] = set()
+    for ledger_path in sorted(watch_dir.rglob("ledger.jsonl")):
+        for row in load_jsonl_records(ledger_path):
+            event = str(row.get("event") or "").strip().lower()
+            if event not in {"failed", "stale_active_cleared"}:
+                continue
+            slug = str(row.get("slug") or "").strip()
+            run_id = str(row.get("run_id") or "").strip()
+            reason = str(row.get("reason") or "unknown").strip()
+            error = str(row.get("error") or reason).strip()
+            timestamp = str(row.get("ts") or "").strip()
+            record_key = (timestamp, slug, run_id, error)
+            if record_key in seen_records:
+                continue
+            seen_records.add(record_key)
+            run_exists = bool(slug and run_id and (artifacts_dir / slug / "runs" / run_id).is_dir())
+            fingerprint = _watch_incident_fingerprint(reason=reason, error=error)
+            incident_path_raw = str(row.get("incident_path") or "").strip()
+            incident_path = Path(incident_path_raw) if incident_path_raw else None
+            if incident_path is not None and not incident_path.is_absolute():
+                incident_path = artifacts_dir / incident_path
+            incident_context = (
+                load_json_object_or_empty(incident_path)
+                if incident_path is not None and incident_path.is_file()
+                else {}
+            )
+            incidents.append(
+                {
+                    "timestamp": timestamp,
+                    "slug": slug or None,
+                    "run_id": run_id or None,
+                    "event": event,
+                    "reason": reason,
+                    "error": error[:4000],
+                    "fingerprint": fingerprint,
+                    "run_directory_exists": run_exists,
+                    "cause_tags": _watch_incident_cause_tags(
+                        reason=reason,
+                        error=error,
+                        run_directory_exists=run_exists,
+                    ),
+                    "ledger_path": str(ledger_path),
+                    "incident_path": str(incident_path) if incident_path is not None else None,
+                    "phase": incident_context.get("phase"),
+                    "traceback_excerpt": str(incident_context.get("traceback") or "")[-8000:],
+                }
+            )
+    incidents.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    return incidents[: max(1, limit)]
+
+
+def _watch_incident_fingerprint(*, reason: str, error: str) -> str:
+    normalized = f"{reason}: {error}".lower()
+    normalized = re.sub(r"\b\d{8}t\d{6}z-[0-9a-f]+\b", "<run-id>", normalized)
+    normalized = re.sub(r"0x[0-9a-f]+", "<hex>", normalized)
+    normalized = re.sub(r"\b\d+(?:\.\d+)?\b", "<n>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return sha256_text(normalized)[:20]
+
+
+def _watch_incident_cause_tags(
+    *,
+    reason: str,
+    error: str,
+    run_directory_exists: bool,
+) -> list[str]:
+    text = f"{reason} {error}".lower()
+    tags: list[str] = []
+    if not run_directory_exists:
+        tags.append("orchestration_preflight_failure")
+    if "submit" in text or "submission" in text:
+        tags.append("submit_failed")
+    if any(token in text for token in ("metric", "validation", "schema", "row count", "arrays must be")):
+        tags.append("metric_or_validation_error")
+    if any(token in text for token in ("out of memory", "oom", "capacity", "timeout", "killed")):
+        tags.append("resource_or_capacity")
+    if any(token in text for token in ("autofix", "codex", "oracle", "verification failed")):
+        tags.append("repair_pipeline_failure")
+    if not tags:
+        tags.append("orchestration_runtime_failure")
+    return list(dict.fromkeys(tags))
+
+
 def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
     paths = CompetitionPaths(slug=slug, artifacts_dir=run_dir.parents[2])
     run_payload = _read_json_object(run_dir / "run.json")
     run_id = str(run_payload.get("run_id") or run_dir.name)
     config = run_payload.get("config") if isinstance(run_payload.get("config"), dict) else {}
-    direction = str((config or {}).get("target_direction") or (config or {}).get("direction") or "").lower() or None
-    metric = str((config or {}).get("target_metric") or (config or {}).get("goal_metric") or "").strip() or None
+    evaluation_spec = _read_json_object(paths.context_dir / "evaluation_spec.json")
+    direction = _resolve_run_direction(config=config or {}, evaluation_spec=evaluation_spec)
+    metric = (
+        str(
+            (config or {}).get("target_metric")
+            or (config or {}).get("goal_metric")
+            or evaluation_spec.get("metric_name")
+            or evaluation_spec.get("metric")
+            or ""
+        ).strip()
+        or None
+    )
     status = str(run_payload.get("status") or "unknown")
     iterations = _load_iteration_summaries(run_dir)
     best_offline = _best_iteration_value(iterations=iterations, direction=direction)
@@ -865,6 +1039,16 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
     campaign_outcomes = _load_campaign_outcomes(paths.context_dir / "campaign_outcomes.jsonl", run_id=run_id)
     best_online = _best_online_score(outcomes=outcomes, direction=direction)
     top1_gap = _score_gap(best_score=best_online, top1_score=top1_score, direction=direction)
+    leaderboard_anomalies = _load_leaderboard_anomalies(
+        slug=slug,
+        run_id=run_id,
+        iterations=iterations,
+        outcomes=outcomes,
+        direction=direction or "maximize",
+        best_offline=best_offline,
+        top1_score=top1_score,
+        context_dir=paths.context_dir,
+    )
     submit_failures = _load_submit_failures(run_dir / "submit_attempts.jsonl")
     latest_diagnostics = _latest_text(run_dir, "diagnostics.md", max_chars=1800)
     failure_contexts = [_read_json_object(path) for path in sorted(run_dir.glob("iter-*/submit_failure_context.json"))]
@@ -881,6 +1065,7 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
         submit_failures=submit_failures,
         failure_contexts=failure_contexts,
         diagnostics=latest_diagnostics,
+        leaderboard_anomalies=leaderboard_anomalies,
     )
     return {
         "slug": slug,
@@ -893,6 +1078,8 @@ def _load_run_summary(*, run_dir: Path, slug: str) -> dict[str, object]:
         "best_online": best_online,
         "top1_public_score": top1_score,
         "top1_gap": top1_gap,
+        "leaderboard_anomalies": leaderboard_anomalies,
+        "leaderboard_anomaly_count": len(leaderboard_anomalies),
         "submission_outcome_count": len(outcomes),
         "campaign_outcome_count": len(campaign_outcomes),
         "campaign_outcomes": campaign_outcomes[-20:],
@@ -919,9 +1106,146 @@ def _load_iteration_summaries(run_dir: Path) -> list[dict[str, object]]:
                 "value": value,
                 "score_source": metrics.get("score_source"),
                 "metric_status": metrics.get("metric_status"),
+                "leaderboard_anomaly": (
+                    metrics.get("leaderboard_anomaly") if isinstance(metrics.get("leaderboard_anomaly"), dict) else None
+                ),
             }
         )
     return summaries
+
+
+def _load_leaderboard_anomalies(
+    *,
+    slug: str,
+    run_id: str,
+    iterations: list[dict[str, object]],
+    outcomes: list[dict[str, object]],
+    direction: str,
+    best_offline: float | None,
+    top1_score: float | None,
+    context_dir: Path,
+) -> list[dict[str, object]]:
+    anomalies: list[dict[str, object]] = []
+    for item in iterations:
+        saved = item.get("leaderboard_anomaly")
+        if not isinstance(saved, dict) or saved.get("suspected") is not True:
+            continue
+        anomalies.append(
+            _normalize_leaderboard_anomaly(
+                anomaly=saved,
+                slug=slug,
+                run_id=run_id,
+                iteration=item.get("iteration"),
+                source="iteration_metrics",
+            )
+        )
+    if not anomalies:
+        for outcome in outcomes:
+            saved = outcome.get("leaderboard_anomaly")
+            if isinstance(saved, dict) and saved.get("suspected") is True:
+                anomaly_payload = saved
+            else:
+                outcome_direction = direction
+                rank = outcome.get("rank")
+                total_teams = outcome.get("total_teams")
+                rank_percentile = outcome.get("rank_percentile")
+                rank_source = outcome.get("rank_source")
+                direction_source = "run_config"
+                if rank is None or total_teams is None:
+                    score = _to_float(outcome.get("score"))
+                    if score is not None:
+                        try:
+                            rank_info = leaderboard_rank_for_score(
+                                slug=slug,
+                                output_dir=context_dir,
+                                score=score,
+                                direction=direction,
+                                dry_run=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            rank_info = {}
+                        if rank_info.get("rank") is not None and rank_info.get("total_teams") is not None:
+                            rank = rank_info.get("rank")
+                            total_teams = rank_info.get("total_teams")
+                            rank_percentile = rank_info.get("rank_percentile")
+                            rank_source = "cached_leaderboard_score_estimate"
+                        resolved_direction = str(rank_info.get("direction") or "").strip().lower()
+                        if resolved_direction in {"minimize", "maximize"}:
+                            outcome_direction = resolved_direction
+                            direction_source = str(rank_info.get("direction_source") or "leaderboard")
+                assessment = assess_leaderboard_anomaly(
+                    direction=outcome_direction,
+                    online_score=outcome.get("score"),
+                    offline_score=best_offline,
+                    top1_score=top1_score,
+                    rank=rank,
+                    total_teams=total_teams,
+                    rank_percentile=rank_percentile,
+                    estimated_rank=outcome.get("estimated_rank"),
+                    estimated_total_teams=outcome.get("estimated_total_teams"),
+                    estimated_rank_percentile=outcome.get("estimated_rank_percentile"),
+                )
+                if assessment is None:
+                    continue
+                anomaly_payload = assessment.to_payload()
+                evidence = anomaly_payload.get("evidence")
+                if isinstance(evidence, dict):
+                    evidence["rank_source"] = rank_source
+                    evidence["direction_source"] = direction_source
+            anomalies.append(
+                _normalize_leaderboard_anomaly(
+                    anomaly=anomaly_payload,
+                    slug=slug,
+                    run_id=run_id,
+                    iteration=None,
+                    source="submission_outcome",
+                )
+            )
+    unique: dict[str, dict[str, object]] = {}
+    for anomaly in anomalies:
+        unique.setdefault(str(anomaly["fingerprint"]), anomaly)
+    return list(unique.values())
+
+
+def _resolve_run_direction(*, config: dict[str, object], evaluation_spec: dict[str, object]) -> str | None:
+    for payload in (config, evaluation_spec):
+        for key in ("target_direction", "metric_direction", "direction"):
+            value = str(payload.get(key) or "").strip().lower()
+            if value in {"minimize", "maximize"}:
+                return value
+    return None
+
+
+def _normalize_leaderboard_anomaly(
+    *,
+    anomaly: dict[str, object],
+    slug: str,
+    run_id: str,
+    iteration: object,
+    source: str,
+) -> dict[str, object]:
+    signals = sorted(_string_list(anomaly.get("signals")))
+    normalized_signal = ",".join(signals) or str(anomaly.get("severity") or "unknown")
+    fingerprint = sha256_text(f"{slug.lower()}:{normalized_signal}")[:20]
+    return {
+        **anomaly,
+        "slug": slug,
+        "run_id": run_id,
+        "iteration": iteration,
+        "source": source,
+        "fingerprint": fingerprint,
+    }
+
+
+def _leaderboard_anomaly_fingerprints(runs: list[dict[str, object]]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(anomaly.get("fingerprint") or "")
+            for run in runs
+            for anomaly in _dict_list(run.get("leaderboard_anomalies"))
+            if str(anomaly.get("fingerprint") or "")
+        )
+    )
 
 
 def _load_submission_outcomes(path: Path, *, run_id: str) -> list[dict[str, object]]:
@@ -956,8 +1280,14 @@ def _load_submit_failures(path: Path) -> list[dict[str, object]]:
     return failures
 
 
-def _build_report(*, artifacts_dir: Path, runs: list[dict[str, object]]) -> dict[str, object]:
+def _build_report(
+    *,
+    artifacts_dir: Path,
+    runs: list[dict[str, object]],
+    watch_incidents: list[dict[str, object]],
+) -> dict[str, object]:
     cause_counter = Counter(tag for run in runs for tag in _string_list(run.get("cause_tags")))
+    cause_counter.update(tag for incident in watch_incidents for tag in _string_list(incident.get("cause_tags")))
     method_counter = Counter(
         str(outcome.get("method_id"))
         for run in runs
@@ -971,17 +1301,26 @@ def _build_report(*, artifacts_dir: Path, runs: list[dict[str, object]]) -> dict
         if outcome.get("validation_profile_id")
     )
     status_counter = Counter(str(run.get("status") or "unknown") for run in runs)
+    incident_fingerprint_counter = Counter(
+        str(incident.get("fingerprint") or "") for incident in watch_incidents if str(incident.get("fingerprint") or "")
+    )
     top1_gap_runs = [
         run for run in runs if isinstance(run.get("top1_gap"), (int, float)) and math.isfinite(float(run["top1_gap"]))
     ]
     top1_gap_runs.sort(key=lambda item: float(item["top1_gap"]), reverse=True)
+    leaderboard_anomalies = [anomaly for run in runs for anomaly in _dict_list(run.get("leaderboard_anomalies"))]
     actions = _recommended_actions(cause_counter)
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "artifacts_dir": str(artifacts_dir),
         "run_count": len(runs),
+        "watch_incident_count": len(watch_incidents),
+        "leaderboard_anomaly_count": len(leaderboard_anomalies),
         "status_counts": dict(status_counter.most_common()),
         "cause_counts": dict(cause_counter.most_common()),
+        "watch_incident_fingerprint_counts": dict(incident_fingerprint_counter.most_common(20)),
+        "recent_watch_incidents": watch_incidents[:20],
+        "recent_leaderboard_anomalies": leaderboard_anomalies[:20],
         "campaign_method_counts": dict(method_counter.most_common(20)),
         "campaign_validation_profile_counts": dict(validation_counter.most_common(20)),
         "largest_top1_gaps": [
@@ -991,6 +1330,7 @@ def _build_report(*, artifacts_dir: Path, runs: list[dict[str, object]]) -> dict
                 "top1_gap": run.get("top1_gap"),
                 "best_online": run.get("best_online"),
                 "top1_public_score": run.get("top1_public_score"),
+                "leaderboard_anomaly_count": run.get("leaderboard_anomaly_count"),
                 "cause_tags": run.get("cause_tags"),
             }
             for run in top1_gap_runs[:10]
@@ -1014,6 +1354,7 @@ def _normalized_outcomes(runs: list[dict[str, object]]) -> list[dict[str, object
                 "best_online": run.get("best_online"),
                 "top1_public_score": run.get("top1_public_score"),
                 "top1_gap": run.get("top1_gap"),
+                "leaderboard_anomalies": run.get("leaderboard_anomalies"),
                 "cause_tags": run.get("cause_tags"),
                 "submission_outcome_count": run.get("submission_outcome_count"),
                 "submit_failure_count": run.get("submit_failure_count"),
@@ -1052,6 +1393,14 @@ def _build_experiment_backlog(report: dict[str, object]) -> list[dict[str, objec
             "Broaden the first-plan model family, ensemble, data-source, or public-LB proxy schedule.",
             "Median top1_gap decreases across the next comparable runs.",
         ),
+        "leaderboard_implementation_anomaly": (
+            "Near-last rank or collapsed online score usually indicates that the evaluated candidate and executed "
+            "submission path are not equivalent.",
+            "Trace hidden-test inputs, loaded assets, fallbacks, prediction distribution, row/ID alignment, output "
+            "selection, and metric scale before allowing another model-search submission.",
+            "The repaired run emits runtime-fidelity evidence and leaves the bottom-decile anomaly band without "
+            "resubmitting the same artifact hash.",
+        ),
         "offline_online_mismatch": (
             "Offline validation is not ranking submissions like the public leaderboard.",
             "Add split/leakage diagnostics and force alternate validation when mismatch signals appear.",
@@ -1066,6 +1415,21 @@ def _build_experiment_backlog(report: dict[str, object]) -> list[dict[str, objec
             "Resource failures are consuming iterations before useful model evidence is generated.",
             "Schedule cheap smoke tests and capacity-aware model choices before expensive training.",
             "Runs with capacity signals emit a smaller retry plan instead of repeating the same failure.",
+        ),
+        "orchestration_preflight_failure": (
+            "Failures before run creation bypass run-level autofix and disappear from run-only reports.",
+            "Add a typed preflight failure boundary with durable evidence and a reusable regression test.",
+            "Future preflight failures enter self-improvement and auto-repair or stop with a typed blocker.",
+        ),
+        "repair_pipeline_failure": (
+            "The repair controller, verification, or source-reload path failed before the fix became active.",
+            "Harden repair verification and reload the exact repository source after a verified change.",
+            "Verified source repairs are loaded by the next process and do not repeat the same fingerprint.",
+        ),
+        "orchestration_runtime_failure": (
+            "A supervisor/runtime failure is not represented by a more specific reusable class.",
+            "Promote the error to a typed cross-competition incident and add deterministic recovery.",
+            "The same runtime fingerprint is classified and handled consistently across competitions.",
         ),
     }
     for index, item in enumerate(actions[:8], start=1):
@@ -1256,6 +1620,15 @@ def _skill_spec_for_cause(cause: str) -> dict[str, object]:
             "summary": "Broaden model family, validation, data-source, and ensemble search when public gap is large.",
             "problem_types": ["model_search", "leaderboard"],
         },
+        "leaderboard_implementation_anomaly": {
+            "skill_id": "leaderboard_implementation_anomaly_repair",
+            "title": "Leaderboard Implementation Anomaly Repair",
+            "summary": (
+                "Treat last-place-like outcomes as execution/submission defects and prove runtime fidelity before "
+                "resuming model search."
+            ),
+            "problem_types": ["submission", "runtime_fidelity", "leaderboard"],
+        },
         "offline_online_mismatch": {
             "skill_id": "offline_online_mismatch_repair",
             "title": "Offline/Online Mismatch Repair",
@@ -1279,6 +1652,24 @@ def _skill_spec_for_cause(cause: str) -> dict[str, object]:
             "title": "Iteration Metrics Recovery",
             "summary": "Ensure every iteration emits metrics or an explicit failure context.",
             "problem_types": ["runtime", "metrics"],
+        },
+        "orchestration_preflight_failure": {
+            "skill_id": "preflight_failure_promotion",
+            "title": "Preflight Failure Promotion",
+            "summary": "Promote failures before run creation into typed incidents, autofix evidence, and tests.",
+            "problem_types": ["orchestration", "preflight"],
+        },
+        "repair_pipeline_failure": {
+            "skill_id": "repair_pipeline_reload",
+            "title": "Repair Pipeline Reload",
+            "summary": "Verify repository repairs and reload the exact changed source before retrying a run.",
+            "problem_types": ["orchestration", "autofix"],
+        },
+        "orchestration_runtime_failure": {
+            "skill_id": "orchestration_failure_recovery",
+            "title": "Orchestration Failure Recovery",
+            "summary": "Classify supervisor failures centrally and reuse deterministic recovery across competitions.",
+            "problem_types": ["orchestration", "runtime"],
         },
     }
     return specs.get(
@@ -1385,6 +1776,14 @@ def _render_cause_playbook(cause: str, report: dict[str, object]) -> str:
         for run in problem_runs:
             if isinstance(run, dict) and cause in _string_list(run.get("cause_tags")):
                 examples.append(f"- {run.get('slug')} {run.get('run_id')}: gap={run.get('top1_gap')}")
+    incidents = report.get("recent_watch_incidents")
+    if isinstance(incidents, list):
+        for incident in incidents:
+            if isinstance(incident, dict) and cause in _string_list(incident.get("cause_tags")):
+                examples.append(
+                    f"- {incident.get('slug')} {incident.get('run_id')}: "
+                    f"reason={incident.get('reason')} fingerprint={incident.get('fingerprint')}"
+                )
     lines = [
         f"# Playbook: {cause}",
         "",
@@ -1454,6 +1853,19 @@ def _render_strategy_context(
         lines.extend(["", "## Validation Profile Outcomes"])
         for profile_id, count in list(validation_counts.items())[:8]:
             lines.append(f"- {profile_id}: {count}")
+    incidents = report.get("recent_watch_incidents")
+    lines.extend(["", "## Cross-Competition Watch Incidents"])
+    if isinstance(incidents, list) and incidents:
+        for item in incidents[:10]:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {item.get('slug')} {item.get('run_id')}: "
+                    f"reason={item.get('reason')} fingerprint={item.get('fingerprint')} "
+                    f"phase={item.get('phase')} run_exists={item.get('run_directory_exists')} "
+                    f"incident={item.get('incident_path')} error={str(item.get('error') or '')[:300]}"
+                )
+    else:
+        lines.append("- No watch-level incidents.")
     lines.extend(["", "## Recent Problem Runs"])
     problem_runs = report.get("recent_problem_runs")
     if isinstance(problem_runs, list) and problem_runs:
@@ -1486,14 +1898,28 @@ def _recommended_actions(causes: Counter[str]) -> list[dict[str, object]]:
         "online_far_from_top1": (
             "Force broader model-family search, ensembling, public-LB validation, and data-source review."
         ),
+        "leaderboard_implementation_anomaly": (
+            "Stop model-only tuning and audit the exact packaged/executed submission path before another submit."
+        ),
         "offline_online_mismatch": (
             "Investigate leakage, split mismatch, sample weighting, and public-LB proxy quality."
         ),
         "metric_or_validation_error": "Tighten metric contract validation and fail earlier when scoring is untrusted.",
         "resource_or_capacity": "Add cheaper smoke tests and resource-aware model schedules before expensive runs.",
+        "orchestration_preflight_failure": (
+            "Promote pre-run discovery/profile failures into typed autofix incidents with regression tests."
+        ),
+        "repair_pipeline_failure": (
+            "Harden Oracle/Codex verification and source reload so verified fixes reach the active process."
+        ),
+        "orchestration_runtime_failure": (
+            "Classify supervisor/runtime errors centrally and add reusable recovery instead of per-competition patches."
+        ),
     }
     actions: list[dict[str, object]] = []
-    for cause, count in causes.most_common():
+    ranked_causes = causes.most_common()
+    ranked_causes.sort(key=lambda item: item[0] != "leaderboard_implementation_anomaly")
+    for cause, count in ranked_causes:
         action = action_map.get(cause)
         if action:
             actions.append({"cause": cause, "count": count, "action": action})
@@ -1520,6 +1946,7 @@ def _infer_cause_tags(
     submit_failures: list[dict[str, object]],
     failure_contexts: list[dict[str, object]],
     diagnostics: str,
+    leaderboard_anomalies: list[dict[str, object]],
 ) -> list[str]:
     tags: list[str] = []
     status_l = status.lower()
@@ -1532,6 +1959,8 @@ def _infer_cause_tags(
         tags.append("no_successful_submission")
     if top1_gap is not None and top1_gap > 0:
         tags.append("online_far_from_top1")
+    if leaderboard_anomalies:
+        tags.append("leaderboard_implementation_anomaly")
     if best_offline is not None and best_online is not None and top1_score is not None:
         if abs(best_offline) > 1e-12 and abs(best_online) <= 1e-12 and abs(top1_score) > 1e-12:
             tags.append("offline_online_mismatch")
@@ -1552,6 +1981,8 @@ def _render_markdown(report: dict[str, object]) -> str:
         "",
         f"- generated_at: {report.get('generated_at')}",
         f"- run_count: {report.get('run_count')}",
+        f"- watch_incident_count: {report.get('watch_incident_count')}",
+        f"- leaderboard_anomaly_count: {report.get('leaderboard_anomaly_count')}",
         "",
         "## Cause Counts",
     ]
@@ -1559,6 +1990,28 @@ def _render_markdown(report: dict[str, object]) -> str:
     if isinstance(cause_counts, dict) and cause_counts:
         for cause, count in cause_counts.items():
             lines.append(f"- {cause}: {count}")
+    else:
+        lines.append("- none")
+    anomalies = report.get("recent_leaderboard_anomalies")
+    lines.extend(["", "## Leaderboard Implementation Anomalies"])
+    if isinstance(anomalies, list) and anomalies:
+        for item in anomalies[:10]:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {item.get('slug')} {item.get('run_id')}: severity={item.get('severity')} "
+                    f"signals={item.get('signals')} fingerprint={item.get('fingerprint')}"
+                )
+    else:
+        lines.append("- none")
+    incidents = report.get("recent_watch_incidents")
+    lines.extend(["", "## Recent Watch Incidents"])
+    if isinstance(incidents, list) and incidents:
+        for item in incidents[:10]:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {item.get('slug')} {item.get('run_id')}: reason={item.get('reason')} "
+                    f"fingerprint={item.get('fingerprint')} causes={item.get('cause_tags')}"
+                )
     else:
         lines.append("- none")
     lines.extend(["", "## Recommended Actions"])
@@ -1601,6 +2054,7 @@ def _compact_run(run: dict[str, object]) -> dict[str, object]:
         "best_offline": run.get("best_offline"),
         "best_online": run.get("best_online"),
         "top1_gap": run.get("top1_gap"),
+        "leaderboard_anomalies": run.get("leaderboard_anomalies"),
         "cause_tags": run.get("cause_tags"),
     }
 

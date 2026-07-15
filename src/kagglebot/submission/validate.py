@@ -31,7 +31,7 @@ from kagglebot.submission_sample_discovery import (
 )
 from kagglebot.table_columns import normalize_table_column_names
 
-_PLACEHOLDER_SAMPLE_MAX_ROWS = 10
+_PLACEHOLDER_SAMPLE_MAX_ROWS = 100
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
 _FILENAME_TOKEN_RE = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?P<ext>[A-Za-z0-9]{2,8})\b")
 _COORD_COL_RE = re.compile(r"^(?:x|y|z)_\d+$", re.IGNORECASE)
@@ -43,6 +43,11 @@ _HIDDEN_FULL_TEST_CONTEXT_RE = re.compile(
     r"|\bcode\s+competition\b"
     r"|\bnotebook(?:-only)?\s+submission",
     re.IGNORECASE,
+)
+_INCOMPLETE_DATA_RELEASE_CONTEXT_RE = re.compile(
+    r"\bonly\s+(?:a\s+)?sample\s+of\s+the\s+(?:training\s+)?dataset\s+has\s+been\s+released\b"
+    r"|\bfull\s+dataset\b.{0,120}\b(?:expected|will\s+be|to\s+be)\s+released\b",
+    re.IGNORECASE | re.DOTALL,
 )
 _FILE_ID_ASSET_SUFFIXES = DATA_ASSET_SUFFIXES - TABULAR_DATA_SUFFIXES
 
@@ -199,7 +204,7 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
         and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
         and len(submission) <= len(sample)
         and not _looks_like_wide_single_row_submission(sample=sample, expected_columns=expected_columns)
-        and _has_hidden_full_test_context(sample_csv)
+        and (_has_hidden_full_test_context(sample_csv) or _has_incomplete_data_release_context(sample_csv))
     ):
         problems.append(
             "tiny static submission appears to use public placeholder rows for a hidden/full-test notebook "
@@ -972,6 +977,21 @@ def _has_hidden_full_test_context(sample_csv: Path) -> bool:
             except OSError:
                 continue
             if _HIDDEN_FULL_TEST_CONTEXT_RE.search(text):
+                return True
+    return False
+
+
+def _has_incomplete_data_release_context(sample_csv: Path) -> bool:
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "overview.md", "data.md", "rules.md", "discussion.md"):
+            path = context_dir / name
+            if not path.exists():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if _INCOMPLETE_DATA_RELEASE_CONTEXT_RE.search(text):
                 return True
     return False
 

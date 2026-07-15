@@ -3,16 +3,16 @@
 Recommended action: Improve submit fallback diagnostics, notebook/file mode inference, and retry classification.
 
 ## Signals
+- biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: gap=None
+- arc-prize-2026-arc-agi-3 20260714T060514Z-134b7f94: gap=None
 - cohort-x-task-1 20260629T021700Z-c2183268: gap=0.29333
 - ai-agent-security-multi-step-tool-attacks 20260628T172512Z-e4b70727: gap=None
-- arc-prize-2026-arc-agi-2 20260627T040552Z-1c7b2617: gap=None
+- arc-prize-2026-arc-agi-2 20260627T040552Z-1c7b2617: gap=50.56
 - arc-prize-2026-arc-agi-3 20260627T010924Z-72d6b99d: gap=None
 - pokemon-tcg-ai-battle 20260626T193050Z-5c402644: gap=791.7
 - ai-agent-security-multi-step-tool-attacks 20260626T124420Z-b7d4597a: gap=None
-- llm-classification-finetuning 20260613T190226Z-ede144f1: gap=0.1937899999999999
-- maze-crawler 20260612T161419Z-06f97fbd: gap=1479.9
-- arc-prize-2026-arc-agi-2 20260612T132534Z-2b1b9842: gap=None
-- cohort-x-task-1 20260601T200941Z-e6678bc5: gap=None
+- biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: reason=submit_aborted fingerprint=3be5105ab5a5014fa8f4
+- arc-prize-2026-arc-agi-3 20260714T060514Z-134b7f94: reason=submit_aborted fingerprint=05752cc26d065e7d7ebf
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

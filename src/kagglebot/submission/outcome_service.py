@@ -12,6 +12,26 @@ from kagglebot.scalar_utils import tolerant_finite_float, tolerant_int
 
 _RANK_PAIR_RE = re.compile(r"(?P<rank>\d+)\s*/\s*(?P<total>\d+)")
 _TERMINAL_SUBMISSION_STATUSES = {"complete", "completed", "error", "failed", "cancelled", "canceled"}
+_MESSAGELESS_MATCH_EARLY_TOLERANCE_SEC = 120
+_MESSAGELESS_MATCH_LATE_TOLERANCE_SEC = 600
+
+
+def submission_poll_delay_seconds(
+    *,
+    attempt: int,
+    base_interval_sec: float,
+    consecutive_fetch_errors: int = 0,
+) -> float:
+    """Back off long-running Code submissions and transient API failures."""
+    base = max(0.0, float(base_interval_sec))
+    if attempt > 30:
+        pending_multiplier = 4
+    elif attempt > 10:
+        pending_multiplier = 2
+    else:
+        pending_multiplier = 1
+    error_multiplier = min(8, 2 ** max(0, int(consecutive_fetch_errors)))
+    return base * max(pending_multiplier, error_multiplier)
 
 
 class SubmissionOutcomePollingError(RuntimeError):
@@ -59,7 +79,13 @@ class SubmissionOutcomeService:
                     ) from exc
                 if self.max_attempts is not None and self.max_attempts > 0 and attempt >= self.max_attempts:
                     return None
-                time.sleep(self.poll_interval_sec)
+                time.sleep(
+                    submission_poll_delay_seconds(
+                        attempt=attempt,
+                        base_interval_sec=self.poll_interval_sec,
+                        consecutive_fetch_errors=consecutive_fetch_errors,
+                    )
+                )
                 continue
             match = self._select_submission_row(rows=rows, message=message, submitted_at=submitted_at)
             if match is not None:
@@ -90,10 +116,26 @@ class SubmissionOutcomeService:
                     flush=True,
                 )
             else:
+                if self._has_unmatchable_terminal_messageless_row(rows):
+                    # The API sometimes returns a terminal Code submission row
+                    # without either description or timestamp. It cannot be
+                    # associated safely, and polling the immutable row only
+                    # delays the run. Leave the outcome unresolved instead of
+                    # borrowing a stale score or waiting through every retry.
+                    builtins.print(
+                        f"submission poll: attempt={attempt} status=unmatchable_terminal_no_identity",
+                        flush=True,
+                    )
+                    return None
                 builtins.print(f"submission poll: attempt={attempt} status=not_found waiting", flush=True)
             if self.max_attempts is not None and self.max_attempts > 0 and attempt >= self.max_attempts:
                 return None
-            time.sleep(self.poll_interval_sec)
+            time.sleep(
+                submission_poll_delay_seconds(
+                    attempt=attempt,
+                    base_interval_sec=self.poll_interval_sec,
+                )
+            )
 
     def _select_submission_row(
         self,
@@ -106,20 +148,57 @@ class SubmissionOutcomeService:
             return None
         target = message.strip()
         with_message = [row for row in rows if self._row_matches_submission_message(row, target)]
-        candidates = with_message if with_message else rows
+        if with_message:
+            return self._newest_submission_row(with_message)
+
+        # Some Code Submission API rows omit the description. In that case a
+        # timestamp close to the request is the only safe fallback. Never pick
+        # an arbitrary older row: doing so can attach a previous submission's
+        # score to a newly failed submission before Kaggle exposes its row.
+        candidates = [row for row in rows if not self._row_has_submission_message(row)]
         rows_with_ts: list[tuple[datetime, dict[str, str]]] = []
         for row in candidates:
             ts = self._parse_submission_row_time(row)
             if ts is None:
                 continue
             rows_with_ts.append((ts, row))
-        if rows_with_ts:
-            window_start = submitted_at.timestamp() - 3600
-            recent = [item for item in rows_with_ts if item[0].timestamp() >= window_start]
-            source = recent or rows_with_ts
-            source.sort(key=lambda item: item[0], reverse=True)
-            return source[0][1]
-        return candidates[0]
+        if not rows_with_ts:
+            return None
+        submitted_ts = submitted_at.timestamp()
+        nearby = [
+            item
+            for item in rows_with_ts
+            if submitted_ts - _MESSAGELESS_MATCH_EARLY_TOLERANCE_SEC
+            <= item[0].timestamp()
+            <= submitted_ts + _MESSAGELESS_MATCH_LATE_TOLERANCE_SEC
+        ]
+        if not nearby:
+            return None
+        nearby.sort(key=lambda item: (abs(item[0].timestamp() - submitted_ts), -item[0].timestamp()))
+        return nearby[0][1]
+
+    @classmethod
+    def _newest_submission_row(cls, rows: list[dict[str, str]]) -> dict[str, str]:
+        rows_with_ts = [(ts, row) for row in rows if (ts := cls._parse_submission_row_time(row)) is not None]
+        if not rows_with_ts:
+            return rows[0]
+        return max(rows_with_ts, key=lambda item: item[0])[1]
+
+    @staticmethod
+    def _row_has_submission_message(row: dict[str, str]) -> bool:
+        return any(
+            bool((SubmissionOutcomeService._get_row_value_ci(row, key) or "").strip())
+            for key in ("description", "message", "comments", "comment")
+        )
+
+    @classmethod
+    def _has_unmatchable_terminal_messageless_row(cls, rows: list[dict[str, str]]) -> bool:
+        return any(
+            not cls._row_has_submission_message(row)
+            and cls._parse_submission_row_time(row) is None
+            and cls._extract_submission_status(row) in _TERMINAL_SUBMISSION_STATUSES
+            for row in rows
+        )
 
     @staticmethod
     def _row_matches_submission_message(row: dict[str, str], message: str) -> bool:

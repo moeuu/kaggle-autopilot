@@ -57,6 +57,7 @@ from kagglebot.model_artifacts import (
     is_tensorflow_checkpoint_index_artifact,
     model_directory_artifact_suffix,
 )
+from kagglebot.output_discovery import iter_named_output_paths
 from kagglebot.point_cloud_artifacts import (
     copy_dae_sidecars_if_needed,
     copy_gltf_sidecars_if_needed,
@@ -234,7 +235,7 @@ def find_output_file(output_dir: Path, filename: str) -> Path | None:
             candidates.append(direct)
     try:
         for candidate_filename in candidate_filenames:
-            candidates.extend(path for path in output_dir.rglob(candidate_filename) if path.exists())
+            candidates.extend(path for path in iter_named_output_paths(output_dir, candidate_filename) if path.exists())
     except OSError:
         # Best-effort discovery; callers handle missing artifacts.
         pass
@@ -567,7 +568,7 @@ def _find_preferred_submission_candidate(output_dir: Path, *, require_tabular_da
     try:
         candidates.extend(
             path
-            for path in output_dir.rglob(preferred_name)
+            for path in iter_named_output_paths(output_dir, preferred_name)
             if _submission_candidate_is_usable(path, require_tabular_data_rows=require_tabular_data_rows)
         )
     except OSError:

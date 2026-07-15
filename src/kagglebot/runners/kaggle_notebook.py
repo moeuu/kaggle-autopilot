@@ -107,6 +107,7 @@ from kagglebot.submission_sample_discovery import (
     TABULAR_TAB_DELIMITED_SUFFIX_PREFIXES,
     TABULAR_TEXT_SUFFIXES,
 )
+from kagglebot.writeup import infer_code_competition_from_paths
 
 _KAGGLE_NOTEBOOK_OUTPUT_SUFFIXES = all_submission_output_suffixes_ordered()
 
@@ -7163,6 +7164,9 @@ class KaggleNotebookRunner:
         kernel_id = f"{kaggle_username}/{kernel_slug}"
 
         accelerator = context.accelerator
+        enable_internet = bool(context.enable_internet)
+        if infer_code_competition_from_paths(paths):
+            enable_internet = False
 
         metadata = build_kernel_metadata(
             kaggle_username=kaggle_username,
@@ -7170,7 +7174,7 @@ class KaggleNotebookRunner:
             title=kernel_slug.replace("-", " "),
             competition_slug=slug,
             accelerator=accelerator,
-            enable_internet=context.enable_internet,
+            enable_internet=enable_internet,
             source_config=load_kernel_source_config(paths.plan_path),
         )
         kernel_metadata_path = kernel_dir / "kernel-metadata.json"
@@ -7200,7 +7204,7 @@ class KaggleNotebookRunner:
             "kernel_slug": kernel_slug,
             "kernel_id": kernel_id,
             "accelerator": accelerator,
-            "enable_internet": context.enable_internet,
+            "enable_internet": enable_internet,
             "dry_run": context.dry_run,
             "generated_at": datetime.now(UTC).isoformat(),
             "commands": commands,
@@ -7304,7 +7308,7 @@ def build_kernel_metadata(
         "competition_sources": [competition_slug],
         "dataset_sources": list(source_config.dataset_sources),
         "kernel_sources": list(source_config.kernel_sources),
-        "model_sources": list(source_config.model_sources),
+        "model_sources": list(dict.fromkeys((*source_config.model_sources, *source_config.required_model_sources))),
         "keywords": [],
     }
 

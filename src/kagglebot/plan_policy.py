@@ -16,6 +16,7 @@ from kagglebot.score_sources import (
     normalize_score_source_name,
 )
 from kagglebot.solver.metrics import canonical_metric
+from kagglebot.training_route import approved_execution_route, decide_training_route
 from kagglebot.types import PlanConfig
 from kagglebot.writeup import infer_deliverable_mode_from_paths, normalize_deliverable_mode, normalize_submit_mode
 
@@ -717,6 +718,9 @@ def write_resolved_plan_config(
 def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -> dict[str, object]:
     guarded: dict[str, object] = dict(payload)
 
+    training_route = decide_training_route(guarded)
+    guarded["execution_route"] = approved_execution_route(training_route)
+
     raw_toggles = guarded.get("toggles")
     toggles: dict[str, object] | None = dict(raw_toggles) if isinstance(raw_toggles, dict) else {}
     if toggles is not None:
@@ -724,12 +728,22 @@ def apply_plan_guardrails(paths: CompetitionPaths, payload: dict[str, object]) -
         if isinstance(toggles.get("FAST_DEV"), bool) and bool(toggles.get("FAST_DEV")):
             toggles["FAST_DEV"] = False
             print("[yellow]plan guardrail[/yellow]: forcing FAST_DEV=False for production-quality evaluation.")
-        _force_training_and_validation_toggles(toggles)
+        if training_route.skip_local_training:
+            _force_non_training_and_validation_toggles(toggles)
+        else:
+            _force_training_and_validation_toggles(toggles)
 
     raw_runtime_budget = guarded.get("runtime_budget")
     runtime_budget: dict[str, object] = dict(raw_runtime_budget) if isinstance(raw_runtime_budget, dict) else {}
     guarded["runtime_budget"] = runtime_budget
-    _force_training_and_validation_runtime(runtime_budget)
+    if training_route.skip_local_training:
+        _force_non_training_and_validation_runtime(runtime_budget)
+        print(
+            "[cyan]plan route[/cyan]: using the implemented non-training path because "
+            "local training is explicitly optional and estimated to be very heavy."
+        )
+    else:
+        _force_training_and_validation_runtime(runtime_budget)
 
     raw_eval_protocol = guarded.get("evaluation_protocol")
     evaluation_protocol: dict[str, object] | None = (
@@ -1108,6 +1122,42 @@ def _force_training_and_validation_toggles(toggles: dict[str, object]) -> None:
             print(f"[yellow]plan guardrail[/yellow]: forcing {key}=False.")
 
 
+def _force_non_training_and_validation_toggles(toggles: dict[str, object]) -> None:
+    forced_false = {
+        "ENABLE_TRAINING",
+        "ENABLE_FULL_TRAINING",
+        "ENABLE_REFERENCE_TRAINING",
+        "FAST_DEV",
+        "PACKAGING_ONLY",
+        "ADAPTER_PACKAGING_ONLY",
+        "ALLOW_IDENTITY_ADAPTER",
+        "ALLOW_DEBUG_NOOP_ADAPTER",
+        "ALLOW_NOOP_FALLBACK",
+        "ALLOW_UNSCORED_SUBMISSION",
+        "SKIP_VALIDATION",
+        "DISABLE_VALIDATION",
+        "VALIDATION_DISABLED",
+    }
+    forced_true = {
+        "SKIP_TRAINING",
+        "DISABLE_TRAINING",
+        "TRAINING_DISABLED",
+        "RUN_VALIDATION_GENERATION",
+        "ENABLE_VALIDATION_GENERATION",
+        "RUN_VALIDATION",
+        "ENABLE_VALIDATION",
+        "SAVE_VALIDATION_PREDICTIONS",
+    }
+    for key in forced_false:
+        if toggles.get(key) is not False:
+            toggles[key] = False
+            print(f"[yellow]plan guardrail[/yellow]: forcing {key}=False for non-training execution.")
+    for key in forced_true:
+        if toggles.get(key) is not True:
+            toggles[key] = True
+            print(f"[yellow]plan guardrail[/yellow]: forcing {key}=True for non-training execution.")
+
+
 def _force_training_and_validation_runtime(runtime_budget: dict[str, object]) -> None:
     minimum_ints = {
         "full_training_seeds": 1,
@@ -1144,6 +1194,33 @@ def _force_training_and_validation_runtime(runtime_budget: dict[str, object]) ->
         "allow_noop_fallback",
         "allow_unscored_submission",
     }
+    for key in forced_false:
+        if runtime_budget.get(key) is not False:
+            runtime_budget[key] = False
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}=false.")
+
+
+def _force_non_training_and_validation_runtime(runtime_budget: dict[str, object]) -> None:
+    forced_true = {
+        "run_validation_generation",
+        "enable_validation_generation",
+        "run_validation",
+        "enable_validation",
+    }
+    forced_false = {
+        "enable_reference_training",
+        "enable_training",
+        "packaging_only",
+        "adapter_packaging_only",
+        "allow_identity_adapter",
+        "allow_debug_noop_adapter",
+        "allow_noop_fallback",
+        "allow_unscored_submission",
+    }
+    for key in forced_true:
+        if runtime_budget.get(key) is not True:
+            runtime_budget[key] = True
+            print(f"[yellow]plan guardrail[/yellow]: forcing runtime_budget.{key}=true.")
     for key in forced_false:
         if runtime_budget.get(key) is not False:
             runtime_budget[key] = False
@@ -2241,7 +2318,13 @@ def normalize_rank_force_min_teams(value: object, *, fallback: int) -> int:
 
 
 def improvement_mode_rank(mode: str) -> int:
-    return {"minor_tuning": 0, "moderate_update": 1, "major_overhaul": 2, "validation_redesign": 3}.get(mode, 0)
+    return {
+        "minor_tuning": 0,
+        "moderate_update": 1,
+        "major_overhaul": 2,
+        "validation_redesign": 3,
+        "implementation_audit": 4,
+    }.get(mode, 0)
 
 
 def upgrade_improvement_mode(current_mode: str, minimum_mode: str | None) -> str:

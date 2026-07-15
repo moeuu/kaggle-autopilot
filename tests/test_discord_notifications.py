@@ -102,7 +102,12 @@ def test_build_autopilot_status_payload_reports_current_running_iteration(tmp_pa
                 "run_id": "run-1",
                 "slug": "demo",
                 "status": "running",
-                "config": {"max_iterations": 12, "target_metric": "accuracy", "score_source": "cv"},
+                "config": {
+                    "max_iterations": 12,
+                    "target_metric": "accuracy",
+                    "score_source": "cv",
+                    "submit": True,
+                },
             }
         ),
         encoding="utf-8",
@@ -136,6 +141,7 @@ def test_build_autopilot_status_payload_reports_current_running_iteration(tmp_pa
     assert payload["latest_completed_iteration"] == 3
     assert payload["latest_score"] == 0.97
     assert payload["best_score"] == 0.98
+    assert payload["submit_phase_state"] == "pending"
 
 
 def test_build_autopilot_status_payload_does_not_mix_best_metrics(tmp_path: Path) -> None:

@@ -283,11 +283,18 @@ def should_force_initial_submit(
     iteration: int,
     submit_enabled: bool,
     dry_run: bool,
+    has_successful_submission: bool = False,
     submit_policy: str | None = None,
     submission_limit_per_day: int | None = None,
 ) -> bool:
     _ = submit_policy, submission_limit_per_day
-    return submit_enabled and (not dry_run) and deliverable_mode == "leaderboard" and iteration == 1
+    return (
+        submit_enabled
+        and (not dry_run)
+        and deliverable_mode == "leaderboard"
+        and iteration >= 1
+        and not has_successful_submission
+    )
 
 
 def quality_reasons_allow_spare_submit(reasons: list[str]) -> bool:

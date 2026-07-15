@@ -27,6 +27,17 @@ def test_classify_submit_failure_repair_treats_submission_limit_as_manual() -> N
     assert "submission limit" in decision.manual_next_step.lower()
 
 
+def test_classify_submit_failure_repair_routes_invalid_code_output_to_artifact() -> None:
+    decision = classify_submit_failure_repair(
+        reason="invalid_code_submission_output",
+        error_kind="validation",
+        detail="Invalid code submission output contract: diagnostic artifact test_array_mask.npy",
+    )
+
+    assert decision.repair_target == "submission_artifact"
+    assert decision.repairable is True
+
+
 def test_classify_submit_failure_repair_treats_daily_allowance_as_manual() -> None:
     decision = classify_submit_failure_repair(
         reason="submission_limit",

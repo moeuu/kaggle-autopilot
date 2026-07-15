@@ -66,6 +66,19 @@ def test_find_submission_manifest_skips_invalid_direct_manifest(tmp_path: Path) 
     assert find_submission_manifest(tmp_path) == nested_manifest
 
 
+def test_find_submission_manifest_ignores_generated_runtime_site(tmp_path: Path) -> None:
+    expected = tmp_path / "results" / "submission_manifest.json"
+    decoy = tmp_path / ".dependency_runtime_site" / "submission_manifest.json"
+    expected.parent.mkdir()
+    decoy.parent.mkdir()
+    expected.write_text(json.dumps({"artifact_class": "bundle"}), encoding="utf-8")
+    decoy.write_text(json.dumps({"artifact_class": "multi_file_zip"}), encoding="utf-8")
+    os.utime(expected, (1000, 1000))
+    os.utime(decoy, (2000, 2000))
+
+    assert find_submission_manifest(tmp_path) == expected
+
+
 def test_resolve_manifest_references_resolves_relative_paths(tmp_path: Path) -> None:
     manifest = tmp_path / "submission_manifest.json"
     staging = tmp_path / "bundle"

@@ -29,6 +29,8 @@ HEAVY_DEEP_LEARNING_MODALITIES = frozenset(
     }
 )
 
+DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN = 24 * 60
+
 
 def is_local_gpu_compute(compute: object) -> bool:
     return str(compute or "").strip().lower() == "local_gpu"
@@ -49,7 +51,7 @@ def local_gpu_time_budget_limit_min(
 ) -> int | None:
     raw = getenv("KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN")
     if raw is None or not raw.strip():
-        return None
+        return DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN
     try:
         parsed = int(float(raw.strip()))
     except ValueError:

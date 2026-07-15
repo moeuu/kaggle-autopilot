@@ -28,6 +28,32 @@ def test_submit_kernel_slug_stays_distinct_when_long_slug_is_truncated() -> None
     assert len(submit_slug) <= 50
 
 
+def test_submit_kernel_slug_isolated_by_official_machine_shape() -> None:
+    slug = "arc-prize-2026-arc-agi-2"
+    run_id = "20260714T155630Z-4d48ff70"
+
+    default_slug = resolve_submit_kernel_slug(None, slug, run_id, 1)
+    t4_slug = resolve_submit_kernel_slug(None, slug, run_id, 1, machine_shape="NvidiaTeslaT4")
+    p100_slug = resolve_submit_kernel_slug(None, slug, run_id, 1, machine_shape="NvidiaTeslaP100")
+
+    assert "-t4-" in t4_slug
+    assert "-p100-" in p100_slug
+    assert len({default_slug, t4_slug, p100_slug}) == 3
+    assert len(t4_slug) <= 50
+
+
+def test_training_kernel_slug_isolated_by_official_machine_shape() -> None:
+    slug = "arc-prize-2026-arc-agi-3"
+    run_id = "20260714T060514Z-134b7f94"
+
+    default_slug = resolve_kernel_slug(None, slug, run_id, 1)
+    rtx_slug = resolve_kernel_slug(None, slug, run_id, 1, machine_shape="NvidiaRtxPro6000")
+
+    assert "-rtx-pro-6000-" in rtx_slug
+    assert default_slug != rtx_slug
+    assert len(rtx_slug) <= 50
+
+
 def test_write_kernel_metadata_ignores_invalid_existing_metadata(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir()
@@ -78,3 +104,25 @@ def test_write_kernel_metadata_uses_source_config(tmp_path: Path) -> None:
     assert payload["dataset_sources"] == ["alice/data"]
     assert payload["kernel_sources"] == ["bob/kernel"]
     assert payload["model_sources"] == ["carol/model/PyTorch/default/1"]
+
+
+def test_write_kernel_metadata_attaches_required_model_sources(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir()
+
+    write_kernel_metadata(
+        kernel_dir=kernel_dir,
+        kernel_id="user/demo",
+        title="demo",
+        code_file="kernel.py",
+        kernel_type="script",
+        accelerator="gpu",
+        enable_internet=False,
+        competition_slug="competition",
+        source_config=KernelSourceConfig(
+            required_model_sources=("google/gemma-4/Transformers/gemma-4-31b-it/1",),
+        ),
+    )
+
+    payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert payload["model_sources"] == ["google/gemma-4/Transformers/gemma-4-31b-it/1"]

@@ -5,7 +5,10 @@ import fcntl
 import json
 import os
 import re
+import sys
 import time
+import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,11 +28,13 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
     SubmitAbortedError,
 )
+from kagglebot.hashing import sha256_text
 from kagglebot.history import new_run_id
 from kagglebot.json_utils import (
     append_jsonl_record,
     load_json_object,
     load_jsonl_records,
+    write_json_object,
 )
 from kagglebot.kaggle_api import (
     EnteredCompetition,
@@ -44,7 +49,7 @@ from kagglebot.kaggle_gpu_quota import (
     quota_status_from_web_payload,
     read_kaggle_gpu_quota_file,
 )
-from kagglebot.paths import CompetitionPaths, KnowledgePaths
+from kagglebot.paths import CompetitionPaths, KnowledgePaths, resolve_agent_repository_root
 from kagglebot.self_improvement import (
     SelfImprovementConfig,
     has_interrupted_self_improvement,
@@ -80,6 +85,11 @@ _RESTARTABLE_PREFLIGHT_PHASES = {
     "oracle_evaluation_advisor",
     "autopilot_starting",
 }
+_WATCH_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?P<name>(?:api[_-]?key|kaggle[_-]?key|password|secret|(?:access|refresh|auth)?_?token))"
+    r"\s*[:=]\s*['\"]?[^\s'\"]{4,}"
+)
+_WATCH_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}")
 
 
 @dataclass(frozen=True)
@@ -157,6 +167,11 @@ class WatchConfig:
     def state_path(self) -> Path:
         return self.watch_dir / "state.json"
 
+    @property
+    def repository_root(self) -> Path:
+        """Return the source root shared by agents, knowledge, and reload checks."""
+        return resolve_agent_repository_root(self.workdir)
+
 
 @dataclass(frozen=True)
 class WatchCycleResult:
@@ -181,6 +196,68 @@ class WatchLedger:
 
     def records(self) -> list[dict[str, object]]:
         return load_jsonl_records(self.path)
+
+
+def _write_watch_failure_incident(
+    *,
+    config: WatchConfig,
+    slug: str,
+    run_id: str,
+    reason: str,
+    error: BaseException,
+) -> Path:
+    """Persist traceback evidence even when preflight failed before run creation."""
+    timestamp = datetime.now(UTC)
+    state = load_watch_state(config.state_path)
+    error_text = _redact_watch_failure_text(str(error))
+    traceback_text = _redact_watch_failure_text(
+        "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    )
+    fingerprint = sha256_text(f"{type(error).__name__}:{reason}:{error_text}")[:20]
+    safe_slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower()).strip("-") or "unknown"
+    incident_path = (
+        config.watch_dir / "incidents" / f"{timestamp.strftime('%Y%m%dT%H%M%SZ')}-{safe_slug}-{fingerprint}.json"
+    )
+    write_json_object(
+        incident_path,
+        {
+            "schema_version": 1,
+            "timestamp": timestamp.isoformat(),
+            "slug": slug,
+            "run_id": run_id,
+            "reason": reason,
+            "error_type": type(error).__name__,
+            "error": error_text[:100_000],
+            "traceback": traceback_text[:1_000_000],
+            "fingerprint": fingerprint,
+            "phase": state.get("phase"),
+            "watch_state": state,
+            "run_directory_exists": (config.artifacts_dir / slug / "runs" / run_id).is_dir(),
+            "configured_workdir": str(config.workdir.resolve()),
+            "repo_root": str(config.repository_root),
+        },
+        sort_keys=True,
+    )
+    return incident_path
+
+
+def _redact_watch_failure_text(text: str) -> str:
+    redacted = text
+    for name in (
+        "KAGGLE_API_TOKEN",
+        "KAGGLE_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
+    ):
+        secret = os.environ.get(name)
+        if secret:
+            redacted = redacted.replace(secret, "<redacted>")
+    redacted = _WATCH_SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('name')}=<redacted>",
+        redacted,
+    )
+    return _WATCH_BEARER_RE.sub("Bearer <redacted>", redacted)
 
 
 def _try_acquire_watch_resource_lock(config: WatchConfig, ledger: WatchLedger) -> TextIO | None:
@@ -286,7 +363,7 @@ def run_watch_once(config: WatchConfig) -> WatchCycleResult:
 def _recover_self_improvement_before_watch(config: WatchConfig) -> None:
     recovery_config = SelfImprovementConfig(
         artifacts_dir=config.artifacts_dir,
-        knowledge_paths=KnowledgePaths(workdir=config.workdir),
+        knowledge_paths=KnowledgePaths(workdir=config.repository_root),
         min_interval_hours=config.self_improvement_interval_hours,
         invoke_codex=True,
         publish_codex_changes=config.self_improvement_publish,
@@ -297,6 +374,10 @@ def _recover_self_improvement_before_watch(config: WatchConfig) -> None:
     print("[yellow]self-improvement[/yellow]: recovering interrupted Oracle-to-Codex transaction before watch")
     result = recover_interrupted_self_improvement(recovery_config)
     print(f"[cyan]self-improvement recovery[/cyan]: {result.get('status')}")
+    _restart_after_published_self_improvement(
+        {"status": "written", "codex_improvement": result},
+        dry_run=config.dry_run,
+    )
 
 
 def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchCycleResult:
@@ -374,8 +455,12 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
     )
     ledger.append("started", slug=candidate.slug, run_id=run_id, resume=resume)
 
-    paths = CompetitionPaths(slug=candidate.slug, artifacts_dir=config.artifacts_dir)
-    knowledge_paths = KnowledgePaths(workdir=config.workdir)
+    paths = CompetitionPaths(
+        slug=candidate.slug,
+        artifacts_dir=config.artifacts_dir,
+        repo_root=config.workdir,
+    )
+    knowledge_paths = KnowledgePaths(workdir=config.repository_root)
     previous_state_path = os.environ.get("KAGGLEBOT_WATCH_STATE_PATH")
     os.environ["KAGGLEBOT_WATCH_STATE_PATH"] = str(config.state_path)
     try:
@@ -385,6 +470,7 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
             paths=paths,
             knowledge_paths=knowledge_paths,
             run_id=run_id,
+            resume=resume,
         )
         write_watch_state(
             config.state_path,
@@ -411,7 +497,21 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "skipped"})
         return WatchCycleResult(status="skipped", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except SubmitAbortedError as exc:
-        ledger.append("failed", slug=candidate.slug, run_id=run_id, reason="submit_aborted", error=str(exc))
+        incident_path = _write_watch_failure_incident(
+            config=config,
+            slug=candidate.slug,
+            run_id=run_id,
+            reason="submit_aborted",
+            error=exc,
+        )
+        ledger.append(
+            "failed",
+            slug=candidate.slug,
+            run_id=run_id,
+            reason="submit_aborted",
+            error=str(exc),
+            incident_path=str(incident_path),
+        )
         write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
         return WatchCycleResult(status="failed", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except KernelCapacityError as exc:
@@ -435,7 +535,21 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         print(f"[yellow]watch[/yellow]: resource guard blocked {candidate.slug}; skipping retry for now")
         return WatchCycleResult(status="skipped", slug=candidate.slug, run_id=run_id, reason=reason)
     except Exception as exc:  # noqa: BLE001
-        ledger.append("failed", slug=candidate.slug, run_id=run_id, reason=type(exc).__name__, error=str(exc))
+        incident_path = _write_watch_failure_incident(
+            config=config,
+            slug=candidate.slug,
+            run_id=run_id,
+            reason=type(exc).__name__,
+            error=exc,
+        )
+        ledger.append(
+            "failed",
+            slug=candidate.slug,
+            run_id=run_id,
+            reason=type(exc).__name__,
+            error=str(exc),
+            incident_path=str(incident_path),
+        )
         write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "failed"})
         return WatchCycleResult(status="failed", slug=candidate.slug, run_id=run_id, reason=str(exc))
     finally:
@@ -461,7 +575,7 @@ def _maybe_run_self_improvement(config: WatchConfig, *, force: bool = False) -> 
         result = run_self_improvement_cycle(
             SelfImprovementConfig(
                 artifacts_dir=config.artifacts_dir,
-                knowledge_paths=KnowledgePaths(workdir=config.workdir),
+                knowledge_paths=KnowledgePaths(workdir=config.repository_root),
                 min_interval_hours=interval,
                 invoke_codex=config.self_improvement_codex,
                 publish_codex_changes=config.self_improvement_publish,
@@ -475,7 +589,108 @@ def _maybe_run_self_improvement(config: WatchConfig, *, force: bool = False) -> 
         print(f"[cyan]self-improvement[/cyan]: {result.get('report_path')}")
     elif result.get("status") == "failed":
         print(f"[yellow]self-improvement failed[/yellow]: {result.get('error')}")
+    _schedule_preflight_retry_after_published_self_improvement(config, result)
+    _restart_after_published_self_improvement(result, dry_run=config.dry_run)
     return result
+
+
+def _schedule_preflight_retry_after_published_self_improvement(
+    config: WatchConfig,
+    result: dict[str, object],
+) -> bool:
+    if config.dry_run:
+        return False
+    codex_result = result.get("codex_improvement")
+    publish = codex_result.get("publish") if isinstance(codex_result, dict) else None
+    if (
+        not isinstance(codex_result, dict)
+        or codex_result.get("status") != "completed"
+        or not isinstance(publish, dict)
+        or publish.get("status") != "pushed"
+    ):
+        return False
+    anomaly = result.get("latest_leaderboard_anomaly")
+    if isinstance(anomaly, dict):
+        slug = str(anomaly.get("slug") or "").strip()
+        fingerprint = str(anomaly.get("fingerprint") or "").strip()
+        original_run_id = str(anomaly.get("run_id") or "").strip()
+        if slug and fingerprint:
+            retry_run_id = new_run_id()
+            write_watch_state(
+                config.state_path,
+                {
+                    "active_slug": slug,
+                    "active_run_id": retry_run_id,
+                    "last_status": "running",
+                    "phase": "bootstrapping",
+                    "reason": "verified_self_improvement_leaderboard_anomaly_retry",
+                    "self_improvement_anomaly_fingerprint": fingerprint,
+                    "original_run_id": original_run_id or None,
+                },
+            )
+            WatchLedger(config.ledger_path).append(
+                "self_improvement_retry_scheduled",
+                slug=slug,
+                run_id=retry_run_id,
+                original_run_id=original_run_id or None,
+                reason="verified_leaderboard_anomaly_repair",
+                anomaly_fingerprint=fingerprint,
+            )
+            return True
+    incident = result.get("latest_watch_incident")
+    if not isinstance(incident, dict) or incident.get("run_directory_exists") is not False:
+        return False
+    causes = {str(item) for item in incident.get("cause_tags", []) if isinstance(item, str)}
+    slug = str(incident.get("slug") or "").strip()
+    run_id = str(incident.get("run_id") or "").strip()
+    if "orchestration_preflight_failure" not in causes or not slug or not run_id:
+        return False
+    phase = str(incident.get("phase") or "preparing_data").strip().lower()
+    if phase not in _RESTARTABLE_PREFLIGHT_PHASES:
+        phase = "preparing_data"
+    fingerprint = str(incident.get("fingerprint") or "").strip()
+    write_watch_state(
+        config.state_path,
+        {
+            "active_slug": slug,
+            "active_run_id": run_id,
+            "last_status": "running",
+            "phase": phase,
+            "reason": "verified_self_improvement_preflight_retry",
+            "self_improvement_incident_fingerprint": fingerprint,
+        },
+    )
+    WatchLedger(config.ledger_path).append(
+        "self_improvement_retry_scheduled",
+        slug=slug,
+        run_id=run_id,
+        reason="verified_preflight_repair",
+        incident_fingerprint=fingerprint,
+    )
+    return True
+
+
+def _restart_after_published_self_improvement(
+    result: dict[str, object],
+    *,
+    dry_run: bool,
+    execv_func: Callable[[str, list[str]], None] | None = None,
+) -> bool:
+    codex_result = result.get("codex_improvement")
+    if not isinstance(codex_result, dict) or codex_result.get("status") != "completed":
+        return False
+    publish = codex_result.get("publish")
+    if not isinstance(publish, dict) or publish.get("status") != "pushed":
+        return False
+    if dry_run:
+        return False
+    print(
+        "[yellow]self-improvement[/yellow]: verified repository changes were published; "
+        "restarting watch to load the new source"
+    )
+    runner = execv_func or os.execv
+    runner(sys.executable, [sys.executable, *sys.argv])
+    return True
 
 
 def _new_kaggle_gpu_competition_quota_block(
@@ -718,20 +933,36 @@ def _prepare_competition(
     paths: CompetitionPaths,
     knowledge_paths: KnowledgePaths,
     run_id: str,
+    resume: bool = False,
 ) -> None:
-    print(f"[cyan]watch[/cyan]: bootstrapping {candidate.slug}")
     phase_context = _WatchPhaseContext(slug=candidate.slug, compute=config.compute)
-    update_watch_phase(phase_context, run_id, "preparing_data", detail="downloading and profiling competition data")
-    bootstrap_competition(
-        slug=candidate.slug,
-        competition_url=candidate.url,
-        paths=paths,
-        knowledge_paths=knowledge_paths,
-        rules_source="url",
-        download=True,
-        force=False,
-        dry_run=config.dry_run,
-    )
+    reuse_existing = resume and paths.context_dir.exists() and paths.data_dir.exists()
+    if reuse_existing:
+        print(f"[yellow]watch resume[/yellow]: reusing existing data and context for {candidate.slug}")
+        update_watch_phase(
+            phase_context,
+            run_id,
+            "preparing_data",
+            detail="reusing existing competition data and context",
+        )
+    else:
+        print(f"[cyan]watch[/cyan]: bootstrapping {candidate.slug}")
+        update_watch_phase(
+            phase_context,
+            run_id,
+            "preparing_data",
+            detail="downloading and profiling competition data",
+        )
+        bootstrap_competition(
+            slug=candidate.slug,
+            competition_url=candidate.url,
+            paths=paths,
+            knowledge_paths=knowledge_paths,
+            rules_source="url",
+            download=True,
+            force=False,
+            dry_run=config.dry_run,
+        )
     if config.auto_eval_spec:
         update_watch_phase(
             phase_context,
@@ -1028,7 +1259,11 @@ def _reward_amount_usd(reward: str) -> float | None:
 
 def _load_submission_history(*, config: WatchConfig, slug: str) -> SubmissionHistory:
     autopilot_started = _has_autopilot_history(config=config, slug=slug)
-    ledger_path = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).submission_ledger_path
+    ledger_path = CompetitionPaths(
+        slug=slug,
+        artifacts_dir=config.artifacts_dir,
+        repo_root=config.workdir,
+    ).submission_ledger_path
     if not ledger_path.exists():
         return SubmissionHistory(
             autopilot_started=autopilot_started,
@@ -1086,7 +1321,7 @@ def _enrich_submission_history_from_leaderboard(
 ) -> SubmissionHistory:
     if not history.submitted or history.rank_percentile is not None or history.outcome_score is None:
         return history
-    paths = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir)
+    paths = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir, repo_root=config.workdir)
     direction = _load_metric_direction(paths)
     if direction is None:
         return history
@@ -1118,7 +1353,11 @@ def _enrich_submission_history_from_leaderboard(
 
 
 def _has_autopilot_history(*, config: WatchConfig, slug: str) -> bool:
-    runs_dir = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).runs_dir
+    runs_dir = CompetitionPaths(
+        slug=slug,
+        artifacts_dir=config.artifacts_dir,
+        repo_root=config.workdir,
+    ).runs_dir
     if not runs_dir.exists():
         return False
     for child in runs_dir.iterdir():
@@ -1241,7 +1480,11 @@ def _active_slugs(config: WatchConfig) -> set[str]:
 def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[str, object] | None = None) -> bool:
     if state is not None and active_state_is_stale(state):
         return False
-    run_dir = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).run_dir(run_id)
+    run_dir = CompetitionPaths(
+        slug=slug,
+        artifacts_dir=config.artifacts_dir,
+        repo_root=config.workdir,
+    ).run_dir(run_id)
     if not run_dir.exists():
         return False
     run_json = run_dir / "run.json"
@@ -1267,7 +1510,15 @@ def _preflight_can_restart(
         return False
     if str(state.get("phase") or "").strip().lower() not in _RESTARTABLE_PREFLIGHT_PHASES:
         return False
-    return not CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir).run_dir(run_id).exists()
+    return (
+        not CompetitionPaths(
+            slug=slug,
+            artifacts_dir=config.artifacts_dir,
+            repo_root=config.workdir,
+        )
+        .run_dir(run_id)
+        .exists()
+    )
 
 
 def _candidate_from_slug(slug: str) -> EnteredCompetition:

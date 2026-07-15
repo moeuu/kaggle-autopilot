@@ -72,6 +72,11 @@ def test_score_progress_classifies_modes_and_deltas() -> None:
 
 def test_normalize_code_reference_percentage_for_bounded_metric() -> None:
     assert normalize_code_reference_score_for_comparison(current=0.86, reference=87.5, metric="accuracy") == 0.875
+    assert normalize_code_reference_score_for_comparison(
+        current=0.86,
+        reference=948.0,
+        metric="macro-averaged ROC-AUC skipping classes with no positive labels",
+    ) == pytest.approx(0.948)
     assert normalize_code_reference_score_for_comparison(current=12.0, reference=87.5, metric="rmse") == 87.5
 
 

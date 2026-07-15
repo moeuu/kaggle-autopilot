@@ -34,6 +34,26 @@ def resolve_artifacts_dir(workdir: Path, artifacts_dir: Path) -> Path:
     return (workdir / artifacts_dir).resolve()
 
 
+def resolve_agent_repository_root(configured_root: Path) -> Path:
+    """Resolve the editable source root when CLI was launched from an artifact directory.
+
+    Explicit non-CWD roots are preserved for tests and embedding. For the common
+    CLI default (``--workdir .``), an invalid current directory falls back to the
+    repository containing the imported kagglebot source. This prevents Codex
+    from editing the right repository while change detection watches a different
+    artifact parent.
+    """
+    candidate = configured_root.resolve()
+    if _looks_like_repository_root(candidate) or candidate != Path.cwd().resolve():
+        return candidate
+    package_root = Path(__file__).resolve().parents[2]
+    return package_root if _looks_like_repository_root(package_root) else candidate
+
+
+def _looks_like_repository_root(path: Path) -> bool:
+    return (path / "pyproject.toml").is_file() and (path / "src" / "kagglebot").is_dir()
+
+
 @dataclass(frozen=True)
 class CompetitionPaths:
     """
@@ -51,6 +71,8 @@ class CompetitionPaths:
             object.__setattr__(self, "artifacts_dir", Path(self.repo_root) / "artifacts")
         if self.repo_root is None:
             object.__setattr__(self, "repo_root", self.artifacts_dir.parent)
+        else:
+            object.__setattr__(self, "repo_root", resolve_agent_repository_root(Path(self.repo_root)))
 
     @property
     def base_dir(self) -> Path:

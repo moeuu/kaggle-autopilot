@@ -22,6 +22,9 @@ QUALITY_GUARD_CANDIDATE_HOLDOUT_REL_MARGIN = 0.20
 QUALITY_GUARD_CANDIDATE_HOLDOUT_ABS_MARGIN = 0.01
 QUALITY_GUARD_PREDICTION_COUNT_RATIO = 0.60
 QUALITY_GUARD_PREDICTION_COUNT_ABS_MARGIN = 1.0
+QUALITY_GUARD_PREDICTION_EXPLOSION_RATIO = 5.0
+QUALITY_GUARD_PREDICTION_EXPLOSION_MIN_MEAN = 5.0
+QUALITY_GUARD_PREDICTION_EXPLOSION_MAX_CONFIDENCE = 0.10
 MODEL_NODE_METRIC_KEY = re.compile(r"^model_(?P<model_id>\d+)_node_type_(?P<node_type>\d+)$")
 HARD_POLICY_BLOCK_REASONS = frozenset({"external_test_label_transfer_detected"})
 COMPETITION_FAITHFULNESS_FALSE_SCORE_SOURCE_TOKENS = (
@@ -1104,17 +1107,34 @@ def build_candidate_selection_quality_signal(
 
 def prediction_count_mean(pipeline: dict[str, object]) -> float | None:
     summary = pipeline.get("prediction_count_summary")
-    if not isinstance(summary, dict):
-        return None
-    for split in ("test", "submission", "val", "holdout"):
-        split_summary = summary.get(split)
-        if isinstance(split_summary, dict):
-            parsed = tolerant_finite_float(split_summary.get("mean"))
+    if isinstance(summary, dict):
+        for split in ("test", "submission", "val", "holdout"):
+            split_summary = summary.get(split)
+            if isinstance(split_summary, dict):
+                parsed = tolerant_finite_float(split_summary.get("mean"))
+                if parsed is not None:
+                    return float(parsed)
+        parsed = tolerant_finite_float(summary.get("mean"))
+        if parsed is not None:
+            return float(parsed)
+
+    diagnostics = pipeline.get("prediction_diagnostics")
+    if isinstance(diagnostics, dict):
+        for key in ("avg_detections_per_image", "mean_predictions_per_row", "mean_prediction_count"):
+            parsed = tolerant_finite_float(diagnostics.get(key))
             if parsed is not None:
                 return float(parsed)
-    parsed = tolerant_finite_float(summary.get("mean"))
-    if parsed is not None:
-        return float(parsed)
+    return None
+
+
+def prediction_mean_confidence(pipeline: dict[str, object]) -> float | None:
+    diagnostics = pipeline.get("prediction_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None
+    for key in ("mean_confidence", "avg_confidence", "prediction_mean_confidence"):
+        parsed = tolerant_finite_float(diagnostics.get(key))
+        if parsed is not None:
+            return float(parsed)
     return None
 
 
@@ -1137,6 +1157,31 @@ def detect_prediction_distribution_collapse(payload: dict[str, object] | None) -
     ]
     if len(candidate_means) < 2:
         return None
+
+    selected_confidence = prediction_mean_confidence(selected)
+    sorted_means = sorted(mean for _, mean in candidate_means)
+    middle = len(sorted_means) // 2
+    if len(sorted_means) % 2:
+        median_mean = sorted_means[middle]
+    else:
+        median_mean = (sorted_means[middle - 1] + sorted_means[middle]) / 2.0
+    if (
+        len(candidate_means) >= 3
+        and median_mean > 0.0
+        and selected_mean >= QUALITY_GUARD_PREDICTION_EXPLOSION_MIN_MEAN
+        and selected_mean >= median_mean * QUALITY_GUARD_PREDICTION_EXPLOSION_RATIO
+        and selected_confidence is not None
+        and selected_confidence <= QUALITY_GUARD_PREDICTION_EXPLOSION_MAX_CONFIDENCE
+    ):
+        return {
+            "kind": "low_confidence_explosion",
+            "selected": pipeline_name_from_payload(selected) or extract_selected_pipeline_name(payload) or "unknown",
+            "selected_test_prediction_mean": float(selected_mean),
+            "median_test_prediction_mean": float(median_mean),
+            "selected_mean_confidence": float(selected_confidence),
+            "candidate_count": len(candidate_means),
+        }
+
     max_name, max_mean = max(candidate_means, key=lambda item: item[1])
     if max_mean < 3.0:
         return None
@@ -1164,15 +1209,25 @@ def build_prediction_distribution_quality_signal(
     reasons: list[str] = []
     warnings: list[str] = []
     if detected:
-        warnings.append(
-            "prediction_distribution_collapse="
-            f"selected={collapse.get('selected')},"
-            f"selected_mean={collapse.get('selected_test_prediction_mean')},"
-            f"largest_mean_candidate={collapse.get('largest_mean_candidate')},"
-            f"largest_mean={collapse.get('largest_test_prediction_mean')}"
-        )
-        if candidate_selection_mismatch is not None:
-            reasons.append("prediction_distribution_collapse_vs_candidates")
+        if collapse.get("kind") == "low_confidence_explosion":
+            warnings.append(
+                "prediction_distribution_explosion="
+                f"selected={collapse.get('selected')},"
+                f"selected_mean={collapse.get('selected_test_prediction_mean')},"
+                f"median_mean={collapse.get('median_test_prediction_mean')},"
+                f"mean_confidence={collapse.get('selected_mean_confidence')}"
+            )
+            reasons.append("low_confidence_prediction_explosion")
+        else:
+            warnings.append(
+                "prediction_distribution_collapse="
+                f"selected={collapse.get('selected')},"
+                f"selected_mean={collapse.get('selected_test_prediction_mean')},"
+                f"largest_mean_candidate={collapse.get('largest_mean_candidate')},"
+                f"largest_mean={collapse.get('largest_test_prediction_mean')}"
+            )
+            if candidate_selection_mismatch is not None:
+                reasons.append("prediction_distribution_collapse_vs_candidates")
     return {
         "detected": detected,
         "collapse": collapse,

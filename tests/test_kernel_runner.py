@@ -11,6 +11,8 @@ import os
 import re
 import runpy
 import sqlite3
+import subprocess
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -26,6 +28,7 @@ from kagglebot.kernel_package_files import (
     copy_competition_external_assets,
     copy_kernel_sources,
     copy_shared_kernel_runtime_modules,
+    remove_generated_kernel_cache_files,
     sync_plan_snapshot,
 )
 from kagglebot.kernel_runner import (
@@ -49,6 +52,7 @@ from kagglebot.local_kernel_shims import (
     inject_local_runtime_shims,
     inject_object_coerce_shim,
     inject_pandas_tabular_read_shim,
+    inject_submit_inference_compat_shims,
     inject_training_compat_shims,
     inject_training_progress_shim,
     inject_transformers_eval_strategy_shim,
@@ -178,6 +182,168 @@ def test_run_kernel_dry_run(tmp_path: Path) -> None:
     assert json.loads(staged_plan.read_text(encoding="utf-8")) == plan_payload
 
 
+def test_run_kernel_dry_run_honors_approved_non_training_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner
+
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_init",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run")),
+    )
+    kernel_path = tmp_path / "demo" / "kernel" / "kernel.py"
+    kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    kernel_path.write_text(
+        "DATA = '/kaggle/input/demo/test.csv'\n"
+        "OUT1 = '/kaggle/working/submission.csv'\n"
+        "OUT2 = '/kaggle/working/metrics.json'\n"
+        "MODE = 'KAGGLEBOT_EXECUTION_MODE non_training_submission'\n"
+        "METRIC_FIELDS = 'training_performed non_training_validation_passed non_training_validation_mode'\n",
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "demo" / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "runtime_budget": {
+                    "local_training_required": False,
+                    "estimated_local_training_min": 1_500,
+                    "non_training_submission": {
+                        "mode": "solver",
+                        "implementation_ready": True,
+                        "validation_mode": "offline",
+                        "source": "kernel.py deterministic solver with held-out validation",
+                    },
+                },
+                "execution_route": {
+                    "mode": "non_training_submission",
+                    "approved": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_kernel(
+        slug="demo",
+        run_id="run-direct",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=False,
+        score_source="cv",
+        metric="rmse",
+        direction="minimize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    staged_source = (tmp_path / "demo" / "kernels" / "run-direct" / "kernel.py").read_text(encoding="utf-8")
+    assert "# kagglebot:non_training_submission" in staged_source
+    assert "# kagglebot:force_train" not in staged_source
+    assert "KAGGLEBOT_DO_TRAIN'] = '0'" in staged_source
+    assert "KAGGLEBOT_NON_TRAINING_VALIDATION_REQUIRED'] = '1'" in staged_source
+
+
+def test_arc_agi_3_training_kernel_uses_restricted_rtx_offline(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "arc-prize-2026-arc-agi-3"
+    kernel_path = tmp_path / slug / "kernel" / "kernel.py"
+    kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    kernel_path.write_text(
+        "DATA = '/kaggle/input/competitions/arc-prize-2026-arc-agi-3/test.json'\n"
+        "OUT = '/kaggle/working/submission.parquet'\n"
+        "METRICS = '/kaggle/working/metrics.json'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / slug / "plan.json").write_text(
+        json.dumps({"runtime_budget": {"hardware_profile": "rtx3060"}}),
+        encoding="utf-8",
+    )
+
+    result = run_kernel(
+        slug=slug,
+        run_id="run-rtx",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=True,
+        score_source="holdout",
+        metric="score",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    assert "-rtx-pro-6000-" in result.kernel_id
+    kernel_dir = tmp_path / slug / "kernels" / "run-rtx"
+    metadata = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert metadata["competition_sources"] == [slug]
+    assert metadata["enable_gpu"] is True
+    assert metadata["enable_internet"] is False
+    kernel_text = (kernel_dir / "kernel.py").read_text(encoding="utf-8")
+    assert '_kb_os.environ.setdefault("KAGGLEBOT_HARDWARE_PROFILE", "kaggle_rtx_pro_6000")' in kernel_text
+
+
+def test_other_competition_can_explicitly_use_rtx_without_arc3_internet_policy(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "another-rtx-enabled-competition"
+    kernel_path = tmp_path / slug / "kernel" / "kernel.py"
+    kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    kernel_path.write_text(
+        "DATA = '/kaggle/input/competitions/another-rtx-enabled-competition/test.csv'\n"
+        "OUT = '/kaggle/working/submission.csv'\n"
+        "METRICS = '/kaggle/working/metrics.json'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / slug / "plan.json").write_text(
+        json.dumps({"submit_machine_shape": "NvidiaRtxPro6000"}),
+        encoding="utf-8",
+    )
+
+    result = run_kernel(
+        slug=slug,
+        run_id="run-rtx-explicit",
+        iteration=1,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        enable_internet=True,
+        score_source="holdout",
+        metric="score",
+        direction="maximize",
+        holdout_frac=0.2,
+        cv_folds=3,
+        seed=42,
+        dry_run=True,
+        timeout_minutes=None,
+    )
+
+    assert "-rtx-pro-6000-" in result.kernel_id
+    metadata = json.loads(
+        (tmp_path / slug / "kernels" / "run-rtx-explicit" / "kernel-metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["competition_sources"] == [slug]
+    assert metadata["enable_internet"] is True
+
+
 def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     # Ensure dry-run avoids Kaggle CLI calls and stages a submit-only kernel.
     from kagglebot import kernel_runner
@@ -185,7 +351,7 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
     kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
     submission_path = tmp_path / "submission.csv"
     submission_path.write_text("id,target\n1,0.1\n2,0.2\n", encoding="utf-8")
-    run_submit_kernel(
+    result = run_submit_kernel(
         slug="demo",
         run_id="run-1",
         iteration=1,
@@ -198,6 +364,7 @@ def test_run_submit_kernel_dry_run_embeds_submission(tmp_path: Path) -> None:
         dry_run=True,
         timeout_minutes=None,
     )
+    assert result.kernel_id.endswith("-t4-run-1-i1")
     kernel_dir = tmp_path / "demo" / "kernels" / "run-1" / "submit-iter-1"
     kernel_text = (kernel_dir / "kernel.py").read_text(encoding="utf-8")
     assert "__SUBMISSION_GZIP_B64__" not in kernel_text
@@ -537,7 +704,7 @@ def test_run_submit_kernel_wrapper_aligns_tsv_runtime_sample_and_test(
     assert out["target"].tolist() == pytest.approx([0.9, 0.5, 0.1])
 
 
-def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tmp_path: Path) -> None:
+def test_run_submit_kernel_dry_run_gateway_mode_stages_offline_authoritative_kernel(tmp_path: Path) -> None:
     from kagglebot import kernel_runner
 
     kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
@@ -554,6 +721,9 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
                 "KERNEL_DIR = Path(__file__).resolve().parent",
                 "ARTIFACT_DIR = KERNEL_DIR.parent",
                 "ARTIFACT_ROOT = KERNEL_DIR.parent",
+                "PLAN_PATH = ARTIFACT_ROOT / 'plan.json'",
+                "if not PLAN_PATH.exists():",
+                "    PLAN_PATH = Path('/kaggle/working/plan.json')",
                 "DATA = Path('/kaggle/input/demo/test.csv')",
                 "LOCAL_OUTPUT_DIR = Path(os.environ.get('KAGGLEBOT_LOCAL_OUTPUT_DIR', str(KERNEL_DIR / 'outputs')))",
                 "KAGGLE_WORKING_DIR = Path('/kaggle/working')",
@@ -568,6 +738,18 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
         encoding="utf-8",
     )
     (tmp_path / slug / "plan.json").write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
+    local_metrics = tmp_path / slug / "kernels" / "run-1" / "local-iter-1" / "outputs" / "metrics.json"
+    local_metrics.parent.mkdir(parents=True, exist_ok=True)
+    local_metrics.write_text(
+        json.dumps(
+            {
+                "chosen_pipeline": "strong_model",
+                "offline_value": 0.91,
+                "reference_path_used": True,
+            }
+        ),
+        encoding="utf-8",
+    )
     submission_path = tmp_path / "submission.csv"
     submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
 
@@ -579,9 +761,9 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
         kaggle_username="user",
         kernel_name=None,
         accelerator="gpu",
-        enable_internet=False,
+        enable_internet=True,
         submission_path=submission_path,
-        mode="inference",
+        mode="gateway",
         dry_run=True,
         timeout_minutes=None,
     )
@@ -590,10 +772,17 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
     kernel_text = (kernel_dir / "kernel.py").read_text(encoding="utf-8")
     assert "SUBMISSION_GZIP_B64" not in kernel_text
     assert "# kagglebot:submit_inference" in kernel_text
+    assert "# kagglebot:staged_plan_payload_fallback" in kernel_text
+    assert "# kagglebot:staged_plan_path_fallback" in kernel_text
+    assert 'PLAN_PATH = KERNEL_DIR / "plan.json"' in kernel_text
     assert "_kb_os.environ['KAGGLEBOT_DO_TRAIN'] = '0'" in kernel_text
     assert "_kb_os.environ['KAGGLEBOT_DO_INFER'] = '1'" in kernel_text
     assert "_kb_os.environ['KAGGLEBOT_SUBMIT_NOTEBOOK'] = '1'" in kernel_text
     assert "_kb_os.environ['KAGGLEBOT_SUBMIT_SKIP_CV'] = '1'" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_SELECTED_PIPELINE'] = 'strong_model'" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_SELECTED_OFFLINE_SCORE'] = '0.91000000000000003'" in kernel_text
+    assert "_kb_os.environ['KAGGLEBOT_REQUIRE_REFERENCE_PATH'] = '1'" in kernel_text
+    assert "_kb_os.environ.setdefault('PIP_CACHE_DIR', '/tmp/kagglebot-cache/pip')" in kernel_text
     assert "/kaggle/working/submission.csv" in kernel_text
     assert "/kaggle/working/metrics.json" in kernel_text
     assert "LOCAL_OUTPUT_DIR = KERNEL_DIR / 'outputs'" not in kernel_text
@@ -607,6 +796,45 @@ def test_run_submit_kernel_dry_run_inference_mode_stages_authoritative_kernel(tm
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert payload["enable_gpu"] is True
     assert payload["enable_tpu"] is False
+    assert payload["enable_internet"] is False
+    sitecustomize = (kernel_dir / "sitecustomize.py").read_text(encoding="utf-8")
+    assert "kagglebot: train-progress-shim" in sitecustomize
+    assert "transformers-eval-strategy-shim" not in sitecustomize
+
+
+def test_run_submit_kernel_inference_rejects_persisted_dependency_cache(tmp_path: Path) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    slug = "demo"
+    source_kernel_dir = tmp_path / slug / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "from pathlib import Path\n"
+        "DATA = Path('/kaggle/input/demo/test.csv')\n"
+        "CACHE = Path('/kaggle/working/arc_wheel_cache')\n"
+        "OUT = Path('/kaggle/working/submission.csv')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / slug / "plan.json").write_text("{}", encoding="utf-8")
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="dependency caches must use /tmp"):
+        run_submit_kernel(
+            slug=slug,
+            run_id="run-1",
+            iteration=1,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            enable_internet=False,
+            submission_path=submission_path,
+            mode="inference",
+            dry_run=True,
+            timeout_minutes=None,
+        )
 
 
 def test_run_submit_kernel_allows_submit_accelerator_override(
@@ -845,6 +1073,16 @@ def test_kernel_push_resumes_prior_running_kernel_without_new_push(
     assert output_calls == ["user/kernel-slug"]
 
 
+def test_submit_kernel_output_download_pattern_is_exact() -> None:
+    from kagglebot import kernel_runner
+
+    assert (
+        kernel_runner._submit_kernel_output_file_pattern("submission.parquet")  # noqa: SLF001
+        == r"(^|/)(submission\.parquet|metrics\.json)$"
+    )
+    assert kernel_runner._submit_kernel_output_file_pattern(None) is None  # noqa: SLF001
+
+
 def test_submit_kernel_resume_supersedes_stale_queued_kernel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -874,6 +1112,53 @@ def test_submit_kernel_resume_supersedes_stale_queued_kernel(
         kernel_slug="kernel-slug",
         kernel_id="user/kernel-slug",
         supersede_stale_queued=True,
+    )
+
+    assert (
+        kernel_runner._resume_prior_kernel_if_active(  # noqa: SLF001
+            preparation=preparation,
+            kernel_id="user/kernel-slug",
+            slug="demo",
+            timeout_minutes=1,
+        )
+        is None
+    )
+
+
+def test_submit_kernel_resume_supersedes_completed_kernel_when_source_contract_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kagglebot import kernel_runner, remote_kernel_state
+
+    kernel_dir = tmp_path / "demo" / "kernels" / "run-1"
+    output_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "output"
+    logs_dir = tmp_path / "demo" / "runs" / "run-1" / "iter-1" / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    remote_kernel_state.write_remote_kernel_source(
+        logs_dir,
+        kernel_id="user/kernel-slug",
+        source_fingerprint="old-source",
+    )
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_status",
+        lambda *args, **kwargs: 'user/kernel-slug has status "KernelWorkerStatus.COMPLETE"',
+    )
+    monkeypatch.setattr(
+        kernel_runner,
+        "kernels_output",
+        lambda *args, **kwargs: pytest.fail("stale kernel output must not be downloaded"),
+    )
+
+    preparation = kernel_runner.KernelPreparation(
+        kernel_dir=kernel_dir,
+        output_dir=output_dir,
+        logs_dir=logs_dir,
+        kernel_slug="kernel-slug",
+        kernel_id="user/kernel-slug",
+        source_fingerprint="new-source",
+        supersede_completed_on_source_change=True,
     )
 
     assert (
@@ -1048,12 +1333,20 @@ def test_copy_kernel_sources_skips_output_dirs_and_copy_external_assets(tmp_path
     kernel_source_dir = base_dir / slug / "kernel"
     (kernel_source_dir / "output").mkdir(parents=True, exist_ok=True)
     (kernel_source_dir / "outputs").mkdir(parents=True, exist_ok=True)
+    (kernel_source_dir / "outputs-smoke").mkdir(parents=True, exist_ok=True)
+    (kernel_source_dir / "outputs_test").mkdir(parents=True, exist_ok=True)
     (kernel_source_dir / "__pycache__").mkdir(parents=True, exist_ok=True)
+    (kernel_source_dir / "nested" / "__pycache__").mkdir(parents=True, exist_ok=True)
     (kernel_source_dir / "kernel.py").write_text("from runtime import main\n", encoding="utf-8")
     (kernel_source_dir / "runtime.py").write_text("def main():\n    pass\n", encoding="utf-8")
     (kernel_source_dir / "output" / "submission.csv").write_text("id,target\n", encoding="utf-8")
     (kernel_source_dir / "outputs" / "submission.csv").write_text("id,target\n", encoding="utf-8")
+    (kernel_source_dir / "outputs-smoke" / "cache.npy").write_bytes(b"cache")
+    (kernel_source_dir / "outputs_test" / "cache.npy").write_bytes(b"cache")
     (kernel_source_dir / "__pycache__" / "kernel.pyc").write_bytes(b"pyc")
+    (kernel_source_dir / "nested" / "__pycache__" / "runtime.pyc").write_bytes(b"pyc")
+    (kernel_source_dir / "nested" / ".ruff_cache").mkdir()
+    (kernel_source_dir / "nested" / ".ruff_cache" / "cache").write_bytes(b"cache")
 
     external_dir = base_dir / slug / "external"
     external_dir.mkdir(parents=True, exist_ok=True)
@@ -1071,7 +1364,27 @@ def test_copy_kernel_sources_skips_output_dirs_and_copy_external_assets(tmp_path
     assert (kernel_dir / "WA_Fn-UseC_-Telco-Customer-Churn.csv").exists()
     assert not (kernel_dir / "output").exists()
     assert not (kernel_dir / "outputs").exists()
+    assert not (kernel_dir / "outputs-smoke").exists()
+    assert not (kernel_dir / "outputs_test").exists()
     assert not (kernel_dir / "__pycache__").exists()
+    assert not (kernel_dir / "nested" / "__pycache__").exists()
+    assert not (kernel_dir / "nested" / ".ruff_cache").exists()
+
+
+def test_remove_generated_kernel_cache_files_keeps_real_sources(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    (kernel_dir / "package" / "__pycache__").mkdir(parents=True)
+    (kernel_dir / ".pytest_cache").mkdir()
+    (kernel_dir / "package" / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    (kernel_dir / "package" / "__pycache__" / "kernel.pyc").write_bytes(b"unstable")
+    (kernel_dir / "orphan.pyo").write_bytes(b"unstable")
+
+    remove_generated_kernel_cache_files(kernel_dir)
+
+    assert (kernel_dir / "package" / "kernel.py").exists()
+    assert not (kernel_dir / "package" / "__pycache__").exists()
+    assert not (kernel_dir / ".pytest_cache").exists()
+    assert not (kernel_dir / "orphan.pyo").exists()
 
 
 def test_sync_plan_snapshot_skips_self_copy_and_writes_targets(tmp_path: Path) -> None:
@@ -2299,6 +2612,17 @@ def test_inject_training_compat_shims_groups_training_shims(tmp_path: Path) -> N
     assert text.count("transformers-eval-strategy-shim") == 1
 
 
+def test_inject_submit_inference_compat_shims_preserves_reference_import_order(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+
+    inject_submit_inference_compat_shims(kernel_dir)
+
+    text = (kernel_dir / "sitecustomize.py").read_text(encoding="utf-8")
+    assert "kagglebot: train-progress-shim" in text
+    assert "transformers-eval-strategy-shim" not in text
+
+
 def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -2325,6 +2649,258 @@ def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
     future_idx = next(i for i, line in enumerate(lines) if "from __future__ import annotations" in line)
     marker_idx = next(i for i, line in enumerate(lines) if "kagglebot:kernel_sys_path" in line)
     assert marker_idx > future_idx
+
+
+def test_kernel_bootstrap_imports_unsloth_before_sitecustomize(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "from __future__ import annotations\n\n"
+        "try:\n"
+        "    import unsloth as _early_unsloth\n"
+        "except Exception:\n"
+        "    _early_unsloth = None\n",
+        encoding="utf-8",
+    )
+
+    from kagglebot.kernel_bootstrap import (
+        KERNEL_BOOTSTRAP_END,
+        ensure_kernel_import_path,
+        inject_competition_slug_env,
+        inject_submit_inference_env,
+    )
+
+    ensure_kernel_import_path(kernel_dir)
+    inject_competition_slug_env(kernel_dir, "demo")
+    inject_submit_inference_env(kernel_dir)
+    ensure_kernel_import_path(kernel_dir)
+    text = kernel_path.read_text(encoding="utf-8")
+    assert text.count("# kagglebot:kernel_sys_path") == 1
+    assert text.index("import unsloth as _kb_early_unsloth") < text.index("_KSC =")
+    assert text.index(KERNEL_BOOTSTRAP_END) < text.index("# kagglebot:submit_inference")
+    assert text.index(KERNEL_BOOTSTRAP_END) < text.index("# kagglebot:competition_slug")
+
+
+def test_kernel_bootstrap_defers_attached_notebook_package_shadows(tmp_path: Path) -> None:
+    notebook_root = tmp_path / "notebooks"
+    attached_path = notebook_root / "owner" / "dependency-kernel"
+    system_path = tmp_path / "system-packages"
+    kernel_dir = tmp_path / "kernel"
+    for package_root, origin in ((attached_path, "attached"), (system_path, "system")):
+        package_dir = package_root / "numpy"
+        package_dir.mkdir(parents=True)
+        (package_dir / "__init__.py").write_text(f"ORIGIN = {origin!r}\n", encoding="utf-8")
+    kernel_dir.mkdir()
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text("import numpy\nprint(numpy.ORIGIN)\n", encoding="utf-8")
+
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
+    env = os.environ.copy()
+    env["KAGGLEBOT_NOTEBOOK_SOURCE_ROOT"] = str(notebook_root)
+    env["KAGGLEBOT_WORKING_DIR"] = str(tmp_path / "working")
+    env["KAGGLEBOT_RUNTIME_CACHE_DIR"] = str(tmp_path / "runtime-cache")
+    env["PYTHONPATH"] = os.pathsep.join((str(attached_path), str(system_path)))
+    result = subprocess.run(
+        [sys.executable, str(kernel_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.stdout.strip() == "system"
+
+
+def test_kernel_bootstrap_preserves_attached_unsloth_reference_runtime(tmp_path: Path) -> None:
+    notebook_root = tmp_path / "notebooks"
+    attached_path = notebook_root / "owner" / "dependency-kernel"
+    system_path = tmp_path / "system-packages"
+    kernel_dir = tmp_path / "kernel"
+    for package_root, origin in ((attached_path, "attached"), (system_path, "system")):
+        package_dir = package_root / "unsloth"
+        package_dir.mkdir(parents=True)
+        (package_dir / "__init__.py").write_text(
+            f"import numpy\nimport regex\nORIGIN = ({origin!r}, numpy.ORIGIN, regex.ORIGIN)\n",
+            encoding="utf-8",
+        )
+    (attached_path / "numpy").mkdir()
+    (attached_path / "numpy" / "__init__.py").write_text("ORIGIN = 'attached'\n", encoding="utf-8")
+    (system_path / "numpy").mkdir()
+    (system_path / "numpy" / "__init__.py").write_text("ORIGIN = 'system'\n", encoding="utf-8")
+    (attached_path / "regex").mkdir()
+    (attached_path / "regex" / "__init__.py").write_text("ORIGIN = 'attached'\n", encoding="utf-8")
+    (attached_path / "regex" / "_regex.cpython-311-x86_64-linux-gnu.so").write_bytes(b"")
+    (system_path / "regex").mkdir()
+    (system_path / "regex" / "__init__.py").write_text("ORIGIN = 'system'\n", encoding="utf-8")
+    kernel_dir.mkdir()
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text("import unsloth\nprint(unsloth.ORIGIN)\n", encoding="utf-8")
+
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
+    env = os.environ.copy()
+    env["KAGGLEBOT_NOTEBOOK_SOURCE_ROOT"] = str(notebook_root)
+    env["KAGGLEBOT_WORKING_DIR"] = str(tmp_path / "working")
+    env["KAGGLEBOT_RUNTIME_CACHE_DIR"] = str(tmp_path / "runtime-cache")
+    env["PYTHONPATH"] = os.pathsep.join((str(attached_path), str(system_path)))
+    result = subprocess.run(
+        [sys.executable, str(kernel_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.stdout.strip() == "('attached', 'system', 'system')"
+
+
+def test_kernel_bootstrap_patches_unsloth_transformers_config_alias(tmp_path: Path) -> None:
+    notebook_root = tmp_path / "notebooks"
+    attached_path = notebook_root / "owner" / "dependency-kernel"
+    system_path = tmp_path / "system-packages"
+    kernel_dir = tmp_path / "kernel"
+    (attached_path / "numpy").mkdir(parents=True)
+    (attached_path / "numpy" / "__init__.py").write_text("ORIGIN = 'attached'\n", encoding="utf-8")
+    unsloth_dir = attached_path / "unsloth"
+    (unsloth_dir / "models").mkdir(parents=True)
+    (unsloth_dir / "__init__.py").write_text(
+        "from .models._utils import DemoConfig\nfrom .models.vision import VISION_OK\n",
+        encoding="utf-8",
+    )
+    (unsloth_dir / "models" / "__init__.py").write_text("", encoding="utf-8")
+    (unsloth_dir / "models" / "_utils.py").write_text(
+        "from transformers import PretrainedConfig\n"
+        "for config_filepath in ['transformers.models.demo.configuration_demo']:\n"
+        "    config = (\n"
+        "        '@strict\\n'\n"
+        "        'class DemoConfig(PreTrainedConfig):\\n'\n"
+        "        '    rope_parameters: RopeParameters | dict | None = None\\n'\n"
+        "    )\n"
+        "    exec(config, globals())\n",
+        encoding="utf-8",
+    )
+    (unsloth_dir / "models" / "vision.py").write_text(
+        "from transformers import GenerationConfig, CompileConfig, HybridCache, AutoConfig, PretrainedConfig\n"
+        "from transformers import GenerationConfig, CompileConfig, HybridCache\n"
+        "VISION_OK = True\n",
+        encoding="utf-8",
+    )
+    (unsloth_dir / "models" / "llama.py").write_text(
+        "def rope_base(config, base=10000):\n    base = config.rope_theta\n    return base\n",
+        encoding="utf-8",
+    )
+    (unsloth_dir / "save.py").write_text(
+        'if hasattr(original_model, "model"): original_model = original_model.model\n',
+        encoding="utf-8",
+    )
+    (system_path / "transformers").mkdir(parents=True)
+    (system_path / "transformers" / "__init__.py").write_text(
+        "class PretrainedConfig:\n    pass\n"
+        "class GenerationConfig:\n    pass\n"
+        "class CompileConfig:\n    pass\n"
+        "class AutoConfig:\n    pass\n",
+        encoding="utf-8",
+    )
+    config_dir = system_path / "transformers" / "models" / "demo"
+    config_dir.mkdir(parents=True)
+    (system_path / "transformers" / "models" / "__init__.py").write_text("", encoding="utf-8")
+    (config_dir / "__init__.py").write_text("", encoding="utf-8")
+    (config_dir / "configuration_demo.py").write_text(
+        "from transformers import PretrainedConfig as PreTrainedConfig\n"
+        "class RopeParameters:\n    pass\n"
+        "def strict(cls):\n    return cls\n",
+        encoding="utf-8",
+    )
+    kernel_dir.mkdir()
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "import unsloth\n"
+        "from transformers import PretrainedConfig\n"
+        "print(issubclass(unsloth.DemoConfig, PretrainedConfig), unsloth.VISION_OK)\n",
+        encoding="utf-8",
+    )
+
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
+    env = os.environ.copy()
+    env["KAGGLEBOT_NOTEBOOK_SOURCE_ROOT"] = str(notebook_root)
+    env["KAGGLEBOT_WORKING_DIR"] = str(tmp_path / "working")
+    env["KAGGLEBOT_RUNTIME_CACHE_DIR"] = str(tmp_path / "runtime-cache")
+    env["PYTHONPATH"] = os.pathsep.join((str(attached_path), str(system_path)))
+    result = subprocess.run(
+        [sys.executable, str(kernel_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.stdout.strip() == "True True"
+    copied_llama = (tmp_path / "runtime-cache" / "reference_packages" / "unsloth" / "models" / "llama.py").read_text(
+        encoding="utf-8"
+    )
+    assert "base = config.rope_theta" not in copied_llama
+    assert "rope_parameters" in copied_llama
+    copied_save = (tmp_path / "runtime-cache" / "reference_packages" / "unsloth" / "save.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'hasattr(original_model.model, "push_to_hub")' in copied_save
+
+
+def test_kernel_bootstrap_installs_qwen3_sdpa_without_persisting_packages_as_output(
+    tmp_path: Path,
+) -> None:
+    notebook_root = tmp_path / "notebooks"
+    attached_path = notebook_root / "owner" / "unsloth-runtime"
+    kernel_dir = tmp_path / "kernel"
+    (attached_path / "numpy").mkdir(parents=True)
+    (attached_path / "numpy" / "__init__.py").write_text("ORIGIN = 'attached'\n", encoding="utf-8")
+    qwen_dir = attached_path / "unsloth" / "models"
+    qwen_dir.mkdir(parents=True)
+    (attached_path / "unsloth" / "__init__.py").write_text("", encoding="utf-8")
+    (qwen_dir / "__init__.py").write_text("", encoding="utf-8")
+    (qwen_dir / "qwen3.py").write_text("FLASH_WAS_MISSING = True\n", encoding="utf-8")
+    kernel_dir.mkdir()
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "import unsloth\n"
+        "import unsloth.models.qwen3 as qwen3\n"
+        "import torch\n"
+        "q = torch.randn(1, 1, 4, 8)\n"
+        "k = torch.randn(1, 3, 2, 8)\n"
+        "v = torch.randn(1, 3, 2, 8)\n"
+        "out = qwen3.flash_attn_func(q, k, v, causal=True)\n"
+        "print(callable(qwen3.flash_attn_func), tuple(out.shape))\n",
+        encoding="utf-8",
+    )
+
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
+    working_dir = tmp_path / "working"
+    runtime_cache = tmp_path / "runtime-cache"
+    env = os.environ.copy()
+    env["KAGGLEBOT_NOTEBOOK_SOURCE_ROOT"] = str(notebook_root)
+    env["KAGGLEBOT_WORKING_DIR"] = str(working_dir)
+    env["KAGGLEBOT_RUNTIME_CACHE_DIR"] = str(runtime_cache)
+    env["PYTHONPATH"] = str(attached_path)
+    result = subprocess.run(
+        [sys.executable, str(kernel_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.stdout.strip() == "True (1, 1, 4, 8)"
+    assert (runtime_cache / "reference_packages" / "unsloth" / "models" / "qwen3.py").is_file()
+    assert not (working_dir / ".kagglebot_reference_packages").exists()
+    assert not (working_dir / "unsloth_compiled_cache").exists()
 
 
 def test_run_kernel_uses_custom_kernel(tmp_path: Path) -> None:
@@ -2469,7 +3045,7 @@ def test_run_kernel_local_fails_fast_when_local_kernel_stalls(
                 "print('submission.csv', flush=True)",
                 "print('metrics.json', flush=True)",
                 "print('kernel start', flush=True)",
-                "time.sleep(10)",
+                "time.sleep(45)",
             ]
         )
         + "\n",
@@ -2478,7 +3054,9 @@ def test_run_kernel_local_fails_fast_when_local_kernel_stalls(
     (tmp_path / "demo" / "plan.json").write_text(
         json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8"
     )
-    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "5")
+    # The full slow suite starts many subprocesses in parallel. A five-second
+    # watchdog can expire before Python reaches the first line under xdist.
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "30")
 
     with pytest.raises(KernelFailedError, match="Local kernel stalled"):
         run_kernel_local(
@@ -2540,7 +3118,9 @@ def test_run_kernel_local_ignores_stale_output_artifacts_for_stall_watchdog(
     stale_mtime = time.time() - 60.0
     for stale_file in stale_files:
         os.utime(stale_file, (stale_mtime, stale_mtime))
-    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "5")
+    # The full slow suite starts many subprocesses in parallel; leave enough
+    # startup headroom while still proving stale files do not count as activity.
+    monkeypatch.setenv("KAGGLEBOT_LOCAL_KERNEL_STALL_SEC", "60")
 
     result = run_kernel_local(
         slug="demo",
@@ -2555,7 +3135,7 @@ def test_run_kernel_local_ignores_stale_output_artifacts_for_stall_watchdog(
         cv_folds=3,
         seed=42,
         dry_run=False,
-        timeout_minutes=1,
+        timeout_minutes=2,
         strict_accelerator=False,
     )
 

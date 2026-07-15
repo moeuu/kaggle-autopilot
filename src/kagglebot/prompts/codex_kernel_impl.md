@@ -45,9 +45,12 @@ Implementation contract for `kernel.py`:
   - `N_FOLDS`, `SEEDS`, `FAST_DEV`
   - plan-driven pipeline toggles (do not hardcode a single model family)
   - `GPU_DEVICE`
-- Training and validation are mandatory for every iteration. Ignore or override plan/env settings
-  that disable training, disable validation, request packaging-only/noop/identity fallback, or
-  produce unscored/proxy/public-anchor metrics.
+- Validation is mandatory for every iteration. Training is mandatory unless plan.json contains an approved
+  `execution_route.mode="non_training_submission"`. For that route, honor `KAGGLEBOT_EXECUTION_MODE`, do not fit a
+  model locally, and execute the concrete pretrained/reference/solver/search/simulation/optimization/rule-based path
+  named by the plan. Treat `KAGGLEBOT_NON_TRAINING_VALIDATION_REQUIRED=1` as requiring the planned non-training
+  validation, not CV model fitting. Always ignore packaging-only/noop/identity, sample-template copying, dummy,
+  unscored, proxy, and public-anchor fallbacks.
 - Unified execution contract:
   - The exact same `kernel.py` must run on `local_gpu` and `kaggle_gpu`
   - Only execution location/runtime differs; algorithm path must be shared
@@ -80,9 +83,11 @@ Implementation contract for `kernel.py`:
   - Print per-pipeline CV summary for the plan primary metric
   - Use the same metric implementation/path for epoch model-selection and final offline scoring
     (do not optimize on a proxy metric that differs from final reported score)
-  - `metrics.json` must describe a real trained candidate with a competition-faithful CV/holdout
-    score from train data. Do not write placeholder, proxy, public-anchor, packaging-only, or
-    unscored scores as the primary score.
+  - On the normal training route, `metrics.json` must describe a real trained candidate with a competition-faithful
+    CV/holdout score from train data. On the approved non-training route, it must describe the real implemented result,
+    its declared validation, and include `execution_mode="non_training_submission"`, `training_performed=false`,
+    `non_training_validation_passed=true`, and the exact planned `non_training_validation_mode`. Do not write
+    placeholder, proxy, public-anchor, packaging-only, or unscored scores as the primary score.
   - When multiple candidates exist, log each candidate's CV score, holdout/validation score,
     and test/submission prediction distribution. Do not choose the final submission by CV alone
     if another candidate has materially better holdout/validation or the best-CV candidate has
@@ -104,6 +109,14 @@ Implementation contract for `kernel.py`:
   - For tabular outputs, validate row count and id order against runtime test ids when `sample_submission.*` is tiny/header-only/dummy
     for a hidden/full-test notebook rerun; never emit a 3-row public placeholder submission on Kaggle hidden/full test
   - Ensure no NaN/inf in predictions; clip to safe bounds when needed
+  - Validate the complete competition-specific output schema and semantic invariants after every
+    prediction/post-processing stage and again immediately before writing the final artifact. For graph,
+    tracking, segmentation, sequence, or structured outputs this includes topology/cardinality, identifier,
+    bounds, ordering, and referential-integrity constraints, not only filename/columns/row count.
+  - Any repair that adds or removes structured predictions must enforce those invariants at mutation time.
+    Use deterministic score-plus-identifier tie-breaking for capacity conflicts, and include an adversarial
+    self-test where several eligible repairs compete for the same constrained source/target. Do not rely on
+    one GPU's floating-point boundary behavior to keep the output valid.
   - If `KAGGLEBOT_LOCAL_KERNEL=1`, avoid hard-failing on `/kaggle/working` writes
 - Optional model backends:
   - Use XGBoost/CatBoost only if import succeeds and runtime toggles allow it

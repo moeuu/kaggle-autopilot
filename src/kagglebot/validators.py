@@ -36,7 +36,8 @@ SECRET_PATTERNS = [
     r"kaggle\.json",
     r"\bkaggle[_-]?key\b\s*[:=]\s*['\"]?[^\s'\"]{3,}",
     r"\bkaggle[_-]?username\b\s*[:=]\s*['\"]?[^\s'\"]{3,}",
-    r"\bapi[_-]?key\b\s*[:=]\s*['\"]?[^\s'\"]{8,}",
+    r"\bapi[_-]?key\b\s*[:=]\s*(?!(?:os\.)?(?:getenv|environ)\b)(?![A-Za-z_][A-Za-z0-9_]*\s*\()"
+    r"['\"]?[^\s'\"]{8,}",
     r"\bpassword\b\s*[:=]\s*['\"]?[^\s'\"]{4,}",
     r"\bsecret\b\s*[:=]\s*['\"]?[^\s'\"]{4,}",
     r"\b(?:access|refresh|auth|bearer)?_?token\b\s*[:=]\s*['\"][^'\"]{8,}",

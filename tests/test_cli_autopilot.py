@@ -17,6 +17,7 @@ def test_autopilot_uses_preferred_artifacts_dir_by_default(monkeypatch, tmp_path
 
     def fake_bootstrap(**kwargs):
         captured["artifacts_dir"] = kwargs["paths"].artifacts_dir
+        captured["repo_root"] = kwargs["paths"].repo_root
 
     monkeypatch.setattr("kagglebot.cli._preferred_artifacts_dir", lambda: Path("/data/kaggle-autopilot-artifacts"))
     monkeypatch.setattr("kagglebot.cli.bootstrap_competition", fake_bootstrap)
@@ -27,6 +28,7 @@ def test_autopilot_uses_preferred_artifacts_dir_by_default(monkeypatch, tmp_path
         [
             "--workdir",
             str(tmp_path),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -37,6 +39,40 @@ def test_autopilot_uses_preferred_artifacts_dir_by_default(monkeypatch, tmp_path
 
     assert result.exit_code == 0
     assert captured["artifacts_dir"] == Path("/data/kaggle-autopilot-artifacts")
+    assert captured["repo_root"] == tmp_path
+
+
+def test_autopilot_requires_force_before_external_side_effects(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    calls = {"bootstrap": 0, "autopilot": 0}
+
+    monkeypatch.setattr(
+        "kagglebot.cli.bootstrap_competition",
+        lambda **kwargs: calls.__setitem__("bootstrap", calls["bootstrap"] + 1),
+    )
+    monkeypatch.setattr(
+        "kagglebot.cli.run_autopilot",
+        lambda config: calls.__setitem__("autopilot", calls["autopilot"] + 1),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--workdir",
+            str(tmp_path),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            "autopilot",
+            "playground-series-s6e2",
+            "--compute",
+            "local_gpu",
+            "--no-auto-eval-spec",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "without --force" in result.stderr
+    assert calls == {"bootstrap": 0, "autopilot": 0}
 
 
 def test_autopilot_submit_aborted_exits_clean(monkeypatch, tmp_path: Path) -> None:
@@ -56,6 +92,7 @@ def test_autopilot_submit_aborted_exits_clean(monkeypatch, tmp_path: Path) -> No
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -124,6 +161,7 @@ def test_autopilot_cli_defaults_to_top1_campaign_mode(monkeypatch, tmp_path: Pat
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -152,6 +190,7 @@ def test_autopilot_cli_accepts_baseline_campaign_mode(monkeypatch, tmp_path: Pat
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -182,6 +221,7 @@ def test_autopilot_cli_uses_shared_campaign_mode_aliases(monkeypatch, tmp_path: 
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -216,6 +256,7 @@ def test_autopilot_cli_accepts_method_scout_options(monkeypatch, tmp_path: Path)
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -250,6 +291,7 @@ def test_autopilot_cli_accepts_portfolio_execution_mode(monkeypatch, tmp_path: P
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -281,6 +323,7 @@ def test_autopilot_cli_uses_shared_portfolio_execution_aliases(monkeypatch, tmp_
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -322,6 +365,7 @@ def test_autopilot_cli_top1_exhaustive_applies_safe_defaults(monkeypatch, tmp_pa
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -376,6 +420,7 @@ def test_autopilot_resume_run_id_reuses_existing_run(monkeypatch, tmp_path: Path
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             slug,
             "--compute",
@@ -427,6 +472,7 @@ def test_autopilot_resume_latest_selects_most_recent_run(monkeypatch, tmp_path: 
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             slug,
             "--compute",
@@ -457,6 +503,7 @@ def test_autopilot_resume_run_id_requires_existing_run(monkeypatch, tmp_path: Pa
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",
@@ -500,6 +547,7 @@ def test_autopilot_resume_run_id_accepts_unique_prefix(monkeypatch, tmp_path: Pa
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             slug,
             "--compute",
@@ -537,6 +585,7 @@ def test_autopilot_resume_run_id_rejects_ambiguous_prefix(monkeypatch, tmp_path:
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             slug,
             "--compute",
@@ -613,6 +662,7 @@ def test_autopilot_no_auto_eval_spec_skips_advisor(monkeypatch, tmp_path: Path) 
             str(tmp_path),
             "--artifacts-dir",
             str(tmp_path / "artifacts"),
+            "--force",
             "autopilot",
             "playground-series-s6e2",
             "--compute",

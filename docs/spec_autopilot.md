@@ -11,7 +11,7 @@ This spec reflects the current implementation.
 Primary command:
 
 ```bash
-uv run kagglebot autopilot <competition-url-or-slug> --compute <local_gpu|kaggle_gpu|kaggle_tpu>
+uv run kagglebot --force autopilot <competition-url-or-slug> --compute <local_gpu|kaggle_gpu|kaggle_tpu>
 ```
 
 Key points:
@@ -79,7 +79,7 @@ Required planning-extended fields:
 ## 4. Runtime Evaluation and Stop Rules
 
 Per iteration runtime:
-1. Train model/kernel
+1. Train model/kernel, or execute an approved implemented non-training inference/solver route when optional local training is very heavy
 2. Evaluate offline metric(s)
 3. Persist metrics and diagnostics
 4. Decide continue vs stop

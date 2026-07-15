@@ -15,6 +15,65 @@ from kagglebot.exec_utils import CommandResult
 pytestmark = pytest.mark.slow
 
 
+def test_download_dataset_metadata_uses_authoritative_kaggle_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ANN001
+        captured.update(args=args, slug=slug, dry_run=dry_run)
+        return "metadata"
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    result = kaggle_api.download_dataset_metadata(
+        "owner/dataset",
+        tmp_path / "metadata",
+        slug="competition",
+    )
+
+    assert result == "metadata"
+    assert captured == {
+        "args": [
+            "kaggle",
+            "datasets",
+            "metadata",
+            "owner/dataset",
+            "-p",
+            str(tmp_path / "metadata"),
+        ],
+        "slug": "competition",
+        "dry_run": False,
+    }
+
+
+def test_kernels_output_forwards_file_pattern(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ANN001
+        captured.update(args=args, slug=slug, dry_run=dry_run)
+        return "ok"
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    result = kaggle_api.kernels_output(
+        "user/kernel",
+        tmp_path,
+        slug="demo",
+        force=True,
+        quiet=True,
+        file_pattern=r"(^|/)(submission\.parquet|metrics\.json)$",
+    )
+
+    assert result == "ok"
+    assert captured["args"][6:8] == ["--page-size", "200"]
+    assert captured["args"][-2:] == [
+        "--file-pattern",
+        r"(^|/)(submission\.parquet|metrics\.json)$",
+    ]
+
+
 def test_submission_row_from_api_preserves_format_error_description() -> None:
     row = kaggle_api._submission_row_from_api(
         SimpleNamespace(
@@ -245,6 +304,39 @@ def test_kernels_push_detects_capacity_limit_even_on_zero_exit(monkeypatch) -> N
         kaggle_api.kernels_push(Path("kernel"), slug="demo", dry_run=False)
 
 
+def test_kernels_push_forwards_explicit_machine_shape(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_kaggle(args, slug, *, dry_run):  # noqa: ANN001
+        captured.update(args=args, slug=slug, dry_run=dry_run)
+        return "pushed"
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    assert (
+        kaggle_api.kernels_push(
+            Path("kernel"),
+            slug="demo",
+            dry_run=False,
+            accelerator="NvidiaTeslaT4",
+        )
+        == "pushed"
+    )
+    assert captured == {
+        "args": [
+            "kaggle",
+            "kernels",
+            "push",
+            "-p",
+            "kernel",
+            "--accelerator",
+            "NvidiaTeslaT4",
+        ],
+        "slug": "demo",
+        "dry_run": False,
+    }
+
+
 def test_kernels_push_detects_weekly_gpu_quota_even_on_zero_exit(monkeypatch) -> None:
     def fake_run_command(args, *, dry_run=False, **kwargs):  # noqa: ARG001
         return CommandResult(
@@ -378,6 +470,22 @@ def test_leaderboard_rank_for_score_minimize(monkeypatch, tmp_path) -> None:
     assert result["rank"] == 3
     assert result["total_teams"] == 4
     assert result["rank_percentile"] == 0.75
+
+
+def test_leaderboard_rank_for_score_overrides_wrong_caller_direction(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        csv_path = tmp_path / "leaderboard" / "leaderboard.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("Rank,Score\n1,0.001\n2,0.100\n3,1.000\n", encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    result = kaggle_api.leaderboard_rank_for_score("demo", tmp_path, score=1.0, direction="maximize")
+
+    assert result["rank"] == 3
+    assert result["direction"] == "minimize"
+    assert result["direction_source"] == "leaderboard_rank_order"
 
 
 def test_kernel_exists_matches_url_refs(monkeypatch) -> None:

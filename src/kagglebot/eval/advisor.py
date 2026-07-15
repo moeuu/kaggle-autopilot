@@ -22,7 +22,9 @@ from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.metrics import infer_direction, normalize_direction
 from kagglebot.writeup import (
     infer_deliverable_mode,
+    infer_deliverable_mode_evidence,
     infer_submit_mode,
+    infer_submit_mode_evidence,
     normalize_deliverable_mode,
     normalize_submit_mode,
 )
@@ -85,10 +87,16 @@ class EvaluationAdvisor:
         errors: list[str] = []
         if self.spec_path.exists() and not self.force:
             frozen = load_json_object_or_empty(self.spec_path)
-            stale_reason = _stale_frozen_spec_reason(frozen=frozen, paths=self.paths)
+            validated_frozen, frozen_issues = validate_evaluation_spec(frozen)
+            stale_reason = (
+                f"invalid frozen spec: {'; '.join(frozen_issues)}"
+                if frozen_issues
+                else _stale_frozen_spec_reason(frozen=frozen, paths=self.paths)
+            )
             if stale_reason is None:
+                assert validated_frozen is not None
                 self._write_status(source="frozen", attempts=0, errors=[], notes="existing frozen spec reused")
-                return frozen, "frozen"
+                return validated_frozen, "frozen"
             errors.append(f"stale frozen spec detected: {stale_reason}")
 
         if self.dry_run or not self._search_capability_check():
@@ -208,9 +216,9 @@ class EvaluationAdvisor:
         competition_policy = load_competition_policy(self.paths)
         context_text = "\n".join(
             [
-                _read_trimmed(self.paths.rules_md_path, limit_chars=4000),
-                _read_trimmed(self.paths.overview_md_path, limit_chars=4000),
-                _read_trimmed(self.paths.submission_format_md_path, limit_chars=4000),
+                _read_trimmed(self.paths.rules_md_path, limit_chars=12000),
+                _read_trimmed(self.paths.overview_md_path, limit_chars=12000),
+                _read_trimmed(self.paths.submission_format_md_path, limit_chars=12000),
             ]
         ).lower()
         metric = _infer_metric_from_context(profile=profile, context_text=context_text)
@@ -821,20 +829,27 @@ def _normalize_metric_name(name: str) -> str:
 
 def _stale_frozen_spec_reason(*, frozen: dict[str, object], paths: CompetitionPaths) -> str | None:
     metric_name = frozen.get("metric_name")
-    if not isinstance(metric_name, str) or not metric_name.strip():
-        return None
 
     context_text = "\n".join(
         [
-            _read_trimmed(paths.rules_md_path, limit_chars=4000),
-            _read_trimmed(paths.overview_md_path, limit_chars=4000),
-            _read_trimmed(paths.submission_format_md_path, limit_chars=4000),
+            _read_trimmed(paths.rules_md_path, limit_chars=12000),
+            _read_trimmed(paths.overview_md_path, limit_chars=12000),
+            _read_trimmed(paths.submission_format_md_path, limit_chars=12000),
         ]
     )
     candidates = _extract_metric_candidates_from_text(context_text)
-    if len(candidates) != 1:
-        return None
-    inferred = candidates[0]
-    if _normalize_metric_name(metric_name) != _normalize_metric_name(inferred):
-        return f"metric mismatch frozen={metric_name} context={inferred}"
+    if isinstance(metric_name, str) and metric_name.strip() and len(candidates) == 1:
+        inferred = candidates[0]
+        if _normalize_metric_name(metric_name) != _normalize_metric_name(inferred):
+            return f"metric mismatch frozen={metric_name} context={inferred}"
+
+    frozen_deliverable = normalize_deliverable_mode(frozen.get("deliverable_mode"), default="")
+    inferred_deliverable = infer_deliverable_mode_evidence(context_text)
+    if frozen_deliverable and inferred_deliverable and frozen_deliverable != inferred_deliverable:
+        return f"deliverable mode mismatch frozen={frozen_deliverable} context={inferred_deliverable}"
+
+    frozen_submit = normalize_submit_mode(frozen.get("submit_mode"), default="")
+    inferred_submit = infer_submit_mode_evidence(context_text)
+    if frozen_submit and inferred_submit and frozen_submit != inferred_submit:
+        return f"submit mode mismatch frozen={frozen_submit} context={inferred_submit}"
     return None

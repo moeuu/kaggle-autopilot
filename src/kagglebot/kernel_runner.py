@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -31,10 +32,12 @@ from kagglebot import local_kernel_models as _local_kernel_models
 from kagglebot import local_kernel_pipeline_cfg as _local_kernel_pipeline_cfg
 from kagglebot import local_kernel_process as _local_kernel_process
 from kagglebot import local_kernel_progress as _local_kernel_progress
+from kagglebot import local_kernel_resume as _local_kernel_resume
 from kagglebot import local_kernel_runtime_env as _local_kernel_runtime_env
 from kagglebot import local_kernel_shims as _local_kernel_shims
 from kagglebot import local_sample_submission as _local_sample_submission
 from kagglebot import remote_kernel_state as _remote_kernel_state
+from kagglebot import submit_kernel_fidelity as _submit_kernel_fidelity
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.compute import detect_local_gpu
 from kagglebot.exceptions import (
@@ -45,6 +48,8 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
 )
 from kagglebot.hardware import hardware_env, resolve_hardware_profile
+from kagglebot.hashing import sha256_path, sha256_text
+from kagglebot.json_utils import load_json_object_or_empty
 from kagglebot.kaggle_api import (
     check_rules_accepted,
     kernel_exists,
@@ -72,7 +77,14 @@ from kagglebot.kernel_status import (
     is_kernel_status_running,
     parse_kernel_status,
 )
+from kagglebot.kernel_submit_accelerator import machine_shape_requires_offline as _machine_shape_requires_offline
 from kagglebot.kernel_submit_accelerator import resolve_submit_kernel_accelerator as _resolve_submit_accelerator
+from kagglebot.kernel_submit_accelerator import (
+    resolve_submit_kernel_machine_shape_decision as _resolve_submit_machine_shape_decision,
+)
+from kagglebot.kernel_submit_accelerator import (
+    submit_hardware_profile_for_machine_shape as _submit_hardware_profile_for_machine_shape,
+)
 from kagglebot.kernel_submit_inference import (
     sanitize_submit_inference_output_roots as _sanitize_submit_inference_output_roots,
 )
@@ -83,6 +95,7 @@ from kagglebot.kernel_submit_wrapper import (
 from kagglebot.kernel_submit_wrapper import render_submission_kernel_script as _render_submission_kernel_script
 from kagglebot.logging_utils import truncate_lines
 from kagglebot.paths import CompetitionPaths
+from kagglebot.runtime_policy import local_gpu_time_budget_limit_min
 from kagglebot.solution_guard import ensure_solution_path_allowed
 from kagglebot.submission_format import load_submission_format_hint
 from kagglebot.submission_output_naming import (
@@ -91,11 +104,13 @@ from kagglebot.submission_output_naming import (
     tabular_submission_output_suffixes,
 )
 from kagglebot.submission_sample_discovery import tabular_suffix
+from kagglebot.training_route import plan_requests_non_training, validate_non_training_source
 from kagglebot.validators import ensure_kernel_sources_valid, validate_kernel_package
 
 _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_FORMAT_SUBMISSION_OUTPUT_SUFFIXES = all_submission_output_suffixes()
 _LOCAL_SAMPLE_SUBMISSION_OUTPUT_SUFFIXES = tabular_submission_output_suffixes()
+_KERNEL_LOG_OUTPUT_FILE_PATTERN = r"(^|/)(stdout\.txt|stderr\.txt|output\.log|log\.txt|logs\.txt|[^/]+\.log)$"
 
 
 @dataclass(frozen=True)
@@ -115,6 +130,10 @@ class KernelPreparation:
     kernel_id: str
     runtime_bootstrap_mode: str = "force_train"
     supersede_stale_queued: bool = False
+    source_fingerprint: str | None = None
+    supersede_completed_on_source_change: bool = False
+    machine_shape: str | None = None
+    output_file_pattern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +170,7 @@ class KernelSubmitBuildConfig:
     mode: str
     dry_run: bool
     hardware_profile: str | None = "auto"
+    expected_output_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +189,30 @@ class KernelPackageBuilder:
         if not config.dry_run and not check_rules_accepted(config.slug, dry_run=False):
             raise RulesNotAcceptedError("Competition rules not accepted.")
 
+        plan_path = config.base_dir / config.slug / "plan.json"
+        plan_payload = load_json_object_or_empty(plan_path)
+        machine_shape_decision = _resolve_submit_machine_shape_decision(
+            env_get=os.getenv,
+            accelerator=config.accelerator,
+            hardware_profile=config.hardware_profile,
+            plan=plan_payload,
+            competition_slug=config.slug,
+        )
+        machine_shape = machine_shape_decision.machine_shape
+        enable_internet = bool(config.enable_internet)
+        if _machine_shape_requires_offline(machine_shape, competition_slug=config.slug) and enable_internet:
+            enable_internet = False
+            print(
+                "[yellow]kernel internet[/yellow]: forced off because "
+                f"{machine_shape} sessions must not enable internet"
+            )
+        print(
+            "[cyan]kernel accelerator[/cyan]: "
+            f"accelerator={config.accelerator} "
+            f"machine_shape={machine_shape or 'KaggleDefault'} "
+            f"source={machine_shape_decision.source}"
+        )
+
         if not config.dry_run:
             print(f"[cyan]kernel init[/cyan]: {kernel_dir}")
             kernels_init(kernel_dir, dry_run=False)
@@ -178,11 +222,12 @@ class KernelPackageBuilder:
             config.slug,
             config.run_id,
             config.iteration,
+            machine_shape=machine_shape,
         )
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
         custom_kernel_dir = config.base_dir / config.slug / "kernel"
         custom_kernel_path = custom_kernel_dir / "kernel.py"
-        source_config = load_kernel_source_config(config.base_dir / config.slug / "plan.json")
+        source_config = load_kernel_source_config(plan_path)
         ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=config.base_dir, slug=config.slug)
         if not custom_kernel_path.exists():
             raise KernelFailedError(
@@ -190,6 +235,12 @@ class KernelPackageBuilder:
                 f"Expected: {custom_kernel_path}. "
                 "Generate/update artifacts/<slug>/kernel/kernel.py before running training."
             )
+        if plan_requests_non_training(plan_payload):
+            source_issues = validate_non_training_source(
+                custom_kernel_path.read_text(encoding="utf-8", errors="ignore")
+            )
+            if source_issues:
+                raise KernelFailedError("; ".join(source_issues))
         _kernel_package_files.copy_kernel_sources(custom_kernel_dir, kernel_dir)
         _kernel_package_files.copy_shared_kernel_runtime_modules(kernel_dir)
         _kernel_package_files.copy_competition_external_assets(
@@ -198,18 +249,21 @@ class KernelPackageBuilder:
             kernel_dir=kernel_dir,
         )
         _kernel_package_files.sync_plan_snapshot(
-            plan_path=config.base_dir / config.slug / "plan.json",
+            plan_path=plan_path,
             targets=[kernel_dir / "plan.json"],
         )
         _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
         _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
+        kernel_hardware_profile = _submit_hardware_profile_for_machine_shape(machine_shape) or config.hardware_profile
         _kernel_bootstrap.inject_hardware_profile_env(
             kernel_dir,
-            config.hardware_profile,
+            kernel_hardware_profile,
             compute="kaggle_gpu" if config.accelerator == "gpu" else "kaggle_tpu",
         )
         _kernel_module_inliner.inline_kernel_modules(kernel_dir)
         _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
+        _local_kernel_pipeline_cfg.inject_staged_plan_payload_fallback(kernel_dir)
+        _local_kernel_pipeline_cfg.inject_staged_plan_path_fallback(kernel_dir)
         _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_dir)
         _local_kernel_shims.inject_context_io_shims(kernel_dir, context_dir)
         _local_kernel_shims.inject_training_compat_shims(kernel_dir)
@@ -220,7 +274,10 @@ class KernelPackageBuilder:
         )
         _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_dir, context_dir)
         _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
-        _kernel_bootstrap.inject_force_train_env(kernel_dir)
+        if plan_requests_non_training(plan_payload):
+            _kernel_bootstrap.ensure_kernel_non_training_env(kernel_dir)
+        else:
+            _kernel_bootstrap.ensure_kernel_force_train_env(kernel_dir)
         _local_kernel_shims.ensure_training_progress_shim(kernel_dir)
         ensure_kernel_sources_valid(kernel_dir)
         _kernel_metadata.write_kernel_metadata(
@@ -230,7 +287,7 @@ class KernelPackageBuilder:
             code_file="kernel.py",
             kernel_type="script",
             accelerator=config.accelerator,
-            enable_internet=config.enable_internet,
+            enable_internet=enable_internet,
             competition_slug=config.slug,
             source_config=source_config,
         )
@@ -241,6 +298,7 @@ class KernelPackageBuilder:
             logs_dir=logs_dir,
             kernel_slug=kernel_slug,
             kernel_id=kernel_id,
+            machine_shape=machine_shape,
         )
 
 
@@ -266,7 +324,19 @@ class KernelSubmitPackageBuilder:
             raise KernelFailedError(f"Submission artifact not found: {config.submission_path}")
 
         submit_mode = str(config.mode or "wrapper").strip().lower()
-        if submit_mode != "inference":
+        code_output_mode = submit_mode in {"gateway", "inference"}
+        plan_path = config.base_dir / config.slug / "plan.json"
+        plan_payload = load_json_object_or_empty(plan_path)
+        submit_accelerator = _resolve_submit_accelerator(config.accelerator, env_get=os.getenv)
+        machine_shape_decision = _resolve_submit_machine_shape_decision(
+            env_get=os.getenv,
+            accelerator=submit_accelerator,
+            hardware_profile=config.hardware_profile,
+            plan=plan_payload,
+            competition_slug=config.slug,
+        )
+        submit_machine_shape = machine_shape_decision.machine_shape
+        if not code_output_mode:
             _reject_static_tiny_code_competition_submission(
                 slug=config.slug,
                 base_dir=config.base_dir,
@@ -282,13 +352,20 @@ class KernelSubmitPackageBuilder:
             config.slug,
             config.run_id,
             config.iteration,
+            machine_shape=submit_machine_shape,
         )
         kernel_id = f"{config.kaggle_username}/{kernel_slug}"
-        if submit_mode == "inference":
+        print(
+            "[cyan]kernel accelerator[/cyan]: "
+            f"accelerator={submit_accelerator} "
+            f"machine_shape={submit_machine_shape or 'KaggleDefault'} "
+            f"source={machine_shape_decision.source}"
+        )
+        if code_output_mode:
             custom_kernel_dir = config.base_dir / config.slug / "kernel"
             custom_kernel_path = custom_kernel_dir / "kernel.py"
             context_dir = config.base_dir / config.slug / "context"
-            source_config = load_kernel_source_config(config.base_dir / config.slug / "plan.json")
+            source_config = load_kernel_source_config(plan_path)
             ensure_solution_path_allowed(custom_kernel_dir, artifacts_dir=config.base_dir, slug=config.slug)
             if not custom_kernel_path.exists():
                 raise KernelFailedError(
@@ -302,23 +379,57 @@ class KernelSubmitPackageBuilder:
                 kernel_dir=kernel_dir,
             )
             _kernel_package_files.sync_plan_snapshot(
-                plan_path=config.base_dir / config.slug / "plan.json",
+                plan_path=plan_path,
                 targets=[kernel_dir / "plan.json"],
             )
             _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
             _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
+            submit_hardware_profile = _submit_hardware_profile_for_machine_shape(submit_machine_shape)
+            if submit_hardware_profile is not None:
+                _kernel_bootstrap.inject_hardware_profile_env(
+                    kernel_dir,
+                    submit_hardware_profile,
+                    compute="kaggle_gpu",
+                )
             _kernel_module_inliner.inline_kernel_modules(kernel_dir)
             _local_kernel_data_resolver.inject_data_dir_resolver(kernel_dir)
+            _local_kernel_pipeline_cfg.inject_staged_plan_payload_fallback(kernel_dir)
+            _local_kernel_pipeline_cfg.inject_staged_plan_path_fallback(kernel_dir)
             _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_dir)
             _local_kernel_shims.inject_context_io_shims(kernel_dir, context_dir)
-            _local_kernel_shims.inject_training_compat_shims(kernel_dir)
+            _local_kernel_shims.inject_submit_inference_compat_shims(kernel_dir)
             _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(
                 base_dir=config.base_dir,
                 slug=config.slug,
                 context_dir=context_dir,
             )
             _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_dir, context_dir)
-            _kernel_bootstrap.inject_submit_inference_env(kernel_dir)
+            expected_metrics = _submit_kernel_fidelity.load_expected_submit_metrics_snapshot(
+                [
+                    config.base_dir
+                    / config.slug
+                    / "runs"
+                    / config.run_id
+                    / f"iter-{config.iteration}"
+                    / "metrics.json",
+                    config.base_dir
+                    / config.slug
+                    / "kernels"
+                    / config.run_id
+                    / f"local-iter-{config.iteration}"
+                    / "outputs"
+                    / "metrics.json",
+                    output_dir / "metrics.json",
+                ]
+            )
+            _submit_kernel_fidelity.validate_reference_submission_readiness(
+                reproduction_report_path=context_dir / "reference_reproduction_report.json",
+                expected_metrics=expected_metrics,
+            )
+            _kernel_bootstrap.inject_submit_inference_env(
+                kernel_dir,
+                runtime_env=_submit_kernel_fidelity.build_submit_runtime_env(expected_metrics),
+            )
             _sanitize_submit_inference_output_roots(kernel_dir)
             _validate_inference_submit_kernel(kernel_dir)
             ensure_kernel_sources_valid(kernel_dir)
@@ -331,7 +442,6 @@ class KernelSubmitPackageBuilder:
             _kernel_bootstrap.ensure_kernel_import_path(kernel_dir)
             _kernel_bootstrap.inject_competition_slug_env(kernel_dir, config.slug)
             ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=True)
-        submit_accelerator = _resolve_submit_accelerator(config.accelerator, env_get=os.getenv)
         _kernel_metadata.write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
@@ -339,19 +449,36 @@ class KernelSubmitPackageBuilder:
             code_file="kernel.py",
             kernel_type="script",
             accelerator=submit_accelerator,
-            enable_internet=config.enable_internet,
+            # Submission notebooks must remain offline. In particular, code
+            # competitions reject otherwise valid notebook versions that have
+            # internet enabled in their metadata.
+            enable_internet=False,
             competition_slug=config.slug,
             source_config=source_config,
         )
         validate_kernel_package(kernel_dir)
+        # Source validation compiles Python files and therefore creates timestamped
+        # bytecode. Those local caches are neither part of the executable source
+        # contract nor stable across otherwise identical preparation attempts.
+        _kernel_package_files.remove_generated_kernel_cache_files(kernel_dir)
+        source_fingerprint = _kernel_source_fingerprint(
+            kernel_dir,
+            mode=submit_mode,
+            expected_output_file=config.expected_output_file,
+            machine_shape=submit_machine_shape,
+        )
         return KernelPreparation(
             kernel_dir=kernel_dir,
             output_dir=output_dir,
             logs_dir=logs_dir,
             kernel_slug=kernel_slug,
             kernel_id=kernel_id,
-            runtime_bootstrap_mode="submit_inference" if submit_mode == "inference" else "none",
+            runtime_bootstrap_mode="submit_inference" if code_output_mode else "none",
             supersede_stale_queued=True,
+            source_fingerprint=source_fingerprint,
+            supersede_completed_on_source_change=code_output_mode,
+            machine_shape=submit_machine_shape,
+            output_file_pattern=_submit_kernel_output_file_pattern(config.expected_output_file),
         )
 
 
@@ -391,13 +518,14 @@ class KernelJobMonitor:
                 return resumed_kernel_id
 
         print(f"[cyan]kernel push[/cyan]: {preparation.kernel_dir}")
-        push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
+        push_output = _push_kernel_preparation(preparation, slug=slug)
         _kernel_remote_ops.write_push_log(preparation.logs_dir, push_attempt, push_output)
         _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
         pushed_kernel_id = _remote_kernel_state.extract_kernel_id_from_push(push_output)
         if pushed_kernel_id and pushed_kernel_id != kernel_id:
             print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
             kernel_id = pushed_kernel_id
+        _record_remote_kernel_source(preparation, kernel_id=kernel_id)
         kernel_id = _kernel_remote_ops.resolve_kernel_id(
             kernel_id,
             preparation.kernel_slug,
@@ -407,13 +535,14 @@ class KernelJobMonitor:
         if not resolved_id:
             print("[yellow]kernel not found after push[/yellow]: retrying once")
             push_attempt += 1
-            push_output = kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
+            push_output = _push_kernel_preparation(preparation, slug=slug)
             _kernel_remote_ops.write_push_log(preparation.logs_dir, push_attempt, push_output)
             _raise_for_invalid_kernel_push_sources(push_output, kernel_dir=preparation.kernel_dir)
             pushed_kernel_id = _remote_kernel_state.extract_kernel_id_from_push(push_output)
             if pushed_kernel_id and pushed_kernel_id != kernel_id:
                 print(f"[cyan]kernel id[/cyan]: {pushed_kernel_id}")
                 kernel_id = pushed_kernel_id
+            _record_remote_kernel_source(preparation, kernel_id=kernel_id)
             kernel_id = _kernel_remote_ops.resolve_kernel_id(
                 kernel_id,
                 preparation.kernel_slug,
@@ -425,6 +554,7 @@ class KernelJobMonitor:
             kernel_id = resolved_id
         else:
             kernel_id = resolved_id
+        _record_remote_kernel_source(preparation, kernel_id=kernel_id)
 
         print(f"[cyan]kernel status[/cyan]: {kernel_id}")
         if on_remote_started is not None:
@@ -437,7 +567,13 @@ class KernelJobMonitor:
         )
         _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
         print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
-        kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
+        kernels_output(
+            kernel_id,
+            preparation.output_dir,
+            slug=slug,
+            dry_run=False,
+            file_pattern=preparation.output_file_pattern,
+        )
         return kernel_id
 
 
@@ -531,6 +667,8 @@ def run_submit_kernel(
     mode: str = "wrapper",
     dry_run: bool,
     timeout_minutes: int | None,
+    expected_output_file: str | None = None,
+    hardware_profile: str | None = "auto",
 ) -> KernelRunResult:
     build_config = KernelSubmitBuildConfig(
         slug=slug,
@@ -544,6 +682,8 @@ def run_submit_kernel(
         submission_path=submission_path,
         mode=mode,
         dry_run=dry_run,
+        hardware_profile=hardware_profile,
+        expected_output_file=expected_output_file,
     )
     preparation = KernelSubmitPackageBuilder().prepare(build_config)
     if dry_run:
@@ -559,7 +699,11 @@ def run_submit_kernel(
         slug=slug,
         timeout_minutes=timeout_minutes,
     )
-    resolved_submission_path = find_submission_file(preparation.output_dir)
+    resolved_submission_path = (
+        _find_output_file(preparation.output_dir, expected_output_file)
+        if expected_output_file
+        else find_submission_file(preparation.output_dir)
+    )
     metrics_path = _find_output_file(preparation.output_dir, "metrics.json")
     return KernelRunResult(
         kernel_id=kernel_id,
@@ -609,7 +753,24 @@ def run_kernel_local(
     kernel_path = kernel_source_dir / "kernel.py"
     if not kernel_path.exists():
         raise KernelFailedError(f"Local kernel execution requires {kernel_path} to exist.")
+    source_plan = load_json_object_or_empty(base_dir / slug / "plan.json")
+    if plan_requests_non_training(source_plan):
+        source_issues = validate_non_training_source(kernel_path.read_text(encoding="utf-8", errors="ignore"))
+        if source_issues:
+            raise KernelFailedError("; ".join(source_issues))
+    durable_resume_root = _local_kernel_resume.durable_state_root(
+        base_dir=base_dir,
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+    )
     if kernel_stage_dir.exists():
+        preserved = _local_kernel_resume.preserve_local_kernel_checkpoints(
+            kernel_stage_dir=kernel_stage_dir,
+            durable_root=durable_resume_root,
+        )
+        if preserved is not None:
+            print(f"[cyan]kernel local resume[/cyan]: preserved checkpoints at {preserved}")
         shutil.rmtree(kernel_stage_dir)
     kernel_stage_dir.mkdir(parents=True, exist_ok=True)
     _kernel_package_files.copy_kernel_sources(kernel_source_dir, kernel_stage_dir)
@@ -636,6 +797,7 @@ def run_kernel_local(
     _kernel_bootstrap.inject_hardware_profile_env(kernel_stage_dir, hardware_profile, compute="local_gpu")
     _kernel_module_inliner.inline_kernel_modules(kernel_stage_dir)
     _local_kernel_data_resolver.inject_data_dir_resolver(kernel_stage_dir)
+    _local_kernel_pipeline_cfg.inject_staged_plan_path_fallback(kernel_stage_dir)
     _local_kernel_pipeline_cfg.inject_pipeline_cfg_fallback(kernel_stage_dir)
     _local_kernel_shims.inject_context_io_shims(kernel_stage_dir, context_dir)
     _local_kernel_shims.inject_local_runtime_shims(kernel_stage_dir)
@@ -643,9 +805,19 @@ def run_kernel_local(
     _local_kernel_drift_guard.prepare_zero_overlap_drift_guard(base_dir=base_dir, slug=slug, context_dir=context_dir)
     _local_kernel_shims.inject_zero_overlap_drift_shim(kernel_stage_dir, context_dir)
     _kernel_bootstrap.inject_competition_slug_env(kernel_stage_dir, slug)
-    _kernel_bootstrap.inject_force_train_env(kernel_stage_dir)
+    staged_plan = load_json_object_or_empty(kernel_stage_dir / "plan.json")
+    if plan_requests_non_training(staged_plan):
+        _kernel_bootstrap.ensure_kernel_non_training_env(kernel_stage_dir)
+    else:
+        _kernel_bootstrap.ensure_kernel_force_train_env(kernel_stage_dir)
     _local_kernel_shims.ensure_training_progress_shim(kernel_stage_dir)
     ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
+    restored = _local_kernel_resume.restore_local_kernel_checkpoints(
+        kernel_stage_dir=kernel_stage_dir,
+        durable_root=durable_resume_root,
+    )
+    if restored is not None:
+        print(f"[cyan]kernel local resume[/cyan]: restored exact-source checkpoints into {restored}")
     local_aux_env, local_aux_notes = _local_kernel_aux_inputs.stage_local_kernel_aux_inputs(
         base_dir=base_dir,
         slug=slug,
@@ -669,11 +841,39 @@ def run_kernel_local(
             metrics_path=None,
         )
 
-    timeout_sec = None if timeout_minutes is None else max(60, int(timeout_minutes * 60))
+    effective_timeout_minutes = timeout_minutes
+    if effective_timeout_minutes is None:
+        effective_timeout_minutes = local_gpu_time_budget_limit_min()
+    timeout_sec = None if effective_timeout_minutes is None else max(60, int(effective_timeout_minutes * 60))
+    if effective_timeout_minutes is not None:
+        print(f"[cyan]kernel local budget[/cyan]: hard timeout={effective_timeout_minutes}m")
+    kernel_fingerprint = sha256_path(kernel_path)
     eta_total_sec, eta_samples = _local_kernel_duration.estimate_local_kernel_duration_seconds(
         base_dir=base_dir,
         slug=slug,
+        kernel_fingerprint=kernel_fingerprint,
     )
+    exact_source_timeout_count = _local_kernel_duration.exact_source_timeout_count(
+        base_dir=base_dir,
+        slug=slug,
+        kernel_fingerprint=kernel_fingerprint,
+    )
+    if _local_kernel_duration.exact_source_exceeds_timeout(
+        estimated_duration_sec=eta_total_sec,
+        sample_count=eta_samples,
+        timeout_sec=timeout_sec,
+        timeout_count=exact_source_timeout_count,
+    ):
+        evidence = (
+            f"timed out {exact_source_timeout_count} times"
+            if exact_source_timeout_count >= 2
+            else f"has historical median {eta_total_sec / 60:.1f}m across {eta_samples} completed runs"
+        )
+        raise KernelFailedError(
+            f"Local kernel preflight rejected an exact source version that {evidence}; "
+            f"the hard timeout is {timeout_sec / 60:.1f}m. Keep the accuracy strategy, but fix its runtime contract or "
+            "checkpoint/resume behavior before retrying."
+        )
     started_at = time.time()
     monotonic_start = time.monotonic()
     progress_tracker = _local_kernel_progress.build_local_kernel_progress_tracker(
@@ -750,6 +950,15 @@ def run_kernel_local(
         exec_result = run_once_with_watchdog(current_env=env)
         result = exec_result.command_result
     except subprocess.TimeoutExpired as exc:
+        _local_kernel_duration.append_local_kernel_duration_history(
+            base_dir=base_dir,
+            slug=slug,
+            run_id=run_id,
+            iteration=iteration,
+            duration_sec=max(0.0, time.monotonic() - monotonic_start),
+            kernel_fingerprint=kernel_fingerprint,
+            outcome="timeout",
+        )
         raise KernelTimeoutError(f"Local kernel timed out after {timeout_sec}s.") from exc
     finally:
         heartbeat_stop.set()
@@ -846,6 +1055,7 @@ def run_kernel_local(
         run_id=run_id,
         iteration=iteration,
         duration_sec=result.duration_sec,
+        kernel_fingerprint=kernel_fingerprint,
     )
     print(f"[cyan]kernel local complete[/cyan]: elapsed={result.duration_sec:.0f}s")
 
@@ -945,6 +1155,7 @@ def _wait_for_kernel_and_record_pending(
             slug,
             timeout_minutes,
             output_dir=preparation.output_dir,
+            log_output_file_pattern=_KERNEL_LOG_OUTPUT_FILE_PATTERN,
             initial_queued_since=initial_queued_since,
         )
     except KernelStillRunningError:
@@ -986,6 +1197,15 @@ def _resume_prior_kernel_if_active(
         print(f"[yellow]kernel resume[/yellow]: prior remote kernel status is {status}; pushing a new version")
         return None
 
+    source_changed = _remote_kernel_source_changed(preparation, kernel_id=kernel_id)
+    if source_changed and is_kernel_status_complete(status):
+        _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
+        print(
+            "[yellow]kernel resume[/yellow]: prior completed kernel used stale sources or output contract; "
+            "pushing a new version"
+        )
+        return None
+
     initial_queued_since = (
         _remote_kernel_state.queued_since_from_push_logs(preparation.logs_dir)
         if is_kernel_status_queued(status)
@@ -1013,9 +1233,66 @@ def _resume_prior_kernel_if_active(
             initial_queued_since=initial_queued_since,
         )
     _remote_kernel_state.clear_pending_remote_kernel(preparation.logs_dir)
+    if source_changed:
+        print(
+            "[yellow]kernel resume[/yellow]: prior running kernel finished with stale sources or output contract; "
+            "pushing a new version"
+        )
+        return None
     print(f"[cyan]kernel output[/cyan]: {preparation.output_dir}")
-    kernels_output(kernel_id, preparation.output_dir, slug=slug, dry_run=False)
+    kernels_output(
+        kernel_id,
+        preparation.output_dir,
+        slug=slug,
+        dry_run=False,
+        file_pattern=preparation.output_file_pattern,
+    )
     return kernel_id
+
+
+def _kernel_source_fingerprint(
+    kernel_dir: Path,
+    *,
+    mode: str,
+    expected_output_file: str | None,
+    machine_shape: str | None,
+) -> str:
+    package_digest = sha256_path(kernel_dir)
+    contract = (
+        f"kagglebot-submit-kernel-v2\0{mode}\0{expected_output_file or ''}\0{machine_shape or ''}\0{package_digest}"
+    )
+    return sha256_text(contract)
+
+
+def _push_kernel_preparation(preparation: KernelPreparation, *, slug: str) -> str:
+    if preparation.machine_shape:
+        return kernels_push(
+            preparation.kernel_dir,
+            slug=slug,
+            dry_run=False,
+            accelerator=preparation.machine_shape,
+        )
+    return kernels_push(preparation.kernel_dir, slug=slug, dry_run=False)
+
+
+def _record_remote_kernel_source(preparation: KernelPreparation, *, kernel_id: str) -> None:
+    if not preparation.source_fingerprint:
+        return
+    _remote_kernel_state.write_remote_kernel_source(
+        preparation.logs_dir,
+        kernel_id=kernel_id,
+        source_fingerprint=preparation.source_fingerprint,
+    )
+
+
+def _remote_kernel_source_changed(preparation: KernelPreparation, *, kernel_id: str) -> bool:
+    if not preparation.supersede_completed_on_source_change or not preparation.source_fingerprint:
+        return False
+    return not _remote_kernel_state.remote_kernel_source_matches(
+        preparation.logs_dir,
+        kernel_id=kernel_id,
+        source_fingerprint=preparation.source_fingerprint,
+    )
 
 
 def _wait_for_kernel(
@@ -1024,6 +1301,7 @@ def _wait_for_kernel(
     timeout_minutes: int | None,
     *,
     output_dir: Path,
+    log_output_file_pattern: str | None = _KERNEL_LOG_OUTPUT_FILE_PATTERN,
     initial_queued_since: float | None = None,
 ) -> None:
     _kernel_wait.wait_for_kernel(
@@ -1034,7 +1312,12 @@ def _wait_for_kernel(
         initial_queued_since=initial_queued_since,
         deps=_kernel_wait.KernelWaitDependencies(
             kernels_status=kernels_status,
-            try_fetch_kernel_output=_try_fetch_kernel_output,
+            try_fetch_kernel_output=lambda kernel_id, *, output_dir, slug: _try_fetch_kernel_output(
+                kernel_id,
+                output_dir=output_dir,
+                slug=slug,
+                file_pattern=log_output_file_pattern,
+            ),
             print_kernel_logs=_kernel_logs.print_kernel_logs,
             detect_failure_in_logs=_kernel_logs.detect_failure_in_logs,
             collect_log_tail=_kernel_logs.collect_log_tail,
@@ -1059,10 +1342,24 @@ def _wait_for_kernel_registration(kernel_id: str, kernel_slug: str) -> str | Non
     )
 
 
-def _try_fetch_kernel_output(kernel_id: str, *, output_dir: Path, slug: str) -> None:
+def _try_fetch_kernel_output(
+    kernel_id: str,
+    *,
+    output_dir: Path,
+    slug: str,
+    file_pattern: str | None = _KERNEL_LOG_OUTPUT_FILE_PATTERN,
+) -> None:
     _kernel_remote_ops.try_fetch_kernel_output(
         kernel_id,
         output_dir=output_dir,
         slug=slug,
         kernels_output_func=kernels_output,
+        file_pattern=file_pattern,
     )
+
+
+def _submit_kernel_output_file_pattern(expected_output_file: str | None) -> str | None:
+    expected_name = Path(str(expected_output_file or "").strip()).name
+    if not expected_name:
+        return None
+    return rf"(^|/)({re.escape(expected_name)}|metrics\.json)$"

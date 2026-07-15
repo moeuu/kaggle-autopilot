@@ -56,13 +56,24 @@ Hardware execution budget:
 
 {problem_type_knowledge}
 
-## Required Output
+## Required Output: Improvement Contract
 
-Return concise, actionable implementation instructions for {IMPLEMENTATION_AGENT.display_name}:
-1) What to change and why (root-cause hypothesis of current gap).
-2) Exact file-level edits and model/training changes.
-3) Validation checks after edits (what metrics/logs to confirm).
-4) Fallback if the first plan fails.
+Read the frozen iteration evidence bundle in the existing prompt and attachments before answering.
+Return concise, actionable implementation instructions for {IMPLEMENTATION_AGENT.display_name} with these headings:
+1) **Evidence diagnosis**: cite exact evidence paths/fields and separate model quality from execution,
+   submission, and measurement defects.
+2) **Falsifiable hypothesis**: state one primary root-cause hypothesis, why it outranks alternatives,
+   and what observation would disprove it.
+3) **Material delta**: exact file-level edits and how they differ from the current method and any
+   previously unsupported/no-op transition. Reusing proven components is allowed; repeating a failed approach
+   unchanged is not.
+4) **Validation and attribution**: checks after edits, including the metric, score source, split/data scope,
+   runtime/output contract, and the comparable before/after baseline.
+5) **Expected observation**: predicted metric/log/artifact changes if the hypothesis is correct.
+6) **Stop or rollback criteria**: when to revert, stop spending compute, or repair evaluation before tuning.
+7) **Fallback**: the next materially different action if the first plan fails.
+
+Never describe a delta between different metrics, directions, score sources, or untrusted evaluations as an improvement.
 
 Do not include chain-of-thought.
 """

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,16 +64,95 @@ def load_kernel_source_config(plan_path: Path) -> KernelSourceConfig:
     if not isinstance(raw, dict):
         raw = {}
 
+    reference_sources = _reference_source_lists(plan_path, payload)
+    dataset_sources = _merge_source_lists(
+        _normalize_source_list(raw.get("dataset_sources")),
+        reference_sources.get("dataset", ()),
+    )
+    kernel_sources = _merge_source_lists(
+        _normalize_source_list(raw.get("kernel_sources")),
+        reference_sources.get("kernel", ()),
+    )
+    model_sources = _merge_source_lists(
+        _normalize_source_list(raw.get("model_sources")),
+        reference_sources.get("model", ()),
+    )
+    required_model_sources = _merge_source_lists(
+        _normalize_source_list(raw.get("required_model_sources")),
+        reference_sources.get("model", ()),
+    )
+
     return KernelSourceConfig(
-        dataset_sources=_normalize_source_list(raw.get("dataset_sources")),
-        kernel_sources=_normalize_source_list(raw.get("kernel_sources")),
-        model_sources=_normalize_source_list(raw.get("model_sources")),
-        required_model_sources=_normalize_source_list(raw.get("required_model_sources")),
+        dataset_sources=dataset_sources,
+        kernel_sources=kernel_sources,
+        model_sources=model_sources,
+        required_model_sources=required_model_sources,
         pipeline_model_hints=_normalize_pipeline_model_hints(raw.get("pipeline_model_hints")),
         required_local_seq2seq_pipelines=_normalize_source_list(raw.get("required_local_seq2seq_pipelines")),
         domain_adaptation=_normalize_domain_adaptation(raw_domain_adaptation),
         text_runtime=_normalize_text_runtime(raw_text_runtime),
     )
+
+
+def _reference_source_lists(plan_path: Path, plan: dict[str, object]) -> dict[str, tuple[str, ...]]:
+    if not _inherits_reference_sources(plan):
+        return {}
+    manifest = load_json_object(plan_path.parent / "context" / "reference_inputs_manifest.json")
+    if manifest is None:
+        return {}
+    required_kernel_id = str(manifest.get("required_reference_kernel_id") or "").strip()
+    if not required_kernel_id:
+        return {}
+    notebooks = manifest.get("reference_notebooks")
+    if not isinstance(notebooks, list):
+        return {}
+    source_values: dict[str, list[str]] = {"dataset": [], "kernel": [], "model": []}
+    for notebook in notebooks:
+        if not isinstance(notebook, dict):
+            continue
+        if str(notebook.get("kernel_id") or "").strip() != required_kernel_id:
+            continue
+        input_sources = notebook.get("input_sources")
+        if not isinstance(input_sources, list):
+            break
+        for item in input_sources:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            ref = str(item.get("ref") or "").strip().strip("/")
+            if kind in source_values and ref:
+                source_values[kind].append(ref)
+        break
+    return {kind: _dedupe_source_values(values) for kind, values in source_values.items() if values}
+
+
+def _inherits_reference_sources(plan: dict[str, object]) -> bool:
+    explicit = plan.get("inherit_reference_sources")
+    if isinstance(explicit, bool):
+        return explicit
+    toggles = plan.get("toggles")
+    if not isinstance(toggles, dict):
+        return False
+    return any(
+        toggles.get(key) is True for key in ("ENABLE_REFERENCE_EXACT", "USE_CODE_REFERENCE", "REPRODUCE_REFERENCE")
+    )
+
+
+def _merge_source_lists(*values: tuple[str, ...]) -> tuple[str, ...]:
+    return _dedupe_source_values(item for group in values for item in group)
+
+
+def _dedupe_source_values(values: Iterable[object]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        value = str(item or "").strip().strip("/")
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(value)
+    return tuple(normalized)
 
 
 def _normalize_source_list(raw: object) -> tuple[str, ...]:

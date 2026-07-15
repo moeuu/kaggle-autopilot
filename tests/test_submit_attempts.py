@@ -27,6 +27,7 @@ from kagglebot.submit_attempts import (
     count_successful_submit_attempts,
     decide_submit_outcome_recording,
     format_submit_retry_knowledge_details,
+    has_satisfied_submit_obligation,
     has_submit_attempt_records,
     has_successful_submit_attempt,
     infer_iteration_from_submit_attempt,
@@ -204,6 +205,7 @@ def test_load_submit_attempt_rows_filters_invalid_jsonl_rows(tmp_path) -> None:
 def test_submit_attempt_readers_return_empty_defaults_for_missing_file(tmp_path) -> None:
     assert load_submit_attempt_rows(tmp_path) == []
     assert not has_submit_attempt_records(tmp_path)
+    assert not has_satisfied_submit_obligation(tmp_path)
     assert not has_successful_submit_attempt(tmp_path)
     assert count_successful_submit_attempts(tmp_path) == 0
     assert load_submit_fingerprints(tmp_path) == []
@@ -252,6 +254,24 @@ def test_submit_attempt_resume_completion_policy_handles_submit_and_terminal_ski
     assert is_submit_attempt_complete_for_resume({"action_taken": "skip", "reason": "duplicate_submission_sha_seen"})
     assert not is_submit_attempt_complete_for_resume({"action_taken": "skip", "reason": "quality_blocked"})
     assert not is_submit_attempt_complete_for_resume({"action_taken": "abort", "reason": "submit_failed"})
+
+
+def test_submit_obligation_accepts_success_or_duplicate_but_not_other_terminal_rows(tmp_path: Path) -> None:
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"ok": False, "action_taken": "abort", "reason": "submit_failed"},
+    )
+    assert not has_satisfied_submit_obligation(tmp_path)
+
+    append_submit_attempt(
+        run_dir=tmp_path,
+        payload={"ok": False, "action_taken": "skip", "reason": "duplicate_submission_sha_seen"},
+    )
+    assert has_satisfied_submit_obligation(tmp_path)
+
+    success_dir = tmp_path / "success"
+    append_submit_attempt(run_dir=success_dir, payload={"ok": True})
+    assert has_satisfied_submit_obligation(success_dir)
 
 
 def test_infer_iteration_from_submit_attempt_uses_explicit_iteration_then_path() -> None:

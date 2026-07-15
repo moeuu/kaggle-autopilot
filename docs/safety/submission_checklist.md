@@ -21,8 +21,12 @@ Tool behavior:
 
 - [ ] Submission columns match required format from the published sample submission file, such as `sample_submission.csv`, `.tsv`, `.jsonl`, `.parquet`, `.avro`, `.feather`, or compressed tabular variants like `.csv.zst` (or `submission_format.md` / `overview.md` when sample is placeholder/header-only).
 - [ ] Row count matches the sample submission, or the runtime hidden/full test IDs for code/notebook competitions.
+- [ ] A small prerelease/example sample is not treated as the full test set; when context says the full dataset will be released later, submission remains blocked until full test IDs are available.
 - [ ] ID alignment is correct when ID column exists.
 - [ ] No NaN/inf in prediction columns.
+- [ ] Completed Code Competition output has non-degenerate predictions across runtime test rows; exact row-constant numeric or text outputs are rejected before Codex approval/API execution.
+- [ ] Autopilot semantic preflight confirms the output is not an unchanged sample template, copied multi-output head, placeholder-only output, or metrics-declared fallback, and that recorded pipeline/row-count/filename/hash evidence matches the selected artifact.
+- [ ] Detection outputs do not show a low-confidence prediction explosion (selected mean count at least 5x the candidate median); otherwise threshold/proxy calibration must be audited before submission.
 - [ ] Non-CSV submissions use a supported format: TSV/TXT, JSON/JSONL/NDJSON, Parquet, Avro, Feather/Arrow IPC, Stata, XML, Excel, Pickle, SQLite DB, compressed tabular file, zip/tar bundle, prebuilt 7z/RAR archive, or supported code archive.
 - [ ] Archive submissions are valid non-empty archives with no unsafe paths, duplicate member names, links/symlinks, encrypted zip members, or password-protected 7z/RAR members.
 - [ ] Input archive extraction rejects password-protected 7z/RAR members before writing files.
@@ -66,13 +70,14 @@ Tool behavior:
 Tool behavior:
 - duplicate detection uses local ledger and deterministic hashes for files or directory submission artifacts
 - retries are bounded and repeated fingerprints are aborted
+- outcome polling requires an exact human-readable message match, or a message-less Code row timestamped close to the request; it never attaches an arbitrary stale submission score to a new attempt
 
 ## 5. Recommended Execution
 
 Autopilot (default submit behavior):
 
 ```bash
-uv run kagglebot autopilot <competition-url-or-slug> --compute local_gpu
+uv run kagglebot --force autopilot <competition-url-or-slug> --compute local_gpu
 ```
 
 Direct submit command:

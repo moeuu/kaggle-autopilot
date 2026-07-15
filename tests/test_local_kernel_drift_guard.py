@@ -110,6 +110,13 @@ def test_prepare_zero_overlap_drift_guard_writes_payload(tmp_path: Path, monkeyp
     assert payload["enabled"] is True
     assert payload["target_column"] == "target"
     assert payload["id_column"] == "id"
+    first_bytes = path.read_bytes()
+
+    repeated_path = prepare_zero_overlap_drift_guard(base_dir=tmp_path, slug="demo", context_dir=context_dir)
+
+    assert repeated_path == path
+    assert path.read_bytes() == first_bytes
+    assert "generated_at_epoch" not in payload
 
 
 def test_prepare_zero_overlap_drift_guard_reads_tsv_train_test(tmp_path: Path, monkeypatch) -> None:

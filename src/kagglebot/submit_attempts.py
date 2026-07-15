@@ -98,6 +98,14 @@ def has_successful_submit_attempt(run_dir: Path) -> bool:
     return any(bool(row.get("ok")) for row in load_submit_attempt_rows(run_dir))
 
 
+def has_satisfied_submit_obligation(run_dir: Path) -> bool:
+    """Return whether this run submitted or safely skipped an exact duplicate."""
+    for row in load_submit_attempt_rows(run_dir):
+        if bool(row.get("ok")) or is_submit_attempt_complete_for_resume(row):
+            return True
+    return False
+
+
 def count_successful_submit_attempts(run_dir: Path) -> int:
     count = 0
     for row in load_submit_attempt_rows(run_dir):

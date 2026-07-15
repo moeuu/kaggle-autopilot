@@ -250,6 +250,40 @@ def test_apply_final_run_status_defaults_to_completed() -> None:
     assert payload["status"] == "completed"
 
 
+def test_apply_final_run_status_rejects_unmet_required_submission() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+
+    apply_final_run_status(
+        payload,
+        submitted=False,
+        has_submission_result=False,
+        submit_required=True,
+        submit_obligation_satisfied=False,
+        writeup_mode=False,
+        writeup_bundle_meta=None,
+    )
+
+    assert payload["status"] == "submit_failed"
+    assert payload["stop_reason"] == "required leaderboard submission was not completed"
+
+
+def test_apply_final_run_status_restores_prior_successful_submission() -> None:
+    payload: dict[str, object] = {"run_id": "run-1", "status": "running"}
+
+    apply_final_run_status(
+        payload,
+        submitted=False,
+        has_submission_result=False,
+        has_successful_submission=True,
+        submit_required=True,
+        submit_obligation_satisfied=True,
+        writeup_mode=False,
+        writeup_bundle_meta=None,
+    )
+
+    assert payload["status"] == "submitted"
+
+
 def test_build_run_summary_payload_stringifies_paths(tmp_path: Path) -> None:
     trusted = tmp_path / "trusted.csv"
     faithful = tmp_path / "faithful.csv"

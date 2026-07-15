@@ -210,12 +210,22 @@ def test_mirror_verify_artifacts_copies_kernel_tree_and_excludes_outputs(tmp_pat
     (source_kernel / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
     (source_kernel / "output").mkdir()
     (source_kernel / "output" / "submission.csv").write_text("id,target\n1,0\n", encoding="utf-8")
+    (source_kernel / "outputs-smoke").mkdir()
+    (source_kernel / "outputs-smoke" / "large.npy").write_bytes(b"diagnostic")
+    (source_kernel / "pretrained").mkdir()
+    (source_kernel / "pretrained" / "model.bin").write_bytes(b"model")
+    oversized = source_kernel / "large-source.bin"
+    with oversized.open("wb") as handle:
+        handle.truncate(64 * 1024 * 1024 + 1)
 
     mirror_verify_artifacts(artifacts_dir, repo_root=repo_root)
 
     mirrored_kernel = repo_root / "artifacts" / "demo" / "kernel" / "kernel.py"
     assert mirrored_kernel.read_text(encoding="utf-8") == "VALUE = 1\n"
     assert not (repo_root / "artifacts" / "demo" / "kernel" / "output").exists()
+    assert not (repo_root / "artifacts" / "demo" / "kernel" / "outputs-smoke").exists()
+    assert not (repo_root / "artifacts" / "demo" / "kernel" / "pretrained").exists()
+    assert not (repo_root / "artifacts" / "demo" / "kernel" / "large-source.bin").exists()
 
 
 def test_mirror_verify_artifacts_prefers_latest_kernel_version_and_appends_shim(tmp_path: Path) -> None:

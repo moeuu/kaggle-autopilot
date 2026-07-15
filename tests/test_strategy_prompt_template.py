@@ -28,6 +28,9 @@ def test_codex_kernel_impl_prompt_requires_safe_pipeline_lookup() -> None:
     assert "model-artifact" in template
     assert "submission_manifest.json" in template
     assert "disguising tabular CSV bytes" in template
+    assert "competition-specific output schema and semantic invariants" in template
+    assert "several eligible repairs compete for the same constrained source/target" in template
+    assert "one GPU's floating-point boundary behavior" in template
 
 
 def test_prompts_require_fold_intermediate_submissions() -> None:

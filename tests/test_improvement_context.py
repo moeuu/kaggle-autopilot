@@ -124,3 +124,81 @@ def test_build_improvement_implementation_prompt_wraps_strategy() -> None:
     assert "1. add stronger validation" in text
     assert "local context" in text
     assert build_improvement_implementation_prompt(base_prompt_text="base", strategy_text="") == "base"
+
+
+def test_build_improvement_prompt_plan_includes_frozen_iteration_evidence(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    evidence_path = config.paths.iter_dir("run-evidence", 2) / "iteration_evidence.json"
+    monkeypatch.setattr(
+        "kagglebot.knowledge_context.load_problem_type_knowledge_text",
+        lambda **kwargs: "Prior knowledge",
+    )
+
+    plan = build_improvement_prompt_plan(
+        config=config,
+        run_id="run-evidence",
+        iteration=2,
+        iter_dir=config.paths.iter_dir("run-evidence", 2),
+        agent_dir=config.paths.iter_dir("run-evidence", 2) / "agent",
+        evaluation=SimpleNamespace(metric="auc", direction="maximize", value=0.62),
+        top1_info={"score": 0.78, "source": "leaderboard"},
+        target_score=0.78,
+        delta_offline=-0.01,
+        current_score=None,
+        current_score_source="cv",
+        minimum_improvement_mode=None,
+        minimum_improvement_reason=None,
+        target_medal=None,
+        target_rank_percentile=None,
+        forced_improvement_mode=None,
+        forced_improvement_reason=None,
+        extra_policy_notes=None,
+        enforce_code_reference_implementation=False,
+        code_reference_enforcement_reason=None,
+        best_score_so_far=0.66,
+        previous_submission_history=None,
+        prompt_identity_args={},
+        iteration_evidence_path=evidence_path,
+        iteration_evidence_sha256="abc123",
+        iteration_evidence_summary="## Iteration Evidence Contract\n- iter-1→iter-2: comparable=False",
+    )
+
+    assert str(evidence_path) in plan.base_prompt_text
+    assert "iter-1→iter-2: comparable=False" in plan.base_prompt_text
+    assert "Evidence SHA-256: abc123" in plan.base_prompt_text
+    assert "frozen bundle as the authoritative attribution record" in plan.base_prompt_text
+
+
+def test_implementation_audit_mode_prioritizes_runtime_fidelity(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+
+    plan = build_improvement_prompt_plan(
+        config=config,
+        run_id="run-bottom",
+        iteration=1,
+        iter_dir=config.paths.iter_dir("run-bottom", 1),
+        agent_dir=config.paths.iter_dir("run-bottom", 1) / "agent",
+        evaluation=SimpleNamespace(metric="accuracy", direction="maximize", value=0.86),
+        top1_info={"score": 0.90, "source": "leaderboard"},
+        target_score=0.90,
+        delta_offline=None,
+        current_score=0.86,
+        current_score_source="cv",
+        minimum_improvement_mode=None,
+        minimum_improvement_reason=None,
+        target_medal="winner",
+        target_rank_percentile=0.001,
+        forced_improvement_mode="implementation_audit",
+        forced_improvement_reason="public score collapsed to zero",
+        extra_policy_notes=["audit exact notebook output"],
+        enforce_code_reference_implementation=False,
+        code_reference_enforcement_reason=None,
+        best_score_so_far=0.86,
+        previous_submission_history={"best_score": 0.0, "direction": "maximize"},
+        prompt_identity_args={},
+    )
+
+    assert plan.improvement_mode == "implementation_audit"
+    assert "assume the last-place-like leaderboard result" in plan.base_prompt_text
+    assert "Leaderboard implementation-audit campaign policy" in plan.base_prompt_text
+    assert "changed artifact hash" in plan.base_prompt_text

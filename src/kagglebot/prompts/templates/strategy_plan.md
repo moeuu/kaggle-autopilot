@@ -35,11 +35,12 @@ Provide a deep solution strategy. Include model choices, preprocessing, CV plan,
 Treat the sample submission preview as the required output format, not as proof that the artifact must be CSV.
 For local_gpu, keep each iteration under about 24 hours when possible, but accuracy is the priority. For image/video/audio/text/document/medical-imaging/array/point-cloud/3D/geospatial/bio/sequence/graph/signal/annotation/model-artifact, avoid wasteful full seed x fold x model-family multiplication; keep the strongest feasible pretrained/OCR/VLM/geometric/geospatial/structure-feature path alive and scale it with smaller batches, chunking, quantization, cached embeddings, TTA, OOF blends, or lightweight heads before dropping it.
 Make RTX3060-class execution accuracy-first rather than a hard cap. Expose plan.json/env scale knobs so a stronger GPU profile such as RTX5090 can increase batch size, folds/seeds, candidate count, or image size without rewriting kernel.py.
+Do not assume model fitting is mandatory. When the explicit local-training estimate is at least 1440 minutes and a completed pretrained/reference/solver/search/simulation/optimization/rule-based path can generate the real hidden-test output, specify `local_training_required=false`, the numeric estimated local duration, and a concrete `non_training_submission` implementation and validation contract. A cost-class label alone is insufficient. Never use sample-submission copying, dummy predictions, or an unimplemented proposal for this route; keep all output and submission guards enabled.
 
 ===CODEX_IMPLEMENTATION_INSTRUCTIONS===
 Give {{implementation_agent_name}} a step-by-step implementation plan with exact file paths to modify and acceptance criteria.
 Include explicit instructions to update `artifacts/<slug>/plan.json` with:
-target_metric, target_score, target_direction, score_source, holdout_frac, cv_folds, seed, time_budget_min, hardware_profile, runtime_budget, and any other required defaults.
+target_metric, target_score, target_direction, score_source, holdout_frac, cv_folds, seed, time_budget_min, hardware_profile, runtime_budget, non_training_submission (object or null), and any other required defaults.
 
 ===REFERENCES===
 List papers, repos, blog posts, and links used to justify the plan.

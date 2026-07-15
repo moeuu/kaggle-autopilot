@@ -15,6 +15,21 @@ PYTEST_XDIST_VALUE_OPTIONS = {
     "-n",
     "--numprocesses",
 }
+_VERIFY_MIRROR_EXCLUDED_DIR_NAMES = frozenset(
+    {
+        "__pycache__",
+        "cache",
+        "checkpoints",
+        "logs",
+        "models",
+        "offline_wheels",
+        "output",
+        "outputs",
+        "pretrained",
+        "weights",
+    }
+)
+_VERIFY_MIRROR_MAX_FILE_BYTES = 64 * 1024 * 1024
 
 DEEP_PAST_VERIFY_COMPAT_SHIM = """
 
@@ -259,7 +274,6 @@ VERIFY_COMPAT_SHIMS_BY_SLUG_AND_FILE = {
 
 def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
     local_artifacts_dir = repo_root / "artifacts"
-    excluded_dir_names = {"__pycache__", "output", "outputs"}
 
     try:
         if artifacts_dir.resolve() == local_artifacts_dir.resolve():
@@ -276,11 +290,11 @@ def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
         dest_kernel_dir = local_artifacts_dir / slug_dir.name / "kernel"
         if source_kernel_dir.is_dir():
             for walk_root, dirnames, filenames in os.walk(source_kernel_dir):
-                dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names]
+                dirnames[:] = [dirname for dirname in dirnames if not _is_verify_mirror_generated_dir(dirname)]
                 walk_root_path = Path(walk_root)
                 for filename in filenames:
                     source_path = walk_root_path / filename
-                    if source_path.suffix == ".pyc":
+                    if source_path.suffix == ".pyc" or source_path.stat().st_size > _VERIFY_MIRROR_MAX_FILE_BYTES:
                         continue
                     dest_path = dest_kernel_dir / source_path.relative_to(source_kernel_dir)
                     copy_artifact_if_needed(source=source_path, destination=dest_path)
@@ -305,6 +319,13 @@ def mirror_verify_artifacts(artifacts_dir: Path, *, repo_root: Path) -> None:
                 )
         append_verify_compat_shim(dest_kernel_dir / "kernel.py", slug=slug_dir.name)
         append_verify_compat_shim(dest_kernel_dir / "runtime.py", slug=slug_dir.name)
+
+
+def _is_verify_mirror_generated_dir(dirname: str) -> bool:
+    name = str(dirname).strip().lower()
+    if name in _VERIFY_MIRROR_EXCLUDED_DIR_NAMES:
+        return True
+    return name.startswith(("output-", "outputs-", "output_", "outputs_", ".runtime", ".offline"))
 
 
 def run_verify(

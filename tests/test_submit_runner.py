@@ -34,6 +34,9 @@ def _deps(tmp_path: Path) -> SubmitRunnerDependencies:
         resolve_kaggle_username=lambda **_kwargs: "user",
         run_submit_kernel=lambda **_kwargs: None,
         run_kaggle_submit_kernel=lambda **_kwargs: None,
+        review_code_submission=lambda **_kwargs: None,
+        recheck_code_submission_guard=lambda **_kwargs: None,
+        record_code_submission_execution=lambda **_kwargs: None,
         copy_submission_artifact_to_iteration_dir=lambda **_kwargs: None,
         classify_submit_error=lambda *_args, **_kwargs: {"kind": "permanent", "reason": "bad_request"},
         should_retry_ambiguous_notebook_submit_error=lambda **_kwargs: False,
@@ -237,6 +240,63 @@ def test_expected_notebook_submit_output_file_uses_format_rar_suffix(tmp_path: P
     )
 
     assert _expected_notebook_submit_output_file(paths) == "submission.rar"
+
+
+def test_expected_notebook_submit_output_file_uses_code_competition_history_label(
+    tmp_path: Path,
+) -> None:
+    from kagglebot.submit_runner import _expected_notebook_submit_output_file
+
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "submission_format.md").write_text(
+        "Submission format not provided.\n",
+        encoding="utf-8",
+    )
+    (context_dir / "submission_history.json").write_text(
+        '{"latest": {"label": "submission.parquet", "status": "complete"}}\n',
+        encoding="utf-8",
+    )
+    sample_path = context_dir / "sample_submission.csv"
+    sample_path.write_text("id,prediction\n", encoding="utf-8")
+    paths = SimpleNamespace(
+        context_dir=context_dir,
+        data_dir=tmp_path / "data",
+        sample_submission_path=sample_path,
+    )
+
+    assert _expected_notebook_submit_output_file(paths, code_competition=True) == "submission.parquet"
+    assert _expected_notebook_submit_output_file(paths) == "submission.csv"
+
+
+def test_expected_notebook_submit_output_file_uses_code_competition_artifact_before_sample(
+    tmp_path: Path,
+) -> None:
+    from kagglebot.submit_runner import _expected_notebook_submit_output_file
+
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "submission_format.md").write_text(
+        "Submission format not provided.\n",
+        encoding="utf-8",
+    )
+    sample_path = context_dir / "sample_submission.csv"
+    sample_path.write_text("id,prediction\n", encoding="utf-8")
+    submission_path = tmp_path / "run" / "submission.json"
+    paths = SimpleNamespace(
+        context_dir=context_dir,
+        data_dir=tmp_path / "data",
+        sample_submission_path=sample_path,
+    )
+
+    assert (
+        _expected_notebook_submit_output_file(
+            paths,
+            code_competition=True,
+            submission_path=submission_path,
+        )
+        == "submission.json"
+    )
 
 
 def test_expected_notebook_submit_output_file_uses_format_model_suffix(tmp_path: Path) -> None:
@@ -467,6 +527,8 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
     )
     submission_path = tmp_path / "submission.csv"
     prepared_path = tmp_path / "prepared.csv"
+    submission_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
+    prepared_path.write_text("id,target\n1,0.1\n2,0.2\n3,0.3\n", encoding="utf-8")
     paths.data_dir.mkdir()
     fallback_sample_path = paths.data_dir / "sample_submission.tsv"
     fallback_sample_path.write_text("id\ttarget\n1\t0.0\n", encoding="utf-8")
@@ -503,6 +565,7 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
     def _prepare_preflight(**kwargs):
         calls.append("preflight")
         captured["preflight_fallback_sample_submission_path"] = kwargs["fallback_sample_submission_path"]
+        assert kwargs["validate_and_prepare"](submission_path) == prepared_path
         return SimpleNamespace(
             prepared_context=SimpleNamespace(prepared_submission_path=prepared_path, prepared_submission_sha="sha"),
             preflight_context=SimpleNamespace(
@@ -562,3 +625,4 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
         "preflight_fallback_sample_submission_path": fallback_sample_path,
         "attempt_loop_fallback_sample_submission_path": fallback_sample_path,
     }
+    assert (paths.run_dir("run-1") / "submission_semantic_preflight.json").is_file()

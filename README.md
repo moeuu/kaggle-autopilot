@@ -39,7 +39,7 @@ services must start at boot before the first login.
 Run autopilot with a single command:
 
 ```bash
-uv run kagglebot autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
+uv run kagglebot --force autopilot https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques \
   --compute kaggle_gpu
 ```
 Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched rules text.
@@ -421,7 +421,9 @@ Autopilot creates `artifacts/<slug>/plan.json` with agent-defined targets:
 
 Use `--accelerator auto|gpu|tpu` to force specific accelerator.
 
-Use `--hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2` to control planning and runtime scale knobs.
+Local GPU kernels default to a 1440-minute parent-enforced timeout. Runtime preflight is accuracy-preserving: it only rejects an exact source version after repeated measured runtimes prove that it cannot fit the configured timeout; it does not automatically shrink the model, folds, seeds, or input resolution.
+
+Use `--hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2|kaggle_rtx_pro_6000` to control planning and runtime scale knobs.
 `auto` detects the local NVIDIA GPU when possible. The default local target is RTX3060-class accuracy-first execution:
 strategies should keep the strongest feasible model families enabled, then scale batch size, chunks, precision,
 folds/seeds, or candidate ordering to fit a single 12GB GPU. Stronger GPUs such as RTX5090 should scale through
@@ -474,9 +476,15 @@ Optional environment knobs:
 - ✅ **Strict local validation before submit**: Column order, row count, ID integrity, numeric prediction checks
 - ✅ **Duplicate prevention**: SHA256 hash check against `submissions/ledger.jsonl`
 - ✅ **Rate limiting**: 5-min cooldown between submissions plus a bounded Kaggle submit CLI timeout
-- ✅ **Notebook-submit accelerator integrity**: submit notebooks inherit the requested accelerator, so GPU code competitions are not silently staged as CPU. Set `KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR=cpu|gpu|tpu` only for an explicit override. `KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC` bounds how long a remote kernel may remain `QUEUED` (default 1800s, `0` disables).
+- ✅ **Notebook-submit accelerator integrity**: submit notebooks inherit the requested accelerator, so GPU code competitions are not silently staged as CPU. GPU notebooks select an official Kaggle CLI machine-shape ID from `KAGGLEBOT_SUBMIT_KERNEL_MACHINE_SHAPE`, `plan.json`'s `submit_machine_shape`, or the hardware profile, defaulting to `NvidiaTeslaT4`. ARC-AGI-3 instead defaults to `NvidiaRtxPro6000` and forces internet off for that competition's reserved RTX pool. Other competitions never receive RTX automatically, but may select the same official machine ID explicitly when Kaggle grants that competition access. Notebook metadata casing such as `nvidiaTeslaT4` is canonicalized before CLI use. Machine shape is included in the notebook slug so corrected hardware cannot inherit an older notebook's settings. Set `KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR=cpu|gpu|tpu` only for an explicit override. `KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC` bounds how long a remote kernel may remain `QUEUED` (default 1800s, `0` disables).
+- ✅ **Notebook runtime fidelity**: code-competition submit packages load the staged plan beside `kernel.py`, inherit dataset/kernel/model sources from the required public reference when the plan enables reference reproduction, carry the locally selected pipeline contract into the inference run, require the exact expected output filename, and block Kaggle submission when remote metrics are missing/invalid, the reference reproduction gate remains blocked, or metrics show pipeline drift, missing assets, loss of a required reference path, or a material score regression. Dependency caches are redirected to `/tmp`; explicit cache trees under `/kaggle/working` are rejected before push.
+- ✅ **Codex-reviewed code submission**: after a code-competition Notebook completes, Codex reviews the immutable Notebook/model/output/log evidence and must approve all four checks. A deterministic guard then re-hashes the evidence, rejects restored zero-denominator scores without full model-backed runtime evidence, fallback-only predictions, repeated runtime exceptions, dependency/cache output trees, wrong filenames, known daily-quota exhaustion, and duplicate Notebook-version identities. Only then may the guarded executor call Kaggle; the exact kernel/version/output identity is written to the ledger immediately after API success. Missing or malformed Codex output fails closed.
+- ✅ **Competition-independent semantic preflight**: autopilot file/wrapper submissions and completed Code runtime outputs share one fail-closed prediction check. It blocks unchanged sample templates, row-constant predictions, copied multi-output heads, placeholder text, metrics-declared fallback output, selected/emitted pipeline drift, and recorded row-count/filename/hash mismatches. File/wrapper runs persist `submission_semantic_preflight.json` before any Kaggle API call.
 - ✅ **No infinite submit loop**: Same submit-error fingerprint aborts the run immediately
 - ✅ **Controlled retries**: Transient submit errors retry up to 3 times with backoff; permanent errors abort immediately
+- ✅ **Terminal submission contract**: A submit-enabled leaderboard run cannot finish as `completed` with zero successful submissions; exact duplicate skips remain valid, while every other unmet submit obligation ends as `submit_failed`
+- ✅ **Validated frozen evaluation specs**: Saved evaluation specs are schema- and direction-validated before reuse, and invalid or context-conflicting specs are regenerated
+- ✅ **Best-effort dataset profiling**: Optional dataset profiling failures are persisted as structured `profile_error` metadata instead of aborting watch preflight before run-level recovery can start
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
 - ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, Kaggle `Writeups` wording and legacy `csv` aliases are accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission
@@ -494,7 +502,7 @@ Optional environment knobs:
 - ✅ **Online mismatch guardrails**: when CV improves but public LB regresses, the next iteration prioritizes validation redesign with group/time/leak/proxy split candidates before spending submissions on model-only changes
 - ✅ **Candidate-selection guardrails**: when kernels report multiple candidates, autopilot blocks submissions where the selected pipeline wins only on CV while another candidate has materially better holdout/validation, especially when prediction distribution collapses to sparse or constant-like outputs
 - ✅ **Oracle-gated `sol-ultra` implementation**: every Codex edit that follows an Oracle response uses the shared `oracle_implementation_*` settings (`gpt-5.6-sol`, `xhigh`, `sol-ultra`, semantic `ultra`). Pre-Oracle brief extraction and explicitly selected non-Oracle legacy flows remain on the normal Codex profile.
-- ✅ **Transactional Oracle/Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, submit outcomes, and verified reusable-skill usage, then requires a clean, committed, pushed repository baseline with its GitHub URL and exact SHA before Oracle. Codex starts only after a structured Oracle plan and baseline revalidation. Completed browser consultations are archived by Oracle, with authenticated CDP retry and a persistent warning report when archival cannot be verified; an archival bookkeeping failure does not discard a valid Oracle answer.
+- ✅ **Transactional Oracle/Codex self-improvement loop**: `watch` periodically analyzes recent errors, top1 gaps, submit outcomes, and verified reusable-skill usage, and also reacts once to each new normalized watch-failure fingerprint. Preflight failures are promoted even when no run directory exists. It then requires a clean, committed, pushed repository baseline with its GitHub URL and exact SHA before Oracle. Codex starts only after a structured Oracle plan and baseline revalidation; verified published changes cause `watch` to re-exec between competition cycles so the active process loads them. Completed browser consultations are archived by Oracle, with authenticated CDP retry and a persistent warning report when archival cannot be verified; an archival bookkeeping failure does not discard a valid Oracle answer.
 - ✅ **Reliable full Oracle context delivery**: canonical text sources are losslessly consolidated into one attachment. Browser runs split permitted competition archives into ordered parts below the remote-Chrome 20 MiB transfer ceiling, record source SHA-256 and reconstruction instructions, and never reuse a transcript left by an older run.
 - ✅ **Automated judged Writeups**: writeup competitions produce placeholder-free, secret-scanned, content-hashed reports; submission-enabled `--force` runs check participation and rules, submit through the authenticated Kaggle UI, and never retry duplicate or ambiguous attempts.
 
@@ -609,18 +617,18 @@ uv run pytest -q -m "slow and not competition_artifact"
 
 ```bash
 # 1. Run autopilot (will bootstrap, plan, iterate, and submit when target met)
-uv run kagglebot autopilot titanic --compute kaggle_gpu
+uv run kagglebot --force autopilot titanic --compute kaggle_gpu
 
 # 2. If needed, edit plan.json to adjust target_score or evaluation strategy
 nano artifacts/titanic/plan.json
 
 # 3. Re-run autopilot with adjusted target
-uv run kagglebot autopilot titanic --compute kaggle_gpu
+uv run kagglebot --force autopilot titanic --compute kaggle_gpu
 
 # 4. Resume a crashed run (same competition)
-uv run kagglebot autopilot titanic --compute kaggle_gpu --resume-run-id <run-id>
+uv run kagglebot --force autopilot titanic --compute kaggle_gpu --resume-run-id <run-id>
 # or resume the latest run automatically
-uv run kagglebot autopilot titanic --compute kaggle_gpu --resume-latest
+uv run kagglebot --force autopilot titanic --compute kaggle_gpu --resume-latest
 
 # 5. Check Knowledge Base for learnings
 uv run kagglebot knowledge show titanic
@@ -632,5 +640,6 @@ uv run kagglebot knowledge search --tag tabular --tag binary --limit 5
 ## Notes
 
 - **Non-interactive**: No prompts for input. All decisions via CLI flags or `plan.json`.
-- **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run. Interrupted Oracle-to-Codex improvement, kernel-fix, autofix, and repository self-improvement workflows are checkpointed and completed before watch can launch another kernel.
-- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; duplicate submission SHA is skipped unless forced, initial leaderboard checkpoints are submitted when submit is enabled, and daily/rolling 24h submission limits are honored when rules expose them.
+- **Crash recovery**: use `--resume-run-id <run-id>` (from `artifacts/<slug>/runs/<run-id>/`) or `--resume-latest` to continue a prior run. Interrupted Oracle-to-Codex improvement, kernel-fix, autofix, and repository self-improvement workflows are checkpointed and completed before watch can launch another kernel. Local-kernel training checkpoints are moved out of the disposable staging directory before it is recreated and are restored only when the fully staged kernel and plan fingerprints match exactly; incompatible checkpoints remain preserved for manual recovery.
+- **Reference artifact provenance**: staged Kaggle datasets retain the authoritative `dataset-metadata.json` response alongside downloaded files. Kernels can therefore validate the actual owner, slug, and license evidence instead of inferring licensing from filenames or an unrelated attached dataset.
+- **Submit resume behavior**: resume can continue submitting new iteration outputs in the same run; duplicate submission SHA is skipped unless forced, the first valid leaderboard checkpoint is submitted when submit is enabled even if it is produced after iteration 1, and daily/rolling 24h submission limits are honored when rules expose them.

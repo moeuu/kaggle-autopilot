@@ -646,6 +646,9 @@ def test_agent_pipeline_write_guard_blocks_data_dir(monkeypatch, tmp_path: Path)
             train_path = paths.data_dir / "train.csv"
             train_path.parent.mkdir(parents=True, exist_ok=True)
             train_path.write_text("id,target\n1,1\n", encoding="utf-8")
+            kernel_path = paths.kernel_source_dir / "kernel.py"
+            kernel_path.parent.mkdir(parents=True, exist_ok=True)
+            kernel_path.write_text("print('ok')\n", encoding="utf-8")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(*args, **kwargs):  # noqa: ARG001

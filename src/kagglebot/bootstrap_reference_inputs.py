@@ -6,7 +6,12 @@ from pathlib import Path
 
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.json_utils import load_json_object, parse_json_object_text, write_json_object
-from kagglebot.kaggle_api import download_competition, download_dataset, kernels_pull
+from kagglebot.kaggle_api import (
+    download_competition,
+    download_dataset,
+    download_dataset_metadata,
+    kernels_pull,
+)
 from kagglebot.paths import CompetitionPaths
 from kagglebot.validators import extract_data_archives
 
@@ -16,6 +21,9 @@ _NOTEBOOK_DATASET_REF_RE = re.compile(
 )
 _NOTEBOOK_COMPETITION_REF_RE = re.compile(r"/competitions/(?P<slug>[A-Za-z0-9_.-]+)")
 _NOTEBOOK_KERNEL_REF_RE = re.compile(r"/code/(?P<ref>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+_NOTEBOOK_MODEL_REF_RE = re.compile(
+    r"/models/(?P<ref>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9]+)"
+)
 
 
 def stage_reference_notebook_inputs(
@@ -27,6 +35,7 @@ def stage_reference_notebook_inputs(
     dry_run: bool,
     download_competition_fn=download_competition,
     download_dataset_fn=download_dataset,
+    download_dataset_metadata_fn=download_dataset_metadata,
     download_kernel_fn=kernels_pull,
 ) -> None:
     index_path = paths.code_notebooks_index_path
@@ -98,6 +107,7 @@ def stage_reference_notebook_inputs(
                 dry_run=dry_run,
                 download_competition_fn=download_competition_fn,
                 download_dataset_fn=download_dataset_fn,
+                download_dataset_metadata_fn=download_dataset_metadata_fn,
                 download_kernel_fn=download_kernel_fn,
             )
         for source in _merge_reference_input_sources(metadata_sources, notebook_sources, summary_sources):
@@ -169,7 +179,7 @@ def _collect_metadata_input_sources(metadata: dict[str, object]) -> list[dict[st
         value = str(ref or "").strip().strip("/")
         if not value:
             return
-        key = (kind, value)
+        key = (kind, value.casefold())
         if key in seen:
             return
         seen.add(key)
@@ -191,6 +201,11 @@ def _collect_metadata_input_sources(metadata: dict[str, object]) -> list[dict[st
             if owner and slug:
                 add_source(kind, f"{owner}/{slug}", source=source)
             return
+        if kind == "model":
+            for key in ("model", "source", "ref", "modelRef", "model_ref"):
+                if key in item:
+                    add_source(kind, item.get(key), source=source)
+                    return
         if kind == "competition":
             for key in ("competition", "source", "ref", "slug", "competitionSlug"):
                 if key in item:
@@ -206,6 +221,7 @@ def _collect_metadata_input_sources(metadata: dict[str, object]) -> list[dict[st
         ("dataset_sources", "dataset"),
         ("competition_sources", "competition"),
         ("kernel_sources", "kernel"),
+        ("model_sources", "model"),
     ):
         raw = metadata.get(key)
         if isinstance(raw, list):
@@ -224,6 +240,8 @@ def _collect_metadata_input_sources(metadata: dict[str, object]) -> list[dict[st
                 handle_item("competition", item, source="metadata:dataSources")
             elif "kernel" in source_type or "notebook" in source_type:
                 handle_item("kernel", item, source="metadata:dataSources")
+            elif "model" in source_type:
+                handle_item("model", item, source="metadata:dataSources")
     return sources
 
 
@@ -249,7 +267,7 @@ def _collect_notebook_text_input_sources(path: Path | None) -> list[dict[str, st
         value = ref.strip().strip("/")
         if not value:
             return
-        key = (kind, value)
+        key = (kind, value.casefold())
         if key in seen:
             return
         seen.add(key)
@@ -261,6 +279,8 @@ def _collect_notebook_text_input_sources(path: Path | None) -> list[dict[str, st
         add_source("competition", match.group("slug"), "notebook_text")
     for match in _NOTEBOOK_KERNEL_REF_RE.finditer(text):
         add_source("kernel", match.group("ref"), "notebook_text")
+    for match in _NOTEBOOK_MODEL_REF_RE.finditer(text):
+        add_source("model", match.group("ref"), "notebook_text")
     return sources
 
 
@@ -274,7 +294,7 @@ def _collect_free_text_input_sources(text: str, *, source: str) -> list[dict[str
         value = ref.strip().strip("/")
         if not value:
             return
-        key = (kind, value)
+        key = (kind, value.casefold())
         if key in seen:
             return
         seen.add(key)
@@ -286,6 +306,8 @@ def _collect_free_text_input_sources(text: str, *, source: str) -> list[dict[str
         add_source("competition", match.group("slug"))
     for match in _NOTEBOOK_KERNEL_REF_RE.finditer(text):
         add_source("kernel", match.group("ref"))
+    for match in _NOTEBOOK_MODEL_REF_RE.finditer(text):
+        add_source("model", match.group("ref"))
     return sources
 
 
@@ -314,7 +336,7 @@ def _merge_reference_input_sources(*sources_lists: list[dict[str, str]]) -> list
             ref = str(item.get("ref") or "").strip().strip("/")
             if not kind or not ref:
                 continue
-            key = (kind, ref)
+            key = (kind, ref.casefold())
             if key in seen:
                 continue
             seen.add(key)
@@ -333,6 +355,7 @@ def _stage_reference_sources(
     dry_run: bool,
     download_competition_fn,
     download_dataset_fn,
+    download_dataset_metadata_fn,
     download_kernel_fn,
 ) -> list[dict[str, object]]:
     staged: list[dict[str, object]] = []
@@ -345,8 +368,15 @@ def _stage_reference_sources(
         stage_dir = paths.reference_inputs_dir / stage_name
         status = "discovered"
         error = ""
+        metadata_error = ""
         if kind == "competition" and ref == current_slug:
             status = "already_present_current_competition"
+        elif kind == "model":
+            # Kaggle model sources are attached by model_sources metadata. Do
+            # not automatically download multi-GB checkpoints during context
+            # bootstrap; local runners surface an explicit cache command when
+            # the required model is unavailable locally.
+            status = "remote_model_attachment"
         elif _stage_dir_has_content(stage_dir):
             status = f"already_staged_{kind}"
         elif not download:
@@ -372,6 +402,17 @@ def _stage_reference_sources(
             except Exception as exc:  # noqa: BLE001
                 status = "stage_error"
                 error = str(exc)
+        if (
+            kind == "dataset"
+            and download
+            and not dry_run
+            and status not in {"stage_error", "discovered_not_downloaded"}
+            and not (stage_dir / "dataset-metadata.json").is_file()
+        ):
+            try:
+                download_dataset_metadata_fn(ref, stage_dir, slug=current_slug, dry_run=False)
+            except Exception as exc:  # noqa: BLE001
+                metadata_error = str(exc)
         staged.append(
             {
                 "kernel_id": kernel_id,
@@ -381,6 +422,10 @@ def _stage_reference_sources(
                 "stage_dir": str(stage_dir),
                 "status": status,
                 "error": error or None,
+                "metadata_path": str(stage_dir / "dataset-metadata.json")
+                if (stage_dir / "dataset-metadata.json").is_file()
+                else None,
+                "metadata_error": metadata_error or None,
             }
         )
     return staged

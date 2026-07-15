@@ -5,6 +5,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from kagglebot.runtime_policy import DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN
+
 
 @dataclass(frozen=True)
 class HardwareProfile:
@@ -27,7 +29,7 @@ _PROFILES: dict[str, HardwareProfile] = {
         gpu_count=1,
         vram_gb=12,
         system_ram_gb=None,
-        time_budget_min=None,
+        time_budget_min=DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN,
         tier="local_12gb",
         notes=(
             "Primary local planning target. Accuracy is the default priority; long runs are acceptable.",
@@ -42,7 +44,7 @@ _PROFILES: dict[str, HardwareProfile] = {
         gpu_count=1,
         vram_gb=24,
         system_ram_gb=None,
-        time_budget_min=None,
+        time_budget_min=DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN,
         tier="local_24gb",
         notes=(
             "Can roughly double batch sizes or candidate counts versus RTX 3060, "
@@ -56,7 +58,7 @@ _PROFILES: dict[str, HardwareProfile] = {
         gpu_count=1,
         vram_gb=24,
         system_ram_gb=None,
-        time_budget_min=None,
+        time_budget_min=DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN,
         tier="local_24gb_fast",
         notes=("Use larger batches than RTX 3060; keep the same algorithmic caps unless explicitly scaling up.",),
     ),
@@ -67,7 +69,7 @@ _PROFILES: dict[str, HardwareProfile] = {
         gpu_count=1,
         vram_gb=32,
         system_ram_gb=None,
-        time_budget_min=None,
+        time_budget_min=DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN,
         tier="local_32gb_fast",
         notes=("High-end local target. Scaling should be via profile knobs, not hard-coded model rewrites.",),
     ),
@@ -107,6 +109,20 @@ _PROFILES: dict[str, HardwareProfile] = {
             "Per-device memory is still 16GB.",
         ),
     ),
+    "kaggle_rtx_pro_6000": HardwareProfile(
+        key="kaggle_rtx_pro_6000",
+        label="Kaggle RTX PRO 6000 Blackwell 96GB (g4-standard-48)",
+        gpu_name="RTX PRO 6000 Blackwell",
+        gpu_count=1,
+        vram_gb=96,
+        system_ram_gb=180,
+        time_budget_min=720,
+        tier="kaggle_96gb",
+        notes=(
+            "Competition-restricted accelerator: use only for ARC-AGI-3 notebooks attached to that competition.",
+            "Internet must remain disabled for every RTX PRO 6000 session.",
+        ),
+    ),
     "generic_12gb": HardwareProfile(
         key="generic_12gb",
         label="Generic single GPU 12GB",
@@ -114,7 +130,7 @@ _PROFILES: dict[str, HardwareProfile] = {
         gpu_count=1,
         vram_gb=12,
         system_ram_gb=None,
-        time_budget_min=None,
+        time_budget_min=DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN,
         tier="local_12gb",
         notes=(
             "Fallback local GPU profile. Treat as 12GB accuracy-first: keep high-ceiling pretrained paths alive, "
@@ -210,6 +226,9 @@ def _normalize_key(value: str) -> str:
         "t4x2": "kaggle_t4x2",
         "2xt4": "kaggle_t4x2",
         "kagglet4x2": "kaggle_t4x2",
+        "rtxpro6000": "kaggle_rtx_pro_6000",
+        "rtxpro6000blackwell": "kaggle_rtx_pro_6000",
+        "kagglertxpro6000": "kaggle_rtx_pro_6000",
         "generic12gb": "generic_12gb",
         "auto": "auto",
     }

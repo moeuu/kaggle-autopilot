@@ -216,8 +216,15 @@ def run_kaggle_submit_kernel(
     output_file: str | None = None,
     version: str | None = None,
     dry_run: bool = False,
+    expected_output_file: str | None = None,
 ) -> SubmitResult:
     """Submit to a competition using a Kaggle notebook kernel reference."""
+    _validate_code_submission_contract(
+        kernel=kernel,
+        output_file=output_file,
+        version=version,
+        expected_output_file=expected_output_file,
+    )
     args = [
         "kaggle",
         "competitions",
@@ -284,6 +291,60 @@ def run_kaggle_submit_kernel(
         stderr=stderr_text,
         command=args,
         duration_sec=duration,
+    )
+
+
+def _validate_code_submission_contract(
+    *,
+    kernel: str,
+    output_file: str | None,
+    version: str | None,
+    expected_output_file: str | None,
+) -> None:
+    kernel_ref = str(kernel or "").strip()
+    if kernel_ref.count("/") != 1 or any(not part for part in kernel_ref.split("/", 1)):
+        raise _invalid_code_submission_contract_error("notebook reference must be a nonempty owner/slug value")
+
+    output_name = str(output_file or "").strip()
+    if not output_name:
+        raise _invalid_code_submission_contract_error("output filename is required")
+    if Path(output_name).is_absolute() or "/" in output_name or "\\" in output_name:
+        raise _invalid_code_submission_contract_error("output filename must be a basename")
+
+    expected_name = str(expected_output_file or "").strip()
+    if expected_name and output_name != expected_name:
+        raise _invalid_code_submission_contract_error(
+            f"output filename must exactly match expected notebook output {expected_name!r}"
+        )
+
+    lowered = output_name.lower()
+    if (
+        lowered == "test_array_mask.npy"
+        or lowered.endswith("_mask.npy")
+        or lowered.startswith("oof_")
+        or lowered.startswith("test_preds_")
+    ):
+        raise _invalid_code_submission_contract_error(
+            f"diagnostic artifact {output_name!r} cannot be a code-submission output"
+        )
+
+    try:
+        version_number = int(str(version or "").strip())
+    except ValueError:
+        version_number = 0
+    if version_number <= 0:
+        raise _invalid_code_submission_contract_error("kernel version must be a positive integer")
+
+
+def _invalid_code_submission_contract_error(detail: str) -> SubmissionCliError:
+    diagnostic = f"Invalid code submission output contract: {detail}"
+    return SubmissionCliError(
+        "Kaggle CLI notebook submit blocked by local code-output validation.",
+        command=[],
+        exit_code=6,
+        output=diagnostic,
+        stdout="",
+        stderr=diagnostic,
     )
 
 
@@ -368,6 +429,12 @@ def _is_ambiguous_notebook_bad_request(text: str) -> bool:
 
 def classify_submit_error(stdout: str, stderr: str, returncode: int) -> dict[str, object]:
     merged = f"{stdout}\n{stderr}"
+    if "invalid code submission output contract:" in merged.lower():
+        return {
+            "kind": "validation",
+            "reason": "invalid_code_submission_output",
+            "retry_after_seconds": None,
+        }
     if _is_ambiguous_notebook_bad_request(merged):
         return {"kind": "unknown", "reason": "ambiguous_notebook_bad_request", "retry_after_seconds": 3}
     for reason, patterns in _PERMANENT_RULES:

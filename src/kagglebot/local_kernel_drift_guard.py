@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 
 from kagglebot import local_kernel_context as _local_kernel_context
@@ -198,7 +197,6 @@ def prepare_zero_overlap_drift_guard(*, base_dir: Path, slug: str, context_dir: 
     )
     payload["target_column"] = target_col
     payload["id_column"] = id_col
-    payload["generated_at_epoch"] = int(time.time())
 
     guard_path = context_dir / ZERO_OVERLAP_DRIFT_GUARD_FILENAME
     write_json_object(guard_path, payload)

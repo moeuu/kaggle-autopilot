@@ -126,6 +126,18 @@ def inject_training_compat_shims(kernel_dir: Path) -> None:
     inject_transformers_eval_strategy_shim(kernel_dir)
 
 
+def inject_submit_inference_compat_shims(kernel_dir: Path) -> None:
+    """Add submit progress hooks without eagerly importing Transformers.
+
+    Some reference runtimes, notably Unsloth, require their package to be
+    imported before Transformers, PEFT, or TRL.  The general training shim
+    imports Transformers while ``sitecustomize.py`` is executed, before the
+    authoritative kernel gets control.  Submit kernels keep progress logging
+    but leave compatibility imports to the kernel's deliberate import order.
+    """
+    inject_training_progress_shim(kernel_dir)
+
+
 def append_sitecustomize_shim(kernel_dir: Path, marker: str, shim: list[str]) -> None:
     site_path = kernel_dir / "sitecustomize.py"
     if site_path.exists():

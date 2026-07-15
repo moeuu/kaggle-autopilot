@@ -196,6 +196,20 @@ def test_should_force_initial_submit_only_for_real_leaderboard_runs() -> None:
         submit_enabled=True,
         dry_run=True,
     )
+    assert should_force_initial_submit(
+        deliverable_mode="leaderboard",
+        iteration=2,
+        submit_enabled=True,
+        dry_run=False,
+        has_successful_submission=False,
+    )
+    assert not should_force_initial_submit(
+        deliverable_mode="leaderboard",
+        iteration=2,
+        submit_enabled=True,
+        dry_run=False,
+        has_successful_submission=True,
+    )
 
 
 def test_quality_reason_soft_overrides_are_narrow() -> None:

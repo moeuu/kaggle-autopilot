@@ -299,7 +299,7 @@ def print_local_kernel_progress(
     activity_suffix = format_local_kernel_activity_suffix(progress_tracker)
     gpu_suffix = format_local_gpu_activity_suffix(accelerator=accelerator)
     elapsed = max(0, int(elapsed_sec))
-    if eta_total_sec is not None and eta_total_sec > 0:
+    if eta_total_sec is not None and eta_total_sec > elapsed_sec:
         remaining = max(0, int(eta_total_sec - elapsed_sec))
         print(
             "[cyan]kernel local running[/cyan]: "
@@ -307,14 +307,22 @@ def print_local_kernel_progress(
             f"{activity_suffix}{gpu_suffix}"
         )
         return
+    historical_suffix = ""
+    if eta_total_sec is not None and eta_total_sec > 0:
+        historical_suffix = f"; exact-source historical median~{int(eta_total_sec)}s exceeded"
     if timeout_sec is not None:
         timeout_remaining = max(0, int(timeout_sec - elapsed_sec))
         print(
             f"[cyan]kernel local running[/cyan]: "
-            f"elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s){activity_suffix}{gpu_suffix}"
+            f"elapsed={elapsed}s eta=unknown (timeout in <= {timeout_remaining}s{historical_suffix})"
+            f"{activity_suffix}{gpu_suffix}"
         )
         return
-    print(f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown{activity_suffix}{gpu_suffix}")
+    exceeded_suffix = f" ({historical_suffix.removeprefix('; ')})" if historical_suffix else ""
+    print(
+        f"[cyan]kernel local running[/cyan]: elapsed={elapsed}s eta=unknown"
+        f"{exceeded_suffix}{activity_suffix}{gpu_suffix}"
+    )
 
 
 def format_local_kernel_activity_suffix(progress_tracker: LocalKernelProgressTracker | None) -> str:

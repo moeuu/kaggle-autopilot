@@ -530,7 +530,17 @@ def build_autopilot_status_payload(
     _put_if_not_none(
         payload, "score_source", _clean_str(latest_metrics.get("score_source") or run_config.get("score_source"))
     )
-    _put_if_not_none(payload, "submit_phase_state", _clean_str(marker.get("submit_phase_state")))
+    _put_if_not_none(
+        payload,
+        "submit_phase_state",
+        _status_submit_phase_state(
+            status=status,
+            current_iteration=current_iteration,
+            completed_iteration=completed_iteration,
+            completed_marker=marker,
+            run_config=run_config,
+        ),
+    )
     _put_if_not_none(payload, "phase_detail", _clean_str(watch_state.get("phase_detail")))
     _put_if_not_none(payload, "run_record_status", run_status)
     _put_if_not_none(payload, "readiness_score", _nested_number(latest_metrics, "readiness", "score"))
@@ -705,6 +715,27 @@ def _resolve_phase(
             return submit_state
         return "iteration_completed"
     return "kernel_running"
+
+
+def _status_submit_phase_state(
+    *,
+    status: str,
+    current_iteration: int | None,
+    completed_iteration: int | None,
+    completed_marker: dict[str, object],
+    run_config: dict[str, object],
+) -> str | None:
+    """Describe the active iteration without leaking the previous iteration's submit state."""
+    if current_iteration is not None and completed_iteration == current_iteration:
+        return _clean_str(completed_marker.get("submit_phase_state"))
+    if current_iteration is None or status.strip().lower() not in {"", "running"}:
+        return None
+    submit_enabled = run_config.get("submit")
+    if submit_enabled is True:
+        return "pending"
+    if submit_enabled is False:
+        return "disabled"
+    return None
 
 
 def _iteration_dirs(run_dir: Path) -> list[tuple[int, Path]]:

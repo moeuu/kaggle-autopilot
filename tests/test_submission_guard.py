@@ -513,6 +513,24 @@ def test_validate_submission_rejects_tiny_static_hidden_test_notebook_submission
         validate_submission(str(submission), str(sample), data_dir=tmp_path / "data")
 
 
+def test_validate_submission_rejects_prerelease_sample_as_full_submission(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    sample = context_dir / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    rows = {"id": [f"sample-{index}" for index in range(13)], "label": [0.1] * 13}
+    pd.DataFrame(rows).to_csv(sample, index=False)
+    pd.DataFrame(rows).to_csv(submission, index=False)
+    (context_dir / "data.md").write_text(
+        "Currently, only a sample of the training dataset has been released. "
+        "The full dataset, including the public training and testing sets, is expected to be released later.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SubmissionValidationError, match="tiny static submission"):
+        validate_submission(str(submission), str(sample), data_dir=tmp_path / "data")
+
+
 def test_validate_submission_uses_overview_hint_when_sample_is_header_only(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     context_dir = data_dir / "context"
@@ -1159,7 +1177,13 @@ def test_run_kaggle_submit_kernel_uses_kernel_flag(monkeypatch) -> None:
         )
 
     monkeypatch.setattr("kagglebot.submission.guard.subprocess.run", fake_subprocess_run)
-    result = run_kaggle_submit_kernel(slug="demo", kernel="user/demo-kernel", message="m")
+    result = run_kaggle_submit_kernel(
+        slug="demo",
+        kernel="user/demo-kernel",
+        message="m",
+        output_file="submission.csv",
+        version="1",
+    )
     assert result.returncode == 0
     assert result.command[:3] == ["kaggle", "competitions", "submit"]
     assert "-k" in result.command
@@ -1189,3 +1213,59 @@ def test_run_kaggle_submit_kernel_supports_output_and_version(monkeypatch) -> No
     assert "submission.csv" in result.command
     assert "-v" in result.command
     assert "3" in result.command
+
+
+@pytest.mark.parametrize(
+    "output_file",
+    [
+        "/data/run/submission.parquet",
+        "nested/submission.parquet",
+        "test_array_mask.npy",
+        "candidate_mask.npy",
+        "oof_predictions.npy",
+        "test_preds_model.npy",
+    ],
+)
+def test_run_kaggle_submit_kernel_rejects_invalid_code_output_before_cli(
+    monkeypatch,
+    output_file: str,
+) -> None:
+    invoked = False
+
+    def fake_subprocess_run(*args, **kwargs):  # noqa: ARG001
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("Kaggle CLI must not be invoked")
+
+    monkeypatch.setattr("kagglebot.submission.guard.subprocess.run", fake_subprocess_run)
+    with pytest.raises(SubmissionCliError, match="local code-output validation") as exc:
+        run_kaggle_submit_kernel(
+            slug="demo",
+            kernel="user/demo-kernel",
+            message="m",
+            output_file=output_file,
+            expected_output_file="submission.parquet",
+            version="2",
+        )
+
+    assert invoked is False
+    classification = classify_submit_error(exc.value.stdout, exc.value.stderr, exc.value.exit_code)
+    assert classification["reason"] == "invalid_code_submission_output"
+    assert classification["kind"] == "validation"
+
+
+def test_run_kaggle_submit_kernel_requires_exact_expected_output(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "kagglebot.submission.guard.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("CLI must not run")),
+    )
+
+    with pytest.raises(SubmissionCliError, match="local code-output validation"):
+        run_kaggle_submit_kernel(
+            slug="demo",
+            kernel="user/demo-kernel",
+            message="m",
+            output_file="submission.csv",
+            expected_output_file="submission.parquet",
+            version="2",
+        )

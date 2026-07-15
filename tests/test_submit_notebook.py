@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from kagglebot.exceptions import KaggleCliError, KernelCapacityError, SubmissionCliError
+from kagglebot.exceptions import (
+    KaggleCliError,
+    KernelCapacityError,
+    SubmissionCliError,
+    SubmissionValidationError,
+)
 from kagglebot.submit_notebook import (
     NotebookSubmitRunner,
     build_kaggle_submit_kernel_kwargs,
@@ -812,6 +817,407 @@ def test_run_notebook_kernel_submission_runs_kernel_and_submits_reference(tmp_pa
         "dry_run": False,
     }
     assert messages == ["[cyan]submit notebook[/cyan]: user/demo-submit"]
+
+
+def test_code_submission_runs_review_guard_executor_and_ledger_in_order(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-1" / "submission.json"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("{}\n", encoding="utf-8")
+    logs_dir = submission_path.parent / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "kernel_push-001.txt").write_text("Kernel version 3 successfully pushed.\n", encoding="utf-8")
+    output_dir = tmp_path / "kernel-output"
+    output_dir.mkdir()
+    remote_submission = output_dir / "submission.json"
+    remote_submission.write_text('{"task": []}\n', encoding="utf-8")
+    events: list[str] = []
+    approval = object()
+    permit = object()
+
+    def review(**kwargs):  # noqa: ANN003
+        events.append("review")
+        assert kwargs["submission_path"] == remote_submission
+        assert kwargs["kernel_version"] == "3"
+        return approval
+
+    def guard(**kwargs):  # noqa: ANN003
+        events.append("guard")
+        assert kwargs["approval"] is approval
+        return permit
+
+    def submit(**_kwargs):
+        events.append("executor")
+        return SimpleNamespace(returncode=0)
+
+    def record(**kwargs):  # noqa: ANN003
+        events.append("ledger")
+        assert kwargs["permit"] is permit
+
+    run_notebook_kernel_submission(
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        iter_logs_dir=logs_dir,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        strict_accelerator=False,
+        submission_path=submission_path,
+        message="submit",
+        artifact_mode="gateway",
+        dry_run=False,
+        timeout_minutes=60,
+        run_submit_kernel=lambda **_kwargs: SimpleNamespace(
+            kernel_id="user/demo-submit",
+            output_dir=output_dir,
+            submission_path=remote_submission,
+            metrics_path=None,
+        ),
+        run_kaggle_submit_kernel=submit,
+        copy_submission_artifact=lambda source: source,
+        classify_submit_error=lambda *_args: {},
+        should_retry_ambiguous=lambda **_kwargs: False,
+        sleep=lambda _seconds: None,
+        on_message=lambda _message: None,
+        is_capacity_error=lambda _exc: False,
+        is_push_error=lambda _exc: False,
+        expected_output_file="submission.json",
+        review_code_submission=review,
+        recheck_code_submission_guard=guard,
+        record_code_submission_execution=record,
+    )
+
+    assert events == ["review", "guard", "executor", "ledger"]
+
+
+def test_code_submission_review_rejection_blocks_executor(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-1" / "submission.json"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("{}\n", encoding="utf-8")
+    logs_dir = submission_path.parent / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "kernel_push-001.txt").write_text("Kernel version 3 successfully pushed.\n", encoding="utf-8")
+    output_dir = tmp_path / "kernel-output"
+    output_dir.mkdir()
+    remote_submission = output_dir / "submission.json"
+    remote_submission.write_text("{}\n", encoding="utf-8")
+    cli_invoked = False
+
+    def submit(**_kwargs):
+        nonlocal cli_invoked
+        cli_invoked = True
+
+    with pytest.raises(SubmissionValidationError, match="rejected"):
+        run_notebook_kernel_submission(
+            slug="demo",
+            run_id="run-1",
+            iteration=1,
+            iter_logs_dir=logs_dir,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            strict_accelerator=False,
+            submission_path=submission_path,
+            message="submit",
+            artifact_mode="gateway",
+            dry_run=False,
+            timeout_minutes=60,
+            run_submit_kernel=lambda **_kwargs: SimpleNamespace(
+                kernel_id="user/demo-submit",
+                output_dir=output_dir,
+                submission_path=remote_submission,
+                metrics_path=None,
+            ),
+            run_kaggle_submit_kernel=submit,
+            copy_submission_artifact=lambda source: source,
+            classify_submit_error=lambda *_args: {},
+            should_retry_ambiguous=lambda **_kwargs: False,
+            sleep=lambda _seconds: None,
+            on_message=lambda _message: None,
+            is_capacity_error=lambda _exc: False,
+            is_push_error=lambda _exc: False,
+            expected_output_file="submission.json",
+            review_code_submission=lambda **_kwargs: (_ for _ in ()).throw(SubmissionValidationError("rejected")),
+        )
+
+    assert cli_invoked is False
+
+
+def test_run_notebook_kernel_submission_selects_exact_gateway_output_over_npy_diagnostics(
+    tmp_path: Path,
+) -> None:
+    submission_path = tmp_path / "iter-2" / "test_array_mask.npy"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_bytes(b"diagnostic input")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "kernel_push-001.txt").write_text(
+        "Kernel version 9 successfully pushed.\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "kernel-output"
+    output_dir.mkdir()
+    downloaded_mask = output_dir / "test_array_mask.npy"
+    downloaded_mask.write_bytes(b"mask")
+    downloaded_parquet = output_dir / "submission.parquet"
+    downloaded_parquet.write_bytes(b"parquet")
+    copied_sources: list[Path] = []
+    captured_kernel_kwargs: dict[str, object] = {}
+    captured_submit_kwargs: dict[str, object] = {}
+
+    def run_submit_kernel(**kwargs):  # noqa: ANN003
+        captured_kernel_kwargs.update(kwargs)
+        return SimpleNamespace(
+            kernel_id="user/arc-submit",
+            output_dir=output_dir,
+            submission_path=downloaded_mask,
+        )
+
+    def copy_submission(source: Path) -> Path:
+        copied_sources.append(source)
+        return tmp_path / "copied" / source.name
+
+    def run_kaggle_submit_kernel(**kwargs):  # noqa: ANN003
+        captured_submit_kwargs.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    _result, submission_ref, artifact_path = run_notebook_kernel_submission(
+        slug="arc-demo",
+        run_id="run-1",
+        iteration=2,
+        iter_logs_dir=logs_dir,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        strict_accelerator=False,
+        submission_path=submission_path,
+        message="submit",
+        artifact_mode="gateway",
+        dry_run=False,
+        timeout_minutes=60,
+        run_submit_kernel=run_submit_kernel,
+        run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+        copy_submission_artifact=copy_submission,
+        classify_submit_error=lambda *_args: {},
+        should_retry_ambiguous=lambda **_kwargs: False,
+        sleep=lambda _seconds: None,
+        on_message=lambda _message: None,
+        is_capacity_error=lambda _exc: False,
+        is_push_error=lambda _exc: False,
+        expected_output_file="submission.parquet",
+    )
+
+    assert submission_ref == "kernel:user/arc-submit"
+    assert artifact_path == tmp_path / "copied" / "submission.parquet"
+    assert copied_sources == [downloaded_parquet]
+    assert captured_kernel_kwargs["mode"] == "gateway"
+    assert captured_kernel_kwargs["expected_output_file"] == "submission.parquet"
+    assert captured_submit_kwargs == {
+        "slug": "arc-demo",
+        "kernel": "user/arc-submit",
+        "message": "submit",
+        "output_file": "submission.parquet",
+        "version": "9",
+        "dry_run": False,
+        "expected_output_file": "submission.parquet",
+    }
+    assert not any(".npy" in str(value) or "/data/" in str(value) for value in captured_submit_kwargs.values())
+
+
+def test_run_notebook_kernel_submission_fails_before_cli_when_gateway_output_is_missing(
+    tmp_path: Path,
+) -> None:
+    submission_path = tmp_path / "iter-2" / "test_array_mask.npy"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_bytes(b"diagnostic")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "kernel_push-001.txt").write_text(
+        "Kernel version 4 successfully pushed.\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "kernel-output"
+    output_dir.mkdir()
+    mask = output_dir / "test_array_mask.npy"
+    mask.write_bytes(b"mask")
+    cli_invoked = False
+
+    def run_kaggle_submit_kernel(**_kwargs):
+        nonlocal cli_invoked
+        cli_invoked = True
+
+    with pytest.raises(SubmissionCliError, match="output contract is invalid") as exc:
+        run_notebook_kernel_submission(
+            slug="arc-demo",
+            run_id="run-1",
+            iteration=2,
+            iter_logs_dir=logs_dir,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            strict_accelerator=False,
+            submission_path=submission_path,
+            message="submit",
+            artifact_mode="gateway",
+            dry_run=False,
+            timeout_minutes=60,
+            run_submit_kernel=lambda **_kwargs: SimpleNamespace(
+                kernel_id="user/arc-submit",
+                output_dir=output_dir,
+                submission_path=mask,
+            ),
+            run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+            copy_submission_artifact=lambda source: source,
+            classify_submit_error=lambda *_args: {},
+            should_retry_ambiguous=lambda **_kwargs: False,
+            sleep=lambda _seconds: None,
+            on_message=lambda _message: None,
+            is_capacity_error=lambda _exc: False,
+            is_push_error=lambda _exc: False,
+            expected_output_file="submission.parquet",
+        )
+
+    assert cli_invoked is False
+    assert "discovered_output=test_array_mask.npy" in exc.value.stderr
+    assert exc.value.submission_ref == "kernel:user/arc-submit"
+    assert exc.value.submission_artifact_path is None
+    assert exc.value.code_output_file_name == "submission.parquet"
+
+
+def test_run_notebook_kernel_submission_fails_before_cli_when_remote_pipeline_degrades(
+    tmp_path: Path,
+) -> None:
+    submission_path = tmp_path / "iter-2" / "submission.json"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("{}\n", encoding="utf-8")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "kernel_push-001.txt").write_text(
+        "Kernel version 5 successfully pushed.\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "kernel-output"
+    output_dir.mkdir()
+    remote_submission = output_dir / "submission.json"
+    remote_submission.write_text("{}\n", encoding="utf-8")
+    remote_metrics = output_dir / "metrics.json"
+    remote_metrics.write_text(
+        '{"metric":"accuracy","direction":"maximize","offline_value":0.46,"chosen_pipeline":"simple_baseline"}\n',
+        encoding="utf-8",
+    )
+    cli_invoked = False
+
+    def run_kaggle_submit_kernel(**_kwargs):
+        nonlocal cli_invoked
+        cli_invoked = True
+
+    with pytest.raises(SubmissionCliError, match="does not match the selected candidate") as exc:
+        run_notebook_kernel_submission(
+            slug="arc-demo",
+            run_id="run-1",
+            iteration=2,
+            iter_logs_dir=logs_dir,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            strict_accelerator=False,
+            submission_path=submission_path,
+            message="submit",
+            artifact_mode="inference",
+            dry_run=False,
+            timeout_minutes=60,
+            run_submit_kernel=lambda **_kwargs: SimpleNamespace(
+                kernel_id="user/arc-submit",
+                output_dir=output_dir,
+                submission_path=remote_submission,
+                metrics_path=remote_metrics,
+            ),
+            run_kaggle_submit_kernel=run_kaggle_submit_kernel,
+            copy_submission_artifact=lambda source: source,
+            classify_submit_error=lambda *_args: {},
+            should_retry_ambiguous=lambda **_kwargs: False,
+            sleep=lambda _seconds: None,
+            on_message=lambda _message: None,
+            is_capacity_error=lambda _exc: False,
+            is_push_error=lambda _exc: False,
+            expected_output_file="submission.json",
+            expected_metrics_payload={
+                "metric": "accuracy",
+                "direction": "maximize",
+                "offline_value": 86.5,
+                "chosen_pipeline": "qwen",
+            },
+        )
+
+    assert cli_invoked is False
+    assert "pipeline changed from 'qwen' to 'simple_baseline'" in exc.value.stderr
+    assert exc.value.submission_ref == "kernel:user/arc-submit"
+    assert exc.value.submission_artifact_path == remote_submission
+    assert exc.value.kernel_version == "5"
+
+
+def test_notebook_submit_error_preserves_kernel_and_gateway_artifact_context(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-2" / "test_array_mask.npy"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_bytes(b"diagnostic")
+    logs_dir = tmp_path / "iter-2" / "logs"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "kernel_push-001.txt").write_text(
+        "Kernel version 5 successfully pushed.\n",
+        encoding="utf-8",
+    )
+    gateway_output = tmp_path / "kernel-output" / "submission.parquet"
+    gateway_output.parent.mkdir()
+    gateway_output.write_bytes(b"parquet")
+    copied_output = tmp_path / "copied" / "submission.parquet"
+    submit_error = SubmissionCliError(
+        "bad request",
+        command=[],
+        exit_code=1,
+        stderr="400 Client Error: Bad Request",
+    )
+
+    with pytest.raises(SubmissionCliError) as exc:
+        run_notebook_kernel_submission(
+            slug="arc-demo",
+            run_id="run-1",
+            iteration=2,
+            iter_logs_dir=logs_dir,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            strict_accelerator=False,
+            submission_path=submission_path,
+            message="submit",
+            artifact_mode="gateway",
+            dry_run=False,
+            timeout_minutes=60,
+            run_submit_kernel=lambda **_kwargs: SimpleNamespace(
+                kernel_id="user/arc-submit",
+                output_dir=gateway_output.parent,
+                submission_path=gateway_output,
+            ),
+            run_kaggle_submit_kernel=lambda **_kwargs: (_ for _ in ()).throw(submit_error),
+            copy_submission_artifact=lambda _source: copied_output,
+            classify_submit_error=lambda *_args: {"reason": "bad_request"},
+            should_retry_ambiguous=lambda **_kwargs: False,
+            sleep=lambda _seconds: None,
+            on_message=lambda _message: None,
+            is_capacity_error=lambda _exc: False,
+            is_push_error=lambda _exc: False,
+            expected_output_file="submission.parquet",
+        )
+
+    assert exc.value.submission_ref == "kernel:user/arc-submit"
+    assert exc.value.submission_artifact_path == copied_output
+    assert exc.value.code_output_file_name == "submission.parquet"
+    assert exc.value.kernel_version == "5"
 
 
 def test_run_notebook_kernel_submission_keeps_expected_output_file_when_kernel_path_missing(tmp_path: Path) -> None:

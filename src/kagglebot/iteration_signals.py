@@ -17,6 +17,7 @@ class IterationRepairSignalPolicyDecision:
     force_major_overhaul: bool
     forced_major_overhaul_reason: str | None
     forced_validation_redesign_reason: str | None
+    implementation_audit_required: bool
     loop_signal_errors: list[dict[str, object]]
     loop_signal_problems: list[dict[str, object]]
     repair_signals: dict[str, object] | None
@@ -33,6 +34,7 @@ class IterationRepairSignals:
     subgroup_collapse_signal: dict[str, object] | None
     online_mismatch_signal: dict[str, object] | None
     online_history_regression_signal: dict[str, object] | None
+    leaderboard_anomaly_signal: dict[str, object] | None
 
 
 def extract_orig_proba_signal(kernel_metrics_payload: dict[str, object] | None) -> dict[str, object] | None:
@@ -295,6 +297,7 @@ def collect_iteration_repair_signals(
     previous_submission_history: dict[str, object],
     detect_subgroup_collapse_signal: Callable[..., dict[str, object] | None],
     detect_online_history_regression_signal: Callable[..., dict[str, object] | None],
+    leaderboard_anomaly_signal: dict[str, object] | None = None,
 ) -> IterationRepairSignals:
     return IterationRepairSignals(
         orig_proba_signal=extract_orig_proba_signal(kernel_metrics_payload),
@@ -333,6 +336,7 @@ def collect_iteration_repair_signals(
             direction=direction,
             history=previous_submission_history,
         ),
+        leaderboard_anomaly_signal=leaderboard_anomaly_signal,
     )
 
 
@@ -347,6 +351,7 @@ def apply_iteration_repair_signal_policy(
     subgroup_collapse_signal: dict[str, object] | None,
     online_mismatch_signal: dict[str, object] | None,
     online_history_regression_signal: dict[str, object] | None,
+    leaderboard_anomaly_signal: dict[str, object] | None,
     minimum_improvement_mode: str | None,
     minimum_improvement_reason: str | None,
     force_major_overhaul: bool,
@@ -360,6 +365,7 @@ def apply_iteration_repair_signal_policy(
     forced_validation_redesign_reason: str | None = None
     loop_signal_errors: list[dict[str, object]] = []
     loop_signal_problems: list[dict[str, object]] = []
+    implementation_audit_required = leaderboard_anomaly_signal is not None
 
     def _append_note_reason(note: object) -> None:
         nonlocal minimum_improvement_reason_next
@@ -379,6 +385,23 @@ def apply_iteration_repair_signal_policy(
         force_major_overhaul = True
         forced_major_overhaul_reason = (
             f"{forced_major_overhaul_reason} {note}".strip() if forced_major_overhaul_reason else str(note)
+        )
+
+    if leaderboard_anomaly_signal is not None:
+        note = str(
+            leaderboard_anomaly_signal.get("note")
+            or "Leaderboard result is in a last-place-like anomaly band; audit implementation fidelity first."
+        )
+        extra_policy_notes.append(note)
+        _append_major_reason(note)
+        loop_signal_errors.append(
+            {
+                "iteration": iteration,
+                "error_message": "Leaderboard score/rank indicates a probable submission implementation defect.",
+                "fix_summary": note,
+                "resolved": False,
+                "outcome_bucket": "implementation_anomaly",
+            }
         )
 
     if orig_proba_signal is not None:
@@ -522,6 +545,7 @@ def apply_iteration_repair_signal_policy(
             "subgroup_collapse": subgroup_collapse_signal,
             "online_mismatch": online_mismatch_signal,
             "online_history_regression": online_history_regression_signal,
+            "leaderboard_implementation_anomaly": leaderboard_anomaly_signal,
         }
         if extra_policy_notes
         else None
@@ -530,7 +554,9 @@ def apply_iteration_repair_signal_policy(
         "minimum_improvement_mode": minimum_improvement_mode_next,
         "minimum_improvement_reason": minimum_improvement_reason_next,
         "forced_improvement_mode": (
-            "validation_redesign"
+            "implementation_audit"
+            if implementation_audit_required
+            else "validation_redesign"
             if forced_validation_redesign_reason and not force_major_overhaul
             else "major_overhaul"
             if force_major_overhaul
@@ -546,6 +572,7 @@ def apply_iteration_repair_signal_policy(
         force_major_overhaul=force_major_overhaul,
         forced_major_overhaul_reason=forced_major_overhaul_reason,
         forced_validation_redesign_reason=forced_validation_redesign_reason,
+        implementation_audit_required=implementation_audit_required,
         loop_signal_errors=loop_signal_errors,
         loop_signal_problems=loop_signal_problems,
         repair_signals=repair_signals,

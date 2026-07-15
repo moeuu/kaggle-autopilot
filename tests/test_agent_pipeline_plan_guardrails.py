@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig, _apply_authoritative_runtime_budget
 from kagglebot.paths import CompetitionPaths
 from kagglebot.plan_policy import validate_plan_payload, write_plan_payload
 
@@ -34,6 +35,32 @@ def _base_payload() -> dict[str, object]:
             "primary_metric": "f1",
         },
         "stop_policy": {"max_iterations": 3, "error_fingerprint_abort": True},
+    }
+
+
+def test_agent_plan_runtime_budget_uses_executor_default_instead_of_model_value(tmp_path: Path) -> None:
+    payload: dict[str, object] = {"runtime_budget": {"max_runtime_min": 690, "full_training_folds": 2}}
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=tmp_path,
+        hardware_profile="rtx3060",
+        time_budget_min=None,
+    )
+
+    _apply_authoritative_runtime_budget(payload, config=config)
+
+    assert payload["runtime_budget"] == {
+        "max_runtime_min": 1440,
+        "full_training_folds": 2,
+        "hardware_profile": "rtx3060",
+        "gpu_vram_gb": 12,
+        "gpu_count": 1,
     }
 
 
@@ -248,6 +275,56 @@ def test_write_plan_payload_forces_training_and_validation(tmp_path: Path) -> No
     assert runtime["max_val_samples"] >= 128
     assert runtime["adapter_packaging_only"] is False
     assert runtime["allow_unscored_submission"] is False
+
+
+def test_write_plan_payload_allows_ready_non_training_route_but_keeps_validation(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"task": "optimization", "modality": "graph", "train_rows": 100_000}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("External data is allowed for this challenge.", encoding="utf-8")
+    payload = _base_payload()
+    payload["runtime_budget"] = {
+        "local_training_required": False,
+        "estimated_local_training_min": 1_500,
+        "non_training_submission": {
+            "mode": "solver",
+            "implementation_ready": True,
+            "validation_mode": "offline",
+            "source": "kernel.py deterministic graph solver with held-out task validation",
+        },
+    }
+
+    write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["execution_route"]["approved"] is True
+    assert persisted["execution_route"]["mode"] == "non_training_submission"
+    assert persisted["toggles"]["ENABLE_TRAINING"] is False
+    assert persisted["toggles"]["TRAINING_DISABLED"] is True
+    assert persisted["toggles"]["RUN_VALIDATION"] is True
+    assert persisted["runtime_budget"]["enable_training"] is False
+    assert persisted["runtime_budget"]["run_validation"] is True
+    assert persisted["runtime_budget"]["allow_unscored_submission"] is False
+
+
+def test_write_plan_payload_does_not_skip_training_without_implemented_path(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    payload = _base_payload()
+    payload["runtime_budget"] = {
+        "local_training_required": False,
+        "estimated_local_training_min": 10_000,
+    }
+
+    write_plan_payload(paths, payload)
+    persisted = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+
+    assert persisted["execution_route"]["approved"] is False
+    assert persisted["toggles"]["ENABLE_TRAINING"] is True
+    assert persisted["runtime_budget"]["enable_training"] is True
 
 
 def test_write_plan_payload_forces_cv_for_non_generalizable_score_source(tmp_path: Path) -> None:

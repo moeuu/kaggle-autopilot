@@ -81,6 +81,7 @@ def test_apply_iteration_repair_signal_policy_builds_notes_errors_and_major_over
         subgroup_collapse_signal={"note": "subgroup collapsed"},
         online_mismatch_signal=None,
         online_history_regression_signal=None,
+        leaderboard_anomaly_signal=None,
         minimum_improvement_mode="minor_tuning",
         minimum_improvement_reason=None,
         force_major_overhaul=False,
@@ -148,6 +149,7 @@ def test_collect_iteration_repair_signals_applies_policy_flags_and_detectors() -
         previous_submission_history={"best_score": 0.75},
         detect_subgroup_collapse_signal=subgroup_detector,
         detect_online_history_regression_signal=history_detector,
+        leaderboard_anomaly_signal=None,
     )
 
     assert signals.orig_proba_signal is not None
@@ -158,6 +160,7 @@ def test_collect_iteration_repair_signals_applies_policy_flags_and_detectors() -
     assert signals.subgroup_collapse_signal == {"note": "subgroup collapsed"}
     assert signals.online_mismatch_signal is not None
     assert signals.online_history_regression_signal == {"note": "history regressed"}
+    assert signals.leaderboard_anomaly_signal is None
     assert subgroup_calls == [
         {
             "kernel_metrics_payload": payload,
@@ -185,6 +188,7 @@ def test_apply_iteration_repair_signal_policy_prefers_validation_redesign_for_on
         subgroup_collapse_signal=None,
         online_mismatch_signal={"note": "online mismatch"},
         online_history_regression_signal={"note": "online history regression"},
+        leaderboard_anomaly_signal=None,
         minimum_improvement_mode="minor_tuning",
         minimum_improvement_reason="medal policy",
         force_major_overhaul=False,
@@ -204,6 +208,32 @@ def test_apply_iteration_repair_signal_policy_prefers_validation_redesign_for_on
         "forced_improvement_reason": "online history regression",
         "extra_policy_notes": ["online mismatch", "online history regression"],
     }
+
+
+def test_leaderboard_anomaly_forces_implementation_audit_before_model_search() -> None:
+    decision = apply_iteration_repair_signal_policy(
+        iteration=1,
+        orig_proba_signal=None,
+        original_data_unused_signal=None,
+        pseudo_label_signal=None,
+        missing_ensemble_signal=None,
+        same_family_plateau_signal=None,
+        subgroup_collapse_signal=None,
+        online_mismatch_signal=None,
+        online_history_regression_signal=None,
+        leaderboard_anomaly_signal={"note": "bottom 1%; audit packaged output"},
+        minimum_improvement_mode=None,
+        minimum_improvement_reason=None,
+        force_major_overhaul=False,
+        forced_major_overhaul_reason=None,
+        prefer_validation_redesign=False,
+        upgrade_improvement_mode=_upgrade_mode,
+    )
+
+    assert decision.implementation_audit_required is True
+    assert decision.force_major_overhaul is True
+    assert decision.next_iteration_policy["forced_improvement_mode"] == "implementation_audit"
+    assert decision.loop_signal_errors[0]["outcome_bucket"] == "implementation_anomaly"
 
 
 def test_record_iteration_repair_signal_knowledge_dispatches_errors_and_problems() -> None:

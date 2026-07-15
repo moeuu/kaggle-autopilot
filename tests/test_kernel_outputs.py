@@ -1046,6 +1046,20 @@ def test_find_output_file_prefers_newest_under_run_tree(tmp_path: Path) -> None:
     assert find_output_file(root, "metrics.json") == newer
 
 
+def test_find_output_file_ignores_generated_runtime_site(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    runtime_dir = output_dir / ".model_runtime_site" / "package"
+    runtime_dir.mkdir(parents=True)
+    expected = output_dir / "metrics.json"
+    decoy = runtime_dir / "metrics.json"
+    expected.write_text('{"metric":"rmse","offline_value":0.1}\n', encoding="utf-8")
+    decoy.write_text('{"package_metadata":true}\n', encoding="utf-8")
+    os.utime(expected, (1000, 1000))
+    os.utime(decoy, (2000, 2000))
+
+    assert find_output_file(output_dir, "metrics.json") == expected
+
+
 def test_find_submission_file_uses_newest_fold_intermediate_when_final_missing(tmp_path: Path) -> None:
     output_dir = tmp_path / "output"
     output_dir.mkdir()

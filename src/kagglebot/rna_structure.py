@@ -82,10 +82,17 @@ def find_rna_structure_files(data_dir: Path) -> RnaStructureFiles | None:
     if not all((train_sequences_path, test_sequences_path, train_labels_path, sample_submission_path)):
         return None
 
-    train_head = _read_table_head(train_sequences_path)
-    test_head = _read_table_head(test_sequences_path)
-    label_head = _read_table_head(train_labels_path)
-    sample_head = _read_table_head(sample_submission_path)
+    # RNA detection is a best-effort classifier that runs for every dataset.
+    # Non-tabular competitions (for example ARC) can use JSON objects whose
+    # values have different lengths. Those are valid competition artifacts but
+    # cannot be represented by a DataFrame, so treat them as "not RNA" instead
+    # of aborting bootstrap before the competition-specific path can run.
+    train_head = _try_read_table_head(train_sequences_path)
+    test_head = _try_read_table_head(test_sequences_path)
+    label_head = _try_read_table_head(train_labels_path)
+    sample_head = _try_read_table_head(sample_submission_path)
+    if any(frame is None for frame in (train_head, test_head, label_head, sample_head)):
+        return None
 
     if not _looks_like_sequence_table(train_head):
         return None
@@ -352,6 +359,13 @@ def _normalize_coordinate_row(values: np.ndarray | list[float], *, coordinate_co
 
 def _read_table_head(path: Path) -> pd.DataFrame:
     return read_table(path, nrows=5)
+
+
+def _try_read_table_head(path: Path) -> pd.DataFrame | None:
+    try:
+        return _read_table_head(path)
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
 
 
 def _read_table(path: Path) -> pd.DataFrame:

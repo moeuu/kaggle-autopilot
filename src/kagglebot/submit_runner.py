@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -19,6 +19,7 @@ from kagglebot.exceptions import (
     SubmissionRateLimitError,
     SubmissionValidationError,
 )
+from kagglebot.json_utils import load_json_object
 from kagglebot.submission_format import load_submission_format_hint
 from kagglebot.submission_output_naming import (
     all_submission_output_suffixes,
@@ -29,6 +30,10 @@ from kagglebot.submission_sample_discovery import (
     TABULAR_INPUT_SUFFIXES,
     find_usable_sample_submissions,
     tabular_suffix,
+)
+from kagglebot.submission_semantics import (
+    discover_submission_metrics_path,
+    validate_autopilot_submission_semantics,
 )
 
 _EXPECTED_NOTEBOOK_OUTPUT_SUFFIXES = all_submission_output_suffixes()
@@ -86,6 +91,9 @@ class SubmitRunnerDependencies:
     resolve_kaggle_username: Callable[..., str]
     run_submit_kernel: Callable[..., object]
     run_kaggle_submit_kernel: Callable[..., object]
+    review_code_submission: Callable[..., object]
+    recheck_code_submission_guard: Callable[..., object]
+    record_code_submission_execution: Callable[..., object]
     copy_submission_artifact_to_iteration_dir: Callable[..., object]
     classify_submit_error: Callable[..., dict[str, object]]
     should_retry_ambiguous_notebook_submit_error: Callable[..., bool]
@@ -191,7 +199,14 @@ def attempt_submit_for_run(
         submitted_at=submitted_at,
         source_submission_path=submission_path,
         input_submission_path=input_submission_path,
-        validate_and_prepare=submission_service.validate_and_prepare_submission,
+        validate_and_prepare=lambda path: _validate_and_prepare_autopilot_submission(
+            submission_service=submission_service,
+            submission_path=path,
+            source_submission_path=input_submission_path,
+            run_dir=run_dir,
+            sample_submission_path=config.paths.sample_submission_path,
+            data_dir=config.paths.data_dir,
+        ),
         validation_error_types=(SubmissionValidationError,),
         validation_exit_code=SubmissionValidationError.exit_code,
         code_fingerprint=submit_code_fingerprint,
@@ -236,11 +251,22 @@ def attempt_submit_for_run(
         raise deps.build_error("Submit preflight did not produce submit stage state.")
     code_competition = preflight_context.code_competition
     seen_fingerprints = preflight_context.seen_fingerprints
+    if (
+        code_competition
+        and submit_stage_state.notebook_submit_required
+        and str(submit_stage_state.submission_artifact_mode or "").strip().lower() == "inference"
+    ):
+        # "inference" is the legacy name for a code competition whose real
+        # artifact is produced by the live gateway. Keep that distinction in
+        # submit records so a local diagnostic input is never described as the
+        # submitted artifact.
+        submit_stage_state = replace(submit_stage_state, submission_artifact_mode="gateway")
 
     notebook_submitter = _build_notebook_submit_runner(
         config=config,
         run_id=run_id,
         deps=deps,
+        submission_path=prepared_submission_path,
     )
 
     submit_attempt_loop_result = _submit_attempt_loop.run_submit_stage_attempts_until_success_or_abort(
@@ -273,7 +299,11 @@ def attempt_submit_for_run(
         submit_attempt_recorder=submit_attempt_recorder,
         submit_retry_recorder=submit_retry_recorder,
         submission_cli_error_types=(SubmissionCliError,),
-        local_guardrail_error_types=(DuplicateSubmissionError, SubmissionRateLimitError),
+        local_guardrail_error_types=(
+            DuplicateSubmissionError,
+            SubmissionRateLimitError,
+            SubmissionValidationError,
+        ),
         kaggle_cli_error_types=(KaggleCliError,),
         classify_submit_error=deps.classify_submit_error,
         should_use_notebook_fallback=deps.should_use_notebook_submit_fallback,
@@ -338,9 +368,45 @@ def _resolve_fallback_sample_submission_path(paths: SubmitRunnerPaths) -> Path:
     return paths.data_dir / "sample_submission.csv"
 
 
-def _build_notebook_submit_runner(*, config: SubmitRunnerConfig, run_id: str, deps: SubmitRunnerDependencies):
+def _validate_and_prepare_autopilot_submission(
+    *,
+    submission_service: object,
+    submission_path: Path,
+    source_submission_path: Path,
+    run_dir: Path,
+    sample_submission_path: Path,
+    data_dir: Path,
+) -> Path:
+    """Apply structural and semantic validation before file/wrapper submission.
+
+    Inference-mode Code submissions skip this local artifact hook and apply the
+    same semantic checks to the completed remote runtime output during review.
+    """
+    prepared_path = submission_service.validate_and_prepare_submission(submission_path)
+    metrics_path = discover_submission_metrics_path(
+        submission_path=source_submission_path,
+        run_dir=run_dir,
+    )
+    validate_autopilot_submission_semantics(
+        submission_path=prepared_path,
+        sample_submission_path=sample_submission_path,
+        data_dir=data_dir,
+        metrics_path=metrics_path,
+        report_path=run_dir / "submission_semantic_preflight.json",
+    )
+    return prepared_path
+
+
+def _build_notebook_submit_runner(
+    *,
+    config: SubmitRunnerConfig,
+    run_id: str,
+    deps: SubmitRunnerDependencies,
+    submission_path: Path | None = None,
+):
     from kagglebot import submit_notebook as _submit_notebook
 
+    constraints = deps.load_competition_rule_constraints(config.paths)
     return _submit_notebook.build_notebook_submit_runner_for_run(
         slug=config.slug,
         run_id=run_id,
@@ -355,23 +421,81 @@ def _build_notebook_submit_runner(*, config: SubmitRunnerConfig, run_id: str, de
         resolve_kaggle_username=deps.resolve_kaggle_username,
         run_submit_kernel=deps.run_submit_kernel,
         run_kaggle_submit_kernel=deps.run_kaggle_submit_kernel,
+        review_code_submission=deps.review_code_submission,
+        recheck_code_submission_guard=lambda **kwargs: deps.recheck_code_submission_guard(
+            **kwargs,
+            submission_ledger_path=config.paths.submission_ledger_path,
+            submission_limit_per_day=getattr(constraints, "submission_limit_per_day", None),
+            fetch_submission_rows=lambda slug: deps.list_competition_submissions(slug, dry_run=False),
+            force_submit=config.force_submit,
+        ),
+        record_code_submission_execution=lambda **kwargs: deps.record_code_submission_execution(
+            **kwargs,
+            submission_ledger_path=config.paths.submission_ledger_path,
+            iteration_state_path=(
+                config.paths.run_dir(run_id) / f"iter-{int(kwargs.get('iteration') or 0)}" / "iteration_state.json"
+            ),
+        ),
         copy_submission_artifact_to_iteration_dir=deps.copy_submission_artifact_to_iteration_dir,
         classify_submit_error=deps.classify_submit_error,
         should_retry_ambiguous=deps.should_retry_ambiguous_notebook_submit_error,
         sleep=deps.sleep,
         on_message=deps.on_message,
-        expected_output_file=_expected_notebook_submit_output_file(config.paths),
+        expected_output_file=_expected_notebook_submit_output_file(
+            config.paths,
+            code_competition=deps.infer_code_competition_from_paths(config.paths),
+            submission_path=submission_path,
+        ),
     )
 
 
-def _expected_notebook_submit_output_file(paths: SubmitRunnerPaths) -> str | None:
+def _expected_notebook_submit_output_file(
+    paths: SubmitRunnerPaths,
+    *,
+    code_competition: bool = False,
+    submission_path: Path | None = None,
+) -> str | None:
     format_expected = _expected_notebook_submit_output_file_from_format(paths)
     if format_expected is not None:
         return format_expected
+    if code_competition:
+        history_expected = _expected_code_output_file_from_submission_history(paths)
+        if history_expected is not None:
+            return history_expected
+        submission_name = Path(submission_path).name if submission_path is not None else ""
+        lowered_submission_name = submission_name.lower()
+        if submission_name and any(
+            lowered_submission_name.endswith(suffix) for suffix in _EXPECTED_NOTEBOOK_OUTPUT_SUFFIXES
+        ):
+            return submission_name
     sample_path = _resolve_fallback_sample_submission_path(paths)
     suffix = tabular_suffix(sample_path)
     if suffix in _EXPECTED_NOTEBOOK_SAMPLE_OUTPUT_SUFFIXES:
         return f"submission{suffix}"
+    return None
+
+
+def _expected_code_output_file_from_submission_history(paths: SubmitRunnerPaths) -> str | None:
+    context_dir = getattr(paths, "context_dir", None)
+    if context_dir is None:
+        return None
+    payload = load_json_object(Path(context_dir) / "submission_history.json")
+    if payload is None:
+        return None
+    records: list[object] = [payload.get("latest"), payload.get("best")]
+    recent = payload.get("recent")
+    if isinstance(recent, list):
+        records.extend(recent)
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        label = str(record.get("label") or "").strip()
+        lowered = label.lower()
+        if not label or "/" in label or "\\" in label:
+            continue
+        if not any(lowered.endswith(suffix) for suffix in _EXPECTED_NOTEBOOK_OUTPUT_SUFFIXES):
+            continue
+        return label
     return None
 
 

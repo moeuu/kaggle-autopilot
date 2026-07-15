@@ -31,10 +31,18 @@ Before submission, autopilot applies:
 - bounded Kaggle submit CLI timeout (`KAGGLEBOT_SUBMIT_TIMEOUT_SEC`, default 300s)
 - repeated error fingerprint abort on submit failures
 
+For Code Competitions, the final send path is deliberately split into three stages:
+
+1. Codex reviews the completed Notebook source, model/reference configuration, exact output contract, metrics, and runtime logs. The decision is bound to hashes of the reviewed evidence and must explicitly approve every check.
+2. A deterministic guard re-hashes that evidence and rechecks the expected filename, known daily/rolling quota, exact Notebook/version/output duplicate identity, and local ledger. Restored scores with zero current examples and no full model-backed runtime evidence, fallback-only predictions, repeated runtime exceptions, and dependency/cache trees in Notebook Output are hard failures regardless of the Codex answer.
+3. The guarded executor invokes the Kaggle API once. On API success it immediately records the exact kernel/version/output identity in the ledger before outcome polling.
+
+When the rules do not expose a numeric daily limit, autopilot does not invent a one-submission-per-day restriction. If a numeric limit is known, Kaggle submission history is fetched again immediately before execution and failure to verify the quota fails closed.
+
 ## Current CLI
 
 ```bash
-uv run kagglebot autopilot <competition> --compute local_gpu
+uv run kagglebot --force autopilot <competition> --compute local_gpu
 ```
 
 Useful options:

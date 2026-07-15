@@ -774,6 +774,55 @@ def test_build_prediction_distribution_quality_signal_blocks_with_candidate_mism
     assert signal["block_submit"] is True
 
 
+def test_build_prediction_distribution_quality_signal_blocks_low_confidence_explosion() -> None:
+    payload = {
+        "selected_pipeline": "low_threshold",
+        "pipelines": [
+            {
+                "name": "reference",
+                "prediction_diagnostics": {
+                    "avg_detections_per_image": 1.2,
+                    "mean_confidence": 0.09,
+                },
+            },
+            {
+                "name": "low_threshold",
+                "prediction_diagnostics": {
+                    "avg_detections_per_image": 11.3,
+                    "mean_confidence": 0.049,
+                },
+            },
+            {
+                "name": "conservative",
+                "prediction_diagnostics": {
+                    "avg_detections_per_image": 0.4,
+                    "mean_confidence": 0.39,
+                },
+            },
+            {
+                "name": "balanced",
+                "prediction_diagnostics": {
+                    "avg_detections_per_image": 1.0,
+                    "mean_confidence": 0.21,
+                },
+            },
+        ],
+    }
+
+    signal = build_prediction_distribution_quality_signal(
+        payload=payload,
+        candidate_selection_mismatch=None,
+    )
+
+    assert signal["detected"] is True
+    assert signal["reasons"] == ["low_confidence_prediction_explosion"]
+    assert signal["warnings"] == [
+        "prediction_distribution_explosion="
+        "selected=low_threshold,selected_mean=11.3,median_mean=1.1,mean_confidence=0.049"
+    ]
+    assert signal["block_submit"] is True
+
+
 def test_extract_competition_faithfulness_prefers_metric_name_over_numeric_metric() -> None:
     faithfulness = extract_competition_faithfulness(
         evaluation_metric="rmse",

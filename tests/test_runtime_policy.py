@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from kagglebot.runtime_policy import (
+    DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN,
     is_heavy_deep_learning_modality,
     is_local_gpu_compute,
     local_gpu_time_budget_limit_min,
@@ -49,4 +50,4 @@ def test_local_gpu_time_budget_limit_min_parses_env_with_floor() -> None:
     assert local_gpu_time_budget_limit_min(getenv=lambda _key: "120") == 120
     assert local_gpu_time_budget_limit_min(getenv=lambda _key: "0") is None
     assert local_gpu_time_budget_limit_min(getenv=lambda _key: "bad") is None
-    assert local_gpu_time_budget_limit_min(getenv=lambda _key: None) is None
+    assert local_gpu_time_budget_limit_min(getenv=lambda _key: None) == DEFAULT_LOCAL_GPU_TIME_BUDGET_MIN

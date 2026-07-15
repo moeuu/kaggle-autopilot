@@ -137,7 +137,7 @@ def bootstrap(
 ) -> None:
     cfg = ctx.obj
     slug = parse_competition_slug(competition)
-    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir)
+    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir, repo_root=cfg.workdir)
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
 
     meta_path = bootstrap_competition(
@@ -164,7 +164,7 @@ def implement(
 ) -> None:
     cfg = ctx.obj
     slug = parse_competition_slug(competition)
-    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir)
+    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir, repo_root=cfg.workdir)
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
     bootstrap_competition(
         slug=slug,
@@ -226,18 +226,18 @@ def train(
     kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username for kernels."),
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel slug override."),
     internet: str = typer.Option("off", "--internet", help="Kernel internet: auto|off|on."),
-    time_budget_min: int | None = typer.Option(None, "--time-budget-min", help="Time budget in minutes."),
+    time_budget_min: int | None = typer.Option(1440, "--time-budget-min", help="Time budget in minutes."),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     hardware_profile: str | None = typer.Option(
         "auto",
         "--hardware-profile",
-        help="Runtime profile for kernel env: auto, rtx3060, rtx5090, kaggle_p100, etc.",
+        help="Runtime profile for kernel env: auto, rtx3060, rtx5090, kaggle_p100, kaggle_rtx_pro_6000, etc.",
     ),
     strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
 ) -> None:
     cfg = ctx.obj
     slug = parse_competition_slug(competition)
-    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir)
+    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir, repo_root=cfg.workdir)
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
     bootstrap_competition(
         slug=slug,
@@ -364,7 +364,7 @@ def submit(
 ) -> None:
     cfg = ctx.obj
     slug = parse_competition_slug(competition)
-    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir)
+    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir, repo_root=cfg.workdir)
     if not file.exists():
         raise typer.BadParameter(f"Submission file not found: {file}")
 
@@ -426,7 +426,7 @@ def autopilot(
     kaggle_username: str | None = typer.Option(None, "--kaggle-username", help="Kaggle username."),
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
     internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
-    time_budget_min: int | None = typer.Option(None, "--time-budget-min", help="Time budget in minutes."),
+    time_budget_min: int | None = typer.Option(1440, "--time-budget-min", help="Time budget in minutes."),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     verify_cmd: str = typer.Option("uv run pytest -q", "--verify-cmd", help="Verification command."),
     message: str | None = typer.Option(None, "-m", "--message", help="Submission message override."),
@@ -484,7 +484,7 @@ def autopilot(
     hardware_profile: str | None = typer.Option(
         "auto",
         "--hardware-profile",
-        help="Runtime planning profile: auto, rtx3060, rtx5090, kaggle_p100, kaggle_t4x2, etc.",
+        help="Runtime planning profile: auto, rtx3060, rtx5090, kaggle_p100, kaggle_rtx_pro_6000, etc.",
     ),
     strict_accelerator: bool = typer.Option(False, "--strict-accelerator", help="Fail if GPU unavailable."),
     auto_eval_spec: bool = typer.Option(
@@ -496,8 +496,14 @@ def autopilot(
     resume_latest: bool = typer.Option(False, "--resume-latest", help="Resume the most recent run."),
 ) -> None:
     cfg = ctx.obj
+    if not cfg.force and not cfg.dry_run:
+        raise typer.BadParameter(
+            "Refusing to run autopilot downloads, remote kernels, or submissions without --force. "
+            "Use --dry-run for a side-effect-free preview.",
+            param_hint="--force",
+        )
     slug = parse_competition_slug(competition)
-    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir)
+    paths = CompetitionPaths(slug=slug, artifacts_dir=cfg.artifacts_dir, repo_root=cfg.workdir)
     knowledge_paths = KnowledgePaths(workdir=cfg.workdir)
 
     resolved_accelerator = _resolve_accelerator(compute.value, accelerator)
@@ -688,9 +694,9 @@ def watch(
     kernel_name: str | None = typer.Option(None, "--kernel-name", help="Kernel name override."),
     internet: str | None = typer.Option("on", "--internet", help="auto|off|on"),
     time_budget_min: int | None = typer.Option(
-        None,
+        1440,
         "--time-budget-min",
-        help="Per-kernel time budget in minutes. Omit for unlimited local GPU runtime.",
+        help="Per-kernel time budget in minutes (default: 1440 for local GPU).",
     ),
     seed: int | None = typer.Option(None, "--seed", help="Random seed."),
     score_source: str | None = typer.Option(None, "--score-source", help="holdout|cv"),
@@ -748,7 +754,7 @@ def watch(
     hardware_profile: str | None = typer.Option(
         "auto",
         "--hardware-profile",
-        help="Runtime planning profile: auto, rtx3060, rtx5090, kaggle_p100, kaggle_t4x2, etc.",
+        help="Runtime planning profile: auto, rtx3060, rtx5090, kaggle_p100, kaggle_rtx_pro_6000, etc.",
     ),
 ) -> None:
     cfg = ctx.obj
@@ -888,7 +894,7 @@ def watch_kaggle_gpu_sidecar(
     hardware_profile: str | None = typer.Option(
         "kaggle_p100",
         "--hardware-profile",
-        help="Runtime planning profile: kaggle_p100, kaggle_t4, kaggle_t4x2, rtx3060, rtx5090, etc.",
+        help="Runtime planning profile: kaggle_p100, kaggle_t4, kaggle_rtx_pro_6000, rtx3060, rtx5090, etc.",
     ),
 ) -> None:
     cfg = ctx.obj
@@ -965,7 +971,7 @@ def watch_kaggle_gpu_sidecar(
 @app.command("self-improve")
 def self_improve(
     ctx: typer.Context,
-    max_runs: int = typer.Option(80, "--max-runs", min=1, help="Recent run count to analyze."),
+    max_runs: int = typer.Option(500, "--max-runs", min=1, help="Historical run count to analyze."),
     interval_hours: float = typer.Option(
         0.0,
         "--interval-hours",

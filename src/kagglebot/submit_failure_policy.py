@@ -171,7 +171,7 @@ def submit_error_text_indicates_file_issue(text: str) -> bool:
 def submit_error_requires_file_fix(*, reason: object, error_kind: object, detail: str) -> bool:
     normalized_reason = str(reason or "").strip().lower()
     normalized_kind = str(error_kind or "").strip().lower()
-    if normalized_reason == "local_submission_validation_failed":
+    if normalized_reason in {"invalid_code_submission_output", "local_submission_validation_failed"}:
         return True
     if normalized_reason.startswith("submission_poll_status_") and submit_error_text_indicates_file_issue(detail):
         return True

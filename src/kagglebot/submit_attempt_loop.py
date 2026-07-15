@@ -104,6 +104,14 @@ def run_submit_stage_attempts_until_success_or_abort(
             submission_reference = submit_attempt_result.submission_reference
             submission_artifact_path = submit_attempt_result.submission_artifact_path
         except submission_cli_error_types as exc:
+            exception_submission_ref = str(getattr(exc, "submission_ref", "") or "").strip()
+            if exception_submission_ref:
+                submission_reference = exception_submission_ref
+            if hasattr(exc, "submission_artifact_path"):
+                exception_artifact_path = getattr(exc, "submission_artifact_path")
+                submission_artifact_path = (
+                    exception_artifact_path if isinstance(exception_artifact_path, Path) else None
+                )
             stdout = str(getattr(exc, "stdout", "") or "")
             stderr = str(getattr(exc, "stderr", "") or "")
             output = str(getattr(exc, "output", "") or "")

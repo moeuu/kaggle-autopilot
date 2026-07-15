@@ -12,30 +12,74 @@ def sanitize_kernel_slug(value: str) -> str:
     return cleaned[:50]
 
 
-def resolve_submit_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
+def resolve_submit_kernel_slug(
+    kernel_name: str | None,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    *,
+    machine_shape: str | None = None,
+) -> str:
+    shape_token = _machine_shape_slug_token(machine_shape)
     if kernel_name:
+        if not shape_token:
+            return sanitize_kernel_slug(kernel_name)
         return build_versioned_kernel_slug(
             prefix_parts=("submit", sanitize_kernel_slug(kernel_name)),
             run_id=run_id,
             iteration=iteration,
             fallback_prefix="submit",
+            variant=shape_token,
         )
     return build_versioned_kernel_slug(
         prefix_parts=("kagglebot", "submit", slug),
         run_id=run_id,
         iteration=iteration,
         fallback_prefix="kagglebot-submit",
+        variant=shape_token,
     )
 
 
-def resolve_kernel_slug(kernel_name: str | None, slug: str, run_id: str, iteration: int) -> str:
+def _machine_shape_slug_token(machine_shape: str | None) -> str:
+    value = str(machine_shape or "").strip()
+    if not value:
+        return ""
+    aliases = {
+        "NvidiaTeslaP100": "p100",
+        "NvidiaTeslaT4": "t4",
+        "NvidiaTeslaT4Highmem": "t4-highmem",
+        "NvidiaTeslaA100": "a100",
+        "NvidiaL4": "l4",
+        "NvidiaL4X1": "l4x1",
+        "NvidiaH100": "h100",
+        "NvidiaRtxPro6000": "rtx-pro-6000",
+    }
+    return aliases.get(value, sanitize_kernel_slug(value))
+
+
+def resolve_kernel_slug(
+    kernel_name: str | None,
+    slug: str,
+    run_id: str,
+    iteration: int,
+    *,
+    machine_shape: str | None = None,
+) -> str:
+    shape_token = _machine_shape_slug_token(machine_shape)
     if kernel_name:
-        return sanitize_kernel_slug(kernel_name)
+        return build_versioned_kernel_slug(
+            prefix_parts=(sanitize_kernel_slug(kernel_name),),
+            run_id=run_id,
+            iteration=iteration,
+            fallback_prefix="kagglebot",
+            variant=shape_token,
+        )
     return build_versioned_kernel_slug(
         prefix_parts=("kagglebot", slug),
         run_id=run_id,
         iteration=iteration,
         fallback_prefix="kagglebot",
+        variant=shape_token,
     )
 
 
@@ -45,8 +89,10 @@ def build_versioned_kernel_slug(
     run_id: str,
     iteration: int,
     fallback_prefix: str,
+    variant: str = "",
 ) -> str:
-    suffix = f"{run_id[-6:]}-i{iteration}"
+    suffix_parts = [part for part in (sanitize_kernel_slug(variant), run_id[-6:], f"i{iteration}") if part]
+    suffix = "-".join(suffix_parts)
     prefix = "-".join(part for part in prefix_parts if part)
     max_len = 50
     allowed_prefix_len = max_len - len(suffix) - 1
@@ -64,7 +110,7 @@ def metadata_source_lists(
 ) -> tuple[list[str], list[str], list[str]]:
     source_config = source_config or KernelSourceConfig()
     dataset_sources = list(source_config.dataset_sources)
-    model_sources = list(source_config.model_sources)
+    model_sources = list(dict.fromkeys((*source_config.model_sources, *source_config.required_model_sources)))
     if source_config.has_explicit_kernel_sources():
         kernel_sources = list(source_config.kernel_sources)
     else:

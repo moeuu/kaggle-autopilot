@@ -49,6 +49,12 @@ def validate_inference_submit_kernel(kernel_dir: Path) -> None:
         )
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
     lowered = text.lower()
+    if (kernel_dir / "plan.json").exists() and "plan_path" in lowered:
+        if "# kagglebot:staged_plan_payload_fallback" not in text:
+            raise KernelFailedError(
+                "Invalid notebook submit artifact for code competition inference mode: "
+                "staged plan is not embedded for the relocated Kaggle runtime."
+            )
     suspicious_fragments = (
         ("submit_only metrics payload", '"kind": "submit_only"'),
         ("embedded submission wrapper payload", "submission_gzip_b64"),
@@ -79,6 +85,19 @@ def validate_inference_submit_kernel(kernel_dir: Path) -> None:
             raise KernelFailedError(
                 f"Invalid notebook submit artifact for code competition inference mode: found {label} in staged kernel."
             )
+    persisted_cache_patterns = (
+        re.compile(r"/kaggle/working/[^\n'\"]*(?:cache|site-packages|wheelhouse)", re.IGNORECASE),
+        re.compile(
+            r"\b(?:KAGGLE_WORKING_DIR|WORKING_DIR)\s*/\s*['\"][^'\"]*(?:cache|site-packages|wheelhouse)[^'\"]*['\"]",
+            re.IGNORECASE,
+        ),
+    )
+    if any(pattern.search(text) for pattern in persisted_cache_patterns):
+        raise KernelFailedError(
+            "Invalid notebook submit artifact for code competition inference mode: "
+            "dependency caches must use /tmp, not /kaggle/working, because persisted cache trees can break rerun "
+            "submission."
+        )
     readonly_root_patterns = {
         var_name: re.compile(rf"\b{var_name}\s*=.*?/kaggle/src\b", re.IGNORECASE)
         for var_name in ("kernel_dir", "artifact_dir", "artifact_root")

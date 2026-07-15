@@ -320,6 +320,92 @@ def test_evaluation_advisor_refreshes_stale_frozen_spec(tmp_path: Path) -> None:
     assert spec["metric_name"] == "auc"
 
 
+def test_evaluation_advisor_refreshes_structurally_invalid_frozen_spec(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "rmse", "task": "regression", "modality": "tabular"}),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Evaluation metric is RMSE.\n", encoding="utf-8")
+    paths.context_dir.joinpath("evaluation_spec.json").write_text("{}\n", encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+
+    assert source == "fallback"
+    assert spec["metric_name"] == "rmse"
+    assert spec["direction"] == "minimize"
+
+
+def test_evaluation_advisor_refreshes_frozen_spec_with_wrong_metric_direction(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "auc", "task": "classification", "modality": "tabular"}),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text("Evaluation metric is AUC.\n", encoding="utf-8")
+    invalid = _valid_payload()["evaluation_spec"] | {"direction": "minimize"}
+    paths.context_dir.joinpath("evaluation_spec.json").write_text(json.dumps(invalid), encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+
+    assert source == "fallback"
+    assert spec["metric_name"] == "auc"
+    assert spec["direction"] == "maximize"
+
+
+def test_evaluation_advisor_refreshes_frozen_writeup_mode_when_code_submission_contract_conflicts(
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"metric": "accuracy", "task": "classification", "modality": "video"}, indent=2),
+        encoding="utf-8",
+    )
+    paths.rules_md_path.write_text(
+        "For hackathons, a submission may be judged by a panel using a rubric.\n",
+        encoding="utf-8",
+    )
+    paths.overview_md_path.write_text(
+        "Your submission CSV must contain one row per predicted track.\n"
+        "Submissions to this competition must be made through Notebooks.\n"
+        "The submission file must be named submission.csv.\n"
+        "See the Code Competition FAQ.\n",
+        encoding="utf-8",
+    )
+    stale = _valid_payload()["evaluation_spec"] | {
+        "deliverable_mode": "writeup",
+        "submit_mode": "file",
+        "metric_name": "accuracy",
+    }
+    paths.context_dir.joinpath("evaluation_spec.json").write_text(json.dumps(stale, indent=2), encoding="utf-8")
+
+    advisor = EvaluationAdvisor(
+        paths=paths,
+        slug="demo",
+        dry_run=False,
+        force=False,
+        search_capability_check=lambda: False,
+    )
+    spec, source = advisor.ensure_spec()
+
+    assert source == "fallback"
+    assert spec["deliverable_mode"] == "leaderboard"
+    assert spec["submit_mode"] == "notebook"
+
+
 def test_evaluation_advisor_preserves_frozen_spec_without_force(tmp_path: Path) -> None:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.context_dir.mkdir(parents=True, exist_ok=True)

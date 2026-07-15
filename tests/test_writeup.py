@@ -55,6 +55,21 @@ def test_infer_deliverable_mode_ignores_negative_writeup_mentions() -> None:
     assert mode == "leaderboard"
 
 
+def test_infer_deliverable_mode_prefers_explicit_code_submission_contract_over_rules_boilerplate() -> None:
+    mode = infer_deliverable_mode(
+        "For hackathons, each team may submit one submission only.\n"
+        "Each submission will be ranked by the evaluation metric or evaluation rubric "
+        "in the case of hackathon competitions.\n"
+        "A panel may require documentation from a winner.\n",
+        "Your submission CSV must contain one row per predicted track.\n"
+        "Submissions to this competition must be made through Notebooks.\n"
+        "The submission file must be named submission.csv.\n"
+        "See the Code Competition FAQ.\n",
+    )
+
+    assert mode == "leaderboard"
+
+
 def test_infer_deliverable_mode_from_paths_prefers_csv_evidence_over_negative_writeup_mentions(
     tmp_path: Path,
 ) -> None:

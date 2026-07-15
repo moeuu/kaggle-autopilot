@@ -26,6 +26,40 @@ def test_submission_ledger_duplicate_detection(tmp_path):
         ensure_not_duplicate_submission(ledger, slug="demo", message="second", submission_path=str(submission))
 
 
+def test_submission_ledger_uses_notebook_identity_instead_of_commit_marker_hash(tmp_path):
+    submission = tmp_path / "submission.parquet"
+    submission.write_bytes(b"same commit marker")
+    ledger = SubmissionLedger(tmp_path / "ledger.jsonl")
+
+    first_identity = "kernel:user/first@1"
+    second_identity = "kernel:user/second@1"
+    ledger.record(
+        slug="demo-code-competition",
+        message="first notebook",
+        submission_path=submission,
+        run_id="run-1",
+        submission_kind="notebook",
+        submission_identity=first_identity,
+        submission_ref="12345",
+    )
+
+    assert ledger.is_duplicate(
+        slug="demo-code-competition",
+        message="same notebook again",
+        submission_path=submission,
+        submission_identity=first_identity,
+    )
+    assert not ledger.is_duplicate(
+        slug="demo-code-competition",
+        message="different notebook with the same marker",
+        submission_path=submission,
+        submission_identity=second_identity,
+    )
+    row = json.loads(ledger.ledger_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["submission_identity"] == first_identity
+    assert row["submission_ref"] == "12345"
+
+
 def test_submission_ledger_ignores_malformed_lines(tmp_path):
     submission = tmp_path / "submission.csv"
     submission.write_text("id,target\n1,0.1\n", encoding="utf-8")

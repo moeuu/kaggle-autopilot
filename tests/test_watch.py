@@ -93,6 +93,158 @@ def _config(tmp_path: Path, **overrides: object) -> WatchConfig:
     return base.__class__(**{**base.__dict__, **overrides})
 
 
+def test_published_self_improvement_restarts_watch_process() -> None:
+    calls: list[tuple[str, list[str]]] = []
+
+    restarted = supervisor._restart_after_published_self_improvement(
+        {
+            "status": "written",
+            "codex_improvement": {
+                "status": "completed",
+                "publish": {"status": "pushed", "commit": "abc123"},
+            },
+        },
+        dry_run=False,
+        execv_func=lambda executable, argv: calls.append((executable, argv)),
+    )
+
+    assert restarted is True
+    assert len(calls) == 1
+    assert calls[0][1][0] == calls[0][0]
+
+
+def test_unpublished_self_improvement_does_not_restart_watch_process() -> None:
+    restarted = supervisor._restart_after_published_self_improvement(
+        {
+            "status": "written",
+            "codex_improvement": {
+                "status": "completed",
+                "publish": {"status": "disabled"},
+            },
+        },
+        dry_run=False,
+        execv_func=lambda *_args: (_ for _ in ()).throw(AssertionError("must not restart")),
+    )
+
+    assert restarted is False
+
+
+def test_published_self_improvement_schedules_one_preflight_retry(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    result = {
+        "status": "written",
+        "codex_improvement": {
+            "status": "completed",
+            "publish": {"status": "pushed", "commit": "abc123"},
+        },
+        "latest_watch_incident": {
+            "slug": "demo",
+            "run_id": "run-preflight",
+            "run_directory_exists": False,
+            "phase": "preparing_data",
+            "fingerprint": "failure-123",
+            "cause_tags": ["orchestration_preflight_failure"],
+        },
+    }
+
+    scheduled = supervisor._schedule_preflight_retry_after_published_self_improvement(  # noqa: SLF001
+        config,
+        result,
+    )
+
+    assert scheduled is True
+    state = supervisor.load_watch_state(config.state_path)
+    assert state["active_slug"] == "demo"
+    assert state["active_run_id"] == "run-preflight"
+    assert state["reason"] == "verified_self_improvement_preflight_retry"
+    ledger = WatchLedger(config.ledger_path).records()
+    assert ledger[-1]["event"] == "self_improvement_retry_scheduled"
+    assert ledger[-1]["incident_fingerprint"] == "failure-123"
+
+
+def test_published_self_improvement_schedules_fresh_run_for_leaderboard_anomaly(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(supervisor, "new_run_id", lambda: "run-repaired")
+    result = {
+        "status": "written",
+        "codex_improvement": {
+            "status": "completed",
+            "publish": {"status": "pushed", "commit": "abc123"},
+        },
+        "latest_leaderboard_anomaly": {
+            "slug": "demo",
+            "run_id": "run-bottom",
+            "fingerprint": "bottom-signals-123",
+            "severity": "critical",
+        },
+    }
+
+    scheduled = supervisor._schedule_preflight_retry_after_published_self_improvement(  # noqa: SLF001
+        config,
+        result,
+    )
+
+    assert scheduled is True
+    state = supervisor.load_watch_state(config.state_path)
+    assert state["active_slug"] == "demo"
+    assert state["active_run_id"] == "run-repaired"
+    assert state["original_run_id"] == "run-bottom"
+    assert state["reason"] == "verified_self_improvement_leaderboard_anomaly_retry"
+    ledger = WatchLedger(config.ledger_path).records()
+    assert ledger[-1]["reason"] == "verified_leaderboard_anomaly_repair"
+    assert ledger[-1]["anomaly_fingerprint"] == "bottom-signals-123"
+
+
+def test_watch_failure_incident_preserves_preflight_traceback(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setenv("KAGGLE_KEY", "supersecretvalue")
+    supervisor.write_watch_state(
+        config.state_path,
+        {
+            "active_slug": "demo",
+            "active_run_id": "run-preflight",
+            "last_status": "running",
+            "phase": "preparing_data",
+        },
+    )
+    try:
+        raise ValueError("All arrays must be of the same length KAGGLE_KEY=supersecretvalue")
+    except ValueError as exc:
+        incident_path = supervisor._write_watch_failure_incident(  # noqa: SLF001
+            config=config,
+            slug="demo",
+            run_id="run-preflight",
+            reason="ValueError",
+            error=exc,
+        )
+
+    payload = json.loads(incident_path.read_text(encoding="utf-8"))
+    assert payload["phase"] == "preparing_data"
+    assert payload["run_directory_exists"] is False
+    assert "ValueError: All arrays must be of the same length" in payload["traceback"]
+    assert "supersecretvalue" not in json.dumps(payload)
+    assert "KAGGLE_KEY=<redacted>" in payload["traceback"]
+    assert payload["repo_root"] == str(tmp_path)
+
+
+def test_watch_self_improvement_uses_resolved_repository_root(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Path] = {}
+
+    def fake_run_self_improvement_cycle(config):
+        captured["workdir"] = config.knowledge_paths.workdir
+        return {"status": "skipped_not_due"}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(supervisor, "run_self_improvement_cycle", fake_run_self_improvement_cycle)
+
+    supervisor.run_watch_self_improvement(_config(tmp_path), force=True)
+
+    assert captured["workdir"] == Path(supervisor.__file__).resolve().parents[2]
+
+
 def test_watch_optional_int_rejects_bool_and_fractional_values() -> None:
     assert supervisor._optional_int(True) is None  # noqa: SLF001
     assert supervisor._optional_int("3.5") is None  # noqa: SLF001
@@ -146,6 +298,57 @@ def test_prepare_competition_reuses_eval_spec_despite_global_force(monkeypatch, 
     assert advisor_kwargs["force"] is False
     assert phases == ["preparing_data", "oracle_evaluation_advisor"]
     assert phase_contexts == [("demo", "local_gpu"), ("demo", "local_gpu")]
+
+
+def test_prepare_competition_resume_reuses_existing_data_without_kaggle_download(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, auto_eval_spec=True, force=True)
+    candidate = _competition("demo")
+    paths = supervisor.CompetitionPaths(
+        slug="demo",
+        artifacts_dir=config.artifacts_dir,
+        repo_root=config.workdir,
+    )
+    paths.context_dir.mkdir(parents=True)
+    paths.data_dir.mkdir(parents=True)
+    knowledge_paths = supervisor.KnowledgePaths(workdir=tmp_path)
+    phases: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        supervisor,
+        "bootstrap_competition",
+        lambda **kwargs: pytest.fail("resume must not re-download existing competition data"),
+    )
+
+    class FakeAdvisor:
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["paths"] is paths
+
+        def ensure_spec(self):
+            return {"deliverable_mode": "leaderboard"}, "frozen"
+
+    monkeypatch.setattr(supervisor, "EvaluationAdvisor", FakeAdvisor)
+    monkeypatch.setattr(
+        supervisor,
+        "update_watch_phase",
+        lambda _context, _run_id, phase, **kwargs: phases.append((phase, kwargs.get("detail", ""))),
+    )
+
+    supervisor._prepare_competition(
+        config=config,
+        candidate=candidate,
+        paths=paths,
+        knowledge_paths=knowledge_paths,
+        run_id="run-1",
+        resume=True,
+    )
+
+    assert phases == [
+        ("preparing_data", "reusing existing competition data and context"),
+        ("oracle_evaluation_advisor", "resolving evaluation specification"),
+    ]
 
 
 def test_select_next_competition_filters_disabled_and_blocked(monkeypatch, tmp_path: Path) -> None:
@@ -892,13 +1095,19 @@ def test_run_watch_once_passes_improved_submit_policy(monkeypatch, tmp_path: Pat
         captured["submit_policy"] = config.submit_policy
         captured["submit"] = config.submit
         captured["force_submit"] = config.force_submit
+        captured["repo_root"] = config.paths.repo_root
 
     monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
 
     result = run_watch_once(_config(tmp_path))
 
     assert result.status == "finished"
-    assert captured == {"submit_policy": "improved", "submit": True, "force_submit": True}
+    assert captured == {
+        "submit_policy": "improved",
+        "submit": True,
+        "force_submit": True,
+        "repo_root": tmp_path,
+    }
 
 
 def test_run_watch_once_caps_iterations_to_plan_max(monkeypatch, tmp_path: Path) -> None:
@@ -1119,6 +1328,7 @@ def test_watch_cli_dry_run_once(monkeypatch, tmp_path: Path) -> None:
         captured["submit_policy"] = config.submit_policy
         captured["compute"] = config.compute
         captured["max_iterations"] = config.max_iterations
+        captured["time_budget_min"] = config.time_budget_min
         return type("Result", (), {"status": "dry_run", "slug": "demo", "run_id": "run-1"})()
 
     monkeypatch.setattr("kagglebot.cli.run_watch_once", fake_run_watch_once)
@@ -1137,7 +1347,12 @@ def test_watch_cli_dry_run_once(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert captured == {"submit_policy": "improved", "compute": "local_gpu", "max_iterations": 5}
+    assert captured == {
+        "submit_policy": "improved",
+        "compute": "local_gpu",
+        "max_iterations": 5,
+        "time_budget_min": 1440,
+    }
 
 
 def test_watch_kaggle_gpu_sidecar_cli_builds_lightweight_config(monkeypatch, tmp_path: Path) -> None:

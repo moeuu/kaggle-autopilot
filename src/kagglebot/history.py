@@ -45,7 +45,22 @@ class SubmissionLedger:
     def _record_timestamp(record: dict[str, object]) -> datetime | None:
         return parse_iso_datetime_utc(record.get("ts"))
 
-    def is_duplicate(self, *, slug: str, message: str, submission_path: Path) -> bool:
+    def is_duplicate(
+        self,
+        *,
+        slug: str,
+        message: str,
+        submission_path: Path,
+        submission_identity: str | None = None,
+    ) -> bool:
+        normalized_identity = str(submission_identity or "").strip()
+        if normalized_identity:
+            return any(
+                self._is_submit_event(rec)
+                and rec.get("slug") == slug
+                and rec.get("submission_identity") == normalized_identity
+                for rec in self._iter_records()
+            )
         fingerprint = submission_fingerprint(slug, message, submission_path)
         submission_sha = sha256_path(submission_path)
         for rec in self._iter_records():
@@ -73,6 +88,8 @@ class SubmissionLedger:
         out_of_band: bool = False,
         source_run_id: str | None = None,
         source_iteration: int | None = None,
+        submission_identity: str | None = None,
+        submission_ref: str | None = None,
     ) -> None:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         submission_sha = sha256_path(submission_path)
@@ -94,6 +111,8 @@ class SubmissionLedger:
             "out_of_band": out_of_band,
             "source_run_id": source_run_id,
             "source_iteration": source_iteration,
+            "submission_identity": str(submission_identity or "").strip() or None,
+            "submission_ref": str(submission_ref or "").strip() or None,
         }
         append_jsonl_record(self.ledger_path, record)
 

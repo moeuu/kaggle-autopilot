@@ -132,8 +132,17 @@ def normalize_code_reference_score_for_comparison(
     metric_name = canonical_metric(metric)
     current_value = float(current)
     reference_value = float(reference)
-    if metric_name in BOUNDED_CLASSIFICATION_METRICS and 0.0 <= current_value <= 1.0 and 1.0 < reference_value <= 100.0:
-        return reference_value / 100.0
+    bounded_metric = metric_name in BOUNDED_CLASSIFICATION_METRICS or any(
+        token in str(metric).strip().lower().replace("_", " ")
+        for token in ("auc", "accuracy", "f1", "precision", "recall", "average precision")
+    )
+    if bounded_metric and 0.0 <= current_value <= 1.0 and 1.0 < reference_value <= 10_000.0:
+        # Kaggle notebook titles often encode 0.948 as either "94.8" or
+        # "0948". Scale integer/percentage shorthands into the metric's
+        # bounded range instead of treating them as literal scores.
+        while reference_value > 1.0:
+            reference_value /= 10.0
+        return reference_value
     return reference_value
 
 

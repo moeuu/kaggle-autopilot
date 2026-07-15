@@ -691,6 +691,13 @@ def test_oracle_improvement_context_resolves_competition_root_and_attaches_runti
     run_path.write_text('{"status":"running"}\n', encoding="utf-8")
     (iter_dir / "metrics.json").write_text('{"offline_value":0.42}\n', encoding="utf-8")
     (iter_dir / "diagnostics.md").write_text("validation drift detected\n", encoding="utf-8")
+    (iter_dir / "iteration_evidence.json").write_text(
+        '{"transitions_observed":[{"hypothesis_outcome":"not_supported"}]}\n',
+        encoding="utf-8",
+    )
+    (iter_dir / "iteration_evidence.md").write_text("# Iteration Evidence\n", encoding="utf-8")
+    (iter_dir / "kernel_before_improvement.py").write_text("print('frozen kernel')\n", encoding="utf-8")
+    (iter_dir / "plan_before_improvement.json").write_text('{"model":"baseline"}\n', encoding="utf-8")
     (logs_dir / "kernel_stderr.txt").write_text("CUDA out of memory\n", encoding="utf-8")
     prompt_path = strategy_dir / "gpt_improvement_prompt.md"
     prompt_path.write_text("improve this run", encoding="utf-8")
@@ -705,9 +712,19 @@ def test_oracle_improvement_context_resolves_competition_root_and_attaches_runti
     assert strategy_runner._oracle_context_dir(prompt_path) == context_dir
     assert strategy_dir / "oracle_context_manifest.md" in plan.paths
     bundle = (strategy_dir / "oracle_canonical_context.md").read_text(encoding="utf-8")
-    for expected in (kernel_path, run_path, iter_dir / "metrics.json", iter_dir / "diagnostics.md"):
+    for expected in (
+        kernel_path,
+        run_path,
+        iter_dir / "metrics.json",
+        iter_dir / "diagnostics.md",
+        iter_dir / "iteration_evidence.json",
+        iter_dir / "iteration_evidence.md",
+        iter_dir / "kernel_before_improvement.py",
+        iter_dir / "plan_before_improvement.json",
+    ):
         assert str(expected) in bundle
     assert "CUDA out of memory" in bundle
+    assert "not_supported" in bundle
 
 
 def test_oracle_autofix_context_attaches_saved_error_and_current_kernel(tmp_path: Path) -> None:

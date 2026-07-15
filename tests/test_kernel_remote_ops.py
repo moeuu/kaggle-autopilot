@@ -82,10 +82,10 @@ def test_write_push_log_and_clear_stale_kernel_output(tmp_path: Path) -> None:
 
 
 def test_try_fetch_kernel_output_swallows_kaggle_cli_error(tmp_path: Path) -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, str | None]] = []
 
     def kernels_output(kernel_id: str, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-        calls.append(kernel_id)
+        calls.append((kernel_id, kwargs.get("file_pattern")))
         raise KaggleCliError("transient")
 
     try_fetch_kernel_output(
@@ -93,6 +93,7 @@ def test_try_fetch_kernel_output_swallows_kaggle_cli_error(tmp_path: Path) -> No
         output_dir=tmp_path,
         slug="demo",
         kernels_output_func=kernels_output,
+        file_pattern=r"\.log$",
     )
 
-    assert calls == ["user/kernel"]
+    assert calls == [("user/kernel", r"\.log$")]

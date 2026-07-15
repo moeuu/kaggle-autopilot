@@ -1433,8 +1433,17 @@ def kernels_init(kernel_dir: Path, *, dry_run: bool = False) -> str:
     return _run_kaggle(["kaggle", "kernels", "init", "-p", str(kernel_dir)], slug=None, dry_run=dry_run)
 
 
-def kernels_push(kernel_dir: Path, *, slug: str | None = None, dry_run: bool = False) -> str:
-    return _run_kaggle(["kaggle", "kernels", "push", "-p", str(kernel_dir)], slug, dry_run=dry_run)
+def kernels_push(
+    kernel_dir: Path,
+    *,
+    slug: str | None = None,
+    dry_run: bool = False,
+    accelerator: str | None = None,
+) -> str:
+    args = ["kaggle", "kernels", "push", "-p", str(kernel_dir)]
+    if accelerator:
+        args.extend(["--accelerator", accelerator])
+    return _run_kaggle(args, slug, dry_run=dry_run)
 
 
 def kernels_status(kernel_id: str, *, slug: str | None = None, dry_run: bool = False) -> str:
@@ -1449,13 +1458,27 @@ def kernels_output(
     dry_run: bool = False,
     force: bool = False,
     quiet: bool = False,
+    file_pattern: str | None = None,
+    page_size: int = 200,
 ) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
-    args = ["kaggle", "kernels", "output", kernel_id, "-p", str(output_dir)]
+    resolved_page_size = max(1, min(200, int(page_size)))
+    args = [
+        "kaggle",
+        "kernels",
+        "output",
+        kernel_id,
+        "-p",
+        str(output_dir),
+        "--page-size",
+        str(resolved_page_size),
+    ]
     if force:
         args.append("--force")
     if quiet:
         args.append("--quiet")
+    if file_pattern:
+        args.extend(["--file-pattern", file_pattern])
     return _run_kaggle(args, slug, dry_run=dry_run)
 
 
@@ -1489,6 +1512,19 @@ def download_dataset(
         args.append("--force")
     if quiet:
         args.append("--quiet")
+    return _run_kaggle(args, slug, dry_run=dry_run)
+
+
+def download_dataset_metadata(
+    dataset_ref: str,
+    dest_dir: Path,
+    *,
+    slug: str | None = None,
+    dry_run: bool = False,
+) -> str:
+    """Download Kaggle's authoritative dataset metadata beside staged files."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    args = ["kaggle", "datasets", "metadata", dataset_ref, "-p", str(dest_dir)]
     return _run_kaggle(args, slug, dry_run=dry_run)
 
 
@@ -1687,7 +1723,9 @@ def leaderboard_rank_for_score(
             "error": "Unable to parse score column from leaderboard CSV.",
         }
 
-    if direction == "minimize":
+    inferred_direction = _infer_leaderboard_direction(rows)
+    resolved_direction = inferred_direction or ("minimize" if direction == "minimize" else "maximize")
+    if resolved_direction == "minimize":
         better = sum(1 for value in scores if value < score)
     else:
         better = sum(1 for value in scores if value > score)
@@ -1698,9 +1736,35 @@ def leaderboard_rank_for_score(
         "rank": rank,
         "total_teams": total_teams,
         "rank_percentile": rank_percentile,
+        "direction": resolved_direction,
+        "direction_source": "leaderboard_rank_order" if inferred_direction is not None else "caller",
         "source": "kaggle competitions leaderboard --download",
         "scope": "public",
     }
+
+
+def _infer_leaderboard_direction(rows: list[dict[str, str]]) -> str | None:
+    """Infer metric direction from the leaderboard's explicit rank ordering."""
+    ranked_scores = [
+        (rank, score)
+        for row in rows
+        if (rank := _extract_rank_or_none(row)) is not None and (score := _extract_score_or_none(row)) is not None
+    ]
+    if len(ranked_scores) < 2:
+        return None
+    best_rank = min(rank for rank, _score in ranked_scores)
+    worst_rank = max(rank for rank, _score in ranked_scores)
+    if best_rank == worst_rank:
+        return None
+    best_scores = [score for rank, score in ranked_scores if rank == best_rank]
+    worst_scores = [score for rank, score in ranked_scores if rank == worst_rank]
+    best_score = sum(best_scores) / len(best_scores)
+    worst_score = sum(worst_scores) / len(worst_scores)
+    if best_score > worst_score:
+        return "maximize"
+    if best_score < worst_score:
+        return "minimize"
+    return None
 
 
 def _load_leaderboard_rows(

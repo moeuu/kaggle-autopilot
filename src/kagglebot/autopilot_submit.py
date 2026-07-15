@@ -14,6 +14,7 @@ from kagglebot import competition_rules as _competition_rules
 from kagglebot import context_artifacts as _context_artifacts
 from kagglebot import env_utils as _env_utils
 from kagglebot import kaggle_cli_errors as _kaggle_cli_errors
+from kagglebot import submit_codex_review as _submit_codex_review
 from kagglebot import submit_failure_policy as _submit_failure_policy
 from kagglebot import submit_notebook as _submit_notebook
 from kagglebot import submit_retry_policy as _submit_retry_policy
@@ -64,6 +65,9 @@ def build_autopilot_submit_dependencies(
     resolve_kaggle_username_func: Callable[..., str] | None = None,
     run_submit_kernel_func: Callable[..., object] | None = None,
     run_kaggle_submit_kernel_func: Callable[..., object] | None = None,
+    review_code_submission_func: Callable[..., object] | None = None,
+    recheck_code_submission_guard_func: Callable[..., object] | None = None,
+    record_code_submission_execution_func: Callable[..., object] | None = None,
     classify_submit_error_func: Callable[..., dict[str, object]] | None = None,
     compute_error_fingerprint_func: Callable[..., str] | None = None,
     normalize_error_text_func: Callable[..., str] | None = None,
@@ -90,6 +94,15 @@ def build_autopilot_submit_dependencies(
     resolved_run_kaggle_submit_kernel = run_kaggle_submit_kernel_func or _resolve_compat_callable(
         "run_kaggle_submit_kernel",
         run_kaggle_submit_kernel,
+    )
+    resolved_review_code_submission = (
+        review_code_submission_func or _submit_codex_review.review_code_submission_before_execute
+    )
+    resolved_recheck_code_submission_guard = (
+        recheck_code_submission_guard_func or _submit_codex_review.recheck_code_submission_execution_guard
+    )
+    resolved_record_code_submission_execution = (
+        record_code_submission_execution_func or _submit_codex_review.record_code_submission_execution
     )
     resolved_classify_submit_error = classify_submit_error_func or _resolve_compat_callable(
         "classify_submit_error",
@@ -126,6 +139,9 @@ def build_autopilot_submit_dependencies(
         resolve_kaggle_username=resolved_resolve_kaggle_username,
         run_submit_kernel=resolved_run_submit_kernel,
         run_kaggle_submit_kernel=resolved_run_kaggle_submit_kernel,
+        review_code_submission=resolved_review_code_submission,
+        recheck_code_submission_guard=resolved_recheck_code_submission_guard,
+        record_code_submission_execution=resolved_record_code_submission_execution,
         copy_submission_artifact_to_iteration_dir=_autopilot_state.copy_submission_artifact_to_iteration_dir,
         classify_submit_error=resolved_classify_submit_error,
         should_retry_ambiguous_notebook_submit_error=(

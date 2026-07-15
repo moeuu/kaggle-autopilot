@@ -13,7 +13,11 @@ from kagglebot.self_improvement import (
     SelfImprovementConfig,
     _best_iteration_value,
     _best_online_score,
+    _collect_watch_incidents,
+    _existing_publish_paths,
+    _load_run_summary,
     _read_json_object,
+    _record_self_improvement_schedule,
     _score_gap,
     has_interrupted_self_improvement,
     load_self_improvement_context,
@@ -75,6 +79,46 @@ def test_self_improvement_score_helpers_use_shared_direction_policy() -> None:
     assert _score_gap(best_score=0.75, top1_score=0.9, direction="maximize") == 0.15000000000000002
     assert _score_gap(best_score=0.75, top1_score=0.6, direction="minimize") == 0.15000000000000002
     assert _score_gap(best_score=0.95, top1_score=0.9, direction="maximize") == 0.0
+
+
+def test_run_summary_detects_historical_bottom_rank_from_cached_leaderboard(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    slug = "demo"
+    run_id = "run-bottom"
+    run_dir = artifacts / slug / "runs" / run_id
+    _write_json(
+        run_dir / "run.json",
+        {
+            "run_id": run_id,
+            "slug": slug,
+            "status": "submitted",
+            "config": {"target_direction": "maximize", "target_metric": "custom score"},
+        },
+    )
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.5})
+    context_dir = artifacts / slug / "context"
+    _write_json(context_dir / "top1_public.json", {"score": 0.001})
+    leaderboard = context_dir / "leaderboard" / "demo-publicleaderboard.csv"
+    leaderboard.parent.mkdir(parents=True)
+    leaderboard.write_text("Rank,Score\n1,0.001\n2,0.010\n3,1.000\n", encoding="utf-8")
+    ledger = artifacts / slug / "submissions" / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps({"event": "outcome", "run_id": run_id, "outcome": {"status": "complete", "score": 1.0}}) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = _load_run_summary(run_dir=run_dir, slug=slug)
+
+    assert summary["direction"] == "maximize"
+    anomalies = summary["leaderboard_anomalies"]
+    assert isinstance(anomalies, list)
+    assert len(anomalies) == 1
+    evidence = anomalies[0]["evidence"]
+    assert evidence["rank"] == 3
+    assert evidence["total_teams"] == 3
+    assert evidence["direction"] == "minimize"
+    assert evidence["rank_source"] == "cached_leaderboard_score_estimate"
 
 
 def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: Path) -> None:
@@ -152,6 +196,168 @@ def test_self_improvement_report_detects_top1_gap_and_submit_failure(tmp_path: P
         limit=5,
     )
     assert skills[0]["skill_id"] == "submit_failure_recovery"
+
+
+def test_self_improvement_promotes_watch_failure_without_run_directory(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    ledger = artifacts / "_watch" / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-14T15:58:16+00:00",
+                "event": "failed",
+                "slug": "arc-demo",
+                "run_id": "20260714T155630Z-4d48ff70",
+                "reason": "ValueError",
+                "error": "All arrays must be of the same length",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    incidents = _collect_watch_incidents(artifacts, limit=20)
+    result = run_self_improvement_cycle(
+        SelfImprovementConfig(
+            artifacts_dir=artifacts,
+            knowledge_paths=KnowledgePaths(workdir=tmp_path),
+            invoke_codex=False,
+            force=True,
+        )
+    )
+
+    assert incidents[0]["run_directory_exists"] is False
+    assert incidents[0]["cause_tags"] == [
+        "orchestration_preflight_failure",
+        "metric_or_validation_error",
+    ]
+    assert result["status"] == "written"
+    report = json.loads((artifacts / "_self_improvement" / "latest.json").read_text(encoding="utf-8"))
+    assert report["watch_incident_count"] == 1
+    assert report["cause_counts"]["orchestration_preflight_failure"] == 1
+    assert report["recent_watch_incidents"][0]["error"] == "All arrays must be of the same length"
+    context = (artifacts / "_self_improvement" / "strategy_context.md").read_text(encoding="utf-8")
+    assert "Cross-Competition Watch Incidents" in context
+    assert "All arrays must be of the same length" in context
+
+
+def test_new_watch_failure_bypasses_periodic_self_improvement_interval(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    config = SelfImprovementConfig(
+        artifacts_dir=artifacts,
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+        invoke_codex=False,
+        min_interval_hours=6,
+    )
+    first = run_self_improvement_cycle(config)
+    assert first["status"] == "written"
+
+    ledger = artifacts / "_watch" / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-15T00:00:00+00:00",
+                "event": "failed",
+                "reason": "RuntimeError",
+                "error": "Codex autofix verification failed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    second = run_self_improvement_cycle(config)
+
+    assert second["status"] == "written"
+    scheduler = json.loads(config.scheduler_state_path.read_text(encoding="utf-8"))
+    assert len(scheduler["handled_watch_incident_fingerprints"]) == 1
+
+
+def test_bottom_rank_anomaly_bypasses_interval_and_prioritizes_implementation_repair(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    config = SelfImprovementConfig(
+        artifacts_dir=artifacts,
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+        invoke_codex=False,
+        min_interval_hours=6,
+    )
+    assert run_self_improvement_cycle(config)["status"] == "written"
+
+    slug = "last-place-demo"
+    run_id = "run-bottom"
+    run_dir = artifacts / slug / "runs" / run_id
+    _write_json(
+        run_dir / "run.json",
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "config": {"target_direction": "maximize", "target_metric": "accuracy"},
+        },
+    )
+    _write_json(run_dir / "iter-1" / "metrics.json", {"offline_value": 0.86})
+    _write_json(artifacts / slug / "context" / "top1_public.json", {"score": 0.90})
+    ledger = artifacts / slug / "submissions" / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "event": "outcome",
+                "run_id": run_id,
+                "outcome": {
+                    "status": "complete",
+                    "score": 0.0,
+                    "rank": 99,
+                    "total_teams": 100,
+                    "rank_percentile": 0.99,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_self_improvement_cycle(config)
+
+    assert result["status"] == "written"
+    anomaly = result["latest_leaderboard_anomaly"]
+    assert anomaly["slug"] == slug
+    assert anomaly["severity"] == "critical"
+    report = json.loads(config.latest_json_path.read_text(encoding="utf-8"))
+    assert report["cause_counts"]["leaderboard_implementation_anomaly"] == 1
+    assert report["recommended_actions"][0]["cause"] == "leaderboard_implementation_anomaly"
+    scheduler = json.loads(config.scheduler_state_path.read_text(encoding="utf-8"))
+    assert len(scheduler["handled_leaderboard_anomaly_fingerprints"]) == 1
+    assert (tmp_path / "knowledge" / "skills" / "leaderboard_implementation_anomaly_repair.md").exists()
+
+
+def test_failed_codex_repair_keeps_leaderboard_anomaly_actionable(tmp_path: Path) -> None:
+    config = SelfImprovementConfig(
+        artifacts_dir=tmp_path / "artifacts",
+        knowledge_paths=KnowledgePaths(workdir=tmp_path),
+    )
+
+    _record_self_improvement_schedule(
+        config=config,
+        codex_result={"status": "codex_failed"},
+        incident_fingerprints=[],
+        anomaly_fingerprints=["bottom-signals-123"],
+    )
+
+    scheduler = json.loads(config.scheduler_state_path.read_text(encoding="utf-8"))
+    assert scheduler["handled_leaderboard_anomaly_fingerprints"] == []
+    assert scheduler["retry_at"] is not None
+
+
+def test_existing_publish_paths_ignores_optional_missing_strategy_file(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+
+    paths = _existing_publish_paths(tmp_path)
+
+    assert paths == ["src", "README.md"]
+    assert "STRATEGY.md" not in paths
 
 
 def test_self_improvement_records_only_implemented_skill_outcomes(tmp_path: Path) -> None:

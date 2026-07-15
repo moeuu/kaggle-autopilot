@@ -16,7 +16,9 @@ from kagglebot.remote_kernel_state import (
     raise_kernel_queued_timeout,
     read_pending_remote_kernel_id,
     remote_kernel_queued_timeout_sec,
+    remote_kernel_source_matches,
     write_pending_remote_kernel,
+    write_remote_kernel_source,
 )
 
 
@@ -36,6 +38,27 @@ def test_read_pending_remote_kernel_id_ignores_invalid_or_non_object_payload(tmp
 
     clear_pending_remote_kernel(logs_dir)
     assert read_pending_remote_kernel_id(logs_dir) is None
+
+
+def test_remote_kernel_source_requires_matching_kernel_and_fingerprint(tmp_path: Path) -> None:
+    logs_dir = tmp_path / "logs"
+    write_remote_kernel_source(logs_dir, kernel_id="user/kernel", source_fingerprint="source-v1")
+
+    assert remote_kernel_source_matches(
+        logs_dir,
+        kernel_id="user/kernel",
+        source_fingerprint="source-v1",
+    )
+    assert not remote_kernel_source_matches(
+        logs_dir,
+        kernel_id="user/kernel",
+        source_fingerprint="source-v2",
+    )
+    assert not remote_kernel_source_matches(
+        logs_dir,
+        kernel_id="user/other",
+        source_fingerprint="source-v1",
+    )
 
 
 @pytest.mark.parametrize(

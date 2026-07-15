@@ -198,8 +198,9 @@ def build_kaggle_submit_kernel_kwargs(
     reference: NotebookSubmitReference,
     message: str,
     dry_run: bool,
+    expected_output_file: str | None = None,
 ) -> dict[str, object]:
-    return {
+    kwargs: dict[str, object] = {
         "slug": slug,
         "kernel": reference.kernel_ref,
         "message": message,
@@ -207,6 +208,9 @@ def build_kaggle_submit_kernel_kwargs(
         "version": reference.version,
         "dry_run": dry_run,
     }
+    if expected_output_file:
+        kwargs["expected_output_file"] = expected_output_file
+    return kwargs
 
 
 def build_submit_kernel_run_kwargs(
@@ -223,8 +227,9 @@ def build_submit_kernel_run_kwargs(
     artifact_mode: str | None,
     dry_run: bool,
     timeout_minutes: int | None,
+    expected_output_file: str | None = None,
 ) -> dict[str, object]:
-    return {
+    kwargs: dict[str, object] = {
         "slug": slug,
         "run_id": run_id,
         "iteration": iteration,
@@ -238,6 +243,9 @@ def build_submit_kernel_run_kwargs(
         "dry_run": dry_run,
         "timeout_minutes": timeout_minutes,
     }
+    if expected_output_file:
+        kwargs["expected_output_file"] = expected_output_file
+    return kwargs
 
 
 def decide_ambiguous_notebook_submit_retry(

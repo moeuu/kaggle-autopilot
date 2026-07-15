@@ -9,6 +9,7 @@ from kagglebot.exceptions import KernelCapacityError
 from kagglebot.json_utils import load_json_object, write_json_object
 
 PENDING_REMOTE_KERNEL_FILENAME = "remote_kernel_pending.json"
+REMOTE_KERNEL_SOURCE_FILENAME = "remote_kernel_source.json"
 REMOTE_KERNEL_QUEUED_TIMEOUT_ENV = "KAGGLEBOT_KERNEL_QUEUED_TIMEOUT_SEC"
 REMOTE_KERNEL_DEFAULT_QUEUED_TIMEOUT_SEC = 1800.0
 
@@ -20,6 +21,42 @@ _KERNEL_ID_RE = re.compile(r"(?P<user>[A-Za-z0-9_-]+)/(?P<slug>[A-Za-z0-9_.-]+)"
 
 def pending_remote_kernel_path(logs_dir: Path) -> Path:
     return logs_dir / PENDING_REMOTE_KERNEL_FILENAME
+
+
+def remote_kernel_source_path(logs_dir: Path) -> Path:
+    return logs_dir / REMOTE_KERNEL_SOURCE_FILENAME
+
+
+def write_remote_kernel_source(
+    logs_dir: Path,
+    *,
+    kernel_id: str,
+    source_fingerprint: str,
+) -> None:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    write_json_object(
+        remote_kernel_source_path(logs_dir),
+        {
+            "kernel_id": kernel_id,
+            "source_fingerprint": source_fingerprint,
+            "recorded_at_unix": time.time(),
+        },
+    )
+
+
+def remote_kernel_source_matches(
+    logs_dir: Path,
+    *,
+    kernel_id: str,
+    source_fingerprint: str,
+) -> bool:
+    payload = load_json_object(remote_kernel_source_path(logs_dir))
+    if not isinstance(payload, dict):
+        return False
+    return (
+        str(payload.get("kernel_id") or "").strip() == kernel_id
+        and str(payload.get("source_fingerprint") or "").strip() == source_fingerprint
+    )
 
 
 def write_pending_remote_kernel(logs_dir: Path, *, kernel_id: str, kernel_slug: str) -> None:

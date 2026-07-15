@@ -50,6 +50,7 @@ from kagglebot.model_artifacts import (
     model_index_shard_specs,
     tensorflow_checkpoint_sidecar_specs,
 )
+from kagglebot.output_discovery import iter_named_output_paths
 from kagglebot.point_cloud_artifacts import (
     copy_dae_sidecars_if_needed,
     copy_gltf_sidecars_if_needed,
@@ -262,7 +263,9 @@ def find_submission_manifest(root: Path) -> Path | None:
             return candidate
     try:
         matches = sorted(
-            path for path in root.rglob(SUBMISSION_MANIFEST_FILENAME) if _is_valid_submission_manifest(path)
+            path
+            for path in iter_named_output_paths(root, SUBMISSION_MANIFEST_FILENAME)
+            if _is_valid_submission_manifest(path)
         )
     except OSError:
         return None

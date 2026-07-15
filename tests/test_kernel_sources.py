@@ -82,3 +82,79 @@ def test_load_kernel_source_config_defaults_when_optional_text_fields_missing(tm
     assert config.text_runtime.required_aux_inputs == ()
     assert config.text_runtime.metadata_supervision == ""
     assert config.has_text_runtime_features() is False
+
+
+def test_load_kernel_source_config_inherits_required_reference_inputs(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "toggles": {"ENABLE_REFERENCE_EXACT": True},
+                "kaggle_kernel_sources": {"dataset_sources": ["alice/explicit-data"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (context_dir / "reference_inputs_manifest.json").write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/reference",
+                "reference_notebooks": [
+                    {
+                        "kernel_id": "alice/reference",
+                        "input_sources": [
+                            {"kind": "dataset", "ref": "bob/reference-data"},
+                            {"kind": "kernel", "ref": "carol/offline-wheels"},
+                            {
+                                "kind": "model",
+                                "ref": "google/gemma-4/Transformers/gemma-4-31b-it/1",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_kernel_source_config(plan_path)
+
+    assert config.dataset_sources == ("alice/explicit-data", "bob/reference-data")
+    assert config.kernel_sources == ("carol/offline-wheels",)
+    assert config.model_sources == ("google/gemma-4/Transformers/gemma-4-31b-it/1",)
+    assert config.required_model_sources == ("google/gemma-4/Transformers/gemma-4-31b-it/1",)
+
+
+def test_load_kernel_source_config_can_disable_reference_input_inheritance(tmp_path: Path) -> None:
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "inherit_reference_sources": False,
+                "toggles": {"ENABLE_REFERENCE_EXACT": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (context_dir / "reference_inputs_manifest.json").write_text(
+        json.dumps(
+            {
+                "required_reference_kernel_id": "alice/reference",
+                "reference_notebooks": [
+                    {
+                        "kernel_id": "alice/reference",
+                        "input_sources": [{"kind": "model", "ref": "google/model/Transformers/default/1"}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_kernel_source_config(plan_path)
+
+    assert config.model_sources == ()

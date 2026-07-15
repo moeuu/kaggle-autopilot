@@ -24,6 +24,7 @@ from kagglebot import compute_handoff as _compute_handoff
 from kagglebot import diagnostics as _diagnostics
 from kagglebot import env_utils as _env_utils
 from kagglebot import improvement_context as _improvement_context
+from kagglebot import iteration_evidence as _iteration_evidence
 from kagglebot import iteration_metrics as _iteration_metrics
 from kagglebot import iteration_signals as _iteration_signals
 from kagglebot import json_utils as _json_utils
@@ -33,6 +34,7 @@ from kagglebot import kernel_metrics as _kernel_metrics
 from kagglebot import kernel_preflight as _kernel_preflight
 from kagglebot import kernel_quality as _kernel_quality
 from kagglebot import kernel_snapshot as _kernel_snapshot
+from kagglebot import leaderboard_anomaly as _leaderboard_anomaly
 from kagglebot import leaderboard_policy as _leaderboard_policy
 from kagglebot import loop_control as _loop_control
 from kagglebot import method_scout as _method_scout
@@ -138,6 +140,7 @@ from kagglebot.top1_exhaustive import (
     format_top1_public_score_message,
     write_top1_public_snapshot,
 )
+from kagglebot.training_route import decide_training_route, validate_non_training_metrics
 from kagglebot.validation_lab import run_validation_lab
 from kagglebot.write_guard import (
     _backup_guarded_files,
@@ -644,6 +647,8 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
             if isinstance(payload.get("previous_submission_history"), dict)
             else None
         )
+        iteration_evidence_path = _workflow_optional_str(payload.get("iteration_evidence_path"))
+        iteration_evidence_sha256 = _workflow_optional_str(payload.get("iteration_evidence_sha256"))
         _run_improvement(
             config=config,
             run_id=run_id,
@@ -667,6 +672,10 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
             code_reference_enforcement_reason=_workflow_optional_str(payload.get("code_reference_enforcement_reason")),
             best_score_so_far=_workflow_optional_float(payload.get("best_score_so_far")),
             previous_submission_history=previous_history,
+            expected_iteration_evidence_path=(
+                Path(iteration_evidence_path) if iteration_evidence_path is not None else None
+            ),
+            expected_iteration_evidence_sha256=iteration_evidence_sha256,
         )
     elif workflow_kind == "autofix":
         attempt = _workflow_required_int(payload, "attempt", workflow_id=workflow_id)
@@ -903,6 +912,36 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     )
     dataset_profile = knowledge_phase.load_dataset_profile()
     problem_types = knowledge_phase.derive_problem_types()
+    training_route_decision = decide_training_route(
+        _json_utils.load_json_object_or_empty(config.paths.plan_path),
+        compute=config.compute,
+        deliverable_mode=deliverable_mode,
+        submit_mode=submit_mode,
+        code_competition=bool(resolved.get("code_competition")),
+    )
+    direct_notebook_execution = bool(training_route_decision.direct_notebook and submit_enabled)
+    training_route_payload = training_route_decision.to_dict()
+    training_route_payload["direct_notebook_execution"] = direct_notebook_execution
+    _json_utils.write_json_object(run_dir / "training_route.json", training_route_payload)
+    run_payload["training_route"] = training_route_payload
+    kernel_execution_config = config
+    if direct_notebook_execution:
+        kernel_execution_config = replace(
+            config,
+            compute="kaggle_gpu",
+            accelerator="gpu",
+            strict_accelerator=False,
+            hardware_profile=_compute_handoff.kaggle_gpu_handoff_profile(),
+        )
+        print(
+            "[cyan]execution route[/cyan]: skipping very heavy optional local training; "
+            "running the implemented non-training solution as a guarded Kaggle notebook."
+        )
+    run_config_payload = run_payload.get("config")
+    if isinstance(run_config_payload, dict):
+        run_config_payload["execution_compute"] = kernel_execution_config.compute
+        run_config_payload["execution_hardware_profile"] = kernel_execution_config.hardware_profile
+    _autopilot_state.write_run_payload(run_dir, run_payload)
     submission_phase = (
         SubmissionPhase(
             config=config,
@@ -1224,8 +1263,8 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     ),
                 )
 
-            if evaluation is None and config.compute.startswith("kaggle_"):
-                kaggle_user = resolve_kaggle_username(config.kaggle_username)
+            if evaluation is None and kernel_execution_config.compute.startswith("kaggle_"):
+                kaggle_user = resolve_kaggle_username(kernel_execution_config.kaggle_username)
                 _watch_state.update_watch_phase(
                     config,
                     run_id,
@@ -1233,7 +1272,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     detail="Building and validating the Kaggle kernel package before push.",
                     iteration=iteration,
                 )
-                print(f"[cyan]kernel run[/cyan]: {config.compute}")
+                print(f"[cyan]kernel run[/cyan]: {kernel_execution_config.compute}")
                 kernel_attempts = 0
                 error_fingerprints: dict[str, int] = {}
 
@@ -1255,7 +1294,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             base_dir=config.paths.base_dir.parent,
                             kaggle_username=kaggle_user,
                             kernel_name=kernel_name,
-                            accelerator=config.accelerator,
+                            accelerator=kernel_execution_config.accelerator,
                             enable_internet=enable_internet,
                             score_source=score_source,
                             metric=target_metric,
@@ -1264,8 +1303,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             cv_folds=cv_folds,
                             seed=seed,
                             dry_run=config.dry_run,
-                            timeout_minutes=time_budget_min,
-                            hardware_profile=config.hardware_profile,
+                            timeout_minutes=(
+                                min(time_budget_min or 12 * 60, 12 * 60)
+                                if direct_notebook_execution
+                                else time_budget_min
+                            ),
+                            hardware_profile=kernel_execution_config.hardware_profile,
                             on_remote_started=mark_kaggle_kernel_started,
                         )
                         if kernel_result.submission_path:
@@ -1280,6 +1323,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
                             kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
+                            non_training_issues = validate_non_training_metrics(
+                                kernel_metrics_payload,
+                                training_route_decision,
+                            )
+                            if non_training_issues:
+                                raise KernelFailedError("; ".join(non_training_issues))
                             evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
@@ -1459,6 +1508,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
                             kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
+                            non_training_issues = validate_non_training_metrics(
+                                kernel_metrics_payload,
+                                training_route_decision,
+                            )
+                            if non_training_issues:
+                                raise KernelFailedError("; ".join(non_training_issues))
                             evaluation = _kernel_metrics.load_kernel_metrics(
                                 kernel_result.metrics_path,
                                 metric_direction,
@@ -1554,6 +1609,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                                     kernel_metrics_artifact_path = kernel_result.metrics_path
                                     kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
+                                    non_training_issues = validate_non_training_metrics(
+                                        kernel_metrics_payload,
+                                        training_route_decision,
+                                    )
+                                    if non_training_issues:
+                                        raise KernelFailedError("; ".join(non_training_issues))
                                     evaluation = _kernel_metrics.load_kernel_metrics(
                                         kernel_result.metrics_path,
                                         metric_direction,
@@ -1872,6 +1933,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             medal_policy_reason: str | None = None
             rank_forced_major_overhaul = False
             rank_force_reason: str | None = None
+            leaderboard_anomaly_payload: dict[str, object] | None = None
             code_reference_score, code_reference_source = _code_reference.extract_code_reference_score(config.paths)
             code_reference_comparison_score = _score_progress.normalize_code_reference_score_for_comparison(
                 current=decision_score,
@@ -1971,6 +2033,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 iteration=iteration,
                 submit_enabled=submit_enabled,
                 dry_run=config.dry_run,
+                has_successful_submission=_submit_attempts.has_successful_submit_attempt(run_dir),
                 submit_policy=str(resolved.get("submit_policy") or ""),
                 submission_limit_per_day=submission_limit_per_day,
             )
@@ -2358,7 +2421,10 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 submit_non_improving = False
                 defer_submit_for_accuracy_frontier = False
                 submit_limited_holdback = False
-                print("[yellow]submit override[/yellow]: forcing iter 1 submit to probe Kaggle submission contract.")
+                print(
+                    "[yellow]submit override[/yellow]: forcing the first successful submit "
+                    "to probe the Kaggle submission contract."
+                )
             if campaign_mode == "top1" and campaign_candidate is not None:
                 campaign_allocation = allocate_submission(
                     candidate=campaign_candidate,
@@ -2563,6 +2629,25 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 rank_force_reason = rank_state.force_reason
                                 for message in rank_state.messages:
                                     print(message)
+                            anomaly = _leaderboard_anomaly.assess_leaderboard_anomaly(
+                                direction=metric_direction,
+                                online_score=online_score,
+                                offline_score=decision_score,
+                                top1_score=top1_score,
+                                rank=submission_rank,
+                                total_teams=submission_total_teams,
+                                rank_percentile=submission_rank_percentile,
+                                estimated_rank=submission_rank_estimate,
+                                estimated_total_teams=submission_total_teams_estimate,
+                                estimated_rank_percentile=submission_rank_percentile_estimate,
+                            )
+                            if anomaly is not None:
+                                leaderboard_anomaly_payload = anomaly.to_payload()
+                                outcome_payload["leaderboard_anomaly"] = leaderboard_anomaly_payload
+                                print(
+                                    "[red]leaderboard implementation anomaly[/red]: "
+                                    f"{leaderboard_anomaly_payload['note']}"
+                                )
                         submitted_tracking_score, submitted_tracking_source = (
                             _submit_tracking.submission_score_for_tracking(
                                 offline_score=decision_score,
@@ -2779,6 +2864,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 detect_online_history_regression_signal=(
                     _submission_history.detect_online_regression_vs_submission_history
                 ),
+                leaderboard_anomaly_signal=leaderboard_anomaly_payload,
             )
             best_online_submission_score = _leaderboard_policy.update_best_online_submission_score(
                 current_best_score=best_online_submission_score,
@@ -2839,6 +2925,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 subgroup_collapse_signal=repair_signals.subgroup_collapse_signal,
                 online_mismatch_signal=repair_signals.online_mismatch_signal,
                 online_history_regression_signal=repair_signals.online_history_regression_signal,
+                leaderboard_anomaly_signal=repair_signals.leaderboard_anomaly_signal,
                 minimum_improvement_mode=medal_minimum_improvement_mode,
                 minimum_improvement_reason=medal_policy_reason,
                 force_major_overhaul=force_major_overhaul_next,
@@ -2856,6 +2943,8 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             loop_signal_problems = repair_signal_policy.loop_signal_problems
             if repair_signal_policy.repair_signals is not None:
                 metrics_payload["repair_signals"] = repair_signal_policy.repair_signals
+            if leaderboard_anomaly_payload is not None:
+                metrics_payload["leaderboard_anomaly"] = leaderboard_anomaly_payload
             metrics_payload["previous_submission_history"] = previous_submission_history
             metrics_payload["next_iteration_policy"] = repair_signal_policy.next_iteration_policy
             _iteration_metrics.write_iteration_metrics_payload(metrics_path, metrics_payload)
@@ -3055,7 +3144,9 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 target_medal=target_medal,
                 target_rank_percentile=target_rank_percentile,
                 forced_improvement_mode=(
-                    "validation_redesign"
+                    "implementation_audit"
+                    if repair_signal_policy.implementation_audit_required
+                    else "validation_redesign"
                     if forced_validation_redesign_reason and not force_major_overhaul_next
                     else "major_overhaul"
                     if force_major_overhaul_next
@@ -3199,10 +3290,18 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             record_problem_type_insight=record_problem_type_insight,
             record_error_fix_insight=record_error_fix_insight,
         )
+    has_successful_submission = _submit_attempts.has_successful_submit_attempt(run_dir)
+    submit_obligation_satisfied = (submitted and bool(last_submission_result)) or (
+        _submit_attempts.has_satisfied_submit_obligation(run_dir)
+    )
+    terminal_submit_contract_failed = submit_enabled and not config.dry_run and not submit_obligation_satisfied
     _autopilot_state.apply_final_run_status(
         run_payload,
         submitted=submitted,
         has_submission_result=bool(last_submission_result),
+        has_successful_submission=has_successful_submission,
+        submit_required=submit_enabled and not config.dry_run,
+        submit_obligation_satisfied=submit_obligation_satisfied,
         writeup_mode=writeup_mode,
         writeup_bundle_meta=writeup_bundle_meta,
     )
@@ -3220,6 +3319,11 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     )
 
     _autopilot_state.write_run_payload(run_dir, run_payload)
+    if terminal_submit_contract_failed:
+        raise SubmitAbortedError(
+            "Leaderboard submission was required, but the run reached its terminal state without a successful "
+            "submission or a duplicate-submission guard match."
+        )
 
 
 def _run_improvement(
@@ -3245,7 +3349,24 @@ def _run_improvement(
     code_reference_enforcement_reason: str | None = None,
     best_score_so_far: float | None = None,
     previous_submission_history: dict[str, object] | None = None,
+    expected_iteration_evidence_path: Path | None = None,
+    expected_iteration_evidence_sha256: str | None = None,
 ) -> None:
+    evidence_bundle = _iteration_evidence.prepare_iteration_evidence(
+        paths=config.paths,
+        slug=config.slug,
+        run_id=run_id,
+        iteration=iteration,
+        evaluation=evaluation,
+        target_score=target_score,
+        current_score=current_score,
+        current_score_source=current_score_source,
+        delta_offline=delta_offline,
+        pending_problem_insights=pending_problem_insights,
+        previous_submission_history=previous_submission_history,
+        expected_path=expected_iteration_evidence_path,
+        expected_sha256=expected_iteration_evidence_sha256,
+    )
     if config.dry_run:
         _run_improvement_body(
             config=config,
@@ -3270,6 +3391,7 @@ def _run_improvement(
             code_reference_enforcement_reason=code_reference_enforcement_reason,
             best_score_so_far=best_score_so_far,
             previous_submission_history=previous_submission_history,
+            iteration_evidence=evidence_bundle,
             workflow_checkpoint=None,
         )
         return
@@ -3302,6 +3424,8 @@ def _run_improvement(
         "code_reference_enforcement_reason": code_reference_enforcement_reason,
         "best_score_so_far": best_score_so_far,
         "previous_submission_history": previous_submission_history,
+        "iteration_evidence_path": str(evidence_bundle.path),
+        "iteration_evidence_sha256": evidence_bundle.sha256,
     }
     with _oracle_workflow_state.oracle_workflow_checkpoint(
         run_dir=config.paths.run_dir(run_id),
@@ -3332,6 +3456,7 @@ def _run_improvement(
             code_reference_enforcement_reason=code_reference_enforcement_reason,
             best_score_so_far=best_score_so_far,
             previous_submission_history=previous_submission_history,
+            iteration_evidence=evidence_bundle,
             workflow_checkpoint=checkpoint,
         )
 
@@ -3359,6 +3484,7 @@ def _run_improvement_body(
     code_reference_enforcement_reason: str | None,
     best_score_so_far: float | None,
     previous_submission_history: dict[str, object] | None,
+    iteration_evidence: _iteration_evidence.IterationEvidenceBundle,
     workflow_checkpoint: _oracle_workflow_state.OracleWorkflowCheckpoint | None,
 ) -> None:
     agent_dir = iter_dir / "agent"
@@ -3387,6 +3513,9 @@ def _run_improvement_body(
         code_reference_enforcement_reason=code_reference_enforcement_reason,
         best_score_so_far=best_score_so_far,
         previous_submission_history=previous_submission_history,
+        iteration_evidence_path=iteration_evidence.path,
+        iteration_evidence_sha256=iteration_evidence.sha256,
+        iteration_evidence_summary=iteration_evidence.prompt_summary,
         prompt_identity_args=prompt_identity_format_args(),
     )
     for notice in prompt_plan.mode_notices:
@@ -3522,6 +3651,7 @@ def _run_improvement_body(
         iteration=iteration,
     )
     response_text, _ = _run_improve_codex_pass(current_prompt_path=prompt_path, stage_suffix="")
+    _iteration_evidence.verify_iteration_evidence_bundle(iteration_evidence)
 
     if code_reference_mandatory and required_reference_notebook is not None and not config.dry_run:
         kernel_path = config.paths.kernel_source_dir / "kernel.py"
@@ -3552,6 +3682,7 @@ def _run_improvement_body(
                 current_prompt_path=repair_prompt_path,
                 stage_suffix="_code_reference_repair",
             )
+            _iteration_evidence.verify_iteration_evidence_bundle(iteration_evidence)
             implementation_issues = _code_reference.validate_code_reference_implementation(
                 kernel_path=kernel_path,
                 reference=required_reference_notebook,

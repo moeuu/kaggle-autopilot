@@ -335,3 +335,28 @@ def test_initial_model_rna_structure_uses_manifest_fallback_for_non_tabular_outp
     assert manifest["artifact_class"] == "tabular"
     assert manifest["submission_path"] == "answers.tabular.csv"
     assert manifest["requested_output_path"] == "answers.nii.gz"
+
+
+def test_rna_detection_does_not_abort_on_arc_variable_length_json(tmp_path) -> None:
+    data_dir = tmp_path / "arc-prize" / "data"
+    data_dir.mkdir(parents=True)
+    variable_payload = {
+        "task-a": [[{"input": [[1]], "output": [[2]]}]],
+        "task-b": [
+            [{"input": [[3]], "output": [[4]]}],
+            [{"input": [[5]], "output": [[6]]}],
+        ],
+    }
+    for name in (
+        "arc-agi_training_challenges.json",
+        "arc-agi_training_solutions.json",
+        "arc-agi_test_challenges.json",
+        "sample_submission.json",
+    ):
+        (data_dir / name).write_text(json.dumps(variable_payload), encoding="utf-8")
+    (data_dir / "sample_submission.csv").write_text("output_id,output\ntask-a,|0|\n", encoding="utf-8")
+
+    assert detect_rna_structure_task(data_dir) is False
+    profile = build_dataset_profile(data_dir)
+    assert isinstance(profile, dict)
+    assert profile.get("status")

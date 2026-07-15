@@ -66,8 +66,8 @@ _LEADERBOARD_STRONG_PATTERNS = (
     re.compile(r"\bnormal leaderboard csv competition\b"),
     re.compile(r"\bnot a judged/writeup competition\b"),
     re.compile(r"\brather than `?writeup`?\b"),
-    re.compile(r"\bsubmission(?:s)? must contain\b"),
-    re.compile(r"\bsample submission\b"),
+    re.compile(r"\bsubmissions?(?:\s+(?:csv|file))?\s+must\s+contain\b"),
+    re.compile(r"\bsample[_ -]submission\b"),
 )
 _LEADERBOARD_SUPPORT_PATTERNS = (
     re.compile(r"\bleaderboard\b"),
@@ -129,25 +129,45 @@ def _line_csv_score(line: str) -> int:
         score += 2
     if any(pattern.search(line) for pattern in _LEADERBOARD_SUPPORT_PATTERNS):
         score += 1
+    if any(pattern.search(line) for pattern in _NOTEBOOK_SUBMIT_PATTERNS):
+        score += 2
+    if any(pattern.search(line) for pattern in _CODE_COMPETITION_PATTERNS):
+        score += 4
     return score
 
 
-def infer_deliverable_mode(*texts: str, default: str = "leaderboard") -> str:
+def infer_deliverable_mode_evidence(*texts: str) -> str | None:
+    """Return a mode only when local competition text contains mode evidence."""
     lines = [line.strip().lower() for text in texts for line in text.splitlines() if line.strip()]
     if not lines:
-        return default
+        return None
     writeup_score = sum(_line_writeup_score(line) for line in lines)
     leaderboard_score = sum(_line_csv_score(line) for line in lines)
-    return "writeup" if writeup_score >= 3 and writeup_score > leaderboard_score else default
+    if writeup_score >= 3 and writeup_score > leaderboard_score:
+        return "writeup"
+    has_strong_leaderboard_evidence = any(
+        pattern.search(line) for line in lines for pattern in _LEADERBOARD_STRONG_PATTERNS
+    )
+    if leaderboard_score >= 2 or has_strong_leaderboard_evidence:
+        return "leaderboard"
+    return None
+
+
+def infer_deliverable_mode(*texts: str, default: str = "leaderboard") -> str:
+    return infer_deliverable_mode_evidence(*texts) or default
+
+
+def infer_submit_mode_evidence(*texts: str) -> str | None:
+    lines = [line.strip().lower() for text in texts for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if any(pattern.search(line) for line in lines for pattern in _NOTEBOOK_SUBMIT_PATTERNS):
+        return "notebook"
+    return None
 
 
 def infer_submit_mode(*texts: str, default: str = "file") -> str:
-    lines = [line.strip().lower() for text in texts for line in text.splitlines() if line.strip()]
-    if not lines:
-        return default
-    if any(pattern.search(line) for line in lines for pattern in _NOTEBOOK_SUBMIT_PATTERNS):
-        return "notebook"
-    return default
+    return infer_submit_mode_evidence(*texts) or default
 
 
 def infer_code_competition(*texts: str, default: bool = False) -> bool:

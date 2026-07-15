@@ -11,6 +11,7 @@ from kagglebot.local_kernel_progress import (
     build_local_kernel_progress_tracker,
     format_local_gpu_activity_suffix,
     format_local_kernel_activity_suffix,
+    print_local_kernel_progress,
 )
 
 
@@ -126,3 +127,22 @@ def test_progress_tracker_ignores_stale_artifacts_then_counts_new_activity(tmp_p
 def test_format_local_gpu_activity_suffix_handles_missing_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
     assert format_local_gpu_activity_suffix(accelerator="gpu") == ""
+
+
+def test_progress_does_not_report_zero_eta_after_historical_estimate_expires(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    print_local_kernel_progress(
+        elapsed_sec=600.0,
+        timeout_sec=1440 * 60,
+        eta_total_sec=120.0,
+        eta_samples=2,
+        progress_tracker=None,
+        accelerator="cpu",
+    )
+
+    output = capsys.readouterr().out
+    assert "eta=unknown" in output
+    assert "eta~0s" not in output
+    assert "historical median~120s exceeded" in output
+    assert "timeout in <= 85800s" in output

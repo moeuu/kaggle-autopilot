@@ -868,6 +868,10 @@ def _oracle_iteration_dir(prompt_path: Path) -> Path | None:
 
 def _oracle_iteration_context_candidates(iter_dir: Path) -> list[Path]:
     return [
+        iter_dir / "iteration_evidence.json",
+        iter_dir / "iteration_evidence.md",
+        iter_dir / "kernel_before_improvement.py",
+        iter_dir / "plan_before_improvement.json",
         iter_dir / "metrics.json",
         iter_dir / "diagnostics.md",
         iter_dir / "evaluation_report.json",

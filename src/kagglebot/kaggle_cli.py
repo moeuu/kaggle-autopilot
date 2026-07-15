@@ -79,6 +79,8 @@ def kernels_output(
     stream_output: bool = False,
     force: bool = False,
     dry_run: bool = False,
+    file_pattern: str | None = None,
+    page_size: int = 200,
 ) -> str:
     return _kernels_output(
         kernel_id,
@@ -87,4 +89,6 @@ def kernels_output(
         dry_run=dry_run,
         force=force,
         quiet=not stream_output,
+        file_pattern=file_pattern,
+        page_size=page_size,
     )

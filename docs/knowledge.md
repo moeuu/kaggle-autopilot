@@ -302,7 +302,7 @@ After autopilot completes:
 
 ```bash
 # Bootstrap and autopilot
-uv run kagglebot autopilot house-prices --compute local_gpu
+uv run kagglebot --force autopilot house-prices --compute local_gpu
 ```
 
 **Behind the scenes**:

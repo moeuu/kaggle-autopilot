@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,245 @@ def test_oracle_strategy_uses_sol_ultra_only_for_followup_implementation() -> No
     assert agent_pipeline._implementation_agent_for_strategy_engine("oracle") is ORACLE_IMPLEMENTATION_AGENT
     assert agent_pipeline._implementation_agent_for_strategy_engine("auto") is ORACLE_IMPLEMENTATION_AGENT
     assert agent_pipeline._implementation_agent_for_strategy_engine("codex") is IMPLEMENTATION_AGENT
+
+
+def test_implementation_failure_diagnostics_include_stdout_when_stderr_is_empty() -> None:
+    result = SimpleNamespace(returncode=7, stdout="useful agent failure", stderr="")
+    signaled_result = SimpleNamespace(returncode=-9, stdout="", stderr="")
+
+    detail = agent_pipeline._format_agent_failure(result)
+    signaled_detail = agent_pipeline._format_agent_failure(signaled_result)
+
+    assert "useful agent failure" in detail
+    assert "returncode=7" in detail
+    assert detail.strip() != ""
+    assert "returncode=-9 (SIGKILL)" in signaled_detail
+
+
+def test_implementation_result_diagnostics_are_persisted(tmp_path: Path) -> None:
+    result = SimpleNamespace(returncode=124, stdout="captured stdout", stderr="timed out after 30s")
+
+    agent_pipeline._persist_implementation_result(tmp_path, result)
+
+    assert (tmp_path / "implementation_stdout.txt").read_text(encoding="utf-8") == "captured stdout"
+    assert (tmp_path / "implementation_stderr.txt").read_text(encoding="utf-8") == "timed out after 30s"
+    status = json.loads((tmp_path / "implementation_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "timed_out"
+    assert status["returncode"] == 124
+    assert status["timed_out"] is True
+
+
+def test_setup_plus_four_actions_is_rejected_and_clamped_to_three() -> None:
+    issue = agent_pipeline._candidate_message_budget_issue(
+        setup_message_count=1,
+        action_message_count=4,
+        max_messages_per_candidate=4,
+    )
+    effective = agent_pipeline._effective_action_message_count(
+        requested_action_messages=4,
+        setup_message_count=1,
+        max_messages_per_candidate=4,
+    )
+
+    assert issue is not None
+    assert "5 total" in issue
+    assert effective == 3
+
+
+def test_kernel_repair_prompt_requires_contract_safe_multipost_width(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.base_dir.mkdir(parents=True)
+    paths.plan_path.write_text(
+        '{"runtime_budget":{"max_messages_per_candidate":4},"pipelines":[]}',
+        encoding="utf-8",
+    )
+    smoke = agent_pipeline.KernelContractSmokeResult(
+        compile_returncode=0,
+        compile_stdout="",
+        compile_stderr="",
+        smoke_returncode=1,
+        smoke_stdout="",
+        smoke_stderr="candidate 360 exceeds frozen plan message cap",
+    )
+
+    prompt = agent_pipeline._build_kernel_repair_prompt(
+        paths=paths,
+        original_prompt_path=tmp_path / "prompt.md",
+        initial_failure="transport failed",
+        smoke_result=smoke,
+    )
+
+    assert 'available_posts = max(0, int(CONFIG["max_messages_per_candidate"]) - 1)' in prompt
+    assert "must emit only 3 action messages" in prompt
+    assert "every selectable profile" in prompt
+    assert "candidate 360 exceeds frozen plan message cap" in prompt
+
+
+def test_missing_frozen_plan_pipeline_lookup_is_diagnosed(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    plan_path = tmp_path / "plan.json"
+    kernel_path.write_text(
+        '# _pipeline_hyperparameters("commented_out_pipeline")\ncfg = _pipeline_hyperparameters("obsolete_pipeline")\n',
+        encoding="utf-8",
+    )
+    plan_path.write_text(
+        '{"pipelines":[{"name":"actual_pipeline","key_hyperparameters":{}}]}',
+        encoding="utf-8",
+    )
+
+    issues = agent_pipeline._diagnose_missing_pipeline_lookups(kernel_path, plan_path)
+
+    assert len(issues) == 1
+    assert "obsolete_pipeline" in issues[0]
+    assert "commented_out_pipeline" not in issues[0]
+    assert "actual_pipeline" in issues[0]
+
+
+@pytest.mark.parametrize(
+    ("repair_returncode", "expect_error"),
+    [(0, False), (-9, True)],
+)
+def test_failed_implementation_gets_one_bounded_repair_and_contract_resmoke(
+    monkeypatch,
+    tmp_path: Path,
+    repair_returncode: int,
+    expect_error: bool,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    paths = CompetitionPaths(
+        slug="demo",
+        artifacts_dir=tmp_path / "artifacts",
+        repo_root=repo_root,
+    )
+    paths.context_agent_dir.mkdir(parents=True)
+    paths.kernel_source_dir.mkdir(parents=True)
+    paths.plan_path.write_text(
+        '{"runtime_budget":{"max_messages_per_candidate":4},"pipelines":[]}',
+        encoding="utf-8",
+    )
+    (paths.context_agent_dir / "strategy_plan.md").write_text("strategy", encoding="utf-8")
+    instructions_path = paths.context_agent_dir / "instructions.md"
+    instructions_path.write_text("instructions", encoding="utf-8")
+    (paths.kernel_source_dir / "kernel.py").write_text("print('generated')\n", encoding="utf-8")
+    output_dir = paths.context_agent_dir / "implement"
+    output_dir.mkdir()
+
+    agent_calls: list[Path] = []
+
+    def fake_agent(**kwargs):
+        agent_calls.append(kwargs["prompt_path"])
+        last_message_path = kwargs["output_dir"] / "last-message.txt"
+        last_message_path.write_text("repair complete", encoding="utf-8")
+        if len(agent_calls) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout='{"type":"turn.failed","error":{"message":"transport denied"}}',
+                stderr="",
+                last_message_path=last_message_path,
+            )
+        return SimpleNamespace(
+            returncode=repair_returncode,
+            stdout="repair output",
+            stderr="",
+            last_message_path=last_message_path,
+        )
+
+    failed_smoke = agent_pipeline.KernelContractSmokeResult(
+        compile_returncode=0,
+        compile_stdout="",
+        compile_stderr="",
+        smoke_returncode=1,
+        smoke_stdout="",
+        smoke_stderr="candidate 360 exceeds frozen plan message cap",
+    )
+    passed_smoke = agent_pipeline.KernelContractSmokeResult(
+        compile_returncode=0,
+        compile_stdout="",
+        compile_stderr="",
+        smoke_returncode=0,
+        smoke_stdout="all profiles valid",
+        smoke_stderr="",
+    )
+    smoke_results = iter((failed_smoke, passed_smoke))
+    monkeypatch.setattr(agent_pipeline, "_run_guarded_kernel_implementation_agent", fake_agent)
+    monkeypatch.setattr(agent_pipeline, "_run_kernel_contract_smoke", lambda **kwargs: next(smoke_results))
+
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=repo_root,
+    )
+
+    if expect_error:
+        with pytest.raises(KaggleBotError, match="failed after one repair attempt") as exc_info:
+            agent_pipeline._run_codex_kernel_implementation(paths, config, output_dir, instructions_path)
+        assert "returncode=-9 (SIGKILL)" in str(exc_info.value)
+    else:
+        agent_pipeline._run_codex_kernel_implementation(paths, config, output_dir, instructions_path)
+
+    assert len(agent_calls) == 2
+    assert agent_calls[1] == output_dir / "repair-1" / "prompt.md"
+    repair_prompt = agent_calls[1].read_text(encoding="utf-8")
+    assert "transport denied" in repair_prompt
+    assert "candidate 360 exceeds frozen plan message cap" in repair_prompt
+
+
+def test_successful_implementation_is_contract_smoked(monkeypatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts", repo_root=repo_root)
+    paths.context_agent_dir.mkdir(parents=True)
+    paths.kernel_source_dir.mkdir(parents=True)
+    paths.plan_path.write_text('{"pipelines":[]}', encoding="utf-8")
+    (paths.context_agent_dir / "strategy_plan.md").write_text("strategy", encoding="utf-8")
+    instructions_path = paths.context_agent_dir / "instructions.md"
+    instructions_path.write_text("instructions", encoding="utf-8")
+    (paths.kernel_source_dir / "kernel.py").write_text("print('generated')\n", encoding="utf-8")
+    output_dir = paths.context_agent_dir / "implement"
+    output_dir.mkdir()
+    last_message_path = output_dir / "last-message.txt"
+    last_message_path.write_text("complete", encoding="utf-8")
+    result = SimpleNamespace(
+        returncode=0,
+        stdout="complete",
+        stderr="",
+        last_message_path=last_message_path,
+    )
+    smoke = agent_pipeline.KernelContractSmokeResult(
+        compile_returncode=0,
+        compile_stdout="",
+        compile_stderr="",
+        smoke_returncode=0,
+        smoke_stdout="valid",
+        smoke_stderr="",
+    )
+    smoke_calls: list[Path] = []
+    monkeypatch.setattr(agent_pipeline, "_run_guarded_kernel_implementation_agent", lambda **kwargs: result)
+    monkeypatch.setattr(
+        agent_pipeline,
+        "_run_kernel_contract_smoke",
+        lambda **kwargs: smoke_calls.append(kwargs["kernel_path"]) or smoke,
+    )
+    config = AgentPipelineConfig(
+        slug="demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=repo_root,
+    )
+
+    agent_pipeline._run_codex_kernel_implementation(paths, config, output_dir, instructions_path)
+
+    assert smoke_calls == [paths.kernel_source_dir / "kernel.py"]
 
 
 def test_agent_pipeline_publishes_codex_oracle_codex_phases(monkeypatch, tmp_path: Path) -> None:

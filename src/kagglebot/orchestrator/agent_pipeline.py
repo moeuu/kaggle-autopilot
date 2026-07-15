@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import inspect
 import json
+import os
 import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +71,7 @@ from kagglebot.writeup import (
 
 _PLANNING_CODEX_MODEL = IMPLEMENTATION_AGENT.model
 _PLANNING_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
+_KERNEL_CONTRACT_SMOKE_TIMEOUT_SEC = 180.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +89,29 @@ class AgentPipelineConfig:
     hardware_profile: str | None = "auto"
     time_budget_min: int | None = None
     strategy_engine: str = "oracle"
+
+
+@dataclass(frozen=True)
+class KernelContractSmokeResult:
+    compile_returncode: int
+    compile_stdout: str
+    compile_stderr: str
+    smoke_returncode: int | None
+    smoke_stdout: str
+    smoke_stderr: str
+    pipeline_issues: tuple[str, ...] = ()
+    compile_timed_out: bool = False
+    smoke_timed_out: bool = False
+
+    @property
+    def passed(self) -> bool:
+        return (
+            self.compile_returncode == 0
+            and self.smoke_returncode == 0
+            and not self.pipeline_issues
+            and not self.compile_timed_out
+            and not self.smoke_timed_out
+        )
 
 
 @dataclass(frozen=True)
@@ -419,6 +450,7 @@ def _run_strategy_plan(
         profile = _load_dataset_profile_payload(paths)
         if plan_payload is not None:
             plan_payload = repair_plan_payload_for_profile(plan_payload, profile)
+            _apply_authoritative_runtime_budget(plan_payload, config=config)
         issues = _validate_strategy_output(
             strategy_text,
             instructions_text,
@@ -554,6 +586,8 @@ def _run_codex_kernel_implementation(
             "blocked_modules": blocked_text,
         },
     )
+    prompt_text = _authorized_competition_implementation_context(paths) + "\n\n" + prompt_text
+    prompt_text += "\n\n" + _kernel_candidate_contract_instructions(paths)
     if paths.method_registry_path.exists():
         registry = load_json_object(paths.method_registry_path)
         if registry is not None:
@@ -578,6 +612,82 @@ def _run_codex_kernel_implementation(
     prompt_path = output_dir / "prompt.md"
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
+    result = _run_guarded_kernel_implementation_agent(
+        paths=paths,
+        config=config,
+        prompt_path=prompt_path,
+        output_dir=output_dir,
+        stage="codex_kernel_implementation",
+        implementation_agent=implementation_agent,
+    )
+    if config.dry_run:
+        return
+
+    initial_detail = _format_agent_failure(result)
+    initial_executable = _kernel_contains_executable_code(kernel_path)
+    initial_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+    if result.returncode == 0 and initial_executable and initial_smoke.passed:
+        _print_block(
+            f"{implementation_agent.log_alias} kernel implementation result",
+            _read_text(result.last_message_path),
+        )
+        return
+
+    failure_event = _extract_agent_failure_event(str(getattr(result, "stdout", "") or ""))
+    initial_failure = initial_detail
+    if failure_event and failure_event not in initial_detail:
+        initial_failure = f"{failure_event}\n\n{initial_detail}"
+    if not initial_executable:
+        initial_failure += f"\nGenerated kernel contains no executable code: {kernel_path}"
+
+    repair_output_dir = output_dir / "repair-1"
+    repair_output_dir.mkdir(parents=True, exist_ok=True)
+    repair_prompt = _build_kernel_repair_prompt(
+        paths=paths,
+        original_prompt_path=prompt_path,
+        initial_failure=initial_failure,
+        smoke_result=initial_smoke,
+    )
+    _assert_no_secrets(repair_prompt)
+    repair_prompt_path = repair_output_dir / "prompt.md"
+    repair_prompt_path.write_text(repair_prompt, encoding="utf-8")
+    repair_result = _run_guarded_kernel_implementation_agent(
+        paths=paths,
+        config=config,
+        prompt_path=repair_prompt_path,
+        output_dir=repair_output_dir,
+        stage="codex_kernel_implementation_repair",
+        implementation_agent=implementation_agent,
+    )
+    repaired_executable = _kernel_contains_executable_code(kernel_path)
+    repaired_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+    if repair_result.returncode != 0 or not repaired_executable or not repaired_smoke.passed:
+        repaired_code_detail = ""
+        if not repaired_executable:
+            repaired_code_detail = f"\nGenerated kernel contains no executable code: {kernel_path}"
+        raise KaggleBotError(
+            f"{implementation_agent.display_name} kernel implementation failed after one repair attempt.\n\n"
+            f"Initial agent result:\n{initial_detail}\n\n"
+            f"Initial kernel contract smoke:\n{_format_kernel_contract_smoke(initial_smoke)}\n\n"
+            f"Repair agent result:\n{_format_agent_failure(repair_result)}{repaired_code_detail}\n\n"
+            f"Repaired kernel contract smoke:\n{_format_kernel_contract_smoke(repaired_smoke)}"
+        )
+    _print_block(
+        f"{implementation_agent.log_alias} kernel repair result",
+        _read_text(repair_result.last_message_path),
+    )
+    return
+
+
+def _run_guarded_kernel_implementation_agent(
+    *,
+    paths: CompetitionPaths,
+    config: AgentPipelineConfig,
+    prompt_path: Path,
+    output_dir: Path,
+    stage: str,
+    implementation_agent: object,
+):
     write_policy = _repo_root_write_policy(
         repo_root=config.repo_root,
         denied_prefixes=[paths.data_dir, paths.kernels_dir],
@@ -588,29 +698,417 @@ def _run_codex_kernel_implementation(
         prompt_path,
         output_dir,
         dry_run=config.dry_run,
-        model=implementation_agent.model,
-        reasoning_effort=implementation_agent.reasoning_effort,
-        reasoning_profile=implementation_agent.reasoning_profile,
-        cli_profile=implementation_agent.cli_profile,
+        model=getattr(implementation_agent, "model"),
+        reasoning_effort=getattr(implementation_agent, "reasoning_effort"),
+        reasoning_profile=getattr(implementation_agent, "reasoning_profile"),
+        cli_profile=getattr(implementation_agent, "cli_profile"),
         cwd=config.repo_root,
     )
+    _persist_implementation_result(output_dir, result)
     after = _snapshot_tree(config.repo_root)
     _enforce_allowlist_changes(
         root=config.repo_root,
         before=before,
         after=after,
         allowed_prefixes=write_policy,
-        stage="codex_kernel_implementation",
+        stage=stage,
         guard_snapshot=guard_snapshot,
         auto_repair=True,
     )
-    if result.returncode != 0:
-        raise KaggleBotError(f"{IMPLEMENTATION_AGENT.display_name} kernel implementation failed: {result.stderr}")
-    if not config.dry_run:
-        _print_block(
-            f"{IMPLEMENTATION_AGENT.log_alias} kernel implementation result",
-            _read_text(result.last_message_path),
+    return result
+
+
+def _persist_implementation_result(output_dir: Path, result: object) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stdout = str(getattr(result, "stdout", "") or "")
+    stderr = str(getattr(result, "stderr", "") or "")
+    returncode = getattr(result, "returncode", None)
+    timed_out = _agent_result_timed_out(result)
+    signal_name: str | None = None
+    signal_number: int | None = None
+    if isinstance(returncode, int) and returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+    if timed_out:
+        status = "timed_out"
+    elif signal_number is not None:
+        status = "signaled"
+    elif returncode == 0:
+        status = "succeeded"
+    else:
+        status = "failed"
+    stdout_path = output_dir / "implementation_stdout.txt"
+    stderr_path = output_dir / "implementation_stderr.txt"
+    status_path = output_dir / "implementation_status.json"
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    write_json_object(
+        status_path,
+        {
+            "status": status,
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "signal": signal_name,
+            "signal_number": signal_number,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+        },
+    )
+
+
+def _authorized_competition_implementation_context(paths: CompetitionPaths) -> str:
+    return (
+        "## Authorized, bounded competition work\n"
+        f"This is an authorized Kaggle competition implementation for `{paths.slug}` using only the supplied "
+        "local competition data and deterministic SDK. Work only inside the prompt's allowed paths. Do not access "
+        "credentials, live third-party systems, or targets outside the supplied offline evaluation environment."
+    )
+
+
+def _effective_action_message_count(
+    *,
+    requested_action_messages: int,
+    setup_message_count: int,
+    max_messages_per_candidate: int,
+) -> int:
+    available = max(0, int(max_messages_per_candidate) - max(0, int(setup_message_count)))
+    return min(max(0, int(requested_action_messages)), available)
+
+
+def _candidate_message_budget_issue(
+    *,
+    action_message_count: int,
+    setup_message_count: int,
+    max_messages_per_candidate: int,
+) -> str | None:
+    total = max(0, int(action_message_count)) + max(0, int(setup_message_count))
+    if total <= int(max_messages_per_candidate):
+        return None
+    return (
+        f"candidate has {setup_message_count} setup + {action_message_count} action messages "
+        f"({total} total), exceeding max_messages_per_candidate={max_messages_per_candidate}"
+    )
+
+
+def _kernel_candidate_contract_instructions(paths: CompetitionPaths) -> str:
+    current_cap = _plan_max_messages_per_candidate(paths.plan_path)
+    current_example = ""
+    if current_cap is not None:
+        effective = _effective_action_message_count(
+            requested_action_messages=4,
+            setup_message_count=1,
+            max_messages_per_candidate=current_cap,
         )
+        current_example = (
+            f"\nFor the current frozen cap ({current_cap}), a builder with one setup message and four requested "
+            f"action messages must emit only {effective} action messages."
+        )
+    return (
+        "## Mandatory generated-candidate invariants\n"
+        "Before declaring implementation complete:\n"
+        "- Use only pipeline names that actually occur in `plan.json`.\n"
+        "- For every generated `AttackCandidate`, enforce "
+        "`len(candidate.user_messages) <= runtime_budget.max_messages_per_candidate` under the default environment.\n"
+        "- A chain containing one read message followed by `k` action messages requires "
+        "`k <= max_messages_per_candidate - 1`, unless the read and first action are combined into one message. "
+        "For builders with setup messages, compute "
+        "`effective_action_messages = min(requested_action_messages, "
+        "max(0, max_messages_per_candidate - setup_message_count))` before constructing the chain. "
+        "Reduce the action width; do not disable the whole candidate family.\n"
+        "- Derive candidate and message limits from `plan.json`; do not substitute stale hardcoded defaults when a "
+        "pipeline lookup misses.\n"
+        "- Honor the frozen plan's training toggles. In particular, do not force `TRAINING_ENABLED = True` when "
+        "the approved execution route is non-training.\n"
+        "- Compile the generated kernel, contract-smoke every selectable profile, and run the bounded default-profile "
+        "smoke with no `KAGGLEBOT_STACK_K` or equivalent correctness override."
+        f"{current_example}"
+    )
+
+
+def _plan_max_messages_per_candidate(plan_path: Path) -> int | None:
+    payload = load_json_object(plan_path)
+    if payload is None:
+        return None
+    budget = payload.get("runtime_budget")
+    if not isinstance(budget, dict):
+        return None
+    value = budget.get("max_messages_per_candidate")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(0, int(value))
+
+
+def _format_agent_failure(result: object) -> str:
+    parts: list[str] = []
+    stderr = str(getattr(result, "stderr", "") or "").strip()
+    stdout = str(getattr(result, "stdout", "") or "").strip()
+    if stderr:
+        parts.append(f"stderr tail:\n{_diagnostic_tail(stderr)}")
+    if stdout:
+        parts.append(f"stdout tail:\n{_diagnostic_tail(stdout)}")
+    returncode = getattr(result, "returncode", None)
+    if isinstance(returncode, int):
+        parts.append(_format_returncode(returncode, timed_out=_agent_result_timed_out(result)))
+    else:
+        parts.append(f"returncode={returncode if returncode is not None else 'unknown'}")
+    return "\n".join(parts) if parts else "implementation process failed without stdout/stderr"
+
+
+def _diagnostic_tail(text: str, *, max_chars: int = 8_000, max_lines: int = 80) -> str:
+    tail = text.strip()[-max_chars:]
+    lines = tail.splitlines()
+    return truncate_lines("\n".join(lines[-max_lines:]), max_lines=max_lines, max_chars=1_000)
+
+
+def _agent_result_timed_out(result: object) -> bool:
+    returncode = getattr(result, "returncode", None)
+    detail = "\n".join(
+        (
+            str(getattr(result, "stderr", "") or ""),
+            str(getattr(result, "stdout", "") or ""),
+        )
+    ).lower()
+    return returncode == 124 or (returncode not in {None, 0} and "timed out" in detail)
+
+
+def _extract_agent_failure_event(stdout: str) -> str:
+    for raw_line in reversed(stdout.splitlines()):
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.failed":
+            continue
+        error = event.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"]).strip()
+        return raw_line.strip()
+    return ""
+
+
+def _kernel_contains_executable_code(kernel_path: Path) -> bool:
+    try:
+        kernel_text = kernel_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip() and not line.lstrip().startswith("#") for line in kernel_text.splitlines())
+
+
+def _diagnose_missing_pipeline_lookups(kernel_path: Path, plan_path: Path) -> tuple[str, ...]:
+    try:
+        kernel_text = kernel_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return (f"could not read generated kernel for frozen-plan lookup validation: {exc}",)
+    try:
+        kernel_tree = ast.parse(kernel_text, filename=str(kernel_path))
+    except SyntaxError as exc:
+        return (f"could not parse generated kernel for frozen-plan lookup validation: {exc}",)
+    plan = load_json_object(plan_path)
+    if plan is None:
+        return (f"could not load frozen plan for pipeline lookup validation: {plan_path}",)
+    raw_pipelines = plan.get("pipelines")
+    pipelines = raw_pipelines if isinstance(raw_pipelines, list) else []
+    available = {
+        str(item.get("name")) for item in pipelines if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    referenced: set[str] = set()
+    for node in ast.walk(kernel_tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        function_name = ""
+        if isinstance(node.func, ast.Name):
+            function_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            function_name = node.func.attr
+        pipeline_name = node.args[0]
+        if (
+            function_name == "_pipeline_hyperparameters"
+            and isinstance(pipeline_name, ast.Constant)
+            and isinstance(pipeline_name.value, str)
+        ):
+            referenced.add(pipeline_name.value)
+    missing = sorted(referenced - available)
+    if not missing:
+        return ()
+    available_text = ", ".join(sorted(available)) or "<none>"
+    return (
+        "generated kernel references frozen-plan pipeline name(s) absent from plan.json: "
+        f"{', '.join(missing)}; available pipeline names: {available_text}",
+    )
+
+
+def _run_kernel_contract_smoke(
+    *,
+    paths: CompetitionPaths,
+    kernel_path: Path,
+    timeout_sec: float = _KERNEL_CONTRACT_SMOKE_TIMEOUT_SEC,
+) -> KernelContractSmokeResult:
+    pipeline_issues = _diagnose_missing_pipeline_lookups(kernel_path, paths.plan_path)
+    if not kernel_path.is_file():
+        return KernelContractSmokeResult(
+            compile_returncode=1,
+            compile_stdout="",
+            compile_stderr=f"generated kernel does not exist: {kernel_path}",
+            smoke_returncode=None,
+            smoke_stdout="",
+            smoke_stderr="compile failed; runtime smoke was not attempted",
+            pipeline_issues=pipeline_issues,
+        )
+    with tempfile.TemporaryDirectory(prefix="kagglebot_kernel_contract_") as tmp_name:
+        staging_root = Path(tmp_name)
+        staged_kernel_dir = staging_root / "kernel"
+        staged_data_dir = staging_root / "data"
+        staged_output_dir = staging_root / "output"
+        staged_kernel_dir.mkdir()
+        staged_data_dir.mkdir()
+        staged_output_dir.mkdir()
+        staged_kernel_path = staged_kernel_dir / "kernel.py"
+        shutil.copy2(kernel_path, staged_kernel_path)
+        if paths.plan_path.exists():
+            shutil.copy2(paths.plan_path, staging_root / "plan.json")
+        for package_name in ("aicomp_sdk", "kaggle_evaluation"):
+            source = paths.data_dir / package_name
+            if source.exists():
+                (staged_data_dir / package_name).symlink_to(source, target_is_directory=True)
+
+        env = {key: value for key, value in os.environ.items() if not key.startswith("KAGGLEBOT_")}
+        env.update(
+            {
+                "KAGGLEBOT_FAST_DEV": "1",
+                "KAGGLEBOT_VALIDATION_MAX_SAMPLES": "2",
+                "KAGGLEBOT_LOCAL_KERNEL": "1",
+                "KAGGLEBOT_LOCAL_OUTPUT_DIR": str(staged_output_dir),
+                "KAGGLEBOT_OUTPUT_DIR": str(staged_output_dir),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        compile_result = _run_bounded_smoke_command(
+            [sys.executable, "-m", "py_compile", str(staged_kernel_path)],
+            cwd=staged_kernel_dir,
+            env=env,
+            timeout_sec=min(30.0, timeout_sec),
+        )
+        if compile_result[0] != 0 or compile_result[3]:
+            return KernelContractSmokeResult(
+                compile_returncode=compile_result[0],
+                compile_stdout=compile_result[1],
+                compile_stderr=compile_result[2],
+                smoke_returncode=None,
+                smoke_stdout="",
+                smoke_stderr="compile failed; runtime smoke was not attempted",
+                pipeline_issues=pipeline_issues,
+                compile_timed_out=compile_result[3],
+            )
+        smoke_result = _run_bounded_smoke_command(
+            [sys.executable, str(staged_kernel_path)],
+            cwd=staged_kernel_dir,
+            env=env,
+            timeout_sec=timeout_sec,
+        )
+        return KernelContractSmokeResult(
+            compile_returncode=compile_result[0],
+            compile_stdout=compile_result[1],
+            compile_stderr=compile_result[2],
+            smoke_returncode=smoke_result[0],
+            smoke_stdout=smoke_result[1],
+            smoke_stderr=smoke_result[2],
+            pipeline_issues=pipeline_issues,
+            compile_timed_out=compile_result[3],
+            smoke_timed_out=smoke_result[3],
+        )
+
+
+def _run_bounded_smoke_command(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_sec: float,
+) -> tuple[int, str, str, bool]:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return 124, _coerce_process_output(exc.stdout), _coerce_process_output(exc.stderr), True
+    return completed.returncode, completed.stdout, completed.stderr, False
+
+
+def _coerce_process_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _format_returncode(returncode: int | None, *, timed_out: bool) -> str:
+    if timed_out:
+        return f"returncode={returncode} (timeout)"
+    if returncode is not None and returncode < 0:
+        try:
+            signal_name = signal.Signals(-returncode).name
+        except ValueError:
+            signal_name = f"signal {-returncode}"
+        return f"returncode={returncode} ({signal_name})"
+    return f"returncode={returncode}"
+
+
+def _format_kernel_contract_smoke(result: KernelContractSmokeResult) -> str:
+    parts = [
+        "compile " + _format_returncode(result.compile_returncode, timed_out=result.compile_timed_out),
+    ]
+    if result.compile_stdout.strip():
+        parts.append(f"compile stdout:\n{result.compile_stdout.strip()}")
+    if result.compile_stderr.strip():
+        parts.append(f"compile stderr:\n{result.compile_stderr.strip()}")
+    parts.append("smoke " + _format_returncode(result.smoke_returncode, timed_out=result.smoke_timed_out))
+    if result.smoke_stdout.strip():
+        parts.append(f"smoke stdout:\n{result.smoke_stdout.strip()}")
+    if result.smoke_stderr.strip():
+        parts.append(f"smoke stderr:\n{result.smoke_stderr.strip()}")
+    if result.pipeline_issues:
+        parts.append("frozen-plan lookup diagnostics:\n" + "\n".join(result.pipeline_issues))
+    return "\n".join(parts)
+
+
+def _build_kernel_repair_prompt(
+    *,
+    paths: CompetitionPaths,
+    original_prompt_path: Path,
+    initial_failure: str,
+    smoke_result: KernelContractSmokeResult,
+) -> str:
+    return (
+        f"{_authorized_competition_implementation_context(paths)}\n\n"
+        "The first implementation pass failed its process or generated-kernel contract. Perform exactly one focused "
+        "repair pass. Do not restart broad competition or SDK research. Read the "
+        f"original implementation requirements at `{original_prompt_path}`, the frozen plan at `{paths.plan_path}`, "
+        f"and repair only `{paths.kernel_source_dir}`.\n\n"
+        f"{_kernel_candidate_contract_instructions(paths)}\n\n"
+        "The present multipost-style builder must use this contract-safe shape when it has one setup read:\n"
+        "```python\n"
+        "requested_stack_k = max(1, int(stack_k))\n"
+        'available_posts = max(0, int(CONFIG["max_messages_per_candidate"]) - 1)\n'
+        "effective_stack_k = min(requested_stack_k, available_posts)\n"
+        "```\n"
+        "Keep marker, genuine-read, and multipost candidate families active; reduce chain width before dropping a "
+        "family. Validate every selectable profile before finishing. Use only pipeline names actually present in "
+        "plan.json, and raise an actionable configuration-drift error for any required missing name. Do not force "
+        "training on when the frozen plan approves a non-training route. Run the default bounded smoke without "
+        "`KAGGLEBOT_STACK_K` or an equivalent correctness override.\n\n"
+        f"Initial agent failure:\n{initial_failure}\n\n"
+        f"Exact isolated compile/FAST_DEV contract smoke diagnostics:\n{_format_kernel_contract_smoke(smoke_result)}\n"
+    )
 
 
 def _ensure_context_materials(paths: CompetitionPaths) -> None:
@@ -1811,9 +2309,11 @@ def _build_fallback_strategy(
         runtime_budget.setdefault("hardware_profile", hardware_profile.key)
         runtime_budget.setdefault("gpu_vram_gb", hardware_profile.vram_gb)
         runtime_budget.setdefault("gpu_count", hardware_profile.gpu_count)
-        runtime_budget.setdefault(
-            "max_runtime_min",
-            config.time_budget_min if config.time_budget_min is not None else hardware_profile.time_budget_min,
+        # The executor's wall-clock budget is authoritative. Keeping a model-proposed
+        # value here can make generated code enforce a different deadline from the
+        # process supervisor (the Biohub 690-minute mismatch was one such case).
+        runtime_budget["max_runtime_min"] = (
+            config.time_budget_min if config.time_budget_min is not None else hardware_profile.time_budget_min
         )
     research_sources = [
         {
@@ -1913,6 +2413,24 @@ def _build_fallback_strategy(
         )
     instructions_text = "\n".join(instructions_lines).replace("{slug}", config.slug).strip()
     return strategy_text, instructions_text, plan_payload, research_sources_text, research_summary_text
+
+
+def _apply_authoritative_runtime_budget(
+    plan_payload: dict[str, object],
+    *,
+    config: AgentPipelineConfig,
+) -> None:
+    """Keep generated-code runtime metadata aligned with the executor deadline."""
+    hardware_profile = resolve_hardware_profile(config.hardware_profile, compute=config.compute)
+    raw_runtime_budget = plan_payload.get("runtime_budget")
+    runtime_budget = dict(raw_runtime_budget) if isinstance(raw_runtime_budget, dict) else {}
+    runtime_budget["hardware_profile"] = hardware_profile.key
+    runtime_budget["gpu_vram_gb"] = hardware_profile.vram_gb
+    runtime_budget["gpu_count"] = hardware_profile.gpu_count
+    runtime_budget["max_runtime_min"] = (
+        config.time_budget_min if config.time_budget_min is not None else hardware_profile.time_budget_min
+    )
+    plan_payload["runtime_budget"] = runtime_budget
 
 
 def _fallback_tabular_format_summary() -> str:

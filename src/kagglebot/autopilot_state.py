@@ -222,10 +222,13 @@ def apply_final_run_status(
     *,
     submitted: bool,
     has_submission_result: bool,
+    has_successful_submission: bool = False,
+    submit_required: bool = False,
+    submit_obligation_satisfied: bool = False,
     writeup_mode: bool,
     writeup_bundle_meta: dict[str, object] | None,
 ) -> dict[str, object]:
-    if submitted and has_submission_result:
+    if (submitted and has_submission_result) or has_successful_submission:
         return apply_run_status(payload, status="submitted")
     if writeup_mode and writeup_bundle_meta:
         payload["writeup_bundle"] = writeup_bundle_meta
@@ -235,6 +238,12 @@ def apply_final_run_status(
         if writeup_status == "submit_blocked":
             return apply_run_status(payload, status="writeup_submit_blocked")
         return apply_run_status(payload, status="writeup_ready")
+    if submit_required and not submit_obligation_satisfied:
+        return apply_run_status(
+            payload,
+            status="submit_failed",
+            stop_reason="required leaderboard submission was not completed",
+        )
     if payload.get("status") not in {"interrupted", "submit_failed"}:
         return apply_run_status(payload, status="completed")
     return payload

@@ -18,6 +18,7 @@ from kagglebot.bootstrap import (
     _mirror_sample_submission_to_data,
     _parse_last_run_epoch,
     _read_direction_from_json,
+    _write_dataset_profile,
     _write_sample_head,
     bootstrap_competition,
 )
@@ -49,6 +50,25 @@ def test_parse_last_run_epoch_normalizes_iso_timestamps_to_utc() -> None:
     assert _parse_last_run_epoch("2026-02-24T01:00:00Z") == expected
     assert _parse_last_run_epoch("2026-02-24 10:00:00+09:00") == expected
     assert _parse_last_run_epoch("not a date") == 0.0
+
+
+def test_dataset_profile_failure_is_persisted_without_aborting_bootstrap(tmp_path, monkeypatch) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+
+    def fail_profile(_data_dir):
+        raise ValueError("unsupported nested sample format")
+
+    monkeypatch.setattr("kagglebot.knowledge.build_dataset_profile", fail_profile)
+
+    profile = _write_dataset_profile(paths)
+
+    assert profile["status"] == "profile_error"
+    assert profile["tags"] == []
+    assert profile["profile_error"] == {
+        "type": "ValueError",
+        "message": "unsupported nested sample format",
+    }
+    assert json.loads(paths.dataset_profile_path.read_text(encoding="utf-8")) == profile
 
 
 def test_rules_file_written_to_markdown(tmp_path) -> None:
@@ -246,6 +266,7 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
         return ""
 
     dataset_calls: list[str] = []
+    dataset_metadata_calls: list[str] = []
     kernel_calls: list[str] = []
     competition_calls: list[tuple[str, str]] = []
 
@@ -264,6 +285,22 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
         dataset_calls.append(str(dataset_ref))
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / "dataset.csv").write_text("id,value\n1,0.5\n", encoding="utf-8")
+        return "ok"
+
+    def fake_download_dataset_metadata(dataset_ref, dest_dir, *, slug=None, dry_run=False):  # noqa: ANN001, ARG001
+        dataset_metadata_calls.append(str(dataset_ref))
+        (dest_dir / "dataset-metadata.json").write_text(
+            json.dumps(
+                {
+                    "info": {
+                        "ownerUser": str(dataset_ref).split("/", 1)[0],
+                        "datasetSlug": str(dataset_ref).split("/", 1)[1],
+                        "licenses": [{"name": "CC0-1.0"}],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         return "ok"
 
     def fake_kernels_pull(kernel_id, output_dir, *, slug=None, dry_run=False, metadata=True):  # noqa: ANN001, ARG001
@@ -291,6 +328,7 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
                     "dataset_sources": ["alice/original-churn"],
                     "competition_sources": ["external-comp"],
                     "kernel_sources": ["carol/shared-model"],
+                    "model_sources": ["google/gemma-4/Transformers/gemma-4-31b-it/1"],
                 }
             ),
             encoding="utf-8",
@@ -302,6 +340,7 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
     monkeypatch.setattr("kagglebot.bootstrap.kernels_pull", fake_kernels_pull)
     monkeypatch.setattr("kagglebot.bootstrap.download_competition", fake_download_competition)
     monkeypatch.setattr("kagglebot.bootstrap.download_dataset", fake_download_dataset)
+    monkeypatch.setattr("kagglebot.bootstrap.download_dataset_metadata", fake_download_dataset_metadata)
     monkeypatch.setattr("kagglebot.bootstrap._list_competition_code_candidates_from_cli", lambda *, slug: [])
     monkeypatch.setattr("kagglebot.bootstrap._fetch_competition_topics_from_api", lambda *, slug, timeout: [])
 
@@ -325,13 +364,21 @@ def test_bootstrap_stages_reference_notebook_inputs(tmp_path, monkeypatch) -> No
     assert ("dataset", "alice/original-churn") in refs
     assert ("competition", "external-comp") in refs
     assert ("kernel", "carol/shared-model") in refs
+    assert ("model", "google/gemma-4/Transformers/gemma-4-31b-it/1") in refs
     assert ("dataset", "bob/notebook-only-backup") in refs
     staged = {(item["kind"], item["ref"], item["status"]) for item in entry["staged_sources"]}
     assert ("dataset", "alice/original-churn", "staged_dataset") in staged
     assert ("competition", "external-comp", "staged_competition") in staged
     assert ("kernel", "carol/shared-model", "staged_kernel") in staged
+    assert (
+        "model",
+        "google/gemma-4/Transformers/gemma-4-31b-it/1",
+        "remote_model_attachment",
+    ) in staged
     assert "alice/original-churn" in dataset_calls
     assert "bob/notebook-only-backup" in dataset_calls
+    assert sorted(dataset_metadata_calls) == sorted(dataset_calls)
+    assert all(item["metadata_path"] for item in entry["staged_sources"] if item["kind"] == "dataset")
     assert "carol/shared-model" in kernel_calls
     assert any(slug == "external-comp" for slug, _dest in competition_calls)
 

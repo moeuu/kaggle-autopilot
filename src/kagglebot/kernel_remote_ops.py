@@ -91,8 +91,17 @@ def try_fetch_kernel_output(
     output_dir: Path,
     slug: str,
     kernels_output_func: Callable[..., object],
+    file_pattern: str | None = None,
 ) -> None:
     try:
-        kernels_output_func(kernel_id, output_dir, slug=slug, dry_run=False, force=True, quiet=True)
+        kernels_output_func(
+            kernel_id,
+            output_dir,
+            slug=slug,
+            dry_run=False,
+            force=True,
+            quiet=True,
+            file_pattern=file_pattern,
+        )
     except KaggleCliError:
         return

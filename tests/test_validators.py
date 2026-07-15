@@ -454,6 +454,16 @@ def test_validate_kernel_package_scans_auxiliary_sources(tmp_path: Path) -> None
         validate_kernel_package(tmp_path)
 
 
+def test_validate_kernel_package_allows_environment_api_key_lookup(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "import os\nclient = Client(api_key=os.getenv('VLLM_API_KEY', 'local-placeholder'))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "kernel-metadata.json").write_text("{}", encoding="utf-8")
+
+    validate_kernel_package(tmp_path)
+
+
 @pytest.mark.parametrize("suffix", [".tar.gz", ".tgz", ".tar.xz", ".tar.zst"])
 def test_validate_kernel_sources_accepts_named_tar_submission_output(tmp_path: Path, suffix: str) -> None:
     (tmp_path / "kernel.py").write_text(

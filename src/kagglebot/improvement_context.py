@@ -108,6 +108,9 @@ def build_improvement_prompt_plan(
     best_score_so_far: float | None,
     previous_submission_history: dict[str, object] | None,
     prompt_identity_args: dict[str, object],
+    iteration_evidence_path: Path | None = None,
+    iteration_evidence_sha256: str | None = None,
+    iteration_evidence_summary: str | None = None,
 ) -> ImprovementPromptPlan:
     prompt_template = render_prompt_identity(config.paths.codex_improve_template.read_text(encoding="utf-8"))
     prompt_path = agent_dir / "prompt.md"
@@ -231,6 +234,15 @@ def build_improvement_prompt_plan(
         submit_failure_notes=submit_failure_notes,
         submit_failure_force_reason=submit_failure_force_reason,
     )
+    if iteration_evidence_path is not None:
+        base_prompt_text += (
+            "\n\n"
+            + (iteration_evidence_summary or "## Iteration Evidence Contract")
+            + "\n"
+            + f"- Evidence path: {iteration_evidence_path}\n"
+            + f"- Evidence SHA-256: {iteration_evidence_sha256 or 'unavailable'}\n"
+            + "Treat this frozen bundle as the authoritative attribution record for the next-iteration decision.\n"
+        )
     base_prompt_text += (
         "\n\n## Ranked Kaggle Ecosystem Discovery\n"
         f"- Snapshot: {config.paths.kaggle_discovery_md_path}\n"
@@ -342,6 +354,14 @@ def append_improvement_policy_context(
                 "Mode is validation_redesign: first build and compare group/time/leak/proxy split candidates, "
                 "calibrate against previous public outcomes, and only then rank new model-family changes.\n"
             )
+        elif forced_improvement_mode == "implementation_audit":
+            base_prompt_text += (
+                "Mode is implementation_audit: assume the last-place-like leaderboard result is an execution or "
+                "submission defect until disproved. Trace the exact hidden-test input, loaded model/assets, runtime "
+                "fallbacks, prediction distribution, ID/order alignment, filename/schema, metric scale/direction, "
+                "and selected notebook output. Reproduce the remote path with fidelity checks before changing model "
+                "families, and do not resubmit an unchanged artifact.\n"
+            )
     elif minimum_improvement_reason:
         base_prompt_text += (
             "\n\nMinimum improvement mode policy is active.\n"
@@ -354,6 +374,16 @@ def append_improvement_policy_context(
             "- Treat online regression or low offline-online correlation as a split problem first.\n"
             "- Create validation_variant candidates for group, time, leak-safe, and proxy/adversarial splits.\n"
             "- Do not submit another model-only candidate until the active validation profile is justified.\n"
+        )
+    if improvement_mode == "implementation_audit":
+        base_prompt_text += (
+            "\n\nLeaderboard implementation-audit campaign policy:\n"
+            "- Treat near-last rank, zero-score collapse, and extreme offline/online disagreement as implementation "
+            "evidence before treating them as model-quality evidence.\n"
+            "- Compare the packaged Notebook and executed logs against the locally evaluated candidate.\n"
+            "- Verify non-constant predictions, hidden-test coverage, row/ID order, output filename and schema, and "
+            "that diagnostic .npy/.json files cannot be selected as submissions.\n"
+            "- Require a changed artifact hash plus runtime-fidelity evidence before another submission.\n"
         )
     if target_rank_percentile is not None:
         medal_label = target_medal or "rank"

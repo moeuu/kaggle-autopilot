@@ -22,6 +22,7 @@ from kagglebot.kaggle_api import (
     DownloadProgressCallback,
     download_competition,
     download_dataset,
+    download_dataset_metadata,
     kernels_pull,
     list_competition_kernels,
 )
@@ -144,6 +145,7 @@ def bootstrap_competition(
         dry_run=dry_run,
         download_competition_fn=download_competition,
         download_dataset_fn=download_dataset,
+        download_dataset_metadata_fn=download_dataset_metadata,
         download_kernel_fn=kernels_pull,
     )
 
@@ -1577,7 +1579,21 @@ def _write_prompts(
 def _write_dataset_profile(paths: CompetitionPaths) -> dict[str, object]:
     from kagglebot.knowledge import build_dataset_profile
 
-    profile = build_dataset_profile(paths.data_dir)
+    try:
+        profile = build_dataset_profile(paths.data_dir)
+    except Exception as exc:  # noqa: BLE001
+        profile = {
+            "status": "profile_error",
+            "task": "unknown",
+            "modality": "unknown",
+            "tags": [],
+            "files": [],
+            "profile_error": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+        }
+        print(f"[bootstrap] dataset profiling failed; continuing with an unknown profile: {type(exc).__name__}: {exc}")
     paths.context_dir.mkdir(parents=True, exist_ok=True)
     write_json_object(paths.dataset_profile_path, profile)
     return profile

@@ -12,9 +12,12 @@ It always follows this high-level path:
 ## Quick Start
 
 ```bash
-uv run kagglebot autopilot https://www.kaggle.com/competitions/<slug> \
+uv run kagglebot --force autopilot https://www.kaggle.com/competitions/<slug> \
   --compute local_gpu
 ```
+
+`autopilot` is non-interactive and submit-enabled. Normal execution therefore requires the global `--force` flag
+before the `autopilot` subcommand; use global `--dry-run` instead for a side-effect-free preview.
 
 For long-running operation across competitions already entered by the Kaggle account:
 
@@ -158,7 +161,12 @@ Useful overrides:
   logs, and saved error transcripts. Repository self-improvement calls include `latest.json`, `latest.md`, strategy
   context, experiment backlog, skill candidates, and outcome history. Runtime context files are capped at 4 MiB each
   and 16 MiB total so a runaway log cannot break Oracle delivery. Full bundle contents are authoritative over capped
-  inline excerpts.
+  inline excerpts. Improvement calls also freeze `iteration_evidence.json`, `iteration_evidence.md`,
+  `kernel_before_improvement.py`, and `plan_before_improvement.json` in the completed iteration directory. The
+  evidence bundle joins each Oracle hypothesis and Codex implementation report to the next iteration's trusted
+  score, runtime errors, candidate outcomes, submission attempts, and actual kernel/plan diff. Score deltas are
+  computed only when metric, direction, score source, and evaluation trust are comparable; external reference or
+  unfaithful scores remain visible but cannot be labeled as iteration gains.
 - `KAGGLEBOT_ORACLE_INLINE_PROMPT=0` sends the rendered prompt and context bundle through Oracle `--file` attachments
   instead. In browser mode, Oracle may still inline small text files, so they may not appear as visible ChatGPT file
   chips even though the model receives the content.
@@ -211,7 +219,15 @@ Per iteration, autopilot does:
 1. Train and evaluate
 2. Write metrics and diagnostics
 3. Check top1-tier condition (direction-aware)
-4. If not top1-tier and iterations remain, run improvement
+4. If not top1-tier and iterations remain, freeze an iteration evidence bundle and run Oracle improvement
+
+Before Oracle chooses the next change, the evidence bundle records the current score provenance, fold/readiness
+evidence, diagnostics and deduplicated error signatures, portfolio/graph outcomes, submission failures, and frozen
+kernel/plan snapshots. From iteration 2 onward it adds the actual kernel diff, plan field changes, prior Oracle
+hypothesis, Codex implementation report, and the observed outcome for each transition. Oracle is required to return
+an improvement contract containing evidence citations, one falsifiable hypothesis, a material delta from failed or
+no-op approaches, an attribution-safe validation plan, expected observations, stop/rollback criteria, and a fallback.
+Interrupted Oracle workflows persist the evidence path and SHA-256 and refuse to resume from a modified bundle.
 
 Submission behavior:
 - Default: submit every iteration
@@ -225,7 +241,7 @@ Submission behavior:
 - `--top1-submit-policy value_only|calibration|final_lock` controls portfolio-level submit ranking without bypassing campaign baseline, duplicate, rate-limit, or rules guardrails.
 - In top1 campaign mode, candidates below the historical/champion baseline are treated as regressions and are not submitted unless explicitly selected as calibration candidates or `--force-submit` is used
 - `submission_gate` is activated only when rules indicate submission-count limits
-- The first leaderboard iteration is submitted to establish an online checkpoint when submit is enabled, even with `submit_policy=improved`
+- The first valid leaderboard checkpoint is submitted to establish an online checkpoint when submit is enabled, even with `submit_policy=improved`; a resumed run keeps this obligation until that run records a successful submission
 - When daily/rolling submission slots remain for all remaining iterations, spare-slot policy can submit non-improving or soft quality-guarded candidates while still respecting hard safety guards
 - Duplicate submission SHA is skipped before file or notebook submit unless explicitly forced
   - Existing zip/tar submission archives are rejected when they contain duplicate member names, matching bundle-build validation
@@ -237,15 +253,28 @@ Submission behavior:
 - Loop decision uses readiness score (SRS); submission score/rank are secondary guardrails
 - Repeated submit-error fingerprints are aborted safely
 - Submit-failure repair classification recognizes submission artifact filenames from the shared asset-modality/tabular/archive suffix registry, including compound and compressed suffixes, instead of a stale hand-written extension list
-- Local GPU runs do not impose a default wall-clock time budget; set `time_budget_min`/`max_total_min` only for explicit
-  operator or rule limits. Bug-like stagnation is controlled separately through repeated-error fingerprints,
-  no-improvement patience, and same-config loop guards.
+- Local GPU runs use a 1440-minute safety ceiling unless a lower operator/rule limit applies. Bug-like stagnation is
+  controlled separately through repeated-error fingerprints, no-improvement patience, and same-config loop guards.
+- Training is not assumed to be mandatory. A plan may skip local fitting only when it explicitly states that local training
+  is optional, provides a numeric estimate of at least 1440 minutes (cost labels alone do not qualify), and identifies an implemented pretrained/reference/solver/search/simulation/
+  optimization/rule-based path plus a supported validation method. Code competitions then execute that path as a Kaggle
+  notebook and continue through the usual output-contract, semantic, Codex evidence-review, quota, duplicate, and ledger
+  guards. Missing evidence, unimplemented ideas, sample-template copying, dummy output, or absent runtime proof keeps the
+  normal train-and-validate route.
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
 - writeup runs produce a validated, content-hashed report without placeholder instructions; when submission is enabled,
   global `--force` is present, and participation/rules checks pass, the final writeup is saved and submitted through an
   authenticated Kaggle browser session. Started, submitted, and ambiguous content hashes are never retried automatically.
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test`/`sample_submission` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test artifact in a wrapper kernel
+- completed Code Competition notebooks are not sent directly: Codex first reviews immutable Notebook/model/output/runtime-log evidence, then a deterministic guard re-hashes the evidence and rechecks expected output, known quota, exact Notebook-version duplicate identity, and ledger before the API executor runs. Restored scores with zero current evaluation rows and no full model-backed runtime evidence, fallback-only predictions, exact row-constant runtime predictions, repeated runtime exceptions, and persisted dependency/cache output trees fail closed even if Codex says approve. A successful API call records the exact kernel/version/output identity immediately.
+- file/wrapper submissions and completed Code runtime outputs use the same competition-independent semantic preflight. It rejects an unchanged sample template, exact row-constant predictions, identical multi-output heads, placeholder text, metrics-declared fallback output, selected/emitted pipeline drift, and metrics-vs-artifact row-count/filename/hash mismatches. File/wrapper decisions are persisted in `runs/<run_id>/submission_semantic_preflight.json`; inference-mode Code submissions apply the check to the completed remote output rather than the tiny local public-test artifact.
+- inference-mode packages stage `plan.json` beside `kernel.py` and inject `KAGGLEBOT_SELECTED_PIPELINE`, `KAGGLEBOT_SELECTED_OFFLINE_SCORE`, and `KAGGLEBOT_REQUIRE_REFERENCE_PATH` when the local qualification metrics provide them; kernels may use this contract to skip repeated CV and reproduce the selected hidden-test inference path
+- GPU notebooks resolve an exact machine shape in this order: `KAGGLEBOT_SUBMIT_KERNEL_MACHINE_SHAPE`, `plan.json`'s `submit_machine_shape`/`runtime_budget.submit_machine_shape`, mapped Kaggle hardware profile, competition policy, then the broadly compatible `NvidiaTeslaT4` default. ARC-AGI-3's competition policy selects the official `NvidiaRtxPro6000` CLI ID and forces internet off for that competition's reserved RTX pool. Other competitions do not receive RTX automatically; an explicit environment, plan, or hardware-profile selection is preserved when Kaggle grants that competition access to the same machine ID. Notebook metadata casing such as `nvidiaTeslaT4` is accepted only as input and canonicalized. The resolved shape is included in both the source fingerprint and notebook slug, preventing corrected hardware from reusing an older notebook's persisted accelerator configuration. Set the environment value to `default` to deliberately omit an exact shape.
+- when a plan opts into required reference reproduction, dataset/kernel/model inputs from that reference notebook's metadata are inherited by the staged notebook; referenced models are also treated as required local assets so local runs fail with a cache command instead of silently scoring a weak fallback
+- after the remote submit notebook finishes, its `metrics.json` is compared with the selected local candidate; a missing/invalid report, a still-blocked reference reproduction report, an omitted selected pipeline/model/score, pipeline or metric changes, newly missing dependencies/sources, loss of a required reference path, and material score regressions abort before the Kaggle submission API is called
+- submit inference caches default to `/tmp/kagglebot-cache`; packages that explicitly persist dependency cache/site-package/wheelhouse trees under `/kaggle/working` are rejected before push
+- remote submit output retrieval requests only the exact expected submission filename plus `metrics.json` (and only log files while polling), using Kaggle's maximum supported output page size so dependency caches and diagnostic artifacts cannot hide the real deliverable or exhaust output-listing requests
 - static wrapper submit kernels fail fast for detected code competitions when the embedded artifact has only tiny public-test rows, preventing accidental 3-row notebook submissions; the row-count guard recognizes compressed and zip-wrapped single-table binary artifacts such as Parquet
 - submit-only wrapper kernels also re-check runtime test files; when Kaggle exposes a hidden/full test set with more rows than the tiny public sample submission, the wrapper expands the output to the runtime test ids and fills unknown ids with a deterministic fallback
 - submit-only wrapper kernels preserve non-CSV tabular output names and can align against runtime CSV/TSV/TAB/PSV/TXT, JSON/JSONL/JSONLINES/NDJSON, YAML/YML, Parquet/PARQ/PQ/Avro/HDF5/AnnData `.h5ad` obs/X matrices/Loom `.loom` col_attrs/matrix stores/GeoPackage `.gpkg`/`.geopackage` attribute tables/Shapefile `.shp` and DBF `.dbf` attribute tables/KML-KMZ `.kml`/`.kmz` placemarks, including compressed `.kml` inputs, NetCDF `.nc`/`.netcdf`/`.cdf`/`.nc4` table-like variables/FITS `.fits`/`.fit`/`.fts` binary tables/NumPy `.npy`/`.npz` tabular arrays/Feather/FTR/Arrow IPC, Stata, XML, Excel/XLSM, Pickle, compressed tabular, zip-wrapped single-table inputs such as `.csv.zip`/`.psv.zip`/`.jsonl.zip` plus binary table members like Parquet/Feather/Avro/ORC/Pickle/Excel/XLSB/Stata/SAS/SPSS, SQLite-derived sample/test files, DuckDB `.duckdb`/`.ddb` table inputs, and RDS/RData `.rds`/`.rda`/`.rdata` table inputs; NumPy matrix inputs can use adjacent `*_columns.txt`, `*.schema.json`, `columns.txt`, or `schema.json` sidecars when their width matches
@@ -254,11 +283,12 @@ Submission behavior:
 - local submission validation rejects tiny static submissions when context identifies a hidden/full-test notebook/code competition, so public 3-row placeholder outputs do not pass preflight
 - heuristic `writeup` inference is conservative and ignores negative mentions such as `not a judged/writeup competition`
 - leaderboard runs default to `target_medal=winner` and `target_rank_percentile=0.001`; until that near-first-place band is reached, autopilot will not collapse into `minor_tuning`
+- an observed bottom-decile result (with at least 20 teams), bottom-two-percent estimate plus independent score-collapse evidence, or an online score below 2% of a positive top score is treated as a probable implementation anomaly rather than ordinary model weakness. The next iteration enters `implementation_audit`: it traces hidden-test discovery, model/assets, runtime fallbacks, prediction variance, ID/order alignment, output filename/schema, metric scale, and exact Notebook output selection before model-family tuning. Existing hash/daily-limit guards still prevent unchanged or excessive resubmissions
 - for large tabular binary datasets with meaningful categoricals, planning quality gates require multi-family search plus at least one OOF blend candidate
 - required reference notebooks emit `context/reference_inputs_manifest.json`; with `--download`, referenced datasets/competitions are staged under `context/reference_inputs/`
 - if pseudo-labeling fully fails or an external/original-data feature path collapses to constants, the next iteration gets explicit repair targets instead of silently accepting the degraded path
 - if CV improves but public LB regresses, autopilot treats that as a validation mismatch first and forces validation redesign with group/time/leak/proxy split candidates before model-only changes
-- when kernels report multiple candidate pipelines, autopilot blocks CV-only winners whose holdout/validation score is materially worse than another candidate, especially if their test/submission prediction distribution collapses to sparse or constant-like outputs
+- when kernels report multiple candidate pipelines, autopilot blocks CV-only winners whose holdout/validation score is materially worse than another candidate, especially if their test/submission prediction distribution collapses to sparse or constant-like outputs; detection candidates are also blocked when the selected output has at least 5x the candidate-median prediction count while mean confidence is at most 0.10
 - long-running multi-fold candidates are instructed to persist fold-level OOF/test predictions, metadata, and a valid `submission_<candidate>_fold<N>.<suffix>` after each completed fold so an interrupted run can still submit the completed-fold candidate
 
 ## Important Defaults
@@ -384,7 +414,7 @@ Submission behavior:
 ```text
 --compute local_gpu|kaggle_gpu|kaggle_tpu   (required)
 --accelerator auto|gpu|tpu
---hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2
+--hardware-profile auto|rtx3060|rtx5090|kaggle_p100|kaggle_t4|kaggle_t4x2|kaggle_rtx_pro_6000
 --score-source holdout|cv
 --holdout-frac FLOAT
 --cv-folds INT
@@ -430,8 +460,14 @@ competition; only a passed submission deadline does. Unfamiliar competition type
 instead of being filtered out at selection time; complex simulation/reasoning/optimization tasks receive larger
 training-time estimates so lightweight sidecars can still make capacity-aware choices.
 
-`watch` also runs a periodic self-improvement loop. The loop scans recent runs, submission outcomes, top1 gaps,
-diagnostics, submit failures, and explicitly applied reusable skills under `artifacts/`. It writes
+`watch` also runs a periodic and incident-driven self-improvement loop. The loop scans up to 500 historical runs by
+default, including submission outcomes, top1 gaps, diagnostics, submit failures, explicitly applied reusable skills,
+and `_watch/**/ledger.jsonl` failures under
+`artifacts/`. Watch failures are included even when discovery or dataset profiling failed before a run directory was
+created. A new normalized watch-failure fingerprint bypasses the periodic interval once; handled fingerprints are
+checkpointed so the same incident does not cause an unbounded Oracle loop. New watch failures also persist a
+secret-free incident artifact with phase, traceback, run-existence, and repository-root evidence, allowing Oracle/Codex
+to repair failures that previously had only a one-line ledger message. It writes
 `_self_improvement/latest.json`, `latest.md`, `strategy_context.md`, `experiment_backlog.json`,
 `skill_candidates.json`, and normalized `outcomes.jsonl`, then asks the Oracle/GPT strategy adviser for the highest
 value improvement brief and calls Codex to implement it only after the repository is clean, committed, pushed to its
@@ -448,6 +484,23 @@ into future bootstrap/planning prompts and live `knowledge_hints.txt`; generated
 `knowledge/playbooks/`. Use `--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to
 write reports without invoking the Oracle/Codex implementation step. `--self-improvement-publish` additionally
 verifies, commits, and pushes repo changes after success; it is enabled by default in `watch` and still requires global `--force`.
+Optional absent repository files do not break the publish transaction. After a verified self-improvement commit is
+pushed, `watch` re-executes itself between competition cycles so the active process loads the changed source.
+If the triggering incident failed before its run directory was created, a successful verified/published repair schedules
+one immediate preflight retry with the original slug/run ID; later identical fingerprints fall back to the normal
+interval and cooldown instead of looping indefinitely.
+Near-last leaderboard outcomes are also normalized into stable per-competition anomaly fingerprints. A new fingerprint
+bypasses the periodic interval, is prioritized as a repository/runtime-fidelity repair, and after a verified push
+schedules one fresh guarded run. Repeated runs with the same anomaly signals reuse the handled fingerprint, so they do
+not create an automatic repair/resubmit loop; subsequent submissions remain subject to duplicate-hash and Kaggle-limit
+guards.
+Historical outcomes without recorded rank are enriched from a cached full leaderboard. Rank ordering also overrides a
+stale or misclassified metric direction, so minimize competitions are not audited as maximize competitions. Kaggle
+outcome polling refuses stale nonmatching descriptions and only permits a description-less Code row within the bounded
+request-time window, preventing an old score from being recorded against a newly failed submission.
+When the CLI is launched from an artifact-only directory with the default `--workdir .`, agent edits and source-change
+detection resolve to the repository containing the imported `kagglebot` package while artifacts remain in their
+configured location; explicit embedding roots are preserved.
 Manual runs are available through `kagglebot self-improve [--publish]`.
 
 ## Artifacts
@@ -507,7 +560,9 @@ Key files:
 - Associated submission manifests must be valid JSON objects; malformed run-specific metadata is rejected rather than silently ignored.
 - Manifest path fields accept common aliases and object values such as `{ "path": "predictions.zarr" }`, `{ "sourcePath": "answers.nii.gz" }`, and `folderPath`, so hand-written or agent-generated manifests do not have to use one exact schema.
 - Submit failures now persist a structured `submit_failure_context.json` snapshot so `submit_autofix` can distinguish between submission-file repairs, submit-mode/kernel fixes, platform issues, and manual blockers such as missing rules acceptance or credentials.
-- For local kernel training (`local_gpu`), terminal logs show elapsed/ETA and stage progress (`seed i/N`, `fold j/K`, `step s/T`) when patterns are detectable from kernel output.
+- For local kernel training (`local_gpu`), terminal logs show elapsed/ETA and stage progress (`seed i/N`, `fold j/K`, `step s/T`) when patterns are detectable from kernel output. Local kernels have a 1440-minute hard wall-clock timeout by default, enforced by the parent process rather than relying on generated kernel code. Override it with `--time-budget-min` or `KAGGLEBOT_LOCAL_GPU_TIME_BUDGET_MIN` (`0` keeps the existing explicit unlimited escape hatch).
+- Historical ETA is used only for the exact staged-kernel source fingerprint. Once that median is exceeded, status reports `eta=unknown` instead of `eta~0s`. If the same exact source times out twice, or has at least two completed runs whose median exceeds the configured hard timeout, preflight rejects it for runtime-contract repair; it does not automatically remove models, folds, seeds, resolution, or other accuracy-bearing work.
+- Discord status reports the active iteration's submit state. While an enabled run is still training it shows `pending`; it does not copy `disabled` or another terminal submit state from the previous completed iteration.
 - Local-to-Kaggle GPU handoff is a last resort. A timeout, exhausted CUDA-OOM retry, host-memory guard, stall, or
   SIGKILL-style exit must repeat three times with the same resource-failure class after the Oracle-to-Codex repair
   loop before handoff is considered. A missing local GPU is immediately eligible, but every handoff still requires
