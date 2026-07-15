@@ -9,6 +9,7 @@ from kagglebot.exceptions import SubmissionValidationError
 from kagglebot.submission_semantics import (
     analyze_submission_semantics,
     discover_submission_metrics_path,
+    runtime_tabular_fidelity_findings,
     semantic_finding_messages,
     validate_autopilot_submission_semantics,
 )
@@ -160,3 +161,27 @@ def test_discover_submission_metrics_prefers_same_iteration(tmp_path: Path) -> N
     )
 
     assert resolved == metrics
+
+
+def test_runtime_tabular_fidelity_findings_enforce_identifier_and_numeric_contract() -> None:
+    findings = runtime_tabular_fidelity_findings(
+        {
+            "applicable": True,
+            "schema": {"columns": ["id", "target"]},
+            "row_count": 3,
+            "prediction_columns": ["target"],
+            "prediction_null_count": 1,
+            "prediction_nonfinite_count": 1,
+            "identifier": {"unique": False, "null_count": 1, "order_digests": {}},
+            "numeric_dispersion": [{"column": "target", "unique_count": 1, "unique_truncated": False, "stddev": 0.0}],
+        }
+    )
+
+    assert {finding["code"] for finding in findings} == {
+        "tabular_identifier_not_unique",
+        "tabular_identifier_nulls",
+        "tabular_identifier_order_digest_missing",
+        "tabular_prediction_dispersion_collapsed",
+        "tabular_prediction_nonfinite",
+        "tabular_prediction_nulls",
+    }

@@ -772,6 +772,8 @@ def test_run_submit_kernel_dry_run_gateway_mode_stages_offline_authoritative_ker
     kernel_text = (kernel_dir / "kernel.py").read_text(encoding="utf-8")
     assert "SUBMISSION_GZIP_B64" not in kernel_text
     assert "# kagglebot:submit_inference" in kernel_text
+    assert "# kagglebot:submit_runtime_fidelity" in kernel_text
+    assert "from submit_runtime_fidelity import install" in kernel_text
     assert "# kagglebot:staged_plan_payload_fallback" in kernel_text
     assert "# kagglebot:staged_plan_path_fallback" in kernel_text
     assert 'PLAN_PATH = KERNEL_DIR / "plan.json"' in kernel_text
@@ -793,6 +795,12 @@ def test_run_submit_kernel_dry_run_gateway_mode_stages_offline_authoritative_ker
     assert "LOCAL_OUTPUT_DIR = KAGGLE_WORKING_DIR" not in kernel_text
     assert "Path('/kaggle/working')" in kernel_text
     assert not (kernel_dir / "output").exists()
+    fidelity_expected = json.loads((kernel_dir / "submit_fidelity_expected.json").read_text(encoding="utf-8"))
+    assert fidelity_expected["run_id"] == "run-1"
+    assert fidelity_expected["iteration"] == 1
+    assert fidelity_expected["selection"]["pipeline"] == "strong_model"
+    assert fidelity_expected["output"]["filename"] == "submission.csv"
+    assert fidelity_expected["package_fingerprint"]
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert payload["enable_gpu"] is True
     assert payload["enable_tpu"] is False
@@ -1078,7 +1086,8 @@ def test_submit_kernel_output_download_pattern_is_exact() -> None:
 
     assert (
         kernel_runner._submit_kernel_output_file_pattern("submission.parquet")  # noqa: SLF001
-        == r"(^|/)(submission\.parquet|metrics\.json)$"
+        == r"(^|/)(submission\.parquet|metrics\.json|submit_fidelity_runtime\.json|kernel_error[^/]*\.txt|"
+        r"stderr\.txt|error[^/]*\.(txt|log)|[^/]+\.log)$"
     )
     assert kernel_runner._submit_kernel_output_file_pattern(None) is None  # noqa: SLF001
 

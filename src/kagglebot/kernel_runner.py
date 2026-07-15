@@ -119,6 +119,13 @@ class KernelRunResult:
     output_dir: Path
     submission_path: Path | None
     metrics_path: Path | None
+    fidelity_expected_path: Path | None = None
+    fidelity_runtime_path: Path | None = None
+    fidelity_report_path: Path | None = None
+    source_fingerprint: str | None = None
+    requested_accelerator: str | None = None
+    executed_accelerator: str | None = None
+    capacity_fallback_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,10 @@ class KernelPreparation:
     supersede_completed_on_source_change: bool = False
     machine_shape: str | None = None
     output_file_pattern: str | None = None
+    fidelity_expected_path: Path | None = None
+    requested_accelerator: str | None = None
+    executed_accelerator: str | None = None
+    capacity_fallback_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +182,8 @@ class KernelSubmitBuildConfig:
     dry_run: bool
     hardware_profile: str | None = "auto"
     expected_output_file: str | None = None
+    requested_accelerator: str | None = None
+    capacity_fallback_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -325,6 +338,11 @@ class KernelSubmitPackageBuilder:
 
         submit_mode = str(config.mode or "wrapper").strip().lower()
         code_output_mode = submit_mode in {"gateway", "inference"}
+        resolved_expected_output_file = (
+            config.expected_output_file or config.submission_path.name
+            if code_output_mode
+            else config.expected_output_file
+        )
         plan_path = config.base_dir / config.slug / "plan.json"
         plan_payload = load_json_object_or_empty(plan_path)
         submit_accelerator = _resolve_submit_accelerator(config.accelerator, env_get=os.getenv)
@@ -361,6 +379,7 @@ class KernelSubmitPackageBuilder:
             f"machine_shape={submit_machine_shape or 'KaggleDefault'} "
             f"source={machine_shape_decision.source}"
         )
+        expected_metrics: dict[str, object] | None = None
         if code_output_mode:
             custom_kernel_dir = config.base_dir / config.slug / "kernel"
             custom_kernel_path = custom_kernel_dir / "kernel.py"
@@ -426,10 +445,17 @@ class KernelSubmitPackageBuilder:
                 reproduction_report_path=context_dir / "reference_reproduction_report.json",
                 expected_metrics=expected_metrics,
             )
-            _kernel_bootstrap.inject_submit_inference_env(
-                kernel_dir,
-                runtime_env=_submit_kernel_fidelity.build_submit_runtime_env(expected_metrics),
+            runtime_env = _submit_kernel_fidelity.build_submit_runtime_env(expected_metrics)
+            runtime_env.update(
+                {
+                    "KAGGLEBOT_FIDELITY_REQUESTED_ACCELERATOR": config.requested_accelerator or config.accelerator,
+                    "KAGGLEBOT_FIDELITY_EXECUTED_ACCELERATOR": submit_accelerator,
+                    "KAGGLEBOT_FIDELITY_MACHINE_SHAPE": submit_machine_shape or "",
+                    "KAGGLEBOT_FIDELITY_CAPACITY_FALLBACK_USED": ("1" if config.capacity_fallback_used else "0"),
+                }
             )
+            _kernel_bootstrap.inject_submit_inference_env(kernel_dir, runtime_env=runtime_env)
+            _kernel_bootstrap.inject_submit_runtime_fidelity(kernel_dir)
             _sanitize_submit_inference_output_roots(kernel_dir)
             _validate_inference_submit_kernel(kernel_dir)
             ensure_kernel_sources_valid(kernel_dir)
@@ -461,10 +487,27 @@ class KernelSubmitPackageBuilder:
         # bytecode. Those local caches are neither part of the executable source
         # contract nor stable across otherwise identical preparation attempts.
         _kernel_package_files.remove_generated_kernel_cache_files(kernel_dir)
+        fidelity_expected_path = None
+        if code_output_mode:
+            fidelity_expected_path = _submit_kernel_fidelity.stage_submit_fidelity_expected_contract(
+                package_dir=kernel_dir,
+                slug=config.slug,
+                run_id=config.run_id,
+                iteration=config.iteration,
+                kernel_id=kernel_id,
+                artifact_mode=submit_mode,
+                expected_output_file=str(resolved_expected_output_file),
+                expected_metrics=expected_metrics,
+                selected_candidate_path=config.submission_path,
+                requested_accelerator=config.requested_accelerator or config.accelerator,
+                executed_accelerator=submit_accelerator,
+                machine_shape=submit_machine_shape,
+                capacity_fallback_used=config.capacity_fallback_used,
+            )
         source_fingerprint = _kernel_source_fingerprint(
             kernel_dir,
             mode=submit_mode,
-            expected_output_file=config.expected_output_file,
+            expected_output_file=resolved_expected_output_file,
             machine_shape=submit_machine_shape,
         )
         return KernelPreparation(
@@ -478,7 +521,11 @@ class KernelSubmitPackageBuilder:
             source_fingerprint=source_fingerprint,
             supersede_completed_on_source_change=code_output_mode,
             machine_shape=submit_machine_shape,
-            output_file_pattern=_submit_kernel_output_file_pattern(config.expected_output_file),
+            output_file_pattern=_submit_kernel_output_file_pattern(resolved_expected_output_file),
+            fidelity_expected_path=fidelity_expected_path,
+            requested_accelerator=config.requested_accelerator or config.accelerator,
+            executed_accelerator=submit_accelerator,
+            capacity_fallback_used=config.capacity_fallback_used,
         )
 
 
@@ -669,6 +716,8 @@ def run_submit_kernel(
     timeout_minutes: int | None,
     expected_output_file: str | None = None,
     hardware_profile: str | None = "auto",
+    requested_accelerator: str | None = None,
+    capacity_fallback_used: bool = False,
 ) -> KernelRunResult:
     build_config = KernelSubmitBuildConfig(
         slug=slug,
@@ -684,6 +733,8 @@ def run_submit_kernel(
         dry_run=dry_run,
         hardware_profile=hardware_profile,
         expected_output_file=expected_output_file,
+        requested_accelerator=requested_accelerator,
+        capacity_fallback_used=capacity_fallback_used,
     )
     preparation = KernelSubmitPackageBuilder().prepare(build_config)
     if dry_run:
@@ -692,6 +743,11 @@ def run_submit_kernel(
             output_dir=preparation.output_dir,
             submission_path=None,
             metrics_path=None,
+            fidelity_expected_path=preparation.fidelity_expected_path,
+            source_fingerprint=preparation.source_fingerprint,
+            requested_accelerator=preparation.requested_accelerator,
+            executed_accelerator=preparation.executed_accelerator,
+            capacity_fallback_used=preparation.capacity_fallback_used,
         )
 
     kernel_id = KernelJobMonitor().push_and_wait(
@@ -705,11 +761,21 @@ def run_submit_kernel(
         else find_submission_file(preparation.output_dir)
     )
     metrics_path = _find_output_file(preparation.output_dir, "metrics.json")
+    fidelity_runtime_path = _find_output_file(
+        preparation.output_dir,
+        _submit_kernel_fidelity.RUNTIME_FILE_NAME,
+    )
     return KernelRunResult(
         kernel_id=kernel_id,
         output_dir=preparation.output_dir,
         submission_path=resolved_submission_path,
         metrics_path=metrics_path,
+        fidelity_expected_path=preparation.fidelity_expected_path,
+        fidelity_runtime_path=fidelity_runtime_path,
+        source_fingerprint=preparation.source_fingerprint,
+        requested_accelerator=preparation.requested_accelerator,
+        executed_accelerator=preparation.executed_accelerator,
+        capacity_fallback_used=preparation.capacity_fallback_used,
     )
 
 
@@ -1259,7 +1325,7 @@ def _kernel_source_fingerprint(
 ) -> str:
     package_digest = sha256_path(kernel_dir)
     contract = (
-        f"kagglebot-submit-kernel-v2\0{mode}\0{expected_output_file or ''}\0{machine_shape or ''}\0{package_digest}"
+        f"kagglebot-submit-kernel-v3\0{mode}\0{expected_output_file or ''}\0{machine_shape or ''}\0{package_digest}"
     )
     return sha256_text(contract)
 
@@ -1362,4 +1428,7 @@ def _submit_kernel_output_file_pattern(expected_output_file: str | None) -> str 
     expected_name = Path(str(expected_output_file or "").strip()).name
     if not expected_name:
         return None
-    return rf"(^|/)({re.escape(expected_name)}|metrics\.json)$"
+    return (
+        rf"(^|/)({re.escape(expected_name)}|metrics\.json|submit_fidelity_runtime\.json|"
+        r"kernel_error[^/]*\.txt|stderr\.txt|error[^/]*\.(txt|log)|[^/]+\.log)$"
+    )

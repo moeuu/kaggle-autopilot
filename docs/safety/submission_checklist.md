@@ -25,6 +25,9 @@ Tool behavior:
 - [ ] ID alignment is correct when ID column exists.
 - [ ] No NaN/inf in prediction columns.
 - [ ] Completed Code Competition output has non-degenerate predictions across runtime test rows; exact row-constant numeric or text outputs are rejected before Codex approval/API execution.
+- [ ] Fresh `gateway`/`inference` Notebook packages contain `submit_fidelity_expected.json`, and the completed version emits `submit_fidelity_runtime.json` with matching contract/package digests.
+- [ ] `submission_fidelity_report.json` (or its versioned iteration-log copy) has a passing verdict for the exact output hash; missing, stale, ambiguous, mutated, fallback, or current-version error evidence is a local non-retryable validation failure.
+- [ ] A failed fidelity attempt is not repeated unless its package fingerprint, expected-contract digest, or selected output hash changed. A syntactically valid output alone does not resume model search or permit resubmission.
 - [ ] Autopilot semantic preflight confirms the output is not an unchanged sample template, copied multi-output head, placeholder-only output, or metrics-declared fallback, and that recorded pipeline/row-count/filename/hash evidence matches the selected artifact.
 - [ ] Detection outputs do not show a low-confidence prediction explosion (selected mean count at least 5x the candidate median); otherwise threshold/proxy calibration must be audited before submission.
 - [ ] Non-CSV submissions use a supported format: TSV/TXT, JSON/JSONL/NDJSON, Parquet, Avro, Feather/Arrow IPC, Stata, XML, Excel, Pickle, SQLite DB, compressed tabular file, zip/tar bundle, prebuilt 7z/RAR archive, or supported code archive.
@@ -60,6 +63,7 @@ Tool behavior:
 
 Tool behavior:
 - invalid files are rejected before CLI submit call.
+- code-submit fidelity is decided before Codex review; Codex may add concerns but cannot override a failed deterministic verdict.
 - conservative column/order/id-suffix autofix can rewrite supported tabular formats without changing the intended file type.
 
 ## 4. Duplicate and Rate Limits

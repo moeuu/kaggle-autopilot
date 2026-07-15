@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,8 @@ from kagglebot.exceptions import (
     SubmissionCliError,
     SubmissionValidationError,
 )
+from kagglebot.kernel_runtime.submit_runtime_fidelity import record_runtime_fidelity
+from kagglebot.submit_kernel_fidelity import stage_submit_fidelity_expected_contract
 from kagglebot.submit_notebook import (
     NotebookSubmitRunner,
     build_kaggle_submit_kernel_kwargs,
@@ -889,6 +892,115 @@ def test_code_submission_runs_review_guard_executor_and_ledger_in_order(tmp_path
     )
 
     assert events == ["review", "guard", "executor", "ledger"]
+
+
+def test_fresh_code_submission_validates_attestation_before_review_and_passes_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slug = "demo"
+    run_id = "run-1"
+    iteration = 1
+    submission_path = tmp_path / "iter-1" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("id,target\n1,0.1\n2,0.9\n", encoding="utf-8")
+    logs_dir = submission_path.parent / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "kernel_push-001.txt").write_text("Kernel version 3 successfully pushed.\n", encoding="utf-8")
+    package_dir = tmp_path / slug / "kernels" / run_id / "submit-iter-1"
+    package_dir.mkdir(parents=True)
+    (package_dir / "kernel.py").write_text("print('inference')\n", encoding="utf-8")
+    (package_dir / "kernel-metadata.json").write_text(
+        json.dumps({"model_sources": ["owner/model/1"]}),
+        encoding="utf-8",
+    )
+    metrics = {
+        "chosen_pipeline": "model",
+        "metric": "accuracy",
+        "direction": "maximize",
+        "score_source": "cv",
+        "score": 0.8,
+        "active_model_source": "owner/model/1",
+        "test_prediction_distribution": {"source_top10": [["model", 2]]},
+    }
+    expected_path = stage_submit_fidelity_expected_contract(
+        package_dir=package_dir,
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        kernel_id="user/demo-submit",
+        artifact_mode="gateway",
+        expected_output_file="submission.csv",
+        expected_metrics=metrics,
+        selected_candidate_path=submission_path,
+        requested_accelerator="gpu",
+        executed_accelerator="gpu",
+        machine_shape="NvidiaTeslaT4",
+        capacity_fallback_used=False,
+    )
+    output_dir = tmp_path / "remote-output"
+    output_dir.mkdir()
+    remote_submission = output_dir / "submission.csv"
+    remote_submission.write_text("id,target\n2,0.8\n1,0.2\n", encoding="utf-8")
+    metrics_path = output_dir / "metrics.json"
+    metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "test.csv").write_text("id\n2\n1\n", encoding="utf-8")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_REQUESTED_ACCELERATOR", "gpu")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_EXECUTED_ACCELERATOR", "gpu")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_MACHINE_SHAPE", "NvidiaTeslaT4")
+    record_runtime_fidelity(package_root=package_dir, output_root=output_dir, input_root=input_dir)
+    runtime_path = output_dir / "submit_fidelity_runtime.json"
+    events: list[str] = []
+    approval = object()
+    permit = object()
+
+    def review(**kwargs):  # noqa: ANN003
+        events.append("review")
+        report_path = kwargs["fidelity_report_path"]
+        assert json.loads(report_path.read_text(encoding="utf-8"))["verdict"] == "pass"
+        return approval
+
+    run_notebook_kernel_submission(
+        slug=slug,
+        run_id=run_id,
+        iteration=iteration,
+        iter_logs_dir=logs_dir,
+        base_dir=tmp_path,
+        kaggle_username="user",
+        kernel_name=None,
+        accelerator="gpu",
+        strict_accelerator=False,
+        submission_path=submission_path,
+        message="submit",
+        artifact_mode="gateway",
+        dry_run=False,
+        timeout_minutes=60,
+        run_submit_kernel=lambda **_kwargs: SimpleNamespace(
+            kernel_id="user/demo-submit",
+            output_dir=output_dir,
+            submission_path=remote_submission,
+            metrics_path=metrics_path,
+            fidelity_expected_path=expected_path,
+            fidelity_runtime_path=runtime_path,
+        ),
+        run_kaggle_submit_kernel=lambda **_kwargs: events.append("executor"),
+        copy_submission_artifact=lambda source: source,
+        classify_submit_error=lambda *_args: {},
+        should_retry_ambiguous=lambda **_kwargs: False,
+        sleep=lambda _seconds: None,
+        on_message=lambda _message: None,
+        is_capacity_error=lambda _exc: False,
+        is_push_error=lambda _exc: False,
+        expected_output_file="submission.csv",
+        expected_metrics_payload=metrics,
+        review_code_submission=review,
+        recheck_code_submission_guard=lambda **_kwargs: permit,
+        record_code_submission_execution=lambda **_kwargs: events.append("ledger"),
+    )
+
+    assert events == ["review", "executor", "ledger"]
 
 
 def test_code_submission_review_rejection_blocks_executor(tmp_path: Path) -> None:

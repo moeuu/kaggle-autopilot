@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from kagglebot.exceptions import KernelFailedError, SubmissionCliError
+from kagglebot.exceptions import KernelFailedError, SubmissionCliError, SubmissionValidationError
+from kagglebot.kernel_runtime.submit_runtime_fidelity import record_runtime_fidelity
 from kagglebot.submit_kernel_fidelity import (
     build_submit_runtime_env,
     load_expected_submit_metrics_snapshot,
+    stage_submit_fidelity_expected_contract,
     validate_reference_submission_readiness,
     validate_submit_kernel_runtime_fidelity,
 )
@@ -212,3 +214,212 @@ def test_runtime_fidelity_rejects_unreported_selection_contract(tmp_path: Path) 
     assert "selected metric 'accuracy' was not reported" in exc.value.stderr
     assert "selected active model" in exc.value.stderr
     assert "selected score 0.9 was not reported" in exc.value.stderr
+
+
+def _strong_fidelity_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    package_dir = tmp_path / "package"
+    output_dir = tmp_path / "output"
+    input_dir = tmp_path / "input"
+    package_dir.mkdir()
+    output_dir.mkdir()
+    (input_dir / "demo").mkdir(parents=True)
+    (package_dir / "kernel.py").write_text("print('inference')\n", encoding="utf-8")
+    (package_dir / "kernel-metadata.json").write_text(
+        json.dumps({"model_sources": ["owner/model/1"], "competition_sources": ["demo"]}),
+        encoding="utf-8",
+    )
+    local_candidate = tmp_path / "local-candidate.csv"
+    local_candidate.write_text("id,target\n1,0.1\n2,0.9\n", encoding="utf-8")
+    metrics = {
+        "chosen_pipeline": "model",
+        "metric": "accuracy",
+        "direction": "maximize",
+        "score_source": "cv",
+        "score": 0.8,
+        "active_model_source": "owner/model/1",
+        "submission_output_file": "submission.csv",
+        "test_prediction_distribution": {"source_top10": [["model_inference", 2]]},
+    }
+    expected_path = stage_submit_fidelity_expected_contract(
+        package_dir=package_dir,
+        slug="demo",
+        run_id="run-1",
+        iteration=1,
+        kernel_id="user/demo",
+        artifact_mode="inference",
+        expected_output_file="submission.csv",
+        expected_metrics=metrics,
+        selected_candidate_path=local_candidate,
+        requested_accelerator="gpu",
+        executed_accelerator="gpu",
+        machine_shape="NvidiaTeslaT4",
+        capacity_fallback_used=False,
+    )
+    submission_path = output_dir / "submission.csv"
+    submission_path.write_text("id,target\n2,0.8\n1,0.2\n", encoding="utf-8")
+    metrics_path = _write_json(output_dir / "metrics.json", metrics)
+    (input_dir / "demo" / "test.csv").write_text("id\n2\n1\n", encoding="utf-8")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_REQUESTED_ACCELERATOR", "gpu")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_EXECUTED_ACCELERATOR", "gpu")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_MACHINE_SHAPE", "NvidiaTeslaT4")
+    monkeypatch.setenv("KAGGLEBOT_FIDELITY_CAPACITY_FALLBACK_USED", "0")
+    record_runtime_fidelity(package_root=package_dir, output_root=output_dir, input_root=input_dir)
+    return {
+        "package_dir": package_dir,
+        "output_dir": output_dir,
+        "expected_path": expected_path,
+        "runtime_path": output_dir / "submit_fidelity_runtime.json",
+        "submission_path": submission_path,
+        "metrics_path": metrics_path,
+        "metrics": metrics,
+    }
+
+
+def test_normalized_runtime_fidelity_report_passes_and_binds_exact_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _strong_fidelity_candidate(tmp_path, monkeypatch)
+    report_path = tmp_path / "logs" / "submission_fidelity_report-v3.json"
+
+    report = validate_submit_kernel_runtime_fidelity(
+        artifact_mode="inference",
+        expected_metrics=candidate["metrics"],
+        actual_metrics_path=candidate["metrics_path"],
+        expected_contract_path=candidate["expected_path"],
+        runtime_fidelity_path=candidate["runtime_path"],
+        submission_path=candidate["submission_path"],
+        package_dir=candidate["package_dir"],
+        report_path=report_path,
+        kernel_id="user/demo",
+        kernel_version="3",
+        run_id="run-1",
+        iteration=1,
+    )
+
+    assert report is not None
+    assert report["verdict"] == "pass"
+    assert report["reason_codes"] == []
+    assert report["selected_output"]["sha256"]
+    assert (
+        report["comparison"]["expected"]["package_fingerprint"] == report["comparison"]["actual"]["package_fingerprint"]
+    )
+    assert str(candidate["runtime_path"].resolve()) in report["supporting_artifact_paths"]
+    assert json.loads(report_path.read_text(encoding="utf-8"))["attempt_fingerprint"]
+
+
+def test_normalized_runtime_fidelity_failure_is_non_retryable_and_records_stable_codes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _strong_fidelity_candidate(tmp_path, monkeypatch)
+    runtime = json.loads(candidate["runtime_path"].read_text(encoding="utf-8"))
+    runtime["errors"] = {
+        "unhandled_exception": None,
+        "traceback_count": 0,
+        "transcripts": [
+            {
+                "relative_path": "kernel_error.txt",
+                "size": 20,
+                "sha256": "abc",
+                "traceback_count": 2,
+                "nonempty": True,
+            }
+        ],
+    }
+    candidate["runtime_path"].write_text(json.dumps(runtime), encoding="utf-8")
+    report_path = tmp_path / "report.json"
+
+    with pytest.raises(SubmissionValidationError) as exc:
+        validate_submit_kernel_runtime_fidelity(
+            artifact_mode="inference",
+            expected_metrics=candidate["metrics"],
+            actual_metrics_path=candidate["metrics_path"],
+            expected_contract_path=candidate["expected_path"],
+            runtime_fidelity_path=candidate["runtime_path"],
+            submission_path=candidate["submission_path"],
+            package_dir=candidate["package_dir"],
+            report_path=report_path,
+            kernel_id="user/demo",
+            kernel_version="3",
+            run_id="run-1",
+            iteration=1,
+        )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["verdict"] == "fail"
+    assert "runtime_error_transcript_present" in report["reason_codes"]
+    assert "runtime_error_evidence_contradictory" in report["reason_codes"]
+    assert exc.value.reason_codes == report["reason_codes"]
+    assert exc.value.report_path == report_path
+    assert "package_fingerprint=" in str(exc.value)
+    assert "selected_output_sha256=" in str(exc.value)
+
+
+def test_normalized_fidelity_detects_platform_error_transcript_created_after_recorder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _strong_fidelity_candidate(tmp_path, monkeypatch)
+    (candidate["output_dir"] / "kernel_error.txt").write_text(
+        "Traceback (most recent call last):\nRuntimeError: late platform transcript\n",
+        encoding="utf-8",
+    )
+    report_path = tmp_path / "report.json"
+
+    with pytest.raises(SubmissionValidationError):
+        validate_submit_kernel_runtime_fidelity(
+            artifact_mode="inference",
+            expected_metrics=candidate["metrics"],
+            actual_metrics_path=candidate["metrics_path"],
+            expected_contract_path=candidate["expected_path"],
+            runtime_fidelity_path=candidate["runtime_path"],
+            submission_path=candidate["submission_path"],
+            package_dir=candidate["package_dir"],
+            report_path=report_path,
+            kernel_id="user/demo",
+            kernel_version="3",
+            run_id="run-1",
+            iteration=1,
+        )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "runtime_error_transcript_present" in report["reason_codes"]
+    assert "runtime_error_evidence_incomplete" in report["reason_codes"]
+    assert str((candidate["output_dir"] / "kernel_error.txt").resolve()) in report["supporting_artifact_paths"]
+
+
+def test_unchanged_failed_fidelity_attempt_requires_changed_contract_package_or_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _strong_fidelity_candidate(tmp_path, monkeypatch)
+    report_path = tmp_path / "report.json"
+    runtime = json.loads(candidate["runtime_path"].read_text(encoding="utf-8"))
+    runtime["expected_contract"]["sha256"] = "mutated"
+    candidate["runtime_path"].write_text(json.dumps(runtime), encoding="utf-8")
+    kwargs = {
+        "artifact_mode": "inference",
+        "expected_metrics": candidate["metrics"],
+        "actual_metrics_path": candidate["metrics_path"],
+        "expected_contract_path": candidate["expected_path"],
+        "runtime_fidelity_path": candidate["runtime_path"],
+        "submission_path": candidate["submission_path"],
+        "package_dir": candidate["package_dir"],
+        "report_path": report_path,
+        "kernel_id": "user/demo",
+        "kernel_version": "3",
+        "run_id": "run-1",
+        "iteration": 1,
+    }
+    with pytest.raises(SubmissionValidationError):
+        validate_submit_kernel_runtime_fidelity(**kwargs)
+
+    runtime["expected_contract"]["sha256"] = json.loads(report_path.read_text(encoding="utf-8"))[
+        "expected_contract_sha256"
+    ]
+    candidate["runtime_path"].write_text(json.dumps(runtime), encoding="utf-8")
+    with pytest.raises(SubmissionValidationError):
+        validate_submit_kernel_runtime_fidelity(**kwargs)
+
+    assert "unchanged_failed_fidelity_attempt" in json.loads(report_path.read_text(encoding="utf-8"))["reason_codes"]

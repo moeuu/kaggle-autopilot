@@ -248,6 +248,58 @@ def semantic_finding_messages(
     )
 
 
+def runtime_tabular_fidelity_findings(tabular: dict[str, object]) -> list[dict[str, str]]:
+    """Return stable fidelity findings from the pure-stdlib runtime CSV audit."""
+    findings: list[dict[str, str]] = []
+
+    def add(code: str, message: str) -> None:
+        findings.append({"code": code, "message": message})
+
+    if tabular.get("parse_error"):
+        add("tabular_output_parse_failed", "runtime could not parse the selected tabular output")
+        return findings
+    schema = tabular.get("schema")
+    columns = schema.get("columns") if isinstance(schema, dict) else None
+    if not isinstance(columns, list) or not columns:
+        add("tabular_output_schema_missing", "runtime tabular output has no recorded schema")
+    row_count = _runtime_nonnegative_int(tabular.get("row_count"))
+    if row_count in {None, 0}:
+        add("tabular_output_rows_missing", "runtime tabular output has no prediction rows")
+    prediction_columns = tabular.get("prediction_columns")
+    if not isinstance(prediction_columns, list) or not prediction_columns:
+        add("tabular_prediction_columns_missing", "runtime tabular output has no prediction columns")
+    if (_runtime_nonnegative_int(tabular.get("prediction_null_count")) or 0) > 0:
+        add("tabular_prediction_nulls", "runtime tabular predictions contain null values")
+    if (_runtime_nonnegative_int(tabular.get("prediction_nonfinite_count")) or 0) > 0:
+        add("tabular_prediction_nonfinite", "runtime tabular predictions contain non-finite numeric values")
+
+    identifier = tabular.get("identifier")
+    if isinstance(identifier, dict):
+        if identifier.get("unique") is not True:
+            add("tabular_identifier_not_unique", "runtime tabular identifiers are not unique")
+        if (_runtime_nonnegative_int(identifier.get("null_count")) or 0) > 0:
+            add("tabular_identifier_nulls", "runtime tabular identifiers contain null values")
+        order_digests = identifier.get("order_digests")
+        if not isinstance(order_digests, dict) or not order_digests:
+            add("tabular_identifier_order_digest_missing", "runtime identifier order digest is missing")
+
+    dispersion = tabular.get("numeric_dispersion")
+    rows = [item for item in dispersion if isinstance(item, dict)] if isinstance(dispersion, list) else []
+    if isinstance(row_count, int) and row_count >= 3 and rows:
+        known_unique_counts = [
+            _runtime_nonnegative_int(item.get("unique_count"))
+            for item in rows
+            if item.get("unique_truncated") is not True
+        ]
+        if (
+            known_unique_counts
+            and len(known_unique_counts) == len(rows)
+            and all(value == 1 for value in known_unique_counts)
+        ):
+            add("tabular_prediction_dispersion_collapsed", "all runtime prediction rows are constant")
+    return findings
+
+
 def _metrics_findings(
     *,
     metrics: dict[str, object],
@@ -388,6 +440,14 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _runtime_nonnegative_int(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _finding(code: str, message: str) -> dict[str, object]:

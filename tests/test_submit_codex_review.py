@@ -190,6 +190,58 @@ def test_review_evidence_surfaces_reference_model_provenance(tmp_path: Path) -> 
     assert "non-authoritative public-reference score" in prompt
 
 
+def test_failed_fidelity_report_rejects_before_codex_invocation(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path)
+    (candidate["package_dir"] / "submit_fidelity_expected.json").write_text(
+        json.dumps({"schema_version": 1, "package_fingerprint": "package-1"}),
+        encoding="utf-8",
+    )
+    fidelity_report_path = tmp_path / "submission_fidelity_report.json"
+    fidelity_report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "verdict": "fail",
+                "reason_codes": ["selected_output_hash_mismatch"],
+                "attempt_fingerprint": "attempt-1",
+                "package_fingerprint": "package-1",
+                "selected_output": {"sha256": "mutated"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    invoked = False
+
+    def must_not_run(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("Codex must not run after deterministic fidelity failure")
+
+    with pytest.raises(SubmissionValidationError, match="fidelity failed before Codex"):
+        review_code_submission_before_execute(
+            slug="demo",
+            run_id="run-1",
+            iteration=1,
+            kernel_id="user/kernel",
+            kernel_version="2",
+            package_dir=candidate["package_dir"],
+            output_dir=candidate["output_dir"],
+            runtime_logs_dir=candidate["logs_dir"],
+            submission_path=candidate["submission_path"],
+            metrics_path=candidate["metrics_path"],
+            expected_output_file=candidate["submission_path"].name,
+            message="human-readable submission",
+            review_dir=tmp_path / "review",
+            fidelity_report_path=fidelity_report_path,
+            run_codex_func=must_not_run,
+        )
+
+    assert invoked is False
+    evidence = json.loads((tmp_path / "review" / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["submission_fidelity"]["verdict"] == "fail"
+    assert any(item["path"] == str(fidelity_report_path.resolve()) for item in evidence["artifacts"])
+
+
 def test_review_rejects_restored_zero_total_and_all_fallback(tmp_path: Path) -> None:
     candidate = _candidate(tmp_path)
     candidate["metrics_path"].write_text(

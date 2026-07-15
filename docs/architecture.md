@@ -160,6 +160,15 @@ Before any submit call:
 - duplicate hash check
 - rate-limit and retry policy
 - repeated error fingerprint abort
+- freshly packaged `gateway`/`inference` kernels bind selection, metric provenance, assets, accelerator, output name,
+  local candidate evidence, and the bounded source package in `submit_fidelity_expected.json`
+- the pure-standard-library bootstrap recorder emits version-scoped input/asset, output/hash, metrics, fallback,
+  tabular ID/order/dispersion, accelerator-fallback, and exception/error-transcript evidence
+- `submit_kernel_fidelity.py` writes one normalized, immutable `submission_fidelity_report.json`; a non-passing
+  verdict raises `SubmissionValidationError` before Codex or Kaggle submission, and Codex cannot override it
+
+Wrapper and file submissions retain their existing validation path. The mandatory attestation applies only to newly
+built `gateway`/`inference` code-submit packages; direct legacy metrics-only callers remain compatible.
 
 ## Artifact Map
 

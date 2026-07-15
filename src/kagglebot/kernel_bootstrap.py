@@ -15,6 +15,7 @@ KERNEL_HARDWARE_PROFILE_MARKER = "# kagglebot:hardware_profile"
 KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
 KERNEL_NON_TRAINING_MARKER = "# kagglebot:non_training_submission"
 KERNEL_SUBMIT_INFERENCE_MARKER = "# kagglebot:submit_inference"
+KERNEL_SUBMIT_FIDELITY_MARKER = "# kagglebot:submit_runtime_fidelity"
 KERNEL_BOOTSTRAP_SCAN_LINES = 512
 
 
@@ -446,6 +447,35 @@ def inject_submit_inference_env(
     if insert_at is None:
         insert_at = find_bootstrap_insertion_index(lines)
     lines = lines[:insert_at] + resolver_block + lines[insert_at:]
+    updated = "\n".join(lines)
+    if text.endswith("\n"):
+        updated += "\n"
+    kernel_path.write_text(updated, encoding="utf-8")
+
+
+def inject_submit_runtime_fidelity(kernel_dir: Path) -> None:
+    """Install the cheap, fail-closed recorder in fresh code-submit packages."""
+    kernel_path = kernel_dir / "kernel.py"
+    if not kernel_path.exists():
+        return
+    text = kernel_path.read_text(encoding="utf-8", errors="ignore")
+    if KERNEL_SUBMIT_FIDELITY_MARKER in text:
+        return
+    recorder_block = [
+        KERNEL_SUBMIT_FIDELITY_MARKER,
+        "try:",
+        "    from submit_runtime_fidelity import install as _kb_install_submit_fidelity",
+        "    _kb_install_submit_fidelity()",
+        "    del _kb_install_submit_fidelity",
+        "except Exception:",
+        "    pass",
+        "",
+    ]
+    lines = text.splitlines()
+    insert_at = find_bootstrap_block_end(lines)
+    if insert_at is None:
+        insert_at = find_bootstrap_insertion_index(lines)
+    lines = lines[:insert_at] + recorder_block + lines[insert_at:]
     updated = "\n".join(lines)
     if text.endswith("\n"):
         updated += "\n"

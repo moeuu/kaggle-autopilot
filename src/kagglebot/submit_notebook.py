@@ -228,6 +228,9 @@ def run_notebook_kernel_submission(
         timeout_minutes=timeout_minutes,
         expected_output_file=expected_output_file,
     )
+    if _is_code_output_artifact_mode(artifact_mode):
+        submit_kernel_kwargs["requested_accelerator"] = accelerator
+        submit_kernel_kwargs["capacity_fallback_used"] = False
     kernel_result = run_submit_kernel_with_cpu_fallback(
         submit_kernel_kwargs=submit_kernel_kwargs,
         run_submit_kernel=run_submit_kernel,
@@ -251,6 +254,7 @@ def run_notebook_kernel_submission(
         expected_output_file=expected_output_file,
     )
     local_artifact_path: Path | None = None
+    fidelity_report_path: Path | None = None
     try:
         local_artifact_path = _resolve_submit_kernel_local_artifact_path(
             kernel_result=kernel_result,
@@ -266,11 +270,49 @@ def run_notebook_kernel_submission(
             )
         if not dry_run:
             metrics_path = getattr(kernel_result, "metrics_path", None)
-            _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
-                artifact_mode=artifact_mode,
-                expected_metrics=expected_metrics_payload,
-                actual_metrics_path=metrics_path if isinstance(metrics_path, Path) else None,
+            package_dir = base_dir / slug / "kernels" / run_id / f"submit-iter-{iteration}"
+            result_expected_path = getattr(kernel_result, "fidelity_expected_path", None)
+            packaged_expected_path = package_dir / _submit_kernel_fidelity.EXPECTED_FILE_NAME
+            expected_contract_path = (
+                result_expected_path
+                if isinstance(result_expected_path, Path)
+                else packaged_expected_path
+                if packaged_expected_path.is_file()
+                else None
             )
+            output_dir = getattr(kernel_result, "output_dir", None)
+            result_runtime_path = getattr(kernel_result, "fidelity_runtime_path", None)
+            discovered_runtime_path = (
+                _kernel_outputs.find_output_file(output_dir, _submit_kernel_fidelity.RUNTIME_FILE_NAME)
+                if isinstance(output_dir, Path)
+                else None
+            )
+            runtime_fidelity_path = (
+                result_runtime_path if isinstance(result_runtime_path, Path) else discovered_runtime_path
+            )
+            if expected_contract_path is not None:
+                fidelity_report_path = iter_logs_dir / f"submission_fidelity_report-v{version_label}.json"
+                _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
+                    artifact_mode=artifact_mode,
+                    expected_metrics=expected_metrics_payload,
+                    actual_metrics_path=metrics_path if isinstance(metrics_path, Path) else None,
+                    expected_contract_path=expected_contract_path,
+                    runtime_fidelity_path=runtime_fidelity_path,
+                    submission_path=local_artifact_path,
+                    package_dir=package_dir,
+                    report_path=fidelity_report_path,
+                    kernel_id=kernel_id,
+                    kernel_version=version_label,
+                    run_id=run_id,
+                    iteration=iteration,
+                    previous_report_paths=iter_logs_dir.glob("submission_fidelity_report-v*.json"),
+                )
+            else:
+                _submit_kernel_fidelity.validate_submit_kernel_runtime_fidelity(
+                    artifact_mode=artifact_mode,
+                    expected_metrics=expected_metrics_payload,
+                    actual_metrics_path=metrics_path if isinstance(metrics_path, Path) else None,
+                )
     except SubmissionCliError as exc:
         _annotate_notebook_submit_error(
             exc,
@@ -301,7 +343,7 @@ def run_notebook_kernel_submission(
                 exit_code=6,
                 output=f"kernel={kernel_id}; expected_output={code_output_file_name or '<missing>'}",
             )
-        review_approval = review_code_submission(
+        review_kwargs: dict[str, object] = dict(
             slug=slug,
             run_id=run_id,
             iteration=iteration,
@@ -316,6 +358,9 @@ def run_notebook_kernel_submission(
             message=message,
             review_dir=iter_logs_dir / "submit-codex-review" / f"v{version_label}",
         )
+        if fidelity_report_path is not None:
+            review_kwargs["fidelity_report_path"] = fidelity_report_path
+        review_approval = review_code_submission(**review_kwargs)
         if recheck_code_submission_guard is None:
             raise SubmissionCliError(
                 "Code-submission reviewer is configured without its deterministic execution guard.",
@@ -554,7 +599,17 @@ def run_submit_kernel_with_cpu_fallback(
         if cpu_fallback_decision.retry_on_cpu:
             on_message(cpu_fallback_decision.message)
             try:
-                return run_submit_kernel(**{**submit_kernel_kwargs, "accelerator": "cpu"})
+                return run_submit_kernel(
+                    **{
+                        **submit_kernel_kwargs,
+                        "accelerator": "cpu",
+                        "requested_accelerator": submit_kernel_kwargs.get(
+                            "requested_accelerator",
+                            submit_kernel_kwargs.get("accelerator", ""),
+                        ),
+                        "capacity_fallback_used": True,
+                    }
+                )
             except Exception as retry_exc:  # noqa: BLE001
                 raise wrap_error(retry_exc) from retry_exc
         if is_capacity_error(exc):

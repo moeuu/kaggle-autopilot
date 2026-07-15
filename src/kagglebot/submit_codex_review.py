@@ -19,6 +19,11 @@ from kagglebot.submission_semantics import semantic_finding_messages
 
 _REQUIRED_CODEX_CHECKS = ("notebook", "model", "output_contract", "runtime_logs")
 _LOG_NAMES = {"stdout.txt", "stderr.txt", "output.log", "log.txt", "logs.txt"}
+_ERROR_LOG_RE = re.compile(
+    r"(?:^kernel_error(?:[-_][^.]+)?\.txt$|^error(?:[-_][^.]+)?\.(?:log|txt)$|"
+    r"^.*(?:exception|traceback).*\.(?:log|txt)$)",
+    flags=re.IGNORECASE,
+)
 _EXCEPTION_RE = re.compile(
     r"(?P<signature>(?:NameError|RuntimeError|ImportError|ModuleNotFoundError|AttributeError|"
     r"TypeError|ValueError|CUDA error|OutOfMemoryError):[^\n\r\"]+)",
@@ -56,6 +61,7 @@ def review_code_submission_before_execute(
     expected_output_file: str,
     message: str,
     review_dir: Path,
+    fidelity_report_path: Path | None = None,
     run_codex_func: Callable[..., CodexResult] = run_codex,
 ) -> CodeSubmissionReviewApproval:
     """Require a read-only Codex review of a completed code-submission kernel.
@@ -78,11 +84,18 @@ def review_code_submission_before_execute(
         metrics_path=metrics_path,
         expected_output_file=expected_output_file,
         message=message,
+        fidelity_report_path=fidelity_report_path,
     )
     evidence_digest = _evidence_digest(evidence)
     evidence["evidence_digest"] = evidence_digest
     evidence_path = review_dir / "evidence.json"
     write_json_object(evidence_path, evidence, ensure_ascii=False, sort_keys=True)
+
+    fidelity = evidence.get("submission_fidelity")
+    if isinstance(fidelity, dict) and fidelity.get("required") is True and fidelity.get("verdict") != "pass":
+        reason_codes = fidelity.get("reason_codes")
+        detail = ", ".join(map(str, reason_codes)) if isinstance(reason_codes, list) else "missing fidelity report"
+        raise _review_rejected(f"deterministic submission fidelity failed before Codex: {detail}")
 
     prompt_path = review_dir / "prompt.md"
     prompt_path.write_text(_render_review_prompt(evidence_path, evidence_digest), encoding="utf-8")
@@ -133,6 +146,10 @@ def assert_code_submission_review_approved(approval: CodeSubmissionReviewApprova
     if not recorded_digest or recorded_digest != approval.evidence_digest or actual_digest != recorded_digest:
         raise _review_rejected("review evidence digest changed after review")
     _verify_artifact_records(evidence.get("artifacts"))
+
+    fidelity = evidence.get("submission_fidelity")
+    if isinstance(fidelity, dict) and fidelity.get("required") is True and fidelity.get("verdict") != "pass":
+        raise _review_rejected("deterministic submission fidelity verdict is not passing")
 
     findings = evidence.get("deterministic_findings")
     if not isinstance(findings, list):
@@ -269,6 +286,7 @@ def _build_review_evidence(
     metrics_path: Path | None,
     expected_output_file: str,
     message: str,
+    fidelity_report_path: Path | None = None,
 ) -> dict[str, object]:
     package_files = _package_review_files(package_dir)
     output_files = _files_under(output_dir)
@@ -276,6 +294,22 @@ def _build_review_evidence(
     artifact_paths = [*package_files, submission_path, *(log_files[:20])]
     if metrics_path is not None:
         artifact_paths.append(metrics_path)
+    expected_fidelity_path = package_dir / "submit_fidelity_expected.json"
+    fidelity_required = expected_fidelity_path.is_file()
+    resolved_fidelity_report_path = fidelity_report_path
+    if resolved_fidelity_report_path is None:
+        output_report = output_dir / "submission_fidelity_report.json"
+        if output_report.is_file():
+            resolved_fidelity_report_path = output_report
+    fidelity_report = (
+        load_json_object(resolved_fidelity_report_path) if resolved_fidelity_report_path is not None else None
+    )
+    if resolved_fidelity_report_path is not None and resolved_fidelity_report_path.is_file():
+        artifact_paths.append(resolved_fidelity_report_path)
+    if fidelity_report is not None:
+        supporting = fidelity_report.get("supporting_artifact_paths")
+        if isinstance(supporting, list):
+            artifact_paths.extend(path for value in supporting if (path := Path(str(value))).is_file())
     artifacts = [_artifact_record(path) for path in _unique_paths(artifact_paths)]
     metrics = load_json_object(metrics_path) if metrics_path is not None else None
     log_text = _read_log_text(log_files)
@@ -289,6 +323,8 @@ def _build_review_evidence(
         log_files=log_files,
         log_text=log_text,
         output_inventory=output_inventory,
+        fidelity_required=fidelity_required,
+        fidelity_report=fidelity_report,
     )
     return {
         "schema_version": 1,
@@ -315,6 +351,21 @@ def _build_review_evidence(
         "metrics_summary": _metrics_summary(metrics),
         "runtime_summary": _runtime_summary(log_files, log_text),
         "runtime_error_excerpt": _runtime_error_excerpt(log_text),
+        "submission_fidelity": {
+            "required": fidelity_required,
+            "report_path": (
+                str(resolved_fidelity_report_path.resolve()) if resolved_fidelity_report_path is not None else None
+            ),
+            "verdict": fidelity_report.get("verdict") if fidelity_report is not None else None,
+            "reason_codes": fidelity_report.get("reason_codes") if fidelity_report is not None else [],
+            "attempt_fingerprint": (
+                fidelity_report.get("attempt_fingerprint") if fidelity_report is not None else None
+            ),
+            "package_fingerprint": (
+                fidelity_report.get("package_fingerprint") if fidelity_report is not None else None
+            ),
+            "selected_output": fidelity_report.get("selected_output") if fidelity_report is not None else None,
+        },
         "deterministic_findings": findings,
     }
 
@@ -329,6 +380,8 @@ def _deterministic_findings(
     log_files: list[Path],
     log_text: str,
     output_inventory: dict[str, object],
+    fidelity_required: bool = False,
+    fidelity_report: dict[str, object] | None = None,
 ) -> list[str]:
     findings: list[str] = []
     if not package_dir.is_dir() or not any((package_dir / name).is_file() for name in ("kernel.py", "kernel.ipynb")):
@@ -347,6 +400,16 @@ def _deterministic_findings(
     if dependency_files:
         findings.append(f"notebook output contains {dependency_files} persisted dependency/cache files")
     findings.extend(_submission_prediction_findings(submission_path, metrics=metrics))
+    if fidelity_required and fidelity_report is None:
+        findings.append("mandatory submission fidelity report is missing or invalid")
+    elif fidelity_required and fidelity_report.get("verdict") != "pass":
+        codes = fidelity_report.get("reason_codes")
+        findings.append(f"deterministic submission fidelity verdict failed: {codes}")
+    elif fidelity_required:
+        selected = fidelity_report.get("selected_output")
+        expected_sha = str(selected.get("sha256") or "") if isinstance(selected, dict) else ""
+        if not expected_sha or sha256_file_or_none(submission_path) != expected_sha:
+            findings.append("reviewed output hash differs from the passing submission fidelity report")
     return findings
 
 
@@ -407,9 +470,18 @@ def _metrics_findings(metrics: dict[str, object] | None) -> list[str]:
 def _package_review_files(package_dir: Path) -> list[Path]:
     if not package_dir.is_dir():
         return []
-    names = {"kernel.py", "kernel.ipynb", "kernel-metadata.json", "plan.json", "submission_manifest.json"}
+    names = {
+        "kernel.py",
+        "kernel.ipynb",
+        "kernel-metadata.json",
+        "plan.json",
+        "submission_manifest.json",
+        "submit_fidelity_expected.json",
+    }
     return sorted(
-        path for path in package_dir.iterdir() if path.is_file() and (path.name in names or path.suffix == ".py")
+        path
+        for path in package_dir.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and (path.name in names or path.suffix == ".py")
     )
 
 
@@ -424,7 +496,9 @@ def _files_under(root: Path) -> list[Path]:
 
 def _runtime_log_files(output_dir: Path, runtime_logs_dir: Path) -> list[Path]:
     output_logs = _unique_paths(
-        path for path in _files_under(output_dir) if path.name.lower() in _LOG_NAMES or path.suffix.lower() == ".log"
+        path
+        for path in _files_under(output_dir)
+        if path.name.lower() in _LOG_NAMES or path.suffix.lower() == ".log" or _ERROR_LOG_RE.search(path.name)
     )
     if output_logs:
         return output_logs
@@ -434,7 +508,7 @@ def _runtime_log_files(output_dir: Path, runtime_logs_dir: Path) -> list[Path]:
     return _unique_paths(
         path
         for path in _files_under(runtime_logs_dir)
-        if path.name.lower() in _LOG_NAMES or path.suffix.lower() == ".log"
+        if path.name.lower() in _LOG_NAMES or path.suffix.lower() == ".log" or _ERROR_LOG_RE.search(path.name)
     )
 
 
@@ -559,6 +633,10 @@ listed under `package_files`, files inventoried under the current `output_dir`, 
 `runtime_summary.log_files` belong to this candidate. Do not search parent or sibling
 directories for other logs. If an unlisted earlier-version error log is encountered, ignore
 it; it must not override the current version's recorded runtime evidence.
+
+`submission_fidelity` is the deterministic source of truth for package/runtime/output
+identity. A non-passing fidelity verdict is not reviewable and cannot be overridden by
+this response. You may explain additional concerns while retaining the four checks below.
 
 Reject any candidate that used dummy/fallback predictions instead of its claimed model,
 restored a score without current evaluation, hid repeated runtime exceptions, emitted the
