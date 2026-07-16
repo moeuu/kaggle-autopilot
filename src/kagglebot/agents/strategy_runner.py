@@ -30,7 +30,7 @@ _PYTEST_TIMEOUT_SEC = 2.0
 _RUNNER_LABEL = STRATEGY_AGENT.log_alias
 _DEFAULT_ORACLE_BROWSER_PORT = 9222
 _ORACLE_BROWSER_READY_TIMEOUT_SEC = 15.0
-_DEFAULT_ORACLE_BROWSER_INPUT_TIMEOUT = "600s"
+_DEFAULT_ORACLE_BROWSER_INPUT_TIMEOUT = "3600s"
 _DEFAULT_ORACLE_BROWSER_TIMEOUT = "24h"
 _DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
 _DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
@@ -411,7 +411,11 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             last_message_path.unlink(missing_ok=True)
             (output_dir / "oracle_archive.json").unlink(missing_ok=True)
             result = run_command(args, timeout=timeout)
-            if _oracle_browser_engine_requested(extra_args):
+            written_text = (
+                transcript_path.read_text(encoding="utf-8", errors="ignore") if transcript_path.exists() else ""
+            )
+            written_response = bool(written_text.strip()) and not _oracle_transcript_is_cli_failure(written_text)
+            if _oracle_browser_engine_requested(extra_args) and (result.returncode == 0 or written_response):
                 archive_report = _ensure_oracle_conversation_archived(
                     transcript_path=transcript_path,
                     output_dir=output_dir,
@@ -457,7 +461,8 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
     transcript_text = transcript_path.read_text(encoding="utf-8", errors="ignore") if transcript_path.exists() else ""
     returncode = result.returncode
     stderr = result.stderr
-    if returncode != 0 and transcript_text.strip():
+    transcript_is_response = bool(transcript_text.strip()) and not _oracle_transcript_is_cli_failure(transcript_text)
+    if returncode != 0 and transcript_is_response:
         returncode = 0
         stderr = "\n".join(
             part
@@ -467,6 +472,8 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
             )
             if part
         )
+    elif returncode != 0 and transcript_text.strip():
+        stderr = "\n".join(part for part in (stderr, transcript_text.strip()) if part)
     if archive_report is not None and archive_report.get("archived") is not True:
         archive_error = str(archive_report.get("fallbackReason") or archive_report.get("reason") or "unknown")
         stderr = "\n".join(
@@ -486,6 +493,19 @@ def _run_oracle_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool =
         sandbox_policy_mode="external",
         engine="oracle",
     )
+
+
+def _oracle_transcript_is_cli_failure(text: str) -> bool:
+    """Distinguish Oracle's browser error transcript from a model response."""
+    stripped = text.lstrip()
+    if not stripped.startswith("\U0001f9ff oracle "):
+        return False
+    failure_markers = (
+        "\nERROR:",
+        "\nUser error (",
+        "\nThis run did not return cleanly",
+    )
+    return any(marker in stripped for marker in failure_markers)
 
 
 def _resolve_strategy_engine(engine: str | None) -> str:
@@ -548,7 +568,12 @@ def _oracle_force_args(extra_args: list[str]) -> list[str]:
 def _oracle_inline_prompt_enabled(extra_args: list[str]) -> bool:
     if _oracle_args_include_option(extra_args, "--file", "-f"):
         return False
-    return _env_flag("KAGGLEBOT_ORACLE_INLINE_PROMPT", default=True)
+    if "KAGGLEBOT_ORACLE_INLINE_PROMPT" in os.environ:
+        return _env_flag("KAGGLEBOT_ORACLE_INLINE_PROMPT", default=False)
+    # Browser automation must type/paste inline prompts into the ChatGPT composer. Large
+    # strategy prompts can take longer than the browser input deadline to appear there,
+    # while file attachments avoid that fragile UI path. Keep API mode inline by default.
+    return not _oracle_browser_engine_requested(extra_args)
 
 
 def _build_oracle_attachment_plan(
@@ -559,7 +584,8 @@ def _build_oracle_attachment_plan(
     inline_prompt: bool,
     split_large_data: bool = False,
 ) -> OracleAttachmentPlan:
-    context_paths: list[Path] = [] if inline_prompt else [oracle_prompt_path]
+    prompt_delivery_paths: list[Path] = [] if inline_prompt else [oracle_prompt_path]
+    context_paths: list[Path] = []
     for candidate in _oracle_context_bundle_candidates(prompt_path):
         if candidate.exists() and candidate.is_file() and candidate not in context_paths:
             context_paths.append(candidate)
@@ -578,7 +604,7 @@ def _build_oracle_attachment_plan(
 
     if not context_paths and context_dir is None:
         return OracleAttachmentPlan(
-            paths=tuple(context_paths),
+            paths=tuple(prompt_delivery_paths),
             data_paths=tuple(data_paths),
             data_decision=data_decision,
         )
@@ -603,7 +629,9 @@ def _build_oracle_attachment_plan(
         ),
         encoding="utf-8",
     )
-    delivery_paths = list(context_paths) if context_dir is None else []
+    delivery_paths = list(prompt_delivery_paths)
+    if context_dir is None:
+        delivery_paths.extend(context_paths)
     delivery_paths.append(context_bundle_path)
     for delivery in data_deliveries:
         delivery_paths.extend(delivery.paths)

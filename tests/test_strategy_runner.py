@@ -269,14 +269,42 @@ def test_run_strategy_defaults_to_auto_and_uses_oracle_when_available(monkeypatc
     assert "--force" in captured_args
     assert "-p" in captured_args
     assert (
-        "Use the Kagglebot strategy prompt below together with every attached canonical context file."
+        "Read the attached Kagglebot strategy prompt file and any attached Kagglebot context bundle files."
         in (captured_args[captured_args.index("-p") + 1])
     )
     assert "Authorized benign use" in captured_args[captured_args.index("-p") + 1]
-    assert "strategy prompt" in captured_args[captured_args.index("-p") + 1]
-    assert "--file" not in captured_args
+    assert "\n\nstrategy prompt" not in captured_args[captured_args.index("-p") + 1]
+    assert "--file" in captured_args
+    assert str(tmp_path / "oracle_strategy_prompt.md") in captured_args
     assert (tmp_path / "oracle_strategy_prompt.md").exists()
     assert (tmp_path / "strategy_last_message.txt").read_text(encoding="utf-8") == "oracle strategy output\n"
+
+
+def test_run_strategy_oracle_does_not_treat_browser_error_transcript_as_response(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+
+    def fake_run_command(args: list[str], **kwargs) -> CommandResult:  # noqa: ARG001
+        output_path = Path(args[args.index("--write-output") + 1])
+        output_path.write_text(
+            "\U0001f9ff oracle 0.16.0 — test\n"
+            "ERROR: Prompt did not appear in conversation before timeout (likely too large).\n"
+            "User error (browser-automation): Prompt did not appear in conversation before timeout.\n",
+            encoding="utf-8",
+        )
+        return CommandResult(args=args, returncode=1, stdout="", stderr="", duration_sec=0.01)
+
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
+    )
+    monkeypatch.setattr(strategy_runner, "run_command", fake_run_command)
+
+    result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="oracle")
+
+    assert result.returncode == 1
+    assert "Prompt did not appear in conversation before timeout" in result.stderr
 
 
 def test_run_strategy_auto_requires_oracle_when_oracle_unavailable(monkeypatch, tmp_path: Path) -> None:
@@ -436,7 +464,7 @@ def test_oracle_browser_bootstrap_reuses_ready_remote_chrome(monkeypatch) -> Non
         "--browser-attachments",
         "auto",
         "--browser-input-timeout",
-        "600s",
+        "3600s",
         "--browser-timeout",
         "24h",
         "--browser-archive",
@@ -459,7 +487,7 @@ def test_oracle_browser_bootstrap_keeps_explicit_model_strategy(monkeypatch) -> 
         "--browser-attachments",
         "auto",
         "--browser-input-timeout",
-        "600s",
+        "3600s",
         "--browser-timeout",
         "24h",
         "--browser-archive",
