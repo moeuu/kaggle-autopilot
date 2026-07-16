@@ -4,7 +4,6 @@ Recommended action: Classify supervisor/runtime errors centrally and add reusabl
 
 ## Signals
 - biohub-cell-tracking-during-development 20260707T063753Z-169cfcdf: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
-- amia-public-challenge-2026 20260610T103310Z-965204a0: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

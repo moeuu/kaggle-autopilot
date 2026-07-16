@@ -6,7 +6,6 @@ Recommended action: Improve submit fallback diagnostics, notebook/file mode infe
 - biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: gap=None
 - arc-prize-2026-arc-agi-3 20260714T060514Z-134b7f94: gap=None
 - cohort-x-task-1 20260629T021700Z-c2183268: gap=0.29333
-- ai-agent-security-multi-step-tool-attacks 20260628T172512Z-e4b70727: gap=None
 - biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: reason=submit_aborted fingerprint=3be5105ab5a5014fa8f4
 - arc-prize-2026-arc-agi-3 20260714T060514Z-134b7f94: reason=submit_aborted fingerprint=05752cc26d065e7d7ebf
 - ai-agent-security-multi-step-tool-attacks 20260628T172512Z-e4b70727: reason=submit_aborted fingerprint=3f0a0e8be0c3e5adc3e5
