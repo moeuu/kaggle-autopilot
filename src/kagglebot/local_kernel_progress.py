@@ -23,6 +23,7 @@ from kagglebot.kernel_progress import (
 from kagglebot.logging_utils import truncate_lines
 
 LOCAL_KERNEL_STARTUP_STALL_GRACE_SEC = 30.0
+_LOCAL_KERNEL_CONTROL_FILENAMES = frozenset({"local_launch_manifest.json"})
 
 
 @dataclass
@@ -174,6 +175,8 @@ def scan_watch_dirs_activity(
             continue
         for path in paths:
             if not path.is_file():
+                continue
+            if path.name in _LOCAL_KERNEL_CONTROL_FILENAMES:
                 continue
             try:
                 mtime = float(path.stat().st_mtime)

@@ -32,6 +32,8 @@ from kagglebot.kernel_package_files import (
     sync_plan_snapshot,
 )
 from kagglebot.kernel_runner import (
+    KernelRunResult,
+    _prepare_local_execution_output,
     resolve_kaggle_username,
     run_kernel,
     run_kernel_local,
@@ -3039,6 +3041,173 @@ def test_run_kernel_local_executes_staged_copy(tmp_path: Path) -> None:
     assert staged_plan_parent.exists()
     assert json.loads(staged_plan_local.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
     assert json.loads(staged_plan_parent.read_text(encoding="utf-8")) == {"toggles": {"USE_MODEL": True}}
+
+
+def test_local_execution_output_isolates_stale_checkpoints_and_reuses_matching_identity(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    plan_path = tmp_path / "plan.json"
+    kernel_path.write_text("print('kernel v1')\n", encoding="utf-8")
+    plan_path.write_text('{"batch_size": 1}\n', encoding="utf-8")
+    base_output_dir = tmp_path / "output"
+    base_output_dir.mkdir()
+    stale_checkpoint = base_output_dir / "resume_main_fold0.pt"
+    stale_checkpoint.write_bytes(b"old-checkpoint-bytes")
+    env = {
+        "KAGGLEBOT_BATCH_SIZE": "unique-training-scale-value",
+        "KAGGLEBOT_TEXT_GROUP_KEYS": "unique-document-group-value",
+        "KAGGLEBOT_OUTPUT_DIR": "/volatile/old-output",
+        "KAGGLEBOT_RESUME": "1",
+        "KAGGLEBOT_API_TOKEN": "top-secret-credential-value",
+    }
+
+    selected, identity, resume_enabled = _prepare_local_execution_output(
+        base_output_dir=base_output_dir,
+        kernel_path=kernel_path,
+        plan_path=plan_path,
+        hardware_profile="rtx3060",
+        accelerator="gpu",
+        iteration=1,
+        autofix_attempt=2,
+        env=env,
+    )
+
+    assert selected != base_output_dir
+    assert not resume_enabled
+    assert stale_checkpoint.read_bytes() == b"old-checkpoint-bytes"
+    assert not list(selected.glob("*.pt"))
+    assert selected.parent == base_output_dir
+    assert selected.name == f"launch-{identity[:16]}"
+    manifest_path = selected / "local_launch_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["launch_signature"] == identity
+    assert manifest["launch_count"] == 1
+    assert manifest["resume_enabled_for_launch"] is False
+    assert manifest["autofix_attempt"] == 2
+    assert "KAGGLEBOT_BATCH_SIZE" in manifest["training_env_keys"]
+    assert "KAGGLEBOT_TEXT_GROUP_KEYS" in manifest["training_env_keys"]
+    assert "KAGGLEBOT_API_TOKEN" not in manifest["training_env_keys"]
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    assert "unique-training-scale-value" not in manifest_text
+    assert "unique-document-group-value" not in manifest_text
+    assert "top-secret-credential-value" not in manifest_text
+    assert "/volatile/old-output" not in manifest_text
+
+    selected_again, identity_again, resume_enabled_again = _prepare_local_execution_output(
+        base_output_dir=base_output_dir,
+        kernel_path=kernel_path,
+        plan_path=plan_path,
+        hardware_profile="rtx3060",
+        accelerator="gpu",
+        iteration=1,
+        autofix_attempt=3,
+        env=env,
+    )
+
+    assert selected_again == selected
+    assert identity_again == identity
+    assert resume_enabled_again
+    reused_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert reused_manifest["launch_count"] == 2
+    assert reused_manifest["resume_enabled_for_launch"] is True
+    assert reused_manifest["autofix_attempt"] == 3
+    assert stale_checkpoint.read_bytes() == b"old-checkpoint-bytes"
+
+
+def test_local_execution_identity_changes_with_kernel_plan_and_training_env(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    plan_path = tmp_path / "plan.json"
+    kernel_path.write_text("print('kernel v1')\n", encoding="utf-8")
+    plan_path.write_text('{"batch_size": 1}\n', encoding="utf-8")
+    base_output_dir = tmp_path / "output"
+    base_output_dir.mkdir()
+    (base_output_dir / "best_main_fold0.pt").write_bytes(b"stale-best")
+
+    def prepare(env: dict[str, str]) -> tuple[Path, str, bool]:
+        return _prepare_local_execution_output(
+            base_output_dir=base_output_dir,
+            kernel_path=kernel_path,
+            plan_path=plan_path,
+            hardware_profile="rtx3060",
+            accelerator="gpu",
+            iteration=1,
+            autofix_attempt=1,
+            env=env,
+        )
+
+    kernel_v1_dir, kernel_v1_identity, _ = prepare({"KAGGLEBOT_BATCH_SIZE": "1"})
+    kernel_path.write_text("print('kernel v2')\n", encoding="utf-8")
+    kernel_v2_dir, kernel_v2_identity, _ = prepare({"KAGGLEBOT_BATCH_SIZE": "1"})
+    plan_path.write_text('{"batch_size": 2}\n', encoding="utf-8")
+    plan_v2_dir, plan_v2_identity, _ = prepare({"KAGGLEBOT_BATCH_SIZE": "1"})
+    scaled_dir, scaled_identity, _ = prepare({"KAGGLEBOT_BATCH_SIZE": "2"})
+
+    assert len({kernel_v1_identity, kernel_v2_identity, plan_v2_identity, scaled_identity}) == 4
+    assert len({kernel_v1_dir, kernel_v2_dir, plan_v2_dir, scaled_dir}) == 4
+    assert (base_output_dir / "best_main_fold0.pt").read_bytes() == b"stale-best"
+
+
+def test_run_kernel_local_routes_artifacts_to_checkpoint_identity_namespace(tmp_path: Path) -> None:
+    source_kernel_dir = tmp_path / "demo" / "kernel"
+    source_kernel_dir.mkdir(parents=True, exist_ok=True)
+    (source_kernel_dir / "kernel.py").write_text(
+        "\n".join(
+            [
+                "import os",
+                "from pathlib import Path",
+                "",
+                "out_dir = Path(os.environ['KAGGLEBOT_OUTPUT_DIR'])",
+                "out_dir.mkdir(parents=True, exist_ok=True)",
+                "out_dir.joinpath('resume_policy.txt').write_text(os.environ['KAGGLEBOT_RESUME'], encoding='utf-8')",
+                "out_dir.joinpath('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
+                "out_dir.joinpath('metrics.json').write_text(",
+                '    \'{"metric":"rmse","offline_value":0.1}\', encoding=\'utf-8\'',
+                ")",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "demo" / "plan.json").write_text(
+        json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8"
+    )
+    run_id = "run-checkpoint-identity"
+    run_dir = tmp_path / "demo" / "runs" / run_id
+    (run_dir / "autofix" / "attempt-2").mkdir(parents=True)
+    base_output_dir = run_dir / "iter-1" / "output"
+    base_output_dir.mkdir(parents=True)
+    stale_checkpoint = base_output_dir / "resume_main_fold0.pt"
+    stale_checkpoint.write_bytes(b"stale-resume")
+
+    def execute() -> KernelRunResult:
+        return run_kernel_local(
+            slug="demo",
+            run_id=run_id,
+            iteration=1,
+            base_dir=tmp_path,
+            accelerator="gpu",
+            score_source="holdout",
+            metric="rmse",
+            direction="minimize",
+            holdout_frac=0.2,
+            cv_folds=3,
+            seed=42,
+            dry_run=False,
+            timeout_minutes=1,
+            strict_accelerator=False,
+        )
+
+    first = execute()
+    assert first.output_dir != base_output_dir
+    assert first.submission_path == first.output_dir / "submission.csv"
+    assert first.metrics_path == first.output_dir / "metrics.json"
+    assert (first.output_dir / "resume_policy.txt").read_text(encoding="utf-8") == "0"
+    assert stale_checkpoint.read_bytes() == b"stale-resume"
+
+    second = execute()
+    assert second.output_dir == first.output_dir
+    assert second.submission_path == second.output_dir / "submission.csv"
+    assert (second.output_dir / "resume_policy.txt").read_text(encoding="utf-8") == "1"
+    assert stale_checkpoint.read_bytes() == b"stale-resume"
 
 
 def test_run_kernel_local_fails_fast_when_local_kernel_stalls(

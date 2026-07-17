@@ -124,6 +124,18 @@ def test_progress_tracker_ignores_stale_artifacts_then_counts_new_activity(tmp_p
     assert isinstance(fresh_snapshot["last_artifact_age_sec"], (int, float))
 
 
+def test_progress_tracker_ignores_local_launch_manifest(tmp_path: Path) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir(parents=True, exist_ok=True)
+    (watch_dir / "local_launch_manifest.json").write_text("{}\n", encoding="utf-8")
+    tracker = build_local_kernel_progress_tracker(base_dir=tmp_path, slug="demo", watch_dirs=[watch_dir])
+
+    snapshot = tracker.snapshot()
+
+    assert snapshot["artifact_count"] == 0
+    assert snapshot["last_artifact_age_sec"] is None
+
+
 def test_format_local_gpu_activity_suffix_handles_missing_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
     assert format_local_gpu_activity_suffix(accelerator="gpu") == ""

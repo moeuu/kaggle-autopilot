@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -111,6 +113,161 @@ _LOCAL_KERNEL_HEARTBEAT_INTERVAL_SEC = 30.0
 _LOCAL_FORMAT_SUBMISSION_OUTPUT_SUFFIXES = all_submission_output_suffixes()
 _LOCAL_SAMPLE_SUBMISSION_OUTPUT_SUFFIXES = tabular_submission_output_suffixes()
 _KERNEL_LOG_OUTPUT_FILE_PATTERN = r"(^|/)(stdout\.txt|stderr\.txt|output\.log|log\.txt|logs\.txt|[^/]+\.log)$"
+_LOCAL_EXECUTION_MANIFEST = "local_launch_manifest.json"
+_LOCAL_EXECUTION_ENV_EXCLUDED = {
+    "KAGGLEBOT_COMPETITION_SLUG",
+    "KAGGLEBOT_ITERATION",
+    "KAGGLEBOT_LOCAL_KERNEL",
+    "KAGGLEBOT_LOCAL_KERNEL_MAX_RSS_MB",
+    "KAGGLEBOT_LOCAL_KERNEL_STALL_SEC",
+    "KAGGLEBOT_LOCAL_NOFILE",
+    "KAGGLEBOT_LOCAL_WORKING_DIR",
+    "KAGGLEBOT_OUTPUT_DIR",
+    "KAGGLEBOT_RESUME",
+    "KAGGLEBOT_RESUME_RUN_ID",
+    "KAGGLEBOT_RESUME_SLUG",
+    "KAGGLEBOT_RUN_ID",
+    "KAGGLEBOT_SLUG",
+    "KAGGLEBOT_SUBMISSION_FILENAME",
+    "KAGGLEBOT_TORCH_SHARING_STRATEGY",
+}
+_LOCAL_EXECUTION_ENV_EXCLUDED_PREFIXES = (
+    "KAGGLEBOT_KAGGLE_",
+    "KAGGLEBOT_ORACLE_",
+    "KAGGLEBOT_WATCH_",
+)
+_LOCAL_EXECUTION_ENV_SECRET_SEGMENTS = {
+    "AUTH",
+    "COOKIE",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "KEY",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+}
+
+
+def _local_execution_manifest_matches(manifest: dict[str, object], launch_signature: str) -> bool:
+    return manifest.get("launch_signature") == launch_signature
+
+
+def _local_execution_dir_is_empty(path: Path) -> bool:
+    return not path.exists() or not any(path.iterdir())
+
+
+def _training_kagglebot_env(env: dict[str, str]) -> list[tuple[str, str]]:
+    selected: list[tuple[str, str]] = []
+    for key in sorted(env):
+        if not key.startswith("KAGGLEBOT_"):
+            continue
+        if key in _LOCAL_EXECUTION_ENV_EXCLUDED or key.startswith(_LOCAL_EXECUTION_ENV_EXCLUDED_PREFIXES):
+            continue
+        if _LOCAL_EXECUTION_ENV_SECRET_SEGMENTS.intersection(key.split("_")):
+            continue
+        selected.append((key, env[key]))
+    return selected
+
+
+def _latest_local_autofix_attempt(run_dir: Path) -> int | None:
+    autofix_dir = run_dir / "autofix"
+    if not autofix_dir.is_dir():
+        return None
+    attempts = []
+    for path in autofix_dir.iterdir():
+        match = re.fullmatch(r"attempt-(\d+)", path.name)
+        if path.is_dir() and match:
+            attempts.append(int(match.group(1)))
+    return max(attempts, default=None)
+
+
+def _atomic_write_local_execution_manifest(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            temporary_path = Path(handle.name)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _prepare_local_execution_output(
+    *,
+    base_output_dir: Path,
+    kernel_path: Path,
+    plan_path: Path,
+    hardware_profile: str,
+    accelerator: str,
+    iteration: int,
+    autofix_attempt: int | None,
+    env: dict[str, str],
+) -> tuple[Path, str, bool]:
+    """Select a checkpoint-compatible output namespace for one local execution."""
+    training_env = _training_kagglebot_env(env)
+    training_env_sha256 = sha256_text(json.dumps(training_env, ensure_ascii=True, separators=(",", ":")))
+    signature_inputs: dict[str, object] = {
+        "schema_version": 1,
+        "kernel_sha256": sha256_path(kernel_path),
+        "plan_sha256": sha256_path(plan_path) if plan_path.is_file() else None,
+        "hardware_profile": hardware_profile,
+        "accelerator": accelerator,
+        "training_env_sha256": training_env_sha256,
+    }
+    launch_signature = sha256_text(
+        json.dumps(signature_inputs, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    )
+
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    base_manifest = load_json_object_or_empty(base_output_dir / _LOCAL_EXECUTION_MANIFEST)
+    base_matches = _local_execution_manifest_matches(base_manifest, launch_signature)
+    selected_output_dir = base_output_dir
+    if not base_matches and not _local_execution_dir_is_empty(base_output_dir):
+        candidate_stem = f"launch-{launch_signature[:16]}"
+        collision = 1
+        while True:
+            suffix = "" if collision == 1 else f"-{collision}"
+            candidate = base_output_dir / f"{candidate_stem}{suffix}"
+            candidate_manifest = load_json_object_or_empty(candidate / _LOCAL_EXECUTION_MANIFEST)
+            candidate_matches = _local_execution_manifest_matches(candidate_manifest, launch_signature)
+            if candidate_matches or _local_execution_dir_is_empty(candidate):
+                selected_output_dir = candidate
+                break
+            collision += 1
+
+    selected_output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = selected_output_dir / _LOCAL_EXECUTION_MANIFEST
+    previous_manifest = load_json_object_or_empty(manifest_path)
+    same_identity = _local_execution_manifest_matches(previous_manifest, launch_signature)
+    try:
+        previous_launch_count = int(previous_manifest.get("launch_count", 0))
+    except (TypeError, ValueError):
+        previous_launch_count = 0
+    manifest = {
+        **signature_inputs,
+        "launch_signature": launch_signature,
+        "kernel_path": str(kernel_path.resolve()),
+        "plan_path": str(plan_path.resolve()),
+        "iteration": int(iteration),
+        "autofix_attempt": autofix_attempt,
+        "training_env_keys": [key for key, _ in training_env],
+        "launch_count": previous_launch_count + 1 if same_identity else 1,
+        "resume_enabled_for_launch": same_identity,
+        "resume_policy": "same_launch_signature_only",
+    }
+    _atomic_write_local_execution_manifest(manifest_path, manifest)
+    return selected_output_dir, launch_signature, same_identity
 
 
 @dataclass(frozen=True)
@@ -878,12 +1035,6 @@ def run_kernel_local(
         _kernel_bootstrap.ensure_kernel_force_train_env(kernel_stage_dir)
     _local_kernel_shims.ensure_training_progress_shim(kernel_stage_dir)
     ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
-    restored = _local_kernel_resume.restore_local_kernel_checkpoints(
-        kernel_stage_dir=kernel_stage_dir,
-        durable_root=durable_resume_root,
-    )
-    if restored is not None:
-        print(f"[cyan]kernel local resume[/cyan]: restored exact-source checkpoints into {restored}")
     local_aux_env, local_aux_notes = _local_kernel_aux_inputs.stage_local_kernel_aux_inputs(
         base_dir=base_dir,
         slug=slug,
@@ -940,6 +1091,58 @@ def run_kernel_local(
             f"the hard timeout is {timeout_sec / 60:.1f}m. Keep the accuracy strategy, but fix its runtime contract or "
             "checkpoint/resume behavior before retrying."
         )
+    env = os.environ.copy()
+    env.setdefault("KAGGLEBOT_LOCAL_KERNEL", "1")
+    env.setdefault("KAGGLEBOT_SLUG", slug)
+    env.setdefault("KAGGLEBOT_COMPETITION_SLUG", slug)
+    env.setdefault("KAGGLEBOT_RUN_ID", run_id)
+    env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
+    env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
+    local_submission_filename = _local_submission_filename_from_sample(base_dir=base_dir, slug=slug)
+    if local_submission_filename is not None:
+        env.setdefault("KAGGLEBOT_SUBMISSION_FILENAME", local_submission_filename)
+    resolved_hardware_profile = resolve_hardware_profile(hardware_profile, compute="local_gpu")
+    for key, value in hardware_env(resolved_hardware_profile).items():
+        env.setdefault(key, value)
+    for key, value in local_aux_env.items():
+        env[key] = value
+    for key, value in local_model_env.items():
+        env[key] = value
+    env_notes = _local_kernel_runtime_env.apply_local_runtime_env_defaults(
+        env=env,
+        accelerator=accelerator,
+        local_working_dir=kernel_stage_dir / "outputs" / "kaggle_working",
+    )
+    for note in env_notes:
+        print(f"[yellow]kernel local[/yellow]: {note}")
+    output_dir, launch_signature, resume_enabled = _prepare_local_execution_output(
+        base_output_dir=output_dir,
+        kernel_path=kernel_path,
+        plan_path=kernel_stage_dir / "plan.json",
+        hardware_profile=resolved_hardware_profile.key,
+        accelerator=accelerator,
+        iteration=iteration,
+        autofix_attempt=_latest_local_autofix_attempt(output_dir.parent.parent),
+        env=env,
+    )
+    env["KAGGLEBOT_OUTPUT_DIR"] = str(output_dir)
+    env["KAGGLEBOT_RESUME"] = "1" if resume_enabled else "0"
+    if resume_enabled:
+        restored = _local_kernel_resume.restore_local_kernel_checkpoints(
+            kernel_stage_dir=kernel_stage_dir,
+            durable_root=durable_resume_root,
+        )
+        if restored is not None:
+            print(f"[cyan]kernel local resume[/cyan]: restored exact-source checkpoints into {restored}")
+    print(
+        "[cyan]kernel local execution[/cyan]: "
+        f"output={output_dir} signature={launch_signature[:16]} "
+        f"resume={'enabled' if resume_enabled else 'disabled'}"
+    )
+    memory_cap_bytes = _local_kernel_limits.resolve_memory_cap_bytes(env)
+    if memory_cap_bytes is not None:
+        print(f"[yellow]kernel local[/yellow]: host memory guard active at {memory_cap_bytes // (1024 * 1024)} MiB RSS")
+
     started_at = time.time()
     monotonic_start = time.monotonic()
     progress_tracker = _local_kernel_progress.build_local_kernel_progress_tracker(
@@ -957,33 +1160,6 @@ def run_kernel_local(
         progress_tracker=progress_tracker,
         accelerator=accelerator,
     )
-    env = os.environ.copy()
-    env["KAGGLEBOT_OUTPUT_DIR"] = str(output_dir)
-    env.setdefault("KAGGLEBOT_LOCAL_KERNEL", "1")
-    env.setdefault("KAGGLEBOT_SLUG", slug)
-    env.setdefault("KAGGLEBOT_COMPETITION_SLUG", slug)
-    env.setdefault("KAGGLEBOT_RUN_ID", run_id)
-    env.setdefault("KAGGLEBOT_ITERATION", str(iteration))
-    env.setdefault("KAGGLEBOT_ACCELERATOR", accelerator)
-    local_submission_filename = _local_submission_filename_from_sample(base_dir=base_dir, slug=slug)
-    if local_submission_filename is not None:
-        env.setdefault("KAGGLEBOT_SUBMISSION_FILENAME", local_submission_filename)
-    for key, value in hardware_env(resolve_hardware_profile(hardware_profile, compute="local_gpu")).items():
-        env.setdefault(key, value)
-    for key, value in local_aux_env.items():
-        env[key] = value
-    for key, value in local_model_env.items():
-        env[key] = value
-    env_notes = _local_kernel_runtime_env.apply_local_runtime_env_defaults(
-        env=env,
-        accelerator=accelerator,
-        local_working_dir=kernel_stage_dir / "outputs" / "kaggle_working",
-    )
-    for note in env_notes:
-        print(f"[yellow]kernel local[/yellow]: {note}")
-    memory_cap_bytes = _local_kernel_limits.resolve_memory_cap_bytes(env)
-    if memory_cap_bytes is not None:
-        print(f"[yellow]kernel local[/yellow]: host memory guard active at {memory_cap_bytes // (1024 * 1024)} MiB RSS")
 
     heartbeat_stop = threading.Event()
     heartbeat = threading.Thread(

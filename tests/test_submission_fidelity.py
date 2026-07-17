@@ -121,6 +121,158 @@ def test_file_fidelity_rejects_ordered_identifier_mismatch(tmp_path: Path) -> No
     assert exc_info.value.fidelity_repair_required is True
 
 
+def test_file_fidelity_accepts_variable_instance_rows_by_longest_sample_base(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg,0\nimg_a,0\nimg_b,0\n")
+    submission = _write(
+        tmp_path / "submission.csv",
+        "filament_id,target\nimg_b_arbitrary-suffix,0.3\nimg_a_1,0.1\nimg_a_alpha_beta,0.2\nimg_root,0.4\n",
+    )
+    _write(
+        tmp_path / "output" / "test_prediction_ledger.csv",
+        "stem,prediction_count\nimg,1\nimg_a,2\nimg_b,1\n",
+    )
+
+    report = _validate(
+        tmp_path,
+        submission=submission,
+        sample=sample,
+        metrics=_metrics(tmp_path / "metrics.json", test_submission_rows=4),
+    )
+
+    assert report["verdict"] == "pass"
+    cardinality = report["identifier_cardinality"]
+    assert cardinality["mode"] == "variable_rows_by_base_identifier"
+    assert cardinality["row_cardinality"] == "variable_per_entity"
+    assert cardinality["identifier_relation"] == "sample_id_plus_suffix"
+    assert cardinality["sample_predictions_are_placeholders"] is True
+    assert cardinality["rows_per_base"] == {"img": 1, "img_a": 2, "img_b": 1}
+    assert cardinality["row_count_evidence"]["metrics"]["matches_actual"] is True
+    assert cardinality["row_count_evidence"]["prediction_ledger"]["matches_actual"] is True
+    assert cardinality["row_count_evidence"]["prediction_ledger"]["base_counts_match_actual"] is True
+    assert "file_identifier_order_mismatch" not in report["reason_codes"]
+    assert "file_row_count_mismatch" not in report["reason_codes"]
+
+
+def test_file_fidelity_warns_when_variable_instance_base_has_no_rows(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_b,0\n")
+    submission = _write(tmp_path / "submission.csv", "filament_id,target\nimg_a_1,0.1\nimg_a_custom,0.2\n")
+
+    report = _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert report["verdict"] == "pass"
+    assert "file_identifier_bases_without_rows" in report["warning_codes"]
+    assert report["identifier_cardinality"]["missing_bases"] == ["img_b"]
+
+
+def test_file_fidelity_rejects_unknown_variable_instance_base(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_b,0\n")
+    submission = _write(tmp_path / "submission.csv", "filament_id,target\nimg_a_1,0.1\nimg_c_1,0.2\n")
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert "file_identifier_unknown_base" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_rejects_duplicate_variable_instance_identifier(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_b,0\n")
+    submission = _write(
+        tmp_path / "submission.csv",
+        "filament_id,target\nimg_a_1,0.1\nimg_a_1,0.2\nimg_b_1,0.3\n",
+    )
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert "tabular_identifier_not_unique" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_rejects_ambiguous_variable_instance_base(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_a,0\n")
+    submission = _write(tmp_path / "submission.csv", "filament_id,target\nimg_a_1,0.1\nimg_a_2,0.2\n")
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert "file_identifier_base_mapping_ambiguous" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_rejects_empty_variable_instance_suffix(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_b,0\n")
+    submission = _write(tmp_path / "submission.csv", "filament_id,target\nimg_a_,0.1\nimg_b_1,0.2\n")
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert "file_identifier_suffix_malformed" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_rejects_variable_rows_disagreeing_with_metrics(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_b,0\n")
+    submission = _write(
+        tmp_path / "submission.csv",
+        "filament_id,target\nimg_a_1,0.1\nimg_a_2,0.2\nimg_b_1,0.3\n",
+    )
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(
+            tmp_path,
+            submission=submission,
+            sample=sample,
+            metrics=_metrics(tmp_path / "metrics.json", test_submission_rows=2),
+        )
+
+    assert "file_row_count_metrics_mismatch" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_rejects_variable_rows_disagreeing_with_ledger(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0\nimg_b,0\n")
+    submission = _write(
+        tmp_path / "submission.csv",
+        "filament_id,target\nimg_a_1,0.1\nimg_a_2,0.2\nimg_b_1,0.3\n",
+    )
+    _write(
+        tmp_path / "output" / "test_prediction_ledger.csv",
+        "stem,prediction_count\nimg_a,1\nimg_b,1\n",
+    )
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(
+            tmp_path,
+            submission=submission,
+            sample=sample,
+            metrics=_metrics(tmp_path / "metrics.json", test_submission_rows=3),
+        )
+
+    assert "file_row_count_ledger_mismatch" in exc_info.value.reason_codes
+    assert "file_identifier_ledger_count_mismatch" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_does_not_infer_variable_rows_from_nonplaceholder_sample(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "filament_id,target\nimg_a,0.2\nimg_b,0.8\n")
+    submission = _write(
+        tmp_path / "submission.csv",
+        "filament_id,target\nimg_a_1,0.1\nimg_a_2,0.2\nimg_b_1,0.3\n",
+    )
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert "file_row_count_mismatch" in exc_info.value.reason_codes
+    assert "file_identifier_order_mismatch" in exc_info.value.reason_codes
+
+
+def test_file_fidelity_keeps_fixed_row_count_and_order_checks(tmp_path: Path) -> None:
+    sample = _write(tmp_path / "sample_submission.csv", "id,target\n1,0\n2,0\n3,0\n")
+    submission = _write(tmp_path / "submission.csv", "id,target\n2,0.2\n1,0.1\n")
+
+    with pytest.raises(SubmissionValidationError) as exc_info:
+        _validate(tmp_path, submission=submission, sample=sample, metrics=_metrics(tmp_path / "metrics.json"))
+
+    assert "file_row_count_mismatch" in exc_info.value.reason_codes
+    assert "file_identifier_order_mismatch" in exc_info.value.reason_codes
+
+
 @pytest.mark.parametrize(
     ("submission_text", "metrics_updates", "expected_code"),
     [

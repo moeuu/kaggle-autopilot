@@ -520,6 +520,7 @@ def test_prepare_oracle_chrome_profile_excludes_live_browser_locks(monkeypatch, 
     destination = tmp_path / "copy"
     destination.mkdir()
 
+    monkeypatch.delenv("KAGGLEBOT_ORACLE_CHROME_USER_DATA_DIR", raising=False)
     monkeypatch.setenv("KAGGLEBOT_ORACLE_CHROME_COPY_PROFILE", str(source))
     monkeypatch.setattr(strategy_runner, "mkdtemp", lambda prefix: str(destination))
     monkeypatch.setattr(strategy_runner.shutil, "which", lambda command: None)
@@ -543,6 +544,7 @@ def test_prepare_oracle_chrome_profile_passes_root_excludes_to_rsync(monkeypatch
     def fake_run(args: list[str], **kwargs) -> None:  # noqa: ARG001
         captured_args.extend(args)
 
+    monkeypatch.delenv("KAGGLEBOT_ORACLE_CHROME_USER_DATA_DIR", raising=False)
     monkeypatch.setenv("KAGGLEBOT_ORACLE_CHROME_COPY_PROFILE", str(source))
     monkeypatch.setattr(strategy_runner, "mkdtemp", lambda prefix: str(destination))
     monkeypatch.setattr(strategy_runner.shutil, "which", lambda command: "/usr/bin/rsync")

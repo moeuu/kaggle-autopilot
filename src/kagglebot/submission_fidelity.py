@@ -33,6 +33,10 @@ REPORT_TYPE = "SubmissionFidelityReport"
 QUARANTINE_STATE_KEY = "submission_fidelity_quarantine"
 QUARANTINE_LEDGER_EVENT = "submission_fidelity_quarantine"
 
+_FIXED_ROWS_IDENTIFIER_MODE = "fixed_rows"
+_VARIABLE_ROWS_IDENTIFIER_MODE = "variable_rows_by_base_identifier"
+_IDENTIFIER_DIAGNOSTIC_LIMIT = 500
+
 _CODE_OUTPUT_MODES = {"gateway", "inference"}
 _TRUSTED_SCORE_SOURCES = frozenset({"cv", "cross_validation", "holdout", "offline", "oof"})
 _SCORE_KEYS = ("selected_cv_mean", "offline_value", "primary_score", "score", "value")
@@ -145,6 +149,7 @@ def validate_file_submission_fidelity(
         prepared_submission_path=prepared_submission_path,
         code_fingerprint=code_fingerprint,
         metrics=metrics,
+        metrics_path=metrics_path,
         sample_submission_path=sample_submission_path,
         score_value=score_value,
         score_direction=score_direction,
@@ -182,6 +187,7 @@ def build_file_submission_fidelity_contract(
     prepared_submission_path: Path,
     code_fingerprint: str | None,
     metrics: Mapping[str, object] | None,
+    metrics_path: Path | None,
     sample_submission_path: Path | None,
     score_value: float | None,
     score_direction: str | None,
@@ -195,6 +201,12 @@ def build_file_submission_fidelity_contract(
     )
     local_evidence = _local_tabular_evidence(prepared_submission_path)
     sample_evidence = _local_tabular_evidence(sample_submission_path)
+    identifier_cardinality = _identifier_cardinality_contract(
+        sample_submission_path=sample_submission_path,
+        submission_path=prepared_submission_path,
+        metrics=metrics_payload,
+        metrics_path=metrics_path,
+    )
     fallback_flags = {key: _truthy(metrics_payload.get(key)) for key in _FALLBACK_FLAG_KEYS if key in metrics_payload}
     source_counts = _bounded_source_counts(
         metrics_payload.get("test_prediction_distribution") or metrics_payload.get("prediction_source_distribution")
@@ -246,6 +258,7 @@ def build_file_submission_fidelity_contract(
             "prediction_statistics": local_evidence.get("prediction_statistics") if local_evidence else None,
         },
         "sample_contract": sample_evidence,
+        "identifier_cardinality": identifier_cardinality,
         "fallback": {
             "declared_flags": fallback_flags,
             "prediction_source_counts": source_counts,
@@ -294,11 +307,24 @@ def build_file_submission_fidelity_report(
 
     actual_tabular = _local_tabular_evidence(prepared_submission_path)
     sample_tabular = _local_tabular_evidence(sample_submission_path)
+    actual_identifier_cardinality = _identifier_cardinality_contract(
+        sample_submission_path=sample_submission_path,
+        submission_path=prepared_submission_path,
+        metrics=metrics,
+        metrics_path=metrics_path,
+    )
     if actual_tabular is not None:
         for finding in runtime_tabular_fidelity_findings(actual_tabular):
             add(str(finding["code"]), str(finding["message"]))
     if actual_tabular is not None and sample_tabular is not None:
-        _compare_local_tabular_contract(sample_tabular, actual_tabular, add=add)
+        _compare_local_tabular_contract(
+            sample_tabular,
+            actual_tabular,
+            expected_identifier_cardinality=_nested_mapping(expected_contract, "identifier_cardinality"),
+            actual_identifier_cardinality=actual_identifier_cardinality,
+            add=add,
+            warn=warnings.append,
+        )
 
     semantic_findings = semantic_report.get("findings") if semantic_report else None
     if isinstance(semantic_findings, list):
@@ -356,6 +382,9 @@ def build_file_submission_fidelity_report(
         )
         if path is not None and path.exists()
     ]
+    ledger_path = _nested_text(actual_identifier_cardinality, "row_count_evidence", "prediction_ledger", "path")
+    if ledger_path and Path(ledger_path).is_file():
+        supporting.append(str(Path(ledger_path).resolve()))
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "report_type": REPORT_TYPE,
@@ -383,6 +412,7 @@ def build_file_submission_fidelity_report(
         "metric_provenance": provenance,
         "fallback": dict(fallback),
         "prediction_evidence": actual_tabular,
+        "identifier_cardinality": actual_identifier_cardinality,
         "attempt_fingerprint": attempt_fingerprint,
         "comparison": {
             "expected": {
@@ -825,11 +855,429 @@ def _local_tabular_evidence(path: Path | None) -> dict[str, object] | None:
     }
 
 
-def _compare_local_tabular_contract(expected, actual, *, add) -> None:  # noqa: ANN001
+def _identifier_cardinality_contract(
+    *,
+    sample_submission_path: Path | None,
+    submission_path: Path | None,
+    metrics: Mapping[str, object] | None,
+    metrics_path: Path | None,
+) -> dict[str, object]:
+    """Infer a conservative row-per-instance identifier contract.
+
+    A variable-row submission is accepted only when its schema matches the
+    sample, sample predictions are placeholders, it has one identifier column,
+    every actual identifier maps uniquely to a sample base identifier, actual
+    identifiers are unique, and at least one row expands a base as
+    ``<base>_<nonempty suffix>``. The longest base match handles sample IDs that
+    themselves contain underscores.
+    """
+    result: dict[str, object] = {
+        "mode": _FIXED_ROWS_IDENTIFIER_MODE,
+        "row_cardinality": "fixed",
+        "identifier_relation": "exact",
+        "candidate": False,
+        "eligible": False,
+    }
+    if (
+        sample_submission_path is None
+        or submission_path is None
+        or not sample_submission_path.is_file()
+        or not submission_path.is_file()
+    ):
+        return result
+    try:
+        sample = read_table(sample_submission_path)
+        actual = read_table(submission_path)
+    except Exception:  # noqa: BLE001 - the format validators report unreadable tables
+        return result
+
+    sample.columns = [str(column)[:500] for column in sample.columns]
+    actual.columns = [str(column)[:500] for column in actual.columns]
+    sample_id_columns = [column for column in sample.columns if _looks_like_id_column(column)]
+    actual_id_columns = [column for column in actual.columns if _looks_like_id_column(column)]
+    schema_matches_sample = list(actual.columns) == list(sample.columns)
+    prediction_columns = [column for column in sample.columns if column not in sample_id_columns]
+    sample_predictions_are_placeholders = bool(prediction_columns) and all(
+        _is_placeholder_prediction(value) for column in prediction_columns for value in sample[column].tolist()
+    )
+    actual_prediction_empty_count = sum(
+        _is_empty_cell(value)
+        for column in prediction_columns
+        if column in actual.columns
+        for value in actual[column].tolist()
+    )
+    result.update(
+        {
+            "sample_identifier_columns": sample_id_columns[:32],
+            "actual_identifier_columns": actual_id_columns[:32],
+            "actual_instance_row_count": int(len(actual)),
+            "schema_matches_sample": schema_matches_sample,
+            "sample_prediction_columns": prediction_columns[:100],
+            "sample_predictions_are_placeholders": sample_predictions_are_placeholders,
+            "actual_prediction_empty_count": actual_prediction_empty_count,
+        }
+    )
+    if len(sample_id_columns) != 1 or actual_id_columns != sample_id_columns:
+        return result
+
+    identifier_column = sample_id_columns[0]
+    expected_values = [_normalized_cell(value) for value in sample[identifier_column].tolist()]
+    actual_values = [_normalized_cell(value) for value in actual[identifier_column].tolist()]
+    base_occurrences: dict[str, int] = {}
+    ordered_bases: list[str] = []
+    for base in expected_values:
+        if base not in base_occurrences:
+            ordered_bases.append(base)
+            base_occurrences[base] = 0
+        base_occurrences[base] += 1
+    rows_per_base = dict.fromkeys(ordered_bases, 0)
+    unknown_identifiers: list[str] = []
+    ambiguous_identifiers: list[str] = []
+    malformed_identifiers: list[str] = []
+    suffixed_row_count = 0
+    exact_row_count = 0
+    sorted_bases = sorted(base_occurrences, key=len, reverse=True)
+    for identifier in actual_values:
+        base = identifier if identifier in base_occurrences else ""
+        if not base:
+            base = next(
+                (
+                    candidate_base
+                    for candidate_base in sorted_bases
+                    if identifier.startswith(f"{candidate_base}_") and len(identifier) > len(candidate_base) + 1
+                ),
+                "",
+            )
+        if not base:
+            if any(identifier == f"{candidate_base}_" for candidate_base in sorted_bases):
+                malformed_identifiers.append(identifier)
+                continue
+            unknown_identifiers.append(identifier)
+            continue
+        if base_occurrences[base] != 1:
+            ambiguous_identifiers.append(identifier)
+            continue
+        rows_per_base[base] += 1
+        if identifier == base:
+            exact_row_count += 1
+        else:
+            suffixed_row_count += 1
+
+    actual_unique = len(set(actual_values)) == len(actual_values)
+    expected_unique = all(count == 1 for count in base_occurrences.values())
+    candidate = suffixed_row_count > 0 or bool(ambiguous_identifiers) or bool(malformed_identifiers)
+    eligible = bool(
+        candidate
+        and schema_matches_sample
+        and sample_predictions_are_placeholders
+        and expected_unique
+        and actual_unique
+        and actual_prediction_empty_count == 0
+        and not unknown_identifiers
+        and not ambiguous_identifiers
+        and not malformed_identifiers
+    )
+    missing_bases = [base for base in ordered_bases if rows_per_base[base] == 0]
+    bounded_rows_per_base = ordered_bases[:_IDENTIFIER_DIAGNOSTIC_LIMIT]
+    row_count_evidence = _variable_row_count_evidence(
+        actual_row_count=len(actual),
+        rows_per_base=rows_per_base,
+        metrics=metrics,
+        metrics_path=metrics_path,
+        submission_path=submission_path,
+    )
+    result.update(
+        {
+            "mode": _VARIABLE_ROWS_IDENTIFIER_MODE if eligible else _FIXED_ROWS_IDENTIFIER_MODE,
+            "row_cardinality": "variable_per_entity" if eligible else "fixed",
+            "identifier_relation": "sample_id_plus_suffix" if eligible else "exact",
+            "base_identifier_source": "sample_submission",
+            "base_identifier_coverage": "subset" if eligible else "exact",
+            "suffix_delimiter": "_",
+            "candidate": candidate,
+            "eligible": eligible,
+            "identifier_column": identifier_column,
+            "expected_image_base_count": len(ordered_bases),
+            "expected_identifier_unique": expected_unique,
+            "actual_identifier_unique": actual_unique,
+            "exact_identifier_row_count": exact_row_count,
+            "suffixed_identifier_row_count": suffixed_row_count,
+            "unknown_base_count": len(unknown_identifiers),
+            "unknown_base_examples": [value[:500] for value in unknown_identifiers[:20]],
+            "ambiguous_base_count": len(ambiguous_identifiers),
+            "ambiguous_base_examples": [value[:500] for value in ambiguous_identifiers[:20]],
+            "malformed_suffix_count": len(malformed_identifiers),
+            "malformed_suffix_examples": [value[:500] for value in malformed_identifiers[:20]],
+            "missing_base_count": len(missing_bases),
+            "missing_bases": [value[:500] for value in missing_bases[:_IDENTIFIER_DIAGNOSTIC_LIMIT]],
+            "missing_bases_truncated": len(missing_bases) > _IDENTIFIER_DIAGNOSTIC_LIMIT,
+            "rows_per_base": {base[:500]: rows_per_base[base] for base in bounded_rows_per_base},
+            "rows_per_base_truncated": len(ordered_bases) > _IDENTIFIER_DIAGNOSTIC_LIMIT,
+            "row_count_evidence": row_count_evidence,
+        }
+    )
+    return result
+
+
+def _is_placeholder_prediction(value: object) -> bool:
+    if _is_empty_cell(value):
+        return True
+    try:
+        numeric = float(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(numeric) and numeric == 0.0
+
+
+def _is_empty_cell(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, (list, tuple, dict)) and bool(pd.isna(value)):
+        return True
+    return isinstance(value, str) and not value.strip()
+
+
+def _variable_row_count_evidence(
+    *,
+    actual_row_count: int,
+    rows_per_base: Mapping[str, int],
+    metrics: Mapping[str, object] | None,
+    metrics_path: Path | None,
+    submission_path: Path,
+) -> dict[str, object]:
+    metrics_payload = metrics if isinstance(metrics, Mapping) else {}
+    metrics_row_count_provided = (
+        "test_submission_rows" in metrics_payload and metrics_payload.get("test_submission_rows") is not None
+    )
+    metrics_row_count = _strict_nonnegative_int(metrics_payload.get("test_submission_rows"))
+    ledger_path = _find_prediction_ledger_path(
+        metrics=metrics_payload,
+        metrics_path=metrics_path,
+        submission_path=submission_path,
+    )
+    return {
+        "actual_row_count": int(actual_row_count),
+        "metrics": {
+            "test_submission_rows_provided": metrics_row_count_provided,
+            "test_submission_rows": metrics_row_count,
+            "valid": None if not metrics_row_count_provided else metrics_row_count is not None,
+            "matches_actual": None if metrics_row_count is None else metrics_row_count == actual_row_count,
+        },
+        "prediction_ledger": _prediction_ledger_evidence(
+            ledger_path=ledger_path,
+            actual_row_count=actual_row_count,
+            rows_per_base=rows_per_base,
+        ),
+    }
+
+
+def _find_prediction_ledger_path(
+    *,
+    metrics: Mapping[str, object],
+    metrics_path: Path | None,
+    submission_path: Path,
+) -> Path | None:
+    candidates: list[Path] = []
+    for key in ("test_prediction_ledger_path", "test_prediction_ledger"):
+        raw = metrics.get(key)
+        if not isinstance(raw, (str, Path)) or not str(raw).strip():
+            continue
+        candidate = Path(str(raw).strip())
+        if not candidate.is_absolute() and metrics_path is not None:
+            candidate = metrics_path.parent / candidate
+        candidates.append(candidate)
+    for directory in (
+        metrics_path.parent if metrics_path is not None else None,
+        submission_path.parent,
+    ):
+        if directory is None:
+            continue
+        candidates.extend(
+            (directory / "test_prediction_ledger.csv", directory / "output" / "test_prediction_ledger.csv")
+        )
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _prediction_ledger_evidence(
+    *,
+    ledger_path: Path | None,
+    actual_row_count: int,
+    rows_per_base: Mapping[str, int],
+) -> dict[str, object]:
+    if ledger_path is None:
+        return {"available": False}
+    evidence: dict[str, object] = {
+        "available": True,
+        "path": str(ledger_path.resolve()),
+        "sha256": sha256_file_or_none(ledger_path),
+    }
+    try:
+        ledger = read_table(ledger_path)
+    except Exception as exc:  # noqa: BLE001 - retain a bounded diagnostic for the fidelity report
+        evidence.update({"valid": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+        return evidence
+    ledger.columns = [str(column)[:500] for column in ledger.columns]
+    count_column = next((column for column in ledger.columns if column.lower() == "prediction_count"), None)
+    base_column = next(
+        (
+            column
+            for preferred in ("stem", "base_identifier", "image_id", "id", "identifier")
+            for column in ledger.columns
+            if column.lower() == preferred
+        ),
+        None,
+    )
+    evidence.update(
+        {
+            "row_count": int(len(ledger)),
+            "columns": list(ledger.columns)[:100],
+            "count_column": count_column,
+            "base_identifier_column": base_column,
+        }
+    )
+    if count_column is None:
+        evidence.update({"valid": False, "error": "prediction_count column is missing"})
+        return evidence
+    numeric_counts = pd.to_numeric(ledger[count_column], errors="coerce")
+    parsed_counts = [_strict_nonnegative_int(value) for value in numeric_counts.tolist()]
+    if any(value is None for value in parsed_counts):
+        evidence.update({"valid": False, "error": "prediction_count contains invalid values"})
+        return evidence
+    ledger_count_values = [int(value) for value in parsed_counts if value is not None]
+    ledger_total = sum(ledger_count_values)
+    evidence.update(
+        {
+            "valid": True,
+            "prediction_count_sum": ledger_total,
+            "matches_actual": ledger_total == actual_row_count,
+        }
+    )
+    if base_column is None:
+        return evidence
+    ledger_bases = [_normalized_cell(value) for value in ledger[base_column].tolist()]
+    duplicate_bases = len(set(ledger_bases)) != len(ledger_bases)
+    ledger_counts = dict(zip(ledger_bases, ledger_count_values, strict=False))
+    unknown_bases = sorted(set(ledger_counts) - set(rows_per_base))
+    missing_bases = sorted(set(rows_per_base) - set(ledger_counts))
+    mismatched_bases = sorted(
+        base for base in set(rows_per_base) & set(ledger_counts) if rows_per_base[base] != ledger_counts[base]
+    )
+    evidence.update(
+        {
+            "base_identifiers_unique": not duplicate_bases,
+            "unknown_base_count": len(unknown_bases),
+            "unknown_base_examples": unknown_bases[:20],
+            "missing_base_count": len(missing_bases),
+            "missing_base_examples": missing_bases[:20],
+            "base_count_mismatch_count": len(mismatched_bases),
+            "base_count_mismatch_examples": mismatched_bases[:20],
+            "base_counts_match_actual": not duplicate_bases
+            and not unknown_bases
+            and not missing_bases
+            and not mismatched_bases,
+        }
+    )
+    return evidence
+
+
+def _strict_nonnegative_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
+        return None
+    return int(numeric)
+
+
+def _compare_local_tabular_contract(
+    expected,  # noqa: ANN001
+    actual,  # noqa: ANN001
+    *,
+    expected_identifier_cardinality,  # noqa: ANN001
+    actual_identifier_cardinality,  # noqa: ANN001
+    add,  # noqa: ANN001
+    warn,  # noqa: ANN001
+) -> None:
     expected_schema = _nested_list(expected, "schema", "columns")
     actual_schema = _nested_list(actual, "schema", "columns")
     if expected_schema and actual_schema != expected_schema:
         add("file_schema_mismatch", "prepared artifact schema differs from sample submission")
+
+    actual_cardinality = actual_identifier_cardinality if isinstance(actual_identifier_cardinality, Mapping) else {}
+    expected_cardinality = (
+        expected_identifier_cardinality if isinstance(expected_identifier_cardinality, Mapping) else {}
+    )
+    variable_rows = (
+        _text(expected_cardinality.get("mode")) == _VARIABLE_ROWS_IDENTIFIER_MODE
+        and _text(actual_cardinality.get("mode")) == _VARIABLE_ROWS_IDENTIFIER_MODE
+    )
+    if actual_cardinality.get("candidate") is True:
+        if (actual_cardinality.get("unknown_base_count") or 0) > 0:
+            add("file_identifier_unknown_base", "prepared artifact contains identifiers with no sample image base")
+        if (actual_cardinality.get("ambiguous_base_count") or 0) > 0:
+            add(
+                "file_identifier_base_mapping_ambiguous",
+                "prepared artifact identifiers do not map unambiguously to sample image bases",
+            )
+        if (actual_cardinality.get("malformed_suffix_count") or 0) > 0:
+            add(
+                "file_identifier_suffix_malformed",
+                "prepared artifact contains an instance identifier with an empty suffix",
+            )
+        if (actual_cardinality.get("actual_prediction_empty_count") or 0) > 0:
+            add("file_prediction_value_empty", "prepared artifact contains empty prediction values")
+    if _text(expected_cardinality.get("mode")) == _VARIABLE_ROWS_IDENTIFIER_MODE and not variable_rows:
+        add(
+            "file_identifier_cardinality_mode_mismatch",
+            "prepared artifact no longer satisfies the frozen variable-row identifier contract",
+        )
+    if variable_rows:
+        row_count_evidence = _nested_mapping(actual_cardinality, "row_count_evidence") or {}
+        metrics_evidence = _nested_mapping(row_count_evidence, "metrics") or {}
+        ledger_evidence = _nested_mapping(row_count_evidence, "prediction_ledger") or {}
+        if metrics_evidence.get("test_submission_rows_provided") is True:
+            if metrics_evidence.get("valid") is not True:
+                add("file_metrics_row_count_invalid", "metrics.test_submission_rows is not a nonnegative integer")
+            elif metrics_evidence.get("matches_actual") is not True:
+                add(
+                    "file_row_count_metrics_mismatch",
+                    "prepared artifact row count differs from metrics.test_submission_rows",
+                )
+        if ledger_evidence.get("available") is True:
+            if ledger_evidence.get("valid") is not True:
+                add("file_prediction_ledger_invalid", "test prediction ledger is unreadable or invalid")
+            else:
+                if ledger_evidence.get("matches_actual") is not True:
+                    add(
+                        "file_row_count_ledger_mismatch",
+                        "prepared artifact row count differs from the test prediction ledger sum",
+                    )
+                if (
+                    ledger_evidence.get("base_identifier_column")
+                    and ledger_evidence.get("base_counts_match_actual") is not True
+                ):
+                    add(
+                        "file_identifier_ledger_count_mismatch",
+                        "prepared artifact rows per base identifier differ from the test prediction ledger",
+                    )
+        if (actual_cardinality.get("missing_base_count") or 0) > 0:
+            warn("file_identifier_bases_without_rows")
+        return
+
     if expected.get("row_count") != actual.get("row_count"):
         add("file_row_count_mismatch", "prepared artifact row count differs from sample submission")
     expected_id = _nested_mapping(expected, "identifier")
