@@ -758,9 +758,8 @@ def test_run_submit_kernel_dry_run_gateway_mode_stages_offline_authoritative_ker
         encoding="utf-8",
     )
     (tmp_path / slug / "plan.json").write_text(json.dumps({"toggles": {"USE_MODEL": True}}, indent=2), encoding="utf-8")
-    local_metrics = tmp_path / slug / "kernels" / "run-1" / "local-iter-1" / "outputs" / "metrics.json"
-    local_metrics.parent.mkdir(parents=True, exist_ok=True)
-    local_metrics.write_text(
+    selected_artifact_metrics = tmp_path / "metrics.json"
+    selected_artifact_metrics.write_text(
         json.dumps(
             {
                 "chosen_pipeline": "strong_model",
@@ -793,7 +792,11 @@ def test_run_submit_kernel_dry_run_gateway_mode_stages_offline_authoritative_ker
     assert "SUBMISSION_GZIP_B64" not in kernel_text
     assert "# kagglebot:submit_inference" in kernel_text
     assert "# kagglebot:submit_runtime_fidelity" in kernel_text
-    assert "from submit_runtime_fidelity import install" in kernel_text
+    assert "kagglebot_embedded_submit_runtime_fidelity" in kernel_text
+    assert "_KB_SUBMIT_FIDELITY_NS['install']" in kernel_text
+    assert "# kagglebot:submit_runtime_fidelity_finalize" in kernel_text
+    assert "flush_installed_runtime_fidelity" in kernel_text
+    assert kernel_text.rfind("flush_installed_runtime_fidelity") > kernel_text.index("OUT = Path")
     assert "# kagglebot:staged_plan_payload_fallback" in kernel_text
     assert "# kagglebot:staged_plan_path_fallback" in kernel_text
     assert 'PLAN_PATH = KERNEL_DIR / "plan.json"' in kernel_text
@@ -820,6 +823,7 @@ def test_run_submit_kernel_dry_run_gateway_mode_stages_offline_authoritative_ker
     assert fidelity_expected["iteration"] == 1
     assert fidelity_expected["selection"]["pipeline"] == "strong_model"
     assert fidelity_expected["output"]["filename"] == "submission.csv"
+    assert fidelity_expected["accelerator"]["requires_gpu"] is True
     assert fidelity_expected["package_fingerprint"]
     payload = json.loads((kernel_dir / "kernel-metadata.json").read_text(encoding="utf-8"))
     assert payload["enable_gpu"] is True

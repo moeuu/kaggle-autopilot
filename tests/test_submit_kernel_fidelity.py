@@ -227,7 +227,12 @@ def test_runtime_fidelity_rejects_unreported_selection_contract(tmp_path: Path) 
     assert "selected score 0.9 was not reported" in exc.value.stderr
 
 
-def _strong_fidelity_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+def _strong_fidelity_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    artifact_mode: str = "inference",
+) -> dict[str, object]:
     package_dir = tmp_path / "package"
     output_dir = tmp_path / "output"
     input_dir = tmp_path / "input"
@@ -257,7 +262,7 @@ def _strong_fidelity_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         run_id="run-1",
         iteration=1,
         kernel_id="user/demo",
-        artifact_mode="inference",
+        artifact_mode=artifact_mode,
         expected_output_file="submission.csv",
         expected_metrics=metrics,
         selected_candidate_path=local_candidate,
@@ -317,6 +322,36 @@ def test_normalized_runtime_fidelity_report_passes_and_binds_exact_output(
     )
     assert str(candidate["runtime_path"].resolve()) in report["supporting_artifact_paths"]
     assert json.loads(report_path.read_text(encoding="utf-8"))["attempt_fingerprint"]
+
+
+def test_gateway_runtime_fidelity_accepts_visible_constant_placeholder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _strong_fidelity_candidate(tmp_path, monkeypatch, artifact_mode="gateway")
+    candidate["submission_path"].write_text("id,target\n1,0.0\n2,0.0\n", encoding="utf-8")
+    record_runtime_fidelity(
+        package_root=candidate["package_dir"],
+        output_root=candidate["output_dir"],
+        input_root=tmp_path / "input",
+    )
+
+    report = validate_submit_kernel_runtime_fidelity(
+        artifact_mode="gateway",
+        expected_metrics=candidate["metrics"],
+        actual_metrics_path=candidate["metrics_path"],
+        expected_contract_path=candidate["expected_path"],
+        runtime_fidelity_path=candidate["runtime_path"],
+        submission_path=candidate["submission_path"],
+        package_dir=candidate["package_dir"],
+        kernel_id="user/demo",
+        kernel_version="3",
+        run_id="run-1",
+        iteration=1,
+    )
+
+    assert report is not None
+    assert report["verdict"] == "pass"
 
 
 def test_normalized_runtime_fidelity_failure_is_non_retryable_and_records_stable_codes(

@@ -607,6 +607,7 @@ class KernelSubmitPackageBuilder:
                     / "outputs"
                     / "metrics.json",
                     output_dir / "metrics.json",
+                    config.submission_path.parent / "metrics.json",
                 ]
             )
             _submit_kernel_fidelity.validate_reference_submission_readiness(
@@ -623,7 +624,6 @@ class KernelSubmitPackageBuilder:
                 }
             )
             _kernel_bootstrap.inject_submit_inference_env(kernel_dir, runtime_env=runtime_env)
-            _kernel_bootstrap.inject_submit_runtime_fidelity(kernel_dir)
             _sanitize_submit_inference_output_roots(kernel_dir)
             _validate_inference_submit_kernel(kernel_dir)
             ensure_kernel_sources_valid(kernel_dir)
@@ -672,6 +672,13 @@ class KernelSubmitPackageBuilder:
                 machine_shape=submit_machine_shape,
                 capacity_fallback_used=config.capacity_fallback_used,
             )
+            _kernel_bootstrap.inject_submit_runtime_fidelity(
+                kernel_dir,
+                expected_contract_path=fidelity_expected_path,
+            )
+            ensure_kernel_sources_valid(kernel_dir)
+            validate_kernel_package(kernel_dir)
+            _kernel_package_files.remove_generated_kernel_cache_files(kernel_dir)
         source_fingerprint = _kernel_source_fingerprint(
             kernel_dir,
             mode=submit_mode,

@@ -46,6 +46,27 @@ def test_package_fingerprint_covers_source_but_skips_weights_and_expected_contra
     assert package_source_fingerprint(package_dir) != first
 
 
+def test_package_fingerprint_normalizes_generated_embedded_recorder(tmp_path: Path) -> None:
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    kernel_path = package_dir / "kernel.py"
+    kernel_path.write_text("print('start')\n# kagglebot:submit_inference\nprint('run')\n", encoding="utf-8")
+    expected = package_source_fingerprint(package_dir)
+
+    kernel_path.write_text(
+        "print('start')\n"
+        "# kagglebot:submit_runtime_fidelity\n"
+        "embedded_recorder = 'generated'\n"
+        "# kagglebot:submit_inference\n"
+        "print('run')\n"
+        "# kagglebot:submit_runtime_fidelity_finalize\n"
+        "flush_recorder()\n",
+        encoding="utf-8",
+    )
+
+    assert package_source_fingerprint(package_dir) == expected
+
+
 def test_runtime_recorder_captures_bounded_relative_inputs_output_and_tabular_stats(
     tmp_path: Path,
     monkeypatch,
@@ -139,3 +160,37 @@ def test_installed_recorder_chains_unhandled_exception_and_writes_evidence(tmp_p
     assert report["errors"]["unhandled_exception"]["type"] == "RuntimeError"
     assert "RuntimeError: boom" in report["errors"]["unhandled_exception"]["traceback"]
     assert str(tmp_path) not in json.dumps(report)
+
+
+def test_explicit_flush_writes_evidence_before_process_exit(tmp_path: Path) -> None:
+    package_dir = tmp_path / "package"
+    output_dir = tmp_path / "working"
+    input_dir = tmp_path / "input"
+    package_dir.mkdir()
+    output_dir.mkdir()
+    input_dir.mkdir()
+    (package_dir / "kernel.py").write_text("print('ok')\n", encoding="utf-8")
+    _write_expected(package_dir)
+    script = tmp_path / "flush_before_exit.py"
+    script.write_text(
+        "from kagglebot.kernel_runtime.submit_runtime_fidelity import "
+        "flush_installed_runtime_fidelity, install\n"
+        f"install(package_root={str(package_dir)!r}, output_root={str(output_dir)!r}, input_root={str(input_dir)!r})\n"
+        f"open({str(output_dir / 'submission.csv')!r}, 'w', encoding='utf-8').write('id,target\\n1,0.5\\n')\n"
+        "flush_installed_runtime_fidelity()\n"
+        f"assert __import__('pathlib').Path({str(output_dir / RUNTIME_FILE_NAME)!r}).is_file()\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output_dir / RUNTIME_FILE_NAME).read_text(encoding="utf-8"))
+    assert report["outputs"]["selected"]["filename"] == "submission.csv"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -49,6 +50,7 @@ def validate_inference_submit_kernel(kernel_dir: Path) -> None:
         )
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
     lowered = text.lower()
+    _validate_inference_server_lifecycle(text)
     if (kernel_dir / "plan.json").exists() and "plan_path" in lowered:
         if "# kagglebot:staged_plan_payload_fallback" not in text:
             raise KernelFailedError(
@@ -120,3 +122,55 @@ def validate_inference_submit_kernel(kernel_dir: Path) -> None:
             "Invalid notebook submit artifact for code competition inference mode: "
             "kernel does not appear to write outputs under /kaggle/working."
         )
+
+
+def _validate_inference_server_lifecycle(text: str) -> None:
+    """Require the hosted server to be smoke-started in the visible notebook run."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return
+
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    serve_calls: list[ast.Call] = []
+    fallback_calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Attribute) and function.attr == "run_local_gateway":
+            raise KernelFailedError(
+                "Invalid notebook submit artifact for code competition inference mode: "
+                "run_local_gateway is a local-only smoke test; the submitted kernel must call serve()."
+            )
+        if isinstance(function, ast.Attribute) and function.attr == "serve":
+            serve_calls.append(node)
+        if isinstance(function, ast.Name) and function.id == "write_fallback_submission":
+            fallback_calls.append(node)
+
+    for call in serve_calls:
+        ancestor = parents.get(call)
+        while ancestor is not None:
+            if isinstance(ancestor, ast.If):
+                condition = ast.unparse(ancestor.test)
+                if "KAGGLE_IS_COMPETITION_RERUN" in condition:
+                    raise KernelFailedError(
+                        "Invalid notebook submit artifact for code competition inference mode: "
+                        "serve() is hidden behind KAGGLE_IS_COMPETITION_RERUN, so the visible run cannot smoke-test "
+                        "the hosted inference server. Call serve() unconditionally."
+                    )
+            ancestor = parents.get(ancestor)
+
+    if serve_calls and fallback_calls:
+        first_serve_line = min(call.lineno for call in serve_calls)
+        first_fallback_line = min(call.lineno for call in fallback_calls)
+        if first_fallback_line < first_serve_line:
+            raise KernelFailedError(
+                "Invalid notebook submit artifact for code competition inference mode: "
+                "the visible fallback runs before serve(), so server imports and construction are not validated. "
+                "Call serve() before writing the visible-run fallback."
+            )

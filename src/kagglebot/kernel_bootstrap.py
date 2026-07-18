@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ KERNEL_FORCE_TRAIN_MARKER = "# kagglebot:force_train"
 KERNEL_NON_TRAINING_MARKER = "# kagglebot:non_training_submission"
 KERNEL_SUBMIT_INFERENCE_MARKER = "# kagglebot:submit_inference"
 KERNEL_SUBMIT_FIDELITY_MARKER = "# kagglebot:submit_runtime_fidelity"
+KERNEL_SUBMIT_FIDELITY_FINALIZE_MARKER = "# kagglebot:submit_runtime_fidelity_finalize"
 KERNEL_BOOTSTRAP_SCAN_LINES = 512
 
 
@@ -451,29 +453,51 @@ def inject_submit_inference_env(
     kernel_path.write_text(updated, encoding="utf-8")
 
 
-def inject_submit_runtime_fidelity(kernel_dir: Path) -> None:
-    """Install the cheap, fail-closed recorder in fresh code-submit packages."""
+def inject_submit_runtime_fidelity(kernel_dir: Path, *, expected_contract_path: Path) -> None:
+    """Install and explicitly flush the fail-closed recorder in code-submit packages."""
     kernel_path = kernel_dir / "kernel.py"
     if not kernel_path.exists():
         return
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
     if KERNEL_SUBMIT_FIDELITY_MARKER in text:
         return
+    expected_bytes = expected_contract_path.read_bytes()
+    expected_contract = json.loads(expected_bytes)
+    if not isinstance(expected_contract, dict):
+        raise KernelFailedError("Submit runtime fidelity expected contract must be a JSON object.")
+    runtime_module_path = Path(__file__).resolve().parent / "kernel_runtime" / "submit_runtime_fidelity.py"
+    runtime_source = runtime_module_path.read_text(encoding="utf-8")
+    expected_digest = hashlib.sha256(expected_bytes).hexdigest()
+    package_source_sha = str(expected_contract.get("package_fingerprint") or "").strip()
+    if not package_source_sha:
+        raise KernelFailedError("Submit runtime fidelity expected contract has no package fingerprint.")
     recorder_block = [
         KERNEL_SUBMIT_FIDELITY_MARKER,
-        "try:",
-        "    from submit_runtime_fidelity import install as _kb_install_submit_fidelity",
-        "    _kb_install_submit_fidelity()",
-        "    del _kb_install_submit_fidelity",
-        "except Exception:",
-        "    pass",
+        f"_KB_SUBMIT_FIDELITY_SOURCE = {runtime_source!r}",
+        "_KB_SUBMIT_FIDELITY_NS = {",
+        "    '__file__': globals().get('__file__', '/kaggle/working/kernel.py'),",
+        "    '__name__': 'kagglebot_embedded_submit_runtime_fidelity',",
+        "}",
+        "exec(compile(_KB_SUBMIT_FIDELITY_SOURCE, 'submit_runtime_fidelity.py', 'exec'), _KB_SUBMIT_FIDELITY_NS)",
+        f"_KB_SUBMIT_FIDELITY_EXPECTED = {expected_contract!r}",
+        "_KB_SUBMIT_FIDELITY_NS['install'](",
+        "    expected_contract=_KB_SUBMIT_FIDELITY_EXPECTED,",
+        f"    expected_contract_sha256={expected_digest!r},",
+        f"    package_source_sha256={package_source_sha!r},",
+        ")",
+        "del _KB_SUBMIT_FIDELITY_SOURCE, _KB_SUBMIT_FIDELITY_EXPECTED",
         "",
+    ]
+    finalizer_block = [
+        KERNEL_SUBMIT_FIDELITY_FINALIZE_MARKER,
+        "_KB_SUBMIT_FIDELITY_NS['flush_installed_runtime_fidelity']()",
+        "del _KB_SUBMIT_FIDELITY_NS",
     ]
     lines = text.splitlines()
     insert_at = find_bootstrap_block_end(lines)
     if insert_at is None:
         insert_at = find_bootstrap_insertion_index(lines)
-    lines = lines[:insert_at] + recorder_block + lines[insert_at:]
+    lines = lines[:insert_at] + recorder_block + lines[insert_at:] + finalizer_block
     updated = "\n".join(lines)
     if text.endswith("\n"):
         updated += "\n"

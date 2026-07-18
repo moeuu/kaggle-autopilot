@@ -18,6 +18,7 @@ import re
 import sys
 import threading
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -76,10 +77,12 @@ _BEARER_TEXT_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+={0,2}")
 _TRACEBACK_FILE_RE = re.compile(r'(File\s+")[^"]+[/\\]([^/\\"]+)(")')
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9:])/(?:[^\s,;'\"()]+)")
 _WINDOWS_PATH_RE = re.compile(r"(?i)\b[A-Z]:\\(?:[^\s,;'\"()]+)")
+_EMBEDDED_RECORDER_MARKER = "# kagglebot:submit_runtime_fidelity"
+_EMBEDDED_RECORDER_FINALIZE_MARKER = "# kagglebot:submit_runtime_fidelity_finalize"
 
 _installed = False
 _unhandled_exception: dict[str, object] | None = None
-_install_state: dict[str, Path] = {}
+_install_state: dict[str, object] = {}
 
 
 def canonical_json_bytes(payload: object) -> bytes:
@@ -129,12 +132,40 @@ def package_source_fingerprint(package_root: Path) -> str:
         digest.update(b"file\0")
         digest.update(relative.encode("utf-8", errors="surrogateescape"))
         digest.update(b"\0")
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        if relative == "kernel.py":
+            digest.update(_kernel_source_without_embedded_recorder(path))
+        else:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
         digest.update(b"\0end\0")
     digest.update(f"count\0{count}".encode("ascii"))
     return digest.hexdigest()
+
+
+def _kernel_source_without_embedded_recorder(path: Path) -> bytes:
+    """Normalize the generated recorder blocks out of the package identity."""
+    raw = path.read_bytes()
+    try:
+        lines = raw.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return raw
+    output: list[str] = []
+    skipping_installer = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == _EMBEDDED_RECORDER_FINALIZE_MARKER:
+            break
+        if stripped == _EMBEDDED_RECORDER_MARKER:
+            skipping_installer = True
+            continue
+        if skipping_installer:
+            if stripped.startswith("# kagglebot:"):
+                skipping_installer = False
+                output.append(line)
+            continue
+        output.append(line)
+    return "".join(output).encode("utf-8")
 
 
 def install(
@@ -142,6 +173,9 @@ def install(
     package_root: str | Path | None = None,
     output_root: str | Path | None = None,
     input_root: str | Path | None = None,
+    expected_contract: Mapping[str, object] | None = None,
+    expected_contract_sha256: str | None = None,
+    package_source_sha256: str | None = None,
 ) -> None:
     """Install a chained exception hook and an atexit recorder exactly once."""
     global _installed
@@ -157,7 +191,14 @@ def install(
     inputs = (
         Path(input_root) if input_root is not None else Path(os.environ.get("KAGGLEBOT_INPUT_ROOT", "/kaggle/input"))
     )
-    _install_state.update(package_root=root, output_root=output, input_root=inputs)
+    _install_state.update(
+        package_root=root,
+        output_root=output,
+        input_root=inputs,
+        expected_contract=dict(expected_contract) if expected_contract is not None else None,
+        expected_contract_sha256=str(expected_contract_sha256 or ""),
+        package_source_sha256=str(package_source_sha256 or ""),
+    )
 
     previous_hook = sys.excepthook
     previous_thread_hook = threading.excepthook
@@ -189,20 +230,30 @@ def install(
     atexit.register(_record_installed_runtime)
 
 
+def flush_installed_runtime_fidelity() -> None:
+    """Persist the installed recorder before Kaggle snapshots notebook outputs."""
+    if not _installed:
+        raise RuntimeError("submit runtime fidelity recorder is not installed")
+    _record_installed_runtime()
+
+
 def record_runtime_fidelity(
     *,
     package_root: str | Path,
     output_root: str | Path,
     input_root: str | Path,
     unhandled_exception: dict[str, object] | None = None,
+    expected_contract: Mapping[str, object] | None = None,
+    expected_contract_sha256: str | None = None,
+    package_source_sha256: str | None = None,
 ) -> dict[str, object]:
     """Build and persist the completed runtime attestation."""
     package = Path(package_root)
     output = Path(output_root)
     inputs = Path(input_root)
     expected_path = package / EXPECTED_FILE_NAME
-    expected = _load_json_object(expected_path)
-    expected_digest = _safe_sha256(expected_path)
+    expected = dict(expected_contract) if expected_contract is not None else _load_json_object(expected_path)
+    expected_digest = str(expected_contract_sha256 or "") or _safe_sha256(expected_path)
     expected_output = _nested_text(expected, "output", "filename")
     metrics_path = _find_named_file(output, "metrics.json")
     metrics = _load_json_object(metrics_path) if metrics_path is not None else None
@@ -220,7 +271,7 @@ def record_runtime_fidelity(
             "loaded": expected is not None,
         },
         "package": {
-            "source_sha256": _safe_package_fingerprint(package),
+            "source_sha256": str(package_source_sha256 or "") or _safe_package_fingerprint(package),
             "source_file_count_limit": _MAX_SOURCE_FILES,
         },
         "kernel": {
@@ -267,15 +318,23 @@ def record_runtime_fidelity(
 def _record_installed_runtime() -> None:
     try:
         record_runtime_fidelity(
-            package_root=_install_state["package_root"],
-            output_root=_install_state["output_root"],
-            input_root=_install_state["input_root"],
+            package_root=Path(_install_state["package_root"]),
+            output_root=Path(_install_state["output_root"]),
+            input_root=Path(_install_state["input_root"]),
             unhandled_exception=_unhandled_exception,
+            expected_contract=(
+                _install_state.get("expected_contract")
+                if isinstance(_install_state.get("expected_contract"), Mapping)
+                else None
+            ),
+            expected_contract_sha256=str(_install_state.get("expected_contract_sha256") or ""),
+            package_source_sha256=str(_install_state.get("package_source_sha256") or ""),
         )
     except Exception as exc:  # noqa: BLE001 - audit failure must not alter kernel exit behavior
         try:
-            output = _install_state.get("output_root")
-            if output is not None:
+            configured_output = _install_state.get("output_root")
+            if configured_output is not None:
+                output = Path(configured_output)
                 output.mkdir(parents=True, exist_ok=True)
                 _atomic_write_json(
                     output / RUNTIME_FILE_NAME,

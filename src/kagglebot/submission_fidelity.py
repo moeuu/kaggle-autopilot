@@ -1473,7 +1473,8 @@ def build_submit_fidelity_expected_contract(
             "executed": _text(executed_accelerator).lower(),
             "machine_shape": _text(machine_shape),
             "capacity_fallback_used": bool(capacity_fallback_used),
-            "requires_gpu": _requires_gpu_execution(metrics),
+            "requires_gpu": _text(artifact_mode).lower() in {"gateway", "inference"}
+            or _requires_gpu_execution(metrics),
         },
         "selected_local_candidate": {
             "name": selected_candidate_path.name if selected_candidate_path is not None else None,
@@ -1817,9 +1818,14 @@ def build_submission_fidelity_report(
 
     tabular = _nested_value(runtime, "tabular_prediction") if runtime else None
     if isinstance(tabular, Mapping):
-        for finding in runtime_tabular_fidelity_findings(dict(tabular)):
-            add(str(finding["code"]), str(finding["message"]))
-        _compare_tabular_input_contract(runtime, tabular, add=add)
+        # Hosted code competitions evaluate the served program during a hidden
+        # rerun.  Their visible commit artifact is only a tiny gateway
+        # placeholder, not the hidden prediction set, so ordinary prediction
+        # dispersion/cardinality checks do not apply to this artifact.
+        if artifact_mode not in _CODE_OUTPUT_MODES:
+            for finding in runtime_tabular_fidelity_findings(dict(tabular)):
+                add(str(finding["code"]), str(finding["message"]))
+            _compare_tabular_input_contract(runtime, tabular, add=add)
 
     attempt_fingerprint = sha256_text("\0".join((expected_package, str(selected_output_sha or ""))))
     for previous in previous_reports:
