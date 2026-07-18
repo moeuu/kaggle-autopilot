@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import py_compile
 import re
 import shutil
@@ -137,6 +138,8 @@ FORBIDDEN_EVALUATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Kernel sources emit score_source=lb_proxy, which is forbidden for model selection.",
     ),
 ]
+
+_T5_MODEL_ID_RE = re.compile(r"(?<![a-z0-9])(?:prot[-_]?t5|mt5|t5)(?![a-z0-9])", re.IGNORECASE)
 
 
 def _references_supported_submission_output(content: str) -> bool:
@@ -479,17 +482,100 @@ def validate_kernel_sources(
     if "metrics.json" not in content:
         issues.append("Kernel sources do not reference metrics.json output.")
 
-    lowered = content.lower()
-    if "prot_t5" in lowered or "t5" in lowered:
-        if "automodel.from_pretrained" in lowered and "t5encodermodel" not in lowered and ".get_encoder" not in lowered:
-            issues.append(
-                "Detected T5/ProtT5 with AutoModel; use T5EncoderModel or "
-                "model.get_encoder() to avoid decoder_input_ids errors."
-            )
+    if _uses_t5_with_generic_automodel(py_files):
+        issues.append(
+            "Detected T5/ProtT5 with AutoModel; use T5EncoderModel or "
+            "model.get_encoder() to avoid decoder_input_ids errors."
+        )
     for pattern, message in FORBIDDEN_EVALUATION_PATTERNS:
         if pattern.search(content):
             issues.append(message)
     return issues
+
+
+def _uses_t5_with_generic_automodel(py_files: list[Path]) -> bool:
+    for path in py_files:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError:
+            # Syntax failures are already reported by the compile check above.
+            continue
+        constants = _module_string_constants(tree)
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        encoder_sources = {
+            ast.unparse(node.func.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get_encoder"
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not _is_automodel_from_pretrained(node):
+                continue
+            model_id = _resolve_pretrained_model_id(node, constants)
+            if model_id is None or _T5_MODEL_ID_RE.search(model_id) is None:
+                continue
+            if _automodel_result_uses_encoder(node, parents, encoder_sources):
+                continue
+            return True
+    return False
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    constants: dict[str, str] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Constant):
+            if isinstance(statement.value.value, str):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = statement.value.value
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        ):
+            constants[statement.target.id] = statement.value.value
+    return constants
+
+
+def _is_automodel_from_pretrained(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "from_pretrained"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "AutoModel"
+    )
+
+
+def _resolve_pretrained_model_id(node: ast.Call, constants: dict[str, str]) -> str | None:
+    model_arg: ast.expr | None = node.args[0] if node.args else None
+    if model_arg is None:
+        model_arg = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "pretrained_model_name_or_path"),
+            None,
+        )
+    if isinstance(model_arg, ast.Constant) and isinstance(model_arg.value, str):
+        return model_arg.value
+    if isinstance(model_arg, ast.Name):
+        return constants.get(model_arg.id)
+    return None
+
+
+def _automodel_result_uses_encoder(
+    node: ast.Call,
+    parents: dict[ast.AST, ast.AST],
+    encoder_sources: set[str],
+) -> bool:
+    parent = parents.get(node)
+    if isinstance(parent, ast.Attribute) and parent.attr == "get_encoder" and parent.value is node:
+        return True
+    if isinstance(parent, ast.Assign):
+        targets = parent.targets
+    elif isinstance(parent, ast.AnnAssign):
+        targets = [parent.target]
+    else:
+        return False
+    return any(ast.unparse(target) in encoder_sources for target in targets)
 
 
 def _references_required_output_name(content: str, raw_name: str) -> bool:

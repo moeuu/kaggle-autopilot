@@ -90,6 +90,35 @@ def test_submission_row_from_api_preserves_format_error_description() -> None:
     assert row["publicScore"] == ""
 
 
+def test_list_competition_submissions_falls_back_to_cli_when_python_api_is_empty(monkeypatch) -> None:
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    monkeypatch.setattr(KaggleApi, "authenticate", lambda self: None)
+    monkeypatch.setattr(KaggleApi, "competition_submissions", lambda self, slug: [])
+    monkeypatch.setattr(
+        kaggle_api,
+        "_run_kaggle",
+        lambda args, *, slug, dry_run: (
+            "ref,fileName,date,description,status,publicScore,privateScore\n"
+            "54807123,repaired.csv,2026-07-18 11:46:33,repaired,complete,0.65,\n"
+        ),
+    )
+
+    rows = kaggle_api.list_competition_submissions("filament-segmentation-2026")
+
+    assert rows == [
+        {
+            "ref": "54807123",
+            "fileName": "repaired.csv",
+            "date": "2026-07-18 11:46:33",
+            "description": "repaired",
+            "status": "complete",
+            "publicScore": "0.65",
+            "privateScore": "",
+        }
+    ]
+
+
 def test_optional_datetime_normalizes_iso_values_to_utc() -> None:
     assert kaggle_api._optional_datetime("2026-02-24T01:00:00Z") == datetime(2026, 2, 24, 1, tzinfo=UTC)
     assert kaggle_api._optional_datetime("2026-02-24T10:00:00+09:00") == datetime(2026, 2, 24, 1, tzinfo=UTC)

@@ -547,6 +547,78 @@ def test_kernel_fix_interruption_is_recovered_before_kernel_resume(monkeypatch, 
     assert recovered["error_message"] == "RuntimeError: kernel failed"
 
 
+def test_recovery_skips_obsolete_legacy_kernel_source_fix_for_writeup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+    _write_plan(
+        config.paths,
+        deliverable_mode="writeup",
+        submit_mode="notebook",
+        required_output_filename="features.csv",
+    )
+    (config.paths.kernel_source_dir / "kernel.py").write_text(
+        "# features.csv\n# metrics.json\n",
+        encoding="utf-8",
+    )
+    checkpoint = autopilot_mod._oracle_workflow_state.begin_oracle_workflow(
+        run_dir=config.paths.run_dir(run_id),
+        workflow_id="kernel-fix-iter-1-attempt-1",
+        workflow_kind="kernel_fix",
+        recovery_payload={
+            "iteration": 1,
+            "attempt": 1,
+            "error_message": (
+                "ValueError: Kernel source validation failed:\n"
+                "- Kernel sources do not reference a supported submission output artifact."
+            ),
+        },
+    )
+    checkpoint.mark_oracle_complete()
+    monkeypatch.setattr(
+        "kagglebot.autopilot._run_kernel_fix",
+        lambda **kwargs: pytest.fail("obsolete source fix must not run"),
+    )
+
+    autopilot_mod._recover_pending_oracle_workflow(config=config, run_id=run_id)
+
+    state = json.loads(
+        autopilot_mod._oracle_workflow_state.oracle_workflow_state_path(config.paths.run_dir(run_id)).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["status"] == "completed"
+
+
+def test_kernel_fix_checkpoint_records_source_preflight_stage(monkeypatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    run_id = config.run_id or "run-1"
+
+    def interrupt_fix(**kwargs):  # noqa: ANN003
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix_body", interrupt_fix)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_kernel_fix(
+            config=config,
+            run_id=run_id,
+            iteration=1,
+            iter_dir=config.paths.iter_dir(run_id, 1),
+            error_message="ValueError: Kernel source validation failed",
+            attempt=1,
+            failure_stage="kernel_source_preflight",
+        )
+
+    pending = autopilot_mod._oracle_workflow_state.load_pending_oracle_workflow(config.paths.run_dir(run_id))
+    assert pending is not None
+    recovery_payload = pending["recovery_payload"]
+    assert isinstance(recovery_payload, dict)
+    assert recovery_payload["failure_stage"] == "kernel_source_preflight"
+
+
 def test_recovery_dispatches_interrupted_improvement(monkeypatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     run_id = config.run_id or "run-1"
@@ -1705,6 +1777,9 @@ def test_autopilot_submit_when_top1_tier_single_iteration(monkeypatch, tmp_path:
 
 
 def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monkeypatch, tmp_path: Path) -> None:
+    history_fetches = {"count": 0}
+    improvement_histories: list[dict[str, object]] = []
+
     _write_plan(
         CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts"),
         target_metric="auc",
@@ -1735,7 +1810,25 @@ def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monke
 
     monkeypatch.setattr("kagglebot.autopilot.train_evaluate_and_predict", fake_train, raising=False)
     monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
-    monkeypatch.setattr("kagglebot.autopilot._run_improvement", lambda *args, **kwargs: None)
+
+    def fake_submission_history(*args, **kwargs):  # noqa: ARG001
+        history_fetches["count"] += 1
+        if history_fetches["count"] == 1:
+            return []
+        return [
+            {
+                "description": "manual score arrived during run",
+                "status": "complete",
+                "publicScore": "0.65",
+                "date": "2026-07-18 11:46:33",
+            }
+        ]
+
+    def capture_improvement(*args, **kwargs):  # noqa: ARG001
+        improvement_histories.append(kwargs["previous_submission_history"])
+
+    monkeypatch.setattr("kagglebot.autopilot._run_improvement", capture_improvement)
+    monkeypatch.setattr("kagglebot.autopilot.list_competition_submissions", fake_submission_history)
     monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
     monkeypatch.setattr("kagglebot.autopilot_submit.check_rules_accepted", lambda *args, **kwargs: True)
     monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
@@ -1755,6 +1848,9 @@ def test_autopilot_writes_evaluation_report_and_uses_offline_loop_decision(monke
     run_report = json.loads((config.paths.run_dir("run-1") / "evaluation_report.json").read_text(encoding="utf-8"))
     assert run_report["latest_iteration"] == 2
     assert len(run_report["history"]) == 2
+    assert history_fetches["count"] == 2
+    assert improvement_histories[0]["latest_score"] == pytest.approx(0.65)
+    assert improvement_histories[0]["best_score"] == pytest.approx(0.65)
 
 
 @pytest.mark.parametrize(
@@ -9064,6 +9160,57 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
     marker_path = iter_dir / "agent" / "kernel_regenerated_once.json"
     assert marker_path.exists()
 
+    source_result = _run_kernel_fix(
+        config=config,
+        run_id=run_id,
+        iteration=1,
+        iter_dir=iter_dir,
+        error_message="ValueError: Kernel source validation failed",
+        attempt=2,
+        pending_error_fixes=[],
+        failure_stage="kernel_source_preflight",
+    )
+
+    assert source_result.agent_exit_code == 0
+    assert source_result.repo_changed is False
+    assert source_result.regeneration_already_used is True
+
+    from kagglebot.kernel_preflight import KernelPreflightFailure
+
+    monkeypatch.setattr(
+        "kagglebot.autopilot._kernel_preflight.check_kernel_source_preflight",
+        lambda **kwargs: KernelPreflightFailure(
+            check_name="current_static_rule",
+            kernel_path=config.paths.kernel_source_dir / "kernel.py",
+            command_or_rule="current rule",
+            returncode=None,
+            stdout="",
+            stderr="current source failure",
+            source_excerpt="kernel.py:7",
+            kernel_sha256="a" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        "kagglebot.autopilot._autofix_restart.kernel_regeneration_already_marked",
+        lambda *args, **kwargs: True,
+    )
+    with pytest.raises(KernelFailedError) as source_exc_info:
+        _run_kernel_fix(
+            config=config,
+            run_id=run_id,
+            iteration=1,
+            iter_dir=iter_dir,
+            error_message="original source failure",
+            attempt=3,
+            pending_error_fixes=[],
+            failure_stage="kernel_source_preflight",
+        )
+    source_message = str(source_exc_info.value)
+    assert "Original preflight failure:\noriginal source failure" in source_message
+    assert "Current preflight failure:" in source_message
+    assert "check_name: current_static_rule" in source_message
+    assert "current source failure" in source_message
+
     with pytest.raises(KernelFailedError, match="produced no file changes"):
         _run_kernel_fix(
             config=config,
@@ -9071,6 +9218,6 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
             iteration=1,
             iter_dir=iter_dir,
             error_message="RuntimeError: kernel failed for unknown reason",
-            attempt=2,
+            attempt=4,
             pending_error_fixes=[],
         )

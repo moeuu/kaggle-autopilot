@@ -55,6 +55,23 @@ class NotebookSubmitArtifactModeDecision:
     message: str
 
 
+def code_output_artifact_mode(value: str | None) -> bool:
+    return normalize_notebook_submit_artifact_mode(value) in {"gateway", "inference"}
+
+
+def resolve_notebook_submit_execution_accelerator(*, requested: str, artifact_mode: str | None) -> str:
+    """Use a GPU for hidden-rerun code submissions.
+
+    A visible CPU commit can produce a placeholder successfully while the
+    hidden gateway fails later.  Gateway/inference artifacts therefore use a
+    fail-closed GPU contract; ordinary wrapper notebooks retain the caller's
+    requested accelerator.
+    """
+    if code_output_artifact_mode(artifact_mode):
+        return "gpu"
+    return str(requested or "cpu").strip().lower() or "cpu"
+
+
 def normalize_notebook_submit_artifact_mode(value: str | None) -> str:
     return str(value or "wrapper").strip().lower() or "wrapper"
 

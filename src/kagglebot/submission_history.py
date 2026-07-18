@@ -19,6 +19,114 @@ def build_previous_submission_history_payload(
     entries = [_submission_history_entry(row) for row in rows]
     entries = [entry for entry in entries if entry is not None]
 
+    return _build_submission_history_payload(
+        entries=entries,
+        direction=direction,
+        source=source,
+        count=len(rows),
+    )
+
+
+def merge_current_submission_outcome(
+    *,
+    history: dict[str, object] | None,
+    outcome: dict[str, object],
+    direction: str,
+    history_path: Path | None = None,
+) -> dict[str, object]:
+    """Make a just-polled Kaggle outcome immediately available to improvement planning.
+
+    Kaggle's submissions listing can lag behind the outcome poll.  Merging the exact
+    matched row keeps the next improvement decision score-aware even during that lag;
+    the next live history refresh remains authoritative.
+    """
+
+    raw = outcome.get("raw")
+    entry = _submission_history_entry(_normalize_submission_row(raw)) if isinstance(raw, dict) else None
+    if entry is None:
+        score = tolerant_finite_float(outcome.get("score"))
+        status = str(outcome.get("status") or "unknown")
+        checked_at = str(outcome.get("checked_at") or datetime.now(UTC).isoformat())
+        entry = {"score": score, "status": status, "submitted_at": checked_at}
+
+    previous = history or {}
+    previous_entries = _history_entries(previous)
+    current_identity = _submission_entry_identity(entry)
+    already_present = any(_submission_entry_identity(item) == current_identity for item in previous_entries)
+    merged_entries = [entry]
+    merged_entries.extend(item for item in previous_entries if _submission_entry_identity(item) != current_identity)
+    previous_count = _nonnegative_int(previous.get("count"))
+    previous_scored_count = _nonnegative_int(previous.get("scored_count"))
+    current_is_scored = tolerant_finite_float(entry.get("score")) is not None
+    payload = _build_submission_history_payload(
+        entries=merged_entries,
+        direction=direction,
+        source=_merged_history_source(previous.get("source")),
+        count=max(len(merged_entries), previous_count + (0 if already_present else 1)),
+        scored_count=max(
+            sum(tolerant_finite_float(item.get("score")) is not None for item in merged_entries),
+            previous_scored_count + (1 if current_is_scored and not already_present else 0),
+        ),
+    )
+    if history_path is not None:
+        payload["cache_path"] = str(history_path)
+        write_json_object(history_path, payload)
+    elif previous.get("cache_path"):
+        payload["cache_path"] = previous["cache_path"]
+    return payload
+
+
+def build_public_score_feedback(history: dict[str, object] | None) -> dict[str, object] | None:
+    """Summarize the latest public result against the best earlier scored result."""
+
+    if not history:
+        return None
+    direction = str(history.get("direction") or "maximize")
+    best_score = tolerant_finite_float(history.get("best_score"))
+    latest = history.get("latest")
+    latest_entry = latest if isinstance(latest, dict) else None
+    latest_score = tolerant_finite_float(latest_entry.get("score")) if latest_entry is not None else None
+    if latest_score is None:
+        return {
+            "direction": direction,
+            "latest_public_score": None,
+            "best_public_score": best_score,
+            "prior_best_public_score": _best_scored_entry(history.get("recent"), direction=direction),
+            "improvement_delta_vs_prior_best": None,
+            "result": "latest_unscored" if latest_entry is not None else "no_submissions",
+        }
+
+    latest_identity = _submission_entry_identity(latest_entry)
+    earlier_entries = [
+        item for item in _dict_items(history.get("recent")) if _submission_entry_identity(item) != latest_identity
+    ]
+    prior_best = _best_scored_entry(earlier_entries, direction=direction)
+    if prior_best is None:
+        result = "first_scored_submission"
+        delta = None
+    else:
+        delta = latest_score - prior_best if direction == "maximize" else prior_best - latest_score
+        result = "improved" if delta > 0 else "regressed" if delta < 0 else "tied"
+    return {
+        "direction": direction,
+        "latest_public_score": latest_score,
+        "best_public_score": best_score,
+        "prior_best_public_score": prior_best,
+        "improvement_delta_vs_prior_best": delta,
+        "result": result,
+    }
+
+
+def _build_submission_history_payload(
+    *,
+    entries: list[dict[str, object]],
+    direction: str,
+    source: str,
+    count: int,
+    scored_count: int | None = None,
+) -> dict[str, object]:
+    entries = _deduplicate_submission_entries(entries)
+
     scored_entries = [entry for entry in entries if tolerant_finite_float(entry.get("score")) is not None]
     best_entry: dict[str, object] | None = None
     for entry in scored_entries:
@@ -40,8 +148,8 @@ def build_previous_submission_history_payload(
         "source": source,
         "fetched_at": datetime.now(UTC).isoformat(),
         "direction": direction,
-        "count": len(rows),
-        "scored_count": len(scored_entries),
+        "count": count,
+        "scored_count": len(scored_entries) if scored_count is None else scored_count,
         "best_score": tolerant_finite_float(best_entry.get("score")) if best_entry is not None else None,
         "best": best_entry,
         "latest_score": tolerant_finite_float(latest_entry.get("score")) if latest_entry is not None else None,
@@ -148,6 +256,20 @@ def format_previous_submission_history_for_prompt(history: dict[str, object] | N
         direction = history.get("direction") or "auto"
         lines.append(f"- Best historical public score: {best_score:.6f} (direction={direction}).")
         lines.append("- Do not call a new iteration improved unless its public score beats this historical baseline.")
+    feedback = build_public_score_feedback(history)
+    if feedback is not None:
+        latest_score = tolerant_finite_float(feedback.get("latest_public_score"))
+        prior_best = tolerant_finite_float(feedback.get("prior_best_public_score"))
+        delta = tolerant_finite_float(feedback.get("improvement_delta_vs_prior_best"))
+        result = str(feedback.get("result") or "unknown")
+        if latest_score is not None:
+            lines.append(f"- Latest public score: {latest_score:.6f}.")
+            if prior_best is None:
+                lines.append("- This is the first scored submission; use it as the public baseline.")
+            elif delta is not None:
+                lines.append(
+                    f"- Public improvement delta vs prior best: {delta:+.6f} (result={result}; positive means better)."
+                )
     best = history.get("best")
     if isinstance(best, dict):
         best_desc = str(best.get("description") or best.get("label") or "").strip()
@@ -186,6 +308,79 @@ def format_previous_submission_history_for_prompt(history: dict[str, object] | N
         "continuing same-family tuning."
     )
     return "\n".join(lines)
+
+
+def _normalize_submission_row(raw: dict[object, object]) -> dict[str, str]:
+    return {str(key): "" if value is None else str(value) for key, value in raw.items()}
+
+
+def _history_entries(history: dict[str, object]) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for key in ("latest", "best"):
+        item = history.get(key)
+        if isinstance(item, dict):
+            entries.append(dict(item))
+    entries.extend(_dict_items(history.get("recent")))
+    entries.extend(_dict_items(history.get("recent_unscored")))
+    return _deduplicate_submission_entries(entries)
+
+
+def _dict_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _deduplicate_submission_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    unique: list[dict[str, object]] = []
+    seen: set[tuple[object, ...]] = set()
+    for entry in entries:
+        identity = _submission_entry_identity(entry)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(entry)
+    return unique
+
+
+def _submission_entry_identity(entry: dict[str, object]) -> tuple[object, ...]:
+    submitted_at = str(entry.get("submitted_at") or "").strip()
+    description = str(entry.get("description") or "").strip()
+    label = str(entry.get("label") or "").strip()
+    if submitted_at or description or label:
+        return (submitted_at, description, label)
+    return (
+        tolerant_finite_float(entry.get("score")),
+        str(entry.get("status") or "").strip(),
+        str(entry.get("detail") or "").strip(),
+    )
+
+
+def _best_scored_entry(value: object, *, direction: str) -> float | None:
+    entries = _dict_items(value) if isinstance(value, list) else value
+    if not isinstance(entries, list):
+        return None
+    best: float | None = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        score = tolerant_finite_float(entry.get("score"))
+        if score is not None and should_update_best_score(best, score, direction, 0.0):
+            best = score
+    return best
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merged_history_source(value: object) -> str:
+    source = str(value or "cache").strip()
+    suffix = "live outcome"
+    return source if suffix in source else f"{source} + {suffix}"
 
 
 def _empty_submission_history_payload(

@@ -618,9 +618,21 @@ def _run_codex_kernel_implementation(
             return
 
         initial_detail = _format_agent_failure(result)
+        initial_submit_runtime_error: str | None = None
+        if result.returncode == 0:
+            try:
+                _apply_inference_server_submit_runtime_repair(initial_kernel_path)
+            except (OSError, SyntaxError, ValueError) as exc:
+                initial_submit_runtime_error = str(exc)
+                initial_detail += f"\nDeterministic submit-runtime repair failed: {exc}"
         initial_executable = _kernel_contains_executable_code(initial_kernel_path)
         initial_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=initial_kernel_path)
-        if result.returncode == 0 and initial_executable and initial_smoke.passed:
+        if (
+            result.returncode == 0
+            and initial_submit_runtime_error is None
+            and initial_executable
+            and initial_smoke.passed
+        ):
             _promote_validated_kernel(initial_kernel_path, kernel_path)
             _print_block(
                 f"{implementation_agent.log_alias} kernel implementation result",
@@ -645,21 +657,27 @@ def _run_codex_kernel_implementation(
             repair_kernel_path = _seed_kernel_candidate(kernel_path, repair_kernel_dir)
 
         repair_smoke = initial_smoke
+        deterministic_repairs: list[str] = []
         try:
-            deterministic_repair_applied = _apply_known_profile_schema_migration(
+            if _apply_known_profile_schema_migration(
                 repair_kernel_path,
                 paths.plan_path,
-            )
+            ):
+                deterministic_repairs.append("frozen-plan profile-schema migration")
         except (OSError, SyntaxError, ValueError) as exc:
-            deterministic_repair_applied = False
             initial_failure += f"\nDeterministic profile-schema repair was not applicable: {exc}"
-        if deterministic_repair_applied:
+        try:
+            if _apply_inference_server_submit_runtime_repair(repair_kernel_path):
+                deterministic_repairs.append("inference-server submit-runtime repair")
+        except (OSError, SyntaxError, ValueError) as exc:
+            initial_failure += f"\nDeterministic submit-runtime repair was not applicable: {exc}"
+        if deterministic_repairs:
             repair_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=repair_kernel_path)
             if _kernel_contains_executable_code(repair_kernel_path) and repair_smoke.passed:
                 _promote_validated_kernel(repair_kernel_path, kernel_path)
                 _print_block(
                     f"{implementation_agent.log_alias} kernel deterministic repair result",
-                    "Applied and contract-smoked the frozen-plan profile-schema migration.",
+                    f"Applied and contract-smoked: {', '.join(deterministic_repairs)}.",
                 )
                 return
             initial_failure += (
@@ -800,6 +818,109 @@ def _replace_generated_function(source: str, name: str, replacement: str) -> tup
     match = matches[0]
     rendered = replacement.strip("\n")
     return source[: match.start()] + rendered + "\n\n" + source[match.end() :], True
+
+
+def _apply_inference_server_submit_runtime_repair(kernel_path: Path) -> bool:
+    """Keep local gateway work out of submit while smoke-starting the real server.
+
+    ``InferenceServer.serve()`` starts and returns during a normal notebook
+    commit, but blocks during Kaggle's competition rerun.  Calling it in both
+    environments is intentional: imports, optional wheels, and construction
+    must fail in the visible commit instead of surfacing hours later as a
+    generic Submission Format Error.
+    """
+    source = kernel_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(kernel_path))
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "maybe_start_inference_server"
+    ]
+    if not functions:
+        return False
+    if len(functions) != 1 or isinstance(functions[0], ast.AsyncFunctionDef):
+        raise ValueError("expected one synchronous maybe_start_inference_server function")
+    function = functions[0]
+    gateway_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "run_local_gateway"
+    ]
+    serve_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "serve"
+    ]
+    fallback_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "write_fallback_submission"
+    ]
+    if not gateway_calls and not serve_calls:
+        return False
+    if (
+        not gateway_calls
+        and serve_calls
+        and (
+            not fallback_calls or min(call.lineno for call in serve_calls) < min(call.lineno for call in fallback_calls)
+        )
+    ):
+        return False
+    if len(gateway_calls) > 1:
+        raise ValueError(f"expected one local-gateway call, found {len(gateway_calls)}")
+    if not gateway_calls and len(serve_calls) != 1:
+        raise ValueError(f"expected one inference-server serve call, found {len(serve_calls)}")
+    server_receiver = (gateway_calls or serve_calls)[0].func.value
+    if not isinstance(server_receiver, ast.Call):
+        raise ValueError("inference-server call receiver is not a constructor")
+    server_constructor = ast.unparse(server_receiver)
+    imports = [
+        node
+        for node in function.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and "kaggle_evaluation" in (ast.get_source_segment(source, node) or "")
+    ]
+    if len(imports) != 1:
+        raise ValueError(f"expected one kaggle_evaluation server import, found {len(imports)}")
+    server_import = ast.get_source_segment(source, imports[0])
+    if server_import is None:
+        raise ValueError("could not recover kaggle_evaluation server import")
+    function_header = source.splitlines()[function.lineno - 1]
+    if not function_header.startswith("def ") or not function_header.rstrip().endswith(":"):
+        raise ValueError("generated inference-server function must have a one-line signature")
+
+    replacement = f"""{function_header}
+    {server_import}
+    {server_constructor}.serve()
+    if os.getenv("KAGGLE_IS_COMPETITION_RERUN") is None:
+        submission_path = write_fallback_submission()
+        validate_code_competition_submission(submission_path)
+    return
+"""
+    source, replaced = _replace_generated_function(
+        source,
+        "maybe_start_inference_server",
+        replacement,
+    )
+    if not replaced:
+        raise ValueError("generated inference-server function disappeared during repair")
+    ast.parse(source, filename=str(kernel_path))
+
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{kernel_path.name}.",
+        suffix=".submit-runtime",
+        dir=kernel_path.parent,
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        temporary_path.write_text(source, encoding="utf-8")
+        os.replace(temporary_path, kernel_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return True
 
 
 def _apply_known_profile_schema_migration(kernel_path: Path, plan_path: Path) -> bool:

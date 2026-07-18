@@ -123,6 +123,50 @@ def test_maybe_regenerate_kernel_sources_once_records_failure_note(tmp_path: Pat
     assert "error: boom" in note
 
 
+def test_kernel_regeneration_marker_is_bounded_per_kernel_sha(tmp_path: Path) -> None:
+    agent_dir = tmp_path / "iter-1" / "agent"
+    current_sha = ["a" * 64]
+    calls: list[str] = []
+
+    def regenerate() -> None:
+        calls.append(current_sha[0])
+        current_sha[0] = "b" * 64
+
+    assert maybe_regenerate_kernel_sources_once(
+        dry_run=False,
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=1,
+        trigger_reason="no_changes",
+        regenerate_kernel_sources=regenerate,
+        get_kernel_sha256=lambda: current_sha[0],
+    )
+    assert not maybe_regenerate_kernel_sources_once(
+        dry_run=False,
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=2,
+        trigger_reason="same_kernel",
+        regenerate_kernel_sources=lambda: calls.append("unexpected"),
+        get_kernel_sha256=lambda: current_sha[0],
+    )
+
+    current_sha[0] = "c" * 64
+    assert maybe_regenerate_kernel_sources_once(
+        dry_run=False,
+        agent_dir=agent_dir,
+        run_id="run-1",
+        iteration=1,
+        attempt=3,
+        trigger_reason="source_changed",
+        regenerate_kernel_sources=lambda: calls.append(current_sha[0]),
+        get_kernel_sha256=lambda: current_sha[0],
+    )
+    assert calls == ["a" * 64, "c" * 64]
+
+
 def test_maybe_restart_for_src_changes_allows_new_stage_family_after_legacy_restart(
     monkeypatch, tmp_path: Path
 ) -> None:

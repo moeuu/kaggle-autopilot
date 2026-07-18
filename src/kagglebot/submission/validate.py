@@ -15,6 +15,7 @@ from kagglebot.baseline_tokens import (
 )
 from kagglebot.exceptions import SubmissionValidationError
 from kagglebot.solver.io import read_table
+from kagglebot.submission_fidelity import build_identifier_cardinality_contract
 from kagglebot.submission_format import (
     columns_look_plausible,
     extract_submission_section,
@@ -49,6 +50,17 @@ _INCOMPLETE_DATA_RELEASE_CONTEXT_RE = re.compile(
     r"|\bfull\s+dataset\b.{0,120}\b(?:expected|will\s+be|to\s+be)\s+released\b",
     re.IGNORECASE | re.DOTALL,
 )
+_VARIABLE_INSTANCE_ROW_CONTEXT_RE = re.compile(
+    r"\b(?:each|one)\s+row\s+(?:corresponds?\s+to|per)\s+"
+    r"(?:one|a|each)?\s*(?:predicted|detected)?\s*(?:instance|object|item|event|mask|segment|filament)\b"
+    r"|\b(?:tail\s+strings?|id\s+suffix(?:es)?)\b.{0,120}\b(?:rows?|ids?)\b.{0,60}\bunique\b"
+    r"|\b(?:variable|arbitrary)\s+(?:number\s+of\s+)?rows?\s+per\s+(?:image|sample|entity|record)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_COCO_RLE_CONTEXT_RE = re.compile(
+    r"\bpycocotools\b|\b(?:compressed\s+)?coco[- ]?rle\b|\brle\s+counts?\b", re.IGNORECASE
+)
+_FIXED_MASK_SIZE_RE = re.compile(r"\b(?:size\D{0,30})?(\d{1,6})\s*[x×]\s*(\d{1,6})\s*(?:pixels?)?\b", re.IGNORECASE)
 _FILE_ID_ASSET_SUFFIXES = DATA_ASSET_SUFFIXES - TABULAR_DATA_SUFFIXES
 
 
@@ -199,6 +211,15 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
             placeholder_sample = True
             expected_row_count = test_row_count
 
+    variable_instance_rows = _allows_variable_instance_rows(
+        sample_csv=sample_csv,
+        submission_csv=submission_csv,
+    )
+    if variable_instance_rows:
+        expected_row_count = None
+        expected_id_values = None
+        placeholder_sample = False
+
     if (
         sample_has_data_rows
         and len(sample) <= _PLACEHOLDER_SAMPLE_MAX_ROWS
@@ -253,7 +274,9 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
             if dup_count > 0:
                 problems.append(f"id column '{id_col}' contains duplicate values: {dup_count}")
 
-        if expected_id_values is not None:
+        if variable_instance_rows:
+            pass
+        elif expected_id_values is not None:
             if set(sub_ids) != expected_id_values:
                 missing = sorted(expected_id_values - set(sub_ids))[:5]
                 extra = sorted(set(sub_ids) - expected_id_values)[:5]
@@ -323,9 +346,108 @@ def validate_submission(sub_path: str, sample_path: str, *, data_dir: str | Path
                 continue
             problems.append(f"prediction column '{col}' contains NaN values: {nan_count}")
             continue
+        coco_shape = _declared_coco_rle_shape(column=col, sample_csv=sample_csv)
+        if coco_shape is not None:
+            invalid_count = 0
+            first_error = ""
+            for value in submission_col.astype(str):
+                try:
+                    counts = _decode_compressed_coco_rle_counts(value)
+                    if sum(counts) != coco_shape[0] * coco_shape[1]:
+                        raise ValueError(
+                            f"run sum {sum(counts)} does not match declared mask size {coco_shape[0]}x{coco_shape[1]}"
+                        )
+                    if sum(counts[1::2]) <= 0:
+                        raise ValueError("mask area is zero")
+                except (IndexError, TypeError, ValueError) as exc:
+                    invalid_count += 1
+                    if not first_error:
+                        first_error = str(exc)
+            if invalid_count:
+                problems.append(
+                    f"prediction column '{col}' contains invalid compressed COCO RLE values: "
+                    f"{invalid_count} (first error: {first_error})"
+                )
 
     if problems:
         raise SubmissionValidationError(_format_validation_message(problems))
+
+
+def _allows_variable_instance_rows(*, sample_csv: Path, submission_csv: Path) -> bool:
+    if not _context_declares_variable_instance_rows(sample_csv):
+        return False
+    cardinality = build_identifier_cardinality_contract(
+        sample_submission_path=sample_csv,
+        submission_path=submission_csv,
+        metrics=None,
+        metrics_path=None,
+    )
+    return bool(cardinality.get("eligible"))
+
+
+def _context_declares_variable_instance_rows(sample_csv: Path) -> bool:
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "overview.md", "data.md", "rules.md"):
+            path = context_dir / name
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if _VARIABLE_INSTANCE_ROW_CONTEXT_RE.search(text):
+                return True
+    return False
+
+
+def _declared_coco_rle_shape(*, column: str, sample_csv: Path) -> tuple[int, int] | None:
+    if "rle" not in column.strip().lower():
+        return None
+    for context_dir in _candidate_context_dirs(sample_csv):
+        for name in ("submission_format.md", "overview.md", "data.md", "rules.md"):
+            path = context_dir / name
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if not _COCO_RLE_CONTEXT_RE.search(text):
+                continue
+            match = _FIXED_MASK_SIZE_RE.search(text)
+            if match is not None:
+                return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def _decode_compressed_coco_rle_counts(value: str) -> list[int]:
+    if not value or value.strip() != value or value in {"0", "nan", "inf", "-inf"}:
+        raise ValueError("RLE counts string is empty or a placeholder")
+    counts: list[int] = []
+    position = 0
+    while position < len(value):
+        decoded = 0
+        shift = 0
+        while True:
+            if position >= len(value):
+                raise ValueError("truncated compressed COCO RLE value")
+            char = ord(value[position]) - 48
+            position += 1
+            if char < 0 or char > 0x3F:
+                raise ValueError("compressed COCO RLE contains an out-of-range character")
+            decoded |= (char & 0x1F) << (5 * shift)
+            more = bool(char & 0x20)
+            shift += 1
+            if not more:
+                if char & 0x10:
+                    decoded |= -1 << (5 * shift)
+                break
+        if len(counts) > 2:
+            decoded += counts[-2]
+        if decoded < 0:
+            raise ValueError("compressed COCO RLE contains a negative run")
+        counts.append(decoded)
+    return counts
 
 
 def _prediction_column_allows_text_values(*, column: str, sample_csv: Path) -> bool:

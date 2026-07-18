@@ -3,6 +3,7 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- scripture-in-new-frontiers 20260718T095023Z-c876dbbc: reason=RuntimeError fingerprint=a7804a994fcb95dc5ce2
 - ai-agent-security-multi-step-tool-attacks 20260717T061040Z-4aad47f3: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-large-model-track 20260716T025336Z-83f794ce: reason=OracleStrategyError fingerprint=65df22ce55cf6bb51d0e
 - cuhk-x-competition-small-model-track 20260716T024240Z-edb451b6: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
@@ -12,7 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - cohort-x-task-2 20260715T211756Z-824e1427: reason=OracleStrategyError fingerprint=56655e6b2c92738ada85
 - arc-prize-2026-arc-agi-2 20260715T191406Z-29a80a2b: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 - ai-agent-security-multi-step-tool-attacks 20260715T160516Z-7045e102: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
-- biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: reason=submit_aborted fingerprint=3be5105ab5a5014fa8f4
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

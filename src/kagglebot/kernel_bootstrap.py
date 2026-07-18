@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections.abc import Mapping
@@ -43,6 +44,8 @@ def ensure_kernel_import_path(kernel_dir: Path) -> None:
     text = kernel_path.read_text(encoding="utf-8", errors="ignore")
     lines = strip_kernel_bootstrap(text.splitlines())
     source_without_bootstrap = "\n".join(lines)
+    if text.endswith("\n"):
+        source_without_bootstrap += "\n"
     needs_unsloth_prelude = bool(
         re.search(r"(?m)^\s*(?:import\s+unsloth\b|from\s+unsloth\b)", source_without_bootstrap)
     )
@@ -272,12 +275,7 @@ def ensure_kernel_import_path(kernel_dir: Path) -> None:
         "del _KRUNTIME_CACHE\n"
         "del _os, _sys, _KROOT, _KWORK\n"
     )
-    insert_at = find_bootstrap_insertion_index(lines)
-    bootstrap_lines = bootstrap.splitlines()
-    new_lines = lines[:insert_at] + bootstrap_lines + lines[insert_at:]
-    new_text = "\n".join(new_lines)
-    if text.endswith("\n"):
-        new_text += "\n"
+    new_text = compose_kernel_source(source_without_bootstrap, bootstrap, filename=str(kernel_path))
     kernel_path.write_text(new_text, encoding="utf-8")
 
 
@@ -650,31 +648,64 @@ def find_bootstrap_block_end(lines: list[str]) -> int | None:
 
 
 def find_bootstrap_insertion_index(lines: list[str]) -> int:
+    source = "\n".join(lines)
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return _fallback_bootstrap_insertion_index(lines)
+
+    if not module.body:
+        return len(lines)
+
+    first = module.body[0]
+    has_docstring = (
+        isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
+    )
+    body_idx = 1 if has_docstring else 0
+    insert_at = int(first.end_lineno or first.lineno) if has_docstring else _statement_start_line(first) - 1
+    while body_idx < len(module.body):
+        node = module.body[body_idx]
+        if not isinstance(node, ast.ImportFrom) or node.module != "__future__":
+            break
+        insert_at = int(node.end_lineno or node.lineno)
+        body_idx += 1
+    return insert_at
+
+
+def compose_kernel_source(source: str, bootstrap: str, *, filename: str = "<kernel.py>") -> str:
+    """Insert bootstrap code after the module prologue and verify the result."""
+    try:
+        bootstrap_module = ast.parse(bootstrap, filename=f"{filename} bootstrap")
+    except SyntaxError as exc:
+        raise KernelFailedError(f"Invalid kernel bootstrap for {filename}: {exc}") from exc
+    if any(isinstance(node, ast.ImportFrom) and node.module == "__future__" for node in ast.walk(bootstrap_module)):
+        raise KernelFailedError("Kernel bootstrap must not contain from __future__ imports.")
+
+    lines = source.splitlines()
+    insert_at = find_bootstrap_insertion_index(lines)
+    new_lines = lines[:insert_at] + bootstrap.splitlines() + lines[insert_at:]
+    composed = "\n".join(new_lines)
+    if source.endswith("\n"):
+        composed += "\n"
+    try:
+        compile(composed, filename, "exec")
+    except SyntaxError as exc:
+        raise KernelFailedError(f"Composed kernel source is invalid for {filename}: {exc}") from exc
+    return composed
+
+
+def _statement_start_line(node: ast.stmt) -> int:
+    decorators = getattr(node, "decorator_list", ())
+    return min([node.lineno, *(decorator.lineno for decorator in decorators)])
+
+
+def _fallback_bootstrap_insertion_index(lines: list[str]) -> int:
     idx = 0
     if lines and lines[0].startswith("#!"):
         idx = 1
     if idx < len(lines) and _is_coding_comment(lines[idx]):
         idx += 1
-    while idx < len(lines) and lines[idx].strip() == "":
-        idx += 1
-    if idx < len(lines) and (
-        (lines[idx].startswith('"""') or lines[idx].startswith("'''"))
-        and not lines[idx].strip().endswith(('"""', "'''"))
-    ):
-        quote = lines[idx].strip()[:3]
-        idx += 1
-        while idx < len(lines):
-            current = lines[idx].strip()
-            idx += 1
-            if current.endswith(quote):
-                break
-    elif idx < len(lines) and (lines[idx].startswith('"""') or lines[idx].startswith("'''")):
-        idx += 1
-    while idx < len(lines) and lines[idx].strip() == "":
-        idx += 1
-    while idx < len(lines) and lines[idx].startswith("from __future__ import "):
-        idx += 1
-    while idx < len(lines) and lines[idx].strip() == "":
+    while idx < len(lines) and (not lines[idx].strip() or lines[idx].lstrip().startswith("#")):
         idx += 1
     return idx
 

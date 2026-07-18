@@ -19,6 +19,7 @@ from kagglebot.submit_notebook_decisions import (
     build_notebook_submit_output_reference,
     build_notebook_submit_reference,
     build_submit_kernel_run_kwargs,
+    code_output_artifact_mode,
     decide_ambiguous_notebook_submit_retry,
     decide_notebook_submit_artifact_mode,
     decide_notebook_submit_artifact_mode_for_paths,
@@ -29,6 +30,7 @@ from kagglebot.submit_notebook_decisions import (
     is_submit_kernel_push_error_text,
     normalize_notebook_submit_artifact_mode,
     resolve_notebook_submit_artifact_mode,
+    resolve_notebook_submit_execution_accelerator,
 )
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "build_notebook_submit_reference",
     "build_notebook_submit_runner_for_run",
     "build_submit_kernel_run_kwargs",
+    "code_output_artifact_mode",
     "decide_ambiguous_notebook_submit_retry",
     "decide_notebook_submit_artifact_mode",
     "decide_notebook_submit_artifact_mode_for_paths",
@@ -54,6 +57,7 @@ __all__ = [
     "normalize_notebook_submit_artifact_mode",
     "notebook_kernel_submission_error",
     "resolve_notebook_submit_artifact_mode",
+    "resolve_notebook_submit_execution_accelerator",
     "run_kaggle_submit_kernel_with_retry",
     "run_notebook_kernel_submission",
     "run_notebook_kernel_submission_for_run",
@@ -229,6 +233,11 @@ def run_notebook_kernel_submission(
     submission_ledger_path: Path | None = None,
 ) -> tuple[object, str, Path | None]:
     """Run the submit notebook and submit its Kaggle output reference."""
+    code_output_mode = code_output_artifact_mode(artifact_mode)
+    execution_accelerator = resolve_notebook_submit_execution_accelerator(
+        requested=accelerator,
+        artifact_mode=artifact_mode,
+    )
     submit_kernel_kwargs = build_submit_kernel_run_kwargs(
         slug=slug,
         run_id=run_id,
@@ -236,7 +245,7 @@ def run_notebook_kernel_submission(
         base_dir=base_dir,
         kaggle_username=kaggle_username,
         kernel_name=kernel_name,
-        accelerator=accelerator,
+        accelerator=execution_accelerator,
         enable_internet=False,
         submission_path=submission_path,
         artifact_mode=artifact_mode,
@@ -244,15 +253,15 @@ def run_notebook_kernel_submission(
         timeout_minutes=timeout_minutes,
         expected_output_file=expected_output_file,
     )
-    if _is_code_output_artifact_mode(artifact_mode):
+    if code_output_mode:
         submit_kernel_kwargs["requested_accelerator"] = accelerator
         submit_kernel_kwargs["capacity_fallback_used"] = False
     kernel_result = run_submit_kernel_with_cpu_fallback(
         submit_kernel_kwargs=submit_kernel_kwargs,
         run_submit_kernel=run_submit_kernel,
         decide_cpu_fallback=lambda exc: decide_submit_kernel_cpu_fallback_for_exception(
-            accelerator=accelerator,
-            strict_accelerator=strict_accelerator,
+            accelerator=execution_accelerator,
+            strict_accelerator=strict_accelerator or code_output_mode,
             exc=exc,
             is_capacity_error=is_capacity_error,
             is_push_error=is_push_error,
@@ -469,7 +478,7 @@ def run_notebook_kernel_submission(
 
 
 def _is_code_output_artifact_mode(artifact_mode: str | None) -> bool:
-    return normalize_notebook_submit_artifact_mode(artifact_mode) in {"gateway", "inference"}
+    return code_output_artifact_mode(artifact_mode)
 
 
 def _resolve_submit_kernel_local_artifact_path(

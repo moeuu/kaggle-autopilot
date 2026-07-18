@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import gzip
 import io
@@ -859,6 +860,31 @@ def test_run_submit_kernel_inference_rejects_persisted_dependency_cache(tmp_path
             enable_internet=False,
             submission_path=submission_path,
             mode="inference",
+            dry_run=True,
+            timeout_minutes=None,
+        )
+
+
+def test_run_submit_kernel_gateway_rejects_cpu_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from kagglebot import kernel_runner
+
+    kernel_runner.kernels_init = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not run"))
+    monkeypatch.setenv("KAGGLEBOT_SUBMIT_KERNEL_ACCELERATOR", "cpu")
+    submission_path = tmp_path / "submission.csv"
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+
+    with pytest.raises(KernelFailedError, match="gateway submit requires a GPU kernel"):
+        run_submit_kernel(
+            slug="demo",
+            run_id="run-1",
+            iteration=1,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="gpu",
+            enable_internet=False,
+            submission_path=submission_path,
+            mode="gateway",
             dry_run=True,
             timeout_minutes=None,
         )
@@ -2679,6 +2705,115 @@ def test_kernel_bootstrap_preserves_future_import(tmp_path: Path) -> None:
     assert marker_idx > future_idx
 
 
+def test_kernel_bootstrap_preserves_commented_prologue_and_compiles(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python",
+                "# -*- coding: utf-8 -*-",
+                "# ruff: noqa: E501",
+                '"""Kernel module docstring."""',
+                "",
+                "from __future__ import annotations",
+                "",
+                "import os",
+                "",
+                "class Example:",
+                "    def clone(self) -> Example:",
+                "        return self",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    from kagglebot.kernel_bootstrap import (
+        ensure_kernel_force_train_env,
+        ensure_kernel_import_path,
+        inject_competition_slug_env,
+        inject_hardware_profile_env,
+    )
+
+    ensure_kernel_import_path(kernel_dir)
+    inject_competition_slug_env(kernel_dir, "demo")
+    inject_hardware_profile_env(kernel_dir, "rtx3060", compute="local_gpu")
+    ensure_kernel_force_train_env(kernel_dir)
+
+    staged_source = kernel_path.read_text(encoding="utf-8")
+    compile(staged_source, str(kernel_path), "exec")
+    assert ast.get_docstring(ast.parse(staged_source), clean=False) == "Kernel module docstring."
+    assert staged_source.count("from __future__ import annotations") == 1
+    assert staged_source.index("from __future__ import annotations") < staged_source.index(
+        "# kagglebot:kernel_sys_path"
+    )
+    assert staged_source.index("# kagglebot:kernel_sys_path") < staged_source.index("import os")
+
+
+def test_kernel_bootstrap_without_future_import_follows_docstring(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        '# leading comment\n"""Kernel module docstring."""\n\nVALUE = 1\n',
+        encoding="utf-8",
+    )
+
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
+
+    staged_source = kernel_path.read_text(encoding="utf-8")
+    compile(staged_source, str(kernel_path), "exec")
+    assert staged_source.index('"""Kernel module docstring."""') < staged_source.index("# kagglebot:kernel_sys_path")
+    assert staged_source.index("# kagglebot:kernel_sys_path") < staged_source.index("VALUE = 1")
+
+
+def test_kernel_bootstrap_follows_multiple_future_imports(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "\n".join(
+            [
+                "# leading comment",
+                '"""Kernel module docstring."""',
+                "from __future__ import annotations",
+                "",
+                "# keep this comment with the prologue",
+                "from __future__ import generator_stop",
+                "",
+                "class Node:",
+                "    child: Node | None = None",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    from kagglebot.kernel_bootstrap import ensure_kernel_import_path
+
+    ensure_kernel_import_path(kernel_dir)
+
+    staged_source = kernel_path.read_text(encoding="utf-8")
+    compile(staged_source, str(kernel_path), "exec")
+    assert staged_source.index("from __future__ import generator_stop") < staged_source.index(
+        "# kagglebot:kernel_sys_path"
+    )
+
+
+def test_kernel_source_composition_rejects_future_import_in_bootstrap() -> None:
+    from kagglebot.kernel_bootstrap import compose_kernel_source
+
+    source = '"""Kernel module docstring."""\nfrom __future__ import annotations\nVALUE = 1\n'
+    bootstrap = "from __future__ import generator_stop\nWRAPPED = True\n"
+
+    with pytest.raises(KernelFailedError, match="bootstrap must not contain from __future__ imports"):
+        compose_kernel_source(source, bootstrap)
+
+
 def test_kernel_bootstrap_imports_unsloth_before_sitecustomize(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -3005,9 +3140,19 @@ def test_run_kernel_local_executes_staged_copy(tmp_path: Path) -> None:
     source_kernel_dir = tmp_path / "demo" / "kernel"
     source_kernel_dir.mkdir(parents=True, exist_ok=True)
     source_kernel_path = source_kernel_dir / "kernel.py"
+    staged_kernel = tmp_path / "demo" / "kernels" / "run-5" / "local-iter-1" / "kernel.py"
+    staged_kernel.parent.mkdir(parents=True, exist_ok=True)
+    staged_kernel.write_text("STALE_STAGED_KERNEL = True\n", encoding="utf-8")
     source_text = "\n".join(
         [
+            "# ruff: noqa: E501",
+            '"""Local kernel staging regression fixture."""',
+            "from __future__ import annotations",
+            "",
             "from pathlib import Path",
+            "",
+            "class Row:",
+            "    parent: Row | None = None",
             "",
             "Path('submission.csv').write_text('id,target\\n1,0.1\\n', encoding='utf-8')",
             "Path('metrics.json').write_text('{\"metric\":\"rmse\",\"offline_value\":0.1}', encoding='utf-8')",
@@ -3037,9 +3182,11 @@ def test_run_kernel_local_executes_staged_copy(tmp_path: Path) -> None:
     assert result.submission_path is not None and result.submission_path.exists()
     assert result.metrics_path is not None and result.metrics_path.exists()
     assert source_kernel_path.read_text(encoding="utf-8") == source_text + "\n"
-    staged_kernel = tmp_path / "demo" / "kernels" / "run-5" / "local-iter-1" / "kernel.py"
     assert staged_kernel.exists()
     staged_text = staged_kernel.read_text(encoding="utf-8")
+    compile(staged_text, str(staged_kernel), "exec")
+    assert "STALE_STAGED_KERNEL" not in staged_text
+    assert staged_text.count("from __future__ import annotations") == 1
     assert "# kagglebot:competition_slug" in staged_text
     assert "_kb_os.environ['KAGGLEBOT_COMPETITION_SLUG'] = \"demo\"" in staged_text
     assert "_kb_os.environ['KAGGLEBOT_SLUG'] = \"demo\"" in staged_text

@@ -7,9 +7,11 @@ import pytest
 
 from kagglebot.submission_history import (
     build_previous_submission_history_payload,
+    build_public_score_feedback,
     detect_online_regression_vs_submission_history,
     format_previous_submission_history_for_prompt,
     load_previous_submission_history,
+    merge_current_submission_outcome,
 )
 
 
@@ -82,6 +84,76 @@ def test_previous_submission_history_prompt_and_regression_signal() -> None:
     assert "Do not call a new iteration improved" in prompt
     assert "Recent unscored submissions" in prompt
     assert "Submission Scoring Error" in prompt
+
+
+def test_current_outcome_is_merged_and_exposed_as_improvement_feedback(tmp_path: Path) -> None:
+    history_path = tmp_path / "context" / "submission_history.json"
+    history = build_previous_submission_history_payload(
+        rows=[
+            {
+                "ref": "old",
+                "fileName": "old.csv",
+                "date": "2026-07-18 10:00:00",
+                "description": "old baseline",
+                "status": "complete",
+                "publicScore": "0.61",
+            }
+        ],
+        direction="maximize",
+        source="test",
+    )
+
+    merged = merge_current_submission_outcome(
+        history=history,
+        outcome={
+            "status": "complete",
+            "score": 0.65,
+            "checked_at": "2026-07-18T11:47:00+00:00",
+            "raw": {
+                "ref": "new",
+                "fileName": "repaired.csv",
+                "date": "2026-07-18 11:46:33",
+                "description": "repaired RLE",
+                "status": "complete",
+                "publicScore": "0.65",
+            },
+        },
+        direction="maximize",
+        history_path=history_path,
+    )
+
+    feedback = build_public_score_feedback(merged)
+    assert feedback == {
+        "direction": "maximize",
+        "latest_public_score": pytest.approx(0.65),
+        "best_public_score": pytest.approx(0.65),
+        "prior_best_public_score": pytest.approx(0.61),
+        "improvement_delta_vs_prior_best": pytest.approx(0.04),
+        "result": "improved",
+    }
+    prompt = format_previous_submission_history_for_prompt(merged)
+    assert "Latest public score: 0.650000" in prompt
+    assert "Public improvement delta vs prior best: +0.040000" in prompt
+    assert "result=improved" in prompt
+    saved = json.loads(history_path.read_text(encoding="utf-8"))
+    assert saved["latest_score"] == pytest.approx(0.65)
+    assert saved["best_score"] == pytest.approx(0.65)
+
+
+def test_first_scored_outcome_becomes_public_baseline() -> None:
+    merged = merge_current_submission_outcome(
+        history={"direction": "maximize", "count": 0, "recent": [], "recent_unscored": []},
+        outcome={"status": "complete", "score": 0.65, "checked_at": "2026-07-18T11:47:00+00:00"},
+        direction="maximize",
+    )
+
+    feedback = build_public_score_feedback(merged)
+    assert feedback is not None
+    assert feedback["latest_public_score"] == pytest.approx(0.65)
+    assert feedback["best_public_score"] == pytest.approx(0.65)
+    assert feedback["prior_best_public_score"] is None
+    assert feedback["result"] == "first_scored_submission"
+    assert "use it as the public baseline" in format_previous_submission_history_for_prompt(merged)
 
 
 def test_load_previous_submission_history_uses_best_public_score(tmp_path: Path) -> None:

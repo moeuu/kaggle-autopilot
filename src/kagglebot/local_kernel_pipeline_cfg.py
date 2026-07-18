@@ -88,6 +88,28 @@ def inject_staged_plan_path_fallback(kernel_dir: Path) -> None:
         changed = True
         break
     if not changed:
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith("for path in ("):
+                continue
+            candidate_block = "\n".join(lines[idx : idx + 8])
+            if "plan.json" not in candidate_block:
+                continue
+            if "/kaggle/working/plan.json" in candidate_block:
+                continue
+            indent = line[: len(line) - len(line.lstrip())]
+            marker = f"{indent}{STAGED_PLAN_PATH_MARKER}"
+            if stripped == "for path in (":
+                lines[idx:idx] = [marker]
+                lines[idx + 2 : idx + 2] = [f'{indent}    Path("/kaggle/working/plan.json"),']
+            else:
+                prefix = line[: line.index("(") + 1]
+                suffix = line[line.index("(") + 1 :]
+                lines[idx] = f'{prefix}Path("/kaggle/working/plan.json"), {suffix}'
+                lines[idx:idx] = [marker]
+            changed = True
+            break
+    if not changed:
         return
 
     updated = "\n".join(lines)

@@ -93,7 +93,17 @@ def test_build_improvement_prompt_plan_renders_policy_context(monkeypatch, tmp_p
         enforce_code_reference_implementation=True,
         code_reference_enforcement_reason="baseline policy",
         best_score_so_far=0.66,
-        previous_submission_history={"best_score": 0.7, "direction": "maximize"},
+        previous_submission_history={
+            "best_score": 0.7,
+            "direction": "maximize",
+            "best": {"submitted_at": "2026-07-17T10:00:00+00:00", "score": 0.7},
+            "latest_score": 0.65,
+            "latest": {"submitted_at": "2026-07-18T10:00:00+00:00", "score": 0.65},
+            "recent": [
+                {"submitted_at": "2026-07-18T10:00:00+00:00", "score": 0.65},
+                {"submitted_at": "2026-07-17T10:00:00+00:00", "score": 0.7},
+            ],
+        },
         prompt_identity_args={},
     )
 
@@ -108,6 +118,9 @@ def test_build_improvement_prompt_plan_renders_policy_context(monkeypatch, tmp_p
     assert "Minimum model families before stop: 3" in plan.base_prompt_text
     assert "Additional repair targets:" in plan.base_prompt_text
     assert "Regression Guard Policy:" in plan.base_prompt_text
+    assert "Latest public score: 0.650000" in plan.base_prompt_text
+    assert "Public improvement delta vs prior best: -0.050000" in plan.base_prompt_text
+    assert "result=regressed" in plan.base_prompt_text
     assert "## Code Reference Gate" in plan.base_prompt_text
     assert "Code reference implementation is policy-mandatory" in plan.base_prompt_text
     assert "Prior knowledge" in plan.strategy_prompt

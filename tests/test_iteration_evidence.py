@@ -158,6 +158,51 @@ def test_iteration_evidence_attributes_material_change_across_comparable_scores(
     assert "iter-1→iter-2: comparable=True" in second.prompt_summary
 
 
+def test_iteration_evidence_exposes_current_public_score_and_history_delta(tmp_path: Path) -> None:
+    paths = _make_paths(tmp_path)
+    run_id = "run-public-feedback"
+    iter1 = paths.iter_dir(run_id, 1)
+    _write_iteration_metrics(iter1, value=0.60, source="cv", trusted=True)
+    metrics_path = iter1 / "metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics["submission_score"] = 0.65
+    metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+
+    history = {
+        "source": "test",
+        "direction": "maximize",
+        "best_score": 0.65,
+        "latest_score": 0.65,
+        "best": {"submitted_at": "2026-07-18T11:46:33+00:00", "score": 0.65},
+        "latest": {"submitted_at": "2026-07-18T11:46:33+00:00", "score": 0.65},
+        "recent": [
+            {"submitted_at": "2026-07-18T11:46:33+00:00", "score": 0.65},
+            {"submitted_at": "2026-07-18T10:00:00+00:00", "score": 0.61},
+        ],
+        "recent_unscored": [],
+    }
+    bundle = prepare_iteration_evidence(
+        paths=paths,
+        slug="demo",
+        run_id=run_id,
+        iteration=1,
+        evaluation=_evaluation(value=0.60),
+        target_score=0.80,
+        current_score=0.60,
+        current_score_source="cv",
+        delta_offline=None,
+        pending_problem_insights=[],
+        previous_submission_history=history,
+    )
+
+    score = bundle.payload["iterations"][0]["score"]
+    assert score["public_submission_score"] == pytest.approx(0.65)
+    feedback = bundle.payload["public_score_feedback"]
+    assert feedback["improvement_delta_vs_prior_best"] == pytest.approx(0.04)
+    assert "public=0.650000" in bundle.prompt_summary
+    assert "improvement_delta=+0.040000" in bundle.prompt_summary
+
+
 def test_iteration_evidence_refuses_delta_for_untrusted_or_incomparable_score(tmp_path: Path) -> None:
     paths = _make_paths(tmp_path)
     run_id = "run-2"

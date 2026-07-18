@@ -8,6 +8,7 @@ from pytest import MonkeyPatch
 
 import kagglebot.discord_notifications as discord_notifications
 from kagglebot.discord_notifications import (
+    DELIVERY_RECEIPTS_FILENAME,
     LEDGER_CURSOR_INITIALIZED_KEY,
     LEDGER_OFFSET_KEY,
     DiscordEventConfig,
@@ -73,6 +74,62 @@ def test_discord_event_notifier_requires_at_least_one_matched_route(monkeypatch:
         dedupe_key="test-event",
         payload={},
     )
+
+
+def test_lifecycle_cursor_advances_only_after_durable_api_receipt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    watch_dir = artifacts / "_watch"
+    watch_dir.mkdir(parents=True)
+    (watch_dir / "state.json").write_text(json.dumps({"last_status": "failed"}), encoding="utf-8")
+    (watch_dir / "discord_notifier_state.json").write_text(
+        json.dumps({LEDGER_CURSOR_INITIALIZED_KEY: True, LEDGER_OFFSET_KEY: 0}),
+        encoding="utf-8",
+    )
+    ledger_path = watch_dir / "ledger.jsonl"
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-17T06:04:57+00:00",
+                "event": "failed",
+                "slug": "demo",
+                "run_id": "run-1",
+                "error": "format mismatch",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        discord_notifications.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: UrlResponse(
+            {"matched_routes": 1, "event_id": "server-event-1", "delivery_status": "queued"}
+        ),
+    )
+    notifier = DiscordEventNotifier(DiscordEventConfig(api_url="https://events.invalid/api", api_token="test-token"))
+
+    assert run_discord_notifier_once(
+        artifacts_dir=artifacts,
+        heartbeat_sec=1800,
+        notifier=notifier,
+        now=datetime(2026, 7, 17, 6, 5, 57, tzinfo=UTC),
+    )
+
+    receipts = [
+        json.loads(line) for line in (watch_dir / DELIVERY_RECEIPTS_FILENAME).read_text(encoding="utf-8").splitlines()
+    ]
+    lifecycle = next(record for record in receipts if record["source"] == "watch_lifecycle")
+    assert lifecycle["accepted"] is True
+    assert lifecycle["event_id"].startswith("evt-kaggle-autopilot-20260717T060457Z-")
+    assert lifecycle["response_event_id"] == "server-event-1"
+    assert lifecycle["response_status"] == "queued"
+    assert lifecycle["matched_routes"] == 1
+    assert lifecycle["ledger_offset"] == 0
+    assert lifecycle["ledger_next_offset"] == ledger_path.stat().st_size
+    assert _read_json_object(watch_dir / "discord_notifier_state.json")[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
 
 
 def test_read_json_object_returns_empty_for_missing_invalid_or_non_object_payload(tmp_path: Path) -> None:

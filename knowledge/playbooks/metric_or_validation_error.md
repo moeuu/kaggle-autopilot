@@ -3,6 +3,7 @@
 Recommended action: Tighten metric contract validation and fail earlier when scoring is untrusted.
 
 ## Signals
+- scripture-in-new-frontiers 20260718T095023Z-c876dbbc: gap=None
 - biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: gap=None
 - filament-segmentation-2026 20260716T032330Z-5b754aa5: reason=submit_aborted fingerprint=e69185e5bed70e4bac2c
 - biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: reason=submit_aborted fingerprint=3be5105ab5a5014fa8f4

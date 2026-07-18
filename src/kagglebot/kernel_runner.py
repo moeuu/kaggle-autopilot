@@ -509,6 +509,11 @@ class KernelSubmitPackageBuilder:
         plan_path = config.base_dir / config.slug / "plan.json"
         plan_payload = load_json_object_or_empty(plan_path)
         submit_accelerator = _resolve_submit_accelerator(config.accelerator, env_get=os.getenv)
+        if code_output_mode and submit_accelerator != "gpu":
+            raise KernelFailedError(
+                "Code-competition gateway submit requires a GPU kernel; "
+                f"resolved accelerator={submit_accelerator!r}. Remove a CPU/TPU submit override and retry."
+            )
         machine_shape_decision = _resolve_submit_machine_shape_decision(
             env_get=os.getenv,
             accelerator=submit_accelerator,

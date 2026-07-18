@@ -485,15 +485,74 @@ def test_kernel_source_validation_flags_prott5_automodel(tmp_path: Path) -> None
     kernel_dir.mkdir(parents=True, exist_ok=True)
     _write_kernel(
         kernel_dir / "kernel.py",
-        "from transformers import AutoModel\\n"
-        "MODEL = 'Rostlab/prot_t5_xl_uniref50'\\n"
-        "m = AutoModel.from_pretrained(MODEL)\\n"
-        "DATA = '/kaggle/input/demo/train.csv'\\n"
-        "OUT1 = '/kaggle/working/submission.csv'\\n"
-        "OUT2 = '/kaggle/working/metrics.json'\\n",
+        "from transformers import AutoModel\n"
+        "MODEL = 'Rostlab/prot_t5_xl_uniref50'\n"
+        "m = AutoModel.from_pretrained(MODEL)\n"
+        "DATA = '/kaggle/input/demo/train.csv'\n"
+        "OUT1 = '/kaggle/working/submission.csv'\n"
+        "OUT2 = '/kaggle/working/metrics.json'\n",
     )
     issues = validate_kernel_sources(kernel_dir)
     assert any("T5/ProtT5" in issue for issue in issues)
+
+
+def test_kernel_source_validation_flags_t5_automodel_keyword(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "from transformers import AutoModel\n"
+        "m = AutoModel.from_pretrained(pretrained_model_name_or_path='google-t5/t5-base')\n"
+        "DATA = '/kaggle/input/demo/train.csv'\n"
+        "OUT1 = '/kaggle/working/submission.csv'\n"
+        "OUT2 = '/kaggle/working/metrics.json'\n",
+    )
+    issues = validate_kernel_sources(kernel_dir)
+    assert any("T5/ProtT5" in issue for issue in issues)
+
+
+def test_kernel_source_validation_ignores_unrelated_t5_text(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "from transformers import AutoModel\n"
+        "_EMBEDDED = 'opaque-t5-payload'\n"
+        "m = AutoModel.from_pretrained('Qwen/Qwen3-Embedding-4B')\n"
+        "DATA = '/kaggle/input/demo/train.csv'\n"
+        "OUT1 = '/kaggle/working/submission.csv'\n"
+        "OUT2 = '/kaggle/working/metrics.json'\n",
+    )
+    ensure_kernel_sources_valid(kernel_dir)
+
+
+def test_kernel_source_validation_accepts_t5_encoder_model(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "from transformers import T5EncoderModel\n"
+        "m = T5EncoderModel.from_pretrained('google-t5/t5-base')\n"
+        "DATA = '/kaggle/input/demo/train.csv'\n"
+        "OUT1 = '/kaggle/working/submission.csv'\n"
+        "OUT2 = '/kaggle/working/metrics.json'\n",
+    )
+    ensure_kernel_sources_valid(kernel_dir)
+
+
+def test_kernel_source_validation_accepts_t5_automodel_get_encoder(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "from transformers import AutoModel\n"
+        "model = AutoModel.from_pretrained('google-t5/t5-base')\n"
+        "encoder = model.get_encoder()\n"
+        "DATA = '/kaggle/input/demo/train.csv'\n"
+        "OUT1 = '/kaggle/working/submission.csv'\n"
+        "OUT2 = '/kaggle/working/metrics.json'\n",
+    )
+    ensure_kernel_sources_valid(kernel_dir)
 
 
 def test_kernel_source_validation_flags_oracle_override_patterns(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from kagglebot.metric_matching import metrics_equivalent as _metrics_equivalent
 SOURCE = "kaggle-autopilot"
 DEFAULT_ACCOUNT = "lab_rdp"
 STATE_FILENAME = "discord_notifier_state.json"
+DELIVERY_RECEIPTS_FILENAME = "discord_delivery_receipts.jsonl"
 LEDGER_OFFSET_KEY = "watch_ledger_offset"
 LEDGER_CURSOR_INITIALIZED_KEY = "watch_ledger_cursor_initialized"
 _LIFECYCLE_EVENT_TYPES = {
@@ -44,6 +45,35 @@ class DiscordEventConfig:
     timeout_sec: float = 10.0
 
 
+@dataclass(frozen=True)
+class DiscordEventReceipt:
+    accepted: bool
+    event_id: str = ""
+    event_type: str = ""
+    dedupe_key: str = ""
+    occurred_at: str = ""
+    matched_routes: int = 0
+    response_event_id: str = ""
+    response_status: str = ""
+    error: str = ""
+
+    def __bool__(self) -> bool:
+        return self.accepted
+
+    def as_record(self) -> dict[str, object]:
+        return {
+            "accepted": self.accepted,
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "dedupe_key": self.dedupe_key,
+            "occurred_at": self.occurred_at,
+            "matched_routes": self.matched_routes,
+            "response_event_id": self.response_event_id,
+            "response_status": self.response_status,
+            "error": self.error,
+        }
+
+
 class DiscordEventNotifier:
     def __init__(self, config: DiscordEventConfig | None) -> None:
         self.config = config
@@ -60,15 +90,22 @@ class DiscordEventNotifier:
         dedupe_key: str,
         payload: dict[str, object],
         occurred_at: datetime | None = None,
-    ) -> bool:
+    ) -> DiscordEventReceipt:
         if self.config is None:
-            return False
+            return DiscordEventReceipt(
+                accepted=False,
+                event_type=event_type,
+                dedupe_key=dedupe_key,
+                error="notifier_disabled",
+            )
         occurred = occurred_at or datetime.now(UTC)
+        event_id = f"evt-kaggle-autopilot-{occurred.strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+        occurred_text = occurred.isoformat().replace("+00:00", "Z")
         body = {
-            "id": f"evt-kaggle-autopilot-{occurred.strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}",
+            "id": event_id,
             "source": self.config.source,
             "type": event_type,
-            "occurred_at": occurred.isoformat().replace("+00:00", "Z"),
+            "occurred_at": occurred_text,
             "account": self.config.account,
             "severity": severity,
             "dedupe_key": dedupe_key,
@@ -90,12 +127,41 @@ class DiscordEventNotifier:
                 raw = response.read()
         except (OSError, urllib.error.HTTPError, urllib.error.URLError) as exc:
             print(f"[yellow]discord notify failed[/yellow]: {exc}")
-            return False
+            return DiscordEventReceipt(
+                accepted=False,
+                event_id=event_id,
+                event_type=event_type,
+                dedupe_key=dedupe_key,
+                occurred_at=occurred_text,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         parsed = parse_json_object_bytes(raw) or {}
-        if (_int_or_none(parsed.get("matched_routes")) or 0) <= 0:
+        matched_routes = _int_or_none(parsed.get("matched_routes")) or 0
+        response_event_id = _response_text(parsed, "event_id", "id")
+        response_status = _response_text(parsed, "delivery_status", "status")
+        if matched_routes <= 0:
             print("[yellow]discord notify accepted but matched no routes[/yellow]")
-            return False
-        return True
+            return DiscordEventReceipt(
+                accepted=False,
+                event_id=event_id,
+                event_type=event_type,
+                dedupe_key=dedupe_key,
+                occurred_at=occurred_text,
+                matched_routes=matched_routes,
+                response_event_id=response_event_id,
+                response_status=response_status,
+                error="accepted_without_matching_route",
+            )
+        return DiscordEventReceipt(
+            accepted=True,
+            event_id=event_id,
+            event_type=event_type,
+            dedupe_key=dedupe_key,
+            occurred_at=occurred_text,
+            matched_routes=matched_routes,
+            response_event_id=response_event_id,
+            response_status=response_status,
+        )
 
 
 def notifier_from_env() -> DiscordEventNotifier:
@@ -202,14 +268,20 @@ def _run_discord_notifier_for_watch_state(
         return False
     snapshot = dict(snapshot)
     snapshot["discord_update_key"] = _discord_event_update_key(snapshot=snapshot, event_type=event_type)
-    ok = notifier.emit(
+    receipt = notifier.emit(
         event_type=event_type,
         severity=_severity_for_snapshot(snapshot),
         dedupe_key=_dedupe_key(snapshot=snapshot, event_type=event_type, now=current_time),
         payload=snapshot,
         occurred_at=current_time,
     )
-    if ok:
+    _persist_delivery_receipt(
+        watch_dir=watch_state_path.parent,
+        receipt=receipt,
+        recorded_at=current_time,
+        source="status_snapshot",
+    )
+    if receipt:
         state.update(
             {
                 "last_snapshot_key": snapshot_key,
@@ -220,7 +292,7 @@ def _run_discord_notifier_for_watch_state(
         )
         write_json_object(state_path, state, sort_keys=True)
         print(f"[green]discord notifier[/green]: sent {event_type} ({snapshot_key})")
-    return ok
+    return bool(receipt)
 
 
 def _replay_watch_lifecycle_events(
@@ -261,18 +333,27 @@ def _replay_watch_lifecycle_events(
                 current_time=current_time,
             )
             occurred_at = _parse_datetime(record.get("ts")) or current_time
-            ok = notifier.emit(
+            dedupe_key = _lifecycle_dedupe_key(
+                payload=payload,
+                event_type=event_type,
+                ledger_offset=offset,
+            )
+            receipt = notifier.emit(
                 event_type=event_type,
                 severity="error" if event_name == "failed" else "info",
-                dedupe_key=_lifecycle_dedupe_key(
-                    payload=payload,
-                    event_type=event_type,
-                    ledger_offset=offset,
-                ),
+                dedupe_key=dedupe_key,
                 payload=payload,
                 occurred_at=occurred_at,
             )
-            if not ok:
+            _persist_delivery_receipt(
+                watch_dir=watch_state_path.parent,
+                receipt=receipt,
+                recorded_at=current_time,
+                source="watch_lifecycle",
+                ledger_offset=offset,
+                ledger_next_offset=next_offset,
+            )
+            if not receipt:
                 state[LEDGER_OFFSET_KEY] = offset
                 write_json_object(state_path, state, sort_keys=True)
                 return sent_any, True
@@ -314,6 +395,35 @@ def _watch_ledger_records_after(path: Path, offset: int) -> list[tuple[int, dict
             else:
                 records.append((next_offset, {}))
     return records
+
+
+def _persist_delivery_receipt(
+    *,
+    watch_dir: Path,
+    receipt: object,
+    recorded_at: datetime,
+    source: str,
+    ledger_offset: int | None = None,
+    ledger_next_offset: int | None = None,
+) -> None:
+    """Append an API acknowledgement before advancing any lifecycle cursor."""
+    if not isinstance(receipt, DiscordEventReceipt):
+        return
+    record = receipt.as_record()
+    record.update(
+        {
+            "recorded_at": recorded_at.isoformat(),
+            "source": source,
+        }
+    )
+    _put_if_not_none(record, "ledger_offset", ledger_offset)
+    _put_if_not_none(record, "ledger_next_offset", ledger_next_offset)
+    path = watch_dir / DELIVERY_RECEIPTS_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _lifecycle_payload(
@@ -1089,6 +1199,14 @@ def _int_or_none(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _response_text(payload: dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _int_from_keys(payload: dict[str, object], keys: tuple[str, ...]) -> int | None:

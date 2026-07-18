@@ -201,7 +201,7 @@ def build_file_submission_fidelity_contract(
     )
     local_evidence = _local_tabular_evidence(prepared_submission_path)
     sample_evidence = _local_tabular_evidence(sample_submission_path)
-    identifier_cardinality = _identifier_cardinality_contract(
+    identifier_cardinality = build_identifier_cardinality_contract(
         sample_submission_path=sample_submission_path,
         submission_path=prepared_submission_path,
         metrics=metrics_payload,
@@ -307,7 +307,7 @@ def build_file_submission_fidelity_report(
 
     actual_tabular = _local_tabular_evidence(prepared_submission_path)
     sample_tabular = _local_tabular_evidence(sample_submission_path)
-    actual_identifier_cardinality = _identifier_cardinality_contract(
+    actual_identifier_cardinality = build_identifier_cardinality_contract(
         sample_submission_path=sample_submission_path,
         submission_path=prepared_submission_path,
         metrics=metrics,
@@ -855,7 +855,7 @@ def _local_tabular_evidence(path: Path | None) -> dict[str, object] | None:
     }
 
 
-def _identifier_cardinality_contract(
+def build_identifier_cardinality_contract(
     *,
     sample_submission_path: Path | None,
     submission_path: Path | None,
@@ -2207,7 +2207,7 @@ def _fidelity_problems(
 
 
 def _pipeline_name(payload: Mapping[str, object]) -> str:
-    for key in ("chosen_pipeline", "selected_pipeline", "pipeline"):
+    for key in ("chosen_pipeline", "selected_pipeline", "selected_profile", "pipeline"):
         value = _text(payload.get(key))
         if value:
             return value

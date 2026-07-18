@@ -104,6 +104,65 @@ def test_inject_staged_plan_path_fallback_supports_frozen_plan_path(tmp_path: Pa
     assert 'FROZEN_PLAN_PATH = KERNEL_DIR / "/kaggle/working/plan.json"' in text
 
 
+def test_inject_staged_plan_path_fallback_supports_plan_loader_candidates(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "plan.json").write_text('{"pipelines": []}\n', encoding="utf-8")
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "KERNEL_DIR = Path(__file__).resolve().parent",
+                "ARTIFACT_ROOT = KERNEL_DIR.parent",
+                "def _load_frozen_plan():",
+                '    for path in (ARTIFACT_ROOT / "plan.json", KERNEL_DIR / "plan.json"):',
+                "        if path.exists():",
+                "            return path.read_text()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    inject_staged_plan_path_fallback(kernel_dir)
+
+    text = kernel_path.read_text(encoding="utf-8")
+    assert "kagglebot:staged_plan_path_fallback" in text
+    assert 'for path in (Path("/kaggle/working/plan.json"), ARTIFACT_ROOT' in text
+
+
+def test_inject_staged_plan_path_fallback_supports_multiline_plan_loader(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "plan.json").write_text("{}\n", encoding="utf-8")
+    kernel_path = kernel_dir / "kernel.py"
+    kernel_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "KERNEL_DIR = Path(__file__).resolve().parent",
+                "ARTIFACT_ROOT = KERNEL_DIR.parent",
+                "def _load_frozen_plan():",
+                "    for path in (",
+                '        ARTIFACT_ROOT / "plan.json",',
+                '        KERNEL_DIR / "plan.json",',
+                "    ):",
+                "        if path.exists():",
+                "            return path.read_text()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    inject_staged_plan_path_fallback(kernel_dir)
+
+    text = kernel_path.read_text(encoding="utf-8")
+    assert "kagglebot:staged_plan_path_fallback" in text
+    assert '        Path("/kaggle/working/plan.json"),' in text
+
+
 def test_inject_pipeline_cfg_fallback_replaces_keyerror(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)

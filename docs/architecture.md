@@ -122,7 +122,8 @@ seen-fingerprint set assembly, and tolerant row readers
 used by resume state and self-improvement reporting. This keeps the submit attempt record shape and JSONL parsing rules
 centralized instead of duplicated across the loop, state helpers, and improvement analysis.
 Historical Kaggle submission row normalization, best/latest public-score summary construction, online-regression
-detection against historical submissions, history fetch/cache fallback, and prompt formatting for that history live in
+detection against historical submissions, immediate matched-outcome merging, latest-versus-prior-best feedback,
+history fetch/cache fallback, and prompt formatting for that history live in
 `src/kagglebot/submission_history.py`; the loop supplies the Kaggle fetch adapter and consumes the resulting summary.
 Notebook submit artifact-mode normalization, initial artifact-mode resolution, path-based artifact-mode decisions, tiny
 public sample hidden-test guards, submit-kernel run kwargs construction, kernel output artifact/reference handling,

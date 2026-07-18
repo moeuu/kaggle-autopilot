@@ -596,6 +596,13 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
         f"{workflow_id} ({pending.get('status')}) before planning or kernel execution"
     )
     if workflow_kind == "kernel_fix":
+        if _complete_obsolete_kernel_source_fix_recovery(
+            config=config,
+            run_id=run_id,
+            workflow_id=workflow_id,
+            payload=payload,
+        ):
+            return
         iteration = _workflow_required_int(payload, "iteration", workflow_id=workflow_id)
         attempt = _workflow_required_int(payload, "attempt", workflow_id=workflow_id)
         _run_kernel_fix(
@@ -611,6 +618,7 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
             codex_reasoning_effort=_workflow_optional_str(payload.get("codex_reasoning_effort")),
             prompt_prefix=str(payload.get("prompt_prefix") or ""),
             max_codex_passes=_workflow_optional_int(payload.get("max_codex_passes")),
+            failure_stage=str(payload.get("failure_stage") or "kernel_runtime"),
         )
     elif workflow_kind == "improvement":
         from kagglebot.solver.evaluate import EvaluationResult
@@ -693,6 +701,45 @@ def _recover_pending_oracle_workflow(*, config: AutopilotConfig, run_id: str) ->
             f"Interrupted Oracle workflow {workflow_id} has unsupported kind {workflow_kind!r}; refusing to skip it."
         )
     print(f"[green]resume[/green]: recovered Oracle workflow {workflow_id}; normal autopilot resume may continue")
+
+
+def _complete_obsolete_kernel_source_fix_recovery(
+    *,
+    config: AutopilotConfig,
+    run_id: str,
+    workflow_id: str,
+    payload: dict[str, object],
+) -> bool:
+    """Skip an interrupted source fix when the current source contract already passes."""
+    failure_stage = str(payload.get("failure_stage") or "").strip().lower()
+    error_message = str(payload.get("error_message") or "")
+    legacy_source_failure = (
+        "kernel source validation failed" in error_message.lower() or "kernel_source_preflight_error" in error_message
+    )
+    if failure_stage != "kernel_source_preflight" and not legacy_source_failure:
+        return False
+
+    deliverable_contract = resolve_deliverable_artifact_contract(config.paths.base_dir)
+    current_error = _kernel_preflight.kernel_source_preflight_error(
+        config.paths.kernel_source_dir,
+        require_kaggle_input=False,
+        deliverable_mode=deliverable_contract.deliverable_mode,
+        required_output_names=deliverable_contract.required_output_names,
+        format_error=_kernel_errors.format_kernel_error,
+    )
+    if current_error is not None:
+        return False
+
+    checkpoint = _oracle_workflow_state.OracleWorkflowCheckpoint(
+        path=_oracle_workflow_state.oracle_workflow_state_path(config.paths.run_dir(run_id)),
+        workflow_id=workflow_id,
+    )
+    checkpoint.mark_completed()
+    print(
+        "[yellow]resume[/yellow]: interrupted kernel source fix is obsolete; "
+        "the current deliverable contract already passes, so kernel execution can resume"
+    )
+    return True
 
 
 def _workflow_optional_str(value: object) -> str | None:
@@ -1261,6 +1308,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     format_error=_kernel_errors.format_kernel_error,
                     deliverable_mode=deliverable_artifact_contract.deliverable_mode,
                     required_output_names=deliverable_artifact_contract.required_output_names,
+                    diagnostics_dir=config.paths.run_dir(run_id) / "autofix",
                     implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
                     run_kernel_fix=lambda preflight_error, attempt: _run_kernel_fix(
                         config=config,
@@ -1270,6 +1318,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                         error_message=preflight_error,
                         attempt=attempt,
                         pending_error_fixes=pending_error_fixes,
+                        failure_stage="kernel_source_preflight",
                     ),
                 )
 
@@ -2570,6 +2619,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             submission_skipped = False
             submit_failed_deferred = False
             online_score: float | None = None
+            current_submission_outcome: dict[str, object] | None = None
             submit_phase_state = pre_submit_phase_state
             if submit_enabled and allow_submit and submission_phase is not None:
                 try:
@@ -2604,6 +2654,13 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                         last_submission_result = submission_result
                         outcome_payload = submission_result.get("outcome")
                         if isinstance(outcome_payload, dict):
+                            current_submission_outcome = outcome_payload
+                            previous_submission_history = _submission_history.merge_current_submission_outcome(
+                                history=previous_submission_history,
+                                outcome=outcome_payload,
+                                direction=metric_direction,
+                                history_path=config.paths.context_dir / "submission_history.json",
+                            )
                             online_score = tolerant_finite_float(outcome_payload.get("score"))
                             if online_score is not None:
                                 print(f"[cyan]submission score[/cyan]: {online_score:.6f}")
@@ -3152,6 +3209,48 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     stop_reason=terminal_stop.stop_reason,
                 )
                 break
+
+            if not config.dry_run:
+                previous_submission_history = _submission_history.load_previous_submission_history(
+                    slug=config.slug,
+                    history_path=config.paths.context_dir / "submission_history.json",
+                    direction=metric_direction,
+                    dry_run=False,
+                    fetch_submission_rows=lambda current_slug: list_competition_submissions(
+                        current_slug,
+                        dry_run=False,
+                    ),
+                    on_message=print,
+                )
+                if current_submission_outcome is not None:
+                    previous_submission_history = _submission_history.merge_current_submission_outcome(
+                        history=previous_submission_history,
+                        outcome=current_submission_outcome,
+                        direction=metric_direction,
+                        history_path=config.paths.context_dir / "submission_history.json",
+                    )
+                refreshed_best_public = tolerant_finite_float(previous_submission_history.get("best_score"))
+                if refreshed_best_public is not None:
+                    if _score_utils.should_update_best_score(
+                        best_submitted_score,
+                        refreshed_best_public,
+                        metric_direction,
+                        0.0,
+                    ):
+                        best_submitted_score = refreshed_best_public
+                    best_online_submission_score = _leaderboard_policy.update_best_online_submission_score(
+                        current_best_score=best_online_submission_score,
+                        candidate_score=refreshed_best_public,
+                        direction=metric_direction,
+                    )
+                feedback = _submission_history.build_public_score_feedback(previous_submission_history)
+                if feedback is not None and feedback.get("latest_public_score") is not None:
+                    print(
+                        "[cyan]submission feedback[/cyan]: "
+                        f"latest={float(feedback['latest_public_score']):.6f} "
+                        f"best={float(feedback['best_public_score']):.6f} "
+                        f"result={feedback.get('result')}"
+                    )
 
             print("[cyan]improve[/cyan]: generating next iteration plan")
             _run_improvement(
@@ -3818,9 +3917,10 @@ def _run_kernel_fix(
     codex_reasoning_effort: str | None = None,
     prompt_prefix: str = "",
     max_codex_passes: int | None = None,
-) -> None:
+    failure_stage: str = "kernel_runtime",
+) -> _kernel_preflight.KernelFixResult:
     if config.dry_run:
-        _run_kernel_fix_body(
+        return _run_kernel_fix_body(
             config=config,
             run_id=run_id,
             iteration=iteration,
@@ -3834,8 +3934,8 @@ def _run_kernel_fix(
             prompt_prefix=prompt_prefix,
             max_codex_passes=max_codex_passes,
             workflow_checkpoint=None,
+            failure_stage=failure_stage,
         )
-        return
     recovery_payload: dict[str, object] = {
         "iteration": int(iteration),
         "attempt": int(attempt),
@@ -3845,6 +3945,7 @@ def _run_kernel_fix(
         "codex_reasoning_effort": codex_reasoning_effort,
         "prompt_prefix": prompt_prefix,
         "max_codex_passes": max_codex_passes,
+        "failure_stage": failure_stage,
     }
     with _oracle_workflow_state.oracle_workflow_checkpoint(
         run_dir=config.paths.run_dir(run_id),
@@ -3852,7 +3953,7 @@ def _run_kernel_fix(
         workflow_kind="kernel_fix",
         recovery_payload=recovery_payload,
     ) as checkpoint:
-        _run_kernel_fix_body(
+        return _run_kernel_fix_body(
             config=config,
             run_id=run_id,
             iteration=iteration,
@@ -3866,6 +3967,7 @@ def _run_kernel_fix(
             prompt_prefix=prompt_prefix,
             max_codex_passes=max_codex_passes,
             workflow_checkpoint=checkpoint,
+            failure_stage=failure_stage,
         )
 
 
@@ -3884,9 +3986,11 @@ def _run_kernel_fix_body(
     prompt_prefix: str,
     max_codex_passes: int | None,
     workflow_checkpoint: _oracle_workflow_state.OracleWorkflowCheckpoint | None,
-) -> None:
+    failure_stage: str,
+) -> _kernel_preflight.KernelFixResult:
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
+    kernel_sha_before = _kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir)
     lightweight_fix = _kernel_fix_context.prepare_lightweight_kernel_fix(
         config=config,
         iter_dir=iter_dir,
@@ -3907,7 +4011,10 @@ def _run_kernel_fix_body(
                     "resolved": True,
                 }
             )
-        return
+        return _kernel_preflight.KernelFixResult(
+            kernel_sha_before=kernel_sha_before,
+            kernel_sha_after=_kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
+        )
 
     if codex_model not in {None, ORACLE_IMPLEMENTATION_AGENT.model}:
         raise ValueError(
@@ -3936,6 +4043,7 @@ def _run_kernel_fix_body(
             compute=config.compute,
             time_budget_min=config.time_budget_min,
         ),
+        failure_stage=failure_stage,
     )
 
     strategy_text = ""
@@ -3994,6 +4102,7 @@ def _run_kernel_fix_body(
     codex_pass_limit = max(1, int(max_codex_passes or MAX_KERNEL_FIX_CODEX_PASSES))
     retry_feedback = ""
     last_response_text = ""
+    repo_changed_paths: set[str] = set()
     for codex_pass in range(1, codex_pass_limit + 1):
         pass_prompt_text = (
             base_prompt_text
@@ -4040,6 +4149,7 @@ def _run_kernel_fix_body(
         )
         after = _snapshot_tree(config.paths.repo_root, allowed_prefixes)
         changed = _diff_snapshots(before, after)
+        repo_changed_paths.update(changed)
         if changed:
             _enforce_allowlist_changes(
                 root=config.paths.repo_root,
@@ -4079,16 +4189,57 @@ def _run_kernel_fix_body(
             raise RuntimeError(f"{IMPLEMENTATION_AGENT.display_name} kernel-fix step failed.")
 
         if not changed:
-            regenerated = _autofix_restart.maybe_regenerate_kernel_sources_once(
-                dry_run=config.dry_run,
-                agent_dir=iter_dir / "agent",
-                run_id=run_id,
-                iteration=iteration,
-                attempt=attempt,
-                trigger_reason="codex_no_changes",
-                regenerate_kernel_sources=lambda: _planning_runner.run_plan_and_initial(config, run_id),
-            )
-            if not regenerated:
+            kernel_sha_after_agent = _kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir)
+            kernel_changed = kernel_sha_after_agent != kernel_sha_before
+            regeneration_already_used = False
+            regeneration_attempted = False
+            regenerated = False
+            if not kernel_changed:
+                regeneration_already_used = _autofix_restart.kernel_regeneration_already_marked(
+                    agent_dir,
+                    kernel_sha256=kernel_sha_after_agent,
+                )
+                if failure_stage == "kernel_source_preflight":
+                    deliverable_contract = resolve_deliverable_artifact_contract(config.paths.base_dir)
+                    current_failure = _kernel_preflight.check_kernel_source_preflight(
+                        kernel_source_dir=config.paths.kernel_source_dir,
+                        format_error=_kernel_errors.format_kernel_error,
+                        deliverable_mode=deliverable_contract.deliverable_mode,
+                        required_output_names=deliverable_contract.required_output_names,
+                    )
+                    if current_failure is None:
+                        print(
+                            "[yellow]kernel fix[/yellow]: no repository diff, but the current "
+                            "kernel source preflight passes"
+                        )
+                        return _kernel_preflight.KernelFixResult(
+                            agent_exit_code=result.returncode,
+                            repo_changed=bool(repo_changed_paths),
+                            changed_paths=tuple(sorted(repo_changed_paths)),
+                            kernel_sha_before=kernel_sha_before,
+                            kernel_sha_after=kernel_sha_after_agent,
+                            regeneration_already_used=regeneration_already_used,
+                        )
+                regeneration_attempted = not config.dry_run and not regeneration_already_used
+                regenerated = _autofix_restart.maybe_regenerate_kernel_sources_once(
+                    dry_run=config.dry_run,
+                    agent_dir=agent_dir,
+                    run_id=run_id,
+                    iteration=iteration,
+                    attempt=attempt,
+                    trigger_reason="codex_no_changes",
+                    regenerate_kernel_sources=lambda: _planning_runner.run_plan_and_initial(config, run_id),
+                    get_kernel_sha256=lambda: _kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
+                )
+            if not kernel_changed and not regenerated:
+                if failure_stage == "kernel_source_preflight":
+                    raise KernelFailedError(
+                        "Kernel fix made no repository changes and kernel source preflight still fails.\n"
+                        "Original preflight failure:\n"
+                        f"{error_message}\n\n"
+                        "Current preflight failure:\n"
+                        f"{_kernel_preflight.format_kernel_preflight_failure(current_failure)}"
+                    )
                 raise KernelFailedError(
                     "Kernel fix agent produced no file changes and regeneration fallback was already used."
                 )
@@ -4110,13 +4261,25 @@ def _run_kernel_fix_body(
                         "iteration": iteration,
                         "error_message": error_message,
                         "fix_summary": (
-                            f"{IMPLEMENTATION_AGENT.display_name} kernel-fix made no edits; "
+                            f"{IMPLEMENTATION_AGENT.display_name} kernel-fix changed the generated kernel directly; "
+                            "verification passed."
+                            if kernel_changed
+                            else f"{IMPLEMENTATION_AGENT.display_name} kernel-fix made no edits; "
                             "regenerated kernel sources once and verification passed."
                         ),
                         "resolved": True,
                     }
                 )
-            return
+            return _kernel_preflight.KernelFixResult(
+                agent_exit_code=result.returncode,
+                repo_changed=bool(repo_changed_paths),
+                changed_paths=tuple(sorted(repo_changed_paths)),
+                kernel_sha_before=kernel_sha_before,
+                kernel_sha_after=_kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
+                regeneration_attempted=regeneration_attempted,
+                regeneration_used=regenerated,
+                regeneration_already_used=regeneration_already_used,
+            )
 
         try:
             _verify_artifacts.run_repo_verify(
@@ -4139,7 +4302,13 @@ def _run_kernel_fix_body(
                     "resolved": True,
                 }
             )
-        return
+        return _kernel_preflight.KernelFixResult(
+            agent_exit_code=result.returncode,
+            repo_changed=bool(repo_changed_paths),
+            changed_paths=tuple(sorted(repo_changed_paths)),
+            kernel_sha_before=kernel_sha_before,
+            kernel_sha_after=_kernel_preflight.kernel_source_sha256(config.paths.kernel_source_dir),
+        )
 
     raise RuntimeError(
         f"Kernel fix exhausted {IMPLEMENTATION_AGENT.log_alias} retry passes without resolving the error."

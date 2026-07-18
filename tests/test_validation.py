@@ -280,6 +280,103 @@ def test_validate_submission_row_count_mismatch():
             validate_submission(str(sample_path), str(submission_path))
 
 
+def test_validate_submission_allows_declared_variable_instance_rows(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    context_dir = tmp_path / "context"
+    data_dir.mkdir()
+    context_dir.mkdir()
+    sample_path = data_dir / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    sample_path.write_text(
+        "image_id,segmentation_rle\nimg_a,0\nimg_b,0\n",
+        encoding="utf-8",
+    )
+    submission_path.write_text(
+        "image_id,segmentation_rle\nimg_a_1,rle-a\nimg_a_custom,rle-b\nimg_b_1,rle-c\n",
+        encoding="utf-8",
+    )
+    (context_dir / "submission_format.md").write_text(
+        "Each row corresponds to one predicted instance. ID suffixes make the rows unique.\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(sample_path), str(submission_path), data_dir=data_dir)
+
+
+def test_validate_submission_does_not_infer_variable_instance_rows_without_context(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    sample_path.write_text("image_id,target\nimg_a,0\nimg_b,0\n", encoding="utf-8")
+    submission_path.write_text(
+        "image_id,target\nimg_a_1,0.1\nimg_a_2,0.2\nimg_b_1,0.3\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="row count mismatch"):
+        validate_submission(str(sample_path), str(submission_path))
+
+
+def test_validate_submission_rejects_unknown_variable_instance_base(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    context_dir = tmp_path / "context"
+    data_dir.mkdir()
+    context_dir.mkdir()
+    sample_path = data_dir / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    sample_path.write_text("image_id,target\nimg_a,0\nimg_b,0\n", encoding="utf-8")
+    submission_path.write_text(
+        "image_id,target\nimg_a_1,0.1\nimg_unknown_1,0.2\n",
+        encoding="utf-8",
+    )
+    (context_dir / "submission_format.md").write_text(
+        "Each row corresponds to one predicted object and the ID suffix makes rows unique.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="id values mismatch"):
+        validate_submission(str(sample_path), str(submission_path), data_dir=data_dir)
+
+
+def test_validate_submission_checks_declared_compressed_coco_rle(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    context_dir = tmp_path / "context"
+    data_dir.mkdir()
+    context_dir.mkdir()
+    sample_path = data_dir / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    sample_path.write_text("filament_id,segmentation_rle\nimg_a,0\n", encoding="utf-8")
+    submission_path.write_text(
+        "filament_id,segmentation_rle\nimg_a_1,01?\n",
+        encoding="utf-8",
+    )
+    (context_dir / "submission_format.md").write_text(
+        "Each row corresponds to one predicted filament. Use pycocotools RLE counts. "
+        "The fixed Size is 4 X 4 pixels. ID suffixes make rows unique.\n",
+        encoding="utf-8",
+    )
+
+    validate_submission(str(sample_path), str(submission_path), data_dir=data_dir)
+
+
+def test_validate_submission_rejects_invalid_declared_compressed_coco_rle(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    context_dir = tmp_path / "context"
+    data_dir.mkdir()
+    context_dir.mkdir()
+    sample_path = data_dir / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    sample_path.write_text("filament_id,segmentation_rle\nimg_a,0\n", encoding="utf-8")
+    submission_path.write_text("filament_id,segmentation_rle\nimg_a_1,1\n", encoding="utf-8")
+    (context_dir / "submission_format.md").write_text(
+        "Each row corresponds to one predicted filament. Use compressed COCO-RLE counts. "
+        "The fixed Size is 4 X 4 pixels. ID suffixes make rows unique.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid compressed COCO RLE"):
+        validate_submission(str(sample_path), str(submission_path), data_dir=data_dir)
+
+
 def test_validate_submission_missing_id():
     """Test validation fails when id column has missing values."""
     with tempfile.TemporaryDirectory() as tmpdir:

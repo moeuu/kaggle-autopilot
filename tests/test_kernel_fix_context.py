@@ -10,6 +10,7 @@ from kagglebot.runtime_fixes import save_blocked_modules
 class DummyPaths:
     def __init__(self, root: Path) -> None:
         self.root = root
+        self.repo_root = root
         self.context_dir = root / "context"
         self.kernel_source_dir = root / "kernel"
         self.codex_kernel_fix_template = root / "kernel_fix_template.md"
@@ -123,3 +124,33 @@ def test_append_kernel_fix_strategy_appends_named_strategy_section() -> None:
     assert "base prompt" in text
     assert "## GPT Extra-High Error-Fix Strategy" in text
     assert "1. fix the root cause" in text
+
+
+def test_kernel_source_preflight_prompt_preserves_diagnostic_and_repo_contract(tmp_path: Path) -> None:
+    paths = DummyPaths(tmp_path)
+    config = SimpleNamespace(slug="demo", compute="local_gpu", accelerator="gpu", paths=paths)
+    iter_dir = tmp_path / "runs" / "run-1" / "iter-1"
+    agent_dir = iter_dir / "agent"
+    agent_dir.mkdir(parents=True)
+
+    plan = build_kernel_fix_prompt_plan(
+        config=config,
+        run_id="run-1",
+        iteration=1,
+        iter_dir=iter_dir,
+        agent_dir=agent_dir,
+        error_message="check_name: ast_rule\nstderr:\nprecise failure",
+        attempt=1,
+        prompt_prefix="",
+        use_gpt_strategy=True,
+        prompt_identity_args={},
+        hardware_constraints="GPU",
+        failure_stage="kernel_source_preflight",
+    )
+
+    assert "## Actual Kernel Preflight Failure" in plan.prompt_text
+    assert "check_name: ast_rule" in plan.prompt_text
+    assert "precise failure" in plan.prompt_text
+    assert "generated artifact and read-only evidence" in plan.prompt_text
+    assert f"under `{paths.repo_root}`" in plan.prompt_text
+    assert "rerunning the exact kernel source preflight" in plan.prompt_text

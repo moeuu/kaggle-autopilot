@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from kagglebot import submission_history as _submission_history
 from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
 from kagglebot.scalar_utils import tolerant_finite_float
 
@@ -208,6 +209,7 @@ def build_iteration_evidence_payload(
         "recent_run_submission_attempts": _summarize_attempts(attempts[-12:]),
         "pending_problem_insights": _bounded_json_value(pending_problem_insights, max_items=12),
         "public_submission_history": _submission_history_summary(previous_submission_history),
+        "public_score_feedback": _submission_history.build_public_score_feedback(previous_submission_history),
         "decision_requirements": {
             "evidence_gaps": evidence_gaps,
             "do_not_repeat": do_not_repeat,
@@ -241,14 +243,31 @@ def render_prompt_summary(payload: dict[str, object], *, evidence_path: Path) ->
             if not isinstance(score, dict):
                 continue
             lines.append(
-                "- iter-{iteration}: value={value}, source={source}, trusted={trusted}, metric={metric}".format(
+                "- iter-{iteration}: value={value}, source={source}, trusted={trusted}, metric={metric}, "
+                "public={public}".format(
                     iteration=record.get("iteration"),
                     value=score.get("value"),
                     source=score.get("source"),
                     trusted=score.get("trusted"),
                     metric=score.get("metric"),
+                    public=_format_optional_score(score.get("public_submission_score")),
                 )
             )
+    public_feedback = payload.get("public_score_feedback")
+    if isinstance(public_feedback, dict):
+        lines.append(
+            "- Public leaderboard feedback: latest={latest}, best={best}, prior_best={prior}, "
+            "improvement_delta={delta}, result={result}".format(
+                latest=_format_optional_score(public_feedback.get("latest_public_score")),
+                best=_format_optional_score(public_feedback.get("best_public_score")),
+                prior=_format_optional_score(public_feedback.get("prior_best_public_score")),
+                delta=_format_optional_score(
+                    public_feedback.get("improvement_delta_vs_prior_best"),
+                    signed=True,
+                ),
+                result=public_feedback.get("result"),
+            )
+        )
     if isinstance(transitions, list):
         for transition in transitions:
             if not isinstance(transition, dict):
@@ -489,6 +508,7 @@ def _score_record(*, metrics: dict[str, object], evaluation: dict[str, object]) 
         "split_strategy": evaluation.get("split_strategy"),
         "n_splits": evaluation.get("n_splits"),
         "readiness_score": tolerant_finite_float(evaluation.get("readiness_score")),
+        "public_submission_score": tolerant_finite_float(metrics.get("submission_score")),
     }
 
 
@@ -834,6 +854,13 @@ def _submission_history_summary(history: dict[str, object] | None) -> dict[str, 
         "recent": _bounded_json_value(history.get("recent"), max_items=10),
         "recent_unscored": _bounded_json_value(history.get("recent_unscored"), max_items=10),
     }
+
+
+def _format_optional_score(value: object, *, signed: bool = False) -> str:
+    score = tolerant_finite_float(value)
+    if score is None:
+        return "unavailable"
+    return f"{score:+.6f}" if signed else f"{score:.6f}"
 
 
 def _bounded_json_value(value: object, *, max_items: int) -> object:

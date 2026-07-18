@@ -111,6 +111,91 @@ def test_missing_frozen_plan_pipeline_lookup_is_diagnosed(tmp_path: Path) -> Non
     assert "actual_pipeline" in issues[0]
 
 
+def test_inference_server_submit_runtime_repair_avoids_local_gateway(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(
+        """\
+import os
+
+def _submit_notebook_mode():
+    return True
+
+def write_fallback_submission():
+    return "submission.csv"
+
+def validate_code_competition_submission(path):
+    return None
+
+def maybe_start_inference_server(sdk_root=None):
+    submit_mode = _submit_notebook_mode()
+    if not os.getenv("KAGGLE_IS_COMPETITION_RERUN") and not submit_mode:
+        submission_path = write_fallback_submission()
+        validate_code_competition_submission(submission_path)
+        return
+
+    import kaggle_evaluation.demo.inference_server as server
+
+    if os.getenv("KAGGLE_IS_COMPETITION_RERUN"):
+        server.DemoInferenceServer().serve()
+        return
+
+    if submit_mode:
+        server.DemoInferenceServer().run_local_gateway(data_paths=(str(sdk_root),))
+        validate_code_competition_submission("submission.csv")
+        return
+""",
+        encoding="utf-8",
+    )
+
+    assert agent_pipeline._apply_inference_server_submit_runtime_repair(kernel_path) is True
+
+    repaired = kernel_path.read_text(encoding="utf-8")
+    assert "run_local_gateway" not in repaired
+    assert repaired.count("server.DemoInferenceServer().serve()") == 1
+    assert "submission_path = write_fallback_submission()" in repaired
+    assert repaired.index("import kaggle_evaluation") < repaired.index("server.DemoInferenceServer().serve()")
+    assert repaired.index("server.DemoInferenceServer().serve()") < repaired.index(
+        'if os.getenv("KAGGLE_IS_COMPETITION_RERUN") is None'
+    )
+    assert agent_pipeline._apply_inference_server_submit_runtime_repair(kernel_path) is False
+
+
+def test_inference_server_submit_runtime_repair_upgrades_legacy_hidden_only_server(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    kernel_path.write_text(
+        """\
+import os
+
+def write_fallback_submission():
+    return "submission.csv"
+
+def validate_code_competition_submission(path):
+    return None
+
+def maybe_start_inference_server(sdk_root=None):
+    if not os.getenv("KAGGLE_IS_COMPETITION_RERUN"):
+        submission_path = write_fallback_submission()
+        validate_code_competition_submission(submission_path)
+        return
+
+    import kaggle_evaluation.demo.inference_server as server
+
+    server.DemoInferenceServer().serve()
+    return
+""",
+        encoding="utf-8",
+    )
+
+    assert agent_pipeline._apply_inference_server_submit_runtime_repair(kernel_path) is True
+
+    repaired = kernel_path.read_text(encoding="utf-8")
+    assert repaired.index("server.DemoInferenceServer().serve()") < repaired.index(
+        "submission_path = write_fallback_submission()"
+    )
+    assert 'if os.getenv("KAGGLE_IS_COMPETITION_RERUN") is None' in repaired
+    assert agent_pipeline._apply_inference_server_submit_runtime_repair(kernel_path) is False
+
+
 def test_embedded_attack_profile_dispatch_drift_is_diagnosed(tmp_path: Path) -> None:
     kernel_path = tmp_path / "kernel.py"
     plan_path = tmp_path / "plan.json"

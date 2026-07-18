@@ -1248,7 +1248,9 @@ def list_competition_submissions(slug: str, *, dry_run: bool = False) -> list[di
 
         api = KaggleApi()
         api.authenticate()
-        return [_submission_row_from_api(row) for row in api.competition_submissions(slug)]
+        api_rows = [_submission_row_from_api(row) for row in api.competition_submissions(slug)]
+        if api_rows:
+            return api_rows
     except Exception:  # noqa: BLE001
         pass
     output = _run_kaggle(

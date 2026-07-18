@@ -68,8 +68,18 @@ def kernel_regenerate_marker_path(agent_dir: Path) -> Path:
     return agent_dir / KERNEL_REGENERATE_MARKER_FILENAME
 
 
-def kernel_regeneration_already_marked(agent_dir: Path) -> bool:
-    return kernel_regenerate_marker_path(agent_dir).exists()
+def kernel_regeneration_already_marked(agent_dir: Path, *, kernel_sha256: str | None = None) -> bool:
+    marker_path = kernel_regenerate_marker_path(agent_dir)
+    if not marker_path.exists():
+        return False
+    if kernel_sha256 is None:
+        return True
+    marker = load_json_object_or_empty(marker_path)
+    marked_sha = marker.get("kernel_sha_after") or marker.get("kernel_sha_before")
+    if not marked_sha:
+        # Preserve the bounded behavior of markers created before SHA tracking.
+        return True
+    return str(marked_sha) == kernel_sha256
 
 
 def write_kernel_regeneration_marker(
@@ -79,19 +89,23 @@ def write_kernel_regeneration_marker(
     iteration: int,
     attempt: int,
     trigger_reason: str,
+    kernel_sha_before: str | None = None,
+    kernel_sha_after: str | None = None,
 ) -> Path:
     agent_dir.mkdir(parents=True, exist_ok=True)
     marker_path = kernel_regenerate_marker_path(agent_dir)
-    write_json_object(
-        marker_path,
-        {
-            "created_at": datetime.now(UTC).isoformat(),
-            "trigger_reason": trigger_reason,
-            "attempt": int(attempt),
-            "iteration": int(iteration),
-            "run_id": run_id,
-        },
-    )
+    payload: dict[str, object] = {
+        "created_at": datetime.now(UTC).isoformat(),
+        "trigger_reason": trigger_reason,
+        "attempt": int(attempt),
+        "iteration": int(iteration),
+        "run_id": run_id,
+    }
+    if kernel_sha_before is not None:
+        payload["kernel_sha_before"] = kernel_sha_before
+    if kernel_sha_after is not None:
+        payload["kernel_sha_after"] = kernel_sha_after
+    write_json_object(marker_path, payload)
     return marker_path
 
 
@@ -121,12 +135,14 @@ def maybe_regenerate_kernel_sources_once(
     attempt: int,
     trigger_reason: str,
     regenerate_kernel_sources: Callable[[], None],
+    get_kernel_sha256: Callable[[], str | None] | None = None,
     on_message: Callable[[str], None] = print,
 ) -> bool:
     """Regenerate authoritative kernel sources once when fix loops are stuck."""
     if dry_run:
         return False
-    if kernel_regeneration_already_marked(agent_dir):
+    kernel_sha_before = get_kernel_sha256() if get_kernel_sha256 is not None else None
+    if kernel_regeneration_already_marked(agent_dir, kernel_sha256=kernel_sha_before):
         return False
 
     write_kernel_regeneration_marker(
@@ -135,6 +151,7 @@ def maybe_regenerate_kernel_sources_once(
         iteration=iteration,
         attempt=attempt,
         trigger_reason=trigger_reason,
+        kernel_sha_before=kernel_sha_before,
     )
     on_message(
         "[yellow]kernel fix[/yellow]: unresolved kernel error loop detected; "
@@ -150,6 +167,16 @@ def maybe_regenerate_kernel_sources_once(
             error=exc,
         )
         return False
+    if get_kernel_sha256 is not None:
+        write_kernel_regeneration_marker(
+            agent_dir=agent_dir,
+            run_id=run_id,
+            iteration=iteration,
+            attempt=attempt,
+            trigger_reason=trigger_reason,
+            kernel_sha_before=kernel_sha_before,
+            kernel_sha_after=get_kernel_sha256(),
+        )
     write_kernel_regeneration_note(
         agent_dir=agent_dir,
         attempt=attempt,

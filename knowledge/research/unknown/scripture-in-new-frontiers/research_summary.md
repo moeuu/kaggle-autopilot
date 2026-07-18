@@ -1,39 +1,41 @@
-## Ranked candidate pipeline shortlist
+## Ranked shortlist
 
-### 1. Hybrid CatBoost + rule gate + BGE-M3 retrieval + required APIs
+### 1. Causal CatBoost + rule gate + Qwen3 dual-reranker cascade
 
-**Leak-free features:** raw biometrics; past-only heart-rate, effort, and stress deltas; rolling statistics; recovery deficit; effort-zone interactions; activity category; missing indicators. `session_id` is group-only, and translation is used only after moment prediction. All imputers and encoders are fold-fitted.
+**Leak-free features/encodings:** raw heart rate/zone/effort/recovery/stress/minute, parsed timestamp, missing indicators, activity categorical, static trigger distances, interactions, and within-session current/past lags, deltas, acceleration, rolling means/std, EWM, and threshold crossings. `session_id` is group metadata; `moment_type`, `assigned_verse_id`, translation, verse fields, future rows, and full-session aggregates are excluded. CatBoost receives string categoricals with `"Unknown"` filled safely. Transition counts are fitted inside each fold.
 
-**Models and configuration:** CatBoost MultiClass, 700 iterations, depth 6, learning rate 0.035, balanced class weights, 80-round early stopping; probabilities blended 0.70 learned / 0.30 deterministic rule model. Retrieve top eight with BGE-M3 fp16, maximum length 256, batch size 8, plus TF-IDF lexical score. Gloo output is capped at 22 words and schema-validated.
+**Models and concrete settings:** CatBoost multiclass with 1,000 iterations, depth 6, learning rate 0.025, L2 10, balanced class weights, early stopping 150; 70/30 learned/rule probability blend; optional transition strength 0.18 only after OOF promotion. Qwen3-Embedding-4B first stage, word/char TF-IDF and structured scores, top-12 candidates, then top-8 reranking. Compare Qwen3-Reranker-4B and Querit-4B only through nested Leave-One-Session-Out retrieval selection. Qwen3’s official cards support instruction-aware 4B embedding/reranking and Apache-2.0 licensing; Querit is a newer Apache-2.0 4B cross-encoder challenger. ([Hugging Face][1])
 
-**Runtime/memory:** approximately 30–90 minutes for three-seed grouped CV after embeddings are cached; approximately 3–5 GB VRAM.
+**Expected runtime/memory:** 240–720 minutes end to end on RTX 3060. Sequential 4B loading, FP16, batch 1, 384 tokens, cached corpus/query embeddings and pair scores; target peak 8.5–11.5GB VRAM and <10GB host RSS.
 
-**Leakage risk:** low under Leave-One-Session-Out. Main hazards are future-derived session features, accidental use of `assigned_verse_id`, translation-to-moment correlation, and fold-global preprocessing.
+**Leakage risk:** high if assigned references select retrieval weights/backends on the same session, if temporal features use future rows, or if rule/transition statistics are fitted globally. The nested group protocol and fold-local transforms are mandatory.
 
-**Fallback:** CatBoost plus dynamic threshold rules and train-safe TF-IDF retrieval. This is the recommended final pipeline. BGE-M3’s model card supports multilingual hybrid retrieval and identifies an MIT license. ([Hugging Face][3])
+**Fallback:** Qwen3 4B at shorter lengths → supported 8/4-bit → Qwen3 0.6B → BGE-M3/BGE reranker → TF-IDF. CatBoost absence falls back to ExtraTrees, but that fallback cannot be presented as equal technical depth.
 
-### 2. XGBoost temporal challenger + identical retrieval stack
+### 2. XGBoost temporal challenger + shared retrieval
 
-**Leak-free features:** the same temporal frame, but with fold-fitted one-hot activity encoding and explicit missing indicators.
+**Leak-free features/encodings:** identical causal frame, with fold-fitted numeric median imputation, missing indicators, and `OneHotEncoder(handle_unknown="ignore")` for activity. Train-only columns are dropped; absent test columns are added as NA by `align_features`.
 
-**Models and configuration:** XGBoost `multi:softprob`, 900 estimators, depth 4, learning rate 0.025, subsample 0.85, column sample 0.80, `reg_lambda=6`, and histogram CUDA training. Reuse the cached BGE-M3 and lexical retrieval features.
+**Models and concrete settings:** XGBoost `multi:softprob`, 900 estimators, depth 4, learning rate 0.025, subsample 0.85, column sample 0.80, min child weight 2, alpha 0.15, lambda 6, histogram tree method, CUDA with CPU retry, early stopping 100. Reuse the selected retrieval caches. Evaluate a fixed 50/50 probability blend with CatBoost and promote only for at least +0.005 grouped macro-F1 without >0.03 worst-session loss.
 
-**Runtime/memory:** approximately 35–100 minutes; normally under 4 GB VRAM.
+**Expected runtime/memory:** 60–180 incremental minutes after shared caches; normally <6GB GPU memory and <8GB RAM.
 
-**Leakage risk:** low if the encoder is fit inside every fold, but fold-local absent classes and sparse categories can destabilize probabilities.
+**Leakage risk:** one-hot category fitting outside folds, validation-only target classes, accidental sparse-to-dense conversion, and blend selection on non-OOF predictions.
 
-**Fallback:** CPU XGBoost, then sklearn HistGradientBoosting or ExtraTrees. Blend with CatBoost only when OOF macro-F1 improves by at least 0.005 without materially weakening the worst session.
+**Fallback:** CPU XGBoost, then sparse ExtraTrees or HistGradientBoosting only when safe to densify. Reject the challenger when it lacks stable grouped gain.
 
-### 3. Rule-state machine + word/character TF-IDF
+### 3. Rules + BGE-M3/TF-IDF contract failsafe
 
-**Leak-free features:** organizer thresholds, current/past slopes, activity compatibility, translation filter, and a TF-IDF vocabulary fit only on the permitted retrieval corpus.
+**Leak-free features/encodings:** organizer trigger catalog, activity compatibility, current/past slopes, observed-range checks, cooldown/novelty state, word 1–2 grams, and character 3–5 grams. No learned target encoder.
 
-**Models and configuration:** deterministic moment scores; word 1–2 grams and character 3–5 grams with a 12,000-feature cap; 180-second cooldown.
+**Models and concrete settings:** deterministic state machine; BGE-M3 dense/sparse/multi-vector retrieval when an immutable local asset and `FlagEmbedding` are available; BGE reranker or first-stage scoring; otherwise 12,000-feature word/character TF-IDF. Delivery confidence 0.60, cooldown 180 seconds, no generated words in the pure outage path. BGE-M3’s primary paper describes unified dense, sparse, and multi-vector retrieval across 100+ languages, making it a defensible fallback rather than a generic lexical baseline. ([arXiv][7])
 
-**Runtime/memory:** under 10 minutes and 2 GB RAM.
+**Expected runtime/memory:** <60 minutes with BGE caches; <10 minutes and <2GB RAM for TF-IDF-only mode.
 
-**Leakage risk:** minimal, though hand-tuned rules may inadvertently mirror the tiny sample. Keep every threshold derived from the organizer mapping or frozen plan rather than row-specific labels.
+**Leakage risk:** circularity from organizer mapping labels and thresholds, plus misleadingly strong replay metrics. Report it as an organizer-proxy floor and keep a rules-only ablation.
 
-**Fallback:** this pipeline is itself the outage fallback. It provides reliability evidence but should not be the final entry unless learned candidates fail.
+**Fallback:** deterministic rules + TF-IDF + fixed safe phrases. This path is for reliability and contract validation, not the preferred final product unless learned routes fail honest validation.
 
-A contextual bandit is retained as a logged replay interface only. JITAI and micro-randomized-trial research support the architecture, but the organizer sample contains no genuine intervention outcomes from which to train an adaptive policy. ([arXiv][2])
+## Recommendation
+
+Promote pipeline 1, retain pipeline 2 for diversity, and require pipeline 3 as the outage/sanity floor. The decisive improvement over the current implementation is not another broad hyperparameter sweep; it is nested session-level retrieval evaluation, immutable asset locking, and visibly real dual-API evidence. Keep the JITAI-style timing gate and MRT-compatible ledger as technical depth, while explicitly avoiding effectiveness or medical claims. ([arXiv][3])

@@ -722,6 +722,51 @@ def test_run_submit_kernel_with_cpu_fallback_retries_on_decision() -> None:
     assert "retrying submit kernel on CPU" in messages[0]
 
 
+def test_gateway_submit_forces_gpu_and_disables_cpu_capacity_fallback(tmp_path: Path) -> None:
+    submission_path = tmp_path / "iter-1" / "submission.csv"
+    submission_path.parent.mkdir(parents=True)
+    submission_path.write_text("id,target\n1,0.1\n", encoding="utf-8")
+    logs_dir = submission_path.parent / "logs"
+    logs_dir.mkdir()
+    calls: list[dict[str, object]] = []
+
+    def run_submit_kernel(**kwargs):  # noqa: ANN003
+        calls.append(kwargs)
+        raise KernelCapacityError("gpu unavailable")
+
+    with pytest.raises(KernelCapacityError, match="gpu unavailable"):
+        run_notebook_kernel_submission(
+            slug="demo",
+            run_id="run-1",
+            iteration=1,
+            iter_logs_dir=logs_dir,
+            base_dir=tmp_path,
+            kaggle_username="user",
+            kernel_name=None,
+            accelerator="cpu",
+            strict_accelerator=False,
+            submission_path=submission_path,
+            message="submit",
+            artifact_mode="gateway",
+            dry_run=False,
+            timeout_minutes=60,
+            run_submit_kernel=run_submit_kernel,
+            run_kaggle_submit_kernel=lambda **_kwargs: None,
+            copy_submission_artifact=lambda source: source,
+            classify_submit_error=lambda *_args: {},
+            should_retry_ambiguous=lambda **_kwargs: False,
+            sleep=lambda _seconds: None,
+            on_message=lambda _message: None,
+            is_capacity_error=lambda exc: isinstance(exc, KernelCapacityError),
+            is_push_error=lambda _exc: False,
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["accelerator"] == "gpu"
+    assert calls[0]["requested_accelerator"] == "cpu"
+    assert calls[0]["capacity_fallback_used"] is False
+
+
 def test_run_submit_kernel_with_cpu_fallback_wraps_retry_failure() -> None:
     def run_submit_kernel(**kwargs):  # noqa: ANN003, ARG001
         raise SubmitKernelError("still failed")

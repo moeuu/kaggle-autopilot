@@ -56,6 +56,7 @@ def build_kernel_fix_prompt_plan(
     use_gpt_strategy: bool,
     prompt_identity_args: dict[str, object],
     hardware_constraints: str,
+    failure_stage: str = "kernel_runtime",
 ) -> KernelFixPromptPlan:
     prompt_template = render_prompt_identity(config.paths.codex_kernel_fix_template.read_text(encoding="utf-8"))
     prompt_path = agent_dir / "kernel_fix_prompt.md"
@@ -85,6 +86,18 @@ def build_kernel_fix_prompt_plan(
         dataset_profile=str(config.paths.dataset_profile_path),
         sample_submission=str(config.paths.sample_submission_path),
     )
+    if failure_stage == "kernel_source_preflight":
+        prompt_text = (
+            "## Actual Kernel Preflight Failure\n\n"
+            f"{error_message}\n\n"
+            "## Source-of-Truth Repair Contract\n\n"
+            f"- `{config.paths.kernel_source_dir / 'kernel.py'}` is a generated artifact and read-only evidence "
+            "for this repair. Do not edit it directly.\n"
+            f"- Patch the repository source of truth under `{config.paths.repo_root}`: the generator, renderer, "
+            "prompt, or validation implementation responsible for this failure.\n"
+            "- Success is determined by rerunning the exact kernel source preflight, not by whether a file "
+            "diff exists.\n\n" + prompt_text
+        )
     subgroup_metrics_path = iter_dir / "output" / "metrics.json"
     subgroup_payload = _json_utils.load_json_object(subgroup_metrics_path) if subgroup_metrics_path.exists() else {}
     subgroup_collapse_signal = _kernel_quality.detect_subgroup_collapse_signal(

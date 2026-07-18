@@ -79,6 +79,11 @@ matched route, so transient API failures and missing route configuration are ret
 On first upgrade, the cursor starts at the end of the existing ledger to avoid replaying historical notifications;
 the current watch snapshot is still emitted normally.
 
+Each Event API attempt is appended to `_watch/discord_delivery_receipts.jsonl` before the watch-ledger cursor
+advances. The receipt records the client Event ID, matched route count, server acknowledgement/status, dedupe key,
+and ledger offsets. `matched_routes > 0` proves route acceptance; the recorded server status is the downstream
+delivery audit evidence when a Discord message is not visible.
+
 For an active run, the watch state's status and phase are authoritative. An inner stage may leave `run.json` at a
 failure status while Oracle/Codex autofix or recovery is already running; notification snapshots report that active
 recovery phase and preserve the inner-stage value separately as `run_record_status` for diagnostics.
@@ -223,16 +228,25 @@ Per iteration, autopilot does:
 3. Check top1-tier condition (direction-aware)
 4. If not top1-tier and iterations remain, freeze an iteration evidence bundle and run Oracle improvement
 
-Before Oracle chooses the next change, the evidence bundle records the current score provenance, fold/readiness
-evidence, diagnostics and deduplicated error signatures, portfolio/graph outcomes, submission failures, and frozen
+Before Oracle chooses the next change, the evidence bundle records the current score provenance, the latest/best
+public leaderboard score and improvement-direction delta versus the prior public best, fold/readiness evidence,
+diagnostics and deduplicated error signatures, portfolio/graph outcomes, submission failures, and frozen
 kernel/plan snapshots. From iteration 2 onward it adds the actual kernel diff, plan field changes, prior Oracle
 hypothesis, Codex implementation report, and the observed outcome for each transition. Oracle is required to return
 an improvement contract containing evidence citations, one falsifiable hypothesis, a material delta from failed or
 no-op approaches, an attribution-safe validation plan, expected observations, stop/rollback criteria, and a fallback.
 Interrupted Oracle workflows persist the evidence path and SHA-256 and refuse to resume from a modified bundle.
 
+Kernel source preflight persists a redacted, structured diagnostic at
+`runs/<run_id>/autofix/attempt-<n>/kernel-preflight-error.txt` before invoking a repair. Repair success is determined
+by rerunning the exact source contract, so a no-diff repair may continue when the contract already passes. Identical
+failing regenerations remain bounded by the generated kernel SHA-256.
+
 Submission behavior:
 - Default: submit every iteration
+- A matched Kaggle outcome is merged into `context/submission_history.json` immediately. Before every next-iteration
+  improvement decision, non-dry runs refresh the listing again so scores from manual or out-of-band submissions are
+  also included; a fetch failure falls back to the merged cache.
 - Leaderboard CLI runs default to `--campaign-mode top1`; use `--campaign-mode baseline` for the older lightweight loop
 - Top1 campaign mode writes `context/campaign_state.json`, `context/candidate_registry.json`, `context/reference_reproduction_report.json`, and `context/experiment_graph.json`, tracks historical best public score, top1 gap, validation trust, candidate metadata, and remaining daily slots
 - `--portfolio-execution off|serial|parallel|budgeted` controls the top1 candidate DAG. The default is `serial`; `budgeted` runs the highest evidence-value ready node first and records candidate budget hints.

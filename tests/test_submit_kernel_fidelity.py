@@ -59,6 +59,17 @@ def test_build_submit_runtime_env_carries_selected_candidate_contract() -> None:
     }
 
 
+def test_build_submit_runtime_env_accepts_selected_profile_alias() -> None:
+    runtime_env = build_submit_runtime_env(
+        {
+            "selected_profile": "adaptive_profile",
+            "offline_value": 119.0,
+        }
+    )
+
+    assert runtime_env["KAGGLEBOT_SELECTED_PIPELINE"] == "adaptive_profile"
+
+
 def test_runtime_fidelity_rejects_remote_pipeline_and_dependency_degradation(tmp_path: Path) -> None:
     actual = _write_json(
         tmp_path / "metrics.json",
