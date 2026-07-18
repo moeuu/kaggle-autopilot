@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from kagglebot.paths import CompetitionPaths
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.writeup import (
+    attach_published_writeup_notebook,
     build_writeup_bundle,
     extract_writeup_constraints,
     infer_code_competition_from_paths,
@@ -224,6 +226,92 @@ def test_build_writeup_bundle_creates_report_and_metadata(tmp_path: Path) -> Non
     report_text = report_path.read_text(encoding="utf-8")
     assert "Clinical Relevance" in report_text
     assert "Use this section to" not in report_text
+
+
+def test_writeup_notebook_artifact_is_validated_before_submit(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.plan_path.write_text(
+        json.dumps({"deliverable_mode": "writeup", "submit_mode": "notebook"}),
+        encoding="utf-8",
+    )
+    paths.overview_md_path.write_text(
+        "This judged hackathon requires a writeup and one Kaggle Notebook (required).\n"
+        "The notebook outputs a file named features.csv.\n",
+        encoding="utf-8",
+    )
+    iter_dir = paths.iter_dir("run-1", 1)
+    iter_dir.mkdir(parents=True)
+    (iter_dir / "features.csv").write_text("matchid,teamid,feature\n1,2,3\n", encoding="utf-8")
+    evaluation = EvaluationResult(
+        score_source="contract",
+        metric="contract_score",
+        direction="maximize",
+        value=1.0,
+        std=None,
+        train_score=None,
+        val_score=None,
+        fold_scores=None,
+    )
+
+    bundle = build_writeup_bundle(
+        paths=paths,
+        run_id="run-1",
+        iteration=1,
+        resolved={"deliverable_mode": "writeup"},
+        evaluation=evaluation,
+        metrics_payload={"chosen_pipeline": "feature_builder"},
+        top1_info=None,
+    )
+
+    assert bundle["status"] == "ready_for_notebook_publish"
+    assert bundle["required_artifacts"][0]["name"] == "features.csv"
+    assert bundle["notebook"]["status"] == "publish_required"
+
+    remote_output = tmp_path / "remote-output"
+    remote_output.mkdir()
+    (remote_output / "features.csv").write_text("matchid,teamid,feature\n1,2,3\n", encoding="utf-8")
+    finalized = attach_published_writeup_notebook(
+        bundle,
+        kernel_id="owner/private-demo-notebook",
+        output_dir=remote_output,
+    )
+
+    assert finalized["status"] == "ready_for_submit"
+    assert finalized["notebook"]["private"] is True
+    assert "owner/private-demo-notebook" in Path(str(finalized["report_path"])).read_text(encoding="utf-8")
+
+
+def test_writeup_notebook_publication_rejects_output_drift(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.md"
+    report_path.write_text("# Demo\n\n## Appendix\n", encoding="utf-8")
+    local_artifact = tmp_path / "local-features.csv"
+    local_artifact.write_text("a\n1\n", encoding="utf-8")
+    remote_output = tmp_path / "remote-output"
+    remote_output.mkdir()
+    (remote_output / "features.csv").write_text("a\n2\n", encoding="utf-8")
+    bundle = {
+        "status": "ready_for_notebook_publish",
+        "report_path": str(report_path),
+        "artifact_contract": {"required_output_names": ["features.csv"]},
+        "required_artifacts": [
+            {
+                "name": "features.csv",
+                "path": str(local_artifact),
+                "sha256": hashlib.sha256(local_artifact.read_bytes()).hexdigest(),
+            }
+        ],
+        "validation": {"valid": True, "errors": []},
+    }
+
+    finalized = attach_published_writeup_notebook(
+        bundle,
+        kernel_id="owner/private-demo-notebook",
+        output_dir=remote_output,
+    )
+
+    assert finalized["status"] == "validation_failed"
+    assert any("differs" in error for error in finalized["validation"]["errors"])
 
 
 def test_extract_writeup_constraints_and_block_short_report(tmp_path: Path) -> None:

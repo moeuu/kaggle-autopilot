@@ -5,7 +5,10 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kagglebot.deliverable_artifacts import resolve_deliverable_artifact_contract
+from kagglebot.hashing import sha256_path
 from kagglebot.json_utils import load_json_object, write_json_object
+from kagglebot.kernel_outputs import find_output_file
 from kagglebot.submission_sample_discovery import (
     is_tabular_data_path,
     path_mentions_role,
@@ -380,6 +383,7 @@ def build_writeup_bundle(
     evaluation: EvaluationResult,
     metrics_payload: dict[str, object],
     top1_info: dict[str, object] | None,
+    notebook_id: str | None = None,
 ) -> dict[str, object]:
     run_dir = paths.run_dir(run_id)
     writeup_dir = run_dir / "writeup"
@@ -447,12 +451,39 @@ def build_writeup_bundle(
                 "",
             ]
         )
+    deliverable_contract = resolve_deliverable_artifact_contract(
+        paths.base_dir,
+        deliverable_mode="writeup",
+    )
+    resolved_notebook_id = str(notebook_id or "").strip()
+    if resolved_notebook_id.startswith("local/"):
+        resolved_notebook_id = ""
+    notebook_url = f"https://www.kaggle.com/code/{resolved_notebook_id}" if resolved_notebook_id else None
+    required_artifacts, missing_required_artifacts = _required_artifact_records(
+        run_dir / f"iter-{iteration}",
+        deliverable_contract.required_output_names,
+    )
+
+    if notebook_url is not None:
+        report_lines.extend(
+            [
+                "## Private Notebook",
+                "",
+                f"- Reproducible private Kaggle Notebook: {notebook_url}",
+                "- The notebook is intentionally kept private to preserve the competition confidentiality contract.",
+                "",
+            ]
+        )
     report_lines.extend(
         [
             "## Appendix",
             "",
             f"- Proxy metrics JSON: `{evidence_path.relative_to(run_dir)}`",
             f"- Submission checklist: `{checklist_path.relative_to(run_dir)}`",
+            *[
+                f"- Required notebook output: `{record['name']}` (`sha256:{str(record['sha256'])[:12]}…`)"
+                for record in required_artifacts
+            ],
             "",
         ]
     )
@@ -495,9 +526,18 @@ def build_writeup_bundle(
         min_words=requirement_constraints.get("min_words"),
         max_words=requirement_constraints.get("max_words"),
     )
+    artifact_errors = [f"required notebook output not found: {name}" for name in missing_required_artifacts]
+    if artifact_errors:
+        validation["errors"] = [*list(validation.get("errors") or []), *artifact_errors]
+        validation["valid"] = False
+    notebook_ready = not deliverable_contract.requires_notebook or bool(resolved_notebook_id)
+    if validation["valid"]:
+        status = "ready_for_submit" if notebook_ready else "ready_for_notebook_publish"
+    else:
+        status = "validation_failed"
     metadata = {
         "deliverable_mode": "writeup",
-        "status": "ready_for_submit" if validation["valid"] else "validation_failed",
+        "status": status,
         "run_id": run_id,
         "iteration": iteration,
         "report_path": str(report_path),
@@ -506,11 +546,112 @@ def build_writeup_bundle(
         "rubric_sections": section_titles,
         "requirements_summary": requirements_summary.splitlines() if requirements_summary else [],
         "requirement_constraints": requirement_constraints,
+        "artifact_contract": {
+            "required_output_names": list(deliverable_contract.required_output_names),
+            "requires_notebook": deliverable_contract.requires_notebook,
+            "submit_mode": deliverable_contract.submit_mode,
+        },
+        "required_artifacts": required_artifacts,
+        "notebook": {
+            "required": deliverable_contract.requires_notebook,
+            "status": "ready" if notebook_ready else "publish_required",
+            "kernel_id": resolved_notebook_id or None,
+            "url": notebook_url,
+            "private": True if resolved_notebook_id else None,
+        },
         "content_sha256": hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
         "validation": validation,
     }
     write_json_object(metadata_path, metadata)
     return metadata
+
+
+def attach_published_writeup_notebook(
+    metadata: dict[str, object],
+    *,
+    kernel_id: str,
+    output_dir: Path,
+) -> dict[str, object]:
+    """Attach a verified private Kaggle notebook and re-seal the writeup payload."""
+    resolved_kernel_id = str(kernel_id or "").strip()
+    if not resolved_kernel_id or resolved_kernel_id.startswith("local/"):
+        raise ValueError("Writeup notebook publication did not return a remote Kaggle kernel ID.")
+    report_path = Path(str(metadata.get("report_path") or ""))
+    if not report_path.is_file():
+        raise ValueError(f"Writeup report not found: {report_path}")
+    contract_payload = metadata.get("artifact_contract")
+    required_names_raw = contract_payload.get("required_output_names") if isinstance(contract_payload, dict) else []
+    required_names = tuple(str(name) for name in required_names_raw) if isinstance(required_names_raw, list) else ()
+    remote_records, missing = _required_artifact_records(output_dir, required_names)
+    errors = [f"published notebook output not found: {name}" for name in missing]
+    expected_hashes = {
+        str(record.get("name")): str(record.get("sha256"))
+        for record in metadata.get("required_artifacts", [])
+        if isinstance(record, dict)
+    }
+    for record in remote_records:
+        name = str(record["name"])
+        expected_hash = expected_hashes.get(name)
+        if expected_hash and expected_hash != record["sha256"]:
+            errors.append(f"published notebook output differs from validated local artifact: {name}")
+    if errors:
+        validation = metadata.get("validation") if isinstance(metadata.get("validation"), dict) else {}
+        validation = {**validation, "valid": False, "errors": [*list(validation.get("errors") or []), *errors]}
+        metadata.update({"status": "validation_failed", "validation": validation})
+        return metadata
+
+    notebook_url = f"https://www.kaggle.com/code/{resolved_kernel_id}"
+    report_text = report_path.read_text(encoding="utf-8")
+    notebook_section = (
+        "\n## Private Notebook\n\n"
+        f"- Reproducible private Kaggle Notebook: {notebook_url}\n"
+        "- The notebook is intentionally kept private to preserve the competition confidentiality contract.\n"
+    )
+    if "## Private Notebook" not in report_text:
+        appendix_marker = "\n## Appendix\n"
+        report_text = (
+            report_text.replace(appendix_marker, notebook_section + appendix_marker, 1)
+            if appendix_marker in report_text
+            else report_text.rstrip() + notebook_section + "\n"
+        )
+        report_path.write_text(report_text, encoding="utf-8")
+    metadata.update(
+        {
+            "status": "ready_for_submit",
+            "content_sha256": hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
+            "published_required_artifacts": remote_records,
+            "notebook": {
+                "required": True,
+                "status": "ready",
+                "kernel_id": resolved_kernel_id,
+                "url": notebook_url,
+                "private": True,
+            },
+        }
+    )
+    return metadata
+
+
+def _required_artifact_records(
+    output_root: Path,
+    required_output_names: tuple[str, ...],
+) -> tuple[list[dict[str, object]], list[str]]:
+    records: list[dict[str, object]] = []
+    missing: list[str] = []
+    for name in required_output_names:
+        path = find_output_file(output_root, name)
+        if path is None or not path.is_file():
+            missing.append(name)
+            continue
+        records.append(
+            {
+                "name": name,
+                "path": str(path),
+                "size_bytes": path.stat().st_size,
+                "sha256": sha256_path(path),
+            }
+        )
+    return records, missing
 
 
 def validate_writeup_report(

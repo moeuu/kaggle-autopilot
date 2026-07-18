@@ -14,6 +14,8 @@ def run_kernel_source_preflight_fixes(
     max_attempts: int,
     format_error: Callable[[BaseException], str],
     run_kernel_fix: Callable[[str, int], None],
+    deliverable_mode: str = "leaderboard",
+    required_output_names: tuple[str, ...] = (),
     on_message: Callable[[str], None] = print,
     implementation_agent_alias: str = "implementation agent",
 ) -> None:
@@ -23,6 +25,8 @@ def run_kernel_source_preflight_fixes(
         preflight_error = kernel_source_preflight_error(
             kernel_source_dir,
             require_kaggle_input=False,
+            deliverable_mode=deliverable_mode,
+            required_output_names=required_output_names,
             format_error=format_error,
         )
         if preflight_error is None:

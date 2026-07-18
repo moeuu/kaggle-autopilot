@@ -3,6 +3,7 @@
 Recommended action: Classify supervisor/runtime errors centrally and add reusable recovery instead of per-competition patches.
 
 ## Signals
+- soccer-feature-engineering-hackathon 20260718T074715Z-870c671b: reason=KernelFailedError fingerprint=d171de413b1f36180141
 - biohub-cell-tracking-during-development 20260707T063753Z-169cfcdf: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
 
 ## Next Experiment

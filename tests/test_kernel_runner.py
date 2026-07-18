@@ -33,6 +33,7 @@ from kagglebot.kernel_package_files import (
 )
 from kagglebot.kernel_runner import (
     KernelRunResult,
+    _local_submission_filename_from_sample,
     _prepare_local_execution_output,
     resolve_kaggle_username,
     run_kernel,
@@ -63,6 +64,22 @@ from kagglebot.local_kernel_shims import (
 from kagglebot.submission_sample_discovery import TABULAR_INPUT_SUFFIXES
 
 pytestmark = pytest.mark.slow
+
+
+def test_local_output_filename_uses_required_writeup_artifact(tmp_path: Path) -> None:
+    competition_dir = tmp_path / "demo"
+    context_dir = competition_dir / "context"
+    context_dir.mkdir(parents=True)
+    (competition_dir / "plan.json").write_text(
+        json.dumps({"deliverable_mode": "writeup", "submit_mode": "notebook"}),
+        encoding="utf-8",
+    )
+    (context_dir / "overview.md").write_text(
+        "The required notebook outputs a file named features.csv.",
+        encoding="utf-8",
+    )
+
+    assert _local_submission_filename_from_sample(base_dir=tmp_path, slug="demo") == "features.csv"
 
 
 def test_resolve_kaggle_username_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:

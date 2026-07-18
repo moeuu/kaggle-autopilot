@@ -36,6 +36,14 @@ class DummyStrategyResult:
         self.stderr = stderr
 
 
+def _write_implementation_kernel(prompt_path: Path, source: str) -> None:
+    prefix = "- Primary entrypoint: "
+    prompt_lines = prompt_path.read_text(encoding="utf-8").splitlines()
+    kernel_path = next(Path(line.removeprefix(prefix)) for line in prompt_lines if line.startswith(prefix))
+    kernel_path.parent.mkdir(parents=True, exist_ok=True)
+    kernel_path.write_text(source, encoding="utf-8")
+
+
 def _long_strategy_text() -> str:
     base = "\n".join(
         [
@@ -276,9 +284,7 @@ def test_agent_pipeline_runs_all_stages(monkeypatch, tmp_path: Path) -> None:
         codex_calls.append(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if len(codex_calls) == 2:
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
@@ -349,9 +355,7 @@ def test_agent_pipeline_does_not_raise_on_successful_strategy_result(monkeypatch
     def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
@@ -441,9 +445,7 @@ def test_agent_pipeline_repairs_research_sources_without_retry(monkeypatch, tmp_
     def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
@@ -506,9 +508,7 @@ def test_agent_pipeline_blocks_implementation_when_oracle_times_out(monkeypatch,
         codex_calls.append(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
@@ -586,9 +586,7 @@ def test_agent_pipeline_caps_compact_strategy_prompt(monkeypatch, tmp_path: Path
         codex_calls.append(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
@@ -646,9 +644,7 @@ def test_agent_pipeline_write_guard_blocks_data_dir(monkeypatch, tmp_path: Path)
             train_path = paths.data_dir / "train.csv"
             train_path.parent.mkdir(parents=True, exist_ok=True)
             train_path.write_text("id,target\n1,1\n", encoding="utf-8")
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('ok')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('ok')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
@@ -693,9 +689,7 @@ def test_agent_pipeline_allows_kernel_write(monkeypatch, tmp_path: Path) -> None
     def fake_run_codex(prompt_path: Path, output_dir: Path, dry_run: bool, **kwargs) -> DummyCodexResult:  # noqa: ARG001
         output_dir.mkdir(parents=True, exist_ok=True)
         if output_dir.name == "implement":
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('ok')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('ok')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
@@ -743,9 +737,7 @@ def test_agent_pipeline_allows_src_write(monkeypatch, tmp_path: Path) -> None:
             support_path = tmp_path / "src" / "support_fix.py"
             support_path.parent.mkdir(parents=True, exist_ok=True)
             support_path.write_text("READY = True\n", encoding="utf-8")
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('ok')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('ok')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(*args, **kwargs):  # noqa: ARG001
@@ -793,9 +785,7 @@ def test_agent_pipeline_injects_kernel_reference_when_missing(monkeypatch, tmp_p
         codex_calls.append(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if len(codex_calls) == 2:
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     def fake_run_strategy(prompt_path: Path, output_dir: Path, dry_run: bool) -> DummyStrategyResult:  # noqa: ARG001
@@ -845,9 +835,7 @@ def test_agent_pipeline_uses_full_transcript_when_last_message_is_truncated(monk
         codex_calls.append(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if len(codex_calls) == 2:
-            kernel_path = paths.kernel_source_dir / "kernel.py"
-            kernel_path.parent.mkdir(parents=True, exist_ok=True)
-            kernel_path.write_text("print('kernel')\n", encoding="utf-8")
+            _write_implementation_kernel(prompt_path, "print('kernel')\n")
         return DummyCodexResult(output_dir)
 
     class DummyStrategyWithTranscript:

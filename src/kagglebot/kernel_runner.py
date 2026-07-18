@@ -42,6 +42,7 @@ from kagglebot import remote_kernel_state as _remote_kernel_state
 from kagglebot import submit_kernel_fidelity as _submit_kernel_fidelity
 from kagglebot.competition_policy import load_competition_policy
 from kagglebot.compute import detect_local_gpu
+from kagglebot.deliverable_artifacts import resolve_deliverable_artifact_contract
 from kagglebot.exceptions import (
     KaggleCliError,
     KernelFailedError,
@@ -361,6 +362,7 @@ class KernelPackageBuilder:
 
         plan_path = config.base_dir / config.slug / "plan.json"
         plan_payload = load_json_object_or_empty(plan_path)
+        deliverable_contract = resolve_deliverable_artifact_contract(config.base_dir / config.slug)
         machine_shape_decision = _resolve_submit_machine_shape_decision(
             env_get=os.getenv,
             accelerator=config.accelerator,
@@ -449,7 +451,11 @@ class KernelPackageBuilder:
         else:
             _kernel_bootstrap.ensure_kernel_force_train_env(kernel_dir)
         _local_kernel_shims.ensure_training_progress_shim(kernel_dir)
-        ensure_kernel_sources_valid(kernel_dir)
+        ensure_kernel_sources_valid(
+            kernel_dir,
+            deliverable_mode=deliverable_contract.deliverable_mode,
+            required_output_names=deliverable_contract.required_output_names,
+        )
         _kernel_metadata.write_kernel_metadata(
             kernel_dir=kernel_dir,
             kernel_id=kernel_id,
@@ -847,7 +853,12 @@ def run_kernel(
         timeout_minutes=timeout_minutes,
         on_remote_started=on_remote_started,
     )
-    submission_path = find_submission_file(preparation.output_dir)
+    deliverable_contract = resolve_deliverable_artifact_contract(base_dir / slug)
+    submission_path = (
+        _find_output_file(preparation.output_dir, deliverable_contract.primary_output_name)
+        if deliverable_contract.primary_output_name
+        else find_submission_file(preparation.output_dir)
+    )
     metrics_path = _find_output_file(preparation.output_dir, "metrics.json")
     return KernelRunResult(
         kernel_id=kernel_id,
@@ -977,6 +988,7 @@ def run_kernel_local(
     if not kernel_path.exists():
         raise KernelFailedError(f"Local kernel execution requires {kernel_path} to exist.")
     source_plan = load_json_object_or_empty(base_dir / slug / "plan.json")
+    deliverable_contract = resolve_deliverable_artifact_contract(base_dir / slug)
     if plan_requests_non_training(source_plan):
         source_issues = validate_non_training_source(kernel_path.read_text(encoding="utf-8", errors="ignore"))
         if source_issues:
@@ -1034,7 +1046,12 @@ def run_kernel_local(
     else:
         _kernel_bootstrap.ensure_kernel_force_train_env(kernel_stage_dir)
     _local_kernel_shims.ensure_training_progress_shim(kernel_stage_dir)
-    ensure_kernel_sources_valid(kernel_stage_dir, require_kaggle_input=False)
+    ensure_kernel_sources_valid(
+        kernel_stage_dir,
+        require_kaggle_input=False,
+        deliverable_mode=deliverable_contract.deliverable_mode,
+        required_output_names=deliverable_contract.required_output_names,
+    )
     local_aux_env, local_aux_notes = _local_kernel_aux_inputs.stage_local_kernel_aux_inputs(
         base_dir=base_dir,
         slug=slug,
@@ -1352,6 +1369,9 @@ def run_kernel_local(
 
 
 def _local_submission_filename_from_sample(*, base_dir: Path, slug: str) -> str | None:
+    required_output_name = resolve_deliverable_artifact_contract(base_dir / slug).primary_output_name
+    if required_output_name is not None:
+        return required_output_name
     format_filename = _local_submission_filename_from_format(base_dir=base_dir, slug=slug)
     if format_filename is not None:
         return format_filename

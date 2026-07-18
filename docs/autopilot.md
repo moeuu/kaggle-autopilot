@@ -264,9 +264,13 @@ Submission behavior:
   guards. Missing evidence, unimplemented ideas, sample-template copying, dummy output, or absent runtime proof keeps the
   normal train-and-validate route.
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
-- writeup runs produce a validated, content-hashed report without placeholder instructions; when submission is enabled,
-  global `--force` is present, and participation/rules checks pass, the final writeup is saved and submitted through an
-  authenticated Kaggle browser session. Started, submitted, and ambiguous content hashes are never retried automatically.
+- writeup runs resolve required notebook outputs from `plan.json`, `context/evaluation_spec.json`, and requirement wording
+  in the persisted official competition pages. Named outputs such as `features.csv` satisfy the kernel source/output
+  contract without being treated as leaderboard prediction files. The report records and hashes every required output.
+  When a private notebook is required and submission is enabled with global `--force`, autopilot publishes the notebook,
+  downloads its outputs, requires their hashes to match the locally validated artifacts, adds the private notebook link,
+  checks participation/rules, and submits through Kaggle's authenticated Projects/Writeup UI. Started, submitted, and
+  ambiguous payload hashes are never retried automatically.
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test`/`sample_submission` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test artifact in a wrapper kernel
 - completed Code Competition notebooks are not sent directly: Codex first reviews immutable Notebook/model/output/runtime-log evidence, then a deterministic guard re-hashes the evidence and rechecks expected output, known quota, exact Notebook-version duplicate identity, and ledger before the API executor runs. Restored scores with zero current evaluation rows and no full model-backed runtime evidence, fallback-only predictions, exact row-constant runtime predictions, repeated runtime exceptions, and persisted dependency/cache output trees fail closed even if Codex says approve. A successful API call records the exact kernel/version/output identity immediately.
@@ -486,8 +490,9 @@ into future bootstrap/planning prompts and live `knowledge_hints.txt`; generated
 `knowledge/playbooks/`. Use `--self-improvement-interval-hours 0` to disable it or `--no-self-improvement-codex` to
 write reports without invoking the Oracle/Codex implementation step. `--self-improvement-publish` additionally
 verifies, commits, and pushes repo changes after success; it is enabled by default in `watch` and still requires global `--force`.
-Optional absent repository files do not break the publish transaction. After a verified self-improvement commit is
-pushed, `watch` re-executes itself between competition cycles so the active process loads the changed source.
+Optional absent repository files do not break the publish transaction. `watch` tracks the repository HEAD loaded by the
+current process and re-executes itself between competition cycles whenever it changes, including a pre-publish repair
+commit made during a self-improvement transaction. The next competition therefore cannot continue with stale source.
 If the triggering incident failed before its run directory was created, a successful verified/published repair schedules
 one immediate preflight retry with the original slug/run ID; later identical fingerprints fall back to the normal
 interval and cooldown instead of looping indefinitely.

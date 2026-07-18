@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -28,6 +29,7 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
     SubmitAbortedError,
 )
+from kagglebot.exec_utils import run_command
 from kagglebot.hashing import sha256_text
 from kagglebot.history import new_run_id
 from kagglebot.json_utils import (
@@ -329,6 +331,7 @@ def run_watch_forever(
     sleep_empty_sec: int,
     sleep_error_sec: int,
 ) -> None:
+    loaded_repository_head = _repository_head(config.repository_root)
     while True:
         try:
             result = run_watch_once(config)
@@ -336,9 +339,19 @@ def run_watch_forever(
             WatchLedger(config.ledger_path).append("failed", reason=type(exc).__name__, error=str(exc))
             print(f"[red]watch failed[/red]: {exc}")
             _maybe_run_self_improvement(config)
+            _restart_after_repository_head_change(
+                repository_root=config.repository_root,
+                loaded_head=loaded_repository_head,
+                dry_run=config.dry_run,
+            )
             time.sleep(max(1, sleep_error_sec))
             continue
         _maybe_run_self_improvement(config)
+        _restart_after_repository_head_change(
+            repository_root=config.repository_root,
+            loaded_head=loaded_repository_head,
+            dry_run=config.dry_run,
+        )
         if result.status in {"no_candidates", "dry_run", "no_capacity", "locked"}:
             time.sleep(max(1, sleep_empty_sec))
             continue
@@ -571,6 +584,7 @@ def _maybe_run_self_improvement(config: WatchConfig, *, force: bool = False) -> 
     interval = config.self_improvement_interval_hours
     if not force and (interval is None or interval <= 0):
         return None
+    head_before = _repository_head(config.repository_root)
     try:
         result = run_self_improvement_cycle(
             SelfImprovementConfig(
@@ -590,8 +604,45 @@ def _maybe_run_self_improvement(config: WatchConfig, *, force: bool = False) -> 
     elif result.get("status") == "failed":
         print(f"[yellow]self-improvement failed[/yellow]: {result.get('error')}")
     _schedule_preflight_retry_after_published_self_improvement(config, result)
-    _restart_after_published_self_improvement(result, dry_run=config.dry_run)
+    restarted = _restart_after_published_self_improvement(result, dry_run=config.dry_run)
+    if not restarted:
+        _restart_after_repository_head_change(
+            repository_root=config.repository_root,
+            loaded_head=head_before,
+            dry_run=config.dry_run,
+        )
     return result
+
+
+def _repository_head(repository_root: Path) -> str | None:
+    try:
+        result = run_command(["git", "rev-parse", "HEAD"], cwd=repository_root, timeout=10.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _restart_after_repository_head_change(
+    *,
+    repository_root: Path,
+    loaded_head: str | None,
+    dry_run: bool,
+    execv_func: Callable[[str, list[str]], None] | None = None,
+) -> bool:
+    if dry_run or loaded_head is None:
+        return False
+    current_head = _repository_head(repository_root)
+    if current_head is None or current_head == loaded_head:
+        return False
+    print(
+        "[yellow]watch reload[/yellow]: repository HEAD changed "
+        f"({loaded_head[:12]} -> {current_head[:12]}); restarting before selecting another competition"
+    )
+    runner = execv_func or os.execv
+    runner(sys.executable, [sys.executable, *sys.argv])
+    return True
 
 
 def _schedule_preflight_retry_after_published_self_improvement(

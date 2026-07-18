@@ -433,7 +433,13 @@ def validate_kernel_package(package_dir: Path) -> None:
         raise ValueError(f"Secret pattern detected in kernel package: {unique}")
 
 
-def validate_kernel_sources(kernel_dir: Path, *, require_kaggle_input: bool = True) -> list[str]:
+def validate_kernel_sources(
+    kernel_dir: Path,
+    *,
+    require_kaggle_input: bool = True,
+    deliverable_mode: str = "leaderboard",
+    required_output_names: tuple[str, ...] = (),
+) -> list[str]:
     """Validate kernel source quality and reject non-generalizable evaluation shortcuts."""
     issues: list[str] = []
     if not kernel_dir.exists():
@@ -457,7 +463,18 @@ def validate_kernel_sources(kernel_dir: Path, *, require_kaggle_input: bool = Tr
     content = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in py_files if path.is_file())
     if require_kaggle_input and "/kaggle/input" not in content:
         issues.append("Kernel sources do not reference /kaggle/input for data loading.")
-    if not _references_supported_submission_output(content):
+    normalized_deliverable_mode = str(deliverable_mode or "leaderboard").strip().lower()
+    if normalized_deliverable_mode == "writeup":
+        missing_outputs = [
+            name for name in required_output_names if not _references_required_output_name(content, name)
+        ]
+        if missing_outputs:
+            issues.append(
+                "Kernel sources do not reference required writeup notebook output artifact(s): "
+                + ", ".join(missing_outputs)
+                + "."
+            )
+    elif not _references_supported_submission_output(content):
         issues.append("Kernel sources do not reference a supported submission output artifact.")
     if "metrics.json" not in content:
         issues.append("Kernel sources do not reference metrics.json output.")
@@ -475,8 +492,27 @@ def validate_kernel_sources(kernel_dir: Path, *, require_kaggle_input: bool = Tr
     return issues
 
 
-def ensure_kernel_sources_valid(kernel_dir: Path, *, require_kaggle_input: bool = True) -> None:
-    issues = validate_kernel_sources(kernel_dir, require_kaggle_input=require_kaggle_input)
+def _references_required_output_name(content: str, raw_name: str) -> bool:
+    name = Path(str(raw_name or "")).name.strip()
+    if not name:
+        return False
+    pattern = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?![A-Za-z0-9_.-])", re.IGNORECASE)
+    return any(pattern.search(line) and "/kaggle/input" not in line.lower() for line in content.splitlines())
+
+
+def ensure_kernel_sources_valid(
+    kernel_dir: Path,
+    *,
+    require_kaggle_input: bool = True,
+    deliverable_mode: str = "leaderboard",
+    required_output_names: tuple[str, ...] = (),
+) -> None:
+    issues = validate_kernel_sources(
+        kernel_dir,
+        require_kaggle_input=require_kaggle_input,
+        deliverable_mode=deliverable_mode,
+        required_output_names=required_output_names,
+    )
     if issues:
         detail = "\n".join(f"- {issue}" for issue in issues)
         raise ValueError(f"Kernel source validation failed:\n{detail}")
@@ -486,6 +522,8 @@ def kernel_source_preflight_error(
     kernel_dir: Path,
     *,
     require_kaggle_input: bool = True,
+    deliverable_mode: str = "leaderboard",
+    required_output_names: tuple[str, ...] = (),
     format_error: Callable[[Exception], str] | None = None,
 ) -> str | None:
     """Return kernel source preflight error text, or None when sources are launch-ready."""
@@ -497,7 +535,12 @@ def kernel_source_preflight_error(
             "Run planning/implement to generate kernel.py first."
         )
     try:
-        ensure_kernel_sources_valid(kernel_dir, require_kaggle_input=require_kaggle_input)
+        ensure_kernel_sources_valid(
+            kernel_dir,
+            require_kaggle_input=require_kaggle_input,
+            deliverable_mode=deliverable_mode,
+            required_output_names=required_output_names,
+        )
     except Exception as exc:  # noqa: BLE001
         if format_error is not None:
             return format_error(exc)

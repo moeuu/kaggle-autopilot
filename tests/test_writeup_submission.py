@@ -139,6 +139,39 @@ def test_writeup_submission_blocks_not_entered_and_rules(tmp_path: Path) -> None
     assert adapter.calls == 0
 
 
+def test_writeup_submission_requires_published_notebook_when_contract_requires_it(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    request.metadata["status"] = "ready_for_notebook_publish"
+    request.metadata["notebook"] = {"required": True, "status": "publish_required"}
+    adapter = _Adapter()
+
+    result = submit_validated_writeup(request, adapter=adapter)
+
+    assert result["status"] == "blocked_notebook_required"
+    assert adapter.calls == 0
+
+
+def test_writeup_submission_blocks_changed_required_artifact(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    artifact = tmp_path / "features.csv"
+    artifact.write_text("a\n1\n", encoding="utf-8")
+    request.metadata["required_artifacts"] = [
+        {
+            "name": "features.csv",
+            "path": str(artifact),
+            "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        }
+    ]
+    artifact.write_text("a\n2\n", encoding="utf-8")
+    adapter = _Adapter()
+
+    result = submit_validated_writeup(request, adapter=adapter)
+
+    assert result["status"] == "blocked_required_artifact"
+    assert "changed" in str(result["reason"])
+    assert adapter.calls == 0
+
+
 def test_writeup_cdp_script_is_valid_javascript() -> None:
     node = shutil.which("node")
     if node is None:

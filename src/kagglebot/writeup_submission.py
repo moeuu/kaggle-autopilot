@@ -35,6 +35,8 @@ def submit_validated_writeup(
 ) -> dict[str, object]:
     report_path = Path(str(request.metadata.get("report_path") or ""))
     validation = request.metadata.get("validation")
+    if request.metadata.get("status") == "ready_for_notebook_publish":
+        return {"status": "blocked_notebook_required", "report_path": str(report_path)}
     if request.metadata.get("status") != "ready_for_submit" or not isinstance(validation, dict):
         return {"status": "blocked_invalid_writeup", "report_path": str(report_path)}
     if validation.get("valid") is not True or not report_path.is_file():
@@ -43,16 +45,34 @@ def submit_validated_writeup(
     content_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
     if content_sha256 != request.metadata.get("content_sha256"):
         return {"status": "blocked_content_changed", "content_sha256": content_sha256}
+    artifact_error = _required_artifact_error(request.metadata)
+    if artifact_error is not None:
+        return {
+            "status": "blocked_required_artifact",
+            "content_sha256": content_sha256,
+            "reason": artifact_error,
+        }
+    notebook = request.metadata.get("notebook")
+    if isinstance(notebook, dict) and notebook.get("required") is True:
+        if notebook.get("status") != "ready" or not str(notebook.get("kernel_id") or "").strip():
+            return {"status": "blocked_notebook_required", "content_sha256": content_sha256}
+    submission_sha256 = _writeup_submission_sha256(request.metadata, content_sha256=content_sha256)
     if request.dry_run:
         return {
             "status": "dry_run",
             "content_sha256": content_sha256,
+            "submission_sha256": submission_sha256,
             "report_path": str(report_path),
         }
     if not request.force:
         return {"status": "blocked_force_required", "content_sha256": content_sha256}
 
-    prior = _matching_attempt(request.attempts_path, slug=request.slug, content_sha256=content_sha256)
+    prior = _matching_attempt(
+        request.attempts_path,
+        slug=request.slug,
+        content_sha256=content_sha256,
+        submission_sha256=submission_sha256,
+    )
     if prior is not None:
         return {
             "status": "blocked_duplicate",
@@ -74,6 +94,7 @@ def submit_validated_writeup(
         {
             "slug": request.slug,
             "content_sha256": content_sha256,
+            "submission_sha256": submission_sha256,
             "status": "started",
             "report_path": str(report_path),
             "title": title,
@@ -95,6 +116,7 @@ def submit_validated_writeup(
         "status": status,
         "slug": request.slug,
         "content_sha256": content_sha256,
+        "submission_sha256": submission_sha256,
         "report_path": str(report_path),
         "browser": browser_result,
     }
@@ -142,13 +164,87 @@ class KaggleWriteupCdpAdapter:
             bootstrap.close()
 
 
-def _matching_attempt(path: Path, *, slug: str, content_sha256: str) -> dict[str, object] | None:
+def _matching_attempt(
+    path: Path,
+    *,
+    slug: str,
+    content_sha256: str,
+    submission_sha256: str,
+) -> dict[str, object] | None:
     for row in reversed(load_jsonl_records(path)):
-        if row.get("slug") != slug or row.get("content_sha256") != content_sha256:
+        if row.get("slug") != slug:
+            continue
+        if row.get("content_sha256") == content_sha256 and row.get("status") in {
+            "started",
+            "submitted",
+            "ambiguous",
+        }:
+            return row
+        previous_submission_sha256 = str(row.get("submission_sha256") or "")
+        if previous_submission_sha256:
+            if previous_submission_sha256 != submission_sha256:
+                continue
+        elif row.get("content_sha256") != content_sha256:
             continue
         if row.get("status") in {"started", "submitted", "ambiguous"}:
             return row
     return None
+
+
+def _required_artifact_error(metadata: dict[str, object]) -> str | None:
+    notebook = metadata.get("notebook")
+    notebook_required = isinstance(notebook, dict) and notebook.get("required") is True
+    key = "published_required_artifacts" if notebook_required else "required_artifacts"
+    records = metadata.get(key)
+    contract = metadata.get("artifact_contract")
+    required_names = contract.get("required_output_names") if isinstance(contract, dict) else []
+    if notebook_required and required_names and not isinstance(records, list):
+        return "published notebook required-artifact evidence is missing"
+    if records is None:
+        records = metadata.get("required_artifacts")
+    if not isinstance(records, list):
+        return None
+    for record in records:
+        if not isinstance(record, dict):
+            return f"invalid {key} record"
+        name = str(record.get("name") or "").strip()
+        path = Path(str(record.get("path") or ""))
+        expected_hash = str(record.get("sha256") or "")
+        if not name or not path.is_file() or not expected_hash:
+            return f"required artifact is missing or incomplete: {name or path}"
+        actual_hash = _sha256_file(path)
+        if actual_hash != expected_hash:
+            return f"required artifact changed after validation: {name}"
+    return None
+
+
+def _writeup_submission_sha256(metadata: dict[str, object], *, content_sha256: str) -> str:
+    notebook = metadata.get("notebook") if isinstance(metadata.get("notebook"), dict) else {}
+    artifacts = metadata.get("published_required_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = metadata.get("required_artifacts")
+    artifact_hashes = sorted(
+        (
+            str(record.get("name") or ""),
+            str(record.get("sha256") or ""),
+        )
+        for record in artifacts or []
+        if isinstance(record, dict)
+    )
+    payload = {
+        "content_sha256": content_sha256,
+        "notebook_id": str(notebook.get("kernel_id") or ""),
+        "required_artifacts": artifact_hashes,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _report_title(text: str, *, fallback: str) -> str:
@@ -165,16 +261,16 @@ const port = Number(process.argv[3]);
 const slug = process.argv[4];
 const title = process.argv[5];
 const body = process.argv[6];
-const overviewUrl = `https://www.kaggle.com/competitions/${slug}/overview`;
+const projectsUrl = `https://www.kaggle.com/competitions/${slug}/projects`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 (async () => {
   let client;
   let target;
   try {
-    target = await CDP.New({host, port, url: overviewUrl});
+    target = await CDP.New({host, port, url: projectsUrl});
     client = await CDP({host, port, target});
     await client.Page.enable();
-    await client.Page.navigate({url: overviewUrl});
+    await client.Page.navigate({url: projectsUrl});
     await client.Page.loadEventFired();
     await sleep(2500);
     const pageFunction = async (slug, title, body) => {
@@ -205,9 +301,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const writeupLink = [...document.querySelectorAll('a')].find(
         (node) => /new writeup/i.test(node.textContent || ''));
       if (writeupLink && writeupLink.href) location.href = writeupLink.href;
-      else location.href = `https://www.kaggle.com/competitions/${slug}/writeups/new`;
+      else if (!clickByText(/new writeup/i)) {
+        location.href = `https://www.kaggle.com/competitions/${slug}/projects/new`;
+      }
       await sleep(3500);
-      if (!location.pathname.includes('/competitions/${slug}/') || !location.pathname.includes('writeup')) {
+      const competitionPrefix = `/competitions/${slug}/`;
+      if (!location.pathname.includes(competitionPrefix) ||
+          !/(?:project|writeup)/i.test(location.pathname)) {
         return {status: 'failed', reason: 'unexpected-writeup-route', url: location.href};
       }
       if (/join competition|i understand and accept/i.test(visibleText())) {

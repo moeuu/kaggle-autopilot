@@ -3,7 +3,7 @@
 Recommended action: Force broader model-family search, ensembling, public-LB validation, and data-source review.
 
 ## Signals
-- cohort-x-task-1 20260629T021700Z-c2183268: gap=0.29333
+- No concrete recent examples in the latest report.
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

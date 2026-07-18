@@ -111,6 +111,37 @@ def test_missing_frozen_plan_pipeline_lookup_is_diagnosed(tmp_path: Path) -> Non
     assert "actual_pipeline" in issues[0]
 
 
+def test_embedded_attack_profile_dispatch_drift_is_diagnosed(tmp_path: Path) -> None:
+    kernel_path = tmp_path / "kernel.py"
+    plan_path = tmp_path / "plan.json"
+    kernel_path.write_text(
+        '''\
+ATTACK_SOURCE = r"""
+def build_profile_messages(profile=None):
+    resolved_profile = profile or "actual_pipeline"
+    if resolved_profile == "actual_pipeline":
+        return []
+    if resolved_profile == "obsolete_pipeline":
+        return []
+    return build_profile_messages("obsolete_fallback")
+"""
+''',
+        encoding="utf-8",
+    )
+    plan_path.write_text(
+        '{"pipelines":[{"name":"actual_pipeline","key_hyperparameters":{}}]}',
+        encoding="utf-8",
+    )
+
+    issues = agent_pipeline._diagnose_missing_pipeline_lookups(kernel_path, plan_path)
+
+    assert len(issues) == 1
+    assert "generated attack dispatch" in issues[0]
+    assert "obsolete_pipeline" in issues[0]
+    assert "obsolete_fallback" in issues[0]
+    assert "actual_pipeline" in issues[0]
+
+
 def test_kernel_contract_smoke_injects_data_free_self_test_environment(
     monkeypatch,
     tmp_path: Path,
@@ -305,7 +336,136 @@ def test_successful_implementation_is_contract_smoked(monkeypatch, tmp_path: Pat
 
     agent_pipeline._run_codex_kernel_implementation(paths, config, output_dir, instructions_path)
 
-    assert smoke_calls == [paths.kernel_source_dir / "kernel.py"]
+    assert len(smoke_calls) == 1
+    assert smoke_calls[0].name == "kernel.py"
+    assert smoke_calls[0] != paths.kernel_source_dir / "kernel.py"
+    assert (paths.kernel_source_dir / "kernel.py").read_text(encoding="utf-8") == "print('generated')\n"
+
+
+def test_classifier_block_discards_partial_kernel_and_uses_sanitized_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    paths = CompetitionPaths(slug="security-demo", artifacts_dir=tmp_path / "artifacts", repo_root=repo_root)
+    paths.context_agent_dir.mkdir(parents=True)
+    paths.kernel_source_dir.mkdir(parents=True)
+    paths.plan_path.write_text(
+        json.dumps(
+            {
+                "runtime_budget": {
+                    "max_return_candidates": 700,
+                    "max_messages_per_candidate": 4,
+                    "max_message_chars": 900,
+                    "max_posts_per_candidate": 3,
+                    "archive_cap": 64,
+                    "enable_validation": True,
+                    "enable_training": False,
+                },
+                "pipelines": [
+                    {"name": "adaptive_k1_conditional_multipost_fill"},
+                    {"name": "bounded_trace_archive_mutation_scout"},
+                    {"name": "reference_k1_boundary_anchor_644"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (paths.context_agent_dir / "strategy_plan.md").write_text(
+        "strategy with candidate-payload-sentinel",
+        encoding="utf-8",
+    )
+    instructions_path = paths.context_agent_dir / "instructions.md"
+    instructions_path.write_text("instructions with candidate-payload-sentinel", encoding="utf-8")
+    live_kernel_path = paths.kernel_source_dir / "kernel.py"
+    live_kernel_path.write_text("print('clean baseline')\n", encoding="utf-8")
+    output_dir = paths.context_agent_dir / "implement"
+    output_dir.mkdir()
+
+    prompts: list[str] = []
+    attempted_paths: list[Path] = []
+
+    def staged_entrypoint(prompt_text: str) -> Path:
+        for line in prompt_text.splitlines():
+            if "Primary entrypoint:" in line or line.startswith("Staged entrypoint:"):
+                return Path(line.split(":", maxsplit=1)[1].strip().strip("`"))
+        raise AssertionError("staged entrypoint missing from implementation prompt")
+
+    def fake_agent(**kwargs):
+        prompt_text = kwargs["prompt_path"].read_text(encoding="utf-8")
+        prompts.append(prompt_text)
+        candidate_path = staged_entrypoint(prompt_text)
+        attempted_paths.append(candidate_path)
+        last_message_path = kwargs["output_dir"] / "last-message.txt"
+        if len(prompts) == 1:
+            candidate_path.write_text("print('partial blocked edit')\n", encoding="utf-8")
+            last_message_path.write_text("blocked", encoding="utf-8")
+            return SimpleNamespace(
+                returncode=1,
+                stdout=(
+                    '{"type":"turn.failed","error":{"message":"This content was flagged for possible '
+                    'cybersecurity risk."}}'
+                ),
+                stderr="",
+                last_message_path=last_message_path,
+            )
+        assert candidate_path.read_text(encoding="utf-8") == "print('clean baseline')\n"
+        assert live_kernel_path.read_text(encoding="utf-8") == "print('clean baseline')\n"
+        candidate_path.write_text("print('validated repair')\n", encoding="utf-8")
+        last_message_path.write_text("repair complete", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="repair complete",
+            stderr="",
+            last_message_path=last_message_path,
+        )
+
+    def fake_smoke(**kwargs):
+        text = kwargs["kernel_path"].read_text(encoding="utf-8")
+        if "partial blocked edit" in text:
+            return agent_pipeline.KernelContractSmokeResult(
+                compile_returncode=0,
+                compile_stdout="candidate payload must not enter retry prompt",
+                compile_stderr="",
+                smoke_returncode=1,
+                smoke_stdout="candidate payload must not enter retry prompt",
+                smoke_stderr="KeyError: 'hybrid'",
+            )
+        return agent_pipeline.KernelContractSmokeResult(
+            compile_returncode=0,
+            compile_stdout="",
+            compile_stderr="",
+            smoke_returncode=0,
+            smoke_stdout="all profiles valid",
+            smoke_stderr="",
+        )
+
+    monkeypatch.setattr(agent_pipeline, "_run_guarded_kernel_implementation_agent", fake_agent)
+    monkeypatch.setattr(agent_pipeline, "_run_kernel_contract_smoke", fake_smoke)
+    config = AgentPipelineConfig(
+        slug="security-demo",
+        competition_url=None,
+        compute="local_gpu",
+        accelerator="gpu",
+        internet="off",
+        run_id="run-1",
+        dry_run=False,
+        repo_root=repo_root,
+    )
+
+    agent_pipeline._run_codex_kernel_implementation(paths, config, output_dir, instructions_path)
+
+    assert len(prompts) == 2
+    assert attempted_paths[0] != attempted_paths[1]
+    assert "candidate-payload-sentinel" in prompts[0]
+    assert "candidate-payload-sentinel" not in prompts[1]
+    assert "deterministic offline Kaggle SDK" in prompts[1]
+    assert "adaptive_k1_conditional_multipost_fill" in prompts[1]
+    assert "max_messages_per_candidate=4" in prompts[1]
+    assert "KeyError: 'hybrid'" in prompts[1]
+    assert "candidate payload must not enter retry prompt" not in prompts[1]
+    assert live_kernel_path.read_text(encoding="utf-8") == "print('validated repair')\n"
 
 
 def test_agent_pipeline_publishes_codex_oracle_codex_phases(monkeypatch, tmp_path: Path) -> None:

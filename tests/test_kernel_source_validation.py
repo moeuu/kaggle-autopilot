@@ -51,6 +51,51 @@ def test_kernel_source_validation_requires_outputs(tmp_path: Path) -> None:
     assert any("metrics.json" in issue for issue in issues)
 
 
+def test_writeup_kernel_accepts_required_features_artifact_without_submission_alias(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "DATA = '/kaggle/input/demo/events.csv'\n"
+        "FEATURES = '/kaggle/working/features.csv'\n"
+        "METRICS = '/kaggle/working/metrics.json'\n",
+    )
+
+    ensure_kernel_sources_valid(
+        kernel_dir,
+        deliverable_mode="writeup",
+        required_output_names=("features.csv",),
+    )
+
+
+def test_writeup_kernel_reports_missing_named_required_artifact(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "DATA = '/kaggle/input/demo/events.csv'\nMETRICS = '/kaggle/working/metrics.json'\n",
+    )
+
+    issues = validate_kernel_sources(
+        kernel_dir,
+        deliverable_mode="writeup",
+        required_output_names=("features.csv",),
+    )
+
+    assert any("required writeup notebook output" in issue and "features.csv" in issue for issue in issues)
+
+
+def test_writeup_without_file_requirement_does_not_require_fake_submission(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "kernel"
+    kernel_dir.mkdir(parents=True)
+    _write_kernel(
+        kernel_dir / "kernel.py",
+        "DATA = '/kaggle/input/demo/events.csv'\nMETRICS = '/kaggle/working/metrics.json'\n",
+    )
+
+    ensure_kernel_sources_valid(kernel_dir, deliverable_mode="writeup")
+
+
 def test_kernel_source_validation_accepts_non_csv_submission_output(tmp_path: Path) -> None:
     kernel_dir = tmp_path / "kernel"
     kernel_dir.mkdir(parents=True, exist_ok=True)

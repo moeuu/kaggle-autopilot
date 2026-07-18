@@ -129,6 +129,34 @@ def test_unpublished_self_improvement_does_not_restart_watch_process() -> None:
     assert restarted is False
 
 
+def test_repository_head_change_restarts_watch_even_without_publish_result(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(supervisor, "_repository_head", lambda _root: "new-head")
+
+    restarted = supervisor._restart_after_repository_head_change(  # noqa: SLF001
+        repository_root=tmp_path,
+        loaded_head="old-head",
+        dry_run=False,
+        execv_func=lambda executable, argv: calls.append((executable, argv)),
+    )
+
+    assert restarted is True
+    assert len(calls) == 1
+
+
+def test_repository_head_change_does_not_restart_dry_run(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(supervisor, "_repository_head", lambda _root: "new-head")
+
+    restarted = supervisor._restart_after_repository_head_change(  # noqa: SLF001
+        repository_root=tmp_path,
+        loaded_head="old-head",
+        dry_run=True,
+        execv_func=lambda *_args: (_ for _ in ()).throw(AssertionError("must not restart")),
+    )
+
+    assert restarted is False
+
+
 def test_published_self_improvement_schedules_one_preflight_retry(tmp_path: Path) -> None:
     config = _config(tmp_path)
     result = {

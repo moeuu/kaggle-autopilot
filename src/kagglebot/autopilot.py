@@ -81,6 +81,7 @@ from kagglebot.campaign import (
     upsert_candidate,
 )
 from kagglebot.competition_policy import load_competition_policy
+from kagglebot.deliverable_artifacts import resolve_deliverable_artifact_contract
 from kagglebot.exceptions import (
     KaggleNetworkError,
     KernelCapacityError,
@@ -150,7 +151,7 @@ from kagglebot.write_guard import (
     _snapshot_tree,
     build_repair_write_policy,
 )
-from kagglebot.writeup import build_writeup_bundle
+from kagglebot.writeup import attach_published_writeup_notebook, build_writeup_bundle
 from kagglebot.writeup_submission import WriteupSubmissionRequest, submit_validated_writeup
 
 if TYPE_CHECKING:
@@ -880,6 +881,11 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     writeup_mode = loop_settings.writeup_mode
     submit_enabled = loop_settings.submit_enabled
     writeup_submit_enabled = loop_settings.writeup_submit_enabled
+    deliverable_artifact_contract = resolve_deliverable_artifact_contract(
+        config.paths.base_dir,
+        deliverable_mode=deliverable_mode,
+        submit_mode=submit_mode,
+    )
     strict_competition_metric = loop_settings.strict_competition_metric
     require_submit_improvement = loop_settings.require_submit_improvement
     submit_improved_only = loop_settings.submit_improved_only
@@ -1215,6 +1221,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             evaluation = None
             kernel_metrics_payload: dict[str, object] | None = None
             kernel_metrics_artifact_path: Path | None = None
+            iteration_kernel_id: str | None = None
             evaluation_by_source: dict[str, EvaluationResult] = {}
             model_summary = {}
             accelerator_used = config.accelerator
@@ -1252,6 +1259,8 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     dry_run=config.dry_run,
                     max_attempts=_MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS,
                     format_error=_kernel_errors.format_kernel_error,
+                    deliverable_mode=deliverable_artifact_contract.deliverable_mode,
+                    required_output_names=deliverable_artifact_contract.required_output_names,
                     implementation_agent_alias=IMPLEMENTATION_AGENT.log_alias,
                     run_kernel_fix=lambda preflight_error, attempt: _run_kernel_fix(
                         config=config,
@@ -1312,6 +1321,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             hardware_profile=kernel_execution_config.hardware_profile,
                             on_remote_started=mark_kaggle_kernel_started,
                         )
+                        iteration_kernel_id = kernel_result.kernel_id
                         if kernel_result.submission_path:
                             submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
@@ -1497,6 +1507,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             strict_accelerator=config.strict_accelerator,
                             hardware_profile=config.hardware_profile,
                         )
+                        iteration_kernel_id = kernel_result.kernel_id
                         if kernel_result.submission_path:
                             submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
@@ -1587,6 +1598,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                     local_error_text=error_text,
                                     pending_error_fixes=pending_error_fixes,
                                 )
+                                iteration_kernel_id = kernel_result.kernel_id
                                 accelerator_used = config.accelerator
                                 run_config_payload = run_payload.get("config")
                                 if isinstance(run_config_payload, dict):
@@ -1806,6 +1818,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             strict_accelerator=config.strict_accelerator,
                             hardware_profile=config.hardware_profile,
                         )
+                        iteration_kernel_id = kernel_result.kernel_id
                         if kernel_result.submission_path:
                             submission_path = _autopilot_state.copy_submission_artifact_to_iteration_dir(
                                 source=kernel_result.submission_path,
@@ -2984,6 +2997,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     evaluation=evaluation,
                     metrics_payload=metrics_payload,
                     top1_info=top1_info if isinstance(top1_info, dict) else None,
+                    notebook_id=iteration_kernel_id,
                 )
                 metrics_payload["deliverable_mode"] = "writeup"
                 metrics_payload["writeup_bundle"] = writeup_bundle_meta
@@ -3264,6 +3278,64 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         )
 
     if writeup_submit_enabled and writeup_bundle_meta is not None:
+        notebook_payload = writeup_bundle_meta.get("notebook")
+        notebook_publish_required = (
+            isinstance(notebook_payload, dict)
+            and notebook_payload.get("required") is True
+            and notebook_payload.get("status") != "ready"
+        )
+        if notebook_publish_required and config.force_submit and not config.dry_run:
+            notebook_iteration = int(writeup_bundle_meta.get("iteration") or last_completed_iteration or 1)
+            _watch_state.update_watch_phase(
+                config,
+                run_id,
+                "writeup_notebook_publishing",
+                detail="Publishing and verifying the required private Kaggle notebook before writeup submission.",
+                iteration=notebook_iteration,
+            )
+            try:
+                kaggle_user = resolve_kaggle_username(config.kaggle_username)
+                published_notebook = run_kernel(
+                    slug=config.slug,
+                    run_id=run_id,
+                    iteration=notebook_iteration,
+                    base_dir=config.paths.base_dir.parent,
+                    kaggle_username=kaggle_user,
+                    kernel_name=kernel_name,
+                    accelerator=config.accelerator,
+                    enable_internet=enable_internet,
+                    score_source=score_source,
+                    metric=target_metric,
+                    direction=metric_direction,
+                    holdout_frac=holdout_frac,
+                    cv_folds=cv_folds,
+                    seed=seed,
+                    dry_run=False,
+                    timeout_minutes=min(time_budget_min or 12 * 60, 12 * 60),
+                    hardware_profile=config.hardware_profile,
+                    on_remote_started=lambda kernel_id: _watch_state.update_watch_phase(
+                        config,
+                        run_id,
+                        "writeup_notebook_running",
+                        detail=f"Required private notebook {kernel_id} is running on Kaggle.",
+                        iteration=notebook_iteration,
+                    ),
+                )
+                writeup_bundle_meta = attach_published_writeup_notebook(
+                    writeup_bundle_meta,
+                    kernel_id=published_notebook.kernel_id,
+                    output_dir=published_notebook.output_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                writeup_bundle_meta["notebook_publication"] = {
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            _json_utils.write_json_object(
+                run_dir / "writeup" / "writeup_metadata.json",
+                writeup_bundle_meta,
+            )
         writeup_submission = submit_validated_writeup(
             WriteupSubmissionRequest(
                 slug=config.slug,
