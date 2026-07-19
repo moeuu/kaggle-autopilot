@@ -277,6 +277,533 @@ print("isolated contract self-test passed")
     assert os.environ["ARC_DATA_DIR"] == str(paths.data_dir)
 
 
+def _write_structured_contract_kernel(
+    kernel_path: Path,
+    *,
+    backward_finite: bool = True,
+    contract_exception: str | None = None,
+    contract_output_arg: bool = False,
+    malformed_report: bool = False,
+    normal_mode: str = "missing_data",
+    logit_classes: int = 3,
+) -> None:
+    exception_line = f'raise RuntimeError("{contract_exception}")' if contract_exception else ""
+    contract_signature = "output_dir=None" if contract_output_arg else ""
+    output_resolution = (
+        'output_dir = Path(output_dir or os.environ["KAGGLEBOT_OUTPUT_DIR"])'
+        if contract_output_arg
+        else 'output_dir = Path(os.environ["KAGGLEBOT_OUTPUT_DIR"])'
+    )
+    normal_lines = {
+        "missing_data": [
+            'raise DataDiscoveryError("Raw labeled training assets were not found. No submission was created.")'
+        ],
+        "runtime_error": ['raise RuntimeError("unrelated normal-entrypoint failure")'],
+        "spoofed_runtime_error": [
+            'raise RuntimeError("DataDiscoveryError: Raw labeled training assets were not found")'
+        ],
+        "success": ["return"],
+        "sample_copy": [
+            'output_dir = Path(os.environ["KAGGLEBOT_OUTPUT_DIR"])',
+            'output_dir.joinpath("submission.csv").write_text("id,prediction\\n1,0\\n", encoding="utf-8")',
+        ],
+    }[normal_mode]
+    normal_body = "\n    ".join(normal_lines)
+    report_payload = '"not valid json"' if malformed_report else "json.dumps(report)"
+    kernel_path.write_text(
+        f"""\
+import json
+import os
+from pathlib import Path
+
+class DataDiscoveryError(RuntimeError):
+    pass
+
+def contract_smoke({contract_signature}):
+    {exception_line or "pass"}
+    {output_resolution}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = {{
+        "status": "passed",
+        "data_free": True,
+        "training_performed": False,
+        "score_reported": False,
+        "profiles": {{
+            "planned_pipeline": {{
+                "forward_finite": True,
+                "backward_finite": {backward_finite!r},
+                "deploy_bytes": 1024,
+                "logit_shape": [2, {logit_classes}],
+            }}
+        }},
+    }}
+    (output_dir / "contract_smoke.json").write_text({report_payload}, encoding="utf-8")
+
+def main():
+    {normal_body}
+
+if __name__ == "__main__":
+    main()
+""",
+        encoding="utf-8",
+    )
+
+
+def _structured_contract_paths(tmp_path: Path, *, data_ready: bool) -> tuple[CompetitionPaths, Path]:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.kernel_source_dir.mkdir(parents=True)
+    paths.context_dir.mkdir(parents=True, exist_ok=True)
+    paths.data_dir.mkdir(parents=True)
+    paths.plan_path.write_text(
+        json.dumps(
+            {
+                "pipelines": [{"name": "planned_pipeline"}],
+                "toggles": {"STRICT_MODEL_SIZE_MB": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = {"status": "missing_required_files"}
+    if data_ready:
+        (paths.data_dir / "train.csv").write_text("feature,target\n1,0\n", encoding="utf-8")
+        profile = {"status": "ok", "train_file": "train.csv"}
+    paths.dataset_profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    return paths, paths.kernel_source_dir / "kernel.py"
+
+
+def test_missing_data_accepts_contract_and_expected_full_entrypoint_block(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is True
+    assert result.contract_only is True
+    assert result.normal_smoke_required is True
+    assert result.normal_smoke_returncode == 1
+    assert "DataDiscoveryError" in result.normal_smoke_stderr
+    assert "Raw labeled training assets were not found" in result.normal_smoke_stderr
+    assert not result.normal_smoke_issues
+    assert not list(paths.base_dir.rglob("submission.csv"))
+    assert not list(paths.base_dir.rglob("metrics.json"))
+    assert not list(paths.base_dir.rglob("oof_*.npy"))
+    assert not list(paths.base_dir.rglob("*.pth"))
+
+
+def test_contract_only_acceptance_promotes_kernel_and_records_environmental_blocker(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    candidate_path = tmp_path / "candidate.py"
+    candidate_path.write_text("print('validated candidate')\n", encoding="utf-8")
+    smoke = agent_pipeline.KernelContractSmokeResult(
+        compile_returncode=0,
+        compile_stdout="",
+        compile_stderr="",
+        smoke_returncode=0,
+        smoke_stdout="contract passed",
+        smoke_stderr="",
+        contract_report={
+            "status": "passed",
+            "training_performed": False,
+            "score_reported": False,
+        },
+        data_ready=False,
+        data_readiness_reason="dataset_profile_missing_required_files",
+        normal_smoke_required=True,
+        normal_smoke_returncode=1,
+        normal_smoke_stderr=(
+            "DataDiscoveryError: Raw labeled training assets were not found. No submission was created."
+        ),
+    )
+
+    agent_pipeline._accept_validated_kernel(
+        paths=paths,
+        run_id="run-1",
+        candidate_path=candidate_path,
+        kernel_path=kernel_path,
+        smoke_result=smoke,
+    )
+
+    assert kernel_path.read_text(encoding="utf-8") == "print('validated candidate')\n"
+    verification = json.loads((paths.run_dir("run-1") / "implementation_verification.json").read_text(encoding="utf-8"))
+    assert verification["status"] == "passed_contract_only"
+    assert verification["blocked_reason"] == "missing_competition_data"
+    assert verification["normal_smoke_performed"] is True
+    assert verification["full_run_ok"] is False
+    assert verification["data_available"] is False
+    assert verification["training_performed"] is False
+    assert verification["score_reported"] is False
+
+
+def test_missing_data_does_not_hide_failing_contract_report(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path, backward_finite=False)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert "finite_backward=true" in "\n".join(result.contract_report_issues)
+
+
+def test_contract_report_requires_exact_profiles_and_plan_class_count(tmp_path: Path) -> None:
+    paths, _ = _structured_contract_paths(tmp_path, data_ready=False)
+    paths.plan_path.write_text(
+        json.dumps(
+            {
+                "pipelines": [
+                    {
+                        "name": "planned_pipeline",
+                        "models": ["reference encoder with a 40-class linear head"],
+                    }
+                ],
+                "toggles": {"STRICT_MODEL_SIZE_MB": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = {
+        "status": "passed",
+        "data_free": True,
+        "training_performed": False,
+        "score_reported": False,
+        "profiles": {
+            "planned_pipeline": {
+                "forward_finite": True,
+                "backward_finite": True,
+                "deploy_bytes": 1024,
+                "logit_shape": [2, 3],
+            },
+            "unexpected_pipeline": {
+                "forward_finite": True,
+                "backward_finite": True,
+                "deploy_bytes": 1024,
+                "logit_shape": [2, 40],
+            },
+        },
+    }
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=paths.plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+
+    assert "unexpected_pipeline" in "\n".join(issues)
+    assert "40 output classes" in "\n".join(issues)
+
+
+def _profiled_contract_plan(plan_path: Path) -> None:
+    plan_path.write_text(
+        json.dumps(
+            {
+                "hardware_profile": "rtx3060",
+                "runtime_budget": {"hardware_profile": "rtx3060"},
+                "pipelines": [
+                    {
+                        "name": "planned_pipeline",
+                        "models": ["reference encoder with a 40-class linear head"],
+                    }
+                ],
+                "toggles": {"STRICT_MODEL_SIZE_MB": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _canonical_contract_report(*, entry_profile: bool = False) -> dict[str, object]:
+    pipeline = {
+        "finite_forward": True,
+        "finite_backward": True,
+        "loss": 3.5,
+        "logits_shape": [2, 40],
+        "deploy_bytes": 1024,
+    }
+    if entry_profile:
+        pipeline["profile"] = "rtx3060"
+    return {
+        "status": "passed",
+        "profile": "rtx3060",
+        "data_free": True,
+        "training_performed": False,
+        "score_reported": False,
+        "pipelines": {"planned_pipeline": pipeline},
+    }
+
+
+@pytest.mark.parametrize("entry_profile", [False, True])
+def test_contract_report_accepts_global_or_repeated_hardware_profile(
+    tmp_path: Path,
+    entry_profile: bool,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        _canonical_contract_report(entry_profile=entry_profile),
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+
+    assert issues == ()
+
+
+def test_contract_report_rejects_missing_conflicting_nonfinite_and_oversized_pipeline(
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    reports = []
+
+    missing = _canonical_contract_report()
+    missing["pipelines"] = {}
+    reports.append((missing, "missing=['planned_pipeline']"))
+
+    conflicting = _canonical_contract_report(entry_profile=True)
+    conflicting["pipelines"]["planned_pipeline"]["profile"] = "rtx5090"
+    reports.append((conflicting, "conflicts with top-level profile"))
+
+    nonfinite = _canonical_contract_report()
+    nonfinite["pipelines"]["planned_pipeline"]["finite_backward"] = False
+    reports.append((nonfinite, "finite_backward=true"))
+
+    oversized = _canonical_contract_report()
+    oversized["pipelines"]["planned_pipeline"]["deploy_bytes"] = 100 * 1024 * 1024
+    reports.append((oversized, "exceeds frozen limit"))
+
+    not_data_free = _canonical_contract_report()
+    not_data_free.pop("data_free")
+    reports.append((not_data_free, "data_free=true"))
+
+    for report, expected_issue in reports:
+        issues = agent_pipeline._validate_contract_smoke_report(
+            report,
+            plan_path=plan_path,
+            pipeline_names=("planned_pipeline",),
+        )
+        assert expected_issue in "\n".join(issues)
+
+
+def test_contract_report_normalizes_legacy_alias_and_rejects_disagreement(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report()
+    report["profiles"] = {
+        "planned_pipeline": {
+            "profile": "rtx3060",
+            "forward_finite": True,
+            "backward_finite": True,
+            "loss": 3.5,
+            "logit_shape": [2, 40],
+            "deploy_bytes": 1024,
+        }
+    }
+
+    matching_issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+    report["profiles"]["planned_pipeline"]["deploy_bytes"] = 2048
+    conflicting_issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+
+    assert matching_issues == ()
+    assert "pipelines and profiles disagree" in "\n".join(conflicting_issues)
+
+
+@pytest.mark.parametrize(
+    ("forward_key", "backward_key"),
+    [
+        ("finite_forward", "finite_backward"),
+        ("forward_finite", "backward_finite"),
+    ],
+)
+def test_contract_report_accepts_canonical_and_finiteness_aliases(
+    tmp_path: Path,
+    forward_key: str,
+    backward_key: str,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report()
+    pipeline = report["pipelines"]["planned_pipeline"]
+    pipeline[forward_key] = pipeline.pop("finite_forward")
+    pipeline[backward_key] = pipeline.pop("finite_backward")
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+
+    assert issues == ()
+
+
+def test_kernel_candidate_instructions_specify_exact_contract_profile_schema(tmp_path: Path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+
+    instructions = agent_pipeline._kernel_candidate_contract_instructions(paths)
+
+    assert "`data_free=true`" in instructions
+    assert '"finite_forward": true' in instructions
+    assert '"finite_backward": true' in instructions
+    assert '"logits_shape": [2, <class count>]' in instructions
+    assert '"deploy_bytes": <bytes>' in instructions
+
+
+@pytest.mark.parametrize(
+    ("mutations", "expected_issue"),
+    [
+        ({"finite_forward": None}, "finite_forward=true"),
+        ({"finite_forward": False}, "finite_forward=true"),
+        ({"finite_forward": 1}, "finite_forward=true"),
+        ({"finite_backward": None}, "finite_backward=true"),
+        ({"finite_backward": False}, "finite_backward=true"),
+        ({"finite_backward": 1}, "finite_backward=true"),
+        (
+            {"finite_forward": True, "forward_finite": False},
+            "aliases for finite_forward disagree",
+        ),
+        (
+            {"finite_forward": True, "forward_finite": 1},
+            "aliases for finite_forward disagree",
+        ),
+        (
+            {"finite_backward": True, "backward_finite": False},
+            "aliases for finite_backward disagree",
+        ),
+        (
+            {"finite_backward": True, "backward_finite": 1},
+            "aliases for finite_backward disagree",
+        ),
+    ],
+)
+def test_contract_report_rejects_missing_false_nonboolean_and_conflicting_finiteness(
+    tmp_path: Path,
+    mutations: dict[str, object],
+    expected_issue: str,
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report()
+    pipeline = report["pipelines"]["planned_pipeline"]
+    for key, value in mutations.items():
+        if value is None:
+            pipeline.pop(key)
+        else:
+            pipeline[key] = value
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+
+    assert expected_issue in "\n".join(issues)
+
+
+def test_contract_report_revalidation_does_not_reuse_initial_diagnostics(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    initial_report = _canonical_contract_report()
+    initial_report["pipelines"] = {}
+    repaired_report = _canonical_contract_report(entry_profile=True)
+
+    initial_issues = agent_pipeline._validate_contract_smoke_report(
+        initial_report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+    repaired_issues = agent_pipeline._validate_contract_smoke_report(
+        repaired_report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+    )
+
+    assert initial_issues
+    assert repaired_issues == ()
+
+
+def test_missing_data_does_not_hide_unrelated_contract_exception(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path, contract_exception="unrelated runtime failure")
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert result.smoke_returncode == 1
+    assert "unrelated runtime failure" in result.smoke_stderr
+
+
+def test_contract_smoke_supports_single_output_directory_argument(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path, contract_output_arg=True)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is True
+    assert result.contract_only is True
+
+
+def test_missing_or_malformed_contract_is_rejected(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    kernel_path.write_text("def main():\n    return\n", encoding="utf-8")
+
+    missing = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert missing.passed is False
+    assert "must export callable" in "\n".join(missing.contract_report_issues)
+
+    _write_structured_contract_kernel(kernel_path, malformed_report=True)
+    malformed = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert malformed.passed is False
+    assert "readable contract_smoke.json" in "\n".join(malformed.contract_report_issues)
+
+
+@pytest.mark.parametrize("normal_mode", ["runtime_error", "spoofed_runtime_error"])
+def test_missing_profile_does_not_hide_unrelated_normal_runtime_error(
+    tmp_path: Path,
+    normal_mode: str,
+) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path, normal_mode=normal_mode)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert "RuntimeError" in result.normal_smoke_stderr
+    assert "does not identify DataDiscoveryError" in "\n".join(result.normal_smoke_issues)
+
+
+@pytest.mark.parametrize("normal_mode", ["success", "sample_copy"])
+def test_missing_profile_rejects_silent_non_training_success(tmp_path: Path, normal_mode: str) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path, normal_mode=normal_mode)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert "exited zero" in "\n".join(result.normal_smoke_issues)
+    if normal_mode == "sample_copy":
+        assert "submission.csv" in "\n".join(result.normal_smoke_issues)
+
+
+def test_ready_data_keeps_normal_data_discovery_failure_fatal(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=True)
+    _write_structured_contract_kernel(kernel_path)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert result.normal_smoke_required is True
+    assert result.normal_smoke_returncode == 1
+    assert "DataDiscoveryError" in result.normal_smoke_stderr
+
+
 @pytest.mark.parametrize(
     ("repair_returncode", "expect_error"),
     [(0, False), (-9, True)],

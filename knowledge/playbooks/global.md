@@ -11,8 +11,8 @@ Use this playbook before planning or improving a competition run.
 - online_far_from_top1: Force broader model-family search, ensembling, public-LB validation, and data-source review.
 - no_iteration_metrics: Harden kernel runtime so every run emits metrics.json and diagnostics.md.
 - repair_pipeline_failure: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
-- orchestration_preflight_failure: Promote pre-run discovery/profile failures into typed autofix incidents with regression tests.
 - orchestration_runtime_failure: Classify supervisor/runtime errors centrally and add reusable recovery instead of per-competition patches.
+- orchestration_preflight_failure: Promote pre-run discovery/profile failures into typed autofix incidents with regression tests.
 - offline_online_mismatch: Investigate leakage, split mismatch, sample weighting, and public-LB proxy quality.
 
 ## Guardrails

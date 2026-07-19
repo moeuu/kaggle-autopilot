@@ -90,6 +90,7 @@ from kagglebot.exceptions import (
     KernelCapacityError,
     KernelFailedError,
     KernelStillRunningError,
+    MissingCompetitionDataError,
     OracleStrategyError,
     RulesNotAcceptedError,
     SubmitAbortedError,
@@ -1220,6 +1221,9 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 resume_after_failure = True
             except KernelCapacityError:
                 raise
+            except MissingCompetitionDataError as exc:
+                print(f"[yellow]blocked on data[/yellow]: {exc}")
+                return
             except OracleStrategyError:
                 raise
             except KeyboardInterrupt:
@@ -1272,6 +1276,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     _watch_state.update_watch_phase(config, run_id, "knowledge_refreshing")
     knowledge_phase.refresh()
     plan = planning_phase.execute(plan)
+    _planning_runner.ensure_local_training_data_ready(config, run_id)
 
     _watch_state.update_watch_phase(config, run_id, "resolving_plan")
     resolved = _plan_resolution.resolve_plan_for_autopilot_config(

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
+import pytest
+
 from kagglebot import planning_runner
+from kagglebot.exceptions import MissingCompetitionDataError
+from kagglebot.paths import CompetitionPaths
 
 
 def _planning_config(tmp_path):
@@ -86,3 +91,61 @@ def test_run_plan_and_initial_auto_reports_oracle_when_available(monkeypatch, tm
     assert pipeline_engines == ["oracle"]
     assert phases[0][0] == "gpt_planning"
     assert "oracle(latest-pro)" in phases[0][1]
+
+
+def test_required_local_training_is_resumably_blocked_when_labeled_data_is_missing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True)
+    paths.data_dir.mkdir(parents=True)
+    paths.run_dir("run-1").mkdir(parents=True)
+    paths.plan_path.write_text(
+        json.dumps({"runtime_budget": {"local_training_required": True}}),
+        encoding="utf-8",
+    )
+    paths.dataset_profile_path.write_text(
+        json.dumps({"status": "missing_required_files"}),
+        encoding="utf-8",
+    )
+    (paths.run_dir("run-1") / "implementation_verification.json").write_text(
+        json.dumps(
+            {
+                "status": "passed_contract_only",
+                "blocked_reason": "missing_competition_data",
+                "training_performed": False,
+                "score_reported": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(slug="demo", paths=paths)
+    phases: list[str] = []
+    monkeypatch.setattr(
+        planning_runner,
+        "update_watch_phase",
+        lambda _config, _run_id, phase, **_kwargs: phases.append(phase),
+    )
+
+    with pytest.raises(MissingCompetitionDataError, match="can be resumed"):
+        planning_runner.ensure_local_training_data_ready(config, "run-1")
+
+    run_payload = json.loads((paths.run_dir("run-1") / "run.json").read_text(encoding="utf-8"))
+    assert run_payload["status"] == "blocked_on_data"
+    assert run_payload["blocked_reason"] == "missing_competition_data"
+    assert run_payload["implementation_status"] == "passed_contract_only"
+    assert run_payload["training_performed"] is False
+    assert run_payload["score_reported"] is False
+    assert run_payload["submission_created"] is False
+    assert phases == ["blocked_on_data"]
+    assert not list(paths.run_dir("run-1").rglob("submission.csv"))
+    assert not list(paths.run_dir("run-1").rglob("oof_*.npy"))
+    assert not list(paths.run_dir("run-1").rglob("*.pth"))
+
+    (paths.data_dir / "train.csv").write_text("feature,target\n1,0\n", encoding="utf-8")
+    paths.dataset_profile_path.write_text(
+        json.dumps({"status": "ok", "train_file": "train.csv"}),
+        encoding="utf-8",
+    )
+    planning_runner.ensure_local_training_data_ready(config, "run-1")

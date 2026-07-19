@@ -4,6 +4,7 @@ import ast
 import importlib.util
 import inspect
 import json
+import math
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ from kagglebot.agents.identity import (
 from kagglebot.agents.strategy_runner import resolve_strategy_engine, run_strategy
 from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.compression_suffixes import write_compressed_bytes
+from kagglebot.data_readiness import assess_local_training_data
 from kagglebot.exceptions import KaggleBotError, OracleStrategyError
 from kagglebot.hardware import render_hardware_constraints, resolve_hardware_profile
 from kagglebot.json_utils import load_json_array, load_json_object, parse_json_object_text, write_json_object
@@ -114,8 +116,18 @@ class KernelContractSmokeResult:
     smoke_stdout: str
     smoke_stderr: str
     pipeline_issues: tuple[str, ...] = ()
+    contract_report: dict[str, object] | None = None
+    contract_report_issues: tuple[str, ...] = ()
+    data_ready: bool | None = None
+    data_readiness_reason: str | None = None
+    normal_smoke_required: bool = False
+    normal_smoke_returncode: int | None = None
+    normal_smoke_stdout: str = ""
+    normal_smoke_stderr: str = ""
+    normal_smoke_issues: tuple[str, ...] = ()
     compile_timed_out: bool = False
     smoke_timed_out: bool = False
+    normal_smoke_timed_out: bool = False
 
     @property
     def passed(self) -> bool:
@@ -123,9 +135,34 @@ class KernelContractSmokeResult:
             self.compile_returncode == 0
             and self.smoke_returncode == 0
             and not self.pipeline_issues
+            and not self.contract_report_issues
             and not self.compile_timed_out
             and not self.smoke_timed_out
+            and (
+                not self.normal_smoke_required
+                or (
+                    self.normal_smoke_returncode == 0
+                    and not self.normal_smoke_timed_out
+                    and not self.normal_smoke_issues
+                )
+                or self.expected_missing_data_block
+            )
         )
+
+    @property
+    def expected_missing_data_block(self) -> bool:
+        return (
+            self.normal_smoke_required
+            and self.data_ready is False
+            and self.data_readiness_reason == "dataset_profile_missing_required_files"
+            and self.normal_smoke_returncode not in (None, 0)
+            and not self.normal_smoke_timed_out
+            and not self.normal_smoke_issues
+        )
+
+    @property
+    def contract_only(self) -> bool:
+        return self.passed and self.expected_missing_data_block
 
 
 @dataclass(frozen=True)
@@ -633,7 +670,13 @@ def _run_codex_kernel_implementation(
             and initial_executable
             and initial_smoke.passed
         ):
-            _promote_validated_kernel(initial_kernel_path, kernel_path)
+            _accept_validated_kernel(
+                paths=paths,
+                run_id=config.run_id,
+                candidate_path=initial_kernel_path,
+                kernel_path=kernel_path,
+                smoke_result=initial_smoke,
+            )
             _print_block(
                 f"{implementation_agent.log_alias} kernel implementation result",
                 _read_text(result.last_message_path),
@@ -674,7 +717,13 @@ def _run_codex_kernel_implementation(
         if deterministic_repairs:
             repair_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=repair_kernel_path)
             if _kernel_contains_executable_code(repair_kernel_path) and repair_smoke.passed:
-                _promote_validated_kernel(repair_kernel_path, kernel_path)
+                _accept_validated_kernel(
+                    paths=paths,
+                    run_id=config.run_id,
+                    candidate_path=repair_kernel_path,
+                    kernel_path=kernel_path,
+                    smoke_result=repair_smoke,
+                )
                 _print_block(
                     f"{implementation_agent.log_alias} kernel deterministic repair result",
                     f"Applied and contract-smoked: {', '.join(deterministic_repairs)}.",
@@ -726,7 +775,13 @@ def _run_codex_kernel_implementation(
                 f"Repair agent result:\n{_format_agent_failure(repair_result)}{repaired_code_detail}\n\n"
                 f"Repaired kernel contract smoke:\n{_format_kernel_contract_smoke(repaired_smoke)}"
             )
-        _promote_validated_kernel(repair_kernel_path, kernel_path)
+        _accept_validated_kernel(
+            paths=paths,
+            run_id=config.run_id,
+            candidate_path=repair_kernel_path,
+            kernel_path=kernel_path,
+            smoke_result=repaired_smoke,
+        )
         _print_block(
             f"{implementation_agent.log_alias} kernel repair result",
             _read_text(repair_result.last_message_path),
@@ -803,6 +858,37 @@ def _promote_validated_kernel(candidate_path: Path, kernel_path: Path) -> None:
         os.replace(temporary_path, kernel_path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _accept_validated_kernel(
+    *,
+    paths: CompetitionPaths,
+    run_id: str,
+    candidate_path: Path,
+    kernel_path: Path,
+    smoke_result: KernelContractSmokeResult,
+) -> None:
+    _promote_validated_kernel(candidate_path, kernel_path)
+    status = "passed_contract_only" if smoke_result.contract_only else "passed"
+    payload: dict[str, object] = {
+        "status": status,
+        "run_id": run_id,
+        "kernel_path": str(kernel_path),
+        "compilation_passed": smoke_result.compile_returncode == 0,
+        "contract_smoke_passed": smoke_result.smoke_returncode == 0,
+        "normal_smoke_performed": smoke_result.normal_smoke_required,
+        "full_run_ok": smoke_result.normal_smoke_returncode == 0,
+        "data_available": smoke_result.data_ready,
+        "training_performed": False,
+        "score_reported": False,
+    }
+    if smoke_result.contract_report is not None:
+        payload["contract_report"] = smoke_result.contract_report
+    if smoke_result.contract_only:
+        payload["blocked_reason"] = "missing_competition_data"
+        payload["data_readiness_reason"] = smoke_result.data_readiness_reason
+        payload["full_run_ok"] = False
+    write_json_object(paths.run_dir(run_id) / "implementation_verification.json", payload, sort_keys=True)
 
 
 def _replace_generated_function(source: str, name: str, replacement: str) -> tuple[str, bool]:
@@ -1418,8 +1504,18 @@ def _kernel_candidate_contract_instructions(paths: CompetitionPaths) -> str:
         "pipeline lookup misses.\n"
         "- Honor the frozen plan's training toggles. In particular, do not force `TRAINING_ENABLED = True` when "
         "the approved execution route is non-training.\n"
-        "- Compile the generated kernel, contract-smoke every selectable profile, and run the bounded default-profile "
-        "smoke with no `KAGGLEBOT_STACK_K` or equivalent correctness override."
+        "- Export `contract_smoke()` as a data-free bounded check accepting either zero arguments or one output-"
+        "directory argument. It must write `contract_smoke.json` under `KAGGLEBOT_OUTPUT_DIR`, report "
+        "`status=passed` and `data_free=true`, include exactly every plan-listed pipeline with finite "
+        "forward/backward evidence, the expected logit shape, and deploy bytes, and report "
+        "`training_performed=false` plus "
+        "`score_reported=false`. Use this exact per-pipeline field schema (replacing placeholders with frozen-plan "
+        'values): `"pipelines": {"<pipeline name>": {"profile": "<hardware profile>", '
+        '"finite_forward": true, "finite_backward": true, "logits_shape": [2, <class count>], '
+        '"deploy_bytes": <bytes>}}`. Do not rename or omit those fields.\n'
+        "- The framework compiles the generated kernel, imports it in an isolated subprocess to call "
+        "`contract_smoke()`, and then runs `python kernel.py` as a separate data-discovery probe. Do not alter model "
+        "or training settings to compensate for absent competition data."
         f"{current_example}"
     )
 
@@ -1599,6 +1695,39 @@ def _embedded_attack_profile_dispatch_names(kernel_tree: ast.AST) -> set[str]:
     return names
 
 
+_CONTRACT_SMOKE_CALLER = """\
+import asyncio
+import importlib.util
+import inspect
+import os
+import sys
+from pathlib import Path
+
+kernel_path = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("kagglebot_generated_kernel_contract", kernel_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"could not import generated kernel: {kernel_path}")
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+contract = getattr(module, "contract_smoke", None)
+if not callable(contract):
+    raise AttributeError("generated kernel does not export callable contract_smoke")
+parameters = list(inspect.signature(contract).parameters.values())
+if not parameters:
+    result = contract()
+elif len(parameters) == 1 and parameters[0].kind in {
+    inspect.Parameter.POSITIONAL_ONLY,
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+}:
+    result = contract(Path(os.environ["KAGGLEBOT_OUTPUT_DIR"]))
+else:
+    raise TypeError("contract_smoke must accept zero arguments or one output-directory argument")
+if inspect.isawaitable(result):
+    asyncio.run(result)
+"""
+
+
 def _run_kernel_contract_smoke(
     *,
     paths: CompetitionPaths,
@@ -1606,6 +1735,7 @@ def _run_kernel_contract_smoke(
     timeout_sec: float = _KERNEL_CONTRACT_SMOKE_TIMEOUT_SEC,
 ) -> KernelContractSmokeResult:
     pipeline_issues = _diagnose_missing_pipeline_lookups(kernel_path, paths.plan_path)
+    data_readiness = assess_local_training_data(paths)
     if not kernel_path.is_file():
         return KernelContractSmokeResult(
             compile_returncode=1,
@@ -1615,6 +1745,8 @@ def _run_kernel_contract_smoke(
             smoke_stdout="",
             smoke_stderr="compile failed; runtime smoke was not attempted",
             pipeline_issues=pipeline_issues,
+            data_ready=data_readiness.ready,
+            data_readiness_reason=data_readiness.reason,
         )
     with tempfile.TemporaryDirectory(prefix="kagglebot_kernel_contract_") as tmp_name:
         staging_root = Path(tmp_name)
@@ -1663,14 +1795,74 @@ def _run_kernel_contract_smoke(
                 smoke_stdout="",
                 smoke_stderr="compile failed; runtime smoke was not attempted",
                 pipeline_issues=pipeline_issues,
+                data_ready=data_readiness.ready,
+                data_readiness_reason=data_readiness.reason,
                 compile_timed_out=compile_result[3],
             )
+
+        plan_pipeline_names = _plan_pipeline_names(paths.plan_path)
+        has_contract_smoke = _kernel_exports_contract_smoke(staged_kernel_path)
+        if plan_pipeline_names and not has_contract_smoke:
+            return KernelContractSmokeResult(
+                compile_returncode=compile_result[0],
+                compile_stdout=compile_result[1],
+                compile_stderr=compile_result[2],
+                smoke_returncode=None,
+                smoke_stdout="",
+                smoke_stderr="explicit contract smoke was not attempted",
+                pipeline_issues=pipeline_issues,
+                contract_report_issues=(
+                    "generated kernel must export callable `contract_smoke()` without loading competition "
+                    "training data",
+                ),
+                data_ready=data_readiness.ready,
+                data_readiness_reason=data_readiness.reason,
+                compile_timed_out=compile_result[3],
+            )
+        smoke_args = [sys.executable, str(staged_kernel_path)]
+        if has_contract_smoke:
+            smoke_args = [sys.executable, "-c", _CONTRACT_SMOKE_CALLER, str(staged_kernel_path)]
         smoke_result = _run_bounded_smoke_command(
-            [sys.executable, str(staged_kernel_path)],
+            smoke_args,
             cwd=staged_kernel_dir,
             env=env,
             timeout_sec=timeout_sec,
         )
+        contract_report = _load_contract_smoke_report(
+            staged_output_dir=staged_output_dir,
+            staged_kernel_dir=staged_kernel_dir,
+        )
+        contract_report_issues = list(
+            _validate_contract_smoke_report(
+                contract_report,
+                plan_path=paths.plan_path,
+                pipeline_names=plan_pipeline_names,
+            )
+        )
+        contract_report_issues.extend(_contract_only_output_issues(staging_root))
+        contract_passed = (
+            smoke_result[0] == 0 and not smoke_result[3] and not pipeline_issues and not contract_report_issues
+        )
+
+        normal_smoke_result: tuple[int, str, str, bool] | None = None
+        normal_smoke_required = contract_passed and bool(plan_pipeline_names)
+        if normal_smoke_required:
+            if data_readiness.ready:
+                _stage_read_only_training_data(paths.data_dir, staged_data_dir)
+            env["KAGGLEBOT_DATA_DIR"] = str(staged_data_dir)
+            normal_smoke_result = _run_bounded_smoke_command(
+                [sys.executable, str(staged_kernel_path)],
+                cwd=staged_kernel_dir,
+                env=env,
+                timeout_sec=timeout_sec,
+            )
+        normal_smoke_issues: tuple[str, ...] = ()
+        if normal_smoke_result is not None and data_readiness.reason == "dataset_profile_missing_required_files":
+            normal_smoke_issues = _missing_data_probe_issues(
+                returncode=normal_smoke_result[0],
+                stderr=normal_smoke_result[2],
+                staging_root=staging_root,
+            )
         return KernelContractSmokeResult(
             compile_returncode=compile_result[0],
             compile_stdout=compile_result[1],
@@ -1679,9 +1871,373 @@ def _run_kernel_contract_smoke(
             smoke_stdout=smoke_result[1],
             smoke_stderr=smoke_result[2],
             pipeline_issues=pipeline_issues,
+            contract_report=contract_report,
+            contract_report_issues=tuple(contract_report_issues),
+            data_ready=data_readiness.ready,
+            data_readiness_reason=data_readiness.reason,
+            normal_smoke_required=normal_smoke_required,
+            normal_smoke_returncode=normal_smoke_result[0] if normal_smoke_result is not None else None,
+            normal_smoke_stdout=normal_smoke_result[1] if normal_smoke_result is not None else "",
+            normal_smoke_stderr=normal_smoke_result[2] if normal_smoke_result is not None else "",
+            normal_smoke_issues=normal_smoke_issues,
             compile_timed_out=compile_result[3],
             smoke_timed_out=smoke_result[3],
+            normal_smoke_timed_out=normal_smoke_result[3] if normal_smoke_result is not None else False,
         )
+
+
+def _plan_pipeline_names(plan_path: Path) -> tuple[str, ...]:
+    payload = load_json_object(plan_path) or {}
+    raw_pipelines = payload.get("pipelines")
+    pipelines = raw_pipelines if isinstance(raw_pipelines, list) else []
+    return tuple(
+        str(item["name"]).strip()
+        for item in pipelines
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and str(item["name"]).strip()
+    )
+
+
+def _kernel_exports_contract_smoke(kernel_path: Path) -> bool:
+    try:
+        tree = ast.parse(kernel_path.read_text(encoding="utf-8"), filename=str(kernel_path))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "contract_smoke"
+        for node in ast.walk(tree)
+    )
+
+
+def _load_contract_smoke_report(
+    *,
+    staged_output_dir: Path,
+    staged_kernel_dir: Path,
+) -> dict[str, object] | None:
+    candidates = (
+        staged_output_dir / "contract_smoke.json",
+        staged_kernel_dir / "output" / "contract_smoke.json",
+        staged_kernel_dir / "outputs" / "contract_smoke.json",
+    )
+    for candidate in candidates:
+        report = load_json_object(candidate)
+        if report is not None:
+            return report
+    return None
+
+
+def _validate_contract_smoke_report(
+    report: dict[str, object] | None,
+    *,
+    plan_path: Path,
+    pipeline_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    if report is None:
+        if pipeline_names:
+            return ("contract smoke did not write a readable contract_smoke.json report",)
+        return ()
+
+    issues: list[str] = []
+    if report.get("status") != "passed":
+        issues.append("contract_smoke.json status must be 'passed'")
+    if report.get("training_performed") is not False:
+        issues.append("contract_smoke.json must report training_performed=false")
+    if report.get("score_reported") is not False:
+        issues.append("contract_smoke.json must report score_reported=false")
+
+    collection_name, pipeline_reports, collection_issues = _contract_pipeline_reports(report)
+    issues.extend(collection_issues)
+    # Legacy `profiles` reports predate the explicit data-free marker.
+    if report.get("data_free") is not True and (collection_name == "pipelines" or "data_free" in report):
+        issues.append("contract_smoke.json must report data_free=true")
+    expected_pipeline_names = set(pipeline_names)
+    actual_pipeline_names = {name for name in pipeline_reports if isinstance(name, str)}
+    if actual_pipeline_names != expected_pipeline_names:
+        missing = sorted(expected_pipeline_names - actual_pipeline_names)
+        unexpected = sorted(actual_pipeline_names - expected_pipeline_names)
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={missing}")
+        if unexpected:
+            details.append(f"unexpected={unexpected}")
+        issues.append("contract_smoke.json pipeline names must exactly match frozen plan: " + ", ".join(details))
+    model_size_limit = _plan_model_size_limit_bytes(plan_path)
+    expected_classes = _plan_expected_logit_classes(plan_path)
+    expected_profile = _plan_hardware_profile(plan_path)
+    report_profile = report.get("profile")
+    if "profile" in report and (not isinstance(report_profile, str) or not report_profile.strip()):
+        issues.append("contract_smoke.json profile must be a non-empty string when present")
+    for pipeline_name in pipeline_names:
+        raw_pipeline = pipeline_reports.get(pipeline_name)
+        pointer = f"{collection_name}.{pipeline_name}"
+        if not isinstance(raw_pipeline, dict):
+            if pipeline_name in pipeline_reports:
+                issues.append(f"{pointer} must be an object")
+            continue
+        entry_profile = raw_pipeline.get("profile")
+        if "profile" in raw_pipeline and (not isinstance(entry_profile, str) or not entry_profile.strip()):
+            issues.append(f"{pointer}.profile must be a non-empty string when present")
+        if isinstance(entry_profile, str) and isinstance(report_profile, str) and entry_profile != report_profile:
+            issues.append(f"{pointer}.profile={entry_profile!r} conflicts with top-level profile={report_profile!r}")
+        effective_profile = (
+            entry_profile if isinstance(entry_profile, str) and entry_profile.strip() else report_profile
+        )
+        # Legacy schemas implicitly ran the frozen plan's selected hardware profile.
+        if effective_profile is None and collection_name != "pipelines":
+            effective_profile = expected_profile
+        if expected_profile is not None and effective_profile != expected_profile:
+            if effective_profile is None:
+                issues.append(
+                    f"{pointer}: effective profile missing; checked entry.profile and top-level profile "
+                    f"(expected {expected_profile!r})"
+                )
+            else:
+                issues.append(
+                    f"{pointer}: effective profile={effective_profile!r}; expected frozen-plan profile "
+                    f"{expected_profile!r}"
+                )
+
+        forward_finite = _contract_entry_value(
+            raw_pipeline,
+            pointer=pointer,
+            canonical_name="finite_forward",
+            aliases=("finite_forward", "forward_finite", "logits_finite"),
+            issues=issues,
+        )
+        backward_finite = _contract_entry_value(
+            raw_pipeline,
+            pointer=pointer,
+            canonical_name="finite_backward",
+            aliases=("finite_backward", "backward_finite"),
+            issues=issues,
+        )
+        logit_shape = _contract_entry_value(
+            raw_pipeline,
+            pointer=pointer,
+            canonical_name="logits_shape",
+            aliases=("logits_shape", "logit_shape"),
+            issues=issues,
+        )
+        if not _valid_logit_shape(logit_shape, expected_classes=expected_classes):
+            expected_detail = f" with {expected_classes} output classes" if expected_classes is not None else ""
+            issues.append(f"{pointer} has invalid logits_shape{expected_detail}")
+        if forward_finite is not True:
+            issues.append(f"{pointer} must report finite_forward=true")
+        if backward_finite is not True:
+            issues.append(f"{pointer} must report finite_backward=true")
+        loss = raw_pipeline.get("loss")
+        if "loss" in raw_pipeline and (
+            isinstance(loss, bool) or not isinstance(loss, (int, float)) or not math.isfinite(float(loss))
+        ):
+            issues.append(f"{pointer}.loss must be finite when present")
+        deploy_bytes = raw_pipeline.get("deploy_bytes")
+        if (
+            isinstance(deploy_bytes, bool)
+            or not isinstance(deploy_bytes, (int, float))
+            or not math.isfinite(float(deploy_bytes))
+            or float(deploy_bytes) < 0
+        ):
+            issues.append(f"{pointer} has invalid deploy_bytes")
+        elif model_size_limit is not None and float(deploy_bytes) >= model_size_limit:
+            issues.append(f"{pointer} deploy_bytes={int(deploy_bytes)} exceeds frozen limit (<{int(model_size_limit)})")
+    return tuple(issues)
+
+
+_CONTRACT_PIPELINE_COLLECTION_KEYS = ("pipelines", "profiles", "pipeline_profiles")
+_CONTRACT_ENTRY_FIELD_ALIASES = {
+    "finite_forward": ("finite_forward", "forward_finite", "logits_finite"),
+    "finite_backward": ("finite_backward", "backward_finite"),
+    "logits_shape": ("logits_shape", "logit_shape"),
+    "deploy_bytes": ("deploy_bytes",),
+    "loss": ("loss",),
+    "profile": ("profile",),
+}
+
+
+def _contract_pipeline_reports(
+    report: dict[str, object],
+) -> tuple[str, dict[object, object], tuple[str, ...]]:
+    collections: list[tuple[str, dict[object, object]]] = []
+    issues: list[str] = []
+    for key in _CONTRACT_PIPELINE_COLLECTION_KEYS:
+        if key not in report:
+            continue
+        raw_collection = report[key]
+        if not isinstance(raw_collection, dict):
+            issues.append(f"contract_smoke.json {key} must be an object")
+            continue
+        collections.append((key, raw_collection))
+    if not collections:
+        return "pipelines", {}, tuple(issues)
+
+    collection_name, pipeline_reports = collections[0]
+    normalized = _normalize_contract_pipeline_reports(
+        pipeline_reports,
+        fallback_profile=report.get("profile"),
+    )
+    for alias_name, alias_reports in collections[1:]:
+        if (
+            _normalize_contract_pipeline_reports(
+                alias_reports,
+                fallback_profile=report.get("profile"),
+            )
+            != normalized
+        ):
+            issues.append(f"contract_smoke.json {collection_name} and {alias_name} disagree after schema normalization")
+    return collection_name, pipeline_reports, tuple(issues)
+
+
+def _normalize_contract_pipeline_reports(
+    reports: dict[object, object],
+    *,
+    fallback_profile: object,
+) -> dict[object, object]:
+    normalized: dict[object, object] = {}
+    for name, raw_entry in reports.items():
+        if not isinstance(raw_entry, dict):
+            normalized[name] = raw_entry
+            continue
+        entry: dict[str, object] = {}
+        for canonical_name, aliases in _CONTRACT_ENTRY_FIELD_ALIASES.items():
+            for alias in aliases:
+                if alias in raw_entry:
+                    entry[canonical_name] = raw_entry[alias]
+                    break
+        if "profile" not in entry and isinstance(fallback_profile, str) and fallback_profile.strip():
+            entry["profile"] = fallback_profile
+        normalized[name] = entry
+    return normalized
+
+
+def _contract_entry_value(
+    entry: dict[object, object],
+    *,
+    pointer: str,
+    canonical_name: str,
+    aliases: tuple[str, ...],
+    issues: list[str],
+) -> object:
+    present = [(alias, entry[alias]) for alias in aliases if alias in entry]
+    if not present:
+        return None
+    _, first_value = present[0]
+    if any(type(value) is not type(first_value) or value != first_value for _, value in present[1:]):
+        observed = ", ".join(f"{name}={value!r}" for name, value in present)
+        issues.append(f"{pointer}: aliases for {canonical_name} disagree ({observed})")
+    return first_value
+
+
+def _valid_logit_shape(value: object, *, expected_classes: int | None) -> bool:
+    valid = (
+        isinstance(value, list)
+        and len(value) >= 2
+        and all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value)
+    )
+    return bool(valid and (expected_classes is None or value[-1] == expected_classes))
+
+
+def _plan_expected_logit_classes(plan_path: Path) -> int | None:
+    payload = load_json_object(plan_path) or {}
+    class_counts: set[int] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, str):
+            class_counts.update(
+                int(match.group(1))
+                for match in re.finditer(r"(?<!\d)(\d+)[ -]class(?:es)?\b", value, flags=re.IGNORECASE)
+            )
+
+    visit(payload.get("pipelines"))
+    if len(class_counts) == 1:
+        return next(iter(class_counts))
+    return None
+
+
+def _plan_hardware_profile(plan_path: Path) -> str | None:
+    payload = load_json_object(plan_path) or {}
+    raw_runtime_budget = payload.get("runtime_budget")
+    runtime_budget = raw_runtime_budget if isinstance(raw_runtime_budget, dict) else {}
+    for value in (payload.get("hardware_profile"), runtime_budget.get("hardware_profile")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _plan_model_size_limit_bytes(plan_path: Path) -> float | None:
+    payload = load_json_object(plan_path) or {}
+    raw_toggles = payload.get("toggles")
+    toggles = raw_toggles if isinstance(raw_toggles, dict) else {}
+    raw_limit = toggles.get("STRICT_MODEL_SIZE_MB")
+    if isinstance(raw_limit, bool) or not isinstance(raw_limit, (int, float)) or raw_limit <= 0:
+        return None
+    return float(raw_limit) * 1024 * 1024
+
+
+def _contract_only_output_issues(staging_root: Path) -> tuple[str, ...]:
+    forbidden: list[str] = []
+    for path in staging_root.rglob("*"):
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        if (
+            name.startswith("submission")
+            or name == "metrics.json"
+            or name.startswith("oof_")
+            or (name.startswith("test_") and name.endswith(".npy"))
+            or "checkpoints" in {part.lower() for part in path.parts}
+        ):
+            forbidden.append(str(path.relative_to(staging_root)))
+    if not forbidden:
+        return ()
+    return (
+        "contract-only smoke created prohibited training/scoring/submission artifact(s): "
+        + ", ".join(sorted(forbidden)),
+    )
+
+
+def _missing_data_probe_issues(*, returncode: int, stderr: str, staging_root: Path) -> tuple[str, ...]:
+    issues: list[str] = []
+    if returncode == 0:
+        issues.append("missing-data probe exited zero instead of failing closed")
+    if re.search(r"(?m)^DataDiscoveryError:\s", stderr) is None:
+        issues.append("missing-data probe stderr does not identify DataDiscoveryError")
+    if "raw labeled training assets were not found" not in stderr.lower():
+        issues.append("missing-data probe stderr does not state that raw labeled training assets were not found")
+    forbidden: list[str] = []
+    for path in staging_root.rglob("*"):
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        parts = {part.lower() for part in path.parts}
+        if (
+            name.startswith("submission")
+            or "metric" in name
+            or "score" in name
+            or name.startswith("oof_")
+            or "prediction" in name
+            or any("checkpoint" in part for part in parts)
+            or path.suffix.lower() in {".ckpt", ".joblib", ".onnx", ".pkl", ".pt", ".pth", ".safetensors"}
+        ):
+            forbidden.append(str(path.relative_to(staging_root)))
+    if forbidden:
+        issues.append(
+            "missing-data probe created prohibited training/scoring/submission artifact(s): "
+            + ", ".join(sorted(forbidden))
+        )
+    return tuple(issues)
+
+
+def _stage_read_only_training_data(source_dir: Path, staged_data_dir: Path) -> None:
+    for source in source_dir.iterdir():
+        target = staged_data_dir / source.name
+        if target.exists() or target.is_symlink():
+            continue
+        target.symlink_to(source, target_is_directory=source.is_dir())
 
 
 def _run_bounded_smoke_command(
@@ -1741,6 +2297,26 @@ def _format_kernel_contract_smoke(result: KernelContractSmokeResult) -> str:
         parts.append(f"smoke stderr:\n{result.smoke_stderr.strip()}")
     if result.pipeline_issues:
         parts.append("frozen-plan lookup diagnostics:\n" + "\n".join(result.pipeline_issues))
+    if result.contract_report_issues:
+        parts.append("contract report diagnostics:\n" + "\n".join(result.contract_report_issues))
+    if result.data_ready is False:
+        parts.append(f"training data readiness: unavailable ({result.data_readiness_reason})")
+    if result.normal_smoke_required:
+        parts.append(
+            "normal data-dependent smoke "
+            + _format_returncode(
+                result.normal_smoke_returncode,
+                timed_out=result.normal_smoke_timed_out,
+            )
+        )
+        if result.normal_smoke_stdout.strip():
+            parts.append(f"normal smoke stdout:\n{result.normal_smoke_stdout.strip()}")
+        if result.normal_smoke_stderr.strip():
+            parts.append(f"normal smoke stderr:\n{result.normal_smoke_stderr.strip()}")
+        if result.normal_smoke_issues:
+            parts.append("normal smoke diagnostics:\n" + "\n".join(result.normal_smoke_issues))
+        elif result.expected_missing_data_block:
+            parts.append("normal smoke classification: blocked_missing_competition_training_data (expected)")
     return "\n".join(parts)
 
 
@@ -1769,7 +2345,10 @@ def _build_kernel_repair_prompt(
         "Keep marker, genuine-read, and multipost candidate families active; reduce chain width before dropping a "
         "family. Validate every selectable profile before finishing. Use only pipeline names actually present in "
         "plan.json, and raise an actionable configuration-drift error for any required missing name. Do not force "
-        "training on when the frozen plan approves a non-training route. Run the default bounded smoke without "
+        "training on when the frozen plan approves a non-training route. The exact framework sequence is "
+        "`python -m py_compile kernel.py`, an isolated Python import that calls exported `contract_smoke()`, then "
+        "`python kernel.py` as the full-entrypoint data probe. Do not change modeling, training, validation, or "
+        "submission settings to compensate for missing competition data. Run the default bounded smoke without "
         "`KAGGLEBOT_STACK_K` or an equivalent correctness override.\n\n"
         f"Initial agent failure:\n{initial_failure}\n\n"
         f"Exact isolated compile/FAST_DEV contract smoke diagnostics:\n{_format_kernel_contract_smoke(smoke_result)}\n"
@@ -1844,6 +2423,8 @@ def _format_structural_kernel_diagnostics(result: KernelContractSmokeResult) -> 
         parts.append(f"smoke traceback/error:\n{_diagnostic_tail(result.smoke_stderr)}")
     if result.pipeline_issues:
         parts.append("frozen-plan lookup diagnostics:\n" + "\n".join(result.pipeline_issues))
+    if result.contract_report_issues:
+        parts.append("contract report diagnostics:\n" + "\n".join(result.contract_report_issues))
     return "\n".join(parts)
 
 

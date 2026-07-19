@@ -11,6 +11,10 @@ class OracleStrategyError(KaggleBotError):
     """A required Oracle response was not available for the next Codex stage."""
 
 
+class MissingCompetitionDataError(KaggleBotError):
+    """Local training is required but labeled competition data is unavailable."""
+
+
 class RulesNotAcceptedError(KaggleBotError):
     """Competition rules were not accepted by the user."""
 

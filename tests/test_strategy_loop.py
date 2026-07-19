@@ -41,7 +41,49 @@ def _write_implementation_kernel(prompt_path: Path, source: str) -> None:
     prompt_lines = prompt_path.read_text(encoding="utf-8").splitlines()
     kernel_path = next(Path(line.removeprefix(prefix)) for line in prompt_lines if line.startswith(prefix))
     kernel_path.parent.mkdir(parents=True, exist_ok=True)
-    kernel_path.write_text(source, encoding="utf-8")
+    plan_path = next(parent / "plan.json" for parent in kernel_path.parents if (parent / "plan.json").exists())
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    pipeline_names = [item["name"] for item in plan["pipelines"]]
+    kernel_path.write_text(
+        f"""\
+import json
+import os
+import sys
+from pathlib import Path
+
+NORMAL_SOURCE = {source!r}
+PIPELINE_NAMES = {pipeline_names!r}
+
+def contract_smoke():
+    output_dir = Path(os.environ["KAGGLEBOT_OUTPUT_DIR"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = {{
+        "status": "passed",
+        "training_performed": False,
+        "score_reported": False,
+        "profiles": {{
+            name: {{
+                "forward_finite": True,
+                "backward_finite": True,
+                "deploy_bytes": 1024,
+                "logit_shape": [2, 2],
+            }}
+            for name in PIPELINE_NAMES
+        }},
+    }}
+    (output_dir / "contract_smoke.json").write_text(json.dumps(report), encoding="utf-8")
+
+def main():
+    if "--contract-smoke" in sys.argv:
+        contract_smoke()
+        return
+    exec(compile(NORMAL_SOURCE, "kernel.py", "exec"))
+
+if __name__ == "__main__":
+    main()
+""",
+        encoding="utf-8",
+    )
 
 
 def _long_strategy_text() -> str:

@@ -485,6 +485,7 @@ Optional environment knobs:
 - ✅ **Terminal submission contract**: A submit-enabled leaderboard run cannot finish as `completed` with zero successful submissions; exact duplicate skips remain valid, while every other unmet submit obligation ends as `submit_failed`
 - ✅ **Validated frozen evaluation specs**: Saved evaluation specs are schema- and direction-validated before reuse, and invalid or context-conflicting specs are regenerated
 - ✅ **Best-effort dataset profiling**: Optional dataset profiling failures are persisted as structured `profile_error` metadata instead of aborting watch preflight before run-level recovery can start
+- ✅ **Data-free kernel contract verification**: Generated kernels compile and export `contract_smoke()`, which Kagglebot calls in an isolated subprocess to validate every frozen pipeline without training or scoring. When a plan requires local training but labeled competition assets are absent, Kagglebot preserves the verified implementation, records `blocked_on_data`, creates no submission/OOF/checkpoint artifacts, and can resume after authorized data is staged.
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
 - ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, Kaggle `Writeups` wording and legacy `csv` aliases are accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission

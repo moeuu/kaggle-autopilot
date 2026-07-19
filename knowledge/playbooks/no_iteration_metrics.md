@@ -3,6 +3,7 @@
 Recommended action: Harden kernel runtime so every run emits metrics.json and diagnostics.md.
 
 ## Signals
+- cuhk-x-competition-small-model-track 20260719T030527Z-69497fe0: gap=None
 - ai-agent-security-multi-step-tool-attacks 20260717T061040Z-4aad47f3: gap=None
 - cuhk-x-competition-large-model-track 20260716T025336Z-83f794ce: gap=None
 - cuhk-x-competition-small-model-track 20260716T024240Z-edb451b6: gap=None
