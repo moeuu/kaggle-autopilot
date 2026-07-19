@@ -87,6 +87,13 @@ Per iteration runtime:
 Stop behavior:
 - early stop when submission score reaches top1-tier
 - otherwise stop at `max_iterations`
+- an approved non-training route that honestly reports `validation_unavailable`, a null primary score, and no
+  canonical submission stops as `validation_blocked`; its diagnostics are preserved but never scored or submitted
+- a `skill_artifact` route whose static validation succeeds but whose official paired validation is unavailable stops
+  as `validated_unscored_artifact` with `metric_available=false` only when its primary score is null, its paired-lift
+  metric/source matches the authoritative run contract, all routed artifacts exist, no kernel failure is reported,
+  and every submission-readiness signal remains false; routing objectives and other proxy values are never promoted
+  to the competition score
 
 CV strategy selection:
 - prefers time-aware split (`TimeSeriesSplit`) when reliable time columns are detected

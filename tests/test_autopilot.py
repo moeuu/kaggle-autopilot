@@ -7366,6 +7366,12 @@ def test_autopilot_routes_ready_non_training_code_solution_directly_to_kaggle(
                     "training_performed": False,
                     "non_training_validation_passed": True,
                     "non_training_validation_mode": "offline",
+                    "offline_artifact_validation_passed": True,
+                    "official_paired_validation_passed": True,
+                    "submission_ready": True,
+                    "primary_metric": "rmse",
+                    "split_strategy": "kfold",
+                    "primary_score": 0.4,
                 }
             ),
             encoding="utf-8",
@@ -7415,6 +7421,315 @@ def test_autopilot_routes_ready_non_training_code_solution_directly_to_kaggle(
     route = json.loads((config.paths.run_dir("run-1") / "training_route.json").read_text(encoding="utf-8"))
     assert route["skip_local_training"] is True
     assert route["direct_notebook_execution"] is True
+
+
+def test_autopilot_records_validation_unavailable_diagnostic_without_submitting(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_plan(
+        paths,
+        deliverable_mode="writeup",
+        submit_mode="file",
+        target_metric="mean paired verifier lift",
+        target_score=0.1,
+        target_direction="maximize",
+        score_source="holdout",
+        runtime_budget={
+            "local_training_required": False,
+            "estimated_local_training_min": 1_500,
+            "non_training_submission": {
+                "mode": "solver",
+                "implementation_ready": True,
+                "validation_mode": "offline",
+                "source": "kernel.py runs the official paired evaluator when its assets are mounted",
+            },
+        },
+    )
+    calls = {"local": 0, "submitted": 0, "kernel_fix": 0}
+
+    def run_local_kernel(**kwargs):  # noqa: ANN003
+        calls["local"] += 1
+        output_dir = tmp_path / "kernel-output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        remediation = ["Mount the pinned public tasks and official paired evaluator."]
+        metrics = {
+            "execution_mode": "non_training_submission",
+            "training_performed": False,
+            "non_training_validation_passed": False,
+            "non_training_validation_mode": "offline",
+            "execution_status": "validation_unavailable",
+            "primary_score": None,
+            "remediation": remediation,
+        }
+        route_result = {
+            "mode": "skill_artifact",
+            "validation_status": "success",
+            "artifact_paths": [str(output_dir / "diagnostic_skill_portfolio.zip")],
+            "manifest": {"archive": "diagnostic_skill_portfolio.zip", "submission_ready": False},
+        }
+        submission_contract = {
+            "archive_name": "diagnostic_skill_portfolio.zip",
+            "canonical_submission_emitted": False,
+            "official_paired_validation_passed": False,
+            "submission_ready": False,
+            "remediation": remediation,
+        }
+        for name, payload in (
+            ("metrics.json", metrics),
+            ("route_result.json", route_result),
+            ("submission_contract.json", submission_contract),
+        ):
+            (output_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+        (output_dir / "candidate_ledger.jsonl").write_text('{"status":"diagnostic"}\n', encoding="utf-8")
+        (output_dir / "diagnostic_skill_portfolio.zip").write_bytes(b"diagnostic")
+        return KernelRunResult(
+            kernel_id="local/demo",
+            output_dir=output_dir,
+            submission_path=output_dir / "route_result.json",
+            metrics_path=output_dir / "metrics.json",
+        )
+
+    def unexpected_submit(**kwargs):  # noqa: ANN003
+        calls["submitted"] += 1
+        raise AssertionError("diagnostic artifacts must not be submitted")
+
+    def unexpected_kernel_fix(**kwargs):  # noqa: ANN003
+        calls["kernel_fix"] += 1
+        raise AssertionError("validation_unavailable is not a kernel crash")
+
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", run_local_kernel)
+    monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", unexpected_kernel_fix)
+    monkeypatch.setattr("kagglebot.autopilot_submit.attempt_submit_for_autopilot_run", unexpected_submit)
+
+    config = _make_config(tmp_path, submit=True, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_autopilot(config)
+
+    assert calls == {"local": 1, "submitted": 0, "kernel_fix": 0}
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    run_payload = json.loads((config.paths.run_dir("run-1") / "run.json").read_text(encoding="utf-8"))
+    metrics_payload = json.loads((iter_dir / "metrics.json").read_text(encoding="utf-8"))
+    iteration_state = json.loads((iter_dir / "iteration_state.json").read_text(encoding="utf-8"))
+    assert run_payload["status"] == "validation_blocked"
+    assert run_payload["summary"]["best_trusted_score"] is None
+    assert metrics_payload["iteration_status"] == "validation_blocked"
+    assert metrics_payload["submission_eligible"] is False
+    assert metrics_payload["scored_candidate"] is False
+    assert iteration_state["iteration_status"] == "validation_blocked"
+    assert iteration_state["trained"] is False
+    assert iteration_state["submission_exists"] is False
+    assert iteration_state["submit_allowed_by_gate"] is False
+    assert (iter_dir / "output" / "candidate_ledger.jsonl").is_file()
+    assert (iter_dir / "output" / "diagnostic_skill_portfolio.zip").is_file()
+    assert not (iter_dir / "submission.zip").exists()
+
+
+def test_autopilot_records_successful_unscored_diagnostic_without_scoring_or_submitting(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_plan(
+        paths,
+        deliverable_mode="writeup",
+        submit_mode="file",
+        target_metric="mean paired verifier lift",
+        target_score=0.1,
+        target_direction="maximize",
+        score_source="holdout",
+        runtime_budget={
+            "local_training_required": False,
+            "estimated_local_training_min": 1_500,
+            "non_training_submission": {
+                "mode": "solver",
+                "implementation_ready": True,
+                "validation_mode": "offline",
+                "source": "kernel.py runs the official paired evaluator when its assets are mounted",
+            },
+        },
+    )
+    calls = {"local": 0, "submitted": 0, "kernel_fix": 0}
+
+    def run_local_kernel(**kwargs):  # noqa: ANN003
+        calls["local"] += 1
+        output_dir = tmp_path / "kernel-output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        routed_output_dir = tmp_path / "kernel-stage-output"
+        routed_output_dir.mkdir(parents=True, exist_ok=True)
+        remediation = ["Mount the pinned public tasks and official paired evaluator."]
+        metrics = {
+            "execution_mode": "non_training_submission",
+            "training_performed": False,
+            "non_training_validation_passed": True,
+            "non_training_validation_mode": "offline",
+            "execution_status": "success",
+            "offline_artifact_validation_passed": True,
+            "official_paired_validation_passed": False,
+            "submission_ready": False,
+            "primary_metric": "mean paired verifier lift",
+            "primary_score": None,
+            "score_source": "holdout",
+            "selected_pipeline": "trajectory_optimized_sparse_portfolio",
+            "selected_candidate_hash": "candidate-sha256",
+            "remediation": remediation,
+        }
+        route_result = {
+            "mode": "skill_artifact",
+            "validation_status": "success",
+            "artifact_paths": [str(routed_output_dir / "diagnostic_skill_portfolio.zip")],
+            "manifest": {"archive": "diagnostic_skill_portfolio.zip", "submission_ready": False},
+        }
+        for name, payload in (
+            ("metrics.json", metrics),
+            ("route_result.json", route_result),
+        ):
+            (output_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+        (output_dir / "candidate_ledger.jsonl").write_text('{"status":"diagnostic"}\n', encoding="utf-8")
+        (routed_output_dir / "diagnostic_skill_portfolio.zip").write_bytes(b"diagnostic")
+        return KernelRunResult(
+            kernel_id="local/demo",
+            output_dir=output_dir,
+            submission_path=output_dir / "route_result.json",
+            metrics_path=output_dir / "metrics.json",
+        )
+
+    def unexpected_path(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise AssertionError("unscored diagnostics must bypass score, readiness, and submission paths")
+
+    def unexpected_submit(**kwargs):  # noqa: ANN003
+        calls["submitted"] += 1
+        unexpected_path(**kwargs)
+
+    def unexpected_kernel_fix(**kwargs):  # noqa: ANN003
+        calls["kernel_fix"] += 1
+        raise AssertionError("a valid unscored diagnostic is not a kernel failure")
+
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", run_local_kernel)
+    monkeypatch.setattr("kagglebot.autopilot._run_kernel_fix", unexpected_kernel_fix)
+    monkeypatch.setattr("kagglebot.autopilot._kernel_metrics.load_kernel_metrics", unexpected_path)
+    monkeypatch.setattr("kagglebot.autopilot._score_utils.should_update_best_score", unexpected_path)
+    monkeypatch.setattr(
+        "kagglebot.autopilot._submission_policy.should_attempt_submit_for_readiness",
+        unexpected_path,
+    )
+    monkeypatch.setattr("kagglebot.autopilot_submit.attempt_submit_for_autopilot_run", unexpected_submit)
+
+    config = _make_config(tmp_path, submit=True, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    run_autopilot(config)
+
+    assert calls == {"local": 1, "submitted": 0, "kernel_fix": 0}
+    iter_dir = config.paths.iter_dir("run-1", 1)
+    run_payload = json.loads((config.paths.run_dir("run-1") / "run.json").read_text(encoding="utf-8"))
+    metrics_payload = json.loads((iter_dir / "metrics.json").read_text(encoding="utf-8"))
+    iteration_state = json.loads((iter_dir / "iteration_state.json").read_text(encoding="utf-8"))
+    assert run_payload["status"] == "validated_unscored_artifact"
+    assert run_payload["summary"]["best_trusted_score"] is None
+    assert metrics_payload["iteration_status"] == "validated_unscored_artifact"
+    assert metrics_payload["primary_score"] is None
+    assert metrics_payload["metric_available"] is False
+    assert metrics_payload["score_available"] is False
+    assert metrics_payload["score_status"] == "unavailable"
+    assert metrics_payload["submission_eligible"] is False
+    assert metrics_payload["scored_candidate"] is False
+    assert metrics_payload["candidate_hash"] == "candidate-sha256"
+    assert "output/diagnostic_skill_portfolio.zip" in metrics_payload["diagnostic_artifact_paths"]
+    assert metrics_payload["remediation"] == ["Mount the pinned public tasks and official paired evaluator."]
+    assert iteration_state["iteration_status"] == "validated_unscored_artifact"
+    assert iteration_state["trained"] is False
+    assert iteration_state["submission_exists"] is False
+    assert iteration_state["submit_allowed_by_gate"] is False
+    assert (iter_dir / "output" / "diagnostic_skill_portfolio.zip").is_file()
+    assert not (iter_dir / "submission.zip").exists()
+
+
+@pytest.mark.parametrize(
+    "metric_override",
+    [
+        {"submission_ready": True},
+        {"official_paired_validation_passed": True},
+    ],
+    ids=["submission-ready", "official-paired-validation"],
+)
+def test_autopilot_rejects_unscored_skill_artifact_with_scored_submission_claims(
+    monkeypatch,
+    tmp_path: Path,
+    metric_override: dict[str, bool],
+) -> None:
+    from kagglebot.autopilot import AutopilotSession
+
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    _write_plan(
+        paths,
+        deliverable_mode="writeup",
+        submit_mode="file",
+        target_metric="mean paired verifier lift",
+        target_score=0.1,
+        target_direction="maximize",
+        score_source="holdout",
+        runtime_budget={
+            "local_training_required": False,
+            "estimated_local_training_min": 1_500,
+            "non_training_submission": {
+                "mode": "solver",
+                "implementation_ready": True,
+                "validation_mode": "offline",
+                "source": "kernel.py runs the official paired evaluator when its assets are mounted",
+            },
+        },
+    )
+
+    def run_local_kernel(**kwargs):  # noqa: ANN003
+        output_dir = tmp_path / "kernel-output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metrics = {
+            "execution_mode": "non_training_submission",
+            "training_performed": False,
+            "execution_status": "success",
+            "non_training_validation_passed": True,
+            "non_training_validation_mode": "offline",
+            "offline_artifact_validation_passed": True,
+            "official_paired_validation_passed": False,
+            "submission_ready": False,
+            "primary_metric": "mean paired verifier lift",
+            "primary_score": None,
+            "score_source": "holdout",
+            "selected_pipeline": "trajectory_optimized_sparse_portfolio",
+            **metric_override,
+        }
+        route_result = {
+            "mode": "skill_artifact",
+            "validation_status": "success",
+            "artifact_paths": [str(output_dir / "diagnostic_skill_portfolio.zip")],
+            "manifest": {"archive": "diagnostic_skill_portfolio.zip", "submission_ready": False},
+        }
+        (output_dir / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+        (output_dir / "route_result.json").write_text(json.dumps(route_result), encoding="utf-8")
+        (output_dir / "diagnostic_skill_portfolio.zip").write_bytes(b"diagnostic")
+        return KernelRunResult(
+            kernel_id="local/demo",
+            output_dir=output_dir,
+            submission_path=output_dir / "route_result.json",
+            metrics_path=output_dir / "metrics.json",
+        )
+
+    monkeypatch.setattr("kagglebot.planning_runner.run_plan_and_initial", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.plan_policy.needs_planning", lambda **kwargs: False)
+    monkeypatch.setattr("kagglebot.verify_artifacts.run_repo_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr("kagglebot.autopilot.leaderboard_top1", lambda *args, **kwargs: {"score": None})
+    monkeypatch.setattr("kagglebot.autopilot.run_kernel_local", run_local_kernel)
+    monkeypatch.setattr("kagglebot.autopilot.MAX_KERNEL_FIX_ATTEMPTS", 0)
+
+    config = _make_config(tmp_path, submit=False, max_iterations=1, compute="local_gpu", accelerator="gpu")
+    session = AutopilotSession(config=config, run_id="run-1", resume_run=False)
+    with pytest.raises(KernelFailedError, match="Local kernel metrics missing expected score"):
+        session.run()
 
 
 def test_autopilot_respects_max_iterations(monkeypatch, tmp_path: Path) -> None:
@@ -9221,3 +9536,21 @@ def test_kernel_fix_regenerates_when_codex_makes_no_changes(monkeypatch, tmp_pat
             attempt=4,
             pending_error_fixes=[],
         )
+
+    original_error = KernelFailedError(
+        "Local kernel metrics missing expected score; ensure metrics.json includes a numeric metric value."
+    )
+    with pytest.raises(KernelFailedError) as preserved_exc_info:
+        _run_kernel_fix(
+            config=config,
+            run_id=run_id,
+            iteration=1,
+            iter_dir=iter_dir,
+            error_message=str(original_error),
+            attempt=5,
+            pending_error_fixes=[],
+            original_error=original_error,
+        )
+    assert preserved_exc_info.value is original_error
+    assert isinstance(original_error.__cause__, KernelFailedError)
+    assert "produced no file changes" in str(original_error.__cause__)

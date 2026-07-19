@@ -267,7 +267,9 @@ def write_iteration_state_marker(
     submit_phase_state: str,
     forced_submit_reason: str | None = None,
     submitted: bool,
-    readiness_score: float,
+    readiness_score: float | None,
+    trained: bool = True,
+    iteration_status: str = "completed",
 ) -> None:
     if submit_phase_finished is None:
         submit_phase_finished = (not submit_phase_required) or (not submit_allowed_by_gate) or submitted
@@ -276,7 +278,8 @@ def write_iteration_state_marker(
         "run_id": run_id,
         "iteration": iteration,
         "iteration_complete": True,
-        "trained": True,
+        "iteration_status": iteration_status,
+        "trained": trained,
         "submission_exists": submission_path.exists(),
         "submission_path": str(submission_path),
         "metrics_exists": metrics_path.exists(),

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from kagglebot.training_route import (
     decide_training_route,
+    is_unscored_non_training_diagnostic,
     plan_requests_non_training,
+    resolve_non_training_validation_blockers,
     validate_non_training_metrics,
     validate_non_training_source,
 )
@@ -136,6 +138,183 @@ def test_non_training_metrics_must_prove_the_approved_route_ran() -> None:
         == ()
     )
     assert validate_non_training_metrics({"offline_value": 0.8}, decision)
+
+
+def test_validation_unavailable_diagnostic_is_nonfatal_but_not_submittable() -> None:
+    decision = decide_training_route(_ready_plan())
+    metrics = {
+        "execution_mode": "non_training_submission",
+        "training_performed": False,
+        "non_training_validation_passed": False,
+        "non_training_validation_mode": "reference_reproduction",
+        "execution_status": "validation_unavailable",
+        "primary_score": None,
+        "remediation": ["Mount the pinned public evaluator."],
+    }
+
+    assert resolve_non_training_validation_blockers(
+        metrics=metrics,
+        route_result={"manifest": {"submission_ready": False}},
+        submission_contract={"submission_ready": False, "canonical_submission_emitted": False},
+        decision=decision,
+        canonical_submission_emitted=False,
+    ) == ("Mount the pinned public evaluator.",)
+
+
+def test_false_non_training_validation_cannot_hide_a_submission_artifact() -> None:
+    decision = decide_training_route(_ready_plan())
+    metrics = {
+        "execution_mode": "non_training_submission",
+        "training_performed": False,
+        "non_training_validation_passed": False,
+        "non_training_validation_mode": "reference_reproduction",
+        "execution_status": "validation_unavailable",
+        "primary_score": None,
+        "remediation": ["Mount the pinned public evaluator."],
+    }
+
+    assert (
+        resolve_non_training_validation_blockers(
+            metrics=metrics,
+            route_result={"manifest": {"submission_ready": True}},
+            submission_contract={"submission_ready": True, "canonical_submission_emitted": True},
+            decision=decision,
+            canonical_submission_emitted=True,
+        )
+        is None
+    )
+
+
+def test_successful_static_diagnostic_can_remain_unscored_and_non_submittable() -> None:
+    decision = decide_training_route(_ready_plan())
+    metrics = {
+        "execution_mode": "non_training_submission",
+        "training_performed": False,
+        "execution_status": "success",
+        "non_training_validation_passed": True,
+        "non_training_validation_mode": "reference_reproduction",
+        "offline_artifact_validation_passed": True,
+        "official_paired_validation_passed": False,
+        "submission_ready": False,
+        "primary_score": None,
+    }
+
+    assert is_unscored_non_training_diagnostic(
+        metrics=metrics,
+        route_result={
+            "mode": "skill_artifact",
+            "validation_status": "success",
+            "artifact_paths": ["/tmp/diagnostic_skill_portfolio.zip"],
+            "manifest": {"archive": "diagnostic_skill_portfolio.zip", "submission_ready": False},
+        },
+        submission_contract={
+            "archive_name": "diagnostic_skill_portfolio.zip",
+            "submission_ready": False,
+            "canonical_submission_emitted": False,
+            "official_paired_validation_passed": False,
+        },
+        decision=decision,
+        canonical_submission_emitted=False,
+    )
+
+
+def test_ordinary_non_training_route_cannot_be_accepted_without_a_score() -> None:
+    decision = decide_training_route(_ready_plan())
+    metrics = {
+        "execution_mode": "non_training_submission",
+        "training_performed": False,
+        "execution_status": "success",
+        "non_training_validation_passed": True,
+        "non_training_validation_mode": "reference_reproduction",
+        "offline_artifact_validation_passed": True,
+        "official_paired_validation_passed": False,
+        "submission_ready": False,
+        "primary_score": None,
+    }
+
+    assert not is_unscored_non_training_diagnostic(
+        metrics=metrics,
+        route_result={
+            "mode": "tabular",
+            "validation_status": "success",
+            "manifest": {"archive": "diagnostic_skill_portfolio.zip", "submission_ready": False},
+        },
+        submission_contract={},
+        decision=decision,
+        canonical_submission_emitted=False,
+    )
+
+
+def test_unscored_diagnostic_rejects_score_and_readiness_contradictions() -> None:
+    decision = decide_training_route(_ready_plan())
+    base_metrics = {
+        "execution_mode": "non_training_submission",
+        "training_performed": False,
+        "execution_status": "success",
+        "non_training_validation_passed": True,
+        "non_training_validation_mode": "reference_reproduction",
+        "offline_artifact_validation_passed": True,
+        "official_paired_validation_passed": False,
+        "submission_ready": False,
+        "primary_score": None,
+    }
+    contradictions = (
+        {"official_paired_validation_passed": True},
+        {"submission_ready": True},
+        {"primary_score": 0.4},
+        {"primary_score": float("nan")},
+        {"primary_score": float("inf")},
+    )
+
+    for contradiction in contradictions:
+        assert not is_unscored_non_training_diagnostic(
+            metrics={**base_metrics, **contradiction},
+            route_result={
+                "mode": "skill_artifact",
+                "validation_status": "success",
+                "manifest": {"archive": "diagnostic_skill_portfolio.zip", "submission_ready": False},
+            },
+            submission_contract={
+                "archive_name": "diagnostic_skill_portfolio.zip",
+                "submission_ready": False,
+                "canonical_submission_emitted": False,
+                "official_paired_validation_passed": False,
+            },
+            decision=decision,
+            canonical_submission_emitted=False,
+        )
+
+
+def test_unscored_diagnostic_cannot_hide_a_canonical_submission() -> None:
+    decision = decide_training_route(_ready_plan())
+    metrics = {
+        "execution_mode": "non_training_submission",
+        "training_performed": False,
+        "execution_status": "success",
+        "non_training_validation_passed": True,
+        "non_training_validation_mode": "reference_reproduction",
+        "offline_artifact_validation_passed": True,
+        "official_paired_validation_passed": False,
+        "submission_ready": False,
+        "primary_score": None,
+    }
+
+    assert not is_unscored_non_training_diagnostic(
+        metrics=metrics,
+        route_result={
+            "mode": "skill_artifact",
+            "validation_status": "success",
+            "manifest": {"archive": "submission.zip", "submission_ready": True},
+        },
+        submission_contract={
+            "archive_name": "submission.zip",
+            "submission_ready": True,
+            "canonical_submission_emitted": True,
+            "official_paired_validation_passed": False,
+        },
+        decision=decision,
+        canonical_submission_emitted=True,
+    )
 
 
 def test_runner_does_not_trust_a_bare_approved_marker() -> None:

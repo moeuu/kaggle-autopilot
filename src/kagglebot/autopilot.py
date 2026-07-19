@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import math
 import os
+import re
 import time
 import traceback
 from dataclasses import dataclass, replace
@@ -71,6 +73,7 @@ from kagglebot.agents.identity import (
     prompt_identity_format_args,
 )
 from kagglebot.agents.strategy_runner import run_strategy
+from kagglebot.artifact_io import copy_artifact_if_needed
 from kagglebot.autopilot_session import AutopilotSession, SubmissionPhase
 from kagglebot.campaign import (
     allocate_submission,
@@ -142,7 +145,13 @@ from kagglebot.top1_exhaustive import (
     format_top1_public_score_message,
     write_top1_public_snapshot,
 )
-from kagglebot.training_route import decide_training_route, validate_non_training_metrics
+from kagglebot.training_route import (
+    TrainingRouteDecision,
+    decide_training_route,
+    is_unscored_non_training_diagnostic,
+    resolve_non_training_validation_blockers,
+    validate_non_training_metrics,
+)
 from kagglebot.validation_lab import run_validation_lab
 from kagglebot.write_guard import (
     _backup_guarded_files,
@@ -211,6 +220,20 @@ class AutopilotConfig:
     hardware_profile: str | None = "auto"
 
 
+@dataclass(frozen=True)
+class _ValidationBlockedKernelResult:
+    blockers: tuple[str, ...]
+    route_result: dict[str, object]
+    submission_contract: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _UnscoredDiagnosticKernelResult:
+    route_result: dict[str, object]
+    submission_contract: dict[str, object]
+    diagnostic_archive_path: Path
+
+
 MAX_KERNEL_FIX_ATTEMPTS: int | None = 8
 MAX_KERNEL_CAPACITY_RETRIES = 3
 KERNEL_CAPACITY_RETRY_SLEEP = 30.0
@@ -250,6 +273,380 @@ _DEFAULT_FORCE_MAJOR_ON_NO_IMPROVE = True
 _MAX_KERNEL_PREFLIGHT_FIX_ATTEMPTS = 2
 _ITERATION_SUBMISSION_SUFFIXES = all_submission_output_suffixes()
 _ITERATION_SAMPLE_SUBMISSION_SUFFIXES = tabular_submission_output_suffixes()
+
+
+def _first_nonempty_string(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalized_score_source(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _is_finite_score(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _metric_names_compatible(actual: object, expected: object) -> bool:
+    if not isinstance(actual, str) or not actual.strip() or not isinstance(expected, str) or not expected.strip():
+        return False
+    if _metric_matching.metrics_equivalent(actual, expected):
+        return True
+    actual_tokens = set(re.findall(r"[a-z0-9]+", actual.lower()))
+    expected_tokens = set(re.findall(r"[a-z0-9]+", expected.lower()))
+    paired_lift = {"paired", "lift"}
+    proxy_markers = {"routing", "screening", "lint"}
+    return paired_lift <= actual_tokens and paired_lift <= expected_tokens and not (actual_tokens & proxy_markers)
+
+
+def _resolve_authoritative_evaluation_contract(
+    *,
+    run_payload: dict[str, object],
+    frozen_plan: dict[str, object],
+    fallback_metric: str,
+    fallback_direction: str,
+    fallback_score_source: str,
+) -> tuple[dict[str, object], str]:
+    run_config = run_payload.get("config") if isinstance(run_payload.get("config"), dict) else {}
+    run_contract = (
+        run_config.get("evaluation_contract") if isinstance(run_config.get("evaluation_contract"), dict) else {}
+    )
+    plan_contract = (
+        frozen_plan.get("evaluation_contract") if isinstance(frozen_plan.get("evaluation_contract"), dict) else {}
+    )
+    if run_contract:
+        contract = dict(run_contract)
+        source = "run.json.config.evaluation_contract"
+    elif plan_contract:
+        contract = dict(plan_contract)
+        source = "plan.json.evaluation_contract"
+    else:
+        contract = {}
+        source = "plan.json"
+
+    expected_metric = _first_nonempty_string(
+        contract.get("expected_metric"),
+        contract.get("metric_name"),
+        contract.get("metric"),
+        frozen_plan.get("target_metric"),
+        fallback_metric,
+    )
+    expected_direction = _first_nonempty_string(
+        contract.get("expected_direction"),
+        contract.get("direction"),
+        frozen_plan.get("target_direction"),
+        fallback_direction,
+    )
+    expected_split = _first_nonempty_string(
+        contract.get("expected_split_strategy"),
+        contract.get("split_strategy"),
+        frozen_plan.get("split_strategy"),
+    )
+    raw_score_sources = contract.get("accepted_score_sources")
+    accepted_score_sources = (
+        [_normalized_score_source(item) for item in raw_score_sources]
+        if isinstance(raw_score_sources, (list, tuple))
+        else []
+    )
+    accepted_score_sources = [item for item in accepted_score_sources if item]
+    if not accepted_score_sources:
+        plan_score_source = _normalized_score_source(frozen_plan.get("score_source"))
+        accepted_score_sources = [plan_score_source or _normalized_score_source(fallback_score_source)]
+
+    contract["expected_metric"] = expected_metric
+    contract["expected_direction"] = (
+        expected_direction.lower()
+        if expected_direction and expected_direction.lower() in {"minimize", "maximize"}
+        else None
+    )
+    contract["expected_split_strategy"] = expected_split
+    contract["accepted_score_sources"] = list(dict.fromkeys(accepted_score_sources))
+    return contract, source
+
+
+def _evaluation_spec_conflict_warnings(
+    *,
+    authoritative_contract: dict[str, object],
+    evaluation_spec: dict[str, object],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    expected_metric = authoritative_contract.get("expected_metric")
+    spec_metric = _first_nonempty_string(evaluation_spec.get("metric_name"), evaluation_spec.get("metric"))
+    if spec_metric and expected_metric and not _metric_names_compatible(spec_metric, expected_metric):
+        warnings.append(
+            "context/evaluation_spec.json metric "
+            f"'{spec_metric}' conflicts with authoritative metric '{expected_metric}' and was ignored"
+        )
+    expected_direction = _first_nonempty_string(authoritative_contract.get("expected_direction"))
+    spec_direction = _first_nonempty_string(evaluation_spec.get("direction"))
+    if (
+        spec_direction
+        and expected_direction
+        and spec_direction.lower() in {"minimize", "maximize"}
+        and spec_direction.lower() != expected_direction.lower()
+    ):
+        warnings.append(
+            "context/evaluation_spec.json direction "
+            f"'{spec_direction}' conflicts with authoritative direction '{expected_direction}' and was ignored"
+        )
+    return tuple(warnings)
+
+
+def _kernel_output_reports_failure(output_dir: Path) -> bool:
+    try:
+        return any(path.is_file() for path in output_dir.rglob("failure.json"))
+    except OSError:
+        return True
+
+
+def _resolve_diagnostic_archive_path(
+    *,
+    kernel_output_dir: Path,
+    route_result: dict[str, object],
+) -> Path | None:
+    manifest = route_result.get("manifest")
+    if not isinstance(manifest, dict):
+        return None
+    archive_name = manifest.get("archive")
+    if not isinstance(archive_name, str) or not archive_name.strip():
+        return None
+    archive_name = archive_name.strip()
+    if Path(archive_name).name != archive_name:
+        return None
+
+    artifact_paths = route_result.get("artifact_paths")
+    if not isinstance(artifact_paths, list) or not artifact_paths:
+        return None
+    resolved_artifact_paths: list[Path] = []
+    for raw_path in artifact_paths:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return None
+        candidate = Path(raw_path.strip())
+        candidate = candidate if candidate.is_absolute() else kernel_output_dir / candidate
+        if not candidate.is_file() or candidate.name.lower() == "submission.zip":
+            return None
+        resolved_artifact_paths.append(candidate)
+
+    candidates = [kernel_output_dir / archive_name]
+    candidates.extend(candidate for candidate in resolved_artifact_paths if candidate.name == archive_name)
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _unscored_metrics_match_contract(
+    *,
+    metrics: dict[str, object],
+    authoritative_contract: dict[str, object],
+) -> bool:
+    if not _metric_names_compatible(metrics.get("primary_metric"), authoritative_contract.get("expected_metric")):
+        return False
+    score_source = _normalized_score_source(metrics.get("score_source"))
+    raw_accepted_sources = authoritative_contract.get("accepted_score_sources")
+    accepted_sources = (
+        {_normalized_score_source(item) for item in raw_accepted_sources}
+        if isinstance(raw_accepted_sources, (list, tuple))
+        else set()
+    )
+    if not score_source or score_source not in accepted_sources:
+        return False
+    actual_direction = _first_nonempty_string(
+        metrics.get("primary_direction"),
+        metrics.get("metric_direction"),
+        metrics.get("direction"),
+    )
+    expected_direction = _first_nonempty_string(authoritative_contract.get("expected_direction"))
+    return not actual_direction or not expected_direction or actual_direction.lower() == expected_direction.lower()
+
+
+def _scored_primary_contract_issues(
+    *,
+    metrics: dict[str, object],
+    authoritative_contract: dict[str, object],
+) -> tuple[str, ...]:
+    issues: list[str] = []
+    if not _metric_names_compatible(metrics.get("primary_metric"), authoritative_contract.get("expected_metric")):
+        issues.append("primary_metric does not match the authoritative evaluation metric")
+
+    expected_direction = _first_nonempty_string(authoritative_contract.get("expected_direction"))
+    actual_direction = _first_nonempty_string(
+        metrics.get("primary_direction"),
+        metrics.get("metric_direction"),
+        metrics.get("direction"),
+    )
+    if expected_direction and (not actual_direction or actual_direction.lower() != expected_direction.lower()):
+        issues.append("metric direction does not match the authoritative evaluation direction")
+
+    expected_split = _first_nonempty_string(authoritative_contract.get("expected_split_strategy"))
+    actual_split = _first_nonempty_string(metrics.get("split_strategy"), metrics.get("validation_split"))
+    if expected_split and (
+        not actual_split
+        or actual_split.strip().lower().replace("-", "_") != expected_split.strip().lower().replace("-", "_")
+    ):
+        issues.append("split strategy does not match the authoritative evaluation split")
+
+    score_source = _normalized_score_source(metrics.get("score_source"))
+    raw_accepted_sources = authoritative_contract.get("accepted_score_sources")
+    accepted_sources = (
+        {_normalized_score_source(item) for item in raw_accepted_sources}
+        if isinstance(raw_accepted_sources, (list, tuple))
+        else set()
+    )
+    if not score_source or score_source not in accepted_sources:
+        issues.append("score_source is not accepted by the authoritative evaluation contract")
+
+    if metrics.get("execution_mode") == "non_training_submission" and (
+        metrics.get("offline_artifact_validation_passed") is not True
+        or metrics.get("official_paired_validation_passed") is not True
+    ):
+        issues.append("non-training primary_score requires successful offline and official paired validation")
+    return tuple(issues)
+
+
+def _load_contract_aware_kernel_metrics(
+    *,
+    metrics_path: Path,
+    metrics: dict[str, object],
+    direction: str,
+    target_metric: str,
+    authoritative_contract: dict[str, object],
+) -> EvaluationResult | None:
+    if "primary_score" not in metrics:
+        return _kernel_metrics.load_kernel_metrics(metrics_path, direction, target_metric)
+    raw_primary_score = metrics.get("primary_score")
+    if not _is_finite_score(raw_primary_score):
+        return None
+    primary_score = float(raw_primary_score)
+    contract_issues = _scored_primary_contract_issues(
+        metrics=metrics,
+        authoritative_contract=authoritative_contract,
+    )
+    if contract_issues:
+        raise KernelFailedError(
+            "Kernel primary_score violates the authoritative evaluation contract: " + "; ".join(contract_issues)
+        )
+    scored_payload = dict(metrics)
+    scored_payload["offline_value"] = primary_score
+    scored_payload["direction"] = direction
+    return _kernel_metrics.evaluation_from_kernel_metrics_payload(
+        scored_payload,
+        direction=direction,
+        target_metric=target_metric,
+    )
+
+
+def _resolve_validation_blocked_kernel_result(
+    *,
+    kernel_result: KernelRunResult,
+    kernel_metrics: dict[str, object],
+    training_route_decision: TrainingRouteDecision,
+) -> _ValidationBlockedKernelResult | None:
+    route_result = _json_utils.load_json_object(kernel_result.output_dir / "route_result.json") or {}
+    submission_contract = _json_utils.load_json_object(kernel_result.output_dir / "submission_contract.json") or {}
+    canonical_submission_emitted = any(path.is_file() for path in kernel_result.output_dir.rglob("submission.zip"))
+    blockers = resolve_non_training_validation_blockers(
+        metrics=kernel_metrics,
+        route_result=route_result,
+        submission_contract=submission_contract,
+        decision=training_route_decision,
+        canonical_submission_emitted=canonical_submission_emitted,
+    )
+    if blockers is None:
+        return None
+    return _ValidationBlockedKernelResult(
+        blockers=blockers,
+        route_result=route_result,
+        submission_contract=submission_contract,
+    )
+
+
+def _resolve_unscored_diagnostic_kernel_result(
+    *,
+    kernel_result: KernelRunResult,
+    kernel_metrics: dict[str, object],
+    training_route_decision: TrainingRouteDecision,
+    authoritative_evaluation_contract: dict[str, object],
+    deliverable_mode: str,
+    submit_mode: str,
+) -> _UnscoredDiagnosticKernelResult | None:
+    if deliverable_mode != "writeup" or submit_mode != "file":
+        return None
+    route_result = _json_utils.load_json_object(kernel_result.output_dir / "route_result.json") or {}
+    submission_contract = _json_utils.load_json_object(kernel_result.output_dir / "submission_contract.json") or {}
+    canonical_submission_emitted = any(path.is_file() for path in kernel_result.output_dir.rglob("submission.zip"))
+    if not is_unscored_non_training_diagnostic(
+        metrics=kernel_metrics,
+        route_result=route_result,
+        submission_contract=submission_contract,
+        decision=training_route_decision,
+        canonical_submission_emitted=canonical_submission_emitted,
+    ):
+        return None
+    if _kernel_output_reports_failure(kernel_result.output_dir):
+        return None
+    if not _unscored_metrics_match_contract(
+        metrics=kernel_metrics,
+        authoritative_contract=authoritative_evaluation_contract,
+    ):
+        return None
+    if _first_nonempty_string(kernel_metrics.get("selected_pipeline")) is None:
+        return None
+    diagnostic_archive_path = _resolve_diagnostic_archive_path(
+        kernel_output_dir=kernel_result.output_dir,
+        route_result=route_result,
+    )
+    if diagnostic_archive_path is None:
+        return None
+    return _UnscoredDiagnosticKernelResult(
+        route_result=route_result,
+        submission_contract=submission_contract,
+        diagnostic_archive_path=diagnostic_archive_path,
+    )
+
+
+def _preserve_diagnostic_artifacts(
+    *,
+    kernel_output_dir: Path,
+    iter_dir: Path,
+    route_result: dict[str, object],
+) -> list[str]:
+    artifact_names = {
+        "candidate_ledger.jsonl",
+        "metrics.json",
+        "route_result.json",
+        "submission_contract.json",
+    }
+    manifest = route_result.get("manifest")
+    if isinstance(manifest, dict):
+        archive_name = manifest.get("archive")
+        if isinstance(archive_name, str) and archive_name.strip():
+            safe_name = Path(archive_name.strip()).name
+            if safe_name == archive_name.strip():
+                artifact_names.add(safe_name)
+
+    routed_artifacts: dict[str, Path] = {}
+    artifact_paths = route_result.get("artifact_paths")
+    if isinstance(artifact_paths, list):
+        for raw_path in artifact_paths:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            candidate = Path(raw_path.strip())
+            if candidate.name in artifact_names and candidate.is_file():
+                routed_artifacts[candidate.name] = candidate
+
+    destination_dir = iter_dir / "output"
+    preserved: list[str] = []
+    for name in sorted(artifact_names):
+        source = kernel_output_dir / name
+        if not source.is_file():
+            source = routed_artifacts.get(name, source)
+        if not source.is_file():
+            continue
+        destination = destination_dir / name
+        copy_artifact_if_needed(source=source, destination=destination)
+        preserved.append(str(destination.relative_to(iter_dir)))
+    return preserved
 
 
 def check_rules_accepted(*args, **kwargs):
@@ -546,6 +943,7 @@ def _run_local_to_kaggle_gpu_handoff(
                     error_message=error_text,
                     attempt=kernel_attempts,
                     pending_error_fixes=pending_error_fixes,
+                    original_error=exc if isinstance(exc, KernelFailedError) else None,
                 )
     except BaseException as exc:
         _compute_handoff.finish_handoff(
@@ -952,6 +1350,26 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         resolved=resolved,
         status="running",
     )
+    frozen_plan_payload = _json_utils.load_json_object_or_empty(config.paths.plan_path)
+    evaluation_contract, evaluation_contract_source = _resolve_authoritative_evaluation_contract(
+        run_payload=run_payload,
+        frozen_plan=frozen_plan_payload,
+        fallback_metric=str(target_metric),
+        fallback_direction=metric_direction,
+        fallback_score_source=loop_settings.score_source,
+    )
+    run_config_payload = run_payload.get("config")
+    if isinstance(run_config_payload, dict):
+        run_config_payload["evaluation_contract"] = evaluation_contract
+    run_payload["evaluation_contract_source"] = evaluation_contract_source
+    evaluation_contract_warnings = _evaluation_spec_conflict_warnings(
+        authoritative_contract=evaluation_contract,
+        evaluation_spec=_json_utils.load_json_object_or_empty(config.paths.context_dir / "evaluation_spec.json"),
+    )
+    if evaluation_contract_warnings:
+        run_payload["evaluation_contract_warnings"] = list(evaluation_contract_warnings)
+        for warning in evaluation_contract_warnings:
+            print(f"[yellow]evaluation contract warning[/yellow]: {warning}.")
     _autopilot_state.write_run_payload(run_dir, run_payload)
     _kernel_snapshot.ensure_best_kernel_snapshot(paths=config.paths, run_dir=run_dir)
 
@@ -1037,7 +1455,6 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     enable_internet = loop_settings.enable_internet
     submission_gate = loop_settings.submission_gate
     submission_limit_per_day = loop_settings.submission_limit_per_day
-    evaluation_contract = loop_settings.evaluation_contract
     readiness_target = loop_settings.readiness_target
     readiness_method = loop_settings.readiness_method
     readiness_k = loop_settings.readiness_k
@@ -1208,6 +1625,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         print(f"[yellow]resume[/yellow]: found completed iterations; resuming at {start_iteration}/{max_iterations}")
     loop_started_at = time.monotonic()
     last_completed_iteration = start_iteration - 1
+    non_submittable_diagnostic_reason: str | None = None
 
     try:
         for iteration in range(start_iteration, max_iterations + 1):
@@ -1266,6 +1684,10 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             metrics_path = iter_dir / "metrics.json"
             evaluation_report_path = iter_dir / "evaluation_report.json"
             evaluation = None
+            validation_blocked_result: _ValidationBlockedKernelResult | None = None
+            validation_blocked_kernel_output_dir: Path | None = None
+            unscored_diagnostic_result: _UnscoredDiagnosticKernelResult | None = None
+            unscored_diagnostic_kernel_output_dir: Path | None = None
             kernel_metrics_payload: dict[str, object] | None = None
             kernel_metrics_artifact_path: Path | None = None
             iteration_kernel_id: str | None = None
@@ -1388,12 +1810,35 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 training_route_decision,
                             )
                             if non_training_issues:
-                                raise KernelFailedError("; ".join(non_training_issues))
-                            evaluation = _kernel_metrics.load_kernel_metrics(
-                                kernel_result.metrics_path,
-                                metric_direction,
-                                target_metric,
-                            )
+                                validation_blocked_result = _resolve_validation_blocked_kernel_result(
+                                    kernel_result=kernel_result,
+                                    kernel_metrics=kernel_metrics_payload,
+                                    training_route_decision=training_route_decision,
+                                )
+                                if validation_blocked_result is None:
+                                    raise KernelFailedError("; ".join(non_training_issues))
+                                validation_blocked_kernel_output_dir = kernel_result.output_dir
+                            else:
+                                unscored_diagnostic_result = _resolve_unscored_diagnostic_kernel_result(
+                                    kernel_result=kernel_result,
+                                    kernel_metrics=kernel_metrics_payload,
+                                    training_route_decision=training_route_decision,
+                                    authoritative_evaluation_contract=evaluation_contract,
+                                    deliverable_mode=deliverable_mode,
+                                    submit_mode=submit_mode,
+                                )
+                                if unscored_diagnostic_result is not None:
+                                    unscored_diagnostic_kernel_output_dir = kernel_result.output_dir
+                                else:
+                                    evaluation = _load_contract_aware_kernel_metrics(
+                                        metrics_path=kernel_result.metrics_path,
+                                        metrics=kernel_metrics_payload,
+                                        direction=metric_direction,
+                                        target_metric=target_metric,
+                                        authoritative_contract=evaluation_contract,
+                                    )
+                        if validation_blocked_result is not None or unscored_diagnostic_result is not None:
+                            break
                         if evaluation is None:
                             raise KernelFailedError(
                                 "Kernel metrics missing expected score; "
@@ -1523,6 +1968,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             error_message=error_text,
                             attempt=kernel_attempts,
                             pending_error_fixes=pending_error_fixes,
+                            original_error=exc if isinstance(exc, KernelFailedError) else None,
                         )
             elif evaluation is None:
                 kernel_path = config.paths.kernel_source_dir / "kernel.py"
@@ -1574,12 +2020,35 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                 training_route_decision,
                             )
                             if non_training_issues:
-                                raise KernelFailedError("; ".join(non_training_issues))
-                            evaluation = _kernel_metrics.load_kernel_metrics(
-                                kernel_result.metrics_path,
-                                metric_direction,
-                                target_metric,
-                            )
+                                validation_blocked_result = _resolve_validation_blocked_kernel_result(
+                                    kernel_result=kernel_result,
+                                    kernel_metrics=kernel_metrics_payload,
+                                    training_route_decision=training_route_decision,
+                                )
+                                if validation_blocked_result is None:
+                                    raise KernelFailedError("; ".join(non_training_issues))
+                                validation_blocked_kernel_output_dir = kernel_result.output_dir
+                            else:
+                                unscored_diagnostic_result = _resolve_unscored_diagnostic_kernel_result(
+                                    kernel_result=kernel_result,
+                                    kernel_metrics=kernel_metrics_payload,
+                                    training_route_decision=training_route_decision,
+                                    authoritative_evaluation_contract=evaluation_contract,
+                                    deliverable_mode=deliverable_mode,
+                                    submit_mode=submit_mode,
+                                )
+                                if unscored_diagnostic_result is not None:
+                                    unscored_diagnostic_kernel_output_dir = kernel_result.output_dir
+                                else:
+                                    evaluation = _load_contract_aware_kernel_metrics(
+                                        metrics_path=kernel_result.metrics_path,
+                                        metrics=kernel_metrics_payload,
+                                        direction=metric_direction,
+                                        target_metric=target_metric,
+                                        authoritative_contract=evaluation_contract,
+                                    )
+                        if validation_blocked_result is not None or unscored_diagnostic_result is not None:
+                            break
                         if evaluation is None:
                             raise KernelFailedError(
                                 "Local kernel metrics missing expected score; "
@@ -1676,12 +2145,35 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                                         training_route_decision,
                                     )
                                     if non_training_issues:
-                                        raise KernelFailedError("; ".join(non_training_issues))
-                                    evaluation = _kernel_metrics.load_kernel_metrics(
-                                        kernel_result.metrics_path,
-                                        metric_direction,
-                                        target_metric,
-                                    )
+                                        validation_blocked_result = _resolve_validation_blocked_kernel_result(
+                                            kernel_result=kernel_result,
+                                            kernel_metrics=kernel_metrics_payload,
+                                            training_route_decision=training_route_decision,
+                                        )
+                                        if validation_blocked_result is None:
+                                            raise KernelFailedError("; ".join(non_training_issues))
+                                        validation_blocked_kernel_output_dir = kernel_result.output_dir
+                                    else:
+                                        unscored_diagnostic_result = _resolve_unscored_diagnostic_kernel_result(
+                                            kernel_result=kernel_result,
+                                            kernel_metrics=kernel_metrics_payload,
+                                            training_route_decision=training_route_decision,
+                                            authoritative_evaluation_contract=evaluation_contract,
+                                            deliverable_mode=deliverable_mode,
+                                            submit_mode=submit_mode,
+                                        )
+                                        if unscored_diagnostic_result is not None:
+                                            unscored_diagnostic_kernel_output_dir = kernel_result.output_dir
+                                        else:
+                                            evaluation = _load_contract_aware_kernel_metrics(
+                                                metrics_path=kernel_result.metrics_path,
+                                                metrics=kernel_metrics_payload,
+                                                direction=metric_direction,
+                                                target_metric=target_metric,
+                                                authoritative_contract=evaluation_contract,
+                                            )
+                                if validation_blocked_result is not None or unscored_diagnostic_result is not None:
+                                    break
                                 if evaluation is None:
                                     raise KernelFailedError(
                                         "Handed-off Kaggle kernel metrics missing expected score; "
@@ -1714,7 +2206,89 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                             error_message=error_text,
                             attempt=kernel_attempts,
                             pending_error_fixes=pending_error_fixes,
+                            original_error=exc if isinstance(exc, KernelFailedError) else None,
                         )
+
+            if validation_blocked_result is not None or unscored_diagnostic_result is not None:
+                if validation_blocked_result is not None:
+                    diagnostic_status = "validation_blocked"
+                    diagnostic_reason = "; ".join(validation_blocked_result.blockers)
+                    diagnostic_route_result = validation_blocked_result.route_result
+                    diagnostic_output_dir = validation_blocked_kernel_output_dir
+                else:
+                    diagnostic_status = "validated_unscored_artifact"
+                    diagnostic_reason = "competition-faithful score unavailable"
+                    if unscored_diagnostic_result is None:
+                        raise RuntimeError("Unscored diagnostic result was not recorded.")
+                    diagnostic_route_result = unscored_diagnostic_result.route_result
+                    diagnostic_output_dir = unscored_diagnostic_kernel_output_dir
+                if diagnostic_output_dir is None:
+                    raise RuntimeError("Diagnostic kernel output directory was not recorded.")
+                preserved_artifacts = _preserve_diagnostic_artifacts(
+                    kernel_output_dir=diagnostic_output_dir,
+                    iter_dir=iter_dir,
+                    route_result=diagnostic_route_result,
+                )
+                non_submittable_diagnostic_reason = diagnostic_reason
+                diagnostic_metrics_payload = dict(kernel_metrics_payload or {})
+                asset_hashes = diagnostic_metrics_payload.get("asset_hashes")
+                archive_hash = asset_hashes.get("archive") if isinstance(asset_hashes, dict) else None
+                candidate_hash = _first_nonempty_string(
+                    diagnostic_metrics_payload.get("selected_candidate_hash"),
+                    diagnostic_metrics_payload.get("selected_packaged_hash"),
+                    archive_hash,
+                )
+                diagnostic_metrics_payload.update(
+                    {
+                        "run_id": run_id,
+                        "iter": iteration,
+                        "iteration_status": diagnostic_status,
+                        "metric_available": False,
+                        "score_available": False,
+                        "score_status": "unavailable",
+                        "submission_eligible": False,
+                        "scored_candidate": False,
+                        "diagnostic_only": True,
+                        "competition_faithful": False,
+                        "candidate_hash": candidate_hash,
+                        "diagnostic_artifact_paths": preserved_artifacts,
+                        "validation_status": diagnostic_route_result.get("validation_status"),
+                        "preserved_artifacts": preserved_artifacts,
+                    }
+                )
+                if validation_blocked_result is not None:
+                    diagnostic_metrics_payload["validation_blockers"] = list(validation_blocked_result.blockers)
+                _iteration_metrics.write_iteration_metrics_payload(metrics_path, diagnostic_metrics_payload)
+                _autopilot_state.write_iteration_state_marker(
+                    iter_dir=iter_dir,
+                    run_id=run_id,
+                    iteration=iteration,
+                    submission_path=iter_dir / "submission.zip",
+                    metrics_path=metrics_path,
+                    evaluation_report_path=evaluation_report_path,
+                    submit_phase_required=submit_enabled and not config.dry_run,
+                    submit_phase_finished=True,
+                    submit_allowed_by_gate=False,
+                    submit_phase_state=diagnostic_status,
+                    submitted=False,
+                    readiness_score=None,
+                    trained=False,
+                    iteration_status=diagnostic_status,
+                )
+                _autopilot_state.apply_run_status(
+                    run_payload,
+                    status=diagnostic_status,
+                    stop_reason=diagnostic_reason,
+                )
+                _watch_state.update_watch_phase(
+                    config,
+                    run_id,
+                    diagnostic_status,
+                    detail=diagnostic_reason,
+                    iteration=iteration,
+                )
+                print(f"[yellow]{diagnostic_status.replace('_', ' ')}[/yellow]: {diagnostic_reason}.")
+                break
 
             if evaluation is None:
                 raise RuntimeError("No evaluation metrics produced.")
@@ -1880,10 +2454,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                         if kernel_result.metrics_path and kernel_result.metrics_path.exists():
                             kernel_metrics_artifact_path = kernel_result.metrics_path
                             kernel_metrics_payload = _json_utils.load_json_object(kernel_result.metrics_path)
-                            evaluation = _kernel_metrics.load_kernel_metrics(
-                                kernel_result.metrics_path,
-                                metric_direction,
-                                target_metric,
+                            evaluation = _load_contract_aware_kernel_metrics(
+                                metrics_path=kernel_result.metrics_path,
+                                metrics=kernel_metrics_payload,
+                                direction=metric_direction,
+                                target_metric=target_metric,
+                                authoritative_contract=evaluation_contract,
                             )
                         if evaluation is None:
                             raise KernelFailedError(
@@ -3298,7 +3874,12 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         best_submittable_submission=best_submittable_submission,
     )
 
-    if (
+    if non_submittable_diagnostic_reason is not None:
+        print(
+            "[yellow]submit skipped[/yellow]: validation assets were unavailable; "
+            "diagnostic artifacts are not eligible for submission."
+        )
+    elif (
         submit_enabled
         and not submitted
         and best_submittable_submission is not None
@@ -3376,7 +3957,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             "(all candidates were blocked by quality guard)."
         )
 
-    if writeup_submit_enabled and writeup_bundle_meta is not None:
+    if non_submittable_diagnostic_reason is None and writeup_submit_enabled and writeup_bundle_meta is not None:
         notebook_payload = writeup_bundle_meta.get("notebook")
         notebook_publish_required = (
             isinstance(notebook_payload, dict)
@@ -3478,17 +4059,23 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     submit_obligation_satisfied = (submitted and bool(last_submission_result)) or (
         _submit_attempts.has_satisfied_submit_obligation(run_dir)
     )
-    terminal_submit_contract_failed = submit_enabled and not config.dry_run and not submit_obligation_satisfied
-    _autopilot_state.apply_final_run_status(
-        run_payload,
-        submitted=submitted,
-        has_submission_result=bool(last_submission_result),
-        has_successful_submission=has_successful_submission,
-        submit_required=submit_enabled and not config.dry_run,
-        submit_obligation_satisfied=submit_obligation_satisfied,
-        writeup_mode=writeup_mode,
-        writeup_bundle_meta=writeup_bundle_meta,
+    terminal_submit_contract_failed = (
+        non_submittable_diagnostic_reason is None
+        and submit_enabled
+        and not config.dry_run
+        and not submit_obligation_satisfied
     )
+    if non_submittable_diagnostic_reason is None:
+        _autopilot_state.apply_final_run_status(
+            run_payload,
+            submitted=submitted,
+            has_submission_result=bool(last_submission_result),
+            has_successful_submission=has_successful_submission,
+            submit_required=submit_enabled and not config.dry_run,
+            submit_obligation_satisfied=submit_obligation_satisfied,
+            writeup_mode=writeup_mode,
+            writeup_bundle_meta=writeup_bundle_meta,
+        )
 
     run_payload["summary"] = _autopilot_state.build_run_summary_payload(
         best_score=best_score,
@@ -3918,6 +4505,7 @@ def _run_kernel_fix(
     prompt_prefix: str = "",
     max_codex_passes: int | None = None,
     failure_stage: str = "kernel_runtime",
+    original_error: KernelFailedError | None = None,
 ) -> _kernel_preflight.KernelFixResult:
     if config.dry_run:
         return _run_kernel_fix_body(
@@ -3935,6 +4523,7 @@ def _run_kernel_fix(
             max_codex_passes=max_codex_passes,
             workflow_checkpoint=None,
             failure_stage=failure_stage,
+            original_error=original_error,
         )
     recovery_payload: dict[str, object] = {
         "iteration": int(iteration),
@@ -3968,6 +4557,7 @@ def _run_kernel_fix(
             max_codex_passes=max_codex_passes,
             workflow_checkpoint=checkpoint,
             failure_stage=failure_stage,
+            original_error=original_error,
         )
 
 
@@ -3987,6 +4577,7 @@ def _run_kernel_fix_body(
     max_codex_passes: int | None,
     workflow_checkpoint: _oracle_workflow_state.OracleWorkflowCheckpoint | None,
     failure_stage: str,
+    original_error: KernelFailedError | None,
 ) -> _kernel_preflight.KernelFixResult:
     agent_dir = iter_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -4240,9 +4831,12 @@ def _run_kernel_fix_body(
                         "Current preflight failure:\n"
                         f"{_kernel_preflight.format_kernel_preflight_failure(current_failure)}"
                     )
-                raise KernelFailedError(
+                no_change_error = KernelFailedError(
                     "Kernel fix agent produced no file changes and regeneration fallback was already used."
                 )
+                if original_error is not None:
+                    raise original_error from no_change_error
+                raise no_change_error
             try:
                 _verify_artifacts.run_repo_verify(
                     config.verify_cmd,

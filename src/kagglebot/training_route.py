@@ -37,6 +37,7 @@ NON_TRAINING_SOURCE_MARKERS = (
     "non_training_validation_passed",
     "non_training_validation_mode",
 )
+NON_TRAINING_VALIDATION_REQUIRED_ISSUE = "metrics.json must declare non_training_validation_passed=true"
 
 
 @dataclass(frozen=True)
@@ -187,13 +188,107 @@ def validate_non_training_metrics(
     if metrics.get("training_performed") is not False:
         issues.append("metrics.json must declare training_performed=false")
     if metrics.get("non_training_validation_passed") is not True:
-        issues.append("metrics.json must declare non_training_validation_passed=true")
+        issues.append(NON_TRAINING_VALIDATION_REQUIRED_ISSUE)
     actual_validation_mode = _token(metrics.get("non_training_validation_mode"))
     if decision.validation_mode and actual_validation_mode != decision.validation_mode:
         issues.append(
             f"metrics.json non_training_validation_mode must match the approved plan ({decision.validation_mode})"
         )
     return tuple(issues)
+
+
+def resolve_non_training_validation_blockers(
+    *,
+    metrics: Mapping[str, object],
+    route_result: Mapping[str, object],
+    submission_contract: Mapping[str, object],
+    decision: TrainingRouteDecision,
+    canonical_submission_emitted: bool,
+) -> tuple[str, ...] | None:
+    """Recognize an honest, non-submittable validation-unavailable result."""
+    if validate_non_training_metrics(metrics, decision) != (NON_TRAINING_VALIDATION_REQUIRED_ISSUE,):
+        return None
+
+    manifest = _mapping(route_result.get("manifest"))
+    if (
+        metrics.get("non_training_validation_passed") is not False
+        or metrics.get("execution_status") != "validation_unavailable"
+        or "primary_score" not in metrics
+        or metrics.get("primary_score") is not None
+        or any(metrics.get(key) is not None for key in ("offline_value", "value"))
+        or manifest.get("submission_ready") is not False
+        or submission_contract.get("submission_ready") is not False
+        or submission_contract.get("canonical_submission_emitted") is not False
+        or canonical_submission_emitted
+    ):
+        return None
+
+    artifact_kind = _token(metrics.get("artifact_kind"))
+    if artifact_kind and artifact_kind != "diagnostic":
+        return None
+
+    blockers = _nonempty_text_items(metrics.get("validation_blockers"))
+    blockers.extend(_nonempty_text_items(metrics.get("remediation")))
+    blockers.extend(_nonempty_text_items(submission_contract.get("remediation")))
+    reason = metrics.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        blockers.append(reason.strip())
+    return tuple(dict.fromkeys(blockers)) or None
+
+
+def is_unscored_non_training_diagnostic(
+    *,
+    metrics: Mapping[str, object],
+    route_result: Mapping[str, object],
+    submission_contract: Mapping[str, object],
+    decision: TrainingRouteDecision,
+    canonical_submission_emitted: bool,
+) -> bool:
+    """Return whether a validated skill artifact has no honest offline score."""
+    if not decision.skip_local_training or validate_non_training_metrics(metrics, decision):
+        return False
+
+    manifest = _mapping(route_result.get("manifest"))
+    artifact_paths = _nonempty_text_items(route_result.get("artifact_paths"))
+    archive_name = manifest.get("archive")
+    archive_basename = (
+        archive_name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+        if isinstance(archive_name, str) and archive_name.strip()
+        else ""
+    )
+    if (
+        route_result.get("mode") != "skill_artifact"
+        or route_result.get("validation_status") != "success"
+        or not archive_basename
+        or archive_basename != archive_name
+        or archive_basename.lower() == "submission.zip"
+        or manifest.get("submission_ready") is not False
+        or not artifact_paths
+        or any(path.replace("\\", "/").rsplit("/", 1)[-1].lower() == "submission.zip" for path in artifact_paths)
+        or canonical_submission_emitted
+    ):
+        return False
+
+    if submission_contract and (
+        submission_contract.get("archive_name") != archive_basename
+        or submission_contract.get("submission_ready") is not False
+        or submission_contract.get("canonical_submission_emitted") is not False
+        or submission_contract.get("official_paired_validation_passed") is not False
+    ):
+        return False
+
+    return bool(
+        metrics.get("execution_mode") == "non_training_submission"
+        and metrics.get("training_performed") is False
+        and metrics.get("execution_status") == "success"
+        and metrics.get("non_training_validation_passed") is True
+        and metrics.get("offline_artifact_validation_passed") is True
+        and metrics.get("official_paired_validation_passed") is False
+        and metrics.get("submission_ready") is False
+        and "primary_score" in metrics
+        and metrics.get("primary_score") is None
+        and all(metrics.get(key) is None for key in ("offline_value", "value"))
+    )
 
 
 def validate_non_training_source(source: str) -> tuple[str, ...]:
@@ -237,3 +332,9 @@ def _evidence_text(proposal: Mapping[str, object]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _nonempty_text_items(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
