@@ -73,6 +73,30 @@ def submit_validated_writeup(
         content_sha256=content_sha256,
         submission_sha256=submission_sha256,
     )
+    if prior is not None and prior.get("status") == "submitted":
+        return {
+            "status": "blocked_duplicate",
+            "content_sha256": content_sha256,
+            "previous_status": prior.get("status"),
+        }
+    resolved_adapter = adapter or KaggleWriteupCdpAdapter()
+    existing = find_submitted_writeup(
+        slug=request.slug,
+        title=_report_title(body, fallback=request.slug),
+        adapter=resolved_adapter,
+    )
+    if existing.get("status") == "submitted":
+        result = {
+            "status": "submitted",
+            "slug": request.slug,
+            "content_sha256": content_sha256,
+            "submission_sha256": submission_sha256,
+            "report_path": str(report_path),
+            "browser": existing,
+            "reconciled": True,
+        }
+        append_jsonl_record(request.attempts_path, result, sort_keys=True)
+        return result
     if prior is not None:
         return {
             "status": "blocked_duplicate",
@@ -101,7 +125,6 @@ def submit_validated_writeup(
         },
         sort_keys=True,
     )
-    resolved_adapter = adapter or KaggleWriteupCdpAdapter()
     try:
         browser_result = resolved_adapter.submit(slug=request.slug, title=title, body=body)
     except Exception as exc:  # noqa: BLE001
@@ -127,7 +150,27 @@ def submit_validated_writeup(
 class KaggleWriteupCdpAdapter:
     """Submit through the authenticated Kaggle UI and fail closed on unknown DOM states."""
 
+    def find_submitted(self, *, slug: str, title: str) -> dict[str, object]:
+        return self._run_cdp_script(
+            script=_KAGGLE_WRITEUP_STATUS_CDP_SCRIPT,
+            args=[slug, title],
+            timeout=90.0,
+        )
+
     def submit(self, *, slug: str, title: str, body: str) -> dict[str, object]:
+        return self._run_cdp_script(
+            script=_KAGGLE_WRITEUP_CDP_SCRIPT,
+            args=[slug, title, body],
+            timeout=180.0,
+        )
+
+    def _run_cdp_script(
+        self,
+        *,
+        script: str,
+        args: list[str],
+        timeout: float,
+    ) -> dict[str, object]:
         bootstrap = strategy_runner._maybe_start_oracle_browser(["--engine", "browser"])  # noqa: SLF001
         try:
             remote = strategy_runner._oracle_remote_chrome_endpoint(bootstrap.args)  # noqa: SLF001
@@ -140,15 +183,13 @@ class KaggleWriteupCdpAdapter:
                 [
                     node,
                     "-e",
-                    _KAGGLE_WRITEUP_CDP_SCRIPT,
+                    script,
                     str(cdp_module),
                     host,
                     str(port),
-                    slug,
-                    title,
-                    body,
+                    *args,
                 ],
-                timeout=180.0,
+                timeout=timeout,
             )
             try:
                 payload = json.loads(result.stdout.strip().splitlines()[-1])
@@ -162,6 +203,29 @@ class KaggleWriteupCdpAdapter:
             return payload
         finally:
             bootstrap.close()
+
+
+def find_submitted_writeup(
+    *,
+    slug: str,
+    title: str,
+    adapter: WriteupBrowserAdapter | None = None,
+) -> dict[str, object]:
+    """Read the authenticated Kaggle project state without submitting anything."""
+    resolved_adapter = adapter or KaggleWriteupCdpAdapter()
+    finder = getattr(resolved_adapter, "find_submitted", None)
+    if not callable(finder):
+        return {"status": "not_checked", "reason": "adapter-does-not-support-reconciliation"}
+    try:
+        result = finder(slug=slug, title=title)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "ambiguous",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    if not isinstance(result, dict):
+        return {"status": "ambiguous", "reason": "invalid-reconciliation-result"}
+    return result
 
 
 def _matching_attempt(
@@ -273,16 +337,92 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     await client.Page.navigate({url: projectsUrl});
     await client.Page.loadEventFired();
     await sleep(2500);
-    const pageFunction = async (slug, title, body) => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const visibleText = () => (document.body && document.body.innerText) || '';
-      const clickByText = (pattern) => {
-        const candidates = [...document.querySelectorAll('button,a,[role="button"]')];
-        const match = candidates.find((node) => pattern.test((node.textContent || '').trim()) && !node.disabled);
-        if (!match) return false;
-        match.click();
-        return true;
-      };
+    const readPage = async () => {
+      const evaluated = await client.Runtime.evaluate({
+        expression: `JSON.stringify({
+          title: document.title,
+          text: (document.body && document.body.innerText) || '',
+          url: location.href,
+          links: [...document.querySelectorAll('a[href]')].map((node) => ({
+            text: (node.textContent || '').replace(/\\s+/g, ' ').trim(),
+            href: node.href
+          }))
+        })`,
+        returnByValue: true,
+      });
+      const value = evaluated.result && evaluated.result.value;
+      return value ? JSON.parse(value) : {};
+    };
+    const page = await readPage();
+    if (/sign in|log in/i.test(page.text || '') && /kaggle/i.test(page.title || '')) {
+      console.log(JSON.stringify({status: 'failed', reason: 'kaggle-authentication-required'}));
+      return;
+    }
+    if (/join competition|i understand and accept/i.test(page.text || '')) {
+      console.log(JSON.stringify({status: 'failed', reason: 'competition-entry-or-rules-action-required'}));
+      return;
+    }
+    const prefix = `/competitions/${slug}/writeups/`;
+    const draftLink = (page.links || []).find((item) => {
+      let path;
+      try {
+        path = new URL(item.href, page.url).pathname;
+      } catch {
+        return false;
+      }
+      return path.startsWith(prefix) && /new writeup|draft/i.test(item.text || '');
+    });
+    if (draftLink && draftLink.href) {
+      await client.close();
+      client = undefined;
+      await CDP.Close({host, port, id: target.id}).catch(() => {});
+      target = await CDP.New({host, port, url: draftLink.href});
+      client = await CDP({host, port, target});
+      await client.Page.enable();
+      await sleep(2500);
+    } else {
+      const opened = await client.Runtime.evaluate({
+        expression: `(() => {
+          const nodes = [...document.querySelectorAll('button,a,[role="button"]')];
+          const match = nodes.find(
+            (node) => /new writeup/i.test((node.textContent || '').trim()) && !node.disabled);
+          if (!match) return false;
+          match.click();
+          return true;
+        })()`,
+        returnByValue: true,
+      });
+      if (!opened.result || opened.result.value !== true) {
+        console.log(JSON.stringify({
+          status: 'failed',
+          reason: 'new-writeup-control-not-found',
+          url: page.url,
+        }));
+        return;
+      }
+      await sleep(2500);
+    }
+    const fillExpression = `(() => {
+      const title = ${JSON.stringify(title)};
+      const body = ${JSON.stringify(body)};
+      const pageText = (document.body && document.body.innerText) || '';
+      if (/join competition|i understand and accept/i.test(pageText)) {
+        return {ok: false, reason: 'competition-entry-or-rules-action-required', url: location.href};
+      }
+      const descriptor = (node) => (
+        (node.name || '') + ' ' + (node.placeholder || '') + ' ' +
+        (node.getAttribute('aria-label') || '')
+      );
+      const titleInput = [...document.querySelectorAll('input')].find((node) =>
+        /(?:^|\\s)title(?:\\s|$)/i.test(descriptor(node)) && !/subtitle/i.test(descriptor(node)));
+      const subtitleInput = [...document.querySelectorAll('input')].find(
+        (node) => /subtitle/i.test(descriptor(node)));
+      const textArea = [...document.querySelectorAll('textarea')].find(
+        (node) => /body|content|description|writeup|markdown/i.test(descriptor(node)));
+      const editor = textArea || document.querySelector('[contenteditable="true"], .ProseMirror');
+      if (!titleInput || !editor) {
+        return {ok: false, reason: 'unrecognized-writeup-editor', url: location.href};
+      }
       const setNativeValue = (element, value) => {
         const prototype = element instanceof HTMLTextAreaElement
           ? HTMLTextAreaElement.prototype
@@ -292,70 +432,179 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         element.dispatchEvent(new Event('input', {bubbles: true}));
         element.dispatchEvent(new Event('change', {bubbles: true}));
       };
-      if (/sign in|log in/i.test(visibleText()) && /kaggle/i.test(document.title)) {
-        return {status: 'failed', reason: 'kaggle-authentication-required'};
-      }
-      if (/join competition|i understand and accept/i.test(visibleText())) {
-        return {status: 'failed', reason: 'competition-entry-or-rules-action-required'};
-      }
-      const writeupLink = [...document.querySelectorAll('a')].find(
-        (node) => /new writeup/i.test(node.textContent || ''));
-      if (writeupLink && writeupLink.href) location.href = writeupLink.href;
-      else if (!clickByText(/new writeup/i)) {
-        location.href = `https://www.kaggle.com/competitions/${slug}/projects/new`;
-      }
-      await sleep(3500);
-      const competitionPrefix = `/competitions/${slug}/`;
-      if (!location.pathname.includes(competitionPrefix) ||
-          !/(?:project|writeup)/i.test(location.pathname)) {
-        return {status: 'failed', reason: 'unexpected-writeup-route', url: location.href};
-      }
-      if (/join competition|i understand and accept/i.test(visibleText())) {
-        return {status: 'failed', reason: 'competition-entry-or-rules-action-required'};
-      }
-      const titleInput = [...document.querySelectorAll('input')].find((node) =>
-        /title/i.test((node.name || '') + ' ' + (node.placeholder || '') + ' ' +
-          (node.getAttribute('aria-label') || '')));
-      const textArea = [...document.querySelectorAll('textarea')].find((node) =>
-        /body|content|description|writeup|markdown/i.test(
-          (node.name || '') + ' ' + (node.placeholder || '') + ' ' +
-          (node.getAttribute('aria-label') || '')));
-      const editor = textArea || document.querySelector('[contenteditable="true"], .ProseMirror');
-      if (!titleInput || !editor) {
-        return {status: 'failed', reason: 'unrecognized-writeup-editor', url: location.href};
-      }
       setNativeValue(titleInput, title);
+      if (subtitleInput) {
+        const subtitle = body.split('\\n')
+          .map((line) => line.trim())
+          .find((line) => line && !line.startsWith('#') && line.length >= 20) || title;
+        setNativeValue(subtitleInput, subtitle.slice(0, 160));
+      }
       if (editor instanceof HTMLTextAreaElement || editor instanceof HTMLInputElement) {
         setNativeValue(editor, body);
       } else {
         editor.focus();
         editor.textContent = body;
-        editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: null}));
+        editor.dispatchEvent(
+          new InputEvent('input', {bubbles: true, inputType: 'insertText', data: null}));
       }
-      await sleep(500);
-      if (!clickByText(/^save(?: writeup)?$/i)) {
-        return {status: 'failed', reason: 'save-control-not-found', url: location.href};
-      }
-      await sleep(3000);
-      if (!clickByText(/^submit$/i)) {
-        return {status: 'failed', reason: 'submit-control-not-found-after-save', url: location.href};
-      }
-      await sleep(1000);
-      clickByText(/^(?:submit|confirm submission)$/i);
-      await sleep(3500);
-      const finalText = visibleText();
-      const confirmed = /successfully submitted|submission complete|writeup submitted/i.test(finalText);
-      return {
-        status: confirmed ? 'submitted' : 'ambiguous',
-        reason: confirmed ? 'kaggle-confirmed' : 'submission-confirmation-not-observed',
+      const save = [...document.querySelectorAll('button,a,[role="button"]')].find(
+        (node) => /^save(?: draft| writeup)?$/i.test((node.textContent || '').trim()) && !node.disabled);
+      if (!save) return {ok: false, reason: 'save-control-not-found', url: location.href};
+      save.click();
+      return {ok: true, url: location.href};
+    })()`;
+    const filled = await client.Runtime.evaluate({expression: fillExpression, returnByValue: true});
+    const fillResult = filled.result && filled.result.value;
+    if (!fillResult || fillResult.ok !== true) {
+      console.log(JSON.stringify({
+        status: 'failed',
+        reason: (fillResult && fillResult.reason) || 'writeup-fill-failed',
+        url: fillResult && fillResult.url,
+      }));
+      return;
+    }
+    await sleep(3000);
+    const submitClicked = await client.Runtime.evaluate({
+      expression: `(() => {
+        const submit = [...document.querySelectorAll('button,a,[role="button"]')].find(
+          (node) => /^submit$/i.test((node.textContent || '').trim()) && !node.disabled);
+        if (!submit) return false;
+        submit.click();
+        return true;
+      })()`,
+      returnByValue: true,
+    });
+    if (!submitClicked.result || submitClicked.result.value !== true) {
+      const current = await readPage();
+      console.log(JSON.stringify({
+        status: 'failed',
+        reason: 'submit-control-not-found-after-save',
+        url: current.url,
+      }));
+      return;
+    }
+    await sleep(1200);
+    await client.Runtime.evaluate({
+      expression: `(() => {
+        const confirm = [...document.querySelectorAll('button,[role="button"]')].find(
+          (node) => /^(?:submit|confirm submission)$/i.test((node.textContent || '').trim()) &&
+            !node.disabled);
+        if (!confirm) return false;
+        confirm.click();
+        return true;
+      })()`,
+      returnByValue: true,
+    });
+    await sleep(3500);
+    const finalPage = await readPage();
+    const confirmed = /submitted!|successfully submitted|submission complete|writeup submitted/i.test(
+      finalPage.text || '');
+    console.log(JSON.stringify({
+      status: confirmed ? 'submitted' : 'ambiguous',
+      reason: confirmed ? 'kaggle-confirmed' : 'submission-confirmation-not-observed',
+      url: finalPage.url,
+    }));
+  } catch (error) {
+    console.log(JSON.stringify({status: 'ambiguous', reason: String(error)}));
+    process.exitCode = 1;
+  } finally {
+    if (client) await client.close().catch(() => {});
+    if (target) await CDP.Close({host, port, id: target.id}).catch(() => {});
+  }
+})();
+"""
+
+
+_KAGGLE_WRITEUP_STATUS_CDP_SCRIPT = r"""
+const CDP = require(process.argv[1]);
+const host = process.argv[2];
+const port = Number(process.argv[3]);
+const slug = process.argv[4];
+const title = process.argv[5];
+const projectsUrl = `https://www.kaggle.com/competitions/${slug}/projects`;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+(async () => {
+  let client;
+  let target;
+  try {
+    target = await CDP.New({host, port, url: projectsUrl});
+    client = await CDP({host, port, target});
+    await client.Page.enable();
+    await client.Page.navigate({url: projectsUrl});
+    await client.Page.loadEventFired();
+    await sleep(2500);
+    const expected = String(title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const prefix = `/competitions/${slug}/writeups/`;
+    const listing = await client.Runtime.evaluate({
+      expression: `JSON.stringify({
+        title: document.title,
+        text: (document.body && document.body.innerText) || '',
         url: location.href,
-      };
-    };
-    const expression = '(' + pageFunction.toString() + ')(' +
-      JSON.stringify(slug) + ',' + JSON.stringify(title) + ',' + JSON.stringify(body) + ')';
-    const evaluated = await client.Runtime.evaluate({expression, awaitPromise: true, returnByValue: true});
-    const value = evaluated.result && evaluated.result.value;
-    console.log(JSON.stringify(value || {status: 'ambiguous', reason: 'empty-cdp-result'}));
+        links: [...document.querySelectorAll('a[href]')].map((node) => ({
+          text: (node.textContent || '').replace(/\\s+/g, ' ').trim(),
+          href: node.href
+        }))
+      })`,
+      returnByValue: true,
+    });
+    const listingValue = listing.result && listing.result.value;
+    const page = listingValue ? JSON.parse(listingValue) : {};
+    if (/sign in|log in/i.test(page.text || '') && /kaggle/i.test(page.title || '')) {
+      console.log(JSON.stringify({status: 'failed', reason: 'kaggle-authentication-required'}));
+      return;
+    }
+    const links = (page.links || []).filter((item) => {
+      try {
+        return new URL(item.href, page.url).pathname.startsWith(prefix);
+      } catch {
+        return false;
+      }
+    });
+    const match = links.find((item) => {
+      const linkText = String(item.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return linkText === expected || (expected.length >= 6 && linkText.includes(expected));
+    });
+    if (!match || !match.href) {
+      console.log(JSON.stringify({
+        status: 'not_found',
+        reason: 'matching-writeup-not-listed',
+        writeup_count: links.length,
+        url: page.url,
+      }));
+      return;
+    }
+    await client.close();
+    client = undefined;
+    await CDP.Close({host, port, id: target.id}).catch(() => {});
+    target = await CDP.New({host, port, url: match.href});
+    client = await CDP({host, port, target});
+    await client.Page.enable();
+    await sleep(3000);
+    const finalState = await client.Runtime.evaluate({
+      expression: `JSON.stringify({
+        title: document.title,
+        text: (document.body && document.body.innerText) || '',
+        url: location.href
+      })`,
+      returnByValue: true,
+    });
+    const finalValue = finalState.result && finalState.result.value;
+    const finalPage = finalValue ? JSON.parse(finalValue) : {};
+    const currentTitle = String(finalPage.title || '')
+      .replace(/\s*\|\s*Kaggle\s*$/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const confirmed = /submitted!/i.test(finalPage.text || '');
+    const titleMatches = currentTitle === expected;
+    console.log(JSON.stringify({
+      status: confirmed && titleMatches ? 'submitted' : 'not_submitted',
+      reason: confirmed
+        ? (titleMatches ? 'kaggle-submitted-confirmation-observed' : 'writeup-title-mismatch')
+        : 'submitted-confirmation-not-observed',
+      title: finalPage.title,
+      url: finalPage.url,
+    }));
   } catch (error) {
     console.log(JSON.stringify({status: 'ambiguous', reason: String(error)}));
     process.exitCode = 1;

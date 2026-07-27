@@ -6387,8 +6387,8 @@ def test_autopilot_creates_improve_prompt(monkeypatch, tmp_path: Path) -> None:
     assert any(
         kwargs.get("reasoning_effort") == ORACLE_IMPLEMENTATION_AGENT.reasoning_effort for kwargs in codex_kwargs_seen
     )
-    assert any(kwargs.get("cli_profile") == "sol-ultra" for kwargs in codex_kwargs_seen)
-    assert any(kwargs.get("reasoning_profile") == "ultra" for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("cli_profile") == "sol-xhigh" for kwargs in codex_kwargs_seen)
+    assert any(kwargs.get("reasoning_profile") == "xhigh" for kwargs in codex_kwargs_seen)
 
 
 def test_run_improvement_allows_context_and_run_artifacts(monkeypatch, tmp_path: Path) -> None:

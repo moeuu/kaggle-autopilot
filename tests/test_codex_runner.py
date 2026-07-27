@@ -317,16 +317,16 @@ def test_run_codex_passes_profile_model_effort_and_workdir(monkeypatch, tmp_path
         tmp_path / "out",
         model="gpt-5.6-sol",
         reasoning_effort="xhigh",
-        reasoning_profile="ultra",
-        cli_profile="sol-ultra",
+        reasoning_profile="xhigh",
+        cli_profile="sol-xhigh",
         cwd=workdir,
     )
 
     args = captured["args"]
     assert isinstance(args, list)
-    assert args[args.index("--profile") + 1] == "sol-ultra"
+    assert args[args.index("--profile") + 1] == "sol-xhigh"
     assert args[args.index("-m") + 1] == "gpt-5.6-sol"
     assert args[args.index("-C") + 1] == str(workdir.resolve())
     assert 'model_reasoning_effort="xhigh"' in args
     assert captured["cwd"] == workdir
-    assert result.reasoning_profile == "ultra"
+    assert result.reasoning_profile == "xhigh"

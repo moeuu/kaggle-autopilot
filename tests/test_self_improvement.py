@@ -563,7 +563,7 @@ def test_self_improvement_calls_codex_when_enabled_and_clean(
     assert "Prioritize submit diagnostics and retry classification." in str(calls["prompt"])
     assert "first-place Kaggle leaderboard performance" in " ".join(str(calls["prompt"]).split())
     assert result["codex_improvement"]["publish"]["status"] == "disabled"
-    assert result["codex_improvement"]["implementation_profile"]["cli_profile"] == "sol-ultra"
+    assert result["codex_improvement"]["implementation_profile"]["cli_profile"] == "sol-xhigh"
 
 
 def test_self_improvement_reexecutes_interrupted_oracle_before_codex(monkeypatch, tmp_path: Path) -> None:

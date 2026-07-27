@@ -784,6 +784,8 @@ def test_run_discord_notifier_once_replays_lifecycle_events_from_watch_ledger(tm
                         "event": "finished",
                         "slug": "first-comp",
                         "run_id": "run-1",
+                        "submission_status": "submitted",
+                        "submission_url": "https://www.kaggle.com/competitions/first-comp/writeups/demo",
                     }
                 ),
             ]
@@ -812,6 +814,8 @@ def test_run_discord_notifier_once_replays_lifecycle_events_from_watch_ledger(tm
     assert notifier.events[1]["payload"]["discord_update_key"] == (
         "kaggle-autopilot:lab_rdp:local_gpu:run:run-1:finished"
     )
+    assert notifier.events[1]["payload"]["submission_status"] == "submitted"
+    assert notifier.events[1]["payload"]["submission_url"].endswith("/writeups/demo")
     notifier_state = _read_json_object(watch_dir / "discord_notifier_state.json")
     assert notifier_state[LEDGER_OFFSET_KEY] == ledger_path.stat().st_size
 

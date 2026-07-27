@@ -344,7 +344,7 @@ def test_run_strategy_auto_falls_back_to_codex_when_oracle_unavailable(monkeypat
     assert result.engine == "codex"
     assert result.returncode == 0
     assert result.stdout == "Codex fallback response"
-    assert fallback_calls == [("gpt-5.6-sol", "ultra")]
+    assert fallback_calls == [("gpt-5.6-sol", "xhigh")]
     assert "Oracle-to-Codex fallback" in result.stderr
     assert (tmp_path / "oracle_strategy_exec.txt").exists()
     assert (tmp_path / "oracle_fallback_reason.txt").exists()
@@ -407,7 +407,7 @@ def test_run_strategy_oracle_uses_two_hour_default_timeout_outside_pytest(monkey
     assert captured_timeout == 7200.0
 
 
-def test_run_strategy_oracle_timeout_falls_back_to_sol_ultra(monkeypatch, tmp_path: Path) -> None:
+def test_run_strategy_oracle_timeout_falls_back_to_sol_xhigh(monkeypatch, tmp_path: Path) -> None:
     prompt_path = tmp_path / "prompt.md"
     prompt_path.write_text("strategy prompt", encoding="utf-8")
     calls: list[tuple[list[str], float | None]] = []
@@ -444,7 +444,7 @@ def test_run_strategy_oracle_timeout_falls_back_to_sol_ultra(monkeypatch, tmp_pa
     assert "--write-output" in oracle_args
     assert oracle_timeout == 7200.0
     assert codex_args[codex_args.index("-m") + 1] == "gpt-5.6-sol"
-    assert 'model_reasoning_effort="ultra"' in codex_args
+    assert 'model_reasoning_effort="xhigh"' in codex_args
     assert result.engine == "codex"
     assert result.stdout == "Codex recovered the strategy"
     assert "timed out after 7200s" in result.stderr

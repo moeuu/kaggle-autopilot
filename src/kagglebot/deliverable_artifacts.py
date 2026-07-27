@@ -32,6 +32,7 @@ _OUTPUT_REQUIREMENT_MARKERS = (
 _NOTEBOOK_REQUIREMENT_PATTERNS = (
     re.compile(r"\b(?:one|a|the)\s+(?:kaggle\s+)?notebook\s*\(required\)", re.IGNORECASE),
     re.compile(r"\brequires?\s+(?:one|a|the)?\s*(?:kaggle\s+)?notebook\b", re.IGNORECASE),
+    re.compile(r"\battached\s+(?:public\s+)?(?:kaggle\s+)?notebook\b", re.IGNORECASE),
     re.compile(r"\bsubmissions?\s+must\s+be\s+made\s+through\s+notebooks?\b", re.IGNORECASE),
     re.compile(r"\bprivate\s+notebook\s+submission\b", re.IGNORECASE),
 )

@@ -58,3 +58,21 @@ def test_leaderboard_contract_does_not_infer_arbitrary_data_filenames(tmp_path: 
 
     assert contract.deliverable_mode == "leaderboard"
     assert contract.required_output_names == ()
+
+
+def test_writeup_detects_attached_public_notebook_requirement(tmp_path: Path) -> None:
+    competition_dir = tmp_path / "demo"
+    context_dir = competition_dir / "context"
+    context_dir.mkdir(parents=True)
+    (competition_dir / "plan.json").write_text(
+        json.dumps({"deliverable_mode": "writeup", "submit_mode": "file"}),
+        encoding="utf-8",
+    )
+    (context_dir / "overview.md").write_text(
+        "A valid submission must contain an Attached Public Notebook.",
+        encoding="utf-8",
+    )
+
+    contract = resolve_deliverable_artifact_contract(competition_dir)
+
+    assert contract.requires_notebook is True

@@ -4,7 +4,7 @@ Autopilot is a non-interactive Kaggle loop with readiness-score iteration contro
 It always follows this high-level path:
 
 1. Bootstrap competition context
-2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex(sol-ultra)`; unavailable Oracle calls use the configured Codex fallback
+2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex(sol-xhigh)`; unavailable Oracle calls use the configured Codex fallback
 3. Train/evaluate per iteration
 4. Improve if needed
 5. Submit and use submission outcomes as secondary guardrails
@@ -91,7 +91,7 @@ For an active run, the watch state's status and phase are authoritative. An inne
 failure status while Oracle/Codex autofix or recovery is already running; notification snapshots report that active
 recovery phase and preserve the inner-stage value separately as `run_record_status` for diagnostics.
 
-## Planning Flow (codex -> oracle(latest-pro) -> codex(sol-ultra))
+## Planning Flow (codex -> oracle(latest-pro) -> codex(sol-xhigh))
 
 Autopilot planning is fixed to:
 
@@ -103,7 +103,7 @@ when the rolling alias does not map to the desired release.
 
 1. Codex: reads local context and writes a brief.
 2. Oracle with the latest Pro model: performs strategy planning with the brief, local context bundle, and live web search when available.
-3. Codex with the `sol-ultra` profile: implements kernel code from frozen instructions.
+3. Codex with the `sol-xhigh` profile: implements kernel code from frozen instructions.
 
 Autopilot attempts Oracle first. If Oracle is not installed as `oracle`, set
 `KAGGLEBOT_ORACLE_COMMAND`, for example `KAGGLEBOT_ORACLE_COMMAND="npx -y @steipete/oracle"`. Extra Oracle flags can
@@ -114,7 +114,7 @@ Global `--dry-run` skips both model calls, writes a deterministic preview plan, 
 guardrails, then stops before kernel preflight, training, evaluation, and submission.
 Oracle strategy calls have an independent two-hour (`7200` second) outer timeout. On timeout, launch failure, a
 non-zero Oracle exit, or an empty response, Kagglebot preserves the Oracle diagnostics and retries the same prompt
-with Codex `gpt-5.6-sol` at `ultra` reasoning. Configure this with `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC`,
+with Codex `gpt-5.6-sol` at `xhigh` reasoning. Configure this with `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC`,
 `KAGGLEBOT_ORACLE_FALLBACK_CODEX`, `KAGGLEBOT_ORACLE_FALLBACK_CODEX_MODEL`, and
 `KAGGLEBOT_ORACLE_FALLBACK_CODEX_REASONING_EFFORT`. Oracle's own browser wait remains 24 hours, but the outer timeout
 takes precedence.
@@ -123,7 +123,7 @@ loop. When Oracle has already written a current response, Kagglebot validates th
 reports a cleanup error. Chat archival is attempted and reported separately, so an archival verification warning
 cannot replace or invalidate a usable Oracle answer.
 Resume skips planning only when the current run contains `planning_complete.json`, written after Oracle planning,
-sol-ultra implementation, and repository verification all succeed. A plan or kernel left by an older or incomplete
+sol-xhigh implementation, and repository verification all succeed. A plan or kernel left by an older or incomplete
 run cannot bypass the required Oracle attempt or its configured Codex fallback.
 Iteration improvement, kernel-fix, and autofix flows also persist `oracle_workflow_state.json` in the run directory.
 If systemd, SIGTERM, or an intentional source-reload restart interrupts Oracle or the following Codex pass, resume
@@ -138,7 +138,7 @@ selection or an active-run kernel resume.
 Every implementation pass that consumes an Oracle response uses the single `[tool.kagglebot.agent]`
 `oracle_implementation_*` profile. This covers initial kernel implementation, improvement iterations, kernel/error
 autofix, the `implement` CLI command, and repository self-improvement. Pre-Oracle brief extraction and an explicitly
-selected legacy `codex` strategy do not use `sol-ultra`.
+selected legacy `codex` strategy do not use `sol-xhigh`.
 
 When browser Oracle is selected and no explicit browser route is configured, Kagglebot bootstraps Chrome automatically
 and appends `--remote-chrome 127.0.0.1:<port>` to the Oracle call. This lets SSH/TTY autopilot loops run without the
@@ -286,11 +286,17 @@ Submission behavior:
 - `deliverable_mode` is canonicalized to `leaderboard|writeup`; legacy `csv` values are accepted for backward compatibility
 - writeup runs resolve required notebook outputs from `plan.json`, `context/evaluation_spec.json`, and requirement wording
   in the persisted official competition pages. Named outputs such as `features.csv` satisfy the kernel source/output
-  contract without being treated as leaderboard prediction files. The report records and hashes every required output.
+  contract without being treated as leaderboard prediction files; wording such as `Attached Public Notebook` also
+  activates the notebook contract. Writeups bypass the generic labeled-competition-data gate because judged hackathons
+  may intentionally provide no competition dataset, while project runtimes and required attachments retain their own
+  validation. The report records and hashes every required output.
   When a private notebook is required and submission is enabled with global `--force`, autopilot publishes the notebook,
   downloads its outputs, requires their hashes to match the locally validated artifacts, adds the private notebook link,
   checks participation/rules, and submits through Kaggle's authenticated Projects/Writeup UI. Started, submitted, and
-  ambiguous payload hashes are never retried automatically.
+  ambiguous payload hashes are never resubmitted automatically. Before resuming an active writeup run, `watch` performs
+  a read-only, exact-title reconciliation against the authenticated Kaggle Writeups listing. Only a matching page with
+  Kaggle's explicit `Submitted!` state closes the run; its URL and status are persisted to the run/watch ledgers and
+  included in the Discord completion event. Draft, missing, title-mismatched, and ambiguous pages remain non-terminal.
 - `submit_mode` is resolved separately as `file|notebook`, with notebook-only rules able to force notebook submit without changing `deliverable_mode`
 - notebook submissions with tiny public `test`/`sample_submission` fixtures are treated as hidden/full-test code competitions and use inference-mode notebook submit instead of embedding a local public-test artifact in a wrapper kernel
 - completed Code Competition notebooks are not sent directly: Codex first reviews immutable Notebook/model/output/runtime-log evidence, then a deterministic guard re-hashes the evidence and rechecks expected output, known quota, exact Notebook-version duplicate identity, and ledger before the API executor runs. Restored scores with zero current evaluation rows and no full model-backed runtime evidence, fallback-only real predictions, repeated runtime exceptions, and persisted dependency/cache output trees fail closed even if Codex says approve. Hosted gateways are validated separately: `run_local_gateway` and hidden-only `serve()` are rejected, `serve()` must run before the visible fallback, and the tiny visible placeholder is not misclassified as the hidden evaluator's prediction set. A successful API call records the exact kernel/version/output identity immediately.
@@ -498,7 +504,7 @@ to repair failures that previously had only a one-line ledger message. It writes
 `skill_candidates.json`, and normalized `outcomes.jsonl`, then asks the Oracle/GPT strategy adviser for the highest
 value improvement brief and calls Codex to implement it only after the repository is clean, committed, pushed to its
 configured upstream, and bound to an exact repository URL and commit SHA. Oracle must echo that baseline in a validated
-JSON plan; the baseline is revalidated before the `sol-ultra` Codex profile runs. That improvement may include
+JSON plan; the baseline is revalidated before the `sol-xhigh` Codex profile runs. That improvement may include
 architectural changes to planner, runner, evaluation, strategy, knowledge, model-search, or self-improvement boundaries
 when the report shows the current architecture is blocking leaderboard progress.
 

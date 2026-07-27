@@ -68,8 +68,8 @@ def test_cli_implement_uses_shared_verify_helper(monkeypatch, tmp_path: Path) ->
     assert captured["dry_run"] is False
     assert captured["artifacts_dir"] == tmp_path / "artifacts"
     codex_kwargs = captured["codex_kwargs"]
-    assert codex_kwargs["cli_profile"] == "sol-ultra"
-    assert codex_kwargs["reasoning_profile"] == "ultra"
+    assert codex_kwargs["cli_profile"] == "sol-xhigh"
+    assert codex_kwargs["reasoning_profile"] == "xhigh"
 
 
 def test_cli_resolve_accelerator_converts_policy_error(monkeypatch) -> None:

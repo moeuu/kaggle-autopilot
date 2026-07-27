@@ -86,15 +86,15 @@ oracle_model = "configured-pro"
     assert model == "fixed-pro"
 
 
-def test_resolve_repository_implementation_agent_uses_sol_ultra_profile(tmp_path: Path) -> None:
+def test_resolve_repository_implementation_agent_uses_sol_xhigh_profile(tmp_path: Path) -> None:
     config_path = tmp_path / "pyproject.toml"
     config_path.write_text(
         """
 [tool.kagglebot.agent]
 repository_implementation_model = "gpt-5.6-sol"
 repository_implementation_reasoning_effort = "xhigh"
-repository_implementation_profile = "sol-ultra"
-repository_implementation_reasoning_profile = "ultra"
+repository_implementation_profile = "sol-xhigh"
+repository_implementation_reasoning_profile = "xhigh"
 """.strip(),
         encoding="utf-8",
     )
@@ -103,8 +103,8 @@ repository_implementation_reasoning_profile = "ultra"
 
     assert agent.model == "gpt-5.6-sol"
     assert agent.reasoning_effort == "xhigh"
-    assert agent.cli_profile == "sol-ultra"
-    assert agent.reasoning_profile == "ultra"
+    assert agent.cli_profile == "sol-xhigh"
+    assert agent.reasoning_profile == "xhigh"
 
 
 def test_resolve_oracle_implementation_agent_centralizes_all_oracle_followup_settings(tmp_path: Path) -> None:
@@ -114,8 +114,8 @@ def test_resolve_oracle_implementation_agent_centralizes_all_oracle_followup_set
 [tool.kagglebot.agent]
 oracle_implementation_model = "gpt-5.6-sol"
 oracle_implementation_reasoning_effort = "xhigh"
-oracle_implementation_profile = "sol-ultra"
-oracle_implementation_reasoning_profile = "ultra"
+oracle_implementation_profile = "sol-xhigh"
+oracle_implementation_reasoning_profile = "xhigh"
 """.strip(),
         encoding="utf-8",
     )
@@ -125,6 +125,6 @@ oracle_implementation_reasoning_profile = "ultra"
 
     assert agent.model == "gpt-5.6-sol"
     assert agent.reasoning_effort == "xhigh"
-    assert agent.cli_profile == "sol-ultra"
-    assert agent.reasoning_profile == "ultra"
+    assert agent.cli_profile == "sol-xhigh"
+    assert agent.reasoning_profile == "xhigh"
     assert repository_agent == agent

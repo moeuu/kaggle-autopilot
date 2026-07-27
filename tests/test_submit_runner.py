@@ -595,7 +595,12 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
             submit_stage_state=kwargs["state"],
             submission_reference=str(prepared_path),
             submission_artifact_path=prepared_path,
-            submission_result=SimpleNamespace(stdout="", stderr="", exit_code=0),
+            submission_result=SimpleNamespace(
+                message="normalized submission message",
+                stdout="",
+                stderr="",
+                exit_code=0,
+            ),
         )
 
     monkeypatch.setattr(
@@ -606,7 +611,11 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
     monkeypatch.setattr(
         submit_runner._submit_outcome,
         "finalize_submit_outcome_for_run_or_abort",
-        lambda **kwargs: calls.append("finalize") or {"ok": True, "submission_ref": kwargs["submission_ref"]},
+        lambda **kwargs: (
+            calls.append("finalize")
+            or captured.update(finalize_message=kwargs["message"])
+            or {"ok": True, "submission_ref": kwargs["submission_ref"]}
+        ),
     )
 
     result = attempt_submit_for_run(
@@ -624,5 +633,6 @@ def test_attempt_submit_for_run_composes_submit_stage_boundaries(monkeypatch, tm
     assert captured == {
         "preflight_fallback_sample_submission_path": fallback_sample_path,
         "attempt_loop_fallback_sample_submission_path": fallback_sample_path,
+        "finalize_message": "normalized submission message",
     }
     assert (paths.run_dir("run-1") / "submission_semantic_preflight.json").is_file()

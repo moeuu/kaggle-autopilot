@@ -253,7 +253,7 @@ class AgentPipeline:
             self.config,
             self.config.run_id,
             "codex_implementation",
-            detail="Codex sol-ultra is implementing the Oracle strategy",
+            detail="Codex sol-xhigh is implementing the Oracle strategy",
         )
         implement_stage.run(instructions_path=instructions_path)
 

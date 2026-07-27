@@ -9,15 +9,28 @@ from pathlib import Path
 from kagglebot.kaggle_api import EnteredCompetition
 from kagglebot.writeup_submission import (
     _KAGGLE_WRITEUP_CDP_SCRIPT,
+    _KAGGLE_WRITEUP_STATUS_CDP_SCRIPT,
     WriteupSubmissionRequest,
     submit_validated_writeup,
 )
 
 
 class _Adapter:
-    def __init__(self, status: str = "submitted") -> None:
+    def __init__(self, status: str = "submitted", *, existing_status: str = "not_found") -> None:
         self.status = status
+        self.existing_status = existing_status
         self.calls = 0
+        self.find_calls = 0
+
+    def find_submitted(self, *, slug: str, title: str) -> dict[str, object]:
+        self.find_calls += 1
+        assert slug == "demo"
+        assert title == "Demo solution"
+        return {
+            "status": self.existing_status,
+            "reason": "test-existing",
+            "url": "https://www.kaggle.com/competitions/demo/writeups/demo-solution",
+        }
 
     def submit(self, *, slug: str, title: str, body: str) -> dict[str, object]:
         self.calls += 1
@@ -119,6 +132,19 @@ def test_writeup_submission_does_not_retry_ambiguous_attempt(tmp_path: Path) -> 
     assert adapter.calls == 1
 
 
+def test_writeup_submission_reconciles_existing_kaggle_submission(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    adapter = _Adapter(existing_status="submitted")
+
+    result = submit_validated_writeup(request, adapter=adapter)
+
+    assert result["status"] == "submitted"
+    assert result["reconciled"] is True
+    assert result["browser"]["url"].endswith("/demo-solution")
+    assert adapter.find_calls == 1
+    assert adapter.calls == 0
+
+
 def test_writeup_submission_blocks_not_entered_and_rules(tmp_path: Path) -> None:
     request = _request(tmp_path)
     adapter = _Adapter()
@@ -184,3 +210,12 @@ def test_writeup_cdp_script_is_valid_javascript() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+    status_result = subprocess.run(  # noqa: S603
+        [node, "-e", "new Function(process.argv[1])", _KAGGLE_WRITEUP_STATUS_CDP_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert status_result.returncode == 0, status_result.stderr

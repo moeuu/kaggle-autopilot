@@ -461,7 +461,17 @@ def _lifecycle_payload(
     payload["status"] = "running" if event_name == "started" else event_name
     payload["phase"] = event_name
     payload["message"] = _lifecycle_message(event_name=event_name, slug=slug, compute=compute)
-    for key in ("reason", "error", "resume"):
+    for key in (
+        "reason",
+        "error",
+        "resume",
+        "submission_status",
+        "submission_url",
+        "submission_score",
+        "submission_rank",
+        "submission_total_teams",
+        "writeup_title",
+    ):
         _put_if_not_none(payload, key, record.get(key))
     payload["discord_update_key"] = _discord_event_update_key(snapshot=payload, event_type=event_type)
     return payload

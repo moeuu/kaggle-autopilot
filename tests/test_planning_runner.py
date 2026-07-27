@@ -149,3 +149,35 @@ def test_required_local_training_is_resumably_blocked_when_labeled_data_is_missi
         encoding="utf-8",
     )
     planning_runner.ensure_local_training_data_ready(config, "run-1")
+
+
+def test_writeup_does_not_require_generic_labeled_competition_data(monkeypatch, tmp_path) -> None:
+    paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
+    paths.context_dir.mkdir(parents=True)
+    paths.data_dir.mkdir(parents=True)
+    paths.run_dir("run-1").mkdir(parents=True)
+    paths.plan_path.write_text(
+        json.dumps(
+            {
+                "deliverable_mode": "writeup",
+                "runtime_budget": {"local_training_required": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths.dataset_profile_path.write_text(
+        json.dumps({"status": "missing_required_files"}),
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(slug="demo", paths=paths)
+    phases: list[str] = []
+    monkeypatch.setattr(
+        planning_runner,
+        "update_watch_phase",
+        lambda _config, _run_id, phase, **_kwargs: phases.append(phase),
+    )
+
+    planning_runner.ensure_local_training_data_ready(config, "run-1")
+
+    assert not (paths.run_dir("run-1") / "run.json").exists()
+    assert phases == []

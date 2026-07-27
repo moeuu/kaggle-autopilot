@@ -1223,7 +1223,7 @@ def run_autopilot(config: AutopilotConfig) -> None:
                 raise
             except MissingCompetitionDataError as exc:
                 print(f"[yellow]blocked on data[/yellow]: {exc}")
-                return
+                raise
             except OracleStrategyError:
                 raise
             except KeyboardInterrupt:

@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 import kagglebot.supervisor as supervisor
 from kagglebot.cli import app
-from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError
+from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError, MissingCompetitionDataError
 from kagglebot.kaggle_api import EnteredCompetition
 from kagglebot.supervisor import (
     WatchConfig,
@@ -17,6 +17,7 @@ from kagglebot.supervisor import (
     _build_autopilot_config,
     _estimate_training_minutes,
     _plan_max_iterations,
+    _reconcile_active_writeup_submission,
     run_watch_once,
     select_next_competition,
 )
@@ -1304,6 +1305,91 @@ def test_run_watch_once_failure_is_recorded_and_next_cycle_selects_new_competiti
     assert second.status == "finished"
     assert second.slug == "second"
     assert attempts == ["first", "second"]
+
+
+def test_run_watch_once_records_missing_data_as_resumable_block(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "kagglebot.supervisor.list_entered_competitions",
+        lambda **kwargs: [_competition("blocked-writeup")],
+    )
+    monkeypatch.setattr("kagglebot.supervisor._prepare_competition", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "kagglebot.supervisor.run_autopilot",
+        lambda _config: (_ for _ in ()).throw(MissingCompetitionDataError("data unavailable")),
+    )
+    config = _config(tmp_path)
+
+    result = run_watch_once(config)
+
+    assert result.status == "blocked"
+    state = json.loads(config.state_path.read_text(encoding="utf-8"))
+    assert state["active_slug"] == "blocked-writeup"
+    assert state["active_run_id"] == result.run_id
+    assert state["last_status"] == "blocked"
+    assert state["phase"] == "blocked_on_data"
+    records = WatchLedger(config.ledger_path).records()
+    assert any(record.get("event") == "blocked" for record in records)
+    assert not any(record.get("event") == "finished" for record in records)
+
+
+def test_reconcile_active_writeup_submission_marks_run_terminal(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    slug = "writeup-demo"
+    run_id = "run-1"
+    run_dir = config.artifacts_dir / slug / "runs" / run_id
+    report_path = run_dir / "iter-1" / "output" / "launch-demo" / "writeup.md"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("# Demo Writeup\n\nEvidence-backed body.\n", encoding="utf-8")
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "slug": slug,
+                "status": "running",
+                "config": {"deliverable_mode": "writeup", "submit": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.state_path.parent.mkdir(parents=True, exist_ok=True)
+    config.state_path.write_text(
+        json.dumps(
+            {
+                "active_slug": slug,
+                "active_run_id": run_id,
+                "last_status": "running",
+                "phase": "local_kernel_running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "kagglebot.supervisor.find_submitted_writeup",
+        lambda **kwargs: {
+            "status": "submitted",
+            "reason": "kaggle-submitted-confirmation-observed",
+            "url": "https://www.kaggle.com/competitions/writeup-demo/writeups/demo",
+        },
+    )
+    ledger = WatchLedger(config.ledger_path)
+
+    reconciled = _reconcile_active_writeup_submission(
+        config=config,
+        ledger=ledger,
+        slug=slug,
+        run_id=run_id,
+    )
+
+    assert reconciled is True
+    run_payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_payload["status"] == "submitted"
+    assert run_payload["writeup_bundle"]["submission"]["url"].endswith("/writeups/demo")
+    state = json.loads(config.state_path.read_text(encoding="utf-8"))
+    assert state["active_slug"] is None
+    assert state["active_run_id"] is None
+    finished = [record for record in ledger.records() if record.get("event") == "finished"]
+    assert finished[-1]["reason"] == "reconciled_writeup_submission"
+    assert finished[-1]["submission_status"] == "submitted"
 
 
 def test_run_watch_once_resource_error_records_resource_block(

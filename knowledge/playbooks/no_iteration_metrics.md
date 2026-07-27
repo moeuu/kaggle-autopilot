@@ -4,7 +4,6 @@ Recommended action: Harden kernel runtime so every run emits metrics.json and di
 
 ## Signals
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: gap=None
-- scripture-in-new-frontiers 20260726T210223Z-39e66e81: gap=None
 - playground-series-s6e7 20260719T155759Z-ddb4b9f1: gap=None
 - cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: gap=None
 - cuhk-x-competition-small-model-track 20260719T030527Z-69497fe0: gap=None

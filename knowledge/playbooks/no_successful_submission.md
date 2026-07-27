@@ -3,9 +3,9 @@
 Recommended action: Prioritize submission-mode and artifact validation fixes before model search.
 
 ## Signals
+- scripture-in-new-frontiers 20260726T210223Z-39e66e81: gap=None
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: gap=None
 - skill-lift 20260727T000926Z-79644f59: gap=None
-- scripture-in-new-frontiers 20260726T210223Z-39e66e81: gap=None
 - playground-series-s6e7 20260719T155759Z-ddb4b9f1: gap=None
 - cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: gap=None
 - soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: gap=None

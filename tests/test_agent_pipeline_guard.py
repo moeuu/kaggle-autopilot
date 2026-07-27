@@ -13,7 +13,7 @@ from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig
 from kagglebot.paths import CompetitionPaths
 
 
-def test_oracle_strategy_uses_sol_ultra_only_for_followup_implementation() -> None:
+def test_oracle_strategy_uses_sol_xhigh_only_for_followup_implementation() -> None:
     assert agent_pipeline._implementation_agent_for_strategy_engine("oracle") is ORACLE_IMPLEMENTATION_AGENT
     assert agent_pipeline._implementation_agent_for_strategy_engine("auto") is ORACLE_IMPLEMENTATION_AGENT
     assert agent_pipeline._implementation_agent_for_strategy_engine("codex") is IMPLEMENTATION_AGENT
@@ -1509,7 +1509,7 @@ def test_agent_pipeline_publishes_codex_oracle_codex_phases(monkeypatch, tmp_pat
         "codex_implementation",
     ]
     assert "Oracle Pro" in str(phases[2][1])
-    assert "sol-ultra" in str(phases[3][1])
+    assert "sol-xhigh" in str(phases[3][1])
 
 
 def test_fallback_strategy_instructions_cover_general_tabular_formats(tmp_path: Path) -> None:

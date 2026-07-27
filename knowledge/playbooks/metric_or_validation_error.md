@@ -7,7 +7,6 @@ Recommended action: Tighten metric contract validation and fail earlier when sco
 - scripture-in-new-frontiers 20260718T095023Z-c876dbbc: gap=None
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: reason=KaggleBotError fingerprint=e3780906cedd3cd49430
 - filament-segmentation-2026 20260716T032330Z-5b754aa5: reason=submit_aborted fingerprint=e69185e5bed70e4bac2c
-- biohub-cell-tracking-during-development 20260714T160327Z-60b94f2d: reason=submit_aborted fingerprint=3be5105ab5a5014fa8f4
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

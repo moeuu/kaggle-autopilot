@@ -14,6 +14,7 @@ from kagglebot.json_utils import load_json_object_or_empty, write_json_object
 from kagglebot.method_scout import effective_method_scout_mode
 from kagglebot.orchestrator.agent_pipeline import AgentPipelineConfig, run_agent_pipeline
 from kagglebot.watch_state import update_watch_phase
+from kagglebot.writeup import normalize_deliverable_mode
 
 
 class PlanningRunConfig(Protocol):
@@ -99,6 +100,11 @@ def run_plan_and_initial(config: PlanningRunConfig, run_id: str) -> None:
 
 def ensure_local_training_data_ready(config: PlanningRunConfig, run_id: str) -> None:
     plan = load_json_object_or_empty(config.paths.plan_path)
+    if normalize_deliverable_mode(plan.get("deliverable_mode"), default="leaderboard") == "writeup":
+        # Judged writeup/hackathon competitions may intentionally provide no
+        # labeled competition dataset. Their project runtime and required
+        # attachments enforce their own data and artifact contracts.
+        return
     raw_runtime_budget = plan.get("runtime_budget")
     runtime_budget = raw_runtime_budget if isinstance(raw_runtime_budget, dict) else {}
     if runtime_budget.get("local_training_required") is not True:

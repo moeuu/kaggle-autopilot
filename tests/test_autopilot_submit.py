@@ -61,6 +61,7 @@ def test_attempt_submit_for_autopilot_run_supplies_runner_dependencies(monkeypat
     assert callable(deps.run_kaggle_submit_kernel)
     assert limits.max_transient_retries == 3
     assert limits.stdout_tail_chars == 1200
+    assert limits.poll_max_attempts == 78
 
 
 def test_build_autopilot_submit_dependencies_resolves_defaults_at_call_time(monkeypatch) -> None:

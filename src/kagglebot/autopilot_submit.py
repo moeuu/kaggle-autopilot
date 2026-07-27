@@ -32,7 +32,9 @@ from kagglebot.submission.guard import (
 )
 from kagglebot.writeup import infer_code_competition_from_paths, infer_deliverable_mode_from_paths
 
-_SUBMISSION_POLL_MAX_ATTEMPTS: int | None = None
+# With the polling backoff (30s, then 60s, then 120s), attempt 78 occurs
+# after about 119 minutes. This bounds an unavailable Kaggle outcome API.
+_SUBMISSION_POLL_MAX_ATTEMPTS = 78
 _SUBMISSION_POLL_INTERVAL_SEC = 30.0
 _SUBMISSION_POLL_MAX_FETCH_ERRORS = 3
 _SUBMIT_MAX_TRANSIENT_RETRIES = 3

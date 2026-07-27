@@ -2,48 +2,48 @@
 
 ### 1. Category-aware multimodal ensemble — recommended final
 
-**Leak-free features/encodings:** Cross-fitted Qwen candidate logits, VideoMAE full-clip and quarter-window logits, modality-presence flags, deterministic motion/clip metadata, and fold-fit option-frequency, answer-cardinality, co-occurrence, and precedence priors. Calibration temperatures and blend weights are learned only from other folds’ OOF predictions. Candidate text is encoded independently; no test distribution or sample-submission prediction values are fit.
+**Leak-free features/encodings:** Cross-fitted Qwen candidate logits, VideoMAE full-clip and quarter-window logits, optional skeleton/IMU/mmWave OOF logits, modality-presence flags, deterministic motion/clip metadata, and fold-train-only option frequency, answer-cardinality, co-occurrence, and precedence priors. Calibration temperatures and blend weights are learned only from OOF predictions; sample-submission values and test distribution statistics are excluded.
 
-**Models and concrete configuration:** Qwen3-VL-Embedding-2B + Qwen3-VL-Reranker-2B QLoRA (rank 32, alpha 32, dropout 0.05, two epochs, learning rate 2e-5, six hard negatives); VideoMAE base (16×224 frames, last two blocks unfrozen, four epochs, backbone/head learning rates 1e-5/3e-4); Qwen3-VL-8B-Instruct NF4 hard-case rerank (eight 448-pixel composites, top eight legal candidates, deterministic generation). Cross-fitted blend step is 0.05 with component weights constrained to 0.10–0.80.
+**Models + concrete hyperparameters:** Qwen3-VL-Embedding-2B recall plus Qwen3-VL-Reranker-2B QLoRA (`r=32`, `alpha=32`, dropout `0.05`, two epochs, LR `2e-5`, six hard negatives, top-eight rerank); VideoMAE base (`16x224`, batch 2, accumulation 8, four epochs, last two blocks unfrozen, backbone/head LR `1e-5/3e-4`); Qwen3-VL-8B-Instruct NF4 only for entropy `>0.35` or margin `<0.18`, with eight 448-pixel ordered composites and at most eight candidates. Blend search uses step `0.05` and component weights `0.10–0.80`.
 
-**Expected runtime/memory:** About 1,260 minutes end to end on one RTX3060; peak 11.8GB VRAM and about 14GB host RAM. The VLM is loaded sequentially after releasing training models.
+**Expected runtime/memory:** Approximately 1,320 minutes end-to-end on one RTX3060, peak 11.8GB VRAM and about 14GB host RAM, with models loaded sequentially.
 
-**Leakage risk:** Medium if subject/clip grouping or cross-fitted blending is implemented incorrectly; otherwise low. The same clip can have multiple questions, so grouping by QA row is forbidden.
+**Leakage risk:** Medium if subject/clip grouping or OOF blending is wrong; low after strict grouping and fold-fit statistics.
 
-**Fallback:** Reduce candidate count, frames, image size, and TTA before substituting Qwen3-VL-4B for 8B. If the Qwen embedding repository is unavailable, use 4B hidden-state/candidate likelihood scores with the same exact decoder. This hybrid is best supported by CUHK-X evidence that non-RGB transfer and cross-subject shift are difficult while reasoning helps HARn. ([arXiv][5])
+**Fallback:** Reduce batch, candidates, TTA, frames, and composite size before replacing 8B with 4B. If the Qwen custom reranker loader is unavailable, use frozen Qwen3-VL embeddings plus a trained listwise MLP; if optional sensor parsers fail, continue with visual branches and record the omission. This ranking is supported by CUHK-X’s modality-sensitive results and Qwen’s official video reranker design. ([arXiv][6])
 
-### 2. Qwen3-VL 2B candidate matcher/reranker — strongest single branch
+### 2. Qwen3-VL 2B legal-candidate matcher/reranker — strongest single branch
 
-**Leak-free features/encodings:** Legal candidate enumeration per category; synchronized modality frames; question and option text; source/category/option-count flags; fold-fit priors. For multi, enumerate all nonempty subsets. For sequence, enumerate valid permutations and score the complete ordered candidate, avoiding post-hoc letter heuristics.
+**Leak-free features/encodings:** Synchronized motion-sampled modality frames; question and option semantics; legal complete candidate enumeration; source/category/option-count flags; fold-fit priors. `multi` uses every non-empty subset and `sequence` uses complete permutations.
 
-**Models and concrete configuration:** Official Qwen3-VL-Embedding-2B for cached video/question and candidate representations, followed by Qwen3-VL-Reranker-2B QLoRA. Use 12 frames at 224 pixels, NF4, batch one, accumulation 16, two epochs, maximum 24 legal candidates and top-eight cross-encoder reranking. The official source documents video input, 2B variants, 2,048-dimensional embeddings, and rank/alpha 32 LoRA. ([GitHub][2])
+**Models + concrete hyperparameters:** `Qwen/Qwen3-VL-Embedding-2B` for cached recall and `Qwen/Qwen3-VL-Reranker-2B` QLoRA with 12 frames at 224, NF4, batch 1, accumulation 16, two epochs, LR `2e-5`, max 24 candidates and top-eight reranking.
 
-**Expected runtime/memory:** Roughly 720 minutes, peak 11.5GB VRAM, 12GB host RAM with cached media and candidate embeddings.
+**Expected runtime/memory:** Roughly 700 minutes, 11.5GB peak VRAM, 12GB host RAM.
 
-**Leakage risk:** Low when hard negatives and priors are created inside each fold. Risk rises if the action vocabulary or calibration is built from all train rows before CV.
+**Leakage risk:** Low when negatives, priors, and calibration are built inside each fold; high if candidate statistics are computed globally before CV.
 
-**Fallback:** Freeze the Qwen backbone and train a small listwise MLP; if PEFT/bitsandbytes is absent, use the Qwen3-VL-4B-Instruct local likelihood scorer. No external API is needed.
+**Fallback:** Freeze the backbone and train a small listwise MLP on cached embeddings; if PEFT/bitsandbytes is missing, use Qwen3-VL-4B deterministic candidate likelihood scoring. ([GitHub][2])
 
-### 3. VideoMAE structured temporal branch — diversity and sequence specialist
+### 3. VideoMAE structured temporal + optional sensor fusion — diversity specialist
 
-**Leak-free features/encodings:** Two deterministic pseudo-RGB views from depth/IR/motion and Depth_Color/Thermal/motion; full-clip embedding; four quarter-window embeddings; candidate text embeddings; train-fold-only cardinality, co-occurrence, and precedence statistics. Global normalization is fit on the fold train clips; per-clip robust normalization is deterministic.
+**Leak-free features/encodings:** Pseudo-RGB depth/IR/thermal/motion clips, full-clip and four quarter-window embeddings, candidate text embeddings reused from Qwen or fold-fit TF-IDF/SVD fallback, plus fold-train-only cardinality/co-occurrence/precedence features. Sensor normalization is fitted on fold train subjects only.
 
-**Models and concrete configuration:** `MCG-NJU/videomae-base-finetuned-kinetics`, 16 frames at 224, batch two, accumulation eight, four epochs, last two transformer blocks unfrozen, learning rates 1e-5 and 3e-4, weight decay 0.05, label smoothing 0.05. A listwise candidate head handles all categories; a quarter-window alignment term supplies explicit order evidence for sequence questions. VideoMAE’s released base model uses 16-frame processing and supports downstream feature extraction. ([Hugging Face][3])
+**Models + concrete hyperparameters:** `MCG-NJU/videomae-base-finetuned-kinetics`, 16 frames at 224, batch 2, accumulation 8, four epochs, last two blocks unfrozen, LR `1e-5` backbone and `3e-4` head, weight decay `0.05`, label smoothing `0.05`. Optional skeleton temporal CNN/transformer, IMU 1D CNN-transformer, and mmWave PointNet-lite heads use 128 normalized timesteps and late-logit fusion.
 
-**Expected runtime/memory:** About 420 minutes; peak 8.5GB VRAM and 10GB host RAM.
+**Expected runtime/memory:** About 420–500 minutes; 8.5GB VRAM and 10–12GB host RAM.
 
-**Leakage risk:** Low with subject and clip grouping. The main modeling risk is domain transfer from RGB/Kinetics rather than label leakage.
+**Leakage risk:** Low with subject+clip grouping; principal risk is domain transfer and defensive parsing of unknown sensor schemas.
 
-**Fallback:** Freeze the full backbone and train only the head on cached embeddings. If the checkpoint cannot be resolved, use `torchvision.models.video.r3d_18` under the same grouped CV, candidate enumeration, and decoder.
+**Fallback:** Freeze VideoMAE and train only the head on cached embeddings; if the checkpoint cannot resolve, use `torchvision.models.video.r3d_18` with identical grouped CV and decoder. ([GitHub][3])
 
-### 4. Local reference VLM — required sanity baseline, not submission choice
+### 4. Local reference Qwen3-VL-4B prompt baseline — mandatory sanity candidate
 
-**Leak-free features/encodings:** Uniform/motion-sampled frames and only the row’s question/options. No retrieved validation answer, test label, or sample-submission value enters the prompt.
+**Leak-free features/encodings:** Only the row’s frames, question, available options, source, and category. No retrieved validation answer, sample value, or test label enters prompts.
 
-**Models and concrete configuration:** Qwen3-VL-4B-Instruct in 4-bit mode, eight composite frames, strict category prompt, temperature zero, maximum 96 generated tokens, one parse-repair attempt.
+**Models + concrete hyperparameters:** Qwen3-VL-4B-Instruct 4-bit, eight ordered composite frames, temperature zero, max 96 new tokens, one strict parse-repair attempt.
 
-**Expected runtime/memory:** Approximately 120–240 minutes for a representative grouped validation subset; 7–10GB VRAM.
+**Expected runtime/memory:** 120–240 minutes for a representative grouped validation subset; approximately 7–10GB VRAM.
 
-**Leakage risk:** Low, but prompt iteration on the same validation fold can overfit. Freeze prompts after the first ablation stage.
+**Leakage risk:** Low, but repeated prompt tuning on one validation fold can overfit; freeze prompts after the fast ablation stage.
 
-**Fallback:** Use Qwen3-VL-2B-Instruct or the already-installed local LLaVA path while preserving frame order and exact output validation. The mandatory canonical notebook’s 0.400 evidence makes this useful for contract testing, but not competitive against the 0.86842 target.
+**Fallback:** Qwen3-VL-2B/compatible installed LLaVA path while preserving ordered frames and exact output validation. The required notebook’s 0.400 evidence makes this a contract check, not a competitive final.

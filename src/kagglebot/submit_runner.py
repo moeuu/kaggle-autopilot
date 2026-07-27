@@ -391,12 +391,16 @@ def attempt_submit_for_run(
         on_message=deps.on_message,
     )
     submit_stage_state = submit_attempt_loop_result.submit_stage_state
+    outcome_message = _effective_submission_message(
+        requested_message=message,
+        submission_result=submit_attempt_loop_result.submission_result,
+    )
     return _submit_outcome.finalize_submit_outcome_for_run_or_abort(
         run_dir=run_dir,
         submission_ledger_path=config.paths.submission_ledger_path,
         slug=config.slug,
         run_id=run_id,
-        message=message,
+        message=outcome_message,
         submitted_at=submitted_at,
         submission_ref=submit_attempt_loop_result.submission_reference,
         submission_result=submit_attempt_loop_result.submission_result,
@@ -421,6 +425,12 @@ def attempt_submit_for_run(
         on_message=deps.on_message,
         wait_for_submission_outcome_func=_submit_stage.wait_for_submission_outcome,
     )
+
+
+def _effective_submission_message(*, requested_message: str, submission_result: object) -> str:
+    """Use the exact message sent by the submission service for outcome matching."""
+    submitted_message = str(getattr(submission_result, "message", "") or "").strip()
+    return submitted_message or requested_message
 
 
 def _resolve_fallback_sample_submission_path(paths: SubmitRunnerPaths) -> Path:

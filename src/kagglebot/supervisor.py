@@ -26,11 +26,12 @@ from kagglebot.eval import EvaluationAdvisor
 from kagglebot.exceptions import (
     KaggleCliResourceError,
     KernelCapacityError,
+    MissingCompetitionDataError,
     RulesNotAcceptedError,
     SubmitAbortedError,
 )
 from kagglebot.exec_utils import run_command
-from kagglebot.hashing import sha256_text
+from kagglebot.hashing import sha256_file, sha256_text
 from kagglebot.history import new_run_id
 from kagglebot.json_utils import (
     append_jsonl_record,
@@ -67,6 +68,7 @@ from kagglebot.watch_state import (
     update_watch_phase,
     write_watch_state,
 )
+from kagglebot.writeup_submission import find_submitted_writeup
 
 _TERMINAL_RUN_STATUSES = {
     "completed",
@@ -355,7 +357,7 @@ def run_watch_forever(
         if result.status in {"no_candidates", "dry_run", "no_capacity", "locked"}:
             time.sleep(max(1, sleep_empty_sec))
             continue
-        if result.status in {"failed", "skipped"}:
+        if result.status in {"blocked", "failed", "skipped"}:
             time.sleep(max(1, sleep_error_sec))
 
 
@@ -397,6 +399,20 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
     state = load_watch_state(config.state_path)
     active_slug = str(state.get("active_slug") or "").strip()
     active_run_id = str(state.get("active_run_id") or "").strip()
+    if (
+        active_slug
+        and active_run_id
+        and not config.dry_run
+        and _reconcile_active_writeup_submission(
+            config=config,
+            ledger=ledger,
+            slug=active_slug,
+            run_id=active_run_id,
+        )
+    ):
+        state = load_watch_state(config.state_path)
+        active_slug = ""
+        active_run_id = ""
 
     if active_slug and active_run_id and _run_can_resume(config, active_slug, active_run_id, state=state):
         candidate = _candidate_from_slug(active_slug)
@@ -505,6 +521,26 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
         if resume:
             set_resume_env(slug=candidate.slug, run_id=run_id)
         run_autopilot(autopilot_config)
+    except MissingCompetitionDataError as exc:
+        reason = "missing_competition_data"
+        ledger.append(
+            "blocked",
+            slug=candidate.slug,
+            run_id=run_id,
+            reason=reason,
+            error=str(exc),
+        )
+        write_watch_state(
+            config.state_path,
+            {
+                "active_slug": candidate.slug,
+                "active_run_id": run_id,
+                "last_status": "blocked",
+                "phase": "blocked_on_data",
+                "reason": reason,
+            },
+        )
+        return WatchCycleResult(status="blocked", slug=candidate.slug, run_id=run_id, reason=str(exc))
     except RulesNotAcceptedError as exc:
         ledger.append("skipped", slug=candidate.slug, run_id=run_id, reason="rules_not_accepted")
         write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "skipped"})
@@ -574,6 +610,113 @@ def _run_watch_once_unlocked(config: WatchConfig, ledger: WatchLedger) -> WatchC
     ledger.append("finished", slug=candidate.slug, run_id=run_id)
     write_watch_state(config.state_path, {"active_slug": None, "active_run_id": None, "last_status": "finished"})
     return WatchCycleResult(status="finished", slug=candidate.slug, run_id=run_id)
+
+
+def _reconcile_active_writeup_submission(
+    *,
+    config: WatchConfig,
+    ledger: WatchLedger,
+    slug: str,
+    run_id: str,
+) -> bool:
+    """Close a locally active writeup run when Kaggle already confirms submission."""
+    run_dir = CompetitionPaths(
+        slug=slug,
+        artifacts_dir=config.artifacts_dir,
+        repo_root=config.workdir,
+    ).run_dir(run_id)
+    run_path = run_dir / "run.json"
+    run_payload = load_json_object(run_path)
+    if not isinstance(run_payload, dict):
+        return False
+    run_config = run_payload.get("config")
+    if not isinstance(run_config, dict) or str(run_config.get("deliverable_mode") or "").strip().lower() != "writeup":
+        return False
+    if str(run_payload.get("status") or "").strip().lower() in _TERMINAL_RUN_STATUSES:
+        return False
+    report_path = _find_active_writeup_report(run_dir)
+    if report_path is None:
+        return False
+    title = _writeup_report_title(report_path, fallback=slug)
+    browser = find_submitted_writeup(slug=slug, title=title)
+    if browser.get("status") != "submitted":
+        return False
+
+    now = datetime.now(UTC).isoformat()
+    evidence = {
+        "status": "submitted",
+        "source": "kaggle_authenticated_ui_reconciliation",
+        "reason": browser.get("reason") or "kaggle-submitted-confirmation-observed",
+        "url": browser.get("url"),
+        "title": title,
+        "verified_at": now,
+        "content_sha256": sha256_file(str(report_path)),
+        "report_path": str(report_path),
+        "browser": browser,
+    }
+    append_jsonl_record(
+        run_dir / "writeup_submit_attempts.jsonl",
+        {"slug": slug, **evidence},
+        sort_keys=True,
+    )
+    write_json_object(run_dir / "writeup_submission.json", evidence, sort_keys=True)
+    writeup_bundle = run_payload.get("writeup_bundle")
+    if not isinstance(writeup_bundle, dict):
+        writeup_bundle = {}
+    writeup_bundle.update({"status": "submitted", "submission": evidence})
+    run_payload.update(
+        {
+            "status": "submitted",
+            "finished_at": now,
+            "stop_reason": "reconciled_verified_writeup_submission",
+            "writeup_bundle": writeup_bundle,
+        }
+    )
+    write_json_object(run_path, run_payload)
+    ledger.append(
+        "finished",
+        slug=slug,
+        run_id=run_id,
+        reason="reconciled_writeup_submission",
+        submission_status="submitted",
+        submission_url=browser.get("url"),
+        writeup_title=title,
+    )
+    write_watch_state(
+        config.state_path,
+        {
+            "active_slug": None,
+            "active_run_id": None,
+            "last_status": "finished",
+            "phase": "finished",
+            "reason": "reconciled_writeup_submission",
+        },
+    )
+    print(f"[green]watch[/green]: reconciled submitted Kaggle writeup for {slug}: {browser.get('url')}")
+    return True
+
+
+def _find_active_writeup_report(run_dir: Path) -> Path | None:
+    candidates = [run_dir / "writeup" / "report.md"]
+    for pattern in (
+        "iter-*/writeup.md",
+        "iter-*/output/writeup.md",
+        "iter-*/output/*/writeup.md",
+        "iter-*/output/*/submission_package/writeup.md",
+    ):
+        candidates.extend(sorted(run_dir.glob(pattern), reverse=True))
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _writeup_report_title(path: Path, *, fallback: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return fallback
+    for line in lines:
+        if line.startswith("# "):
+            return line.removeprefix("# ").strip()[:120] or fallback
+    return fallback
 
 
 def run_watch_self_improvement(config: WatchConfig, *, force: bool = False) -> dict[str, object]:
