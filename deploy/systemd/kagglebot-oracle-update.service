@@ -1,0 +1,13 @@
+[Unit]
+Description=Update Kagglebot Oracle CLI to the latest npm release
+Documentation=file:%h/.local/share/kagglebot-autopilot/current/docs/autopilot.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/kagglebot-autopilot/current
+Environment=PATH=%h/.local/opt/node-v24/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/kagglebot-autopilot/watch.env
+ExecStart=%h/.local/share/kagglebot-autopilot/uv run python -m kagglebot.oracle_update
+TimeoutStartSec=15min

@@ -5,6 +5,14 @@ readonly service_names=(
   kagglebot-watch.service
   kagglebot-discord-notifier.service
 )
+readonly timer_names=(
+  kagglebot-oracle-update.timer
+)
+readonly unit_names=(
+  "${service_names[@]}"
+  kagglebot-oracle-update.service
+  "${timer_names[@]}"
+)
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 runtime_root="${HOME}/.local/share/kagglebot-autopilot"
@@ -40,13 +48,14 @@ install_services() {
   ln -sfn "${repo_root}" "${current_link}"
   ln -sfn "${uv_bin}" "${uv_link}"
 
-  local service_name
-  for service_name in "${service_names[@]}"; do
-    ln -sfn "${current_link}/deploy/systemd/${service_name}" "${user_unit_dir}/${service_name}"
+  local unit_name
+  for unit_name in "${unit_names[@]}"; do
+    ln -sfn "${current_link}/deploy/systemd/${unit_name}" "${user_unit_dir}/${unit_name}"
   done
 
   systemctl --user daemon-reload
-  systemctl --user enable "${service_names[@]}"
+  systemctl --user enable "${service_names[@]}" "${timer_names[@]}"
+  systemctl --user start "${timer_names[@]}"
   systemctl --user restart "${service_names[@]}"
   printf 'Installed from %s\n' "${repo_root}"
   status_services
@@ -55,33 +64,34 @@ install_services() {
 start_services() {
   require_systemd_user
   systemctl --user daemon-reload
-  systemctl --user start "${service_names[@]}"
+  systemctl --user start "${service_names[@]}" "${timer_names[@]}"
   status_services
 }
 
 stop_services() {
   require_systemd_user
-  systemctl --user stop "${service_names[@]}"
+  systemctl --user stop "${service_names[@]}" "${timer_names[@]}"
 }
 
 restart_services() {
   require_systemd_user
   systemctl --user daemon-reload
+  systemctl --user restart "${timer_names[@]}"
   systemctl --user restart "${service_names[@]}"
   status_services
 }
 
 status_services() {
   require_systemd_user
-  systemctl --user status "${service_names[@]}" --no-pager
+  systemctl --user status "${service_names[@]}" "${timer_names[@]}" --no-pager
 }
 
 uninstall_services() {
   require_systemd_user
-  systemctl --user disable --now "${service_names[@]}" 2>/dev/null || true
-  local service_name
-  for service_name in "${service_names[@]}"; do
-    rm -f "${user_unit_dir}/${service_name}"
+  systemctl --user disable --now "${service_names[@]}" "${timer_names[@]}" 2>/dev/null || true
+  local unit_name
+  for unit_name in "${unit_names[@]}"; do
+    rm -f "${user_unit_dir}/${unit_name}"
   done
   rm -f "${current_link}" "${uv_link}"
   systemctl --user daemon-reload

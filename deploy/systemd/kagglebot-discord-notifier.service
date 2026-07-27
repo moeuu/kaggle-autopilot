@@ -11,7 +11,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PATH=%h/.local/npm-global/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-%h/.config/kagglebot-autopilot/discord-notifier.env
 EnvironmentFile=-%h/.config/kagglebot-discord-notifier.env
-ExecStart=%h/.local/share/kagglebot-autopilot/uv run kagglebot discord-notifier --interval-sec 300 --heartbeat-sec 1800
+ExecStart=%h/.local/share/kagglebot-autopilot/uv run kagglebot discord-notifier --interval-sec 60 --heartbeat-sec 1800
 Restart=always
 RestartSec=30
 TimeoutStopSec=30
