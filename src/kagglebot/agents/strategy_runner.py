@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from tempfile import mkdtemp
@@ -33,6 +33,9 @@ _ORACLE_BROWSER_READY_TIMEOUT_SEC = 15.0
 _DEFAULT_ORACLE_BROWSER_INPUT_TIMEOUT = "3600s"
 _DEFAULT_ORACLE_BROWSER_TIMEOUT = "24h"
 _DEFAULT_ORACLE_BROWSER_THINKING_TIME = "extended"
+_DEFAULT_ORACLE_STRATEGY_TIMEOUT_SEC = 2 * 60 * 60
+_DEFAULT_ORACLE_FALLBACK_CODEX_MODEL = "gpt-5.6-sol"
+_DEFAULT_ORACLE_FALLBACK_CODEX_REASONING_EFFORT = "ultra"
 _DEFAULT_ORACLE_DATA_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
 _DEFAULT_ORACLE_FILE_SIZE_LIMIT_BYTES = 1024 * 1024
 _ORACLE_RUNTIME_CONTEXT_FILE_MAX_BYTES = 4 * 1024 * 1024
@@ -154,11 +157,40 @@ class OracleDataDelivery:
 def run_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False, engine: str = "auto") -> StrategyResult:
     resolved_engine = _resolve_strategy_engine(engine)
     if resolved_engine == "oracle":
-        return _run_oracle_strategy(prompt_path, output_dir, dry_run=dry_run)
+        oracle_result = _run_oracle_strategy(prompt_path, output_dir, dry_run=dry_run)
+        fallback_reason = _oracle_fallback_reason(oracle_result, dry_run=dry_run)
+        if fallback_reason is None:
+            return oracle_result
+        _preserve_oracle_result(oracle_result, output_dir, fallback_reason=fallback_reason)
+        fallback_model = _oracle_fallback_codex_model()
+        fallback_effort = _oracle_fallback_codex_reasoning_effort()
+        print(
+            f"oracle strategy unavailable; falling back to Codex model={fallback_model} reasoning={fallback_effort}",
+            flush=True,
+        )
+        codex_result = _run_codex_strategy(
+            prompt_path,
+            output_dir,
+            dry_run=False,
+            model=fallback_model,
+            reasoning_effort=fallback_effort,
+        )
+        fallback_notice = f"Oracle-to-Codex fallback: {fallback_reason}"
+        return replace(
+            codex_result,
+            stderr="\n\n".join(part for part in (fallback_notice, codex_result.stderr) if part),
+        )
     return _run_codex_strategy(prompt_path, output_dir, dry_run=dry_run)
 
 
-def _run_codex_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = False) -> StrategyResult:
+def _run_codex_strategy(
+    prompt_path: Path,
+    output_dir: Path,
+    *,
+    dry_run: bool = False,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> StrategyResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_text = render_prompt_identity(prompt_path.read_text(encoding="utf-8"))
     transcript_path = output_dir / "strategy_exec.txt"
@@ -177,7 +209,8 @@ def _run_codex_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = 
             engine="codex",
         )
 
-    normalized_effort = _normalize_reasoning_effort(_DEFAULT_REASONING_EFFORT)
+    selected_model = (model or _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+    normalized_effort = _normalize_reasoning_effort(reasoning_effort or _DEFAULT_REASONING_EFFORT)
     timeout = float(os.environ.get("KAGGLEBOT_STRATEGY_TIMEOUT_SEC", str(_DEFAULT_TIMEOUT_SEC)))
     if os.environ.get("PYTEST_CURRENT_TEST"):
         timeout = float(os.environ.get("KAGGLEBOT_PYTEST_STRATEGY_TIMEOUT_SEC", str(_PYTEST_TIMEOUT_SEC)))
@@ -185,7 +218,7 @@ def _run_codex_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = 
         STRATEGY_AGENT.cli_command,
         "exec",
         "-m",
-        _DEFAULT_MODEL,
+        selected_model,
         "-c",
         f'model_reasoning_effort="{normalized_effort}"',
     ]
@@ -228,7 +261,7 @@ def _run_codex_strategy(prompt_path: Path, output_dir: Path, *, dry_run: bool = 
                 STRATEGY_AGENT.cli_command,
                 "exec",
                 "-m",
-                _DEFAULT_MODEL,
+                selected_model,
                 "-c",
                 f'model_reasoning_effort="{normalized_effort}"',
             ]
@@ -554,7 +587,44 @@ def _oracle_strategy_timeout() -> float | None:
     raw = os.environ.get("KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC")
     if raw is None:
         raw = os.environ.get("KAGGLEBOT_STRATEGY_TIMEOUT_SEC")
-    return None if raw is None or not raw.strip() else float(raw)
+    return _DEFAULT_ORACLE_STRATEGY_TIMEOUT_SEC if raw is None or not raw.strip() else float(raw)
+
+
+def _oracle_fallback_reason(result: StrategyResult, *, dry_run: bool) -> str | None:
+    if dry_run or not _env_flag("KAGGLEBOT_ORACLE_FALLBACK_CODEX", default=True):
+        return None
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        suffix = f": {detail}" if detail else ""
+        return f"Oracle exited with code {result.returncode}{suffix}"
+    if not result.stdout.strip():
+        return "Oracle returned an empty response"
+    return None
+
+
+def _oracle_fallback_codex_model() -> str:
+    configured = os.environ.get(
+        "KAGGLEBOT_ORACLE_FALLBACK_CODEX_MODEL",
+        _DEFAULT_ORACLE_FALLBACK_CODEX_MODEL,
+    ).strip()
+    return configured or _DEFAULT_ORACLE_FALLBACK_CODEX_MODEL
+
+
+def _oracle_fallback_codex_reasoning_effort() -> str:
+    configured = os.environ.get(
+        "KAGGLEBOT_ORACLE_FALLBACK_CODEX_REASONING_EFFORT",
+        _DEFAULT_ORACLE_FALLBACK_CODEX_REASONING_EFFORT,
+    ).strip()
+    return _normalize_reasoning_effort(configured or _DEFAULT_ORACLE_FALLBACK_CODEX_REASONING_EFFORT)
+
+
+def _preserve_oracle_result(result: StrategyResult, output_dir: Path, *, fallback_reason: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if result.transcript_path.exists():
+        shutil.copyfile(result.transcript_path, output_dir / "oracle_strategy_exec.txt")
+    if result.last_message_path.exists():
+        shutil.copyfile(result.last_message_path, output_dir / "oracle_strategy_last_message.txt")
+    (output_dir / "oracle_fallback_reason.txt").write_text(fallback_reason + "\n", encoding="utf-8")
 
 
 def _oracle_force_args(extra_args: list[str]) -> list[str]:

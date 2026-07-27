@@ -595,6 +595,37 @@ def test_find_competition_files_prefers_feature_pair_over_train_labels(tmp_path)
     assert test_path.name == "test_features.csv"
 
 
+def test_train_test_schema_scoring_disables_text_type_inference(tmp_path, monkeypatch) -> None:
+    import kagglebot.solver.io as solver_io
+
+    train_path = tmp_path / "train.csv"
+    test_path = tmp_path / "test.csv"
+    sample_path = tmp_path / "sample_submission.csv"
+    for path in (train_path, test_path, sample_path):
+        path.write_text("row_id,feature,target\n001,1,0\n", encoding="utf-8")
+
+    calls: list[tuple[Path, object, int | None]] = []
+
+    def fake_read_text(path, *, sep=None, dtype=None, nrows=None):  # noqa: ANN001, ARG001
+        calls.append((path, dtype, nrows))
+        return pd.DataFrame({"row_id": ["001"], "feature": ["1"], "target": ["0"]})
+
+    monkeypatch.setattr(solver_io, "_read_text_tabular_frame", fake_read_text)
+
+    score = solver_io._train_test_pair_score(
+        train_path=train_path,
+        test_path=test_path,
+        sample_path=sample_path,
+    )
+
+    assert score > 0
+    assert calls == [
+        (train_path, str, 5),
+        (test_path, str, 5),
+        (sample_path, str, 5),
+    ]
+
+
 def test_load_competition_data_merges_separate_train_labels(tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()

@@ -6,6 +6,10 @@ from pathlib import Path
 from kagglebot.exceptions import KernelFailedError
 from kagglebot.json_utils import read_json_object
 
+_LITERAL_SEQUENCE_PATH_SUFFIXES = {
+    "key_hyperparameters.allowed_aggregations",
+}
+
 
 def find_runtime_hyperparameter_sequence_paths(value: object, *, prefix: str = "key_hyperparameters") -> list[str]:
     paths: list[str] = []
@@ -14,6 +18,13 @@ def find_runtime_hyperparameter_sequence_paths(value: object, *, prefix: str = "
             paths.extend(find_runtime_hyperparameter_sequence_paths(item, prefix=f"{prefix}.{key}"))
         return paths
     if isinstance(value, (list, tuple)):
+        is_literal_string_sequence = (
+            any(prefix.endswith(suffix) for suffix in _LITERAL_SEQUENCE_PATH_SUFFIXES)
+            and bool(value)
+            and all(isinstance(item, str) and item.strip() for item in value)
+        )
+        if is_literal_string_sequence:
+            return paths
         paths.append(prefix)
     return paths
 

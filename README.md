@@ -23,10 +23,11 @@ For a persistent user-level autopilot directly backed by this clone:
 ./scripts/kagglebot-systemd install
 ```
 
-The installer runs `uv sync --frozen`, registers the versioned units from `deploy/systemd/`, and enables both the
-continuous `watch` loop and Discord notifier. It does not copy or fork the autopilot implementation: systemd runs
-`uv run kagglebot --force watch` from this checkout. Agent model settings continue to come only from
-`[tool.kagglebot.agent]` in `pyproject.toml`.
+The installer runs `uv sync --frozen`, registers the versioned units from `deploy/systemd/`, and enables the continuous
+`watch` loop, Discord notifier, and Oracle auto-update timer. The timer checks npm every 15 minutes, installs the latest
+`@steipete/oracle` release with the dedicated Node 24 runtime, and defers safely while an Oracle session is active. It
+does not copy or fork the autopilot implementation: systemd runs `uv run kagglebot --force watch` from this checkout.
+Agent model settings continue to come only from `[tool.kagglebot.agent]` in `pyproject.toml`.
 
 Optional machine-specific watch settings can be copied from `deploy/systemd/watch.env.example` to
 `~/.config/kagglebot-autopilot/watch.env`. Discord credentials belong in
@@ -46,7 +47,7 @@ Optional: add `--rules-file /path/to/rules.md` (md/txt/html) to override fetched
 
 This will:
 1. **Bootstrap**: Download data, profile dataset, query Knowledge Base for similar competitions
-2. **Plan**: Codex summarizes context, Oracle/latest Pro runs research + frozen plan, then the shared `sol-ultra` Codex implementer applies it; Oracle failure blocks implementation
+2. **Plan**: Codex summarizes context, Oracle/latest Pro runs research + frozen plan, then the shared `sol-ultra` Codex implementer applies it; an unavailable or timed-out Oracle call falls back to `gpt-5.6-sol` with ultra reasoning
 3. **Initial model**: Agent implements an initial solution in `artifacts/<slug>/kernel/kernel.py` (all compute modes)
 4. **Iterate**: Train → evaluate → diagnose → improve (default 5 iterations; long heavy local GPU runs are capped to 3)
 5. **Submit + Decide**: Submit each iteration, wait for Kaggle score, then decide continue/stop
@@ -485,7 +486,7 @@ Optional environment knobs:
 - ✅ **Terminal submission contract**: A submit-enabled leaderboard run cannot finish as `completed` with zero successful submissions; exact duplicate skips remain valid, while every other unmet submit obligation ends as `submit_failed`
 - ✅ **Validated frozen evaluation specs**: Saved evaluation specs are schema- and direction-validated before reuse, and invalid or context-conflicting specs are regenerated
 - ✅ **Best-effort dataset profiling**: Optional dataset profiling failures are persisted as structured `profile_error` metadata instead of aborting watch preflight before run-level recovery can start
-- ✅ **Data-free kernel contract verification**: Generated kernels compile and export `contract_smoke()`, which Kagglebot calls in an isolated subprocess to validate every frozen pipeline without training or scoring. When a plan requires local training but labeled competition assets are absent, Kagglebot preserves the verified implementation, records `blocked_on_data`, creates no submission/OOF/checkpoint artifacts, and can resume after authorized data is staged.
+- ✅ **Data-free kernel contract verification**: Generated kernels compile and export `contract_smoke()`, which Kagglebot calls in an isolated subprocess to validate every frozen pipeline without training or scoring. For explicit writeup deliverables without a conventional train/test pair, Kagglebot treats `dataset_profile_missing_required_files` as informational after a valid data-free smoke. Prediction routes retain the training-data readiness gate. A verified writeup implementation creates no submission/OOF/checkpoint artifacts during the smoke and can resume when its declared inputs are available.
 - ✅ **No rule automation**: Must accept rules manually in browser
 - ✅ **Dry-run mode**: `--dry-run` skips external API calls (Kaggle CLI, Codex)
 - ✅ **Conservative competition-mode inference**: `deliverable_mode` is canonicalized to `leaderboard|writeup`, Kaggle `Writeups` wording and legacy `csv` aliases are accepted, and negative mentions like `not a judged/writeup competition` do not disable leaderboard submission

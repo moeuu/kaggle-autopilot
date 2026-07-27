@@ -3,6 +3,9 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- playground-series-s6e7 20260719T155759Z-ddb4b9f1: reason=RuntimeError fingerprint=92217d94e261b01df814
+- cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: reason=RuntimeError fingerprint=92217d94e261b01df814
+- soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: reason=RuntimeError fingerprint=92217d94e261b01df814
 - scripture-in-new-frontiers 20260718T095023Z-c876dbbc: reason=RuntimeError fingerprint=a7804a994fcb95dc5ce2
 - ai-agent-security-multi-step-tool-attacks 20260717T061040Z-4aad47f3: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-large-model-track 20260716T025336Z-83f794ce: reason=OracleStrategyError fingerprint=65df22ce55cf6bb51d0e
@@ -10,9 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - scripture-in-new-frontiers 20260716T010915Z-7b12de3d: reason=OracleStrategyError fingerprint=4a943231f253606b92a7
 - skill-lift 20260716T001150Z-1038a59e: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 - soccer-feature-engineering-hackathon 20260715T235055Z-2864ef78: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
-- cohort-x-task-2 20260715T211756Z-824e1427: reason=OracleStrategyError fingerprint=56655e6b2c92738ada85
-- arc-prize-2026-arc-agi-2 20260715T191406Z-29a80a2b: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
-- ai-agent-security-multi-step-tool-attacks 20260715T160516Z-7045e102: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

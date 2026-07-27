@@ -283,9 +283,11 @@ def _write_structured_contract_kernel(
     backward_finite: bool = True,
     contract_exception: str | None = None,
     contract_output_arg: bool = False,
+    data_free: bool = True,
     malformed_report: bool = False,
     normal_mode: str = "missing_data",
     logit_classes: int = 3,
+    training_performed: bool = False,
 ) -> None:
     exception_line = f'raise RuntimeError("{contract_exception}")' if contract_exception else ""
     contract_signature = "output_dir=None" if contract_output_arg else ""
@@ -325,8 +327,8 @@ def contract_smoke({contract_signature}):
     output_dir.mkdir(parents=True, exist_ok=True)
     report = {{
         "status": "passed",
-        "data_free": True,
-        "training_performed": False,
+        "data_free": {data_free!r},
+        "training_performed": {training_performed!r},
         "score_reported": False,
         "profiles": {{
             "planned_pipeline": {{
@@ -349,7 +351,12 @@ if __name__ == "__main__":
     )
 
 
-def _structured_contract_paths(tmp_path: Path, *, data_ready: bool) -> tuple[CompetitionPaths, Path]:
+def _structured_contract_paths(
+    tmp_path: Path,
+    *,
+    data_ready: bool,
+    deliverable_mode: str = "leaderboard",
+) -> tuple[CompetitionPaths, Path]:
     paths = CompetitionPaths(slug="demo", artifacts_dir=tmp_path / "artifacts")
     paths.kernel_source_dir.mkdir(parents=True)
     paths.context_dir.mkdir(parents=True, exist_ok=True)
@@ -357,6 +364,7 @@ def _structured_contract_paths(tmp_path: Path, *, data_ready: bool) -> tuple[Com
     paths.plan_path.write_text(
         json.dumps(
             {
+                "deliverable_mode": deliverable_mode,
                 "pipelines": [{"name": "planned_pipeline"}],
                 "toggles": {"STRICT_MODEL_SIZE_MB": 100},
             }
@@ -372,7 +380,11 @@ def _structured_contract_paths(tmp_path: Path, *, data_ready: bool) -> tuple[Com
 
 
 def test_missing_data_accepts_contract_and_expected_full_entrypoint_block(tmp_path: Path) -> None:
-    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    paths, kernel_path = _structured_contract_paths(
+        tmp_path,
+        data_ready=False,
+        deliverable_mode="writeup",
+    )
     _write_structured_contract_kernel(kernel_path)
 
     result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
@@ -403,11 +415,13 @@ def test_contract_only_acceptance_promotes_kernel_and_records_environmental_bloc
         smoke_stderr="",
         contract_report={
             "status": "passed",
+            "data_free": True,
             "training_performed": False,
             "score_reported": False,
         },
         data_ready=False,
         data_readiness_reason="dataset_profile_missing_required_files",
+        allow_missing_training_data=True,
         normal_smoke_required=True,
         normal_smoke_returncode=1,
         normal_smoke_stderr=(
@@ -442,6 +456,41 @@ def test_missing_data_does_not_hide_failing_contract_report(tmp_path: Path) -> N
 
     assert result.passed is False
     assert "finite_backward=true" in "\n".join(result.contract_report_issues)
+
+
+def test_missing_data_remains_fatal_for_conventional_prediction_route(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert result.contract_only is False
+    assert result.allow_missing_training_data is False
+    assert result.data_readiness_reason == "dataset_profile_missing_required_files"
+
+
+@pytest.mark.parametrize(
+    ("contract_kwargs", "expected_issue"),
+    [
+        ({"data_free": False}, "data_free=true"),
+        ({"training_performed": True}, "training_performed=false"),
+    ],
+)
+def test_missing_data_remains_blocking_for_non_data_free_or_training_contract(
+    tmp_path: Path,
+    contract_kwargs: dict[str, bool],
+    expected_issue: str,
+) -> None:
+    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    _write_structured_contract_kernel(kernel_path, **contract_kwargs)
+
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
+
+    assert result.passed is False
+    assert result.contract_only is False
+    assert result.normal_smoke_required is False
+    assert expected_issue in "\n".join(result.contract_report_issues)
 
 
 def test_contract_report_requires_exact_profiles_and_plan_class_count(tmp_path: Path) -> None:
@@ -495,8 +544,12 @@ def _profiled_contract_plan(plan_path: Path) -> None:
     plan_path.write_text(
         json.dumps(
             {
+                "deliverable_mode": "writeup",
                 "hardware_profile": "rtx3060",
-                "runtime_budget": {"hardware_profile": "rtx3060"},
+                "runtime_budget": {
+                    "hardware_profile": "rtx3060",
+                    "scale_profiles": {"rtx3060": {}, "rtx5090": {}},
+                },
                 "pipelines": [
                     {
                         "name": "planned_pipeline",
@@ -522,7 +575,8 @@ def _canonical_contract_report(*, entry_profile: bool = False) -> dict[str, obje
         pipeline["profile"] = "rtx3060"
     return {
         "status": "passed",
-        "profile": "rtx3060",
+        "profile": "local_gpu",
+        "top_level_knobs": {"HARDWARE_PROFILE": "rtx3060"},
         "data_free": True,
         "training_performed": False,
         "score_reported": False,
@@ -530,21 +584,115 @@ def _canonical_contract_report(*, entry_profile: bool = False) -> dict[str, obje
     }
 
 
+@pytest.mark.parametrize("compute_profile", ["local_gpu", "kaggle_gpu", "kaggle_tpu"])
 @pytest.mark.parametrize("entry_profile", [False, True])
-def test_contract_report_accepts_global_or_repeated_hardware_profile(
+def test_contract_report_accepts_independent_compute_and_hardware_profiles(
     tmp_path: Path,
+    compute_profile: str,
     entry_profile: bool,
 ) -> None:
     plan_path = tmp_path / "plan.json"
     _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report(entry_profile=entry_profile)
+    report["profile"] = compute_profile
 
+    warnings: list[str] = []
     issues = agent_pipeline._validate_contract_smoke_report(
-        _canonical_contract_report(entry_profile=entry_profile),
+        report,
         plan_path=plan_path,
         pipeline_names=("planned_pipeline",),
+        expected_compute_profile=compute_profile,
+        warnings=warnings,
     )
 
     assert issues == ()
+    assert "interpreted as compute_mode" in "\n".join(warnings)
+    if entry_profile:
+        assert "interpreted as hardware_profile" in "\n".join(warnings)
+
+
+def test_contract_report_rejects_hardware_environment_that_conflicts_with_frozen_plan(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report(entry_profile=True)
+    report["top_level_knobs"]["HARDWARE_PROFILE"] = "rtx5090"
+    report["pipelines"]["planned_pipeline"]["hardware_profile"] = "rtx5090"
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+        smoke_environment={"KAGGLEBOT_HARDWARE_PROFILE": "rtx3060"},
+    )
+
+    assert "contract_smoke.json hardware_profile='rtx5090'; expected='rtx3060'" in issues
+    assert "pipelines.planned_pipeline.hardware_profile='rtx5090'; expected='rtx3060'" in issues
+
+
+def test_contract_smoke_runner_injects_and_validates_independent_profiles(tmp_path: Path) -> None:
+    paths, kernel_path = _structured_contract_paths(
+        tmp_path,
+        data_ready=False,
+        deliverable_mode="writeup",
+    )
+    _profiled_contract_plan(paths.plan_path)
+    kernel_path.write_text(
+        """\
+import json
+import os
+from pathlib import Path
+
+class DataDiscoveryError(RuntimeError):
+    pass
+
+def contract_smoke(output_dir=None):
+    output_dir = Path(output_dir or os.environ["KAGGLEBOT_OUTPUT_DIR"])
+    compute_profile = os.environ["KAGGLEBOT_COMPUTE_PROFILE"]
+    hardware_profile = os.environ["KAGGLEBOT_HARDWARE_PROFILE"]
+    report = {
+        "status": "passed",
+        "profile": compute_profile,
+        "top_level_knobs": {"HARDWARE_PROFILE": hardware_profile},
+        "data_free": True,
+        "training_performed": False,
+        "score_reported": False,
+        "pipelines": {
+            "planned_pipeline": {
+                "profile": hardware_profile,
+                "finite_forward": True,
+                "finite_backward": True,
+                "logits_shape": [2, 40],
+                "deploy_bytes": 1024,
+            }
+        },
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.joinpath("contract_smoke.json").write_text(json.dumps(report), encoding="utf-8")
+
+def main():
+    raise DataDiscoveryError("Raw labeled training assets were not found. No submission was created.")
+
+if __name__ == "__main__":
+    main()
+""",
+        encoding="utf-8",
+    )
+
+    result = agent_pipeline._run_kernel_contract_smoke(
+        paths=paths,
+        kernel_path=kernel_path,
+        expected_compute_profile="kaggle_gpu",
+        expected_hardware_profile="rtx3060",
+    )
+
+    assert result.passed is True
+    assert result.contract_only is True
+    assert result.contract_report_issues == ()
+    assert result.contract_report["profile"] == "kaggle_gpu"
+    assert result.contract_report["top_level_knobs"]["HARDWARE_PROFILE"] == "rtx3060"
+    assert result.contract_report["pipelines"]["planned_pipeline"]["profile"] == "rtx3060"
+    assert "informational for a writeup deliverable" in "\n".join(result.warnings)
 
 
 def test_contract_report_rejects_missing_conflicting_nonfinite_and_oversized_pipeline(
@@ -560,7 +708,7 @@ def test_contract_report_rejects_missing_conflicting_nonfinite_and_oversized_pip
 
     conflicting = _canonical_contract_report(entry_profile=True)
     conflicting["pipelines"]["planned_pipeline"]["profile"] = "rtx5090"
-    reports.append((conflicting, "conflicts with top-level profile"))
+    reports.append((conflicting, "hardware_profile='rtx5090'; expected='rtx3060'"))
 
     nonfinite = _canonical_contract_report()
     nonfinite["pipelines"]["planned_pipeline"]["finite_backward"] = False
@@ -570,9 +718,25 @@ def test_contract_report_rejects_missing_conflicting_nonfinite_and_oversized_pip
     oversized["pipelines"]["planned_pipeline"]["deploy_bytes"] = 100 * 1024 * 1024
     reports.append((oversized, "exceeds frozen limit"))
 
+    zero_deploy = _canonical_contract_report()
+    zero_deploy["pipelines"]["planned_pipeline"]["deploy_bytes"] = 0
+    reports.append((zero_deploy, "invalid deploy_bytes"))
+
+    wrong_logit_shape = _canonical_contract_report()
+    wrong_logit_shape["pipelines"]["planned_pipeline"]["logits_shape"] = [1, 40]
+    reports.append((wrong_logit_shape, "invalid logits_shape"))
+
     not_data_free = _canonical_contract_report()
     not_data_free.pop("data_free")
     reports.append((not_data_free, "data_free=true"))
+
+    training_performed = _canonical_contract_report()
+    training_performed["training_performed"] = True
+    reports.append((training_performed, "training_performed=false"))
+
+    score_reported = _canonical_contract_report()
+    score_reported["score_reported"] = True
+    reports.append((score_reported, "score_reported=false"))
 
     for report, expected_issue in reports:
         issues = agent_pipeline._validate_contract_smoke_report(
@@ -581,6 +745,118 @@ def test_contract_report_rejects_missing_conflicting_nonfinite_and_oversized_pip
             pipeline_names=("planned_pipeline",),
         )
         assert expected_issue in "\n".join(issues)
+
+
+def test_contract_report_accepts_legacy_pipeline_compute_and_inherits_hardware(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report(entry_profile=True)
+    report["pipelines"]["planned_pipeline"]["profile"] = "local_gpu"
+    warnings: list[str] = []
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+        warnings=warnings,
+    )
+
+    assert issues == ()
+    assert "pipelines.planned_pipeline.profile='local_gpu' is legacy; interpreted as compute_mode" in warnings
+
+
+def test_legacy_pipeline_compute_requires_reported_top_level_hardware(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report(entry_profile=True)
+    report.pop("top_level_knobs")
+    report["pipelines"]["planned_pipeline"]["profile"] = "local_gpu"
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+    )
+
+    assert "pipelines.planned_pipeline.hardware_profile is missing; expected='rtx3060'" in issues
+
+
+def test_contract_report_accepts_legacy_pipeline_hardware_and_inherits_compute(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report(entry_profile=True)
+    warnings: list[str] = []
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+        warnings=warnings,
+    )
+
+    assert issues == ()
+    assert "pipelines.planned_pipeline.profile='rtx3060' is legacy; interpreted as hardware_profile" in warnings
+
+
+def test_contract_report_accepts_explicit_profile_schema_without_legacy_warning(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report()
+    report.pop("profile")
+    report["compute_mode"] = "local_gpu"
+    report["hardware_profile"] = "rtx3060"
+    report.pop("top_level_knobs")
+    report["pipelines"]["planned_pipeline"].update(
+        compute_mode="local_gpu",
+        hardware_profile="rtx3060",
+    )
+    warnings: list[str] = []
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+        warnings=warnings,
+    )
+
+    assert issues == ()
+    assert warnings == []
+
+
+def test_contract_report_rejects_mismatched_compute_mode(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report()
+    report["profile"] = "kaggle_gpu"
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+    )
+
+    assert "contract_smoke.json compute_mode='kaggle_gpu'; expected='local_gpu'" in issues
+
+
+def test_contract_report_rejects_unknown_legacy_profile(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    _profiled_contract_plan(plan_path)
+    report = _canonical_contract_report(entry_profile=True)
+    report["pipelines"]["planned_pipeline"]["profile"] = "mystery_profile"
+
+    issues = agent_pipeline._validate_contract_smoke_report(
+        report,
+        plan_path=plan_path,
+        pipeline_names=("planned_pipeline",),
+        expected_compute_profile="local_gpu",
+    )
+
+    assert "pipelines.planned_pipeline.profile='mystery_profile' is unknown" in issues
 
 
 def test_contract_report_normalizes_legacy_alias_and_rejects_disagreement(tmp_path: Path) -> None:
@@ -648,6 +924,8 @@ def test_kernel_candidate_instructions_specify_exact_contract_profile_schema(tmp
     instructions = agent_pipeline._kernel_candidate_contract_instructions(paths)
 
     assert "`data_free=true`" in instructions
+    assert '"compute_mode": "<local_gpu, kaggle_gpu, or kaggle_tpu>"' in instructions
+    assert '"hardware_profile": "<hardware profile>"' in instructions
     assert '"finite_forward": true' in instructions
     assert '"finite_backward": true' in instructions
     assert '"logits_shape": [2, <class count>]' in instructions
@@ -739,7 +1017,11 @@ def test_missing_data_does_not_hide_unrelated_contract_exception(tmp_path: Path)
 
 
 def test_contract_smoke_supports_single_output_directory_argument(tmp_path: Path) -> None:
-    paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
+    paths, kernel_path = _structured_contract_paths(
+        tmp_path,
+        data_ready=False,
+        deliverable_mode="writeup",
+    )
     _write_structured_contract_kernel(kernel_path, contract_output_arg=True)
 
     result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
@@ -928,12 +1210,12 @@ def test_successful_implementation_is_contract_smoked(monkeypatch, tmp_path: Pat
         smoke_stdout="valid",
         smoke_stderr="",
     )
-    smoke_calls: list[Path] = []
+    smoke_calls: list[dict[str, object]] = []
     monkeypatch.setattr(agent_pipeline, "_run_guarded_kernel_implementation_agent", lambda **kwargs: result)
     monkeypatch.setattr(
         agent_pipeline,
         "_run_kernel_contract_smoke",
-        lambda **kwargs: smoke_calls.append(kwargs["kernel_path"]) or smoke,
+        lambda **kwargs: smoke_calls.append(kwargs) or smoke,
     )
     config = AgentPipelineConfig(
         slug="demo",
@@ -944,13 +1226,16 @@ def test_successful_implementation_is_contract_smoked(monkeypatch, tmp_path: Pat
         run_id="run-1",
         dry_run=False,
         repo_root=repo_root,
+        hardware_profile="rtx5090",
     )
 
     agent_pipeline._run_codex_kernel_implementation(paths, config, output_dir, instructions_path)
 
     assert len(smoke_calls) == 1
-    assert smoke_calls[0].name == "kernel.py"
-    assert smoke_calls[0] != paths.kernel_source_dir / "kernel.py"
+    assert smoke_calls[0]["kernel_path"].name == "kernel.py"
+    assert smoke_calls[0]["kernel_path"] != paths.kernel_source_dir / "kernel.py"
+    assert smoke_calls[0]["expected_compute_profile"] == "local_gpu"
+    assert smoke_calls[0]["expected_hardware_profile"] == "rtx5090"
     assert (paths.kernel_source_dir / "kernel.py").read_text(encoding="utf-8") == "print('generated')\n"
 
 

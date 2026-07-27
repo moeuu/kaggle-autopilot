@@ -997,7 +997,7 @@ def _select_train_test_paths(*, files: list[Path], sample_path: Path) -> tuple[P
 
 def _select_train_test_paths_by_schema(*, candidates: list[Path], sample_path: Path) -> tuple[Path, Path] | None:
     try:
-        sample_head = _read_table_head(sample_path)
+        sample_head = _read_table_schema_head(sample_path)
     except Exception:  # noqa: BLE001
         return None
     sample_cols = [str(col) for col in sample_head.columns]
@@ -1043,7 +1043,7 @@ def _schema_file_profile(
     sample_targets: Sequence[str],
 ) -> dict[str, object] | None:
     try:
-        head = _read_table_head(path)
+        head = _read_table_schema_head(path)
     except Exception:  # noqa: BLE001
         return None
     columns = [str(col) for col in head.columns]
@@ -1133,9 +1133,9 @@ def _path_mentions_role(path: Path, role: str) -> bool:
 
 def _train_test_pair_score(*, train_path: Path, test_path: Path, sample_path: Path) -> int:
     try:
-        train_head = _read_table_head(train_path)
-        test_head = _read_table_head(test_path)
-        sample_head = _read_table_head(sample_path)
+        train_head = _read_table_schema_head(train_path)
+        test_head = _read_table_schema_head(test_path)
+        sample_head = _read_table_schema_head(sample_path)
     except Exception:  # noqa: BLE001
         return -10_000
 
@@ -1172,6 +1172,13 @@ def _tabular_stem(path: Path) -> str:
 
 def _read_table_head(path: Path, *, nrows: int = 5) -> pd.DataFrame:
     return _finalize_table_frame(_read_raw_table_head(path, nrows=nrows))
+
+
+def _read_table_schema_head(path: Path, *, nrows: int = 5) -> pd.DataFrame:
+    """Read only enough rows to compare schemas without inferring text value types."""
+    if _tabular_suffix(path) in TABULAR_TEXT_SUFFIXES:
+        return _finalize_table_frame(_read_text_tabular_frame(path, dtype=str, nrows=nrows))
+    return _read_table_head(path, nrows=nrows)
 
 
 def _read_raw_table_head(path: Path, *, nrows: int = 5) -> pd.DataFrame:
@@ -3022,7 +3029,7 @@ def _is_roleless_test_id_candidate(
     target_columns: Sequence[str] | None,
 ) -> bool:
     try:
-        columns = set(_read_table_head(path, nrows=1).columns)
+        columns = set(_read_table_schema_head(path, nrows=1).columns)
     except Exception:  # noqa: BLE001
         return False
     if id_column not in columns:
@@ -3049,7 +3056,7 @@ def _test_id_candidate_key(
     likely_eval_file = 1 if stem_tokens & TEST_INFERENCE_ROLE_TOKENS else 0
     likely_feature_file = 1 if any(token in stem for token in ("feature", "data")) else 0
     try:
-        columns = set(_read_table_head(path, nrows=1).columns)
+        columns = set(_read_table_schema_head(path, nrows=1).columns)
     except Exception:  # noqa: BLE001
         columns = set()
     has_requested_id = 1 if id_column in columns else 0

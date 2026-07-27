@@ -1,41 +1,33 @@
-## Ranked shortlist
+# Ranked pipeline shortlist
 
-### 1. Causal CatBoost + rule gate + Qwen3 dual-reranker cascade
+## 1. Causal CatBoost + cross-fitted calibration + Qwen3 retrieval/reranking
 
-**Leak-free features/encodings:** raw heart rate/zone/effort/recovery/stress/minute, parsed timestamp, missing indicators, activity categorical, static trigger distances, interactions, and within-session current/past lags, deltas, acceleration, rolling means/std, EWM, and threshold crossings. `session_id` is group metadata; `moment_type`, `assigned_verse_id`, translation, verse fields, future rows, and full-session aggregates are excluded. CatBoost receives string categoricals with `"Unknown"` filled safely. Transition counts are fitted inside each fold.
+**Leak-free features/encodings:** raw heart rate, zone, effort, recovery, stress, session minute, parsed timestamp, missing flags, activity categorical, trigger-distance/interactions, and within-session past-only lags, deltas, accelerations, rolling/EWM summaries, crossings, elapsed time, and online phase. `session_id` is split metadata only. Exclude `moment_type`, `assigned_verse_id`, translation, verse text, future rows, and full-session aggregates. CatBoost receives `activity_type` as a string categorical; all priors, rule probabilities, transition matrices, and calibration parameters are fit within the outer-train fold.
 
-**Models and concrete settings:** CatBoost multiclass with 1,000 iterations, depth 6, learning rate 0.025, L2 10, balanced class weights, early stopping 150; 70/30 learned/rule probability blend; optional transition strength 0.18 only after OOF promotion. Qwen3-Embedding-4B first stage, word/char TF-IDF and structured scores, top-12 candidates, then top-8 reranking. Compare Qwen3-Reranker-4B and Querit-4B only through nested Leave-One-Session-Out retrieval selection. Qwen3’s official cards support instruction-aware 4B embedding/reranking and Apache-2.0 licensing; Querit is a newer Apache-2.0 4B cross-encoder challenger. ([Hugging Face][1])
+**Models and concrete hyperparameters:** CatBoost MultiClass, 1000 iterations, depth 6, learning rate 0.025, L2 10, random strength 0.5, bagging temperature 0.5, balanced class weights, early stopping 150. Blend 0.70 learned + 0.30 rules; transition strength 0.18 with smoothing 0.5. Inner-LOGO scalar temperature in [0.5, 5.0] plus prior-logit adjustment 0.25, promoted only for ECE gain ≥0.01 with no macro-F1 loss. Retrieval uses Qwen3-Embedding-4B, top 12, then Qwen3-Reranker-4B over top 8 with sequential fp16 loading at length 384 and batch 1. The official Qwen card supports the 4B/0.6B family, instruction-aware retrieval, and the yes/no reranker formulation. ([Hugging Face][3])
 
-**Expected runtime/memory:** 240–720 minutes end to end on RTX 3060. Sequential 4B loading, FP16, batch 1, 384 tokens, cached corpus/query embeddings and pair scores; target peak 8.5–11.5GB VRAM and <10GB host RSS.
+**Expected runtime/memory:** roughly 240–720 minutes on RTX 3060; 8.5–11.5GB peak VRAM with sequential loading, cached embeddings/pair scores, and under 10GB host RSS.
 
-**Leakage risk:** high if assigned references select retrieval weights/backends on the same session, if temporal features use future rows, or if rule/transition statistics are fitted globally. The nested group protocol and fold-local transforms are mandatory.
+**Leakage risk:** future session information, calibration on outer validation labels, global priors/transitions, assigned-reference use in retrieval queries or cache keys, and full-data backend selection. **Fallback:** shorten/chunk first, then 8/4-bit, Qwen3 0.6B, BGE-M3, TF-IDF; ExtraTrees only if CatBoost is unavailable.
 
-**Fallback:** Qwen3 4B at shorter lengths → supported 8/4-bit → Qwen3 0.6B → BGE-M3/BGE reranker → TF-IDF. CatBoost absence falls back to ExtraTrees, but that fallback cannot be presented as equal technical depth.
+## 2. XGBoost temporal challenger + shared retrieval cache
 
-### 2. XGBoost temporal challenger + shared retrieval
+**Leak-free features/encodings:** identical causal frame; numeric median imputation and missing indicators are fit on each fold; `activity_type` uses fold-fit one-hot encoding with `handle_unknown="ignore"`. `align_features` adds absent columns as NA and ignores test-only extras.
 
-**Leak-free features/encodings:** identical causal frame, with fold-fitted numeric median imputation, missing indicators, and `OneHotEncoder(handle_unknown="ignore")` for activity. Train-only columns are dropped; absent test columns are added as NA by `align_features`.
+**Models and concrete hyperparameters:** XGBoost `multi:softprob`, 900 trees, depth 4, learning rate 0.025, subsample 0.85, column sample 0.80, min child weight 2, alpha 0.15, lambda 6, histogram tree method, CUDA device, early stopping 100. Inner-LOGO scalar temperature uses the same [0.5, 5.0] promotion gates. Reuse the selected Qwen/BGE/TF-IDF caches. Evaluate a fixed 0.50/0.50 CatBoost–XGBoost probability blend only; promote for ≥0.005 grouped macro-F1 gain, worst-session drop no worse than 0.03, and no per-class recall collapse above 0.20.
 
-**Models and concrete settings:** XGBoost `multi:softprob`, 900 estimators, depth 4, learning rate 0.025, subsample 0.85, column sample 0.80, min child weight 2, alpha 0.15, lambda 6, histogram tree method, CUDA with CPU retry, early stopping 100. Reuse the selected retrieval caches. Evaluate a fixed 50/50 probability blend with CatBoost and promote only for at least +0.005 grouped macro-F1 without >0.03 worst-session loss.
+**Expected runtime/memory:** 60–180 incremental minutes after shared retrieval caches; usually below 6GB VRAM and 8GB host RAM.
 
-**Expected runtime/memory:** 60–180 incremental minutes after shared caches; normally <6GB GPU memory and <8GB RAM.
+**Leakage risk:** globally fit one-hot/imputation, sparse matrix densification, early stopping against labels outside the fold, and blend selection on non-OOF predictions. **Fallback:** CUDA-to-CPU XGBoost, then sparse ExtraTrees; HistGradientBoosting only after a dense-memory guard.
 
-**Leakage risk:** one-hot category fitting outside folds, validation-only target classes, accidental sparse-to-dense conversion, and blend selection on non-OOF predictions.
+## 3. Deterministic rules + BGE-M3/TF-IDF safety floor
 
-**Fallback:** CPU XGBoost, then sparse ExtraTrees or HistGradientBoosting only when safe to densify. Reject the challenger when it lacks stable grouped gain.
+**Leak-free features/encodings:** organizer threshold catalog, activity compatibility, current/past slopes, observed-range checks, novelty, cooldown, word 1–2 grams, and character 3–5 grams. No target encoder or future feature is permitted.
 
-### 3. Rules + BGE-M3/TF-IDF contract failsafe
+**Models and concrete hyperparameters:** deterministic state machine; BGE-M3 at length 256, embedding batch 4, reranker batch 2, first-stage top 10, rerank top 8; TF-IDF `min_df=1`, `max_features=12000`, sublinear TF. BGE-M3 supports dense, sparse, and multi-vector retrieval and is therefore a credible hybrid fallback. ([arXiv][2])
 
-**Leak-free features/encodings:** organizer trigger catalog, activity compatibility, current/past slopes, observed-range checks, cooldown/novelty state, word 1–2 grams, and character 3–5 grams. No learned target encoder.
+**Expected runtime/memory:** under 60 minutes with cached BGE; under 10 minutes and 2GB RAM for TF-IDF-only.
 
-**Models and concrete settings:** deterministic state machine; BGE-M3 dense/sparse/multi-vector retrieval when an immutable local asset and `FlagEmbedding` are available; BGE reranker or first-stage scoring; otherwise 12,000-feature word/character TF-IDF. Delivery confidence 0.60, cooldown 180 seconds, no generated words in the pure outage path. BGE-M3’s primary paper describes unified dense, sparse, and multi-vector retrieval across 100+ languages, making it a defensible fallback rather than a generic lexical baseline. ([arXiv][7])
+**Leakage risk:** circular-looking replay scores because organizer trigger/mapping semantics are close to labels. Do not present replay as real-user effectiveness. **Fallback:** rules + TF-IDF + fixed, clearly labeled non-generative phrases.
 
-**Expected runtime/memory:** <60 minutes with BGE caches; <10 minutes and <2GB RAM for TF-IDF-only mode.
-
-**Leakage risk:** circularity from organizer mapping labels and thresholds, plus misleadingly strong replay metrics. Report it as an organizer-proxy floor and keep a rules-only ablation.
-
-**Fallback:** deterministic rules + TF-IDF + fixed safe phrases. This path is for reliability and contract validation, not the preferred final product unless learned routes fail honest validation.
-
-## Recommendation
-
-Promote pipeline 1, retain pipeline 2 for diversity, and require pipeline 3 as the outage/sanity floor. The decisive improvement over the current implementation is not another broad hyperparameter sweep; it is nested session-level retrieval evaluation, immutable asset locking, and visibly real dual-API evidence. Keep the JITAI-style timing gate and MRT-compatible ledger as technical depth, while explicitly avoiding effectiveness or medical claims. ([arXiv][3])
+**Recommendation:** promote pipeline 1, retain pipeline 2 only for diversity/blending, and require pipeline 3 for outage and contract reliability. The first engineering action is to repair the plan/kernel hash and candidate-name drift, then implement the planned cross-fitted calibration before any tuning.

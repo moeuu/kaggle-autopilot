@@ -4,7 +4,7 @@ Autopilot is a non-interactive Kaggle loop with readiness-score iteration contro
 It always follows this high-level path:
 
 1. Bootstrap competition context
-2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex(sol-ultra)`; implementation stops if Oracle fails
+2. Plan and implement initial kernel via `codex -> oracle(latest-pro) -> codex(sol-ultra)`; unavailable Oracle calls use the configured Codex fallback
 3. Train/evaluate per iteration
 4. Improve if needed
 5. Submit and use submission outcomes as secondary guardrails
@@ -51,8 +51,11 @@ Install and immediately start the repository-managed user services from any clon
 The installer creates a stable symlink to the current clone and registers the unit files in `deploy/systemd/`.
 `kagglebot-watch.service` directly runs `uv run kagglebot --force watch`; there is no separate service-specific
 autopilot implementation. Pulling repository code therefore updates the implementation used on the next service
-restart. The primary, Oracle, and Oracle-follow-up model identities remain centralized in `[tool.kagglebot.agent]` in
-`pyproject.toml`, not duplicated in the systemd unit.
+restart. The installer also enables `kagglebot-oracle-update.timer`, which checks npm every 15 minutes and before
+`watch` starts. It installs the latest `@steipete/oracle` release through the dedicated Node 24 npm prefix. An update is
+deferred while an Oracle or Oracle MCP process is active, then retried on the next timer cycle. Set
+`KAGGLEBOT_ORACLE_AUTO_UPDATE=0` in `watch.env` to disable it. The primary, Oracle, and Oracle-follow-up model identities
+remain centralized in `[tool.kagglebot.agent]` in `pyproject.toml`, not duplicated in the systemd unit.
 
 Use `./scripts/kagglebot-systemd start|stop|restart|status|uninstall` for lifecycle management. Optional per-machine
 settings belong in `~/.config/kagglebot-autopilot/watch.env`; start from `deploy/systemd/watch.env.example`. Keep API
@@ -102,23 +105,26 @@ when the rolling alias does not map to the desired release.
 2. Oracle with the latest Pro model: performs strategy planning with the brief, local context bundle, and live web search when available.
 3. Codex with the `sol-ultra` profile: implements kernel code from frozen instructions.
 
-Autopilot implementation stages require Oracle and do not fall back to a Codex strategy. If Oracle is not installed as `oracle`, set
+Autopilot attempts Oracle first. If Oracle is not installed as `oracle`, set
 `KAGGLEBOT_ORACLE_COMMAND`, for example `KAGGLEBOT_ORACLE_COMMAND="npx -y @steipete/oracle"`. Extra Oracle flags can
 be supplied with `KAGGLEBOT_ORACLE_ARGS`, such as `--browser-manual-login`. Kagglebot defaults Oracle to
 `--engine browser --wait` so planning uses ChatGPT Pro browser access instead of unexpectedly spending API credits;
 set `KAGGLEBOT_ORACLE_ENGINE=api` or `KAGGLEBOT_ORACLE_ENGINE=auto` to override that default.
 Global `--dry-run` skips both model calls, writes a deterministic preview plan, resolves the run configuration and
 guardrails, then stops before kernel preflight, training, evaluation, and submission.
-Oracle strategy calls have no outer timeout by default. Large context bundles may take many minutes, and Kagglebot
-waits for the real Oracle response instead of replacing it with a local strategy. Oracle's browser wait defaults to
-24 hours. Set `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC` only when an operator explicitly wants a hard failure; a timeout
-blocks the Codex implementation and never triggers a Codex-to-Codex fallback.
-Required Oracle failures are excluded from the generic Codex autofix loop. When Oracle has already written a current
-response, Kagglebot validates that response even if the CLI later reports a cleanup error. Chat archival is attempted
-and reported separately, so an archival verification warning cannot replace or invalidate a usable Oracle answer.
+Oracle strategy calls have an independent two-hour (`7200` second) outer timeout. On timeout, launch failure, a
+non-zero Oracle exit, or an empty response, Kagglebot preserves the Oracle diagnostics and retries the same prompt
+with Codex `gpt-5.6-sol` at `ultra` reasoning. Configure this with `KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC`,
+`KAGGLEBOT_ORACLE_FALLBACK_CODEX`, `KAGGLEBOT_ORACLE_FALLBACK_CODEX_MODEL`, and
+`KAGGLEBOT_ORACLE_FALLBACK_CODEX_REASONING_EFFORT`. Oracle's own browser wait remains 24 hours, but the outer timeout
+takes precedence.
+Oracle operational failures are handled by the dedicated strategy fallback rather than the generic Codex autofix
+loop. When Oracle has already written a current response, Kagglebot validates that response even if the CLI later
+reports a cleanup error. Chat archival is attempted and reported separately, so an archival verification warning
+cannot replace or invalidate a usable Oracle answer.
 Resume skips planning only when the current run contains `planning_complete.json`, written after Oracle planning,
 sol-ultra implementation, and repository verification all succeed. A plan or kernel left by an older or incomplete
-run cannot bypass the required Oracle stage.
+run cannot bypass the required Oracle attempt or its configured Codex fallback.
 Iteration improvement, kernel-fix, and autofix flows also persist `oracle_workflow_state.json` in the run directory.
 If systemd, SIGTERM, or an intentional source-reload restart interrupts Oracle or the following Codex pass, resume
 re-runs that complete Oracle-to-Codex workflow before starting planning or another kernel. A corrupt or unsupported

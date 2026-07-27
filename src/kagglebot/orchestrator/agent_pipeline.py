@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +75,7 @@ from kagglebot.writeup import (
 _PLANNING_CODEX_MODEL = IMPLEMENTATION_AGENT.model
 _PLANNING_REASONING_EFFORT = IMPLEMENTATION_AGENT.reasoning_effort
 _KERNEL_CONTRACT_SMOKE_TIMEOUT_SEC = 180.0
+_CONTRACT_COMPUTE_PROFILES = frozenset({"local_gpu", "kaggle_gpu", "kaggle_tpu"})
 _CYBERSECURITY_CLASSIFIER_BLOCK_MARKER = "flagged for possible cybersecurity risk"
 _KNOWN_PROFILE_SCHEMA = (
     "adaptive_k1_conditional_multipost_fill",
@@ -118,8 +120,10 @@ class KernelContractSmokeResult:
     pipeline_issues: tuple[str, ...] = ()
     contract_report: dict[str, object] | None = None
     contract_report_issues: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
     data_ready: bool | None = None
     data_readiness_reason: str | None = None
+    allow_missing_training_data: bool = False
     normal_smoke_required: bool = False
     normal_smoke_returncode: int | None = None
     normal_smoke_stdout: str = ""
@@ -151,10 +155,15 @@ class KernelContractSmokeResult:
 
     @property
     def expected_missing_data_block(self) -> bool:
+        report = self.contract_report or {}
         return (
             self.normal_smoke_required
+            and self.allow_missing_training_data
             and self.data_ready is False
             and self.data_readiness_reason == "dataset_profile_missing_required_files"
+            and report.get("data_free") is True
+            and report.get("training_performed") is False
+            and report.get("score_reported") is False
             and self.normal_smoke_returncode not in (None, 0)
             and not self.normal_smoke_timed_out
             and not self.normal_smoke_issues
@@ -610,6 +619,17 @@ def _run_codex_kernel_implementation(
     instructions_path: Path,
 ) -> None:
     implementation_agent = _implementation_agent_for_strategy_engine(config.strategy_engine)
+    contract_hardware_profile = (
+        _plan_hardware_profile(paths.plan_path)
+        or resolve_hardware_profile(
+            config.hardware_profile,
+            compute=config.compute,
+        ).key
+    )
+    contract_smoke_kwargs = {
+        "expected_compute_profile": config.compute,
+        "expected_hardware_profile": contract_hardware_profile,
+    }
     kernel_dir = paths.kernel_source_dir
     ensure_solution_path_allowed(kernel_dir, artifacts_dir=paths.artifacts_dir, slug=paths.slug)
     kernel_dir.mkdir(parents=True, exist_ok=True)
@@ -663,7 +683,11 @@ def _run_codex_kernel_implementation(
                 initial_submit_runtime_error = str(exc)
                 initial_detail += f"\nDeterministic submit-runtime repair failed: {exc}"
         initial_executable = _kernel_contains_executable_code(initial_kernel_path)
-        initial_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=initial_kernel_path)
+        initial_smoke = _run_kernel_contract_smoke(
+            paths=paths,
+            kernel_path=initial_kernel_path,
+            **contract_smoke_kwargs,
+        )
         if (
             result.returncode == 0
             and initial_submit_runtime_error is None
@@ -715,7 +739,11 @@ def _run_codex_kernel_implementation(
         except (OSError, SyntaxError, ValueError) as exc:
             initial_failure += f"\nDeterministic submit-runtime repair was not applicable: {exc}"
         if deterministic_repairs:
-            repair_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=repair_kernel_path)
+            repair_smoke = _run_kernel_contract_smoke(
+                paths=paths,
+                kernel_path=repair_kernel_path,
+                **contract_smoke_kwargs,
+            )
             if _kernel_contains_executable_code(repair_kernel_path) and repair_smoke.passed:
                 _accept_validated_kernel(
                     paths=paths,
@@ -763,7 +791,11 @@ def _run_codex_kernel_implementation(
             implementation_agent=implementation_agent,
         )
         repaired_executable = _kernel_contains_executable_code(repair_kernel_path)
-        repaired_smoke = _run_kernel_contract_smoke(paths=paths, kernel_path=repair_kernel_path)
+        repaired_smoke = _run_kernel_contract_smoke(
+            paths=paths,
+            kernel_path=repair_kernel_path,
+            **contract_smoke_kwargs,
+        )
         if repair_result.returncode != 0 or not repaired_executable or not repaired_smoke.passed:
             repaired_code_detail = ""
             if not repaired_executable:
@@ -884,6 +916,8 @@ def _accept_validated_kernel(
     }
     if smoke_result.contract_report is not None:
         payload["contract_report"] = smoke_result.contract_report
+    if smoke_result.warnings:
+        payload["warnings"] = list(smoke_result.warnings)
     if smoke_result.contract_only:
         payload["blocked_reason"] = "missing_competition_data"
         payload["data_readiness_reason"] = smoke_result.data_readiness_reason
@@ -1509,10 +1543,16 @@ def _kernel_candidate_contract_instructions(paths: CompetitionPaths) -> str:
         "`status=passed` and `data_free=true`, include exactly every plan-listed pipeline with finite "
         "forward/backward evidence, the expected logit shape, and deploy bytes, and report "
         "`training_performed=false` plus "
-        "`score_reported=false`. Use this exact per-pipeline field schema (replacing placeholders with frozen-plan "
-        'values): `"pipelines": {"<pipeline name>": {"profile": "<hardware profile>", '
+        "`score_reported=false`. Report compute and hardware independently: top-level "
+        '`"compute_mode": "<local_gpu, kaggle_gpu, or kaggle_tpu>"` (the explicit alias `"compute_profile"` and '
+        'legacy top-level `"profile"` are accepted with deterministic value-based classification), and top-level '
+        '`"hardware_profile": "<hardware profile>"` or '
+        '`"top_level_knobs": {"HARDWARE_PROFILE": "<hardware profile>"}`. Use this exact per-pipeline field schema '
+        '(replacing placeholders with frozen-plan values): `"pipelines": {"<pipeline name>": '
+        '{"hardware_profile": "<hardware profile>", '
         '"finite_forward": true, "finite_backward": true, "logits_shape": [2, <class count>], '
-        '"deploy_bytes": <bytes>}}`. Do not rename or omit those fields.\n'
+        '"deploy_bytes": <bytes>}}`. A legacy per-pipeline `"profile"` is classified as a compute mode or frozen-plan '
+        "hardware profile by its value; unknown or ambiguous values fail validation.\n"
         "- The framework compiles the generated kernel, imports it in an isolated subprocess to call "
         "`contract_smoke()`, and then runs `python kernel.py` as a separate data-discovery probe. Do not alter model "
         "or training settings to compensate for absent competition data."
@@ -1733,9 +1773,12 @@ def _run_kernel_contract_smoke(
     paths: CompetitionPaths,
     kernel_path: Path,
     timeout_sec: float = _KERNEL_CONTRACT_SMOKE_TIMEOUT_SEC,
+    expected_compute_profile: str | None = None,
+    expected_hardware_profile: str | None = None,
 ) -> KernelContractSmokeResult:
     pipeline_issues = _diagnose_missing_pipeline_lookups(kernel_path, paths.plan_path)
     data_readiness = assess_local_training_data(paths)
+    allow_missing_training_data = _plan_allows_missing_training_data(paths)
     if not kernel_path.is_file():
         return KernelContractSmokeResult(
             compile_returncode=1,
@@ -1747,6 +1790,7 @@ def _run_kernel_contract_smoke(
             pipeline_issues=pipeline_issues,
             data_ready=data_readiness.ready,
             data_readiness_reason=data_readiness.reason,
+            allow_missing_training_data=allow_missing_training_data,
         )
     with tempfile.TemporaryDirectory(prefix="kagglebot_kernel_contract_") as tmp_name:
         staging_root = Path(tmp_name)
@@ -1776,6 +1820,11 @@ def _run_kernel_contract_smoke(
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
         )
+        if expected_compute_profile:
+            env["KAGGLEBOT_COMPUTE_PROFILE"] = expected_compute_profile
+        resolved_hardware_profile = expected_hardware_profile or _plan_hardware_profile(paths.plan_path)
+        if resolved_hardware_profile:
+            env["KAGGLEBOT_HARDWARE_PROFILE"] = resolved_hardware_profile
         if paths.slug == "arc-prize-2026-arc-agi-2":
             env.pop("ARC_DATA_DIR", None)
             env["FAST_DEV"] = "0"
@@ -1797,6 +1846,7 @@ def _run_kernel_contract_smoke(
                 pipeline_issues=pipeline_issues,
                 data_ready=data_readiness.ready,
                 data_readiness_reason=data_readiness.reason,
+                allow_missing_training_data=allow_missing_training_data,
                 compile_timed_out=compile_result[3],
             )
 
@@ -1817,6 +1867,7 @@ def _run_kernel_contract_smoke(
                 ),
                 data_ready=data_readiness.ready,
                 data_readiness_reason=data_readiness.reason,
+                allow_missing_training_data=allow_missing_training_data,
                 compile_timed_out=compile_result[3],
             )
         smoke_args = [sys.executable, str(staged_kernel_path)]
@@ -1832,13 +1883,26 @@ def _run_kernel_contract_smoke(
             staged_output_dir=staged_output_dir,
             staged_kernel_dir=staged_kernel_dir,
         )
+        validation_warnings: list[str] = []
         contract_report_issues = list(
             _validate_contract_smoke_report(
                 contract_report,
                 plan_path=paths.plan_path,
                 pipeline_names=plan_pipeline_names,
+                expected_compute_profile=expected_compute_profile,
+                smoke_environment=env,
+                warnings=validation_warnings,
             )
         )
+        if (
+            allow_missing_training_data
+            and not data_readiness.ready
+            and data_readiness.reason == "dataset_profile_missing_required_files"
+        ):
+            validation_warnings.append(
+                "training data readiness is unavailable "
+                "(dataset_profile_missing_required_files), which is informational for a writeup deliverable"
+            )
         contract_report_issues.extend(_contract_only_output_issues(staging_root))
         contract_passed = (
             smoke_result[0] == 0 and not smoke_result[3] and not pipeline_issues and not contract_report_issues
@@ -1873,8 +1937,10 @@ def _run_kernel_contract_smoke(
             pipeline_issues=pipeline_issues,
             contract_report=contract_report,
             contract_report_issues=tuple(contract_report_issues),
+            warnings=tuple(validation_warnings),
             data_ready=data_readiness.ready,
             data_readiness_reason=data_readiness.reason,
+            allow_missing_training_data=allow_missing_training_data,
             normal_smoke_required=normal_smoke_required,
             normal_smoke_returncode=normal_smoke_result[0] if normal_smoke_result is not None else None,
             normal_smoke_stdout=normal_smoke_result[1] if normal_smoke_result is not None else "",
@@ -1930,25 +1996,47 @@ def _validate_contract_smoke_report(
     *,
     plan_path: Path,
     pipeline_names: tuple[str, ...],
+    expected_compute_profile: str | None = None,
+    smoke_environment: Mapping[str, str] | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[str, ...]:
     if report is None:
         if pipeline_names:
             return ("contract smoke did not write a readable contract_smoke.json report",)
         return ()
 
-    issues: list[str] = []
+    fatal_errors: list[str] = []
+    warning_messages = warnings if warnings is not None else []
     if report.get("status") != "passed":
-        issues.append("contract_smoke.json status must be 'passed'")
+        fatal_errors.append("contract_smoke.json status must be 'passed'")
     if report.get("training_performed") is not False:
-        issues.append("contract_smoke.json must report training_performed=false")
+        fatal_errors.append("contract_smoke.json must report training_performed=false")
     if report.get("score_reported") is not False:
-        issues.append("contract_smoke.json must report score_reported=false")
+        fatal_errors.append("contract_smoke.json must report score_reported=false")
 
-    collection_name, pipeline_reports, collection_issues = _contract_pipeline_reports(report)
-    issues.extend(collection_issues)
-    # Legacy `profiles` reports predate the explicit data-free marker.
+    expected_hardware_profile = _expected_contract_hardware_profile(
+        plan_path=plan_path,
+        smoke_environment=smoke_environment,
+    )
+    hardware_profile_names = _plan_hardware_profile_names(plan_path)
+    report_profiles = _contract_profiles(
+        report,
+        pointer="contract_smoke.json",
+        hardware_profile_names=hardware_profile_names,
+        include_top_level_knobs=True,
+        fatal_errors=fatal_errors,
+        warnings=warning_messages,
+    )
+    collection_name, pipeline_reports, collection_issues = _contract_pipeline_reports(
+        report,
+        fallback_hardware_profile=report_profiles.hardware_profile,
+    )
+    fatal_errors.extend(collection_issues)
+    # Legacy `profiles` reports predate the explicit marker. They remain valid for
+    # data-ready/full-entrypoint smoke, but expected_missing_data_block requires the
+    # marker before treating absent training data as an informational condition.
     if report.get("data_free") is not True and (collection_name == "pipelines" or "data_free" in report):
-        issues.append("contract_smoke.json must report data_free=true")
+        fatal_errors.append("contract_smoke.json must report data_free=true")
     expected_pipeline_names = set(pipeline_names)
     actual_pipeline_names = {name for name in pipeline_reports if isinstance(name, str)}
     if actual_pipeline_names != expected_pipeline_names:
@@ -1959,41 +2047,64 @@ def _validate_contract_smoke_report(
             details.append(f"missing={missing}")
         if unexpected:
             details.append(f"unexpected={unexpected}")
-        issues.append("contract_smoke.json pipeline names must exactly match frozen plan: " + ", ".join(details))
+        fatal_errors.append("contract_smoke.json pipeline names must exactly match frozen plan: " + ", ".join(details))
     model_size_limit = _plan_model_size_limit_bytes(plan_path)
     expected_classes = _plan_expected_logit_classes(plan_path)
-    expected_profile = _plan_hardware_profile(plan_path)
-    report_profile = report.get("profile")
-    if "profile" in report and (not isinstance(report_profile, str) or not report_profile.strip()):
-        issues.append("contract_smoke.json profile must be a non-empty string when present")
+    reported_compute_profile = report_profiles.compute_mode
+    reported_hardware_profile = report_profiles.hardware_profile
+    if expected_compute_profile is not None and (
+        collection_name == "pipelines" or reported_compute_profile is not None
+    ):
+        if reported_compute_profile is None:
+            fatal_errors.append(f"contract_smoke.json compute_mode is missing; expected={expected_compute_profile!r}")
+        elif reported_compute_profile != expected_compute_profile:
+            fatal_errors.append(
+                f"contract_smoke.json compute_mode={reported_compute_profile!r}; expected={expected_compute_profile!r}"
+            )
+    if (
+        expected_hardware_profile is not None
+        and reported_hardware_profile is not None
+        and reported_hardware_profile != expected_hardware_profile
+    ):
+        fatal_errors.append(
+            f"contract_smoke.json hardware_profile={reported_hardware_profile!r}; "
+            f"expected={expected_hardware_profile!r}"
+        )
     for pipeline_name in pipeline_names:
         raw_pipeline = pipeline_reports.get(pipeline_name)
         pointer = f"{collection_name}.{pipeline_name}"
         if not isinstance(raw_pipeline, dict):
             if pipeline_name in pipeline_reports:
-                issues.append(f"{pointer} must be an object")
+                fatal_errors.append(f"{pointer} must be an object")
             continue
-        entry_profile = raw_pipeline.get("profile")
-        if "profile" in raw_pipeline and (not isinstance(entry_profile, str) or not entry_profile.strip()):
-            issues.append(f"{pointer}.profile must be a non-empty string when present")
-        if isinstance(entry_profile, str) and isinstance(report_profile, str) and entry_profile != report_profile:
-            issues.append(f"{pointer}.profile={entry_profile!r} conflicts with top-level profile={report_profile!r}")
-        effective_profile = (
-            entry_profile if isinstance(entry_profile, str) and entry_profile.strip() else report_profile
+        entry_profiles = _contract_profiles(
+            raw_pipeline,
+            pointer=pointer,
+            hardware_profile_names=hardware_profile_names,
+            include_top_level_knobs=False,
+            fatal_errors=fatal_errors,
+            warnings=warning_messages,
         )
-        # Legacy schemas implicitly ran the frozen plan's selected hardware profile.
-        if effective_profile is None and collection_name != "pipelines":
-            effective_profile = expected_profile
-        if expected_profile is not None and effective_profile != expected_profile:
-            if effective_profile is None:
-                issues.append(
-                    f"{pointer}: effective profile missing; checked entry.profile and top-level profile "
-                    f"(expected {expected_profile!r})"
-                )
+        effective_compute_profile = entry_profiles.compute_mode or reported_compute_profile
+        effective_hardware_profile = entry_profiles.hardware_profile or reported_hardware_profile
+        # Legacy `profiles`/`pipeline_profiles` schemas predate both explicit
+        # dimensions and implicitly ran the configured compute plus frozen hardware.
+        if collection_name != "pipelines":
+            effective_compute_profile = effective_compute_profile or expected_compute_profile
+            effective_hardware_profile = effective_hardware_profile or expected_hardware_profile
+        if expected_compute_profile is not None and effective_compute_profile != expected_compute_profile:
+            if effective_compute_profile is None:
+                fatal_errors.append(f"{pointer}.compute_mode is missing; expected={expected_compute_profile!r}")
             else:
-                issues.append(
-                    f"{pointer}: effective profile={effective_profile!r}; expected frozen-plan profile "
-                    f"{expected_profile!r}"
+                fatal_errors.append(
+                    f"{pointer}.compute_mode={effective_compute_profile!r}; expected={expected_compute_profile!r}"
+                )
+        if expected_hardware_profile is not None and effective_hardware_profile != expected_hardware_profile:
+            if effective_hardware_profile is None:
+                fatal_errors.append(f"{pointer}.hardware_profile is missing; expected={expected_hardware_profile!r}")
+            else:
+                fatal_errors.append(
+                    f"{pointer}.hardware_profile={effective_hardware_profile!r}; expected={expected_hardware_profile!r}"
                 )
 
         forward_finite = _contract_entry_value(
@@ -2001,45 +2112,47 @@ def _validate_contract_smoke_report(
             pointer=pointer,
             canonical_name="finite_forward",
             aliases=("finite_forward", "forward_finite", "logits_finite"),
-            issues=issues,
+            issues=fatal_errors,
         )
         backward_finite = _contract_entry_value(
             raw_pipeline,
             pointer=pointer,
             canonical_name="finite_backward",
             aliases=("finite_backward", "backward_finite"),
-            issues=issues,
+            issues=fatal_errors,
         )
         logit_shape = _contract_entry_value(
             raw_pipeline,
             pointer=pointer,
             canonical_name="logits_shape",
             aliases=("logits_shape", "logit_shape"),
-            issues=issues,
+            issues=fatal_errors,
         )
         if not _valid_logit_shape(logit_shape, expected_classes=expected_classes):
             expected_detail = f" with {expected_classes} output classes" if expected_classes is not None else ""
-            issues.append(f"{pointer} has invalid logits_shape{expected_detail}")
+            fatal_errors.append(f"{pointer} has invalid logits_shape{expected_detail}")
         if forward_finite is not True:
-            issues.append(f"{pointer} must report finite_forward=true")
+            fatal_errors.append(f"{pointer} must report finite_forward=true")
         if backward_finite is not True:
-            issues.append(f"{pointer} must report finite_backward=true")
+            fatal_errors.append(f"{pointer} must report finite_backward=true")
         loss = raw_pipeline.get("loss")
         if "loss" in raw_pipeline and (
             isinstance(loss, bool) or not isinstance(loss, (int, float)) or not math.isfinite(float(loss))
         ):
-            issues.append(f"{pointer}.loss must be finite when present")
+            fatal_errors.append(f"{pointer}.loss must be finite when present")
         deploy_bytes = raw_pipeline.get("deploy_bytes")
         if (
             isinstance(deploy_bytes, bool)
             or not isinstance(deploy_bytes, (int, float))
             or not math.isfinite(float(deploy_bytes))
-            or float(deploy_bytes) < 0
+            or float(deploy_bytes) <= 0
         ):
-            issues.append(f"{pointer} has invalid deploy_bytes")
+            fatal_errors.append(f"{pointer} has invalid deploy_bytes")
         elif model_size_limit is not None and float(deploy_bytes) >= model_size_limit:
-            issues.append(f"{pointer} deploy_bytes={int(deploy_bytes)} exceeds frozen limit (<{int(model_size_limit)})")
-    return tuple(issues)
+            fatal_errors.append(
+                f"{pointer} deploy_bytes={int(deploy_bytes)} exceeds frozen limit (<{int(model_size_limit)})"
+            )
+    return tuple(fatal_errors)
 
 
 _CONTRACT_PIPELINE_COLLECTION_KEYS = ("pipelines", "profiles", "pipeline_profiles")
@@ -2049,12 +2162,20 @@ _CONTRACT_ENTRY_FIELD_ALIASES = {
     "logits_shape": ("logits_shape", "logit_shape"),
     "deploy_bytes": ("deploy_bytes",),
     "loss": ("loss",),
-    "profile": ("profile",),
+    "hardware_profile": ("hardware_profile", "profile"),
 }
+
+
+@dataclass(frozen=True)
+class _ContractProfiles:
+    compute_mode: str | None
+    hardware_profile: str | None
 
 
 def _contract_pipeline_reports(
     report: dict[str, object],
+    *,
+    fallback_hardware_profile: str | None,
 ) -> tuple[str, dict[object, object], tuple[str, ...]]:
     collections: list[tuple[str, dict[object, object]]] = []
     issues: list[str] = []
@@ -2072,13 +2193,13 @@ def _contract_pipeline_reports(
     collection_name, pipeline_reports = collections[0]
     normalized = _normalize_contract_pipeline_reports(
         pipeline_reports,
-        fallback_profile=report.get("profile"),
+        fallback_hardware_profile=fallback_hardware_profile,
     )
     for alias_name, alias_reports in collections[1:]:
         if (
             _normalize_contract_pipeline_reports(
                 alias_reports,
-                fallback_profile=report.get("profile"),
+                fallback_hardware_profile=fallback_hardware_profile,
             )
             != normalized
         ):
@@ -2089,7 +2210,7 @@ def _contract_pipeline_reports(
 def _normalize_contract_pipeline_reports(
     reports: dict[object, object],
     *,
-    fallback_profile: object,
+    fallback_hardware_profile: object,
 ) -> dict[object, object]:
     normalized: dict[object, object] = {}
     for name, raw_entry in reports.items():
@@ -2102,10 +2223,130 @@ def _normalize_contract_pipeline_reports(
                 if alias in raw_entry:
                     entry[canonical_name] = raw_entry[alias]
                     break
-        if "profile" not in entry and isinstance(fallback_profile, str) and fallback_profile.strip():
-            entry["profile"] = fallback_profile
+        if (
+            "hardware_profile" not in entry
+            and isinstance(fallback_hardware_profile, str)
+            and fallback_hardware_profile.strip()
+        ):
+            entry["hardware_profile"] = fallback_hardware_profile
         normalized[name] = entry
     return normalized
+
+
+def _contract_profiles(
+    report: Mapping[object, object],
+    *,
+    pointer: str,
+    hardware_profile_names: frozenset[str],
+    include_top_level_knobs: bool,
+    fatal_errors: list[str],
+    warnings: list[str],
+) -> _ContractProfiles:
+    compute_mode = _contract_alias_value(
+        report,
+        pointer=pointer,
+        field_names=("compute_mode", "compute_profile"),
+        dimension="compute mode",
+        fatal_errors=fatal_errors,
+    )
+    hardware_profile = _contract_alias_value(
+        report,
+        pointer=pointer,
+        field_names=("hardware_profile",),
+        dimension="hardware profile",
+        fatal_errors=fatal_errors,
+    )
+    if compute_mode is not None and compute_mode not in _CONTRACT_COMPUTE_PROFILES:
+        fatal_errors.append(
+            f"{pointer} compute_mode={compute_mode!r} must be one of {sorted(_CONTRACT_COMPUTE_PROFILES)}"
+        )
+
+    if include_top_level_knobs:
+        raw_knobs = report.get("top_level_knobs")
+        if "top_level_knobs" in report and not isinstance(raw_knobs, dict):
+            fatal_errors.append(f"{pointer} top_level_knobs must be an object when present")
+        if isinstance(raw_knobs, dict):
+            knob_profile = _contract_alias_value(
+                raw_knobs,
+                pointer=f"{pointer}.top_level_knobs",
+                field_names=("HARDWARE_PROFILE",),
+                dimension="hardware profile",
+                fatal_errors=fatal_errors,
+            )
+            if hardware_profile is not None and knob_profile is not None and hardware_profile != knob_profile:
+                fatal_errors.append(
+                    f"{pointer} hardware profile fields disagree: "
+                    f"hardware_profile={hardware_profile!r}, "
+                    f"top_level_knobs.HARDWARE_PROFILE={knob_profile!r}"
+                )
+            hardware_profile = hardware_profile or knob_profile
+
+    legacy_profile = report.get("profile")
+    if "profile" in report and (not isinstance(legacy_profile, str) or not legacy_profile.strip()):
+        fatal_errors.append(f"{pointer}.profile must be a non-empty string when present")
+    if isinstance(legacy_profile, str) and legacy_profile.strip():
+        legacy = legacy_profile.strip()
+        is_compute = legacy in _CONTRACT_COMPUTE_PROFILES
+        is_hardware = legacy in hardware_profile_names
+        if is_compute == is_hardware:
+            classification = "ambiguous" if is_compute else "unknown"
+            fatal_errors.append(f"{pointer}.profile={legacy!r} is {classification}")
+        elif is_compute:
+            warnings.append(f"{pointer}.profile={legacy!r} is legacy; interpreted as compute_mode")
+            if compute_mode is not None and compute_mode != legacy:
+                fatal_errors.append(
+                    f"{pointer} compute profile fields disagree: compute_mode={compute_mode!r}, profile={legacy!r}"
+                )
+            compute_mode = compute_mode or legacy
+        else:
+            warnings.append(f"{pointer}.profile={legacy!r} is legacy; interpreted as hardware_profile")
+            if hardware_profile is not None and hardware_profile != legacy:
+                fatal_errors.append(
+                    f"{pointer} hardware profile fields disagree: "
+                    f"hardware_profile={hardware_profile!r}, profile={legacy!r}"
+                )
+            hardware_profile = hardware_profile or legacy
+    return _ContractProfiles(compute_mode=compute_mode, hardware_profile=hardware_profile)
+
+
+def _contract_alias_value(
+    report: Mapping[object, object],
+    *,
+    pointer: str,
+    field_names: tuple[str, ...],
+    dimension: str,
+    fatal_errors: list[str],
+) -> str | None:
+    present: list[tuple[str, str]] = []
+    for field_name in field_names:
+        if field_name not in report:
+            continue
+        value = report[field_name]
+        if not isinstance(value, str) or not value.strip():
+            fatal_errors.append(f"{pointer}.{field_name} must be a non-empty string when present")
+            continue
+        present.append((field_name, value.strip()))
+    if not present:
+        return None
+    _, first_value = present[0]
+    if any(value != first_value for _, value in present[1:]):
+        observed = ", ".join(f"{name}={value!r}" for name, value in present)
+        fatal_errors.append(f"{pointer} {dimension} fields disagree: {observed}")
+    return first_value
+
+
+def _expected_contract_hardware_profile(
+    *,
+    plan_path: Path,
+    smoke_environment: Mapping[str, str] | None,
+) -> str | None:
+    plan_profile = _plan_hardware_profile(plan_path)
+    if plan_profile is not None:
+        return plan_profile
+    environment_profile = smoke_environment.get("KAGGLEBOT_HARDWARE_PROFILE") if smoke_environment is not None else None
+    if isinstance(environment_profile, str) and environment_profile.strip():
+        return environment_profile.strip()
+    return None
 
 
 def _contract_entry_value(
@@ -2129,8 +2370,9 @@ def _contract_entry_value(
 def _valid_logit_shape(value: object, *, expected_classes: int | None) -> bool:
     valid = (
         isinstance(value, list)
-        and len(value) >= 2
+        and len(value) == 2
         and all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in value)
+        and value[0] == 2
     )
     return bool(valid and (expected_classes is None or value[-1] == expected_classes))
 
@@ -2166,6 +2408,30 @@ def _plan_hardware_profile(plan_path: Path) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _plan_hardware_profile_names(plan_path: Path) -> frozenset[str]:
+    payload = load_json_object(plan_path) or {}
+    raw_runtime_budget = payload.get("runtime_budget")
+    runtime_budget = raw_runtime_budget if isinstance(raw_runtime_budget, dict) else {}
+    raw_scale_profiles = runtime_budget.get("scale_profiles")
+    scale_profiles = raw_scale_profiles if isinstance(raw_scale_profiles, dict) else {}
+    names = {str(name).strip() for name in scale_profiles if isinstance(name, str) and str(name).strip()}
+    expected = _plan_hardware_profile(plan_path)
+    if expected is not None:
+        names.add(expected)
+    return frozenset(names)
+
+
+def _plan_allows_missing_training_data(paths: CompetitionPaths) -> bool:
+    plan = load_json_object(paths.plan_path) or {}
+    return (
+        infer_deliverable_mode_from_paths(
+            paths,
+            explicit=plan.get("deliverable_mode"),
+        )
+        == "writeup"
+    )
 
 
 def _plan_model_size_limit_bytes(plan_path: Path) -> float | None:
@@ -2299,6 +2565,8 @@ def _format_kernel_contract_smoke(result: KernelContractSmokeResult) -> str:
         parts.append("frozen-plan lookup diagnostics:\n" + "\n".join(result.pipeline_issues))
     if result.contract_report_issues:
         parts.append("contract report diagnostics:\n" + "\n".join(result.contract_report_issues))
+    if result.warnings:
+        parts.append("contract smoke warnings:\n" + "\n".join(result.warnings))
     if result.data_ready is False:
         parts.append(f"training data readiness: unavailable ({result.data_readiness_reason})")
     if result.normal_smoke_required:
@@ -2425,6 +2693,8 @@ def _format_structural_kernel_diagnostics(result: KernelContractSmokeResult) -> 
         parts.append("frozen-plan lookup diagnostics:\n" + "\n".join(result.pipeline_issues))
     if result.contract_report_issues:
         parts.append("contract report diagnostics:\n" + "\n".join(result.contract_report_issues))
+    if result.warnings:
+        parts.append("contract smoke warnings:\n" + "\n".join(result.warnings))
     return "\n".join(parts)
 
 

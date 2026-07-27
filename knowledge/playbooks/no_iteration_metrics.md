@@ -3,6 +3,9 @@
 Recommended action: Harden kernel runtime so every run emits metrics.json and diagnostics.md.
 
 ## Signals
+- scripture-in-new-frontiers 20260726T210223Z-39e66e81: gap=None
+- playground-series-s6e7 20260719T155759Z-ddb4b9f1: gap=None
+- cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: gap=None
 - cuhk-x-competition-small-model-track 20260719T030527Z-69497fe0: gap=None
 - ai-agent-security-multi-step-tool-attacks 20260717T061040Z-4aad47f3: gap=None
 - cuhk-x-competition-large-model-track 20260716T025336Z-83f794ce: gap=None
@@ -10,8 +13,6 @@ Recommended action: Harden kernel runtime so every run emits metrics.json and di
 - scripture-in-new-frontiers 20260716T010915Z-7b12de3d: gap=None
 - skill-lift 20260716T001150Z-1038a59e: gap=None
 - soccer-feature-engineering-hackathon 20260715T235055Z-2864ef78: gap=None
-- arc-prize-2026-arc-agi-2 20260715T191406Z-29a80a2b: gap=None
-- ai-agent-security-multi-step-tool-attacks 20260715T160516Z-7045e102: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

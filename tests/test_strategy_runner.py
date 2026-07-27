@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from kagglebot.agents import strategy_runner
@@ -299,6 +300,7 @@ def test_run_strategy_oracle_does_not_treat_browser_error_transcript_as_response
         "_maybe_start_oracle_browser",
         lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
     )
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_FALLBACK_CODEX", "0")
     monkeypatch.setattr(strategy_runner, "run_command", fake_run_command)
 
     result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="oracle")
@@ -307,16 +309,45 @@ def test_run_strategy_oracle_does_not_treat_browser_error_transcript_as_response
     assert "Prompt did not appear in conversation before timeout" in result.stderr
 
 
-def test_run_strategy_auto_requires_oracle_when_oracle_unavailable(monkeypatch, tmp_path: Path) -> None:
+def test_run_strategy_auto_falls_back_to_codex_when_oracle_unavailable(monkeypatch, tmp_path: Path) -> None:
     prompt_path = tmp_path / "prompt.md"
     prompt_path.write_text("strategy prompt", encoding="utf-8")
     monkeypatch.setattr(strategy_runner, "_oracle_command", lambda: [])
+    fallback_calls: list[tuple[str | None, str | None]] = []
+
+    def fake_codex_strategy(
+        prompt_path: Path,
+        output_dir: Path,
+        *,
+        dry_run: bool,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> strategy_runner.StrategyResult:
+        fallback_calls.append((model, reasoning_effort))
+        transcript_path = output_dir / "strategy_exec.txt"
+        last_message_path = output_dir / "strategy_last_message.txt"
+        transcript_path.write_text("Codex fallback response\n", encoding="utf-8")
+        last_message_path.write_text("Codex fallback response\n", encoding="utf-8")
+        return strategy_runner.StrategyResult(
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            returncode=0,
+            stdout="Codex fallback response",
+            stderr="",
+            engine="codex",
+        )
+
+    monkeypatch.setattr(strategy_runner, "_run_codex_strategy", fake_codex_strategy)
 
     result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="auto")
 
-    assert result.engine == "oracle"
-    assert result.returncode == 127
-    assert "unavailable" in result.stderr.lower()
+    assert result.engine == "codex"
+    assert result.returncode == 0
+    assert result.stdout == "Codex fallback response"
+    assert fallback_calls == [("gpt-5.6-sol", "ultra")]
+    assert "Oracle-to-Codex fallback" in result.stderr
+    assert (tmp_path / "oracle_strategy_exec.txt").exists()
+    assert (tmp_path / "oracle_fallback_reason.txt").exists()
 
 
 def test_run_strategy_oracle_uses_configured_command_and_args(monkeypatch, tmp_path: Path) -> None:
@@ -350,7 +381,7 @@ def test_run_strategy_oracle_uses_configured_command_and_args(monkeypatch, tmp_p
     assert captured_args[captured_args.index("--model") + 1] == "pinned-pro"
 
 
-def test_run_strategy_oracle_uses_long_default_timeout_outside_pytest(monkeypatch, tmp_path: Path) -> None:
+def test_run_strategy_oracle_uses_two_hour_default_timeout_outside_pytest(monkeypatch, tmp_path: Path) -> None:
     prompt_path = tmp_path / "prompt.md"
     prompt_path.write_text("strategy prompt", encoding="utf-8")
     captured_timeout: float | None = None
@@ -373,7 +404,51 @@ def test_run_strategy_oracle_uses_long_default_timeout_outside_pytest(monkeypatc
     result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="oracle")
 
     assert result.engine == "oracle"
-    assert captured_timeout is None
+    assert captured_timeout == 7200.0
+
+
+def test_run_strategy_oracle_timeout_falls_back_to_sol_ultra(monkeypatch, tmp_path: Path) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("strategy prompt", encoding="utf-8")
+    calls: list[tuple[list[str], float | None]] = []
+
+    def fake_run_command(args: list[str], **kwargs) -> CommandResult:
+        calls.append((args, kwargs.get("timeout")))
+        if "--write-output" in args:
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+        last_message_path = Path(args[args.index("--output-last-message") + 1])
+        last_message_path.write_text("Codex recovered the strategy\n", encoding="utf-8")
+        return CommandResult(
+            args=args,
+            returncode=0,
+            stdout="Codex transcript\n",
+            stderr="",
+            duration_sec=0.01,
+        )
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("KAGGLEBOT_STRATEGY_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("KAGGLEBOT_ORACLE_STRATEGY_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr(
+        strategy_runner,
+        "_maybe_start_oracle_browser",
+        lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
+    )
+    monkeypatch.setattr(strategy_runner, "_supported_flags", lambda: set())
+    monkeypatch.setattr(strategy_runner, "run_command", fake_run_command)
+
+    result = strategy_runner.run_strategy(prompt_path, tmp_path, dry_run=False, engine="oracle")
+
+    oracle_args, oracle_timeout = calls[0]
+    codex_args, _ = calls[1]
+    assert "--write-output" in oracle_args
+    assert oracle_timeout == 7200.0
+    assert codex_args[codex_args.index("-m") + 1] == "gpt-5.6-sol"
+    assert 'model_reasoning_effort="ultra"' in codex_args
+    assert result.engine == "codex"
+    assert result.stdout == "Codex recovered the strategy"
+    assert "timed out after 7200s" in result.stderr
+    assert "timed out after 7200s" in (tmp_path / "oracle_strategy_exec.txt").read_text(encoding="utf-8")
 
 
 def test_run_strategy_oracle_timeout_override_wins_over_global_timeout(monkeypatch, tmp_path: Path) -> None:
@@ -1084,6 +1159,7 @@ def test_run_strategy_does_not_reuse_stale_oracle_transcript(monkeypatch, tmp_pa
         "_maybe_start_oracle_browser",
         lambda extra_args: strategy_runner.OracleBrowserBootstrap(args=[]),
     )
+    monkeypatch.setenv("KAGGLEBOT_ORACLE_FALLBACK_CODEX", "0")
     monkeypatch.setattr(
         strategy_runner,
         "run_command",

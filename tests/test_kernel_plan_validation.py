@@ -26,6 +26,17 @@ def test_find_runtime_hyperparameter_sequence_paths_reports_nested_lists() -> No
     assert paths == ["key_hyperparameters.regularization.dropout"]
 
 
+def test_find_runtime_hyperparameter_sequence_paths_allows_literal_aggregations() -> None:
+    paths = find_runtime_hyperparameter_sequence_paths(
+        {
+            "allowed_aggregations": ["count", "distinct_count"],
+            "learning_rate": [0.01, 0.1],
+        }
+    )
+
+    assert paths == ["key_hyperparameters.learning_rate"]
+
+
 def test_validate_local_kernel_plan_runtime_hyperparameters_allows_missing_plan(tmp_path: Path) -> None:
     validate_local_kernel_plan_runtime_hyperparameters(tmp_path / "missing-plan.json")
 
@@ -55,4 +66,55 @@ def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_sequences(tm
     )
 
     with pytest.raises(KernelFailedError, match="unresolved hyperparameter sequences"):
+        validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+def test_validate_local_kernel_plan_runtime_hyperparameters_allows_literal_aggregations(tmp_path: Path) -> None:
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "pipelines": [
+                    {
+                        "name": "linked_event_motif_graph_50",
+                        "key_hyperparameters": {
+                            "allowed_aggregations": ["count", "distinct_count"],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    validate_local_kernel_plan_runtime_hyperparameters(plan_path)
+
+
+@pytest.mark.parametrize(
+    "invalid_aggregations",
+    [
+        [],
+        ["count", 1],
+        [["count"], "distinct_count"],
+    ],
+)
+def test_validate_local_kernel_plan_runtime_hyperparameters_rejects_invalid_literal_aggregations(
+    tmp_path: Path, invalid_aggregations: list[object]
+) -> None:
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "pipelines": [
+                    {
+                        "name": "linked_event_motif_graph_50",
+                        "key_hyperparameters": {"allowed_aggregations": invalid_aggregations},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(KernelFailedError, match="key_hyperparameters.allowed_aggregations"):
         validate_local_kernel_plan_runtime_hyperparameters(plan_path)

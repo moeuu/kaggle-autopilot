@@ -3,8 +3,9 @@
 Recommended action: Promote pre-run discovery/profile failures into typed autofix incidents with regression tests.
 
 ## Signals
+- None None: reason=KaggleCliError fingerprint=cba6662e9b2e00191cee
+- autonomous-agent-prediction-beta 20260719T171322Z-21ec36c9: reason=stale_watch_state fingerprint=e44bf52e9df39debfccc
 - arc-prize-2026-arc-agi-2 20260714T155630Z-4d48ff70: reason=ValueError fingerprint=5c43de77f69e42d474ab
-- None None: reason=KaggleCliError fingerprint=8c19465d6ca635817391
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

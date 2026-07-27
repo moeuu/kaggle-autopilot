@@ -13,7 +13,7 @@ Use this checklist when changing autopilot behavior.
 
 ## 2. Planning Pipeline Safety
 
-- [ ] Planning order remains `codex -> oracle(latest-pro) -> codex`; Oracle failure, invalid output, or unverified archival blocks implementation without a Codex fallback.
+- [ ] Planning order remains `codex -> oracle(latest-pro) -> codex`; an unavailable, failed, timed-out, or empty Oracle response preserves diagnostics and falls back to `gpt-5.6-sol` with ultra reasoning, while structurally invalid strategy output still fails the normal quality gates.
 - [ ] Only the Codex implementation after a valid Oracle response uses the shared `sol-ultra` profile; pre-Oracle brief extraction remains on the normal profile.
 - [ ] GPT output sections are validated (`STRATEGY`, `RESEARCH_SOURCES_JSONL`, `RESEARCH_SUMMARY_MD`, `PLAN_JSON`, `CODEX_INSTRUCTIONS`).
 - [ ] Research artifacts are persisted to `context/research_*.{jsonl,md}`.
