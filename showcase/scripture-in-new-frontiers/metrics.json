@@ -1,0 +1,219 @@
+{
+  "artifact_hashes": {
+    "api_contract_report.json": "4f59c20ba50042d9229744939cca2ad691a527145d93f8298ca3ed15e4e44af3",
+    "artifact_manifest.json": "56ea7f90e363abb683b42579d1a8e84e96afd9e92950842cc201604c1a647287",
+    "cover.png": "115a6018f66d90a41687fbf52470e71a9e95fff6057959dd2ffe7edcfe3a9748",
+    "demo/index.html": "3b7da80bf785fd5d7ebbabb31ed289b715c6adde963163513b7be607350ef97f",
+    "public_notebook.ipynb": "c94d00d58f853a1b28202a5c66a57cf1fbe61009a2b41adb82bae524e5ef184f",
+    "rubric_evidence.json": "1e11569e3688cf7c7b394c08798621af8b18536dc5de933449591aa63c11e329",
+    "safety_eval.json": "8cf32c4b7a47f883ede74dcfd469df4e9903bdadca598fdb46f4d65c516c3ee7",
+    "video_draft.mp4": "6087ea3715cb34f3e44d65b70c675d5af4c9529a141876fb9ed79e6b457068d8",
+    "video_transcript.md": "73ba03bd021b6c8437899042acad8be289ae9af22f428dad2634c93a0796d60b",
+    "writeup.md": "373d188002dbdba86c221531a370831f37a956e0f5a9af50ef472cb5301d44aa"
+  },
+  "best_technical_pipeline": "rules_bge_tfidf_contract_failsafe",
+  "blockers": [
+    "live_dual_api_evidence_absent",
+    "public_demo_or_repository_url_unresolved",
+    "public_notebook_url_unresolved",
+    "public_placeholders_unresolved",
+    "public_youtube_url_unresolved"
+  ],
+  "candidate_contracts": {
+    "candidate_count": 4,
+    "completed_count": 3,
+    "completed_with_null_score": [],
+    "contracts": [
+      {
+        "candidate_id": "strong_single",
+        "category": "strong_single",
+        "path": "candidate_contracts/strong_single.json",
+        "score": 0.5087589102626697,
+        "status": "completed"
+      },
+      {
+        "candidate_id": "feature_variant",
+        "category": "feature_variant",
+        "path": "candidate_contracts/feature_variant.json",
+        "score": 0.4344806763285024,
+        "status": "completed"
+      },
+      {
+        "candidate_id": "blend",
+        "category": "blend",
+        "path": "candidate_contracts/blend.json",
+        "score": 0.44806779795338153,
+        "status": "completed"
+      },
+      {
+        "candidate_id": "validation_variant",
+        "category": "validation_variant",
+        "path": "candidate_contracts/validation_variant.json",
+        "score": null,
+        "status": "blocked_noncomparable"
+      }
+    ],
+    "direction": "maximize",
+    "schema_version": "1.0",
+    "score_source": "grouped_oof_cv",
+    "technical_metric": "grouped_macro_f1_moment_type"
+  },
+  "data_hashes": {
+    "biometric": "51591d1d7cffdf717edd8df557cc83d410ee08f7690f8ab4ed77b122500e87a2",
+    "mapping": "fcc7c53f1eaa1e232a0d08f238b9aa7d7655c950fbb6ff2081304611829c5909",
+    "organizer_notebook": "4fbdfb00789953051b6629245eab77ee5da247186dee69f64a76935eaf73c65f",
+    "sample_submission": "9bba9b8a9c63c2ddb042e6f969fb0ed8bd808e1429d0cc6d50d8511259a2ccd3"
+  },
+  "execution_mode": "train_and_validate",
+  "fast_dev": false,
+  "final_ready": false,
+  "hardware_profile": "rtx3060",
+  "live_gloo_validated": false,
+  "live_youversion_validated": false,
+  "modality": "writeup_product_tabular_text_api",
+  "model_ids": {
+    "bge_embedding": "BAAI/bge-m3",
+    "bge_reranker": "BAAI/bge-reranker-v2-m3",
+    "querit_reranker": "Querit/Querit-4B",
+    "qwen3_embedding": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_reranker": "Qwen/Qwen3-Reranker-4B"
+  },
+  "no_official_hidden_test": true,
+  "official_competition_metric": "judge rubric: Impact 40 + Video 30 + Technical 30",
+  "official_score_estimate": null,
+  "package_hash": "9fb18d464eb8ea4b3ed1784920479c246e394cfd9251d94c6c07220f00464cd9",
+  "pipeline_toggles": {
+    "bge_m3_ablation": true,
+    "catboost": true,
+    "nested_retrieval_cv": true,
+    "querit_reranker": true,
+    "qwen3_embedding": true,
+    "qwen3_reranker": true,
+    "tfidf_fallback": true,
+    "xgboost": true
+  },
+  "plan_sha256": "98cd45f4a97bcca4c20b7235ab9b991d5cb96d8fa74e38e846f5546fe31e1a41",
+  "plan_source": "kernel_local_file",
+  "resolved_revisions": {
+    "embedding": "5cf2132abc99cad020ac570b19d031efec650f2b",
+    "querit_reranker": "7b796de30ad8dc772d6c46c75659c1341283a665",
+    "reranker": "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+  },
+  "rubric_components": {
+    "impact_vision": 36,
+    "technical_execution": 27,
+    "video_storytelling": 21
+  },
+  "rubric_readiness_label": "offline rubric-readiness proxy—not an official judge score",
+  "rubric_readiness_score_0_100": 84.0,
+  "rubric_weights": {
+    "impact_vision": 40,
+    "technical_execution": 30,
+    "video_storytelling": 30
+  },
+  "sample_submission_ignored": true,
+  "score": 0.6353741496598639,
+  "score_direction": "maximize",
+  "score_label": "grouped LeaveOneGroupOut technical proxy—not an official judge score",
+  "score_metric": "grouped_macro_f1_moment_type",
+  "score_source": "cv",
+  "scorer_version": "versepulse-artifact-rubric-v1.0.0",
+  "scorer_version_sha256": "f56ddb07e020b50d2f79445434b0f972a96818e93dba047480e6e309da6b56be",
+  "submission_package_zip_sha256": "d80281f4a6600e0056fdfe7be8bb1189eb81807f4775881a57bd2df43f9e9d65",
+  "submission_path": "/data/morita/kaggle-autopilot-artifacts/scripture-in-new-frontiers/runs/20260726T210223Z-39e66e81/iter-1/output/launch-6a85e407caed9f7e/submission_package.zip",
+  "technical_proxies": {
+    "api_contract_pass_rate": 1.0,
+    "blend_grouped_macro_f1": 0.44806779795338153,
+    "candidate_scores": {
+      "causal_catboost_calibrated_qwen3_cascade": 0.5087589102626697,
+      "rules_bge_tfidf_contract_failsafe": 0.6353741496598639,
+      "xgboost_temporal_calibrated_shared_retrieval": 0.38596538173605843
+    },
+    "feature_variant_grouped_macro_f1": 0.4344806763285024,
+    "grouped_macro_f1_moment_type": {
+      "aggregation_implementation": "classification_metrics macro F1 over global classes after OOF argmax",
+      "available_group_folds": 5,
+      "comparable_to_frozen_baseline": true,
+      "cv_folds": 5,
+      "cv_type": "LeaveOneGroupOut_session_id",
+      "data_hashes": {
+        "biometric": "51591d1d7cffdf717edd8df557cc83d410ee08f7690f8ab4ed77b122500e87a2",
+        "mapping": "fcc7c53f1eaa1e232a0d08f238b9aa7d7655c950fbb6ff2081304611829c5909",
+        "organizer_notebook": "4fbdfb00789953051b6629245eab77ee5da247186dee69f64a76935eaf73c65f",
+        "sample_submission": "9bba9b8a9c63c2ddb042e6f969fb0ed8bd808e1429d0cc6d50d8511259a2ccd3"
+      },
+      "direction": "maximize",
+      "evaluated_oof_rows": 72,
+      "evaluation_mask_sha256": "91a7f90ad72c176c18b53798d3e4195a26ccb32bdd4e0f9c843839a578605b70",
+      "frozen_iter1_baseline": 0.6353741496598639,
+      "global_class_list": [
+        "active_recovery",
+        "breakthrough_wall",
+        "early_push",
+        "final_rep",
+        "finishing_strong",
+        "peak_effort",
+        "post_workout",
+        "pre_workout",
+        "recovery_window",
+        "redline",
+        "rest_set",
+        "steady_state",
+        "warmup",
+        "working_set"
+      ],
+      "score_source": "grouped_oof_cv",
+      "total_training_rows": 72,
+      "value": 0.6353741496598639
+    },
+    "nested_verse_mrr_at_3": 0.39583333333333326,
+    "nested_verse_recall_at_3": 0.5833333333333334,
+    "safety_pass_rate": 1.0
+  },
+  "test_dataset_kind": "demo_replay_no_official_hidden_test",
+  "training_performed": true,
+  "validation_performed": true,
+  "video": {
+    "bytes": 1772198,
+    "duration_seconds": 175.0,
+    "fps": 1.0,
+    "frame_count": 175,
+    "height": 720,
+    "reader": "opencv",
+    "sha256": "6087ea3715cb34f3e44d65b70c675d5af4c9529a141876fb9ed79e6b457068d8",
+    "width": 1280
+  },
+  "writeup_bundle": {
+    "blockers": [
+      "live_dual_api_evidence_absent",
+      "public_demo_or_repository_url_unresolved",
+      "public_notebook_url_unresolved",
+      "public_placeholders_unresolved",
+      "public_youtube_url_unresolved"
+    ],
+    "official_score_estimate": null,
+    "package_hash": "9fb18d464eb8ea4b3ed1784920479c246e394cfd9251d94c6c07220f00464cd9",
+    "ready_for_submit": false,
+    "required_artifacts": [
+      "writeup.md",
+      "cover.png",
+      "public_notebook.ipynb",
+      "demo/index.html",
+      "video_draft.mp4",
+      "video_transcript.md",
+      "rubric_evidence.json",
+      "api_contract_report.json",
+      "safety_eval.json",
+      "artifact_manifest.json"
+    ],
+    "rubric_components": {
+      "impact_vision": 36,
+      "technical_execution": 27,
+      "video_storytelling": 21
+    },
+    "rubric_total": 84.0,
+    "submission_path": "/data/morita/kaggle-autopilot-artifacts/scripture-in-new-frontiers/runs/20260726T210223Z-39e66e81/iter-1/output/launch-6a85e407caed9f7e/submission_package.zip",
+    "writeup_path": "writeup.md",
+    "writeup_sha256": "373d188002dbdba86c221531a370831f37a956e0f5a9af50ef472cb5301d44aa"
+  }
+}
