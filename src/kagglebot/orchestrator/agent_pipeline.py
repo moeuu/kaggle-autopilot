@@ -1901,7 +1901,8 @@ def _run_kernel_contract_smoke(
         ):
             validation_warnings.append(
                 "training data readiness is unavailable "
-                "(dataset_profile_missing_required_files), which is informational for a writeup deliverable"
+                "(dataset_profile_missing_required_files), which the frozen plan permits for "
+                "contract-only verification"
             )
         contract_report_issues.extend(_contract_only_output_issues(staging_root))
         contract_passed = (
@@ -1924,6 +1925,7 @@ def _run_kernel_contract_smoke(
         if normal_smoke_result is not None and data_readiness.reason == "dataset_profile_missing_required_files":
             normal_smoke_issues = _missing_data_probe_issues(
                 returncode=normal_smoke_result[0],
+                stdout=normal_smoke_result[1],
                 stderr=normal_smoke_result[2],
                 staging_root=staging_root,
             )
@@ -2425,13 +2427,18 @@ def _plan_hardware_profile_names(plan_path: Path) -> frozenset[str]:
 
 def _plan_allows_missing_training_data(paths: CompetitionPaths) -> bool:
     plan = load_json_object(paths.plan_path) or {}
-    return (
+    if (
         infer_deliverable_mode_from_paths(
             paths,
             explicit=plan.get("deliverable_mode"),
         )
         == "writeup"
-    )
+    ):
+        return True
+
+    raw_runtime_budget = plan.get("runtime_budget")
+    runtime_budget = raw_runtime_budget if isinstance(raw_runtime_budget, dict) else {}
+    return runtime_budget.get("local_training_required") is True
 
 
 def _plan_model_size_limit_bytes(plan_path: Path) -> float | None:
@@ -2466,13 +2473,30 @@ def _contract_only_output_issues(staging_root: Path) -> tuple[str, ...]:
     )
 
 
-def _missing_data_probe_issues(*, returncode: int, stderr: str, staging_root: Path) -> tuple[str, ...]:
+def _missing_data_probe_issues(
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    staging_root: Path,
+) -> tuple[str, ...]:
+    probe_text = "\n".join(part for part in (stdout, stderr) if part)
+    probe_text_folded = probe_text.casefold()
+    expected_missing_data = (
+        returncode == 2
+        and "datadiscoveryerror" in probe_text_folded
+        and "raw labeled training assets were not found" in probe_text_folded
+    )
+
     issues: list[str] = []
-    if returncode == 0:
-        issues.append("missing-data probe exited zero instead of failing closed")
-    if re.search(r"(?m)^DataDiscoveryError:\s", stderr) is None:
+    if not expected_missing_data and returncode != 2:
+        if returncode == 0:
+            issues.append("missing-data probe exited zero instead of failing closed")
+        else:
+            issues.append(f"missing-data probe returned {returncode} instead of expected return code 2")
+    if not expected_missing_data and "datadiscoveryerror" not in probe_text_folded:
         issues.append("missing-data probe stderr does not identify DataDiscoveryError")
-    if "raw labeled training assets were not found" not in stderr.lower():
+    if not expected_missing_data and "raw labeled training assets were not found" not in probe_text_folded:
         issues.append("missing-data probe stderr does not state that raw labeled training assets were not found")
     forbidden: list[str] = []
     for path in staging_root.rglob("*"):

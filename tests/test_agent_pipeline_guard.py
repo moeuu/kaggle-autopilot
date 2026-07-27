@@ -298,7 +298,9 @@ def _write_structured_contract_kernel(
     )
     normal_lines = {
         "missing_data": [
-            'raise DataDiscoveryError("Raw labeled training assets were not found. No submission was created.")'
+            'print("BLOCKED: DataDiscoveryError: Raw labeled training assets were not found. '
+            'No submission was created.", file=sys.stderr)',
+            "raise SystemExit(2)",
         ],
         "runtime_error": ['raise RuntimeError("unrelated normal-entrypoint failure")'],
         "spoofed_runtime_error": [
@@ -316,6 +318,7 @@ def _write_structured_contract_kernel(
         f"""\
 import json
 import os
+import sys
 from pathlib import Path
 
 class DataDiscoveryError(RuntimeError):
@@ -392,7 +395,7 @@ def test_missing_data_accepts_contract_and_expected_full_entrypoint_block(tmp_pa
     assert result.passed is True
     assert result.contract_only is True
     assert result.normal_smoke_required is True
-    assert result.normal_smoke_returncode == 1
+    assert result.normal_smoke_returncode == 2
     assert "DataDiscoveryError" in result.normal_smoke_stderr
     assert "Raw labeled training assets were not found" in result.normal_smoke_stderr
     assert not result.normal_smoke_issues
@@ -400,6 +403,90 @@ def test_missing_data_accepts_contract_and_expected_full_entrypoint_block(tmp_pa
     assert not list(paths.base_dir.rglob("metrics.json"))
     assert not list(paths.base_dir.rglob("oof_*.npy"))
     assert not list(paths.base_dir.rglob("*.pth"))
+
+
+def test_missing_data_probe_accepts_prefixed_actionable_diagnostic(tmp_path: Path) -> None:
+    stderr = (
+        "Transparent stop: DataDiscoveryError: raw labeled training assets were not found; "
+        "expected an extracted HAR modality tree, HAR.zip, or contiguous HAR.z01 through "
+        "HAR.z08 plus HAR.zip. No model or submission was created"
+    )
+
+    for diagnostic in (stderr, stderr.swapcase()):
+        issues = agent_pipeline._missing_data_probe_issues(
+            returncode=2,
+            stdout="",
+            stderr=diagnostic,
+            staging_root=tmp_path,
+        )
+
+        assert issues == ()
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected_issue"),
+    [
+        (
+            "",
+            "Transparent stop: raw labeled training assets were not found\n",
+            "does not identify DataDiscoveryError",
+        ),
+        (
+            "",
+            "Transparent stop: DataDiscoveryError: input unavailable\n",
+            "does not state that raw labeled training assets were not found",
+        ),
+    ],
+)
+def test_missing_data_probe_rejects_partial_markers(
+    tmp_path: Path,
+    stdout: str,
+    stderr: str,
+    expected_issue: str,
+) -> None:
+    issues = agent_pipeline._missing_data_probe_issues(
+        returncode=2,
+        stdout=stdout,
+        stderr=stderr,
+        staging_root=tmp_path,
+    )
+
+    assert expected_issue in "\n".join(issues)
+
+
+def test_missing_data_probe_combines_stdout_and_stderr(tmp_path: Path) -> None:
+    issues = agent_pipeline._missing_data_probe_issues(
+        returncode=2,
+        stdout="DataDiscoveryError: input discovery failed\n",
+        stderr="raw labeled training assets were not found\n",
+        staging_root=tmp_path,
+    )
+
+    assert issues == ()
+
+
+def test_required_local_training_missing_data_is_contract_only(
+    tmp_path: Path,
+) -> None:
+    paths, kernel_path = _structured_contract_paths(
+        tmp_path,
+        data_ready=False,
+        deliverable_mode="leaderboard",
+    )
+    plan = json.loads(paths.plan_path.read_text(encoding="utf-8"))
+    plan["runtime_budget"] = {"local_training_required": True}
+    paths.plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    _write_structured_contract_kernel(kernel_path)
+
+    result = agent_pipeline._run_kernel_contract_smoke(
+        paths=paths,
+        kernel_path=kernel_path,
+    )
+
+    assert result.passed is True
+    assert result.contract_only is True
+    assert result.allow_missing_training_data is True
+    assert result.data_readiness_reason == ("dataset_profile_missing_required_files")
 
 
 def test_contract_only_acceptance_promotes_kernel_and_records_environmental_blocker(tmp_path: Path) -> None:
@@ -641,6 +728,7 @@ def test_contract_smoke_runner_injects_and_validates_independent_profiles(tmp_pa
         """\
 import json
 import os
+import sys
 from pathlib import Path
 
 class DataDiscoveryError(RuntimeError):
@@ -671,7 +759,12 @@ def contract_smoke(output_dir=None):
     output_dir.joinpath("contract_smoke.json").write_text(json.dumps(report), encoding="utf-8")
 
 def main():
-    raise DataDiscoveryError("Raw labeled training assets were not found. No submission was created.")
+    print(
+        "BLOCKED: DataDiscoveryError: Raw labeled training assets were not found. "
+        "No submission was created.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 if __name__ == "__main__":
     main()
@@ -692,7 +785,7 @@ if __name__ == "__main__":
     assert result.contract_report["profile"] == "kaggle_gpu"
     assert result.contract_report["top_level_knobs"]["HARDWARE_PROFILE"] == "rtx3060"
     assert result.contract_report["pipelines"]["planned_pipeline"]["profile"] == "rtx3060"
-    assert "informational for a writeup deliverable" in "\n".join(result.warnings)
+    assert "permits for contract-only verification" in "\n".join(result.warnings)
 
 
 def test_contract_report_rejects_missing_conflicting_nonfinite_and_oversized_pipeline(
@@ -1046,10 +1139,17 @@ def test_missing_or_malformed_contract_is_rejected(tmp_path: Path) -> None:
     assert "readable contract_smoke.json" in "\n".join(malformed.contract_report_issues)
 
 
-@pytest.mark.parametrize("normal_mode", ["runtime_error", "spoofed_runtime_error"])
+@pytest.mark.parametrize(
+    ("normal_mode", "expected_issue"),
+    [
+        ("runtime_error", "does not identify DataDiscoveryError"),
+        ("spoofed_runtime_error", "expected return code 2"),
+    ],
+)
 def test_missing_profile_does_not_hide_unrelated_normal_runtime_error(
     tmp_path: Path,
     normal_mode: str,
+    expected_issue: str,
 ) -> None:
     paths, kernel_path = _structured_contract_paths(tmp_path, data_ready=False)
     _write_structured_contract_kernel(kernel_path, normal_mode=normal_mode)
@@ -1058,7 +1158,7 @@ def test_missing_profile_does_not_hide_unrelated_normal_runtime_error(
 
     assert result.passed is False
     assert "RuntimeError" in result.normal_smoke_stderr
-    assert "does not identify DataDiscoveryError" in "\n".join(result.normal_smoke_issues)
+    assert expected_issue in "\n".join(result.normal_smoke_issues)
 
 
 @pytest.mark.parametrize("normal_mode", ["success", "sample_copy"])
@@ -1082,7 +1182,7 @@ def test_ready_data_keeps_normal_data_discovery_failure_fatal(tmp_path: Path) ->
 
     assert result.passed is False
     assert result.normal_smoke_required is True
-    assert result.normal_smoke_returncode == 1
+    assert result.normal_smoke_returncode == 2
     assert "DataDiscoveryError" in result.normal_smoke_stderr
 
 

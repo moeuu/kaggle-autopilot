@@ -317,6 +317,82 @@ def test_leaderboard_top1_download_and_parse(monkeypatch, tmp_path) -> None:
     assert result["score"] == 0.123
 
 
+def test_leaderboard_top1_uses_cached_snapshot_after_rate_limit(monkeypatch, tmp_path, caplog) -> None:
+    cached = (
+        '{"score":0.83582,"timestamp":1785120369,'
+        '"source":"kaggle competitions leaderboard --download","scope":"public"}'
+    )
+    (tmp_path / "top1_public.json").write_text(cached, encoding="utf-8")
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        raise KaggleCliError("failed", args, exit_code=1, output="429 Client Error: Too Many Requests")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    result = kaggle_api.leaderboard_top1("demo", tmp_path)
+
+    assert result["score"] == 0.83582
+    assert result["timestamp"] == 1785120369
+    assert result["scope"] == "public"
+    assert "using cached top1 snapshot" in caplog.text
+
+
+def test_leaderboard_top1_uses_cached_csv_after_rate_limit(monkeypatch, tmp_path, caplog) -> None:
+    csv_path = tmp_path / "leaderboard" / "demo-publicleaderboard.csv"
+    csv_path.parent.mkdir(parents=True)
+    csv_path.write_text("Rank,Score\n1,0.83582\n2,0.8\n", encoding="utf-8")
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        raise KaggleCliError("failed", args, exit_code=1, output="429 Too Many Requests")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    result = kaggle_api.leaderboard_top1("demo", tmp_path)
+
+    assert result["score"] == 0.83582
+    assert "using cached CSV" in caplog.text
+
+
+def test_leaderboard_top1_rate_limit_without_cache_is_nonfatal(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        raise KaggleCliError("failed", args, exit_code=1, output="429 Too Many Requests")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    with pytest.warns(RuntimeWarning, match="429 Too Many Requests"):
+        result = kaggle_api.leaderboard_top1("demo", tmp_path)
+
+    assert result["score"] is None
+    assert "429 Too Many Requests" in str(result["error"])
+
+
+def test_leaderboard_top1_rejects_malformed_cached_snapshot(monkeypatch, tmp_path) -> None:
+    snapshot_path = tmp_path / "top1_public.json"
+    malformed = '{"score":"0.83582","timestamp":1785120369,"scope":"public"}'
+    snapshot_path.write_text(malformed, encoding="utf-8")
+
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        raise KaggleCliError("failed", args, exit_code=1, output="429 Too Many Requests")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    with pytest.warns(RuntimeWarning, match="429 Too Many Requests"):
+        result = kaggle_api.leaderboard_top1("demo", tmp_path)
+
+    assert result["score"] is None
+    assert snapshot_path.read_text(encoding="utf-8") == malformed
+
+
+def test_leaderboard_top1_non_rate_limit_error_still_raises(monkeypatch, tmp_path) -> None:
+    def fake_run_kaggle(args, slug, dry_run):  # noqa: ARG001
+        raise KaggleCliError("failed", args, exit_code=1, output="403 Forbidden")
+
+    monkeypatch.setattr(kaggle_api, "_run_kaggle", fake_run_kaggle)
+
+    with pytest.raises(KaggleCliError, match="failed"):
+        kaggle_api.leaderboard_top1("demo", tmp_path)
+
+
 def test_kernels_push_detects_capacity_limit_even_on_zero_exit(monkeypatch) -> None:
     def fake_run_command(args, *, dry_run=False, **kwargs):  # noqa: ARG001
         return CommandResult(

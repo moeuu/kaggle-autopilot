@@ -29,6 +29,7 @@ from kagglebot.exceptions import (
     RulesNotAcceptedError,
 )
 from kagglebot.exec_utils import run_command
+from kagglebot.json_utils import load_json_object
 from kagglebot.kaggle_credentials import (
     KAGGLE_CREDENTIALS_ERROR,
     kaggle_json_candidates,
@@ -1069,7 +1070,9 @@ def _kaggle_api_credentials(*, config_candidates: Iterable[Path] | None = None) 
 
 
 def _is_rate_limited_download_error(exc: KaggleCliError) -> bool:
-    text = (exc.output or "").lower()
+    if exc.exit_code == 429:
+        return True
+    text = " ".join((exc.message, exc.output, exc.stdout, exc.stderr)).lower()
     return "too many requests" in text or "429" in text or "rate limit" in text or "ratelimit" in text
 
 
@@ -1647,7 +1650,26 @@ def leaderboard_top1(
     metric_hint: str | None = None,
 ) -> dict[str, object]:
     rows, csv_path, load_error = _load_leaderboard_rows(slug=slug, output_dir=output_dir, dry_run=dry_run)
-    if load_error is not None:
+    rate_limited = load_error is not None and _is_rate_limit_error_text(load_error)
+    if rate_limited:
+        assert load_error is not None
+        if rows:
+            logger.warning(
+                "Kaggle leaderboard refresh was rate-limited for %s; using cached CSV %s: %s",
+                slug,
+                csv_path,
+                _summarize_error_output(load_error),
+            )
+        else:
+            cached = _load_valid_top1_public_snapshot(output_dir / "top1_public.json")
+            if cached is not None:
+                logger.warning(
+                    "Kaggle leaderboard refresh was rate-limited for %s; using cached top1 snapshot: %s",
+                    slug,
+                    _summarize_error_output(load_error),
+                )
+                return cached
+    if load_error is not None and not (rows and rate_limited):
         warning = _warn_invalid_leaderboard_csv(csv_path, load_error)
         return {
             "score": None,
@@ -1700,7 +1722,7 @@ def leaderboard_rank_for_score(
     dry_run: bool = False,
 ) -> dict[str, object]:
     rows, _csv_path, load_error = _load_leaderboard_rows(slug=slug, output_dir=output_dir, dry_run=dry_run)
-    if load_error is not None:
+    if load_error is not None and not (rows and _is_rate_limit_error_text(load_error)):
         return {
             "rank": None,
             "total_teams": None,
@@ -1709,6 +1731,12 @@ def leaderboard_rank_for_score(
             "scope": "public",
             "error": load_error,
         }
+    if load_error is not None:
+        logger.warning(
+            "Kaggle leaderboard refresh was rate-limited for %s; using cached leaderboard rows: %s",
+            slug,
+            _summarize_error_output(load_error),
+        )
 
     scores: list[float] = []
     for row in rows:
@@ -1777,38 +1805,74 @@ def _load_leaderboard_rows(
 ) -> tuple[list[dict[str, str]], Path | None, str | None]:
     leaderboard_dir = output_dir / "leaderboard"
     leaderboard_dir.mkdir(parents=True, exist_ok=True)
+    refresh_error: str | None = None
     if not dry_run:
-        _run_kaggle(
-            [
-                "kaggle",
-                "competitions",
-                "leaderboard",
-                "--download",
-                "-c",
-                slug,
-                "-p",
-                str(leaderboard_dir),
-            ],
-            slug=slug,
-            dry_run=dry_run,
-        )
+        try:
+            _run_kaggle(
+                [
+                    "kaggle",
+                    "competitions",
+                    "leaderboard",
+                    "--download",
+                    "-c",
+                    slug,
+                    "-p",
+                    str(leaderboard_dir),
+                ],
+                slug=slug,
+                dry_run=dry_run,
+            )
+        except KaggleCliError as exc:
+            if not _is_rate_limited_download_error(exc):
+                raise
+            detail = (exc.output or exc.message).strip()
+            refresh_error = f"Kaggle leaderboard refresh was rate-limited: {detail}"
 
     csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     _extract_newer_leaderboard_archives(leaderboard_dir, csv_path)
     csv_path = _find_leaderboard_csv(leaderboard_dir, slug)
     if csv_path is None or not csv_path.exists():
-        return [], csv_path, "No leaderboard CSV file was found after download/extract."
+        reason = "No leaderboard CSV file was found after download/extract."
+        return [], csv_path, _combine_leaderboard_load_errors(refresh_error, reason)
     if csv_path.stat().st_size == 0:
-        return [], csv_path, "Leaderboard CSV is empty."
+        return [], csv_path, _combine_leaderboard_load_errors(refresh_error, "Leaderboard CSV is empty.")
 
     with csv_path.open("r", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
-            return [], csv_path, "Leaderboard CSV is missing a header row."
+            reason = "Leaderboard CSV is missing a header row."
+            return [], csv_path, _combine_leaderboard_load_errors(refresh_error, reason)
         rows = [row for row in reader if row]
     if not rows:
-        return [], csv_path, "Leaderboard CSV has a header but no score rows."
-    return rows, csv_path, None
+        reason = "Leaderboard CSV has a header but no score rows."
+        return [], csv_path, _combine_leaderboard_load_errors(refresh_error, reason)
+    return rows, csv_path, refresh_error
+
+
+def _combine_leaderboard_load_errors(refresh_error: str | None, cache_error: str) -> str:
+    if refresh_error is None:
+        return cache_error
+    return f"{refresh_error} Cached leaderboard unavailable: {cache_error}"
+
+
+def _is_rate_limit_error_text(value: str) -> bool:
+    text = value.lower()
+    return "too many requests" in text or "429" in text or "rate limit" in text or "rate-limit" in text
+
+
+def _load_valid_top1_public_snapshot(path: Path) -> dict[str, object] | None:
+    payload = load_json_object(path)
+    if payload is None or payload.get("scope") != "public":
+        return None
+    score = payload.get("score")
+    timestamp = payload.get("timestamp")
+    if not _is_finite_number(score) or not _is_finite_number(timestamp):
+        return None
+    return payload
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
 def _extract_newer_leaderboard_archives(leaderboard_dir: Path, csv_path: Path | None) -> None:

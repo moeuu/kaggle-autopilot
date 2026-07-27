@@ -3,6 +3,7 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: reason=KaggleBotError fingerprint=e3780906cedd3cd49430
 - playground-series-s6e7 20260719T155759Z-ddb4b9f1: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: reason=RuntimeError fingerprint=92217d94e261b01df814
 - soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: reason=RuntimeError fingerprint=92217d94e261b01df814
@@ -12,7 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - cuhk-x-competition-small-model-track 20260716T024240Z-edb451b6: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 - scripture-in-new-frontiers 20260716T010915Z-7b12de3d: reason=OracleStrategyError fingerprint=4a943231f253606b92a7
 - skill-lift 20260716T001150Z-1038a59e: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
-- soccer-feature-engineering-hackathon 20260715T235055Z-2864ef78: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
