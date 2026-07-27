@@ -1,0 +1,153 @@
+{
+  "cases": [
+    {
+      "case": "429_with_retry_after",
+      "passed": true,
+      "reason": "statuses=[429, 200]"
+    },
+    {
+      "case": "429_without_retry_after",
+      "passed": true,
+      "reason": "statuses=[429, 200]"
+    },
+    {
+      "case": "500_then_success",
+      "passed": true,
+      "reason": "statuses=[500, 200]"
+    },
+    {
+      "case": "http_401_rejected",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "http_403_rejected",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "http_404_rejected",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "timeout",
+      "passed": true,
+      "reason": "retried_then_raised"
+    },
+    {
+      "case": "youversion_200_valid",
+      "passed": true,
+      "reason": "current_route_header_and_attribution"
+    },
+    {
+      "case": "youversion_malformed_json",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "youversion_missing_response_path",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "youversion_wrong_reference",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "youversion_empty_canonical_content",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "youversion_absent_copyright_metadata",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "gloo_200_valid",
+      "passed": true,
+      "reason": "oauth2_and_governed_v2_contract"
+    },
+    {
+      "case": "gloo_token_expiry_refresh",
+      "passed": true,
+      "reason": "refreshed"
+    },
+    {
+      "case": "gloo_changed_reference",
+      "passed": true,
+      "reason": "changed_verse_reference"
+    },
+    {
+      "case": "gloo_output_over_22_words",
+      "passed": true,
+      "reason": "encouragement_word_count_out_of_bounds"
+    },
+    {
+      "case": "gloo_nonempty_safety_flags",
+      "passed": true,
+      "reason": "material_safety_flag"
+    },
+    {
+      "case": "gloo_malformed_json_object",
+      "passed": true,
+      "reason": "rejected"
+    },
+    {
+      "case": "gloo_missing_response_path",
+      "passed": true,
+      "reason": "rejected"
+    }
+  ],
+  "data_hashes": {
+    "biometric": "51591d1d7cffdf717edd8df557cc83d410ee08f7690f8ab4ed77b122500e87a2",
+    "mapping": "fcc7c53f1eaa1e232a0d08f238b9aa7d7655c950fbb6ff2081304611829c5909",
+    "organizer_notebook": "4fbdfb00789953051b6629245eab77ee5da247186dee69f64a76935eaf73c65f",
+    "sample_submission": "9bba9b8a9c63c2ddb042e6f969fb0ed8bd808e1429d0cc6d50d8511259a2ccd3"
+  },
+  "gloo_contract": {
+    "authentication": "oauth2_client_credentials",
+    "endpoint": "https://platform.ai.gloo.com/ai/v2/chat/completions",
+    "governed": true,
+    "token_scope": "api/access"
+  },
+  "hardware_profile": "rtx3060",
+  "live_gloo_validated": false,
+  "live_youversion_validated": false,
+  "mode": "offline_fake_session_contract",
+  "model_ids": {
+    "bge_embedding": "BAAI/bge-m3",
+    "bge_reranker": "BAAI/bge-reranker-v2-m3",
+    "querit_reranker": "Querit/Querit-4B",
+    "qwen3_embedding": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_reranker": "Qwen/Qwen3-Reranker-4B"
+  },
+  "pass_rate": 1.0,
+  "passed": 20,
+  "pipeline_toggles": {
+    "bge_m3_ablation": true,
+    "catboost": true,
+    "nested_retrieval_cv": true,
+    "querit_reranker": true,
+    "qwen3_embedding": true,
+    "qwen3_reranker": true,
+    "tfidf_fallback": true,
+    "xgboost": true
+  },
+  "plan_sha256": "98cd45f4a97bcca4c20b7235ab9b991d5cb96d8fa74e38e846f5546fe31e1a41",
+  "plan_source": "kernel_local_file",
+  "replay_success_is_not_live_proof": true,
+  "resolved_revisions": {
+    "embedding": "5cf2132abc99cad020ac570b19d031efec650f2b",
+    "querit_reranker": "7b796de30ad8dc772d6c46c75659c1341283a665",
+    "reranker": "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+  },
+  "total": 20,
+  "youversion_contract": {
+    "auth_header": "X-YVP-App-Key",
+    "passage_route": "/v1/bibles/{version_id}/passages/{usfm}",
+    "version_metadata_required": true
+  }
+}

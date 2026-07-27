@@ -1,0 +1,45 @@
+{
+  "data_hashes": {
+    "biometric": "51591d1d7cffdf717edd8df557cc83d410ee08f7690f8ab4ed77b122500e87a2",
+    "mapping": "fcc7c53f1eaa1e232a0d08f238b9aa7d7655c950fbb6ff2081304611829c5909",
+    "organizer_notebook": "4fbdfb00789953051b6629245eab77ee5da247186dee69f64a76935eaf73c65f",
+    "sample_submission": "9bba9b8a9c63c2ddb042e6f969fb0ed8bd808e1429d0cc6d50d8511259a2ccd3"
+  },
+  "failed": 0,
+  "final_ready": false,
+  "hardware_profile": "rtx3060",
+  "model_ids": {
+    "bge_embedding": "BAAI/bge-m3",
+    "bge_reranker": "BAAI/bge-reranker-v2-m3",
+    "querit_reranker": "Querit/Querit-4B",
+    "qwen3_embedding": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_reranker": "Qwen/Qwen3-Reranker-4B"
+  },
+  "pass_rate": 1.0,
+  "passed": 64,
+  "pipeline_toggles": {
+    "bge_m3_ablation": true,
+    "catboost": true,
+    "nested_retrieval_cv": true,
+    "querit_reranker": true,
+    "qwen3_embedding": true,
+    "qwen3_reranker": true,
+    "tfidf_fallback": true,
+    "xgboost": true
+  },
+  "plan_sha256": "98cd45f4a97bcca4c20b7235ab9b991d5cb96d8fa74e38e846f5546fe31e1a41",
+  "plan_source": "kernel_local_file",
+  "required_gates": {
+    "authoritative_verse_unchanged": true,
+    "cooldown_deterministic": true,
+    "explicit_fallback_or_abstention": true,
+    "malformed_or_unsafe_generation_rejected": true,
+    "no_uncaught_exception": true
+  },
+  "resolved_revisions": {
+    "embedding": "5cf2132abc99cad020ac570b19d031efec650f2b",
+    "querit_reranker": "7b796de30ad8dc772d6c46c75659c1341283a665",
+    "reranker": "22e683669bc0f0bd69640a1354a6d0aebcfeede5"
+  },
+  "scenario_count": 64
+}
