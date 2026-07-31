@@ -11,6 +11,7 @@ import kagglebot.supervisor as supervisor
 from kagglebot.cli import app
 from kagglebot.exceptions import KaggleCliResourceError, KernelCapacityError, MissingCompetitionDataError
 from kagglebot.kaggle_api import EnteredCompetition
+from kagglebot.paths import CompetitionPaths
 from kagglebot.supervisor import (
     WatchConfig,
     WatchLedger,
@@ -464,6 +465,37 @@ def test_select_next_competition_prioritizes_never_submitted(monkeypatch, tmp_pa
     selected = select_next_competition(config)
 
     assert [item.slug for item in selected][:2] == ["never-submitted", "submitted"]
+
+
+def test_select_next_competition_skips_submitted_writeup(monkeypatch, tmp_path: Path) -> None:
+    candidates = [_competition("submitted-writeup", reward="$25,000"), _competition("fresh")]
+    monkeypatch.setattr("kagglebot.supervisor.list_entered_competitions", lambda **kwargs: candidates)
+    config = _config(tmp_path)
+    config.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    config.ledger_path.write_text(
+        json.dumps(
+            {
+                "event": "finished",
+                "slug": "submitted-writeup",
+                "run_id": "run-1",
+                "submission_status": "submitted",
+                "submission_url": "https://www.kaggle.com/competitions/submitted-writeup/writeups/demo",
+                "writeup_title": "Demo",
+                "ts": "2026-04-22T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = select_next_competition(config)
+
+    assert [item.slug for item in selected] == ["fresh"]
+    skipped = [
+        record for record in WatchLedger(config.ledger_path).records() if record.get("event") == "candidate_skipped"
+    ]
+    assert skipped[-1]["slug"] == "submitted-writeup"
+    assert skipped[-1]["reason"] == "writeup_already_submitted"
 
 
 def test_select_next_competition_uses_submission_history_before_prize_score(
@@ -1307,29 +1339,98 @@ def test_run_watch_once_failure_is_recorded_and_next_cycle_selects_new_competiti
     assert attempts == ["first", "second"]
 
 
-def test_run_watch_once_records_missing_data_as_resumable_block(monkeypatch, tmp_path: Path) -> None:
+def test_run_watch_once_cools_down_missing_data_block_and_selects_next_candidate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "kagglebot.supervisor.list_entered_competitions",
-        lambda **kwargs: [_competition("blocked-writeup")],
+        lambda **kwargs: [_competition("blocked-data"), _competition("fresh")],
     )
     monkeypatch.setattr("kagglebot.supervisor._prepare_competition", lambda **kwargs: None)
-    monkeypatch.setattr(
-        "kagglebot.supervisor.run_autopilot",
-        lambda _config: (_ for _ in ()).throw(MissingCompetitionDataError("data unavailable")),
-    )
+    attempts: list[str] = []
+
+    def fake_run_autopilot(config) -> None:
+        attempts.append(config.slug)
+        if config.slug == "blocked-data":
+            paths = CompetitionPaths(slug=config.slug, artifacts_dir=config.paths.artifacts_dir)
+            paths.context_dir.mkdir(parents=True, exist_ok=True)
+            paths.data_dir.mkdir(parents=True, exist_ok=True)
+            paths.dataset_profile_path.write_text(
+                json.dumps({"status": "missing_required_files"}),
+                encoding="utf-8",
+            )
+            run_dir = paths.run_dir(config.run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "run.json").write_text(json.dumps({"status": "blocked_on_data"}), encoding="utf-8")
+            raise MissingCompetitionDataError("data unavailable")
+
+    monkeypatch.setattr("kagglebot.supervisor.run_autopilot", fake_run_autopilot)
     config = _config(tmp_path)
 
-    result = run_watch_once(config)
+    blocked = run_watch_once(config)
 
-    assert result.status == "blocked"
+    assert blocked.status == "blocked"
     state = json.loads(config.state_path.read_text(encoding="utf-8"))
-    assert state["active_slug"] == "blocked-writeup"
-    assert state["active_run_id"] == result.run_id
+    assert state["active_slug"] == "blocked-data"
+    assert state["active_run_id"] == blocked.run_id
     assert state["last_status"] == "blocked"
     assert state["phase"] == "blocked_on_data"
     records = WatchLedger(config.ledger_path).records()
     assert any(record.get("event") == "blocked" for record in records)
     assert not any(record.get("event") == "finished" for record in records)
+
+    resumed = run_watch_once(config)
+
+    assert resumed.status == "finished"
+    assert resumed.slug == "fresh"
+    assert attempts == ["blocked-data", "fresh"]
+
+
+def test_run_watch_once_resumes_data_block_after_training_archive_is_staged(monkeypatch, tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    slug = "blocked-data"
+    run_id = "20260422T000000Z-data1234"
+    paths = CompetitionPaths(slug=slug, artifacts_dir=config.artifacts_dir, repo_root=config.workdir)
+    paths.context_dir.mkdir(parents=True)
+    paths.data_dir.mkdir(parents=True)
+    paths.run_dir(run_id).mkdir(parents=True)
+    paths.dataset_profile_path.write_text(
+        json.dumps({"status": "missing_required_files"}),
+        encoding="utf-8",
+    )
+    (paths.data_dir / "HAR.zip").write_bytes(b"staged training archive")
+    (paths.run_dir(run_id) / "run.json").write_text(
+        json.dumps({"status": "blocked_on_data"}),
+        encoding="utf-8",
+    )
+    config.state_path.parent.mkdir(parents=True)
+    config.state_path.write_text(
+        json.dumps(
+            {
+                "active_slug": slug,
+                "active_run_id": run_id,
+                "last_status": "blocked",
+                "phase": "blocked_on_data",
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "kagglebot.supervisor.list_entered_competitions",
+        lambda **kwargs: pytest.fail("staged data must resume the active run"),
+    )
+    monkeypatch.setattr("kagglebot.supervisor._prepare_competition", lambda **kwargs: None)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "kagglebot.supervisor.run_autopilot",
+        lambda autopilot_config: captured.update(run_id=autopilot_config.run_id),
+    )
+
+    result = run_watch_once(config)
+
+    assert result.status == "finished"
+    assert result.slug == slug
+    assert result.run_id == run_id
+    assert captured == {"run_id": None}
 
 
 def test_reconcile_active_writeup_submission_marks_run_terminal(monkeypatch, tmp_path: Path) -> None:

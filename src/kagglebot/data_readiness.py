@@ -24,10 +24,10 @@ def assess_local_training_data(paths: CompetitionDataPaths) -> LocalTrainingData
     profile = load_json_object_or_empty(paths.dataset_profile_path)
     if not profile:
         return LocalTrainingDataReadiness(False, "dataset_profile_missing")
-    if profile.get("status") == "missing_required_files":
-        return LocalTrainingDataReadiness(False, "dataset_profile_missing_required_files")
 
     sources = _find_training_sources(paths.data_dir, profile)
+    if profile.get("status") == "missing_required_files" and not sources:
+        return LocalTrainingDataReadiness(False, "dataset_profile_missing_required_files")
     if not sources:
         return LocalTrainingDataReadiness(False, "labeled_training_source_missing")
     return LocalTrainingDataReadiness(

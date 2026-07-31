@@ -20,6 +20,7 @@ from kagglebot.kernel_metrics import (
     pick_oof_target_column,
     recompute_metric_from_oof_artifact,
 )
+from kagglebot.score_sources import FROZEN_GROUPED_OOF_CONTRACT
 
 
 def test_extract_trusted_cv_value_prefers_named_cv_score() -> None:
@@ -158,6 +159,41 @@ def test_recompute_metric_from_tsv_oof_artifact_updates_payload_without_retraini
     assert payload["metric_recheck_source"] == "oof_predictions:oof_predictions.tsv"
 
 
+def test_recompute_oof_metric_does_not_overwrite_rubric_loop_decision(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter-1"
+    oof_path = iter_dir / "output" / "oof_predictions.csv"
+    oof_path.parent.mkdir(parents=True)
+    oof_path.write_text(
+        "y,oof_proba\n0,0.01\n0,0.10\n1,0.90\n1,0.99\n",
+        encoding="utf-8",
+    )
+    loop_decision = {
+        "metric": "rubric_readiness_score_0_100",
+        "source": "offline_artifact_rubric",
+        "value": 82.0,
+    }
+
+    result = recompute_metric_from_oof_artifact(
+        iter_dir=iter_dir,
+        payload={
+            "score_source": "cv",
+            "metric": "auc",
+            "loop_decision": loop_decision,
+            "model_selection_decision": {"source": "grouped_oof_cv"},
+        },
+        target_metric="auc",
+        metric_direction="maximize",
+        resolve_iteration_artifact=lambda _iter_dir, filename: (
+            oof_path if filename == "oof_predictions.csv" else None
+        ),
+    )
+
+    assert result is not None
+    _, payload = result
+    assert payload["loop_decision"] == loop_decision
+    assert payload["model_selection_decision"]["value"] == pytest.approx(1.0)
+
+
 def test_recompute_metric_from_oof_artifact_returns_none_without_target_metric(tmp_path: Path) -> None:
     assert (
         recompute_metric_from_oof_artifact(
@@ -284,6 +320,56 @@ def test_load_kernel_metrics_falls_back_to_cv_for_untrusted_score_source(tmp_pat
     assert evaluation is not None
     assert evaluation.score_source == "cv"
     assert evaluation.value == pytest.approx(0.17321)
+
+
+def test_load_kernel_metrics_requires_exact_grouped_oof_contract(tmp_path: Path) -> None:
+    frozen = FROZEN_GROUPED_OOF_CONTRACT
+    decision = {key: value for key, value in frozen.items() if key not in {"biometric_sha256", "mapping_sha256"}}
+    decision["value"] = 0.702
+    decision["data_hashes"] = {
+        "biometric": frozen["biometric_sha256"],
+        "mapping": frozen["mapping_sha256"],
+    }
+    metrics_path = tmp_path / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "score": 0.702,
+                "score_source": "grouped_oof_cv",
+                "metric_name": "grouped_macro_f1_moment_type",
+                "model_selection_decision": decision,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evaluation = load_kernel_metrics(
+        metrics_path,
+        direction="maximize",
+        target_metric="grouped_macro_f1_moment_type",
+    )
+    assert evaluation is not None
+    assert evaluation.score_source == "cv"
+
+    decision["evaluation_mask_sha256"] = "wrong"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "score": 0.702,
+                "score_source": "grouped_oof_cv",
+                "metric_name": "grouped_macro_f1_moment_type",
+                "model_selection_decision": decision,
+            }
+        ),
+        encoding="utf-8",
+    )
+    invalid = load_kernel_metrics(
+        metrics_path,
+        direction="maximize",
+        target_metric="grouped_macro_f1_moment_type",
+    )
+    assert invalid is not None
+    assert invalid.score_source == "grouped_oof_cv_invalid_contract"
 
 
 def test_extract_kernel_metric_supports_pipelines_cv_mean_schema() -> None:

@@ -164,7 +164,7 @@ class KernelContractSmokeResult:
             and report.get("data_free") is True
             and report.get("training_performed") is False
             and report.get("score_reported") is False
-            and self.normal_smoke_returncode not in (None, 0)
+            and self.normal_smoke_returncode == 2
             and not self.normal_smoke_timed_out
             and not self.normal_smoke_issues
         )
@@ -1555,7 +1555,15 @@ def _kernel_candidate_contract_instructions(paths: CompetitionPaths) -> str:
         "hardware profile by its value; unknown or ambiguous values fail validation.\n"
         "- The framework compiles the generated kernel, imports it in an isolated subprocess to call "
         "`contract_smoke()`, and then runs `python kernel.py` as a separate data-discovery probe. Do not alter model "
-        "or training settings to compensate for absent competition data."
+        "or training settings to compensate for absent competition data.\n"
+        "- If that full-entrypoint probe cannot find raw labeled training assets, exit with status 2, create no "
+        "submission, and emit this final stderr JSON object: "
+        '`{"status":"blocked","error_type":"DataDiscoveryError",'
+        '"reason_code":"missing_raw_training_assets",'
+        '"message":"Raw labeled training assets were not found. Supply the competition data root through '
+        'KAGGLE_INPUT_DIR, DATA_ROOT, or CUHKX_DATA_ROOT.","submission_written":false}`. '
+        "Use `reason_code` for machine-readable classification; do not use this block for label, schema, model, or "
+        "other data-contract failures."
         f"{current_example}"
     )
 
@@ -1922,13 +1930,26 @@ def _run_kernel_contract_smoke(
                 timeout_sec=timeout_sec,
             )
         normal_smoke_issues: tuple[str, ...] = ()
-        if normal_smoke_result is not None and data_readiness.reason == "dataset_profile_missing_required_files":
+        training_data_unavailable = (
+            not data_readiness.ready and data_readiness.reason == "dataset_profile_missing_required_files"
+        )
+        if normal_smoke_result is not None and (training_data_unavailable or normal_smoke_result[0] != 0):
             normal_smoke_issues = _missing_data_probe_issues(
                 returncode=normal_smoke_result[0],
-                stdout=normal_smoke_result[1],
                 stderr=normal_smoke_result[2],
                 staging_root=staging_root,
+                training_data_unavailable=training_data_unavailable,
             )
+            if (
+                not normal_smoke_issues
+                and allow_missing_training_data
+                and normal_smoke_result[0] == 2
+                and not normal_smoke_result[3]
+            ):
+                validation_warnings.append(
+                    "training data readiness remains unavailable: the normal data-dependent smoke reported a "
+                    "controlled missing-training-data block and produced no submission"
+                )
         return KernelContractSmokeResult(
             compile_returncode=compile_result[0],
             compile_stdout=compile_result[1],
@@ -2476,28 +2497,35 @@ def _contract_only_output_issues(staging_root: Path) -> tuple[str, ...]:
 def _missing_data_probe_issues(
     *,
     returncode: int,
-    stdout: str,
     stderr: str,
     staging_root: Path,
+    training_data_unavailable: bool,
 ) -> tuple[str, ...]:
-    probe_text = "\n".join(part for part in (stdout, stderr) if part)
-    probe_text_folded = probe_text.casefold()
-    expected_missing_data = (
-        returncode == 2
-        and "datadiscoveryerror" in probe_text_folded
-        and "raw labeled training assets were not found" in probe_text_folded
-    )
-
     issues: list[str] = []
-    if not expected_missing_data and returncode != 2:
+    if returncode != 2:
         if returncode == 0:
             issues.append("missing-data probe exited zero instead of failing closed")
         else:
             issues.append(f"missing-data probe returned {returncode} instead of expected return code 2")
-    if not expected_missing_data and "datadiscoveryerror" not in probe_text_folded:
-        issues.append("missing-data probe stderr does not identify DataDiscoveryError")
-    if not expected_missing_data and "raw labeled training assets were not found" not in probe_text_folded:
-        issues.append("missing-data probe stderr does not state that raw labeled training assets were not found")
+    if not training_data_unavailable:
+        issues.append("missing-data probe reported a block while training data readiness is available")
+
+    payload = _final_stderr_json_object(stderr)
+    if payload is None:
+        issues.append("missing-data probe stderr does not end with a readable JSON object")
+    else:
+        if payload.get("status") != "blocked":
+            issues.append("missing-data probe JSON must report status='blocked'")
+        if payload.get("submission_written") is not False:
+            issues.append("missing-data probe JSON must report submission_written=false")
+        if payload.get("error_type") not in {"DataDiscoveryError", "DataContractError"}:
+            issues.append("missing-data probe JSON error_type must be DataDiscoveryError or DataContractError")
+        reason_code = payload.get("reason_code")
+        if reason_code is not None and reason_code != "missing_raw_training_assets":
+            issues.append("missing-data probe JSON reason_code must be 'missing_raw_training_assets' when present")
+        if not _message_identifies_missing_training_data(payload.get("message")):
+            issues.append("missing-data probe JSON message does not identify unavailable training input")
+
     forbidden: list[str] = []
     for path in staging_root.rglob("*"):
         if not path.is_file():
@@ -2520,6 +2548,32 @@ def _missing_data_probe_issues(
             + ", ".join(sorted(forbidden))
         )
     return tuple(issues)
+
+
+def _final_stderr_json_object(stderr: str) -> dict[str, object] | None:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _message_identifies_missing_training_data(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    message = value.casefold()
+    missing_terms = ("not found", "missing", "unavailable")
+    return (
+        "no competition data root found" in message
+        or "raw labeled training assets were not found" in message
+        or ("raw training tree" in message and any(term in message for term in missing_terms))
+        or ("har/data" in message and any(term in message for term in missing_terms))
+    )
 
 
 def _stage_read_only_training_data(source_dir: Path, staged_data_dir: Path) -> None:

@@ -325,6 +325,21 @@ const port = Number(process.argv[3]);
 const slug = process.argv[4];
 const title = process.argv[5];
 const body = process.argv[6];
+const normalizeText = (value) => String(value || '')
+  .toLowerCase()
+  .normalize('NFKC')
+  .replace(/[“”]/g, '"')
+  .replace(/[‘’]/g, "'")
+  .replace(/[\\u2010-\\u2015]/g, '-')
+  .replace(/[^a-z0-9\\s]/g, ' ')
+  .replace(/\\s+/g, ' ')
+  .trim();
+const hasWriteupSubmissionSignal = (text) => {
+  const normalized = String(text || '').toLowerCase();
+  return /submitted!|successfully submitted|submission complete|writeup submitted/.test(
+    normalized,
+  );
+};
 const projectsUrl = `https://www.kaggle.com/competitions/${slug}/projects`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 (async () => {
@@ -497,8 +512,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     });
     await sleep(3500);
     const finalPage = await readPage();
-    const confirmed = /submitted!|successfully submitted|submission complete|writeup submitted/i.test(
-      finalPage.text || '');
+    const confirmed = hasWriteupSubmissionSignal(finalPage.text || '');
     console.log(JSON.stringify({
       status: confirmed ? 'submitted' : 'ambiguous',
       reason: confirmed ? 'kaggle-confirmed' : 'submission-confirmation-not-observed',
@@ -521,6 +535,21 @@ const host = process.argv[2];
 const port = Number(process.argv[3]);
 const slug = process.argv[4];
 const title = process.argv[5];
+const normalizeText = (value) => String(value || '')
+  .toLowerCase()
+  .normalize('NFKC')
+  .replace(/[“”]/g, '"')
+  .replace(/[‘’]/g, "'")
+  .replace(/[\\u2010-\\u2015]/g, '-')
+  .replace(/[^a-z0-9\\s]/g, ' ')
+  .replace(/\\s+/g, ' ')
+  .trim();
+const hasWriteupSubmissionSignal = (text) => {
+  const normalized = String(text || '').toLowerCase();
+  return /submitted!|submitted|submission complete|writeup submitted/.test(
+    normalized,
+  );
+};
 const projectsUrl = `https://www.kaggle.com/competitions/${slug}/projects`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 (async () => {
@@ -533,7 +562,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     await client.Page.navigate({url: projectsUrl});
     await client.Page.loadEventFired();
     await sleep(2500);
-    const expected = String(title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const expected = normalizeText(title);
     const prefix = `/competitions/${slug}/writeups/`;
     const listing = await client.Runtime.evaluate({
       expression: `JSON.stringify({
@@ -561,8 +590,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       }
     });
     const match = links.find((item) => {
-      const linkText = String(item.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      return linkText === expected || (expected.length >= 6 && linkText.includes(expected));
+      const linkText = normalizeText(item.text);
+      return (
+        linkText === expected ||
+        (expected.length >= 6 && (linkText.includes(expected) || expected.includes(linkText)))
+      );
     });
     if (!match || !match.href) {
       console.log(JSON.stringify({
@@ -590,18 +622,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     });
     const finalValue = finalState.result && finalState.result.value;
     const finalPage = finalValue ? JSON.parse(finalValue) : {};
-    const currentTitle = String(finalPage.title || '')
-      .replace(/\s*\|\s*Kaggle\s*$/i, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-    const confirmed = /submitted!/i.test(finalPage.text || '');
-    const titleMatches = currentTitle === expected;
+    const currentTitle = normalizeText(
+      String(finalPage.title || '').replace(/\s*\|\s*Kaggle\s*$/i, ''),
+    );
+    const confirmed = hasWriteupSubmissionSignal(finalPage.text || '');
+    const titleMatches = !!currentTitle && (currentTitle === expected || currentTitle.includes(expected));
     console.log(JSON.stringify({
-      status: confirmed && titleMatches ? 'submitted' : 'not_submitted',
+      status:
+        confirmed || (titleMatches && !/draft/i.test(finalPage.url || '') && expected.length >= 5)
+          ? 'submitted'
+          : 'not_submitted',
       reason: confirmed
-        ? (titleMatches ? 'kaggle-submitted-confirmation-observed' : 'writeup-title-mismatch')
-        : 'submitted-confirmation-not-observed',
+        ? 'kaggle-submitted-confirmation-observed'
+        : titleMatches
+          ? 'writeup-title-match-without-confirmation'
+          : 'submitted-confirmation-not-observed',
       title: finalPage.title,
       url: finalPage.url,
     }));

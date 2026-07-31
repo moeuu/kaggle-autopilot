@@ -143,11 +143,7 @@ def test_required_local_training_is_resumably_blocked_when_labeled_data_is_missi
     assert not list(paths.run_dir("run-1").rglob("oof_*.npy"))
     assert not list(paths.run_dir("run-1").rglob("*.pth"))
 
-    (paths.data_dir / "train.csv").write_text("feature,target\n1,0\n", encoding="utf-8")
-    paths.dataset_profile_path.write_text(
-        json.dumps({"status": "ok", "train_file": "train.csv"}),
-        encoding="utf-8",
-    )
+    (paths.data_dir / "HAR.zip").write_bytes(b"staged training archive")
     planning_runner.ensure_local_training_data_ready(config, "run-1")
 
 

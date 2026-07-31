@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from kagglebot import score_sources
 from kagglebot import submission_history as _submission_history
 from kagglebot.json_utils import load_json_object, load_jsonl_records, write_json_object
 from kagglebot.scalar_utils import tolerant_finite_float
@@ -23,7 +24,17 @@ _DIFF_EXCERPT_CHARS = 16_000
 _LOG_TAIL_BYTES = 96_000
 _MAX_ERROR_SIGNATURES = 12
 _MAX_CANDIDATES = 16
-_TRUSTED_SCORE_SOURCES = frozenset({"cv", "holdout", "offline", "oof", "cross_validation"})
+_TRUSTED_SCORE_SOURCES = frozenset(
+    {
+        "cv",
+        "holdout",
+        "offline",
+        "oof",
+        "cross_validation",
+        "grouped_oof_cv",
+        "offline_artifact_rubric",
+    }
+)
 _ERROR_MARKERS = re.compile(
     r"(?:traceback|error|exception|failed|failure|out of memory|\boom\b|timed?\s*out|timeout)",
     flags=re.IGNORECASE,
@@ -407,6 +418,8 @@ def _build_iteration_record(
     evaluation = load_json_object(iter_dir / "evaluation_report.json") or {}
     state = load_json_object(iter_dir / "iteration_state.json") or {}
     portfolio = load_json_object(iter_dir / "portfolio_plan.json") or {}
+    candidate_contracts = _load_candidate_contract_index(iter_dir)
+    execution_attempt_resolution = _load_execution_attempt_resolution(iter_dir)
     graph = load_json_object(iter_dir / "graph_execution_report.json") or {}
     diagnostics_path = iter_dir / "diagnostics.md"
     strategy_path = iter_dir / "agent" / f"improve_strategy-{iteration:02d}" / "strategy_last_message.txt"
@@ -431,6 +444,19 @@ def _build_iteration_record(
             "portfolio_plan.json",
         )
     ]
+    contract_index_path = candidate_contracts.get("index_path")
+    if isinstance(contract_index_path, str) and contract_index_path:
+        evidence_files.append(Path(contract_index_path))
+    for contract in candidate_contracts.get("contracts", []):
+        if isinstance(contract, dict) and isinstance(contract.get("path"), str):
+            evidence_files.append(Path(contract["path"]))
+    resolution_path = execution_attempt_resolution.get("path")
+    if isinstance(resolution_path, str) and resolution_path:
+        evidence_files.append(Path(resolution_path))
+    error_signatures = _apply_execution_attempt_resolution(
+        _collect_error_signatures(iter_dir / "logs"),
+        execution_attempt_resolution,
+    )
     return {
         "iteration": iteration,
         "score": _score_record(metrics=metrics, evaluation=evaluation),
@@ -445,8 +471,12 @@ def _build_iteration_record(
             "completed_at": state.get("completed_at"),
         },
         "diagnostics_excerpt": _read_text_excerpt(diagnostics_path, _TEXT_EXCERPT_CHARS),
-        "error_signatures": _collect_error_signatures(iter_dir / "logs"),
-        "portfolio": _portfolio_summary(portfolio),
+        "error_signatures": error_signatures,
+        "execution_attempt_resolution": _bounded_json_value(
+            execution_attempt_resolution,
+            max_items=40,
+        ),
+        "portfolio": _portfolio_summary(portfolio, candidate_contracts=candidate_contracts),
         "graph_execution": _graph_summary(graph),
         "submission_attempts": _attempts_for_iteration(attempts, iteration=iteration),
         "kernel_snapshot": _snapshot_record(kernel_snapshot),
@@ -478,20 +508,51 @@ def _score_record(*, metrics: dict[str, object], evaluation: dict[str, object]) 
     source = str(
         loop_decision.get("source") or metrics.get("score_source") or evaluation.get("score_source") or "unknown"
     )
-    metric = str(metrics.get("metric") or evaluation.get("metric_name") or "unknown")
-    direction = str(metrics.get("direction") or evaluation.get("direction") or "unknown")
+    authoritative_metric = str(
+        metrics.get("authoritative_display_metric")
+        or evaluation.get("authoritative_display_metric")
+        or evaluation.get("metric_name")
+        or metrics.get("metric")
+        or "unknown"
+    )
+    canonical_metric = str(
+        metrics.get("canonical_technical_metric")
+        or evaluation.get("canonical_technical_metric")
+        or metrics.get("metric")
+        or "unknown"
+    )
+    model_selection = metrics.get("model_selection_decision")
+    model_selection = dict(model_selection) if isinstance(model_selection, dict) else {}
+    if not model_selection:
+        report_decision = evaluation.get("model_selection_decision")
+        model_selection = dict(report_decision) if isinstance(report_decision, dict) else {}
+    technical_value = tolerant_finite_float(model_selection.get("value"))
+    if technical_value is None:
+        technical_value = tolerant_finite_float(metrics.get("offline_value"))
+    if _normalize_token(source) == "offline_artifact_rubric":
+        metric = "rubric_readiness_score_0_100"
+    else:
+        metric = canonical_metric
+    direction = str(
+        loop_decision.get("direction") or metrics.get("direction") or evaluation.get("direction") or "unknown"
+    )
     faithfulness = metrics.get("competition_faithfulness")
     faithfulness = faithfulness if isinstance(faithfulness, dict) else {}
     potential = metrics.get("accuracy_potential")
     potential = potential if isinstance(potential, dict) else {}
     trusted_marker = potential.get("trusted")
     faithful_marker = faithfulness.get("faithful")
+    grouped_contract_valid, grouped_contract_errors = score_sources.validate_grouped_oof_contract(
+        model_selection if model_selection else None
+    )
     if isinstance(trusted_marker, bool):
         trusted = trusted_marker
     elif isinstance(faithful_marker, bool):
         trusted = faithful_marker and _normalize_token(source) in _TRUSTED_SCORE_SOURCES
     else:
         trusted = _normalize_token(source) in _TRUSTED_SCORE_SOURCES
+    if _normalize_token(source) == "grouped_oof_cv":
+        trusted = grouped_contract_valid
     reasons = _string_list(potential.get("quality_reasons")) + _string_list(faithfulness.get("reasons"))
     warnings = _string_list(faithfulness.get("warnings"))
     return {
@@ -509,6 +570,29 @@ def _score_record(*, metrics: dict[str, object], evaluation: dict[str, object]) 
         "n_splits": evaluation.get("n_splits"),
         "readiness_score": tolerant_finite_float(evaluation.get("readiness_score")),
         "public_submission_score": tolerant_finite_float(metrics.get("submission_score")),
+        "technical_proxy": {
+            "metric": str(model_selection.get("metric") or canonical_metric),
+            "authoritative_display_metric": authoritative_metric,
+            "value": technical_value,
+            "source": str(
+                model_selection.get("source")
+                or metrics.get("score_source")
+                or evaluation.get("score_source")
+                or "unknown"
+            ),
+            "role": "technical_proxy_only",
+            "trusted": grouped_contract_valid,
+            "trust_errors": grouped_contract_errors,
+            "outer_split": model_selection.get("outer_split"),
+            "folds": model_selection.get("folds"),
+            "seeds": _bounded_json_value(model_selection.get("seeds"), max_items=10),
+            "evaluated_rows": model_selection.get("evaluated_rows"),
+            "data_hashes": _bounded_json_value(model_selection.get("data_hashes"), max_items=10),
+            "evaluation_mask_sha256": model_selection.get("evaluation_mask_sha256"),
+            "global_class_list": _bounded_json_value(model_selection.get("global_class_list"), max_items=20),
+            "technical_champion_variant": model_selection.get("technical_champion_variant"),
+            "deployment_variant": model_selection.get("deployment_variant"),
+        },
     }
 
 
@@ -607,37 +691,236 @@ def _build_invocation_evaluation(
     }
 
 
-def _portfolio_summary(payload: dict[str, object]) -> dict[str, object]:
+def _load_candidate_contract_index(iter_dir: Path) -> dict[str, object]:
+    index_path = next(
+        (
+            path
+            for path in (
+                iter_dir / "output" / "candidate_contracts" / "index.json",
+                iter_dir / "candidate_contracts" / "index.json",
+            )
+            if path.is_file()
+        ),
+        None,
+    )
+    if index_path is None:
+        return {"ingested": False, "contracts": [], "errors": []}
+    index = load_json_object(index_path)
+    if index is None:
+        return {
+            "ingested": False,
+            "index_path": str(index_path),
+            "contracts": [],
+            "errors": ["index:invalid_json_object"],
+        }
+    entries = index.get("contracts")
+    if not isinstance(entries, list):
+        return {
+            "ingested": False,
+            "index_path": str(index_path),
+            "contracts": [],
+            "errors": ["index:contracts_not_list"],
+        }
+    output_root = index_path.parent.parent
+    contracts: list[dict[str, object]] = []
+    errors: list[str] = []
+    for entry in entries[:_MAX_CANDIDATES]:
+        if not isinstance(entry, dict):
+            errors.append("entry:not_object")
+            continue
+        relative = entry.get("path")
+        if not isinstance(relative, str) or not relative:
+            errors.append("entry:path_missing")
+            continue
+        contract_path = output_root / relative
+        contract = load_json_object(contract_path)
+        if contract is None:
+            errors.append(f"{relative}:invalid_or_missing")
+            continue
+        category = str(contract.get("category") or entry.get("category") or "")
+        status = str(contract.get("status") or entry.get("status") or "")
+        if not category or not status:
+            errors.append(f"{relative}:category_or_status_missing")
+            continue
+        score = tolerant_finite_float(contract.get("score"))
+        contract_valid = False
+        contract_errors: list[str] = []
+        if status == "completed":
+            if score is None:
+                errors.append(f"{relative}:completed_score_nonfinite")
+                continue
+            if (
+                contract.get("technical_metric") != "grouped_macro_f1_moment_type"
+                or contract.get("direction") != "maximize"
+                or contract.get("score_source") != "grouped_oof_cv"
+            ):
+                errors.append(f"{relative}:technical_provenance_mismatch")
+                continue
+            contract_valid, contract_errors = score_sources.validate_grouped_oof_contract(contract)
+        contracts.append(
+            {
+                "candidate_id": contract.get("candidate_id"),
+                "category": category,
+                "status": status,
+                "offline_score": score,
+                "score_source": contract.get("score_source"),
+                "model_family": contract.get("feature_recipe"),
+                "technical_valid": contract.get("technical_valid"),
+                "deployment_stable": contract.get("deployment_stable"),
+                "rejection_reason": contract.get("rejection_reason"),
+                "deployment_rejection_reason": contract.get("deployment_rejection_reason"),
+                "trusted": contract_valid,
+                "trust_errors": contract_errors,
+                "path": str(contract_path),
+            }
+        )
+    return {
+        "ingested": bool(contracts) and not errors,
+        "index_path": str(index_path),
+        "contracts": contracts,
+        "errors": errors,
+    }
+
+
+def _load_execution_attempt_resolution(iter_dir: Path) -> dict[str, object]:
+    path = next(
+        (
+            candidate
+            for candidate in (
+                iter_dir / "output" / "execution_attempt_resolution.json",
+                iter_dir / "execution_attempt_resolution.json",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if path is None:
+        return {"ingested": False, "superseded_attempts": [], "active_fatal_attempts": []}
+    payload = load_json_object(path)
+    if payload is None:
+        return {
+            "ingested": False,
+            "path": str(path),
+            "superseded_attempts": [],
+            "active_fatal_attempts": [],
+            "error": "invalid_json_object",
+        }
+    return {
+        "ingested": True,
+        "path": str(path),
+        "successful_plan_sha256": payload.get("successful_plan_sha256"),
+        "completed_phases": _bounded_json_value(payload.get("completed_phases"), max_items=40),
+        "superseded_attempts": _bounded_json_value(payload.get("superseded_attempts"), max_items=40),
+        "active_fatal_attempts": _bounded_json_value(payload.get("active_fatal_attempts"), max_items=40),
+    }
+
+
+def _apply_execution_attempt_resolution(
+    signatures: list[dict[str, object]],
+    resolution: dict[str, object],
+) -> list[dict[str, object]]:
+    superseded = resolution.get("superseded_attempts")
+    superseded = superseded if isinstance(superseded, list) else []
+    superseded_paths: set[str] = set()
+    fingerprints: list[str] = []
+    for attempt in superseded:
+        if not isinstance(attempt, dict) or attempt.get("status") != "superseded_by_successful_attempt":
+            continue
+        fingerprint = str(attempt.get("error_fingerprint") or "")
+        if fingerprint:
+            fingerprints.append(fingerprint)
+        paths = attempt.get("original_log_relative_paths")
+        if isinstance(paths, list):
+            superseded_paths.update(str(path).replace("\\", "/") for path in paths)
+    successful_sha = resolution.get("successful_plan_sha256")
+    resolved: list[dict[str, object]] = []
+    for signature in signatures:
+        item = dict(signature)
+        paths = item.get("paths")
+        normalized_paths = [str(path).replace("\\", "/") for path in paths] if isinstance(paths, list) else []
+        is_superseded = any(
+            observed.endswith(expected) for observed in normalized_paths for expected in superseded_paths
+        )
+        item["active"] = not is_superseded
+        item["status"] = "superseded_by_successful_attempt" if is_superseded else "active"
+        if is_superseded:
+            item["superseded_error_fingerprints"] = fingerprints
+            item["superseded_by_plan_sha256"] = successful_sha
+        resolved.append(item)
+    return resolved
+
+
+def _portfolio_summary(
+    payload: dict[str, object],
+    *,
+    candidate_contracts: dict[str, object] | None = None,
+) -> dict[str, object]:
+    ingested = candidate_contracts or {}
+    contract_items = ingested.get("contracts")
+    contract_by_category = (
+        {str(item.get("category")): item for item in contract_items if isinstance(item, dict) and item.get("category")}
+        if isinstance(contract_items, list)
+        else {}
+    )
     candidates = payload.get("candidates")
     summaries: list[dict[str, object]] = []
     if isinstance(candidates, list):
         for candidate in candidates[:_MAX_CANDIDATES]:
             if not isinstance(candidate, dict):
                 continue
-            summaries.append(
-                {
-                    key: candidate.get(key)
-                    for key in (
-                        "candidate_id",
-                        "category",
-                        "status",
-                        "method_id",
-                        "model_family",
-                        "validation_profile_id",
-                        "offline_score",
-                        "private_robustness_score",
-                        "rank_score",
-                        "failure_reason",
-                    )
-                    if key in candidate
-                }
-            )
+            summary = {
+                key: candidate.get(key)
+                for key in (
+                    "candidate_id",
+                    "category",
+                    "status",
+                    "method_id",
+                    "model_family",
+                    "validation_profile_id",
+                    "offline_score",
+                    "private_robustness_score",
+                    "rank_score",
+                    "failure_reason",
+                )
+                if key in candidate
+            }
+            contract = contract_by_category.get(str(candidate.get("category") or ""))
+            if contract is not None:
+                summary.update(
+                    {
+                        "status": contract.get("status"),
+                        "offline_score": contract.get("offline_score"),
+                        "score_source": contract.get("score_source"),
+                        "model_family": contract.get("model_family"),
+                        "candidate_contract_path": contract.get("path"),
+                    }
+                )
+            summaries.append(summary)
+    existing_categories = {
+        str(item.get("category")) for item in summaries if isinstance(item, dict) and item.get("category")
+    }
+    for category, contract in contract_by_category.items():
+        if category in existing_categories:
+            continue
+        summaries.append(dict(contract))
+    original_missing = payload.get("missing_categories")
+    missing = (
+        [item for item in original_missing if str(item) not in contract_by_category]
+        if isinstance(original_missing, list)
+        else original_missing
+    )
     return {
         "active_validation_profile": payload.get("active_validation_profile"),
         "required_categories": _bounded_json_value(payload.get("required_categories"), max_items=20),
-        "missing_categories": _bounded_json_value(payload.get("missing_categories"), max_items=20),
-        "next_action": payload.get("next_action"),
+        "missing_categories": _bounded_json_value(missing, max_items=20),
+        "next_action": (
+            "Candidate contracts ingested; use completed comparable scores "
+            "and preserve reporting-only validation status."
+            if contract_by_category
+            else payload.get("next_action")
+        ),
         "candidates": summaries,
+        "candidate_contract_ingestion": _bounded_json_value(ingested, max_items=40),
     }
 
 
@@ -788,8 +1071,15 @@ def _evidence_gaps(*, current_record: dict[str, object], transitions: list[dict[
     elif transitions[-1].get("material_change_detected") is not True:
         gaps.append("The latest transition has no verified material kernel or plan change.")
     errors = current_record.get("error_signatures")
-    if isinstance(errors, list) and errors:
-        gaps.append(f"Resolve {len(errors)} current runtime error signature(s) before attributing a model-quality gap.")
+    active_errors = (
+        [item for item in errors if isinstance(item, dict) and item.get("active", True)]
+        if isinstance(errors, list)
+        else []
+    )
+    if active_errors:
+        gaps.append(
+            f"Resolve {len(active_errors)} current runtime error signature(s) before attributing a model-quality gap."
+        )
     portfolio = current_record.get("portfolio")
     portfolio = portfolio if isinstance(portfolio, dict) else {}
     missing = portfolio.get("missing_categories")

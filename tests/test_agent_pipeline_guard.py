@@ -298,8 +298,16 @@ def _write_structured_contract_kernel(
     )
     normal_lines = {
         "missing_data": [
-            'print("BLOCKED: DataDiscoveryError: Raw labeled training assets were not found. '
-            'No submission was created.", file=sys.stderr)',
+            'print(json.dumps({"status": "blocked", "error_type": "DataDiscoveryError", '
+            '"reason_code": "missing_raw_training_assets", '
+            '"message": "Raw labeled training assets were not found. Supply the competition data root through '
+            'KAGGLE_INPUT_DIR, DATA_ROOT, or CUHKX_DATA_ROOT.", "submission_written": False}), file=sys.stderr)',
+            "raise SystemExit(2)",
+        ],
+        "observed_data_contract_missing": [
+            'print(json.dumps({"status": "blocked", "error_type": "DataContractError", '
+            '"message": "No competition data root found. Supply test.csv plus raw HAR training data through '
+            'KAGGLE_INPUT_DIR, DATA_ROOT, or CUHKX_DATA_ROOT.", "submission_written": False}), file=sys.stderr)',
             "raise SystemExit(2)",
         ],
         "runtime_error": ['raise RuntimeError("unrelated normal-entrypoint failure")'],
@@ -405,64 +413,143 @@ def test_missing_data_accepts_contract_and_expected_full_entrypoint_block(tmp_pa
     assert not list(paths.base_dir.rglob("*.pth"))
 
 
-def test_missing_data_probe_accepts_prefixed_actionable_diagnostic(tmp_path: Path) -> None:
-    stderr = (
-        "Transparent stop: DataDiscoveryError: raw labeled training assets were not found; "
-        "expected an extracted HAR modality tree, HAR.zip, or contiguous HAR.z01 through "
-        "HAR.z08 plus HAR.zip. No model or submission was created"
+def test_observed_data_contract_block_is_accepted_when_training_data_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    paths, kernel_path = _structured_contract_paths(
+        tmp_path,
+        data_ready=False,
+        deliverable_mode="writeup",
+    )
+    _write_structured_contract_kernel(
+        kernel_path,
+        normal_mode="observed_data_contract_missing",
     )
 
-    for diagnostic in (stderr, stderr.swapcase()):
-        issues = agent_pipeline._missing_data_probe_issues(
-            returncode=2,
-            stdout="",
-            stderr=diagnostic,
-            staging_root=tmp_path,
-        )
+    result = agent_pipeline._run_kernel_contract_smoke(paths=paths, kernel_path=kernel_path)
 
-        assert issues == ()
+    assert result.passed is True
+    assert result.contract_only is True
+    assert result.normal_smoke_returncode == 2
+    assert not result.normal_smoke_issues
+    assert "controlled missing-training-data block" in "\n".join(result.warnings)
+
+
+def test_missing_data_probe_accepts_observed_structured_data_contract_block(tmp_path: Path) -> None:
+    payload = {
+        "status": "blocked",
+        "error_type": "DataContractError",
+        "message": (
+            "No competition data root found. Supply test.csv plus raw HAR training data through "
+            "KAGGLE_INPUT_DIR, DATA_ROOT, or CUHKX_DATA_ROOT."
+        ),
+        "submission_written": False,
+    }
+    stderr = "diagnostic emitted before the final structured block\n" + json.dumps(payload)
+
+    issues = agent_pipeline._missing_data_probe_issues(
+        returncode=2,
+        stderr=stderr,
+        staging_root=tmp_path,
+        training_data_unavailable=True,
+    )
+
+    assert issues == ()
 
 
 @pytest.mark.parametrize(
-    ("stdout", "stderr", "expected_issue"),
+    ("stderr", "expected_issue"),
     [
         (
-            "",
             "Transparent stop: raw labeled training assets were not found\n",
-            "does not identify DataDiscoveryError",
+            "does not end with a readable JSON object",
         ),
         (
-            "",
-            "Transparent stop: DataDiscoveryError: input unavailable\n",
-            "does not state that raw labeled training assets were not found",
+            '{"status":"blocked","error_type":"DataContractError",'
+            '"message":"HAR/data label schema mismatch","submission_written":false}\n',
+            "does not identify unavailable training input",
+        ),
+        (
+            '{"status":"blocked","error_type":"DataContractError",'
+            '"message":"Training labels are unavailable because schema validation failed",'
+            '"submission_written":false}\n',
+            "does not identify unavailable training input",
         ),
     ],
 )
-def test_missing_data_probe_rejects_partial_markers(
+def test_missing_data_probe_rejects_unstructured_or_unrelated_blocks(
     tmp_path: Path,
-    stdout: str,
     stderr: str,
     expected_issue: str,
 ) -> None:
     issues = agent_pipeline._missing_data_probe_issues(
         returncode=2,
-        stdout=stdout,
         stderr=stderr,
         staging_root=tmp_path,
+        training_data_unavailable=True,
     )
 
     assert expected_issue in "\n".join(issues)
 
 
-def test_missing_data_probe_combines_stdout_and_stderr(tmp_path: Path) -> None:
+def test_missing_data_probe_rejects_incomplete_final_stderr_json(tmp_path: Path) -> None:
     issues = agent_pipeline._missing_data_probe_issues(
         returncode=2,
-        stdout="DataDiscoveryError: input discovery failed\n",
-        stderr="raw labeled training assets were not found\n",
+        stderr='"message":"raw labeled training assets were not found","submission_written":false}',
         staging_root=tmp_path,
+        training_data_unavailable=True,
     )
 
-    assert issues == ()
+    assert "readable JSON object" in "\n".join(issues)
+
+
+def test_missing_data_probe_rejects_submission_claim_or_artifact(tmp_path: Path) -> None:
+    payload = {
+        "status": "blocked",
+        "error_type": "DataDiscoveryError",
+        "reason_code": "missing_raw_training_assets",
+        "message": "Raw labeled training assets were not found.",
+        "submission_written": True,
+    }
+
+    claimed_issues = agent_pipeline._missing_data_probe_issues(
+        returncode=2,
+        stderr=json.dumps(payload),
+        staging_root=tmp_path,
+        training_data_unavailable=True,
+    )
+
+    assert "submission_written=false" in "\n".join(claimed_issues)
+
+    payload["submission_written"] = False
+    (tmp_path / "submission.csv").write_text("id,prediction\n1,0\n", encoding="utf-8")
+    artifact_issues = agent_pipeline._missing_data_probe_issues(
+        returncode=2,
+        stderr=json.dumps(payload),
+        staging_root=tmp_path,
+        training_data_unavailable=True,
+    )
+
+    assert "created prohibited" in "\n".join(artifact_issues)
+    assert "submission.csv" in "\n".join(artifact_issues)
+
+
+def test_missing_data_probe_rejects_block_when_training_data_is_ready(tmp_path: Path) -> None:
+    payload = {
+        "status": "blocked",
+        "error_type": "DataContractError",
+        "message": "No competition data root found.",
+        "submission_written": False,
+    }
+
+    issues = agent_pipeline._missing_data_probe_issues(
+        returncode=2,
+        stderr=json.dumps(payload),
+        staging_root=tmp_path,
+        training_data_unavailable=False,
+    )
+
+    assert "training data readiness is available" in "\n".join(issues)
 
 
 def test_required_local_training_missing_data_is_contract_only(
@@ -510,9 +597,12 @@ def test_contract_only_acceptance_promotes_kernel_and_records_environmental_bloc
         data_readiness_reason="dataset_profile_missing_required_files",
         allow_missing_training_data=True,
         normal_smoke_required=True,
-        normal_smoke_returncode=1,
+        normal_smoke_returncode=2,
         normal_smoke_stderr=(
-            "DataDiscoveryError: Raw labeled training assets were not found. No submission was created."
+            '{"status":"blocked","error_type":"DataDiscoveryError",'
+            '"reason_code":"missing_raw_training_assets",'
+            '"message":"Raw labeled training assets were not found.",'
+            '"submission_written":false}'
         ),
     )
 
@@ -760,8 +850,13 @@ def contract_smoke(output_dir=None):
 
 def main():
     print(
-        "BLOCKED: DataDiscoveryError: Raw labeled training assets were not found. "
-        "No submission was created.",
+        json.dumps({
+            "status": "blocked",
+            "error_type": "DataDiscoveryError",
+            "reason_code": "missing_raw_training_assets",
+            "message": "Raw labeled training assets were not found.",
+            "submission_written": False,
+        }),
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -1023,6 +1118,9 @@ def test_kernel_candidate_instructions_specify_exact_contract_profile_schema(tmp
     assert '"finite_backward": true' in instructions
     assert '"logits_shape": [2, <class count>]' in instructions
     assert '"deploy_bytes": <bytes>' in instructions
+    assert '"error_type":"DataDiscoveryError"' in instructions
+    assert '"reason_code":"missing_raw_training_assets"' in instructions
+    assert '"submission_written":false' in instructions
 
 
 @pytest.mark.parametrize(
@@ -1142,7 +1240,7 @@ def test_missing_or_malformed_contract_is_rejected(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("normal_mode", "expected_issue"),
     [
-        ("runtime_error", "does not identify DataDiscoveryError"),
+        ("runtime_error", "does not end with a readable JSON object"),
         ("spoofed_runtime_error", "expected return code 2"),
     ],
 )
@@ -1184,6 +1282,7 @@ def test_ready_data_keeps_normal_data_discovery_failure_fatal(tmp_path: Path) ->
     assert result.normal_smoke_required is True
     assert result.normal_smoke_returncode == 2
     assert "DataDiscoveryError" in result.normal_smoke_stderr
+    assert "training data readiness is available" in "\n".join(result.normal_smoke_issues)
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,7 @@ from rich import print
 
 from kagglebot.autopilot import AutopilotConfig, run_autopilot
 from kagglebot.bootstrap import bootstrap_competition
+from kagglebot.data_readiness import assess_local_training_data
 from kagglebot.datetime_utils import parse_iso_datetime_utc
 from kagglebot.env_utils import env_flag, env_optional_int, parse_float_value, parse_int_value, read_env_or_file
 from kagglebot.eval import EvaluationAdvisor
@@ -1031,6 +1032,7 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
     allow = {slug.strip().lower() for slug in config.allow_slugs if slug.strip()}
     block = {slug.strip().lower() for slug in config.block_slugs if slug.strip()}
     records = _all_watch_records(config, primary=ledger)
+    submitted_writeups = _submitted_writeup_slugs(records)
     cooldown = _cooldown_slugs(records, hours=config.cooldown_hours)
     resource_blocked = _resource_blocked_slugs(records)
     active = _active_slugs(config)
@@ -1041,6 +1043,9 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
         if slug in active:
             continue
         if allow and slug not in allow:
+            continue
+        if slug in submitted_writeups:
+            ledger.append("candidate_skipped", slug=candidate.slug, reason="writeup_already_submitted")
             continue
         if slug in block or slug in cooldown:
             continue
@@ -1097,6 +1102,20 @@ def select_next_competition(config: WatchConfig, *, ledger: WatchLedger | None =
         filtered.append((priority_tier, score, history.autopilot_started, index, candidate))
     filtered.sort(key=lambda item: (item[0], -item[1], item[2], item[3], item[4].slug))
     return [candidate for _group, _score, _started, _index, candidate in filtered]
+
+
+def _submitted_writeup_slugs(records: list[dict[str, object]]) -> set[str]:
+    submitted: set[str] = set()
+    for record in records:
+        if record.get("event") != "finished" or record.get("submission_status") != "submitted":
+            continue
+        submission_url = str(record.get("submission_url") or "").lower()
+        if "/writeups/" not in submission_url and not record.get("writeup_title"):
+            continue
+        slug = str(record.get("slug") or "").strip().lower()
+        if slug:
+            submitted.add(slug)
+    return submitted
 
 
 def _competition_priority_tier(
@@ -1605,7 +1624,7 @@ def _cooldown_slugs(records: list[dict[str, object]], *, hours: float) -> set[st
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
     slugs: set[str] = set()
     for record in records:
-        if record.get("event") not in {"finished", "failed", "skipped"}:
+        if record.get("event") not in {"blocked", "finished", "failed", "skipped"}:
             continue
         ts = _parse_ts(record.get("ts"))
         slug = str(record.get("slug") or "").strip().lower()
@@ -1674,11 +1693,12 @@ def _active_slugs(config: WatchConfig) -> set[str]:
 def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[str, object] | None = None) -> bool:
     if state is not None and active_state_is_stale(state):
         return False
-    run_dir = CompetitionPaths(
+    paths = CompetitionPaths(
         slug=slug,
         artifacts_dir=config.artifacts_dir,
         repo_root=config.workdir,
-    ).run_dir(run_id)
+    )
+    run_dir = paths.run_dir(run_id)
     if not run_dir.exists():
         return False
     run_json = run_dir / "run.json"
@@ -1688,6 +1708,8 @@ def _run_can_resume(config: WatchConfig, slug: str, run_id: str, *, state: dict[
     if payload is None:
         return True
     status = str(payload.get("status") or "").strip().lower()
+    if status == "blocked_on_data":
+        return assess_local_training_data(paths).ready
     return status not in _TERMINAL_RUN_STATUSES
 
 

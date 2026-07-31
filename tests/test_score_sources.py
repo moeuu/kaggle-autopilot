@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from kagglebot.score_sources import (
+    FROZEN_GROUPED_OOF_CONTRACT,
     is_trusted_offline_score_source,
     normalize_generalizable_score_source,
     normalize_score_source_list,
@@ -15,6 +16,7 @@ def test_normalize_score_source_name_handles_common_aliases() -> None:
     assert normalize_score_source_name("validation") == "holdout"
     assert normalize_score_source_name("lbproxy") == "lb_proxy"
     assert normalize_score_source_name(None) == "holdout"
+    assert normalize_score_source_name("grouped_oof_cv") == "cv"
 
 
 def test_is_trusted_offline_score_source_rejects_public_or_proxy_sources() -> None:
@@ -22,6 +24,23 @@ def test_is_trusted_offline_score_source_rejects_public_or_proxy_sources() -> No
     assert is_trusted_offline_score_source("consensus") is True
     assert is_trusted_offline_score_source("public_lb") is False
     assert is_trusted_offline_score_source("sample_smoke") is False
+    assert is_trusted_offline_score_source("grouped_oof_cv") is False
+    grouped_contract = {
+        key: value
+        for key, value in FROZEN_GROUPED_OOF_CONTRACT.items()
+        if key not in {"biometric_sha256", "mapping_sha256"}
+    }
+    grouped_contract["data_hashes"] = {
+        "biometric": FROZEN_GROUPED_OOF_CONTRACT["biometric_sha256"],
+        "mapping": FROZEN_GROUPED_OOF_CONTRACT["mapping_sha256"],
+    }
+    assert (
+        is_trusted_offline_score_source(
+            "grouped_oof_cv",
+            provenance=grouped_contract,
+        )
+        is True
+    )
 
 
 def test_normalize_score_source_list_deduplicates_in_order() -> None:

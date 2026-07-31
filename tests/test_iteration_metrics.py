@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from kagglebot.eval import EvaluationReport
 from kagglebot.iteration_metrics import (
@@ -15,15 +16,18 @@ from kagglebot.iteration_metrics import (
     build_rank_guard_payload,
     build_regression_guard_payload,
     build_split_index_fingerprints,
+    enrich_evaluation_report_with_kernel_provenance,
     evaluation_to_payload,
     extract_fold_scores_for_report,
     iteration_metrics_allow_submit,
     resolve_iteration_submit_phase_completion,
+    resume_best_kernel_metric_score,
     resume_best_readiness_score,
     resume_noise_guard_state,
     write_iteration_evaluation_report,
     write_iteration_metrics_payload,
 )
+from kagglebot.score_sources import FROZEN_GROUPED_OOF_CONTRACT
 from kagglebot.solver.evaluate import EvaluationResult
 
 
@@ -149,6 +153,103 @@ def test_iteration_metrics_write_helpers_write_json_objects(tmp_path) -> None:
 
     assert json.loads(metrics_path.read_text(encoding="utf-8")) == {"run_id": "run-1", "iter": 2}
     assert json.loads(report_path.read_text(encoding="utf-8")) == {"readiness_score": 0.91}
+
+
+def test_resume_best_kernel_metric_score_preserves_native_rubric_scale(tmp_path) -> None:
+    for iteration, rubric_score in ((1, 84.0), (2, 87.5), (3, 86.0)):
+        output_dir = tmp_path / f"iter-{iteration}" / "output"
+        output_dir.mkdir(parents=True)
+        (output_dir / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "score": 0.64 + iteration / 100.0,
+                    "rubric_readiness_score_0_100": rubric_score,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert resume_best_kernel_metric_score(
+        run_dir=tmp_path,
+        metric_key="rubric_readiness_score_0_100",
+        direction="maximize",
+        max_iterations=3,
+    ) == pytest.approx(87.5)
+
+
+def test_enrich_evaluation_report_uses_exact_kernel_metric_contract() -> None:
+    display_metric = "grouped_macro_f1_moment_type (CV technical proxy; official judging is a 100-point manual rubric)"
+    enriched = enrich_evaluation_report_with_kernel_provenance(
+        {
+            "metric_name": display_metric,
+            "split_strategy": "kfold",
+            "score_source": "cv",
+        },
+        kernel_metrics={
+            "authoritative_display_metric": display_metric,
+            "canonical_technical_metric": "grouped_macro_f1_moment_type",
+            "score_source": "grouped_oof_cv",
+            "technical_proxies": {
+                "grouped_macro_f1_moment_type": {
+                    "cv_type": "LeaveOneGroupOut_session_id",
+                    "score_source": "grouped_oof_cv",
+                }
+            },
+        },
+    )
+
+    assert enriched["metric_name"] == display_metric
+    assert enriched["authoritative_display_metric"] == display_metric
+    assert enriched["canonical_technical_metric"] == "grouped_macro_f1_moment_type"
+    assert enriched["split_strategy"] == "LeaveOneGroupOut_session_id"
+    assert enriched["score_source"] == "grouped_oof_cv"
+
+
+def test_enrich_evaluation_report_ingests_real_grouped_fold_records() -> None:
+    contract = FROZEN_GROUPED_OOF_CONTRACT
+    decision = {key: value for key, value in contract.items() if key not in {"biometric_sha256", "mapping_sha256"}}
+    decision.update(
+        {
+            "value": 0.702,
+            "data_hashes": {
+                "biometric": contract["biometric_sha256"],
+                "mapping": contract["mapping_sha256"],
+            },
+            "per_session_fold_scores": {
+                f"S00{index}": score for index, score in enumerate([0.61, 0.68, 0.72, 0.75, 0.77], start=1)
+            },
+            "seed_fold_records": [
+                {"seed": seed, "fold": fold, "score": 0.6 + fold / 100}
+                for seed in [42, 2024, 777]
+                for fold in range(1, 6)
+            ],
+            "split_index_fingerprints": [
+                {"seed": seed, "fold": fold, "split_index_fingerprint": f"{seed}-{fold}"}
+                for seed in [42, 2024, 777]
+                for fold in range(1, 6)
+            ],
+        }
+    )
+    enriched = enrich_evaluation_report_with_kernel_provenance(
+        {"per_fold_scores": [0.702], "ci_low": 0.702, "ci_high": 0.702},
+        kernel_metrics={
+            "authoritative_display_metric": "display",
+            "canonical_technical_metric": "grouped_macro_f1_moment_type",
+            "model_selection_decision": decision,
+            "loop_decision": {
+                "metric": "rubric_readiness_score_0_100",
+                "source": "offline_artifact_rubric",
+                "value": 82.0,
+            },
+        },
+    )
+
+    assert enriched["model_selection_decision"]["trusted"] is True
+    assert len(enriched["per_fold_scores"]) == 5
+    assert len(enriched["seed_fold_records"]) == 15
+    assert len(enriched["split_index_fingerprints"]) == 15
+    assert enriched["ci_low"] < enriched["ci_high"]
+    assert enriched["loop_decision"]["value"] == pytest.approx(82.0)
 
 
 def test_build_iteration_record_kwargs_uses_evaluation_and_top1_score() -> None:
@@ -314,7 +415,13 @@ def test_build_final_metrics_payload_adds_optional_sections_without_mutating_bas
     )
 
     assert base == {"run_id": "run-1", "iter": 2}
-    assert payload["loop_decision"] == {"source": "readiness", "value": 0.81}
+    assert payload["loop_decision"] == {
+        "metric": "unknown",
+        "source": "readiness",
+        "value": 0.81,
+        "direction": "unknown",
+        "scale": "native",
+    }
     assert payload["noise_guard"] == {"streak": 1}
     assert payload["rank_guard"] == {"rank": 12}
     assert payload["top1_tier"] == {

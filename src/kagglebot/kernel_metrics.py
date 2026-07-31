@@ -8,7 +8,11 @@ from statistics import stdev
 from kagglebot.json_utils import load_json_object, write_json_object
 from kagglebot.metric_matching import normalize_metric_name
 from kagglebot.scalar_utils import tolerant_finite_float
-from kagglebot.score_sources import is_trusted_offline_score_source, normalize_score_source_name
+from kagglebot.score_sources import (
+    is_trusted_offline_score_source,
+    normalize_score_source_name,
+    validate_grouped_oof_contract,
+)
 from kagglebot.solver.evaluate import EvaluationResult
 from kagglebot.solver.io import read_table
 from kagglebot.solver.metrics import canonical_metric, compute_metric, infer_direction, metric_requires_proba
@@ -209,7 +213,27 @@ def recompute_metric_from_oof_artifact(
     updated_payload["metric_recheck_source"] = f"oof_predictions:{oof_path.name}"
     updated_payload["metric_recheck_without_retrain"] = True
     loop_decision = updated_payload.get("loop_decision")
-    if isinstance(loop_decision, dict):
+    rubric_loop = bool(
+        isinstance(loop_decision, dict)
+        and (
+            loop_decision.get("metric") == "rubric_readiness_score_0_100"
+            or loop_decision.get("source") == "offline_artifact_rubric"
+        )
+    )
+    if rubric_loop:
+        model_selection = updated_payload.get("model_selection_decision")
+        model_selection = dict(model_selection) if isinstance(model_selection, dict) else {}
+        model_selection.update(
+            {
+                "metric": metric_name,
+                "direction": direction,
+                "source": score_source,
+                "value": metric_value,
+                "metric_recheck_without_retrain": True,
+            }
+        )
+        updated_payload["model_selection_decision"] = model_selection
+    elif isinstance(loop_decision, dict):
         loop_decision["source"] = score_source
         loop_decision["value"] = metric_value
     else:
@@ -501,14 +525,24 @@ def evaluation_from_kernel_metrics_payload(
             if std_value is None and len(parsed_fold_scores) > 1:
                 std_value = float(stdev(parsed_fold_scores))
 
-    score_source = normalize_score_source_name(payload.get("score_source", "holdout"))
+    raw_score_source = str(payload.get("score_source", "holdout")).strip().lower()
+    raw_score_source = raw_score_source.replace("-", "_").replace(" ", "_")
+    score_source = normalize_score_source_name(raw_score_source)
+    grouped_contract_valid = True
+    if raw_score_source == "grouped_oof_cv":
+        provenance = payload.get("model_selection_decision")
+        grouped_contract_valid, _ = validate_grouped_oof_contract(provenance)
+        if not grouped_contract_valid:
+            score_source = "grouped_oof_cv_invalid_contract"
     if score_source == "holdout":
         for key in payload.keys():
             if isinstance(key, str) and key.lower().startswith("oof_"):
                 score_source = "cv"
                 break
     trusted_fallback_value = None
-    if not is_trusted_offline_score_source(score_source):
+    if not grouped_contract_valid:
+        trusted_fallback_value = None
+    elif not is_trusted_offline_score_source(score_source):
         trusted_fallback_value = extract_trusted_cv_value_from_metrics_payload(payload)
         if trusted_fallback_value is not None:
             value = trusted_fallback_value

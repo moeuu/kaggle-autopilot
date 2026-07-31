@@ -243,6 +243,12 @@ an improvement contract containing evidence citations, one falsifiable hypothesi
 no-op approaches, an attribution-safe validation plan, expected observations, stop/rollback criteria, and a fallback.
 Interrupted Oracle workflows persist the evidence path and SHA-256 and refuse to resume from a modified bundle.
 
+For judged-writeup plans, iteration metrics keep two independent decisions. `loop_decision` uses the
+0–100 offline artifact-rubric readiness score, while `model_selection_decision` uses the model’s native
+technical scale. A `grouped_oof_cv` model-selection record is trusted only when its split, seeds, row
+count, class order, data hashes, and evaluation-mask hash match the frozen contract; OOF metric repair
+does not overwrite an artifact-rubric loop decision.
+
 Kernel source preflight persists a redacted, structured diagnostic at
 `runs/<run_id>/autofix/attempt-<n>/kernel-preflight-error.txt` before invoking a repair. Repair success is determined
 by rerunning the exact source contract, so a no-diff repair may continue when the contract already passes. Identical
@@ -609,3 +615,10 @@ Key files:
   `KAGGLEBOT_KAGGLE_GPU_HANDOFF_PROFILE=kaggle_t4` to override the default `kaggle_p100` profile.
 - For Kaggle kernel training, execution and logs are tracked through kernel run artifacts.
 - If autopilot crashes, restart with `--resume-run-id <run-id>` or `--resume-latest`.
+- A watch run blocked on missing labeled data resumes only after a non-empty training source is staged. Until then the
+  competition follows the normal watch cooldown, allowing another eligible competition to run without emitting repeated
+  start events for the unchanged blocked run.
+
+## Submitted writeup competitions
+
+A competition with a reconciled watch-ledger `finished` event, `submission_status: submitted`, and a Kaggle writeup URL is terminal for automatic watch selection. The watcher records `candidate_skipped` with reason `writeup_already_submitted` instead of starting another run. Standard scored competitions remain eligible for later improvement according to the normal submission-priority policy.

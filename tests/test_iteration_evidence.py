@@ -384,3 +384,219 @@ def test_iteration_evidence_carries_actionable_submission_fidelity_codes(tmp_pat
     ]
     gaps = bundle.payload["decision_requirements"]["evidence_gaps"]
     assert any("required_model_source_not_loaded" in gap and str(report_path) in gap for gap in gaps)
+
+
+def test_iteration_evidence_ingests_completed_kernel_candidate_contracts(tmp_path: Path) -> None:
+    paths = _make_paths(tmp_path)
+    run_id = "run-candidate-contracts"
+    iter1 = paths.iter_dir(run_id, 1)
+    _write_iteration_metrics(iter1, value=0.64, source="cv", trusted=True)
+    (iter1 / "portfolio_plan.json").write_text(
+        json.dumps(
+            {
+                "required_categories": [
+                    "reference_reproduction",
+                    "strong_single",
+                    "feature_variant",
+                    "validation_variant",
+                    "blend",
+                ],
+                "missing_categories": [
+                    "strong_single",
+                    "feature_variant",
+                    "validation_variant",
+                    "blend",
+                ],
+                "candidates": [
+                    {
+                        "candidate_id": f"planned-{category}",
+                        "category": category,
+                        "status": "planned",
+                    }
+                    for category in (
+                        "strong_single",
+                        "feature_variant",
+                        "validation_variant",
+                        "blend",
+                    )
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    contract_dir = iter1 / "output" / "candidate_contracts"
+    contract_dir.mkdir(parents=True)
+    entries = []
+    for category, score in (
+        ("strong_single", 0.66),
+        ("feature_variant", 0.61),
+        ("blend", 0.67),
+    ):
+        relative = f"candidate_contracts/{category}.json"
+        (contract_dir / f"{category}.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": category,
+                    "category": category,
+                    "status": "completed",
+                    "technical_metric": "grouped_macro_f1_moment_type",
+                    "direction": "maximize",
+                    "score": score,
+                    "score_source": "grouped_oof_cv",
+                    "feature_recipe": f"{category}-features",
+                }
+            ),
+            encoding="utf-8",
+        )
+        entries.append(
+            {
+                "candidate_id": category,
+                "category": category,
+                "status": "completed",
+                "score": score,
+                "path": relative,
+            }
+        )
+    validation_relative = "candidate_contracts/validation_variant.json"
+    (contract_dir / "validation_variant.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": "validation_variant",
+                "category": "validation_variant",
+                "status": "reporting_only_noncomparable",
+                "score": None,
+                "score_source": "noncomparable_diagnostic",
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries.append(
+        {
+            "candidate_id": "validation_variant",
+            "category": "validation_variant",
+            "status": "reporting_only_noncomparable",
+            "score": None,
+            "path": validation_relative,
+        }
+    )
+    (contract_dir / "index.json").write_text(
+        json.dumps({"contracts": entries}),
+        encoding="utf-8",
+    )
+
+    bundle = prepare_iteration_evidence(
+        paths=paths,
+        slug="demo",
+        run_id=run_id,
+        iteration=1,
+        evaluation=_evaluation(value=0.64),
+        target_score=0.80,
+        current_score=0.64,
+        current_score_source="cv",
+        delta_offline=None,
+        pending_problem_insights=[],
+        previous_submission_history=None,
+    )
+
+    portfolio = bundle.payload["iterations"][0]["portfolio"]
+    assert portfolio["missing_categories"] == []
+    assert portfolio["candidate_contract_ingestion"]["ingested"] is True
+    by_category = {item["category"]: item for item in portfolio["candidates"]}
+    assert by_category["strong_single"]["status"] == "completed"
+    assert by_category["strong_single"]["offline_score"] == pytest.approx(0.66)
+    assert by_category["validation_variant"]["status"] == "reporting_only_noncomparable"
+    gaps = bundle.payload["decision_requirements"]["evidence_gaps"]
+    assert not any("remain unevaluated" in gap for gap in gaps)
+
+
+def test_iteration_evidence_separates_rubric_loop_score_from_technical_proxy(tmp_path: Path) -> None:
+    paths = _make_paths(tmp_path)
+    run_id = "run-score-provenance"
+    iter1 = paths.iter_dir(run_id, 1)
+    _write_iteration_metrics(iter1, value=0.64, source="cv", trusted=True)
+    metrics_path = iter1 / "metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics["loop_decision"] = {
+        "source": "offline_artifact_rubric",
+        "value": 84.0,
+    }
+    metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+
+    bundle = prepare_iteration_evidence(
+        paths=paths,
+        slug="demo",
+        run_id=run_id,
+        iteration=1,
+        evaluation=_evaluation(value=0.64),
+        target_score=0.70,
+        current_score=84.0,
+        current_score_source="offline_artifact_rubric",
+        delta_offline=None,
+        pending_problem_insights=[],
+        previous_submission_history=None,
+    )
+
+    score = bundle.payload["iterations"][0]["score"]
+    assert score["metric"] == "rubric_readiness_score_0_100"
+    assert score["value"] == pytest.approx(84.0)
+    assert score["source"] == "offline_artifact_rubric"
+    assert score["trusted"] is True
+    assert score["technical_proxy"]["metric"] == "auc"
+    assert score["technical_proxy"]["authoritative_display_metric"] == "auc"
+    assert score["technical_proxy"]["value"] == pytest.approx(0.64)
+    assert score["technical_proxy"]["source"] == "cv"
+    assert score["technical_proxy"]["role"] == "technical_proxy_only"
+    assert score["technical_proxy"]["trusted"] is False
+    assert score["technical_proxy"]["trust_errors"] == ["grouped_oof_contract_missing"]
+
+
+def test_iteration_evidence_marks_preflight_log_signatures_superseded(tmp_path: Path) -> None:
+    paths = _make_paths(tmp_path)
+    run_id = "run-superseded-preflight"
+    iter1 = paths.iter_dir(run_id, 1)
+    _write_iteration_metrics(iter1, value=0.64, source="grouped_oof_cv", trusted=True)
+    logs_dir = iter1 / "logs"
+    logs_dir.mkdir()
+    message = "ERROR unresolved sequence key_hyperparameters.temperature_grid"
+    (logs_dir / "kernel_error.txt").write_text(message, encoding="utf-8")
+    output_dir = iter1 / "output"
+    output_dir.mkdir()
+    (output_dir / "execution_attempt_resolution.json").write_text(
+        json.dumps(
+            {
+                "successful_plan_sha256": "new-plan-sha",
+                "completed_phases": ["model_cv", "final_fit", "artifact_validation"],
+                "superseded_attempts": [
+                    {
+                        "error_fingerprint": "2fe0c29757c2",
+                        "status": "superseded_by_successful_attempt",
+                        "original_log_relative_paths": ["logs/kernel_error.txt"],
+                    }
+                ],
+                "active_fatal_attempts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = prepare_iteration_evidence(
+        paths=paths,
+        slug="demo",
+        run_id=run_id,
+        iteration=1,
+        evaluation=_evaluation(value=0.64, source="grouped_oof_cv"),
+        target_score=0.80,
+        current_score=0.64,
+        current_score_source="grouped_oof_cv",
+        delta_offline=None,
+        pending_problem_insights=[],
+        previous_submission_history=None,
+    )
+
+    record = bundle.payload["iterations"][0]
+    assert record["execution_attempt_resolution"]["ingested"] is True
+    assert record["error_signatures"][0]["active"] is False
+    assert record["error_signatures"][0]["status"] == "superseded_by_successful_attempt"
+    assert record["error_signatures"][0]["superseded_by_plan_sha256"] == "new-plan-sha"
+    gaps = bundle.payload["decision_requirements"]["evidence_gaps"]
+    assert not any("runtime error signature" in gap for gap in gaps)

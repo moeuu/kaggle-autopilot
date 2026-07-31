@@ -3,6 +3,8 @@
 Recommended action: Harden Oracle/Codex verification and source reload so verified fixes reach the active process.
 
 ## Signals
+- autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: reason=OracleStrategyError fingerprint=a63a761b94b857bf966a
+- playground-series-s6e7 20260727T121034Z-a02d37d5: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: reason=KaggleBotError fingerprint=e3780906cedd3cd49430
 - playground-series-s6e7 20260719T155759Z-ddb4b9f1: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: reason=RuntimeError fingerprint=92217d94e261b01df814
@@ -11,8 +13,6 @@ Recommended action: Harden Oracle/Codex verification and source reload so verifi
 - ai-agent-security-multi-step-tool-attacks 20260717T061040Z-4aad47f3: reason=RuntimeError fingerprint=92217d94e261b01df814
 - cuhk-x-competition-large-model-track 20260716T025336Z-83f794ce: reason=OracleStrategyError fingerprint=65df22ce55cf6bb51d0e
 - cuhk-x-competition-small-model-track 20260716T024240Z-edb451b6: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
-- scripture-in-new-frontiers 20260716T010915Z-7b12de3d: reason=OracleStrategyError fingerprint=4a943231f253606b92a7
-- skill-lift 20260716T001150Z-1038a59e: reason=OracleStrategyError fingerprint=e8f53ed69d7cb5e4140f
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.

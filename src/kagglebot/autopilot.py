@@ -1460,6 +1460,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
     enable_internet = loop_settings.enable_internet
     submission_gate = loop_settings.submission_gate
     submission_limit_per_day = loop_settings.submission_limit_per_day
+    loop_metric = loop_settings.loop_metric
     readiness_target = loop_settings.readiness_target
     readiness_method = loop_settings.readiness_method
     readiness_k = loop_settings.readiness_k
@@ -1615,7 +1616,16 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
         direction=metric_direction,
         max_iterations=max_iterations,
     )
-    if resumed_best_readiness is not None and best_score is None:
+    if loop_metric == "rubric_readiness_score_0_100":
+        resumed_rubric_score = _iteration_metrics.resume_best_kernel_metric_score(
+            run_dir=config.paths.run_dir(run_id),
+            metric_key=loop_metric,
+            direction=metric_direction,
+            max_iterations=max_iterations,
+        )
+        if resumed_rubric_score is not None:
+            best_score = resumed_rubric_score
+    elif resumed_best_readiness is not None and best_score is None:
         best_score = resumed_best_readiness
     best_submittable_score, best_submittable_submission = _autopilot_state.resume_best_submittable_iteration_state(
         paths=config.paths,
@@ -2528,6 +2538,10 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 drift_weight=drift_weight,
                 eval_data_cache=eval_data_cache,
             )
+            report_payload = _iteration_metrics.enrich_evaluation_report_with_kernel_provenance(
+                report_payload,
+                kernel_metrics=kernel_metrics_payload,
+            )
             _iteration_metrics.append_run_evaluation_report(
                 run_dir=run_dir, iteration=iteration, payload=report_payload
             )
@@ -2545,8 +2559,34 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 )
                 print(f"[cyan]evaluation sources[/cyan]: {values_line}")
             top1_score = top1_info.get("score") if isinstance(top1_info, dict) else None
-            decision_score = float(evaluation.value)
-            decision_source = str(evaluation.score_source or "offline")
+            if loop_metric == "rubric_readiness_score_0_100":
+                rubric_value = (
+                    tolerant_finite_float(kernel_metrics_payload.get("rubric_readiness_score_0_100"))
+                    if isinstance(kernel_metrics_payload, dict)
+                    else None
+                )
+                if rubric_value is None or not 0.0 <= rubric_value <= 100.0:
+                    raise KernelFailedError(
+                        "Plan declares loop_metric=rubric_readiness_score_0_100, but kernel metrics "
+                        "do not contain a valid 0-100 rubric readiness value."
+                    )
+                if rubric_value <= 1.0 and math.isclose(
+                    rubric_value,
+                    float(evaluation.value),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ):
+                    raise KernelFailedError(
+                        "Measurement provenance failure: the 0-1 technical proxy was copied into "
+                        "the 0-100 rubric readiness loop metric."
+                    )
+                decision_score = float(rubric_value)
+                decision_source = "offline_artifact_rubric"
+                decision_target_score = float(readiness_target)
+            else:
+                decision_score = float(evaluation.value)
+                decision_source = str(evaluation.score_source or "offline")
+                decision_target_score = float(target_score)
             top1_score_value = float(top1_score) if isinstance(top1_score, (int, float)) else None
             effective_best_score, best_score_guard = _score_progress.effective_best_score_for_progress(
                 prev_best=best_score,
@@ -2996,7 +3036,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
             allow_submit = _submission_policy.should_attempt_submit_for_readiness(
                 gate=submission_gate,
                 readiness_score=decision_score,
-                readiness_target=target_score,
+                readiness_target=decision_target_score,
                 direction=metric_direction,
                 iteration=iteration,
                 max_iterations=max_iterations,
@@ -3142,7 +3182,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 iteration=iteration,
                 evaluation=evaluation,
                 target_score=target_score,
-                met_target=_submission_policy.meets_target(decision_score, target_score, metric_direction),
+                met_target=_submission_policy.meets_target(decision_score, decision_target_score, metric_direction),
                 top1_info=top1_info if isinstance(top1_info, dict) else {},
                 compute=config.compute,
                 accelerator=accelerator_used,
@@ -3348,7 +3388,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     )
                     if medal_policy_reason:
                         print(f"[yellow]medal policy[/yellow]: {medal_policy_reason}")
-            met_target = _submission_policy.meets_target(decision_score, target_score, metric_direction)
+            met_target = _submission_policy.meets_target(decision_score, decision_target_score, metric_direction)
             top1_tier = _submission_policy.is_top1_tier(decision_score, top1_score, metric_direction)
             top1_tier_by_readiness = _submission_policy.is_top1_tier(readiness_score, top1_score, metric_direction)
             noise_guard_decision = _loop_control.update_readiness_noise_guard(
@@ -3486,6 +3526,11 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                     code_reference_delta_vs_current=code_reference_delta_vs_current,
                     code_reference_forced_reproduction=code_reference_forced_reproduction,
                 ),
+                model_selection_decision=(
+                    report_payload.get("model_selection_decision")
+                    if isinstance(report_payload.get("model_selection_decision"), dict)
+                    else None
+                ),
             )
             _iteration_metrics.write_iteration_metrics_payload(metrics_path, metrics_payload)
 
@@ -3494,7 +3539,7 @@ def run_autopilot_core(config: AutopilotConfig, run_id: str, *, resume_run: bool
                 evaluation=evaluation,
                 model_summary=model_summary,
                 best_score=best_score,
-                target_score=target_score,
+                target_score=decision_target_score,
                 dataset_profile=dataset_profile,
                 top1_score=top1_score,
                 top1_tier=top1_tier,

@@ -59,6 +59,7 @@ class AutopilotLoopSettings:
     submission_gate: str
     submission_limit_per_day: int | None
     evaluation_contract: dict[str, object] | None
+    loop_metric: str | None
     readiness_target: float
     readiness_method: str
     readiness_k: float
@@ -158,6 +159,7 @@ def resolve_autopilot_loop_settings(
     evaluation_contract = (
         resolved.get("evaluation_contract") if isinstance(resolved.get("evaluation_contract"), dict) else None
     )
+    loop_metric = str(resolved.get("loop_metric") or "").strip() or None
     readiness_target = float(resolved.get("readiness_target_score") or target_score)
     readiness_method = str(resolved.get("readiness_method") or "ci_bound")
     readiness_k = float(resolved.get("readiness_k") or 1.0)
@@ -218,6 +220,7 @@ def resolve_autopilot_loop_settings(
         submission_gate=submission_gate,
         submission_limit_per_day=submission_limit_per_day,
         evaluation_contract=evaluation_contract,
+        loop_metric=loop_metric,
         readiness_target=readiness_target,
         readiness_method=readiness_method,
         readiness_k=readiness_k,

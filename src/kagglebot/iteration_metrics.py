@@ -261,12 +261,24 @@ def build_final_metrics_payload(
     best_score_guard: dict[str, object] | None,
     quality_guard: dict[str, object],
     regression_guard: dict[str, object],
+    model_selection_decision: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload = dict(base_payload)
     payload["loop_decision"] = {
+        "metric": (
+            "rubric_readiness_score_0_100"
+            if loop_decision_source == "offline_artifact_rubric"
+            else str(base_payload.get("metric") or "unknown")
+        ),
         "source": loop_decision_source,
         "value": loop_decision_value,
+        "direction": "maximize"
+        if loop_decision_source == "offline_artifact_rubric"
+        else str(base_payload.get("direction") or "unknown"),
+        "scale": "0_to_100" if loop_decision_source == "offline_artifact_rubric" else "native",
     }
+    if model_selection_decision is not None:
+        payload["model_selection_decision"] = dict(model_selection_decision)
     payload["noise_guard"] = noise_guard
     payload["rank_guard"] = rank_guard
     payload["top1_tier"] = {
@@ -388,6 +400,91 @@ def build_iteration_evaluation_report(
         }
     )
     return report, payload, cache
+
+
+def enrich_evaluation_report_with_kernel_provenance(
+    payload: dict[str, object],
+    *,
+    kernel_metrics: dict[str, object] | None,
+) -> dict[str, object]:
+    """Overlay the kernel's exact comparable-evaluation contract on its host report."""
+    enriched = dict(payload)
+    if not isinstance(kernel_metrics, dict):
+        return enriched
+    authoritative_metric = kernel_metrics.get("authoritative_display_metric")
+    canonical_metric = kernel_metrics.get("canonical_technical_metric")
+    technical_proxies = kernel_metrics.get("technical_proxies")
+    technical_proxies = technical_proxies if isinstance(technical_proxies, dict) else {}
+    technical = technical_proxies.get(str(canonical_metric or ""))
+    technical = technical if isinstance(technical, dict) else {}
+    explicit_decision = kernel_metrics.get("model_selection_decision")
+    decision = dict(explicit_decision) if isinstance(explicit_decision, dict) else {}
+    if not decision:
+        decision = {
+            "metric": canonical_metric,
+            "source": technical.get("score_source") or kernel_metrics.get("score_source"),
+            "value": technical.get("value"),
+            "direction": kernel_metrics.get("score_direction") or kernel_metrics.get("direction"),
+            "outer_split": technical.get("cv_type"),
+            "folds": technical.get("cv_folds"),
+            "seeds": kernel_metrics.get("seeds"),
+            "evaluated_rows": technical.get("evaluated_oof_rows"),
+            "data_hashes": technical.get("data_hashes"),
+            "evaluation_mask_sha256": technical.get("evaluation_mask_sha256"),
+            "global_class_list": technical.get("global_class_list"),
+            "per_session_fold_scores": technical.get("per_session_fold_scores"),
+            "seed_fold_records": technical.get("seed_fold_records"),
+            "split_index_fingerprints": technical.get("split_index_fingerprints"),
+        }
+    trusted, trust_errors = score_sources.validate_grouped_oof_contract(decision)
+    decision["trusted"] = trusted
+    decision["trust_errors"] = trust_errors
+    split = decision.get("outer_split")
+    source = decision.get("source")
+    if isinstance(authoritative_metric, str) and authoritative_metric:
+        enriched["authoritative_display_metric"] = authoritative_metric
+        enriched["metric_name"] = authoritative_metric
+    if isinstance(canonical_metric, str) and canonical_metric:
+        enriched["canonical_technical_metric"] = canonical_metric
+    if isinstance(split, str) and split:
+        enriched["split_strategy"] = split
+    if isinstance(source, str) and source:
+        enriched["score_source"] = source
+    enriched["model_selection_decision"] = decision
+    loop_decision = kernel_metrics.get("loop_decision")
+    if isinstance(loop_decision, dict):
+        enriched["loop_decision"] = dict(loop_decision)
+    value = tolerant_finite_float(decision.get("value"))
+    if value is not None:
+        enriched["metric_value"] = value
+    per_session = decision.get("per_session_fold_scores")
+    if isinstance(per_session, dict):
+        fold_scores = [float(value) for value in per_session.values() if tolerant_finite_float(value) is not None]
+        if fold_scores:
+            scores = np.asarray(fold_scores, dtype=float)
+            mean = float(scores.mean())
+            std = float(scores.std(ddof=1)) if len(scores) > 1 else None
+            enriched["per_fold_scores"] = fold_scores
+            enriched["mean"] = mean
+            enriched["std"] = std
+            if std is None:
+                enriched["ci_low"] = None
+                enriched["ci_high"] = None
+            else:
+                half_width = 1.96 * std / float(np.sqrt(len(scores)))
+                enriched["ci_low"] = mean - half_width
+                enriched["ci_high"] = mean + half_width
+    seed_fold_records = decision.get("seed_fold_records")
+    if isinstance(seed_fold_records, list):
+        enriched["seed_fold_records"] = seed_fold_records
+    fingerprints = decision.get("split_index_fingerprints")
+    if isinstance(fingerprints, list):
+        enriched["split_index_fingerprints"] = fingerprints
+    if isinstance(decision.get("folds"), int):
+        enriched["n_splits"] = decision["folds"]
+    if isinstance(decision.get("seeds"), list):
+        enriched["seeds"] = decision["seeds"]
+    return enriched
 
 
 def build_eval_data_cache_fallback(*, split_strategy: str | None, cv_folds: int) -> dict[str, object]:
@@ -550,6 +647,31 @@ def resume_best_readiness_score(*, run_dir: Path, direction: str, max_iterations
             continue
         if should_update_best_score(best, score, direction, 0.0):
             best = score
+    return best
+
+
+def resume_best_kernel_metric_score(
+    *,
+    run_dir: Path,
+    metric_key: str,
+    direction: str,
+    max_iterations: int,
+) -> float | None:
+    """Resume a loop score from the kernel's native metric scale."""
+    best: float | None = None
+    for iteration in range(1, max_iterations + 1):
+        for path in (
+            run_dir / f"iter-{iteration}" / "output" / "metrics.json",
+            run_dir / f"iter-{iteration}" / "metrics.json",
+        ):
+            payload = load_json_object(path)
+            if payload is None:
+                continue
+            score = tolerant_finite_float(payload.get(metric_key))
+            if score is not None and should_update_best_score(best, score, direction, 0.0):
+                best = score
+            if score is not None:
+                break
     return best
 
 

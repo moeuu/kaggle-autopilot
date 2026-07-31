@@ -3,16 +3,16 @@
 Recommended action: Prioritize submission-mode and artifact validation fixes before model search.
 
 ## Signals
+- skill-lift 20260731T154422Z-6ae67326: gap=None
+- scripture-in-new-frontiers 20260731T151357Z-4111544b: gap=None
+- titanic 20260731T130322Z-d4abf336: gap=None
+- cuhk-x-competition-small-model-track 20260729T200030Z-80a318fb: gap=None
+- skill-lift 20260729T184654Z-87ab425c: gap=None
+- scripture-in-new-frontiers 20260729T081158Z-399ad2dd: gap=None
+- autonomous-agent-prediction-beta 20260727T124942Z-d9b3525c: gap=None
+- playground-series-s6e7 20260727T121034Z-a02d37d5: gap=None
 - scripture-in-new-frontiers 20260726T210223Z-39e66e81: gap=None
 - cuhk-x-competition-small-model-track 20260727T005939Z-5205009c: gap=None
-- skill-lift 20260727T000926Z-79644f59: gap=None
-- playground-series-s6e7 20260719T155759Z-ddb4b9f1: gap=None
-- cuhk-x-competition-large-model-track 20260719T144303Z-1f8ef9d3: gap=None
-- soccer-feature-engineering-hackathon 20260719T100737Z-031b686d: gap=None
-- cuhk-x-competition-small-model-track 20260719T030527Z-69497fe0: gap=None
-- skill-lift 20260718T195338Z-bd473fcc: gap=None
-- ai-agent-security-multi-step-tool-attacks format-repair-20260719: gap=None
-- scripture-in-new-frontiers 20260718T095023Z-c876dbbc: gap=None
 
 ## Next Experiment
 - Pick one reusable orchestration, diagnostics, validation, or strategy-prompt improvement.
