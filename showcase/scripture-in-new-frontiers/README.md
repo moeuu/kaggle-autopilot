@@ -50,7 +50,7 @@ check successfully called its live Bibles and passage endpoints and retrieved
 John 3:16 from the BSB; see `live_api_status.json`. The application key was used
 ephemerally and is not stored in this repository.
 
-Gloo could not be validated live: Stripe rejected every supported payment method,
+Gloo could not be validated live: Stripe rejected every available credit card,
 so the workspace could not be activated and API credentials could not be issued
 before the deadline. The repository therefore claims only its offline adapter and
 20/20 contract tests for Gloo. It does **not** claim dual-live-API completion.

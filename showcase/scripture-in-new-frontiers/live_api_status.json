@@ -24,7 +24,7 @@
   },
   "gloo": {
     "live_validated": false,
-    "reason": "Stripe rejected multiple supported payment methods, so the Gloo workspace could not be activated and API credentials could not be issued before the deadline.",
+    "reason": "Stripe rejected every available credit card, so the Gloo workspace could not be activated and API credentials could not be issued before the deadline.",
     "offline_contract_only": true,
     "offline_contract_passed": 20,
     "offline_contract_total": 20
