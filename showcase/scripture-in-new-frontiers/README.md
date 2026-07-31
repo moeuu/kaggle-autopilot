@@ -15,6 +15,7 @@ safety-checked encouragement.
 - `demo/` — a self-contained browser replay with no external CDN.
 - `metrics.json` and `fold_metrics.csv` — grouped out-of-fold technical evidence.
 - `api_contract_report.json` and `safety_eval.json` — API-boundary and safety checks.
+- `live_api_status.json` — secret-free live-validation status and the Gloo billing limitation.
 - `cover.png` and `evaluation_dashboard.png` — submission media.
 
 No API credentials, Kaggle credentials, private data, or organizer data are
@@ -36,17 +37,31 @@ CSV, verse-movement mapping CSV, sample notebook, and sample submission. The
 implementation discovers those files by schema rather than requiring credentials
 or absolute paths.
 
-The recorded run used Leave-One-Session-Out validation across three deterministic
-seeds. Its selected technical fallback achieved grouped macro-F1 `0.6354`;
-retrieval achieved Recall@3 `0.5833` and MRR@3 `0.3958`. These are offline
+The latest recorded run used Leave-One-Session-Out validation across three
+deterministic seeds. Its technical champion achieved grouped macro-F1 `0.6927`.
+The independently selected conservative deployment route scored `0.6354`;
+retrieval achieved Recall@3 `0.5972` and MRR@3 `0.4282`. These are offline
 technical proxies, not an official judge score.
 
 ## API and safety boundary
 
-In live mode, YouVersion is the authority for canonical Scripture and Gloo is
-limited to schema-constrained encouragement. Secrets are read only from runtime
-environment variables. Replay output is explicitly labeled and is never presented
-as live API evidence.
+YouVersion remains the authority for canonical Scripture. A secret-free final
+check successfully called its live Bibles and passage endpoints and retrieved
+John 3:16 from the BSB; see `live_api_status.json`. The application key was used
+ephemerally and is not stored in this repository.
+
+Gloo could not be validated live: Stripe rejected every supported payment method,
+so the workspace could not be activated and API credentials could not be issued
+before the deadline. The repository therefore claims only its offline adapter and
+20/20 contract tests for Gloo. It does **not** claim dual-live-API completion.
+Replay output remains explicitly labeled and is never presented as live proof.
 
 Open `demo/index.html` locally to inspect the product replay and its auditable
 decision trail.
+
+## Public submission
+
+- [Kaggle writeup](https://www.kaggle.com/competitions/scripture-in-new-frontiers/writeups/versepulse-frontier)
+- [Kaggle notebook](https://www.kaggle.com/code/moeuuu/versepulse-frontier-reproducibility-and-evidence)
+- [Working demo](https://versepulse-frontier-2026.moeu0710.chatgpt.site/demo)
+- [Three-minute video](https://youtu.be/ks5ztaaN5xA)

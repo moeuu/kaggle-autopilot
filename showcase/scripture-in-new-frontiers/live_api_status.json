@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-31T14:05:10Z",
+  "youversion": {
+    "live_validated": true,
+    "app_name": "VersePulse Frontier",
+    "app_status": "live",
+    "auth_header": "X-YVP-App-Key",
+    "bibles_endpoint": {
+      "http_status": 200,
+      "language_range": "en",
+      "returned_count": 11
+    },
+    "passage_endpoint": {
+      "http_status": 200,
+      "bible_id": 3034,
+      "reference": "John 3:16",
+      "content_nonempty": true,
+      "content_chars": 135,
+      "content_sha256": "c6a0fb4f76669b4e0da63d455371ed06c7445569d3dcc6c0fbdd589150dcc9ce",
+      "copyright_present": true
+    },
+    "secret_persisted": false
+  },
+  "gloo": {
+    "live_validated": false,
+    "reason": "Stripe rejected multiple supported payment methods, so the Gloo workspace could not be activated and API credentials could not be issued before the deadline.",
+    "offline_contract_only": true,
+    "offline_contract_passed": 20,
+    "offline_contract_total": 20
+  },
+  "claims": {
+    "dual_live_api_proof": false,
+    "public_demo_mode": "replay"
+  }
+}

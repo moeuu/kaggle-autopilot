@@ -25,9 +25,9 @@
     "qwen3_embedding": true,
     "qwen3_reranker": true,
     "tfidf_fallback": true,
-    "xgboost": true
+    "xgboost": false
   },
-  "plan_sha256": "98cd45f4a97bcca4c20b7235ab9b991d5cb96d8fa74e38e846f5546fe31e1a41",
+  "plan_sha256": "3e74523521b95c3310f26247eef8c0dc05c37a30c71fe1b0ff2672192f1e2912",
   "plan_source": "kernel_local_file",
   "required_gates": {
     "authoritative_verse_unchanged": true,
